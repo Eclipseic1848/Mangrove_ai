@@ -1,0 +1,171 @@
+{
+  "report_id": "verify_workload_filter",
+  "logical_plan_id": "plan_workload_filter_v1",
+  "logical_plan_revision": 1,
+  "logical_plan_hash": "7e1ada9bba84711d0c1490df7cdff6c3caa4fd023197cb6db1d5c443a57de8f1",
+  "status": "pass",
+  "checks": [
+    {
+      "code": "exact_table_count",
+      "passed": true,
+      "expected": 1,
+      "actual": 1,
+      "message": "结果表数量必须与计划一致",
+      "repairable": false,
+      "evidence_refs": []
+    },
+    {
+      "code": "exact_visible_columns",
+      "passed": true,
+      "expected": [
+        "核销工作量天数",
+        "工作量费用"
+      ],
+      "actual": [
+        "核销工作量天数",
+        "工作量费用"
+      ],
+      "message": "可见业务列必须精确匹配且顺序一致",
+      "repairable": false,
+      "evidence_refs": []
+    },
+    {
+      "code": "exact_row_count",
+      "passed": true,
+      "expected": 11,
+      "actual": 11,
+      "message": "结果行数必须与 Golden 一致",
+      "repairable": false,
+      "evidence_refs": []
+    },
+    {
+      "code": "exact_records",
+      "passed": true,
+      "expected": [
+        {
+          "核销工作量天数": "1.0",
+          "工作量费用": "680.00"
+        },
+        {
+          "核销工作量天数": "2.0",
+          "工作量费用": "2040.00"
+        },
+        {
+          "核销工作量天数": "2.5",
+          "工作量费用": "2720.00"
+        },
+        {
+          "核销工作量天数": "1.0",
+          "工作量费用": "4080.00"
+        },
+        {
+          "核销工作量天数": "1.5",
+          "工作量费用": "4760.00"
+        },
+        {
+          "核销工作量天数": "2.0",
+          "工作量费用": "5440.00"
+        },
+        {
+          "核销工作量天数": "0.5",
+          "工作量费用": "6800.00"
+        },
+        {
+          "核销工作量天数": "1.0",
+          "工作量费用": "7480.00"
+        },
+        {
+          "核销工作量天数": "1.5",
+          "工作量费用": "8160.00"
+        },
+        {
+          "核销工作量天数": "2.5",
+          "工作量费用": "9520.00"
+        },
+        {
+          "核销工作量天数": "0.5",
+          "工作量费用": "10200.00"
+        }
+      ],
+      "actual": [
+        {
+          "核销工作量天数": "1.0",
+          "工作量费用": "680.00"
+        },
+        {
+          "核销工作量天数": "2.0",
+          "工作量费用": "2040.00"
+        },
+        {
+          "核销工作量天数": "2.5",
+          "工作量费用": "2720.00"
+        },
+        {
+          "核销工作量天数": "1.0",
+          "工作量费用": "4080.00"
+        },
+        {
+          "核销工作量天数": "1.5",
+          "工作量费用": "4760.00"
+        },
+        {
+          "核销工作量天数": "2.0",
+          "工作量费用": "5440.00"
+        },
+        {
+          "核销工作量天数": "0.5",
+          "工作量费用": "6800.00"
+        },
+        {
+          "核销工作量天数": "1.0",
+          "工作量费用": "7480.00"
+        },
+        {
+          "核销工作量天数": "1.5",
+          "工作量费用": "8160.00"
+        },
+        {
+          "核销工作量天数": "2.5",
+          "工作量费用": "9520.00"
+        },
+        {
+          "核销工作量天数": "0.5",
+          "工作量费用": "10200.00"
+        }
+      ],
+      "message": "结果记录和值必须与 Golden 完全一致",
+      "repairable": false,
+      "evidence_refs": []
+    },
+    {
+      "code": "selection_predicate_ratio",
+      "passed": true,
+      "expected": 1.0,
+      "actual": 1.0,
+      "message": "每个输出行的来源记录都必须满足筛选条件",
+      "repairable": false,
+      "evidence_refs": []
+    },
+    {
+      "code": "evidence_coverage",
+      "passed": true,
+      "expected": 1.0,
+      "actual": 1.0,
+      "message": "每个输出行都必须具有来源证据",
+      "repairable": false,
+      "evidence_refs": []
+    },
+    {
+      "code": "openable_output",
+      "passed": true,
+      "expected": true,
+      "actual": true,
+      "message": "候选输出必须能够重新解析",
+      "repairable": false,
+      "evidence_refs": []
+    }
+  ],
+  "repair_attempt": 0,
+  "failure_fingerprint": null,
+  "generated_at": "2026-07-27T02:00:56.818937Z"
+}

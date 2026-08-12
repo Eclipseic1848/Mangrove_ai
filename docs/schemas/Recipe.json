@@ -1,0 +1,111 @@
+{
+  "$defs": {
+    "RecipeRule": {
+      "description": "单条清洗规则。每条有版本、参数、影响数量与可逆性说明。",
+      "properties": {
+        "rule_id": {
+          "description": "规则唯一标识，如 web_dedup_url_prefix",
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "stage": {
+          "$ref": "#/$defs/RecipeStage"
+        },
+        "name": {
+          "description": "人可读规则名",
+          "title": "Name",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "description": "规则参数",
+          "title": "Params",
+          "type": "object"
+        },
+        "version": {
+          "default": "1",
+          "description": "规则版本，便于复现",
+          "title": "Version",
+          "type": "string"
+        },
+        "reversible": {
+          "default": false,
+          "description": "是否可逆（去重/删除类应为 False）",
+          "title": "Reversible",
+          "type": "boolean"
+        },
+        "high_impact": {
+          "default": false,
+          "description": "高影响规则（字段删除/模糊去重/脱敏/强制类型）需用户显式确认",
+          "title": "High Impact",
+          "type": "boolean"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "rule_id",
+        "stage",
+        "name"
+      ],
+      "title": "RecipeRule",
+      "type": "object"
+    },
+    "RecipeStage": {
+      "description": "清洗规则阶段（plan 8.2）。引擎按阶段顺序执行。",
+      "enum": [
+        "input_validation",
+        "basic_normalize",
+        "field_normalize",
+        "value_normalize",
+        "content_clean",
+        "dedup",
+        "quality_constraint",
+        "sensitive_info",
+        "anomaly_isolation"
+      ],
+      "title": "RecipeStage",
+      "type": "string"
+    }
+  },
+  "description": "清洗规则集合。可内联或引用已保存 Recipe。",
+  "properties": {
+    "recipe_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "已保存 Recipe 引用；内联时留空",
+      "title": "Recipe Id"
+    },
+    "version": {
+      "default": "1",
+      "title": "Version",
+      "type": "string"
+    },
+    "rules": {
+      "items": {
+        "$ref": "#/$defs/RecipeRule"
+      },
+      "title": "Rules",
+      "type": "array"
+    }
+  },
+  "title": "Recipe",
+  "type": "object"
+}

@@ -1,0 +1,1691 @@
+import AxeBuilder from "@axe-core/playwright";
+import { expect, test, type Page } from "@playwright/test";
+
+const guidance = {
+  schema_version: "1",
+  onboarding: [
+    { title: "添加资料", description: "拖入表格或文档。" },
+    { title: "说明目标", description: "描述筛选、汇总和交付要求。" },
+    { title: "检查交付", description: "核对来源后下载正式文件。" },
+  ],
+  examples: [
+    {
+      id: "table-filter",
+      category: "表格",
+      title: "筛选并交付",
+      description: "筛选目标人员并输出工作量明细。",
+      required_inputs: "CSV 或 XLSX",
+      prompt: "筛选张三的全部工作量，输出 XLSX",
+      output_formats: ["xlsx"],
+    },
+    {
+      id: "document-extract",
+      category: "文档",
+      title: "证据化抽取",
+      description: "提取合同付款条款并保留原文证据。",
+      required_inputs: "PDF 或 DOCX",
+      prompt: "提取付款节点和比例，输出 DOCX",
+      output_formats: ["docx"],
+    },
+  ],
+};
+
+async function mockWorkspace(
+  page: Page,
+  theme: "light" | "dark" = "light",
+  role = "admin",
+) {
+  await page.addInitScript(({ selectedTheme }) => {
+    localStorage.setItem("mangrove_token", "e2e-token");
+    localStorage.setItem("mangrove_theme", selectedTheme);
+  }, { selectedTheme: theme });
+  await page.route("**/api/auth/me", (route) => route.fulfill({
+    json: {
+      user_id: "u1",
+      username: "tester",
+      display_name: "测试员",
+      role,
+    },
+  }));
+  await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+    route.fulfill({ json: [] }));
+  await page.route("**/api/semantic-workspace/guidance", (route) =>
+    route.fulfill({ json: guidance }));
+  await page.route("**/api/semantic-workspace/storage", (route) =>
+    route.fulfill({
+      json: {
+        task_count: 0,
+        recycle_bin_count: 0,
+        upload_bytes: 0,
+        delivery_bytes: 0,
+        total_bytes: 0,
+        retention: "回收站保留 30 天",
+        calculated_at: "2026-07-27T00:00:00",
+      },
+    }));
+  await page.route("**/api/models", (route) => route.fulfill({
+    json: {
+      options: [
+        {
+          provider: "local",
+          model: "Qwen3.6-35B-A3B",
+          label: "本地模型 · Qwen3.6-35B-A3B",
+        },
+        {
+          provider: "deepseek",
+          model: "deepseek-chat",
+          label: "DeepSeek · deepseek-chat",
+        },
+      ],
+      default: {
+        provider: "local",
+        model: "Qwen3.6-35B-A3B",
+        label: "本地模型 · Qwen3.6-35B-A3B",
+      },
+      pi_runtime_enabled: true,
+      pi_capability_host_enabled: true,
+    },
+  }));
+  await page.route("**/api/semantic-workspace/capabilities", (route) =>
+    route.fulfill({ json: { enabled: true, items: [] } }));
+  await page.route("**/api/model-connections", (route) =>
+    route.fulfill({ json: { items: [] } }));
+  await page.route("**/api/model-connections/preferences/default", (route) =>
+    route.fulfill({ json: { preference: null } }));
+  await page.route("**/api/data-sources/uploads", (route) => route.fulfill({
+    json: {
+      upload_id: "upload-e2e",
+      original_name: "workload.csv",
+      media_type: "text/csv",
+      size_bytes: 64,
+      sha256: "0".repeat(64),
+    },
+  }));
+  await page.route("**/api/data-tasks/preview", (route) => route.fulfill({
+    json: {
+      schema: {
+        fields: [
+          { name: "姓名", dtype: "string", nullable: false },
+          { name: "工作量", dtype: "integer", nullable: false },
+        ],
+      },
+      sample: [{ 姓名: "张三", 工作量: 5 }],
+      estimated_records: 1,
+    },
+  }));
+}
+
+type WorkspaceFixture = {
+  task_id: string;
+  objective_text: string;
+  output_formats: string[];
+  plan_id: string | null;
+  logical_revision: number | null;
+  binding_revision: number | null;
+  run_id: string | null;
+  status: string;
+  summary: string;
+  created_at: string;
+  updated_at: string;
+  [key: string]: unknown;
+};
+
+function workspaceTask(
+  taskId: string,
+  status: string,
+  title: string,
+): WorkspaceFixture {
+  return {
+    task_id: taskId,
+    title,
+    objective_text: "只筛选张三并输出 XLSX",
+    upload_ids: [],
+    output_formats: ["xlsx"],
+    provider: "local",
+    model: "Qwen3.6-35B-A3B",
+    external_api_confirmed: false,
+    status,
+    active_revision: 1,
+    current_revision: 1,
+    viewing_revision: 1,
+    plan_id: null,
+    logical_revision: null,
+    binding_revision: null,
+    run_id: null,
+    summary: "已理解任务要求",
+    error: null,
+    question: null,
+    cancel_requested: false,
+    deleted_at: null,
+    purge_after: null,
+    created_at: "2026-07-27T00:00:00Z",
+    updated_at: "2026-07-27T00:00:01Z",
+  };
+}
+
+function workspaceDetail(
+  task: WorkspaceFixture,
+  extra: Record<string, unknown> = {},
+) {
+  return {
+    ...task,
+    revisions: [{
+      task_id: task.task_id,
+      revision: 1,
+      objective_text: task.objective_text,
+      output_formats: task.output_formats,
+      plan_id: task.plan_id,
+      logical_revision: task.logical_revision,
+      binding_revision: task.binding_revision,
+      run_id: task.run_id,
+      status: task.status,
+      summary: task.summary,
+      change_summary: "",
+      created_at: task.created_at,
+      updated_at: task.updated_at,
+    }],
+    events: [],
+    uploads: [],
+    plan: null,
+    run: null,
+    attempts: [],
+    harness_events: [],
+    delivery: null,
+    ...extra,
+  };
+}
+
+test.describe("统一数据工作台", () => {
+  for (const item of [
+    { theme: "light" as const, width: 1366, height: 768 },
+    { theme: "dark" as const, width: 1920, height: 1080 },
+  ]) {
+    test(`${item.theme} 主题在 ${item.width}x${item.height} 下完整显示`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width: item.width, height: item.height });
+      await mockWorkspace(page, item.theme);
+      await page.goto("/data-prep");
+
+      await expect(page.getByRole("heading", { name: "想处理什么资料？" }))
+        .toBeVisible();
+      await expect(page.getByText("三步完成第一个任务")).toBeVisible();
+      await expect(page.getByText("筛选并交付")).toBeVisible();
+      await expect(page.getByRole("button", { name: "回收站" })).toBeVisible();
+      await expect(page.locator("html")).toHaveClass(
+        item.theme === "dark" ? /dark/ : /^(?!.*dark)/,
+      );
+      expect(await page.evaluate(() => document.documentElement.scrollWidth))
+        .toBeLessThanOrEqual(item.width);
+      await testInfo.attach(`workspace-${item.theme}`, {
+        body: await page.screenshot(),
+        contentType: "image/png",
+      });
+      if (process.env.MANGROVE_VISUAL_CAPTURE === "1") {
+        await page.screenshot({
+          path: `../.pytest-tmp/workspace-${item.theme}.png`,
+        });
+      }
+    });
+  }
+
+  test("文件、目标、模型和输出格式形成可提交任务", async ({ page }) => {
+    await mockWorkspace(page);
+    await page.goto("/data-prep");
+
+    const submit = page.getByRole("button", { name: "开始执行" });
+    await expect(submit).toBeDisabled();
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "workload.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8"),
+    });
+    await expect(page.getByText("已上传，等待执行")).toBeVisible();
+    await expect(page.getByText("张三", { exact: true })).toBeVisible();
+    await page.getByPlaceholder(/描述你想得到的结果/).fill(
+      "只筛选张三并输出 XLSX",
+    );
+    await page.getByRole("button", { name: "更多", exact: true }).click();
+    await expect(page.getByLabel("执行模型")).toHaveValue(
+      "local::Qwen3.6-35B-A3B",
+    );
+    await expect(submit).toBeEnabled();
+    await page.getByRole("button", { name: "更多", exact: true }).click();
+    await expect(page.getByAltText("howso@Mangrove")).toBeVisible();
+    await expect(page.getByRole("button", { name: "新建任务" })).toBeVisible();
+    if (process.env.MANGROVE_VISUAL_CAPTURE === "1") {
+      await page.screenshot({
+        path: "../.pytest-tmp/workspace-upload-preview.png",
+      });
+    }
+  });
+
+  test("Word 上传完成后自动打开并显示原文件预览", async ({ page }) => {
+    await mockWorkspace(page);
+    await page.unroute("**/api/data-sources/uploads");
+    await page.route("**/api/data-sources/uploads", (route) => route.fulfill({
+      json: {
+        upload_id: "upload-docx",
+        original_name: "商务条款.docx",
+        media_type:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes: 1024,
+        sha256: "1".repeat(64),
+      },
+    }));
+    await page.route(
+      "**/api/data-sources/uploads/upload-docx/document-preview",
+      (route) => route.fulfill({
+        json: {
+          upload_id: "upload-docx",
+          original_name: "商务条款.docx",
+          status: "ready",
+          elements: [{
+            element_id: "clause-1",
+            artifact_id: "upload-docx",
+            page: 1,
+            element_type: "paragraph",
+            text: "投标方逾期交付时应承担违约责任。",
+            reading_order: 1,
+            extractor: "python-docx",
+            extractor_version: "1.2.0",
+            metadata: {
+              location: { kind: "docx_paragraph", paragraph: 1 },
+            },
+          }],
+          rejects: [],
+        },
+      }),
+    );
+    await page.goto("/data-prep");
+
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "商务条款.docx",
+      mimeType:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      buffer: Buffer.from("mock-docx", "utf-8"),
+    });
+
+    await expect(page.getByText("已上传，等待执行")).toBeVisible();
+    await expect(page.getByText("核对文件并说明目标")).toBeVisible();
+    await expect(
+      page.getByLabel("商务条款.docx结构化预览"),
+    ).toBeVisible();
+    await expect(
+      page.getByText("投标方逾期交付时应承担违约责任。"),
+    ).toBeVisible();
+  });
+
+  test("不支持的文件格式会明确说明，不会静默忽略", async ({ page }) => {
+    await mockWorkspace(page);
+    await page.goto("/data-prep");
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "program.exe",
+      mimeType: "application/octet-stream",
+      buffer: Buffer.from("not-an-executable", "utf-8"),
+    });
+    await expect(page.getByText("文件格式不受支持。", { exact: false }))
+      .toBeVisible();
+    await expect(page.getByRole("button", { name: "开始执行" })).toBeDisabled();
+  });
+
+  test("开始执行会提交推荐格式和默认模型并进入任务详情", async ({ page }) => {
+    await mockWorkspace(page);
+    const completed = workspaceTask("task-new", "completed", "张三工作量");
+    let submitted: Record<string, unknown> | null = null;
+    let submittedKey = "";
+    await page.route("**/api/semantic-workspace/tasks", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      submitted = route.request().postDataJSON();
+      submittedKey = route.request().headers()["idempotency-key"] ?? "";
+      await route.fulfill({ status: 202, json: completed });
+    });
+    await page.route("**/api/semantic-workspace/tasks/task-new", (route) =>
+      route.fulfill({
+        json: workspaceDetail(completed, {
+          events: [{
+            event_id: "done",
+            sequence: 1,
+            stage: "deliver",
+            event_type: "task_completed",
+            summary: "正式文件已生成",
+            details: {},
+            created_at: completed.updated_at,
+          }],
+        }),
+      }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-new/preview?*",
+      (route) => route.fulfill({
+        json: {
+          kind: "table",
+          columns: ["姓名", "工作量"],
+          rows: [{ 姓名: "张三", 工作量: 5 }],
+          total: 1,
+          offset: 0,
+          limit: 100,
+        },
+      }),
+    );
+
+    await page.goto("/data-prep");
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "workload.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8"),
+    });
+    await expect(page.getByText("张三", { exact: true })).toBeVisible();
+    await page.getByPlaceholder(/描述你想得到的结果/).fill(
+      "只筛选张三并输出 XLSX",
+    );
+    await page.getByRole("button", { name: "开始执行" }).click();
+
+    await expect(page.getByRole("heading", { name: "张三工作量" })).toBeVisible();
+    expect(submitted).toMatchObject({
+      objective_text: "只筛选张三并输出 XLSX",
+      upload_ids: ["upload-e2e"],
+      output_formats: ["xlsx"],
+      provider: "local",
+      model: "Qwen3.6-35B-A3B",
+    });
+    expect(submittedKey).toMatch(/^[A-Za-z0-9_-]{21}$/);
+  });
+
+  test("管理员可显式选择 Mangrove 增强模式且仍使用本地模型", async ({ page }) => {
+    await mockWorkspace(page);
+    await page.unroute("**/api/semantic-workspace/capabilities");
+    await page.route("**/api/semantic-workspace/capabilities", (route) =>
+      route.fulfill({
+        json: {
+          enabled: true,
+          items: [{
+            pack_id: "gray-python-table",
+            version: "1.0.0",
+            digest: `sha256:${"a".repeat(64)}`,
+            name: "Python 表格处理",
+            kind: "tool",
+            purpose: "按任务要求处理表格数据",
+            scope: "platform",
+          }],
+        },
+      }));
+    const candidate = {
+      ...workspaceTask("task-pi-new", "candidate_ready", "Mangrove 候选任务"),
+      runtime_version: "pi",
+      permission_profile: "standard",
+    };
+    let submitted: Record<string, unknown> | null = null;
+    await page.route("**/api/semantic-workspace/tasks", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      submitted = route.request().postDataJSON();
+      await route.fulfill({ status: 202, json: candidate });
+    });
+    await page.route("**/api/semantic-workspace/tasks/task-pi-new", (route) =>
+      route.fulfill({
+        json: workspaceDetail(candidate, {
+          runtime_version: "pi",
+          permission_profile: "standard",
+          agentic_runtime: {
+            runtime_version: "pi",
+            permission_profile: "standard",
+            status: "candidate_ready",
+            candidates: [],
+            events: [],
+          },
+        }),
+      }));
+
+    await page.goto("/data-prep");
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "workload.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8"),
+    });
+    await page.getByPlaceholder(/描述你想得到的结果/).fill(
+      "只筛选张三并输出 CSV",
+    );
+    await page.getByRole("button", { name: "更多", exact: true }).click();
+    await page.getByRole("button", { name: "Mangrove 增强灰度" }).click();
+    await expect(page.getByText("输入文件只读", { exact: false }))
+      .toBeVisible();
+    await expect(page.getByLabel("执行模型")).toHaveValue(
+      "local::Qwen3.6-35B-A3B",
+    );
+    await page.getByRole("checkbox", { name: /Python 表格处理/ }).check();
+    await page.getByRole("button", { name: "开始执行" }).click();
+
+    expect(submitted).toMatchObject({
+      runtime_version: "pi",
+      permission_profile: "standard",
+      provider: "local",
+      model: "Qwen3.6-35B-A3B",
+      capability_pack_refs: [{
+        pack_id: "gray-python-table",
+        version: "1.0.0",
+        digest: `sha256:${"a".repeat(64)}`,
+      }],
+    });
+  });
+
+  test("普通用户通过自己的连接运行 Mangrove 前必须确认当前任务外发", async ({ page }) => {
+    await mockWorkspace(page, "light", "user");
+    await page.route("**/api/model-connections", (route) => route.fulfill({
+      json: {
+        items: [{
+          connection_id: "conn-user-deepseek",
+          owner_scope: "user_personal",
+          preset_id: "deepseek",
+          display_name: "DeepSeek",
+          model: "deepseek-chat",
+          api_format: "openai_chat_completions",
+          locality: "public",
+          status: "verified",
+          default_model: "deepseek-chat",
+          models: [
+            {
+              model_id: "deepseek-chat",
+              display_name: "DeepSeek Chat",
+              status: "available",
+              enabled: true,
+            },
+            {
+              model_id: "deepseek-reasoner",
+              display_name: "DeepSeek Reasoner",
+              status: "available",
+              enabled: true,
+            },
+          ],
+        }],
+      },
+    }));
+    await page.route("**/api/model-connections/preferences/default", (route) =>
+      route.fulfill({
+        json: {
+          preference: {
+            connection_id: "conn-user-deepseek",
+            model_id: "deepseek-reasoner",
+            available: true,
+          },
+        },
+      }));
+    let submitted: Record<string, unknown> | null = null;
+    await page.route("**/api/semantic-workspace/tasks", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      submitted = route.request().postDataJSON();
+      await route.fulfill({
+        status: 202,
+        json: workspaceTask("task-user-pi", "queued", "外部模型任务"),
+      });
+    });
+
+    await page.goto("/data-prep");
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "workload.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8"),
+    });
+    await page.getByPlaceholder(/描述你想得到的结果/).fill(
+      "只筛选张三并输出 CSV",
+    );
+    await page.getByRole("button", { name: "更多", exact: true }).click();
+    await page.getByRole("button", { name: "Mangrove 增强灰度" }).click();
+
+    await expect(page.getByLabel("模型连接")).toHaveValue(
+      "conn-user-deepseek",
+    );
+    await expect(
+      page.getByText("外发确认：DeepSeek · deepseek-reasoner"),
+    ).toBeVisible();
+    await page.getByLabel("本任务模型").selectOption("deepseek-chat");
+    await expect(
+      page.getByText("外发确认：DeepSeek · deepseek-chat"),
+    ).toBeVisible();
+    await expect(page.getByText(/当前任务中的表格内容与任务说明/)).toBeVisible();
+    await expect(page.getByText(/仅用于当前任务版本/)).toBeVisible();
+    await expect(page.getByRole("button", { name: "开始执行" })).toBeDisabled();
+    const accessibility = await new AxeBuilder({ page })
+      .include('[data-testid="external-model-disclosure"]')
+      .analyze();
+    expect(accessibility.violations).toEqual([]);
+
+    await page.getByRole("checkbox", {
+      name: /确认将上述内容发送到 DeepSeek/,
+    }).check();
+    await page.getByRole("button", { name: "开始执行" }).click();
+
+    expect(submitted).toMatchObject({
+      runtime_version: "pi",
+      provider: "deepseek",
+      model: "deepseek-chat",
+      model_connection_id: "conn-user-deepseek",
+      model_connection_model: "deepseek-chat",
+      external_api_confirmed: true,
+    });
+  });
+
+  test("Mangrove 候选明确区别于正式交付并可下载", async ({ page }) => {
+    await mockWorkspace(page);
+    const candidateTask = {
+      ...workspaceTask(
+        "task-pi-candidate",
+        "candidate_ready",
+        "服务费用候选",
+      ),
+      runtime_version: "pi",
+      permission_profile: "standard",
+    };
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [candidateTask] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-pi-candidate",
+      (route) => route.fulfill({
+        json: workspaceDetail(candidateTask, {
+          runtime_version: "pi",
+          permission_profile: "standard",
+          agentic_runtime: {
+            runtime_version: "pi",
+            permission_profile: "standard",
+            status: "candidate_ready",
+            candidates: [{
+              artifact_id: "candidate-1",
+              filename: "服务费用标准及明细.csv",
+              format: "csv",
+              sha256: "a".repeat(64),
+              size_bytes: 256,
+              openable: true,
+              qa_checks: ["non_empty", "reopened"],
+              download_allowed: true,
+              download_url: (
+                "/api/semantic-workspace/tasks/task-pi-candidate/"
+                + "candidates/candidate-1"
+              ),
+            }],
+            verification: {
+              status: "passed",
+              summary: "候选已通过文件、来源证据和目标语义验证",
+              checks: [
+                {
+                  code: "source_grounding",
+                  passed: true,
+                  summary: "已从原件重新确认 3 条证据",
+                },
+                {
+                  code: "semantic_goal",
+                  passed: true,
+                  summary: "候选只包含用户要求的费用明细",
+                },
+              ],
+              evidence_count: 3,
+              formal_delivery_eligible: false,
+            },
+            events: [],
+          },
+        }),
+      }),
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: "待确认" }).click();
+    await expect(page.getByText("服务费用候选").first()).toBeVisible();
+    await page.getByRole("button", { name: "已完成" }).click();
+    await expect(page.getByText("服务费用候选")).toHaveCount(0);
+    await page.getByRole("button", { name: "待确认" }).click();
+    await page.getByText("服务费用候选").first().click();
+    await expect(page.getByRole("heading", {
+      name: "Mangrove 候选已通过独立验证",
+    }))
+      .toBeVisible();
+    await expect(page.getByText("已从原件重新确认 3 条证据"))
+      .toBeVisible();
+    await expect(page.getByText("不是正式交付")).toBeVisible();
+    await expect(page.getByRole("button", {
+      name: "下载候选 服务费用标准及明细.csv",
+    })).toBeVisible();
+    await expect(page.getByRole("button", {
+      name: "服务费用标准及明细.csv",
+      exact: true,
+    })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "结果与正式交付" }))
+      .toHaveCount(0);
+  });
+
+  test("语义验证无结论时可只重新验证现有候选", async ({ page }) => {
+    await mockWorkspace(page);
+    const candidateTask = {
+      ...workspaceTask(
+        "task-candidate-inconclusive",
+        "candidate_ready",
+        "待重新验证候选",
+      ),
+      runtime_version: "pi",
+      permission_profile: "standard",
+    };
+    const detail = workspaceDetail(candidateTask, {
+      runtime_version: "pi",
+      permission_profile: "standard",
+      agentic_runtime: {
+        runtime_version: "pi",
+        permission_profile: "standard",
+        status: "candidate_ready",
+        candidates: [{
+          artifact_id: "candidate-retry",
+          filename: "第2个报销审批单.json",
+          format: "json",
+          sha256: "b".repeat(64),
+          size_bytes: 2868,
+          openable: true,
+          qa_checks: ["non_empty", "reopened"],
+          download_allowed: true,
+          download_url: (
+            "/api/semantic-workspace/tasks/task-candidate-inconclusive/"
+            + "candidates/candidate-retry"
+          ),
+        }],
+        verification: {
+          status: "inconclusive",
+          summary: "文件与来源证据有效，但独立语义验证未形成可靠结论",
+          checks: [
+            {
+              code: "source_grounding",
+              passed: true,
+              summary: "已从原件重新确认 37 条证据",
+            },
+            {
+              code: "semantic_goal",
+              passed: false,
+              summary: "语义验证服务暂时不可用，请稍后重新验证候选。",
+            },
+          ],
+          evidence_count: 37,
+          formal_delivery_eligible: false,
+        },
+        events: [],
+      },
+    });
+    let retryCalls = 0;
+    let revisionCalls = 0;
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [candidateTask] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-candidate-inconclusive/revisions",
+      (route) => {
+        revisionCalls += 1;
+        return route.fulfill({ status: 500 });
+      },
+    );
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-candidate-inconclusive/candidate-verification/retry",
+      (route) => {
+        retryCalls += 1;
+        return route.fulfill({ json: detail });
+      },
+    );
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-candidate-inconclusive",
+      (route) => route.fulfill({ json: detail }),
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: "待确认" }).click();
+    await page.getByText("待重新验证候选").first().click();
+    await page.getByRole("button", {
+      name: "重新验证候选",
+      exact: true,
+    }).click();
+
+    await expect.poll(() => retryCalls).toBe(1);
+    expect(revisionCalls).toBe(0);
+  });
+
+  test("完成结果可预览，并能回到原文件定位来源", async ({ page }) => {
+    await mockWorkspace(page);
+    const completed = {
+      ...workspaceTask("task-result", "completed", "结果来源检查"),
+      upload_ids: ["upload-e2e"],
+      plan_id: "plan-result",
+      logical_revision: 1,
+      binding_revision: 1,
+      run_id: "run-result",
+    };
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [completed] }));
+    await page.route("**/api/semantic-workspace/tasks/task-result", (route) =>
+      route.fulfill({
+        json: workspaceDetail(completed, {
+          uploads: [{
+            upload_id: "upload-e2e",
+            original_name: "workload.csv",
+            media_type: "text/csv",
+            size_bytes: 64,
+            sha256: "0".repeat(64),
+          }],
+          events: [{
+            event_id: "result-done",
+            sequence: 1,
+            stage: "deliver",
+            event_type: "task_completed",
+            summary: "正式文件已生成",
+            details: {},
+            created_at: completed.updated_at,
+          }],
+          run: { repair_rounds: 0 },
+          delivery: {
+            delivery_id: "delivery-result",
+            run_id: "run-result",
+            plan_id: "plan-result",
+            status: "published",
+            requested_formats: ["xlsx"],
+            created_at: completed.updated_at,
+            outputs: [{
+              output_id: "output-xlsx",
+              format: "xlsx",
+              filename: "张三工作量.xlsx",
+              media_type:
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+              sha256: "1".repeat(64),
+              size_bytes: 2048,
+              qa: {
+                openable: true,
+                checks: ["格式重开通过", "记录数一致"],
+                warnings: [],
+                row_count: 1,
+                sheet_count: 1,
+              },
+              download_url: "/api/semantic-delivery/outputs/output-xlsx",
+            }],
+          },
+        }),
+      }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-result/preview?*",
+      (route) => route.fulfill({
+        json: {
+          kind: "table",
+          columns: ["姓名", "工作量"],
+          rows: [{
+            姓名: "张三",
+            工作量: 5,
+            __lineage: [{
+              artifact_id: "upload-e2e",
+              row_number: 2,
+              values: { 姓名: "张三", 工作量: 5 },
+            }],
+          }],
+          total: 1,
+          offset: 0,
+          limit: 100,
+        },
+      }),
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /结果来源检查/ }).click();
+    await expect(page.getByRole("heading", { name: "结果与正式交付" }))
+      .toBeVisible();
+    await expect(page.getByText("张三工作量.xlsx")).toBeVisible();
+    await expect(page.getByText("可交付", { exact: true })).toBeVisible();
+    const filenameBounds = await page.getByText("张三工作量.xlsx").boundingBox();
+    const bundleBounds = await page.getByRole("button", { name: "下载全部" })
+      .boundingBox();
+    expect(filenameBounds?.width).toBeGreaterThan(100);
+    expect(bundleBounds?.width).toBeGreaterThan(80);
+    await page.getByRole("button", { name: "查看来源" }).click();
+    await expect(page.getByText("已定位来源", { exact: false })).toBeVisible();
+    await expect(page.getByText("原文件第 2 行", { exact: false })).toBeVisible();
+    await expect(page.getByText("张三", { exact: true }).last()).toBeVisible();
+    if (process.env.MANGROVE_VISUAL_CAPTURE === "1") {
+      await page.screenshot({
+        path: "../.pytest-tmp/workspace-result-source.png",
+      });
+    }
+  });
+
+  test("运行中追问先形成草案，确认后创建不可变新版本", async ({ page }) => {
+    await mockWorkspace(page);
+    let activeRevision = 1;
+    let submitted: Record<string, unknown> | null = null;
+    const base = workspaceTask("task-version", "completed", "版本检查");
+    const revision = (number: number) => ({
+      task_id: base.task_id,
+      revision: number,
+      objective_text:
+        number === 1
+          ? base.objective_text
+          : `${base.objective_text}\n用户修改要求：增加地区汇总`,
+      output_formats: ["xlsx"],
+      plan_id: `plan-v${number}`,
+      logical_revision: number,
+      binding_revision: number,
+      run_id: `run-v${number}`,
+      status: "completed",
+      summary: `V${number} 已完成`,
+      change_summary: number === 1 ? "" : "增加地区汇总",
+      created_at: base.created_at,
+      updated_at: base.updated_at,
+    });
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({
+        json: [{ ...base, active_revision: activeRevision }],
+      }));
+    const versionDetail = (url: string) => {
+      const selected = Number(
+        new URL(url).searchParams.get("revision") || activeRevision,
+      );
+      const selectedRevision = revision(selected);
+      return workspaceDetail(
+        {
+          ...base,
+          ...selectedRevision,
+          active_revision: activeRevision,
+          current_revision: activeRevision,
+          viewing_revision: selected,
+        },
+        {
+          revisions: Array.from(
+            { length: activeRevision },
+            (_, index) => revision(index + 1),
+          ),
+          events: [{
+            event_id: `done-v${selected}`,
+            sequence: selected,
+            stage: "deliver",
+            event_type: "task_completed",
+            summary: `V${selected} 已生成`,
+            details: {},
+            created_at: base.updated_at,
+          }],
+        },
+      );
+    };
+    await page.route("**/api/semantic-workspace/tasks/task-version", (route) =>
+      route.fulfill({ json: versionDetail(route.request().url()) }));
+    await page.route("**/api/semantic-workspace/tasks/task-version?*", (route) =>
+      route.fulfill({ json: versionDetail(route.request().url()) }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-version/turns",
+      async (route) => {
+        submitted = route.request().postDataJSON();
+        await route.fulfill({
+          json: {
+            result_id: "steering-1",
+            task_id: "task-version",
+            turn_id: "turn-1",
+            delta_id: "delta-1",
+            action: "revision_proposal",
+            acknowledgement: "已形成修改草案，等待确认",
+            answer: null,
+            proposal_id: "proposal-1",
+            run_id: "run-v1",
+            revision: 1,
+          },
+        });
+      },
+    );
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-version/revision-proposals/proposal-1/decision",
+      async (route) => {
+        expect(route.request().postDataJSON()).toEqual({
+          mode: "cancel_now",
+          external_api_confirmed: false,
+        });
+        activeRevision = 2;
+        await route.fulfill({
+          status: 202,
+          json: {
+            decision: { decision_id: "decision-1", status: "applied" },
+            revision: revision(2),
+          },
+        });
+      },
+    );
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-version/preview?*",
+      (route) => route.fulfill({
+        json: {
+          kind: "table",
+          columns: [],
+          rows: [],
+          total: 0,
+          offset: 0,
+          limit: 100,
+        },
+      }),
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /版本检查/ }).click();
+    await page.getByPlaceholder(/可询问进度和原因/).fill("增加地区汇总");
+    await page.getByRole("button", { name: "发送" }).click();
+    await expect(page.getByText("已形成修改草案，等待确认")).toBeVisible();
+    await page.getByRole("button", { name: "立即停止并切换" }).click();
+    await expect(page.getByLabel("结果版本")).toHaveValue("2");
+    await expect(page.getByRole("button", { name: "发送" })).toBeVisible();
+    expect(submitted).toEqual({ text: "增加地区汇总" });
+
+    await page.getByLabel("结果版本").selectOption("1");
+    await expect(
+      page.getByRole("button", { name: /当前显示历史版本 V1/ }),
+    ).toBeVisible();
+    await expect(page.getByPlaceholder(/可询问进度和原因/)).toBeVisible();
+    await page.getByRole("button", { name: /当前显示历史版本 V1/ }).click();
+    await expect(page.getByLabel("结果版本")).toHaveValue("2");
+  });
+
+  test("待确认任务可收起后重新打开，并可随时取消", async ({ page }) => {
+    await mockWorkspace(page);
+    let status = "needs_input";
+    const waiting = workspaceTask("task-waiting", status, "待确认任务");
+    const question = {
+      kind: "plan",
+      question_id: "q1",
+      prompt: "“本月”指自然月还是最近 30 天？",
+      reason: "时间范围会改变筛选结果",
+      affected_scope: "结果行数",
+      options: [
+        { value: "calendar", label: "自然月" },
+        { value: "rolling", label: "最近 30 天" },
+      ],
+      allow_free_text: false,
+    };
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({
+        json: [{ ...waiting, status }],
+      }));
+    await page.route("**/api/semantic-workspace/tasks/task-waiting", (route) =>
+      route.fulfill({
+        json: workspaceDetail(
+          { ...waiting, status },
+          {
+            question: status === "needs_input" ? question : null,
+            events: status === "needs_input"
+              ? [{
+                event_id: "q-event",
+                sequence: 1,
+                stage: "needs_input",
+                event_type: "question_required",
+                summary: question.prompt,
+                details: {},
+                created_at: waiting.updated_at,
+              }]
+              : [{
+                event_id: "cancel-event",
+                sequence: 2,
+                stage: "cancelled",
+                event_type: "task_cancelled",
+                summary: "任务已取消",
+                details: {},
+                created_at: waiting.updated_at,
+              }],
+          },
+        ),
+      }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-waiting/cancel",
+      async (route) => {
+        status = "cancelled";
+        await route.fulfill({ json: { ...waiting, status } });
+      },
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /待确认任务/ }).click();
+    await expect(
+      page.getByRole("heading", { name: "需要确认一项信息" }),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "稍后回答" }).click();
+    await expect(page.getByRole("button", { name: /继续回答/ })).toBeVisible();
+    await page.getByRole("button", { name: /继续回答/ }).click();
+    await expect(
+      page.getByRole("dialog").getByText(question.prompt),
+    ).toBeVisible();
+    await page.getByRole("button", { name: "稍后回答" }).click();
+    await page.getByRole("button", { name: "取消任务" }).click();
+    await page.getByRole("button", { name: "确认取消" }).click();
+    await expect(page.getByText("任务已取消，未发布新的正式交付。")).toBeVisible();
+    await expect(page.getByText("已取消", { exact: true }).first()).toBeVisible();
+  });
+
+  test("完成任务可以移入回收站并从回收站恢复", async ({ page }) => {
+    await mockWorkspace(page);
+    let deleted = false;
+    const completed = workspaceTask("task-recycle", "completed", "可回收任务");
+    const deletedTask = {
+      ...completed,
+      deleted_at: "2026-07-27T00:10:00Z",
+      purge_after: "2026-08-26T00:10:00Z",
+    };
+    await page.route("**/api/semantic-workspace/tasks?*", (route) => {
+      const wantsDeleted =
+        new URL(route.request().url()).searchParams.get("deleted") === "true";
+      return route.fulfill({
+        json: wantsDeleted
+          ? (deleted ? [deletedTask] : [])
+          : (deleted ? [] : [completed]),
+      });
+    });
+    await page.route("**/api/semantic-workspace/tasks/task-recycle", (route) =>
+      route.fulfill({
+        json: workspaceDetail(deleted ? deletedTask : completed),
+      }));
+    await page.route("**/api/semantic-workspace/tasks/task-recycle", async (route) => {
+      if (route.request().method() !== "DELETE") {
+        await route.fallback();
+        return;
+      }
+      deleted = true;
+      await route.fulfill({ json: deletedTask });
+    });
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-recycle/restore",
+      async (route) => {
+        deleted = false;
+        await route.fulfill({ json: completed });
+      },
+    );
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-recycle/preview?*",
+      (route) => route.fulfill({
+        json: {
+          kind: "table",
+          columns: [],
+          rows: [],
+          total: 0,
+          offset: 0,
+          limit: 100,
+        },
+      }),
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /可回收任务/ }).click();
+    await page.getByRole("button", { name: "移入回收站" }).click();
+    await page.getByRole("button", { name: "移入回收站" }).last().click();
+    await expect(page.getByText("选择任务或新建任务")).toBeVisible();
+    await page.getByRole("button", { name: "回收站" }).click();
+    await page.getByRole("button", { name: /可回收任务/ }).click();
+    await expect(page.getByRole("button", { name: "恢复任务" })).toBeVisible();
+    await page.getByRole("button", { name: "恢复任务" }).click();
+    await expect(page.getByRole("heading", { name: "可回收任务" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /可回收任务/ })).toBeVisible();
+  });
+
+  test("完成任务按阶段归并进度且没有遗留转圈", async ({ page }) => {
+    await mockWorkspace(page);
+    const summary = {
+      task_id: "task-completed",
+      title: "工作量筛选",
+      objective_text: "只筛选张三并输出 XLSX",
+      upload_ids: [],
+      output_formats: ["xlsx"],
+      provider: "local",
+      model: "Qwen3.6-35B-A3B",
+      external_api_confirmed: false,
+      status: "completed",
+      active_revision: 1,
+      current_revision: 1,
+      viewing_revision: 1,
+      plan_id: "plan-1",
+      logical_revision: 1,
+      binding_revision: 1,
+      run_id: "run-1",
+      summary: "已识别筛选条件和输出要求",
+      error: null,
+      question: null,
+      cancel_requested: false,
+      deleted_at: null,
+      purge_after: null,
+      created_at: "2026-07-27T00:00:00Z",
+      updated_at: "2026-07-27T00:00:09Z",
+    };
+    const event = (
+      event_id: string,
+      sequence: number,
+      stage: string,
+      event_type: string,
+      summaryText: string,
+    ) => ({
+      event_id,
+      sequence,
+      stage,
+      event_type,
+      summary: summaryText,
+      details: {},
+      created_at: `2026-07-27T00:00:0${sequence}Z`,
+    });
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [summary] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-completed/preview?*",
+      (route) => route.fulfill({
+        json: {
+          kind: "table",
+          columns: [],
+          rows: [],
+          total: 0,
+          page: 1,
+          page_size: 50,
+        },
+      }),
+    );
+    await page.route("**/api/semantic-workspace/tasks/task-completed", (route) =>
+      route.fulfill({
+        json: {
+          ...summary,
+          revisions: [{
+            task_id: "task-completed",
+            revision: 1,
+            objective_text: summary.objective_text,
+            output_formats: ["xlsx"],
+            plan_id: "plan-1",
+            logical_revision: 1,
+            binding_revision: 1,
+            run_id: "run-1",
+            status: "completed",
+            summary: "",
+            change_summary: "",
+            created_at: summary.created_at,
+            updated_at: summary.updated_at,
+          }],
+          events: [
+            event("e1", 1, "queued", "task_created", "任务已进入队列"),
+            event("e2", 2, "interpret", "stage_started", "正在理解要求"),
+            event("e3", 3, "interpret", "stage_completed", "已形成任务理解"),
+            event("e4", 4, "inspect", "stage_started", "正在读取来源"),
+            event("e5", 5, "bind", "stage_completed", "来源和字段已绑定"),
+            event("e9", 9, "deliver", "task_completed", "正式文件已生成"),
+          ],
+          harness_events: [
+            event("h1", 3, "interpret", "node_completed", "语义计划已校验"),
+            event("h2", 4, "inspect", "node_completed", "来源检查已通过"),
+            event("h3", 5, "bind", "node_completed", "绑定已通过"),
+            event("h4", 6, "plan", "node_completed", "执行计划已生成"),
+            event("h5", 7, "execute", "node_completed", "数据处理已完成"),
+            event("h6", 8, "verify", "verification_passed", "结果验证已通过"),
+            event("h7", 9, "deliver", "delivery_published", "正式交付已发布"),
+          ],
+          uploads: [],
+          plan: null,
+          run: { repair_rounds: 0 },
+          attempts: [],
+          delivery: null,
+        },
+      }));
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /工作量筛选/ }).click();
+    await expect(page.getByRole("heading", { name: "工作量筛选" })).toBeVisible();
+
+    const progressToggle = page.getByRole("button", { name: /执行进度/ });
+    await expect(progressToggle).toContainText("8/8 已完成");
+    await expect(page.locator('[data-testid="progress-stage"]')).toHaveCount(0);
+    if (process.env.MANGROVE_VISUAL_CAPTURE === "1") {
+      await page.screenshot({
+        path: "../.pytest-tmp/workspace-completed-collapsed.png",
+      });
+    }
+    await progressToggle.click();
+    const stages = page.locator('[data-testid="progress-stage"]');
+    await expect(stages).toHaveCount(8);
+    await expect(stages.filter({ hasText: "理解要求" })).toHaveCount(1);
+    await expect(stages.filter({ hasText: "读取来源" })).toHaveCount(1);
+    await expect(
+      page.locator('[data-testid="progress-stage"][data-state="active"]'),
+    ).toHaveCount(0);
+    await expect(
+      page.locator('[data-testid="progress-stage"][data-state="completed"]'),
+    ).toHaveCount(8);
+    const viewport = await page.evaluate(() => ({
+      scrollY: window.scrollY,
+      scrollHeight: document.documentElement.scrollHeight,
+      innerHeight: window.innerHeight,
+    }));
+    expect(viewport.scrollY).toBe(0);
+    expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.innerHeight);
+    const shellBounds = await Promise.all([
+      page.getByAltText("howso@Mangrove").boundingBox(),
+      page.getByRole("button", { name: "新建任务" }).boundingBox(),
+      page.getByRole("heading", { name: "数据工作台" }).boundingBox(),
+    ]);
+    for (const bounds of shellBounds) {
+      expect(bounds?.y).toBeGreaterThanOrEqual(0);
+    }
+    if (process.env.MANGROVE_VISUAL_CAPTURE === "1") {
+      await page.screenshot({
+        path: "../.pytest-tmp/workspace-completed-progress.png",
+      });
+    }
+  });
+
+  test("运行中最多一个阶段转圈，失败时停在实际失败阶段", async ({ page }) => {
+    await mockWorkspace(page);
+    let failed = false;
+    const running = workspaceTask("task-running", "running", "运行逻辑检查");
+    const progressEvents = () => [
+      {
+        event_id: "queued",
+        sequence: 1,
+        stage: "queued",
+        event_type: "task_created",
+        summary: "任务已进入队列",
+        details: {},
+        created_at: "2026-07-27T00:00:01Z",
+      },
+      {
+        event_id: "interpret-done",
+        sequence: 2,
+        stage: "interpret",
+        event_type: "stage_completed",
+        summary: "任务要求已理解",
+        details: {},
+        created_at: "2026-07-27T00:00:02Z",
+      },
+      {
+        event_id: "inspect-start",
+        sequence: 3,
+        stage: "inspect",
+        event_type: "stage_started",
+        summary: "正在读取来源",
+        details: {},
+        created_at: "2026-07-27T00:00:03Z",
+      },
+      {
+        event_id: "bind-done",
+        sequence: 4,
+        stage: "bind",
+        event_type: "stage_completed",
+        summary: "来源和字段已绑定",
+        details: {},
+        created_at: "2026-07-27T00:00:04Z",
+      },
+      {
+        event_id: "execute-start",
+        sequence: 5,
+        stage: "execute",
+        event_type: "stage_started",
+        summary: "正在处理数据",
+        details: {},
+        created_at: "2026-07-27T00:00:05Z",
+      },
+      ...(failed ? [{
+        event_id: "failed",
+        sequence: 7,
+        stage: "failed",
+        event_type: "task_failed",
+        summary: "数据处理失败",
+        details: {},
+        created_at: "2026-07-27T00:00:07Z",
+      }] : []),
+    ];
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({
+        json: [{ ...running, status: failed ? "failed" : "running" }],
+      }));
+    await page.route("**/api/semantic-workspace/tasks/task-running", (route) =>
+      route.fulfill({
+        json: workspaceDetail(
+          {
+            ...running,
+            status: failed ? "failed" : "running",
+            error: failed ? "数据处理失败" : null,
+          },
+          {
+            events: progressEvents(),
+            harness_events: [{
+              event_id: "harness-recheck",
+              sequence: 1,
+              stage: "interpret",
+              event_type: "node_completed",
+              summary: "服务端语义计划已重新校验",
+              details: {},
+              created_at: "2026-07-27T00:00:06Z",
+              source: "harness",
+            }],
+          },
+        ),
+      }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-running/stream",
+      (route) => route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: "",
+      }),
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /运行逻辑检查/ }).click();
+    const active = page.locator(
+      '[data-testid="progress-stage"][data-state="active"]',
+    );
+    await expect(active).toHaveCount(1);
+    await expect(active).toContainText("处理数据");
+    const states = await page.locator('[data-testid="progress-stage"]')
+      .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-state")));
+    const activeIndex = states.indexOf("active");
+    expect(states.slice(activeIndex + 1)).not.toContain("completed");
+
+    failed = true;
+    await page.reload();
+    await page.getByRole("button", { name: /运行逻辑检查/ }).click();
+    await expect(
+      page.locator('[data-testid="progress-stage"][data-state="active"]'),
+    ).toHaveCount(0);
+    const failedStage = page.locator(
+      '[data-testid="progress-stage"][data-state="failed"]',
+    );
+    await expect(failedStage).toHaveCount(1);
+    await expect(failedStage).toContainText("处理数据");
+  });
+
+  test("普通用户能看懂编译失败原因和下一步", async ({ page }) => {
+    await mockWorkspace(page);
+    const failedTask = {
+      ...workspaceTask("task-compile-failed", "failed", "失败说明检查"),
+      plan_id: "plan-failed",
+      error: "语义计划编译失败",
+      failure: {
+        error_code: "STP_COMPILE_FAILED",
+        stage: "interpret",
+        cause_summary: "本地模型两次输出被截断，最后生成的计划未通过校验",
+        attempt_count: 3,
+        elapsed_ms: 7342,
+        source_read: false,
+        intermediate_created: false,
+        delivery_published: false,
+        next_actions: ["修改要求后重试", "检查本地模型配置"],
+        diagnostic_ref: "plan-failed",
+      },
+    };
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [failedTask] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-compile-failed",
+      (route) => route.fulfill({
+        json: workspaceDetail(failedTask, {
+          events: [{
+            event_id: "compile-failed",
+            sequence: 2,
+            stage: "interpret",
+            event_type: "stage_failed",
+            summary: "任务要求理解失败",
+            details: { error_code: "STP_COMPILE_FAILED" },
+            created_at: "2026-07-27T00:00:02Z",
+          }],
+        }),
+      }),
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /失败说明检查/ }).click();
+
+    const notice = page.getByTestId("task-failure-explanation");
+    await expect(notice).toContainText("理解要求");
+    await expect(notice).toContainText(
+      "本地模型两次输出被截断，最后生成的计划未通过校验",
+    );
+    await expect(notice).toContainText("共尝试 3 次");
+    await expect(notice).toContainText("耗时 7.3 秒");
+    await expect(notice).toContainText("尚未读取原始资料");
+    await expect(notice).toContainText("未生成中间结果");
+    await expect(notice).toContainText("未发布正式交付");
+    await expect(notice).toContainText("修改要求后重试");
+    await expect(notice).toContainText("检查本地模型配置");
+    await expect(notice).toContainText("STP_COMPILE_FAILED");
+  });
+
+  test("后序完成事件会收口前序遗留开始态", async ({ page }) => {
+    await mockWorkspace(page);
+    const running = workspaceTask("task-stage-gap", "running", "阶段状态检查");
+    const events = [
+      {
+        event_id: "task-created",
+        sequence: 1,
+        stage: "queued",
+        event_type: "task_created",
+        summary: "任务已进入队列",
+        details: {},
+        created_at: "2026-07-27T00:00:01Z",
+      },
+      {
+        event_id: "inspect-start",
+        sequence: 2,
+        stage: "inspect",
+        event_type: "stage_started",
+        summary: "正在读取来源",
+        details: {},
+        created_at: "2026-07-27T00:00:02Z",
+      },
+      {
+        event_id: "bind-done",
+        sequence: 3,
+        stage: "bind",
+        event_type: "stage_completed",
+        summary: "来源和字段已绑定",
+        details: {},
+        created_at: "2026-07-27T00:00:03Z",
+      },
+    ];
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [running] }));
+    await page.route("**/api/semantic-workspace/tasks/task-stage-gap", (route) =>
+      route.fulfill({
+        json: workspaceDetail(running, { events, harness_events: [] }),
+      }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-stage-gap/stream",
+      (route) => route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: "",
+      }),
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /阶段状态检查/ }).click();
+    await expect(
+      page.locator('[data-testid="progress-stage"][data-state="active"]'),
+    ).toHaveCount(0);
+    await expect(
+      page.locator('[data-testid="progress-stage"]').filter({
+        hasText: "读取来源",
+      }),
+    ).toHaveAttribute("data-state", "completed");
+    await expect(
+      page.locator('[data-testid="progress-stage"]').filter({
+        hasText: "绑定字段",
+      }),
+    ).toHaveAttribute("data-state", "completed");
+  });
+
+  test("Mangrove 文档任务展示冻结理解和可恢复覆盖进度", async ({ page }) => {
+    await mockWorkspace(page);
+    const coverageEvent = (
+      eventId: string,
+      sequence: number,
+      stage: string,
+      eventType: string,
+      summary: string,
+    ) => ({
+      event_id: eventId,
+      sequence,
+      stage,
+      event_type: eventType,
+      summary,
+      details: {},
+      created_at: `2026-07-31T00:00:0${sequence}Z`,
+    });
+    const running = workspaceTask(
+      "task-coverage",
+      "running",
+      "全部报销记录",
+    );
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [running] }));
+    await page.route("**/api/semantic-workspace/tasks/task-coverage", (route) =>
+      route.fulfill({
+        json: workspaceDetail(running, {
+          events: [
+            coverageEvent("c1", 1, "queued", "task_created", "任务已进入队列"),
+            coverageEvent("c2", 2, "goal_interpretation", "tool.completed", "已冻结目标理解"),
+            coverageEvent("c3", 3, "source_probe", "tool.completed", "已识别 109 页"),
+            coverageEvent("c4", 4, "source_discovery", "tool.started", "正在检查全部页面"),
+          ],
+          harness_events: [],
+          agentic_runtime: {
+            runtime_version: "pi",
+            permission_profile: "standard",
+            status: "running",
+            candidates: [],
+            coverage: {
+              contract: {
+                interpretation: "返回整份文件中的全部报销记录",
+                result_cardinality: "all",
+                completeness: "strict",
+                stop_semantics: "全部 109 页完成可信发现且候选已精读",
+              },
+              progress: {
+                authorized: 109,
+                observed: 57,
+                candidates: 2,
+                authoritatively_read: 2,
+                low_quality: 0,
+                unknown: 52,
+                evidence: 2,
+                cache_hits: 41,
+              },
+              ledger: {},
+            },
+          },
+        }),
+      }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-coverage/stream",
+      (route) => route.fulfill({
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+        body: "",
+      }),
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /全部报销记录/ }).click();
+
+    const coverage = page.getByRole("region", { name: "文档覆盖范围" });
+    await expect(coverage).toContainText("返回整份文件中的全部报销记录");
+    await expect(coverage).toContainText("严格完整");
+    await expect(coverage).toContainText("已发现 57/109");
+    await expect(coverage).toContainText("未覆盖 52");
+    await expect(coverage).toContainText("缓存命中 41");
+    await expect(coverage).toContainText("候选 2 · 已精读 2");
+    await expect(
+      page.locator('[data-testid="progress-stage"]').filter({
+        hasText: "候选发现",
+      }),
+    ).toHaveAttribute("data-state", "active");
+
+    await page.reload();
+    await page.getByRole("button", { name: /全部报销记录/ }).click();
+    await expect(
+      page.getByRole("region", { name: "文档覆盖范围" }),
+    ).toContainText("已发现 57/109");
+    await expect(
+      page.locator('[data-testid="progress-stage"]').filter({
+        hasText: "候选发现",
+      }),
+    ).toHaveAttribute("data-state", "active");
+  });
+
+  test("普通用户可展开查看实际使用的专业能力", async ({ page }) => {
+    await mockWorkspace(page, "light", "user");
+    const completed = workspaceTask(
+      "task-capabilities",
+      "completed",
+      "解析合同并提取条款",
+    );
+    const capabilityEvent = {
+      event_id: "capability-1",
+      sequence: 3,
+      task_id: completed.task_id,
+      revision: 1,
+      run_id: "run-capability",
+      stage: "prepare_capabilities",
+      event_type: "stage_completed",
+      summary: "Pi 已准备 1 项能力：MinerU 文档解析（Tool）",
+      progress: null,
+      refs: {
+        capabilities: [{
+          name: "MinerU 文档解析",
+          kind: "tool",
+          version: "2.1.0",
+          purpose: "解析 PDF 文档结构",
+        }],
+      },
+      action: null,
+      audience: "all",
+      created_at: "2026-08-04T20:00:03Z",
+    };
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [completed] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-capabilities",
+      (route) => route.fulfill({
+        json: workspaceDetail(completed, {
+          events: [capabilityEvent],
+          progress: {
+            active_stage: null,
+            stages: [
+              { stage: "understand", status: "completed", summary: "已理解要求" },
+              { stage: "inspect_sources", status: "completed", summary: "已检查来源" },
+              {
+                stage: "prepare_capabilities",
+                status: "completed",
+                summary: capabilityEvent.summary,
+              },
+              { stage: "execute", status: "completed", summary: "已处理数据" },
+              { stage: "verify", status: "completed", summary: "验证通过" },
+              { stage: "deliver", status: "completed", summary: "正式交付已发布" },
+            ],
+            events: [capabilityEvent],
+          },
+        }),
+      }),
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /解析合同并提取条款/ }).click();
+    await page.getByRole("button", { name: /执行进度/ }).click();
+    await expect(page.getByText("Mangrove 已准备 1 项能力：MinerU 文档解析（Tool）").first())
+      .toBeVisible();
+    await page.getByRole("button", { name: /行动记录/ }).click();
+    await expect(page.getByText("Mangrove 已准备 1 项能力：MinerU 文档解析（Tool）").last())
+      .toBeVisible();
+    await expect(page.getByText("Pi 已准备 1 项能力：MinerU 文档解析（Tool）"))
+      .toHaveCount(0);
+    await expect(page.getByText("MinerU 文档解析", { exact: true })).toBeVisible();
+    await expect(page.getByText("Tool", { exact: true })).toBeVisible();
+    await expect(page.getByText("v2.1.0", { exact: true })).toBeVisible();
+    await expect(page.getByText("解析 PDF 文档结构", { exact: true })).toBeVisible();
+  });
+
+  for (const theme of ["light", "dark"] as const) {
+    test(`${theme} 主题没有严重或致命的可访问性问题`, async ({ page }) => {
+      await mockWorkspace(page, theme);
+      await page.goto("/data-prep");
+      await expect(page.getByRole("heading", { name: "想处理什么资料？" }))
+        .toBeVisible();
+
+      const scan = await new AxeBuilder({ page }).analyze();
+      const blocking = scan.violations.filter(
+        (item) => item.impact === "serious" || item.impact === "critical",
+      );
+      expect(blocking).toEqual([]);
+    });
+  }
+});

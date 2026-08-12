@@ -1,0 +1,18 @@
+[
+  {"id":"first-01","query":"提取第一个报销审批单，按人名组织 JSON","cardinality":"first","completeness":"strict","scope":"all","clarify":false},
+  {"id":"first-02","query":"从头开始找，给我最早出现且字段完整的一张报销单","cardinality":"first","completeness":"strict","scope":"all","clarify":false},
+  {"id":"all-01","query":"查找文件中张三的全部报销数据","cardinality":"all","completeness":"strict","scope":"all","clarify":false},
+  {"id":"all-02","query":"不要漏项，把每一页里与张三有关的报销记录都列出来","cardinality":"all","completeness":"strict","scope":"all","clarify":false},
+  {"id":"range-01","query":"只读取第 20 页的审批金额并输出 JSON","cardinality":"all","completeness":"strict","scope":"page:20","clarify":false},
+  {"id":"range-02","query":"在第 20 到 30 页查找所有结算金额","cardinality":"all","completeness":"strict","scope":"page:20-30","clarify":false},
+  {"id":"count-01","query":"按页码顺序提取前 10 条费用记录","cardinality":"count","result_count":10,"completeness":"strict","scope":"all","clarify":false},
+  {"id":"whole-01","query":"把整份附件中的付款条款整理为 Markdown","cardinality":"all","completeness":"strict","scope":"all","clarify":false},
+  {"id":"example-01","query":"找一条报销记录作为格式示例","cardinality":"first","completeness":"strict","scope":"all","clarify":false},
+  {"id":"all-context-01","query":"为了审计，请列出每一条报销记录","cardinality":"all","completeness":"strict","scope":"all","clarify":false},
+  {"id":"attachment-01","query":"只在附件 2 中找全部服务费明细","cardinality":"all","completeness":"strict","scope":"attachment:2","clarify":false},
+  {"id":"table-01","query":"完整提取服务费用标准及明细表，保留行列结构","cardinality":"all","completeness":"strict","scope":"all","clarify":false},
+  {"id":"multi-turn-01","context":"上一轮已确认只读取第 20 页的第一条完整记录。","query":"保持刚才的范围，但改成输出 JSON","cardinality":"first","completeness":"strict","scope":"page:20","clarify":false},
+  {"id":"ambiguous-01","query":"查一下张三的数据","cardinality":"ambiguous","completeness":"ambiguous","scope":"all","clarify":true},
+  {"id":"ambiguous-02","query":"处理这个文件","cardinality":"ambiguous","completeness":"ambiguous","scope":"all","clarify":true},
+  {"id":"best-effort-01","query":"OCR 有问题也没关系，尽量找出能确认的记录并标明缺页","cardinality":"all","completeness":"best_effort","scope":"all","clarify":false}
+]

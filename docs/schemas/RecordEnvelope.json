@@ -1,0 +1,27 @@
+{
+  "description": "内部统一记录信封：业务数据 + 系统元数据分离（plan 6.3）。\n\n导出时业务数据与血缘侧车文件分离，避免系统字段污染业务字段。",
+  "properties": {
+    "record_id": {
+      "description": "稳定内容标识（内容哈希或主键派生）",
+      "title": "Record Id",
+      "type": "string"
+    },
+    "data": {
+      "additionalProperties": true,
+      "description": "业务字段",
+      "title": "Data",
+      "type": "object"
+    },
+    "meta": {
+      "additionalProperties": true,
+      "description": "系统元数据：source_id/artifact_id/position/observed_at/parser/content_hash",
+      "title": "Meta",
+      "type": "object"
+    }
+  },
+  "required": [
+    "record_id"
+  ],
+  "title": "RecordEnvelope",
+  "type": "object"
+}

@@ -1,0 +1,18 @@
+# SearXNG 最小配置：在默认配置基础上开启 JSON 输出（供本项目 API 调用）、关闭限流。
+# 首次启动后若该文件被镜像覆盖，请确认 search.formats 含 json、server.limiter 为 false。
+use_default_settings: true
+
+server:
+  # 部署到公网前请改成随机长字符串（如 openssl rand -hex 32）
+  secret_key: "change-me-to-a-random-secret"
+  # 本项目自己调用 API，关闭机器人限流，避免被自己的请求挡掉
+  limiter: false
+  image_proxy: false
+
+search:
+  # 必须包含 json，否则本项目无法用 ?format=json 取结果
+  formats:
+    - html
+    - json
+  # 默认中文优先（也可在请求里指定 language）
+  default_lang: "zh-CN"

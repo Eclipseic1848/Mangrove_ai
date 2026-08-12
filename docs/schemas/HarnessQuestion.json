@@ -1,0 +1,144 @@
+{
+  "$defs": {
+    "HarnessQuestionOption": {
+      "additionalProperties": false,
+      "properties": {
+        "value": {
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        },
+        "label": {
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        }
+      },
+      "required": [
+        "value",
+        "label",
+        "description"
+      ],
+      "title": "HarnessQuestionOption",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "question_id": {
+      "minLength": 1,
+      "title": "Question Id",
+      "type": "string"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "checkpoint_id": {
+      "minLength": 1,
+      "title": "Checkpoint Id",
+      "type": "string"
+    },
+    "prompt": {
+      "minLength": 1,
+      "title": "Prompt",
+      "type": "string"
+    },
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "affected_scope": {
+      "minLength": 1,
+      "title": "Affected Scope",
+      "type": "string"
+    },
+    "options": {
+      "items": {
+        "$ref": "#/$defs/HarnessQuestionOption"
+      },
+      "maxItems": 3,
+      "minItems": 2,
+      "title": "Options",
+      "type": "array"
+    },
+    "allow_free_text": {
+      "default": true,
+      "title": "Allow Free Text",
+      "type": "boolean"
+    },
+    "answer_schema": {
+      "additionalProperties": true,
+      "title": "Answer Schema",
+      "type": "object"
+    },
+    "resume_token": {
+      "minLength": 16,
+      "title": "Resume Token",
+      "type": "string"
+    },
+    "external_service": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "External Service"
+    },
+    "outbound_data": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Outbound Data",
+      "type": "array"
+    },
+    "purpose": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Purpose"
+    },
+    "risk": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Risk"
+    }
+  },
+  "required": [
+    "question_id",
+    "run_id",
+    "checkpoint_id",
+    "prompt",
+    "reason",
+    "affected_scope",
+    "options",
+    "resume_token"
+  ],
+  "title": "HarnessQuestion",
+  "type": "object"
+}

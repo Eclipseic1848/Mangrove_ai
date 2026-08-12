@@ -1,0 +1,67 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+description: Mangrove Phase 4B Batch 8A isolated contract PoC
+sharing: false
+evaluateOptions:
+  cache: false
+
+prompts:
+  - "{{scenario_id}}"
+
+providers:
+  - id: file://provider.py
+    label: Batch 8A contract adapter
+
+tests:
+  - description: DOCX 限定提取并交付 TXT
+    vars:
+      scenario_id: docx_to_txt
+    assert:
+      - type: contains
+        value: '"outcome":"accepted"'
+      - type: contains
+        value: '"formats":["txt"]'
+
+  - description: PDF 证据审计并交付 DOCX/PDF
+    vars:
+      scenario_id: pdf_audit
+    assert:
+      - type: contains
+        value: '"outcome":"accepted"'
+      - type: contains
+        value: '"formats":["docx","pdf"]'
+
+  - description: XLSX 筛选投影排序并交付 XLSX
+    vars:
+      scenario_id: xlsx_transform
+    assert:
+      - type: contains
+        value: '"outcome":"accepted"'
+      - type: contains
+        value: '"source_kind":"table"'
+
+  - description: CSV 去重分组汇总并交付 CSV/JSON
+    vars:
+      scenario_id: csv_summary
+    assert:
+      - type: contains
+        value: '"formats":["csv","json"]'
+      - type: contains
+        value: '"outcome":"accepted"'
+
+  - description: 本地模型截断后失败关闭且不外发
+    vars:
+      scenario_id: local_model_truncation
+    assert:
+      - type: contains
+        value: '"error_code":"STP_COMPILE_FAILED"'
+      - type: contains
+        value: '"external_fallback":false'
+
+  - description: 文档和表格混合输入被明确拒绝
+    vars:
+      scenario_id: mixed_inputs
+    assert:
+      - type: contains
+        value: '"error_code":"MIXED_INPUT_KINDS"'
+      - type: contains
+        value: '"outcome":"rejected"'

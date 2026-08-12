@@ -1,0 +1,73 @@
+{
+  "schema_version": "1",
+  "onboarding": [
+    {
+      "title": "添加资料",
+      "description": "拖入、选择或粘贴表格和文档，可同时添加多个文件。"
+    },
+    {
+      "title": "说明结果",
+      "description": "用自然语言说明筛选、合并、比较或生成要求。"
+    },
+    {
+      "title": "核对交付",
+      "description": "查看结果、质量和来源，再下载正式文件或提出修改。"
+    }
+  ],
+  "examples": [
+    {
+      "id": "merge-orders",
+      "category": "表格处理",
+      "title": "合并订单并去重",
+      "description": "适合多份结构相近的 Excel 或 CSV。",
+      "required_inputs": "2 份及以上 Excel/CSV",
+      "prompt": "合并这些订单表，按订单号去重，按下单日期升序排列，输出 XLSX 和 JSON。",
+      "output_formats": ["xlsx", "json"]
+    },
+    {
+      "id": "sales-summary",
+      "category": "筛选汇总",
+      "title": "筛选并汇总销售数据",
+      "description": "按条件筛选明细并生成分组汇总。",
+      "required_inputs": "包含区域和销售额字段的表格",
+      "prompt": "筛选销售额大于 10 万的记录，按区域汇总销售额，保留来源明细，输出 XLSX。",
+      "output_formats": ["xlsx"]
+    },
+    {
+      "id": "supplier-join",
+      "category": "表格处理",
+      "title": "关联供应商清单",
+      "description": "关联两份清单并保留差异。",
+      "required_inputs": "2 份带统一标识的供应商表",
+      "prompt": "按统一社会信用代码关联两份供应商清单，保留名称和报价差异，输出 XLSX。",
+      "output_formats": ["xlsx"]
+    },
+    {
+      "id": "contract-compare",
+      "category": "文档比较",
+      "title": "比较两版合同",
+      "description": "定位新增、删除和修改条款并保留双方证据。",
+      "required_inputs": "2 份 PDF 或 DOCX",
+      "prompt": "比较这两版合同，列出新增、删除和修改条款，说明影响并附原文来源，输出 DOCX 和 PDF。",
+      "output_formats": ["docx", "pdf"]
+    },
+    {
+      "id": "policy-audit",
+      "category": "文档核查",
+      "title": "核查制度文件",
+      "description": "按明确规则检查文档并回到原文。",
+      "required_inputs": "制度文件和明确核查规则",
+      "prompt": "核查这份制度是否满足我提供的要求，列出不符合项和对应原文位置，输出 DOCX 和 PDF。",
+      "output_formats": ["docx", "pdf"]
+    },
+    {
+      "id": "report-summary",
+      "category": "文档生成",
+      "title": "按章节总结长报告",
+      "description": "生成带来源位置的结构化摘要。",
+      "required_inputs": "1 份 PDF、DOCX 或 Markdown",
+      "prompt": "按章节总结这份报告，保留关键数字和引用位置，生成 Markdown 和 PDF。",
+      "output_formats": ["markdown", "pdf"]
+    }
+  ]
+}

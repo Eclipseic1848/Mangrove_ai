@@ -1,0 +1,27 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "question_id": {
+      "minLength": 1,
+      "title": "Question Id",
+      "type": "string"
+    },
+    "resume_token": {
+      "minLength": 16,
+      "title": "Resume Token",
+      "type": "string"
+    },
+    "answer": {
+      "minLength": 1,
+      "title": "Answer",
+      "type": "string"
+    }
+  },
+  "required": [
+    "question_id",
+    "resume_token",
+    "answer"
+  ],
+  "title": "HarnessResume",
+  "type": "object"
+}

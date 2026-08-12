@@ -1,0 +1,529 @@
+{
+  "$defs": {
+    "Ambiguity": {
+      "additionalProperties": false,
+      "properties": {
+        "ambiguity_id": {
+          "minLength": 1,
+          "title": "Ambiguity Id",
+          "type": "string"
+        },
+        "question": {
+          "minLength": 1,
+          "title": "Question",
+          "type": "string"
+        },
+        "candidates": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 2,
+          "title": "Candidates",
+          "type": "array"
+        },
+        "material": {
+          "default": true,
+          "title": "Material",
+          "type": "boolean"
+        },
+        "resolved": {
+          "default": false,
+          "title": "Resolved",
+          "type": "boolean"
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolution"
+        }
+      },
+      "required": [
+        "ambiguity_id",
+        "question",
+        "candidates"
+      ],
+      "title": "Ambiguity",
+      "type": "object"
+    },
+    "BindProvenance": {
+      "additionalProperties": false,
+      "properties": {
+        "binder_version": {
+          "minLength": 1,
+          "title": "Binder Version",
+          "type": "string"
+        },
+        "threshold_version": {
+          "minLength": 1,
+          "title": "Threshold Version",
+          "type": "string"
+        },
+        "auto_bind_threshold": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Auto Bind Threshold",
+          "type": "number"
+        },
+        "margin_threshold": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Margin Threshold",
+          "type": "number"
+        },
+        "semantic_backend": {
+          "minLength": 1,
+          "title": "Semantic Backend",
+          "type": "string"
+        },
+        "generated_at": {
+          "format": "date-time",
+          "title": "Generated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "binder_version",
+        "threshold_version",
+        "auto_bind_threshold",
+        "margin_threshold",
+        "semantic_backend"
+      ],
+      "title": "BindProvenance",
+      "type": "object"
+    },
+    "BindStatus": {
+      "enum": [
+        "ready",
+        "needs_user",
+        "blocked"
+      ],
+      "title": "BindStatus",
+      "type": "string"
+    },
+    "Binding": {
+      "additionalProperties": false,
+      "properties": {
+        "semantic_ref": {
+          "minLength": 1,
+          "title": "Semantic Ref",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/BindingStatus"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "targets": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/BindingTarget"
+          },
+          "title": "Targets",
+          "type": "array"
+        }
+      },
+      "required": [
+        "semantic_ref",
+        "status",
+        "confidence"
+      ],
+      "title": "Binding",
+      "type": "object"
+    },
+    "BindingCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "semantic_ref": {
+          "minLength": 1,
+          "title": "Semantic Ref",
+          "type": "string"
+        },
+        "semantic_label": {
+          "minLength": 1,
+          "title": "Semantic Label",
+          "type": "string"
+        },
+        "physical_ref": {
+          "minLength": 1,
+          "title": "Physical Ref",
+          "type": "string"
+        },
+        "artifact_id": {
+          "minLength": 1,
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "target_kind": {
+          "$ref": "#/$defs/TargetKind"
+        },
+        "name_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Name Score",
+          "type": "number"
+        },
+        "semantic_score": {
+          "default": 0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Semantic Score",
+          "type": "number"
+        },
+        "literal_support": {
+          "default": 0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Literal Support",
+          "type": "number"
+        },
+        "type_support": {
+          "default": 0.5,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Type Support",
+          "type": "number"
+        },
+        "evidence_quality": {
+          "default": 1,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Evidence Quality",
+          "type": "number"
+        },
+        "contradiction_penalty": {
+          "default": 0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Contradiction Penalty",
+          "type": "number"
+        },
+        "total_score": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Total Score",
+          "type": "number"
+        },
+        "evidence_reasons": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Evidence Reasons",
+          "type": "array"
+        },
+        "evidence_samples": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Samples",
+          "type": "array"
+        }
+      },
+      "required": [
+        "semantic_ref",
+        "semantic_label",
+        "physical_ref",
+        "artifact_id",
+        "target_kind",
+        "name_score",
+        "total_score",
+        "evidence_reasons"
+      ],
+      "title": "BindingCandidate",
+      "type": "object"
+    },
+    "BindingEvidence": {
+      "additionalProperties": false,
+      "properties": {
+        "source_ref": {
+          "minLength": 1,
+          "title": "Source Ref",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "samples": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Samples",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_ref",
+        "reason"
+      ],
+      "title": "BindingEvidence",
+      "type": "object"
+    },
+    "BindingStatus": {
+      "enum": [
+        "bound",
+        "ambiguous",
+        "missing"
+      ],
+      "title": "BindingStatus",
+      "type": "string"
+    },
+    "BindingTarget": {
+      "additionalProperties": false,
+      "description": "一个真实来源目标；同一语义可跨文件、表或章节绑定多个目标。",
+      "properties": {
+        "physical_ref": {
+          "minLength": 1,
+          "title": "Physical Ref",
+          "type": "string"
+        },
+        "artifact_id": {
+          "minLength": 1,
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "target_kind": {
+          "pattern": "^(table_column|document_section|document_element|document_table_cell)$",
+          "title": "Target Kind",
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/BindingEvidence"
+          },
+          "minItems": 1,
+          "title": "Evidence",
+          "type": "array"
+        }
+      },
+      "required": [
+        "physical_ref",
+        "artifact_id",
+        "target_kind",
+        "confidence",
+        "evidence"
+      ],
+      "title": "BindingTarget",
+      "type": "object"
+    },
+    "BoundPlan": {
+      "additionalProperties": false,
+      "description": "逻辑计划与真实来源结构绑定后的不可变快照。",
+      "properties": {
+        "spec_version": {
+          "default": "2",
+          "pattern": "^2$",
+          "title": "Spec Version",
+          "type": "string"
+        },
+        "bound_plan_id": {
+          "minLength": 1,
+          "title": "Bound Plan Id",
+          "type": "string"
+        },
+        "logical_plan_id": {
+          "minLength": 1,
+          "title": "Logical Plan Id",
+          "type": "string"
+        },
+        "logical_plan_revision": {
+          "minimum": 1,
+          "title": "Logical Plan Revision",
+          "type": "integer"
+        },
+        "logical_plan_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Logical Plan Hash",
+          "type": "string"
+        },
+        "binding_revision": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Binding Revision",
+          "type": "integer"
+        },
+        "input_artifact_hashes": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "minProperties": 1,
+          "title": "Input Artifact Hashes",
+          "type": "object"
+        },
+        "inspection_report_hashes": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "minProperties": 1,
+          "title": "Inspection Report Hashes",
+          "type": "object"
+        },
+        "binder_version": {
+          "minLength": 1,
+          "title": "Binder Version",
+          "type": "string"
+        },
+        "threshold_version": {
+          "minLength": 1,
+          "title": "Threshold Version",
+          "type": "string"
+        },
+        "bindings": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Binding"
+          },
+          "title": "Bindings",
+          "type": "array"
+        },
+        "unresolved_ambiguities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Ambiguity"
+          },
+          "title": "Unresolved Ambiguities",
+          "type": "array"
+        },
+        "bound_at": {
+          "format": "date-time",
+          "title": "Bound At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bound_plan_id",
+        "logical_plan_id",
+        "logical_plan_revision",
+        "logical_plan_hash",
+        "input_artifact_hashes",
+        "inspection_report_hashes",
+        "binder_version",
+        "threshold_version"
+      ],
+      "title": "BoundPlan",
+      "type": "object"
+    },
+    "ClarificationRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "ambiguity_id": {
+          "minLength": 1,
+          "title": "Ambiguity Id",
+          "type": "string"
+        },
+        "question": {
+          "minLength": 1,
+          "title": "Question",
+          "type": "string"
+        },
+        "candidates": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Candidates",
+          "type": "array"
+        }
+      },
+      "required": [
+        "ambiguity_id",
+        "question"
+      ],
+      "title": "ClarificationRequest",
+      "type": "object"
+    },
+    "TargetKind": {
+      "enum": [
+        "table_column",
+        "document_section",
+        "document_element",
+        "document_table_cell"
+      ],
+      "title": "TargetKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "status": {
+      "$ref": "#/$defs/BindStatus"
+    },
+    "logical_plan_id": {
+      "minLength": 1,
+      "title": "Logical Plan Id",
+      "type": "string"
+    },
+    "logical_plan_revision": {
+      "minimum": 1,
+      "title": "Logical Plan Revision",
+      "type": "integer"
+    },
+    "binding_revision": {
+      "minimum": 1,
+      "title": "Binding Revision",
+      "type": "integer"
+    },
+    "bound_plan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BoundPlan"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "candidates": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/BindingCandidate"
+      },
+      "title": "Candidates",
+      "type": "array"
+    },
+    "clarification": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClarificationRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "provenance": {
+      "$ref": "#/$defs/BindProvenance"
+    }
+  },
+  "required": [
+    "status",
+    "logical_plan_id",
+    "logical_plan_revision",
+    "binding_revision",
+    "provenance"
+  ],
+  "title": "BindResult",
+  "type": "object"
+}

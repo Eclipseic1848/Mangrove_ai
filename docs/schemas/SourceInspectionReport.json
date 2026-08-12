@@ -1,0 +1,379 @@
+{
+  "$defs": {
+    "ColumnProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "physical_ref": {
+          "minLength": 1,
+          "title": "Physical Ref",
+          "type": "string"
+        },
+        "artifact_id": {
+          "minLength": 1,
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "table_ref": {
+          "minLength": 1,
+          "title": "Table Ref",
+          "type": "string"
+        },
+        "column_index": {
+          "minimum": 0,
+          "title": "Column Index",
+          "type": "integer"
+        },
+        "raw_name": {
+          "title": "Raw Name",
+          "type": "string"
+        },
+        "normalized_name": {
+          "title": "Normalized Name",
+          "type": "string"
+        },
+        "inferred_type": {
+          "minLength": 1,
+          "title": "Inferred Type",
+          "type": "string"
+        },
+        "null_ratio": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Null Ratio",
+          "type": "number"
+        },
+        "unique_ratio": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Unique Ratio",
+          "type": "number"
+        },
+        "sample_values": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Sample Values",
+          "type": "array"
+        },
+        "duplicate_group": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Duplicate Group"
+        }
+      },
+      "required": [
+        "physical_ref",
+        "artifact_id",
+        "table_ref",
+        "column_index",
+        "raw_name",
+        "normalized_name",
+        "inferred_type",
+        "null_ratio",
+        "unique_ratio"
+      ],
+      "title": "ColumnProfile",
+      "type": "object"
+    },
+    "DocumentTarget": {
+      "additionalProperties": false,
+      "properties": {
+        "physical_ref": {
+          "minLength": 1,
+          "title": "Physical Ref",
+          "type": "string"
+        },
+        "artifact_id": {
+          "minLength": 1,
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "target_kind": {
+          "$ref": "#/$defs/TargetKind"
+        },
+        "label": {
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "text_excerpt": {
+          "minLength": 1,
+          "title": "Text Excerpt",
+          "type": "string"
+        },
+        "page": {
+          "minimum": 1,
+          "title": "Page",
+          "type": "integer"
+        },
+        "element_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Element Ids",
+          "type": "array"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "evidence_ready": {
+          "title": "Evidence Ready",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "physical_ref",
+        "artifact_id",
+        "target_kind",
+        "label",
+        "text_excerpt",
+        "page",
+        "element_ids",
+        "confidence",
+        "evidence_ready"
+      ],
+      "title": "DocumentTarget",
+      "type": "object"
+    },
+    "InspectionDiagnostic": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "InspectionDiagnostic",
+      "type": "object"
+    },
+    "InspectionStatus": {
+      "enum": [
+        "ready",
+        "unsupported",
+        "corrupt",
+        "encrypted",
+        "over_limit",
+        "needs_user"
+      ],
+      "title": "InspectionStatus",
+      "type": "string"
+    },
+    "SourceKind": {
+      "enum": [
+        "tabular",
+        "document"
+      ],
+      "title": "SourceKind",
+      "type": "string"
+    },
+    "TableProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "table_ref": {
+          "minLength": 1,
+          "title": "Table Ref",
+          "type": "string"
+        },
+        "artifact_id": {
+          "minLength": 1,
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "table_index": {
+          "minimum": 0,
+          "title": "Table Index",
+          "type": "integer"
+        },
+        "header_row": {
+          "minimum": 1,
+          "title": "Header Row",
+          "type": "integer"
+        },
+        "sampled_rows": {
+          "minimum": 0,
+          "title": "Sampled Rows",
+          "type": "integer"
+        },
+        "estimated_rows": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Estimated Rows"
+        },
+        "columns": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ColumnProfile"
+          },
+          "title": "Columns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "table_ref",
+        "artifact_id",
+        "name",
+        "table_index",
+        "header_row",
+        "sampled_rows"
+      ],
+      "title": "TableProfile",
+      "type": "object"
+    },
+    "TargetKind": {
+      "enum": [
+        "table_column",
+        "document_section",
+        "document_element",
+        "document_table_cell"
+      ],
+      "title": "TargetKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "spec_version": {
+      "default": "1",
+      "pattern": "^1$",
+      "title": "Spec Version",
+      "type": "string"
+    },
+    "inspection_id": {
+      "minLength": 1,
+      "title": "Inspection Id",
+      "type": "string"
+    },
+    "inspector_version": {
+      "minLength": 1,
+      "title": "Inspector Version",
+      "type": "string"
+    },
+    "artifact_id": {
+      "minLength": 1,
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "artifact_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Artifact Sha256",
+      "type": "string"
+    },
+    "size_bytes": {
+      "minimum": 0,
+      "title": "Size Bytes",
+      "type": "integer"
+    },
+    "original_name": {
+      "minLength": 1,
+      "title": "Original Name",
+      "type": "string"
+    },
+    "declared_media_type": {
+      "minLength": 1,
+      "title": "Declared Media Type",
+      "type": "string"
+    },
+    "detected_format": {
+      "minLength": 1,
+      "title": "Detected Format",
+      "type": "string"
+    },
+    "source_kind": {
+      "$ref": "#/$defs/SourceKind"
+    },
+    "status": {
+      "$ref": "#/$defs/InspectionStatus"
+    },
+    "tables": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/TableProfile"
+      },
+      "title": "Tables",
+      "type": "array"
+    },
+    "document_targets": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DocumentTarget"
+      },
+      "title": "Document Targets",
+      "type": "array"
+    },
+    "diagnostics": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/InspectionDiagnostic"
+      },
+      "title": "Diagnostics",
+      "type": "array"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "title": "Generated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "inspection_id",
+    "inspector_version",
+    "artifact_id",
+    "artifact_sha256",
+    "size_bytes",
+    "original_name",
+    "declared_media_type",
+    "detected_format",
+    "source_kind",
+    "status"
+  ],
+  "title": "SourceInspectionReport",
+  "type": "object"
+}

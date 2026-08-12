@@ -1,0 +1,353 @@
+diff --git a/config/__init__.py b/config/__init__.py
+index d7a8d3a..a0fd11d 100644
+--- a/config/__init__.py
++++ b/config/__init__.py
+@@ -20,3 +20,15 @@
+ 
+ from .base_config import *
+ from .db_config import *
++
++import random as _random
++
++
++# PEP 562 模块级 __getattr__：仅当属性在包命名空间中“不存在”时触发。
++# 由于 base_config 不再定义 CRAWLER_MAX_SLEEP_SEC（改为定义区间边界），
++# 各平台每次读取 config.CRAWLER_MAX_SLEEP_SEC 都会走到这里，返回区间内的随机间隔，
++# 从而把原本固定 2 秒的规律节律变成模拟真人的不规律节奏，规避频次风控。
++def __getattr__(name):
++    if name == "CRAWLER_MAX_SLEEP_SEC":
++        return _random.uniform(CRAWLER_MIN_SLEEP_SEC, CRAWLER_MAX_SLEEP_SEC_BOUND)
++    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+diff --git a/config/base_config.py b/config/base_config.py
+index 28a852e..a300c0e 100644
+--- a/config/base_config.py
++++ b/config/base_config.py
+@@ -17,6 +17,8 @@
+ # 详细许可条款请参阅项目根目录下的LICENSE文件。
+ # 使用本代码即表示您同意遵守上述原则和LICENSE中的所有条款。
+ 
++import os
++
+ # Basic configuration
+ PLATFORM = "xhs"  # Platform, xhs | dy | ks | bili | wb | tieba | zhihu
+ 
+@@ -31,17 +33,18 @@ CRAWLER_TYPE = (
+     "search"  # Crawling type, search (keyword search) | detail (post details) | creator (creator homepage data)
+ )
+ # Whether to enable IP proxy
+-ENABLE_IP_PROXY = False
++# 开关优先取环境变量（由本项目 .env 经子进程注入，见 src/collectors/social_media_collector.py），未设则用默认。
++ENABLE_IP_PROXY = os.getenv("MC_ENABLE_IP_PROXY", "false").lower() in ("1", "true", "yes")
+ 
+ # Number of proxy IP pools
+-IP_PROXY_POOL_COUNT = 2
++IP_PROXY_POOL_COUNT = int(os.getenv("MC_IP_PROXY_POOL_COUNT", "2"))
+ 
+ # Proxy IP provider name
+-IP_PROXY_PROVIDER_NAME = "kuaidaili"  # kuaidaili | wandouhttp | static
++IP_PROXY_PROVIDER_NAME = os.getenv("MC_IP_PROXY_PROVIDER", "kuaidaili")  # kuaidaili | wandouhttp | static
+ 
+ # Static proxy configuration (used when IP_PROXY_PROVIDER_NAME is set to "static")
+ # Format: "http://your_home_domain:port" or "http://user:password@your_home_domain:port"
+-STATIC_PROXY_URL = ""
++STATIC_PROXY_URL = os.getenv("MC_STATIC_PROXY_URL", "")
+ 
+ # Setting to True will not open the browser (headless browser)
+ # Setting False will open a browser
+@@ -56,7 +59,8 @@ SAVE_LOGIN_STATE = True
+ # 是否启用 CDP 模式 - 使用用户本地的 Chrome/Edge 浏览器进行爬取，具有更好的反检测能力
+ # 开启后，会自动检测并启动用户的 Chrome/Edge 浏览器，通过 CDP 协议进行控制
+ # 该方式使用真实浏览器环境，包括用户的扩展、Cookie 和设置，大幅降低被风控检测的风险
+-ENABLE_CDP_MODE = True
++# 开关优先取环境变量（由本项目 .env 经子进程注入，见 src/collectors/social_media_collector.py），未设则用默认。
++ENABLE_CDP_MODE = os.getenv("MC_ENABLE_CDP_MODE", "false").lower() in ("1", "true", "yes")
+ 
+ # CDP 调试端口，用于与浏览器通信
+ # 如果端口被占用，系统会自动尝试下一个可用端口
+@@ -80,7 +84,15 @@ BROWSER_LAUNCH_TIMEOUT = 60
+ # 用户需要在 Chrome 中开启远程调试：chrome://inspect/#remote-debugging
+ # 或者使用命令行参数启动 Chrome：--remote-debugging-port=9222
+ # 这种方式反检测效果最好，因为直接使用用户真实浏览器的所有 Cookie、扩展和浏览历史
+-CDP_CONNECT_EXISTING = True
++#
++# 本项目固定关闭：这里跑的是无人值守的后端任务，不是人坐在电脑前手动敲命令——
++# 连接已打开浏览器这条路要求提前手动开启远程调试、且浏览器会弹确认对话框等人点“接受”，
++# 后端任务没有人来点，只会一直等到 BROWSER_LAUNCH_TIMEOUT 超时。同时它默认复用浏览器当前
++# 已打开的那个 context/标签页——如果连接到的是操作者本人正在用的日常浏览器，会话/标签页
++# 状态和抖音登录检测逻辑对不上，就是"还是弹出普通窗口、卡在登录判定"这类怪现象的根源。
++# 改用"启动新浏览器"模式：程序自己拉起一个独立的真实 Chrome/Edge 进程（带独立 user_data_dir），
++# 全自动、不需要人值守确认，同样是真实浏览器指纹，反检测收益不变。
++CDP_CONNECT_EXISTING = False
+ 
+ # 程序结束时是否自动关闭浏览器
+ # 设置为 False 可以保持浏览器运行，方便调试
+@@ -99,7 +111,7 @@ USER_DATA_DIR = "%s_user_data_dir"  # %s will be replaced by platform name
+ START_PAGE = 1
+ 
+ # Control the number of crawled videos/posts
+-CRAWLER_MAX_NOTES_COUNT = 15
++CRAWLER_MAX_NOTES_COUNT = 10
+ 
+ # Controlling the number of concurrent crawlers
+ MAX_CONCURRENCY_NUM = 1
+@@ -133,8 +145,13 @@ STOP_WORDS_FILE = "./docs/hit_stopwords.txt"
+ # Chinese font file path
+ FONT_PATH = "./docs/STZHONGS.TTF"
+ 
+-# Crawl interval
+-CRAWLER_MAX_SLEEP_SEC = 2
++# ==================== 爬取动态间隔（反频次风控）====================
++# 每次 sleep 不再是固定值，而是从 [CRAWLER_MIN_SLEEP_SEC, CRAWLER_MAX_SLEEP_SEC_BOUND]
++# 区间随机取值，模拟真人不规律的浏览节奏，避免被平台按“固定节律”识别为机器人触发风控。
++# 实际取值逻辑见 config/__init__.py 的 __getattr__：每次读取 config.CRAWLER_MAX_SLEEP_SEC
++# 都会重新随机一次。区间边界优先取环境变量（由本项目 .env 经子进程注入），未设则用默认值。
++CRAWLER_MIN_SLEEP_SEC = float(os.getenv("MC_CRAWL_MIN_SLEEP_SEC", "2.0"))
++CRAWLER_MAX_SLEEP_SEC_BOUND = float(os.getenv("MC_CRAWL_MAX_SLEEP_SEC", "6.0"))
+ 
+ # 是否禁用 SSL 证书验证。仅在使用企业代理、Burp Suite、mitmproxy 等会注入自签名证书的中间人代理时设为 True。
+ # 警告：禁用 SSL 验证将使所有流量暴露于中间人攻击风险，请勿在生产环境中开启。
+diff --git a/media_platform/bilibili/core.py b/media_platform/bilibili/core.py
+index c051fd6..a0404d1 100644
+--- a/media_platform/bilibili/core.py
++++ b/media_platform/bilibili/core.py
+@@ -93,7 +93,7 @@ class BilibiliCrawler(AbstractCrawler):
+                 await self.browser_context.add_init_script(path="libs/stealth.min.js")
+ 
+             self.context_page = await self.browser_context.new_page()
+-            await self.context_page.goto(self.index_url)
++            await self.context_page.goto(self.index_url, wait_until="domcontentloaded", timeout=60000)
+ 
+             # Create a client to interact with the xiaohongshu website.
+             self.bili_client = await self.create_bilibili_client(httpx_proxy_format)
+diff --git a/media_platform/douyin/client.py b/media_platform/douyin/client.py
+index 3310cdb..71b34f6 100644
+--- a/media_platform/douyin/client.py
++++ b/media_platform/douyin/client.py
+@@ -148,7 +148,14 @@ class DouYinClient(AbstractApiClient, ProxyRefreshMixin):
+         return await self.request(method="POST", url=f"{self._host}{uri}", data=data, headers=headers)
+ 
+     async def pong(self, browser_context: BrowserContext) -> bool:
+-        local_storage = await self.playwright_page.evaluate("() => window.localStorage")
++        # 页面 goto() 刚 domcontentloaded 时，抖音首页往往还有一轮客户端跳转/重渲染没走完，
++        # 这时候 evaluate 撞上导航会报 "Execution context was destroyed"（并非登录态问题），
++        # 重试一次等页面稳定即可，比强行改 goto 的等待策略影响面更小。
++        try:
++            local_storage = await self.playwright_page.evaluate("() => window.localStorage")
++        except Exception:
++            await asyncio.sleep(2)
++            local_storage = await self.playwright_page.evaluate("() => window.localStorage")
+         if local_storage.get("HasUserLogin", "") == "1":
+             return True
+ 
+diff --git a/media_platform/douyin/core.py b/media_platform/douyin/core.py
+index c0e9372..9359752 100644
+--- a/media_platform/douyin/core.py
++++ b/media_platform/douyin/core.py
+@@ -95,7 +95,15 @@ class DouYinCrawler(AbstractCrawler):
+                 await self.browser_context.add_init_script(path="libs/stealth.min.js")
+ 
+             self.context_page = await self.browser_context.new_page()
+-            await self.context_page.goto(self.index_url)
++            await self.context_page.goto(self.index_url, wait_until="domcontentloaded", timeout=60000)
++            # domcontentloaded 之后抖音首页通常还有一轮客户端跳转/重渲染没走完，这时候就去
++            # evaluate 拿 UA/localStorage 会撞上 "Execution context was destroyed"（并非登录态
++            # 问题）。等页面网络空闲一下更稳；等不到空闲（首页有持续轮询请求很正常）就直接超时放行，
++            # 不阻塞主流程。
++            try:
++                await self.context_page.wait_for_load_state("networkidle", timeout=8000)
++            except Exception:
++                pass
+ 
+             self.dy_client = await self.create_douyin_client(httpx_proxy_format)
+             if not await self.dy_client.pong(browser_context=self.browser_context):
+diff --git a/media_platform/douyin/login.py b/media_platform/douyin/login.py
+index 4b76d11..0a4174d 100644
+--- a/media_platform/douyin/login.py
++++ b/media_platform/douyin/login.py
+@@ -110,7 +110,10 @@ class DouYinLogin(AbstractLogin):
+ 
+     async def popup_login_dialog(self):
+         """If the login dialog box does not pop up automatically, we will manually click the login button"""
+-        dialog_selector = "xpath=//div[@id='login-panel-new']"
++        # 抖音后来把弹窗容器从固定 id="login-panel-new" 换成了动态 id="login-full-panel-<hash>"，
++        # 旧的精确匹配永远命中不到已经自动弹出的面板，导致又去手动点"登录"按钮，
++        # 而按钮其实正被弹窗自身的遮罩层挡住，点击必然超时。这里两种 id 都认。
++        dialog_selector = "css=div[id='login-panel-new'], div[id^='login-full-panel']"
+         try:
+             # check dialog box is auto popup and wait for 10 seconds
+             await self.context_page.wait_for_selector(dialog_selector, timeout=1000 * 10)
+@@ -272,3 +275,8 @@ class DouYinLogin(AbstractLogin):
+                 'domain': ".douyin.com",
+                 'path': "/"
+             }])
++        # add_cookies 只是把 Cookie 写进浏览器的 Cookie Jar，当前已经打开的这个页面（首页刚加载时
++        # 还没登录态）不会自动感知；check_login_state 检测的 window.localStorage.HasUserLogin
++        # 要靠页面自己用新 Cookie 重新鉴权才会置位，不 reload 的话这个循环会一直转到 600 次超时。
++        # 实测：加了这行之后 HasUserLogin 立刻从 None 变成 "1"。
++        await self.context_page.reload(wait_until="domcontentloaded", timeout=30000)
+diff --git a/media_platform/xhs/core.py b/media_platform/xhs/core.py
+index 83e0b0b..39b4562 100644
+--- a/media_platform/xhs/core.py
++++ b/media_platform/xhs/core.py
+@@ -93,7 +93,8 @@ class XiaoHongShuCrawler(AbstractCrawler):
+                 await self.browser_context.add_init_script(path="libs/stealth.min.js")
+ 
+             self.context_page = await self.browser_context.new_page()
+-            await self.context_page.goto(self.index_url)
++            # 小红书首页资源多，默认 wait_until="load" 常 30s 超时；改为 domcontentloaded + 放宽超时
++            await self.context_page.goto(self.index_url, wait_until="domcontentloaded", timeout=60000)
+ 
+             # Create a client to interact with the Xiaohongshu website.
+             self.xhs_client = await self.create_xhs_client(httpx_proxy_format)
+@@ -408,6 +409,8 @@ class XiaoHongShuCrawler(AbstractCrawler):
+                 accept_downloads=True,
+                 headless=headless,
+                 proxy=playwright_proxy,  # type: ignore
++                # 无 IP 代理时显式禁用代理，绕过 Windows 系统代理(Clash 7897)，否则浏览器导航会超时/失败
++                args=(["--no-proxy-server"] if not playwright_proxy else []),
+                 viewport={
+                     "width": 1920,
+                     "height": 1080
+@@ -416,7 +419,7 @@ class XiaoHongShuCrawler(AbstractCrawler):
+             )
+             return browser_context
+         else:
+-            browser = await chromium.launch(headless=headless, proxy=playwright_proxy)  # type: ignore
++            browser = await chromium.launch(headless=headless, proxy=playwright_proxy, args=(["--no-proxy-server"] if not playwright_proxy else []))  # type: ignore
+             browser_context = await browser.new_context(viewport={"width": 1920, "height": 1080}, user_agent=user_agent)
+             return browser_context
+ 
+diff --git a/media_platform/xhs/playwright_sign.py b/media_platform/xhs/playwright_sign.py
+index 6b28cab..92bc7eb 100644
+--- a/media_platform/xhs/playwright_sign.py
++++ b/media_platform/xhs/playwright_sign.py
+@@ -47,10 +47,15 @@ def _patch_xhshow_a3_hash():
+ 
+     _original_build = CryptoProcessor.build_payload_array
+ 
+-    def _patched_build(self, hex_parameter, a1_value, app_identifier="xhs-pc-web",
+-                       string_param="", timestamp=None, sign_state=None):
+-        payload = _original_build(self, hex_parameter, a1_value, app_identifier,
+-                                  string_param, timestamp, sign_state)
++    def _patched_build(self, *args, **kwargs):
++        # 用 *args/**kwargs 透传，兼容不同 xhshow 版本的 build_payload_array 签名
++        # （新版新增 hex_md5_path 参数，导致旧固定签名错位、sign_state 冲突）
++        payload = _original_build(self, *args, **kwargs)
++        # string_param 是第 5 个位置参数(content_string)或同名关键字
++        string_param = kwargs.get("string_param")
++        if string_param is None and len(args) >= 5:
++            string_param = args[4]
++        string_param = string_param or ""
+         # 仅当 content_string 不含 "{" 时修复 (即 GET 请求)
+         if "{" not in string_param:
+             correct_md5_hex = hashlib.md5(string_param.encode("utf-8")).hexdigest()
+@@ -148,8 +153,10 @@ def sign_with_xhshow(
+         ts = time.time()
+         d_value = hashlib.md5(content_string.encode("utf-8")).hexdigest()
+ 
++        # 新版 xhshow 的 build_payload_array 新增了第二个参数 hex_md5_path；
++        # GET 请求按 xhshow 自身逻辑 hex_md5_path == d_value
+         payload_array = xhshow_client.crypto_processor.build_payload_array(
+-            d_value, a1_value, "xhs-pc-web", content_string, ts
++            d_value, d_value, a1_value, "xhs-pc-web", content_string, ts
+         )
+         xor_result = xhshow_client.crypto_processor.bit_ops.xor_transform_array(payload_array)
+         config = xhshow_client.config
+diff --git a/requirements-win.txt b/requirements-win.txt
+new file mode 100644
+index 0000000..fea89f3
+--- /dev/null
++++ b/requirements-win.txt
+@@ -0,0 +1,30 @@
++httpx==0.28.1
++Pillow==12.1.0
++playwright==1.45.0
++tenacity==8.2.2
++typer>=0.12.3
++opencv-python
++aiomysql==0.2.0
++redis~=4.6.0
++pydantic==2.5.2
++aiofiles~=23.2.1
++fastapi==0.110.2
++uvicorn==0.29.0
++python-dotenv==1.0.1
++jieba==0.42.1
++wordcloud
++matplotlib
++requests==2.32.3
++parsel==1.9.1
++pyexecjs==1.5.1
++pandas==2.2.3
++aiosqlite==0.21.0
++pyhumps==3.8.0
++cryptography>=45.0.7
++alembic>=1.16.5
++sqlalchemy>=2.0.43
++motor>=3.3.0
++openpyxl>=3.1.2
++pytest>=7.4.0
++pytest-asyncio>=0.21.0
++xhshow>=0.1.9
+diff --git a/tools/browser_launcher.py b/tools/browser_launcher.py
+index 6d272bd..7831a90 100644
+--- a/tools/browser_launcher.py
++++ b/tools/browser_launcher.py
+@@ -142,6 +142,10 @@ class BrowserLauncher:
+             "--disable-blink-features=AutomationControlled",  # Disable automation control flag
+             "--exclude-switches=enable-automation",  # Exclude automation switch
+             "--disable-infobars",  # Disable info bars
++            # 强制中文界面/Accept-Language：CDP 模式起的是全新 user-data-dir，没有配置过语言，
++            # Chrome 会退回系统语言——本机是英文，导致抖音等站按英文语言下发页面，MediaCrawler
++            # 里按中文文案写死的选择器（如「登录」按钮）匹配不到任何元素，登录流程直接超时崩溃。
++            "--lang=zh-CN",
+         ]
+ 
+         # Headless mode
+diff --git a/tools/cdp_browser.py b/tools/cdp_browser.py
+index bc5a76c..6ddb527 100644
+--- a/tools/cdp_browser.py
++++ b/tools/cdp_browser.py
+@@ -290,7 +290,10 @@ class CDPBrowserManager:
+         Get browser WebSocket connection URL
+         """
+         try:
+-            async with httpx.AsyncClient() as client:
++            # trust_env=False：强制直连，绕开系统代理。本机若开着 Clash 一类 TUN/全局代理，
++            # 默认 trust_env=True 会把这个 localhost 请求也劫持走，代理转发不了本地调试端口，
++            # 表现为 502/连接异常（本项目 src/collectors/_net.py 里对同一现象已有过记录）。
++            async with httpx.AsyncClient(trust_env=False) as client:
+                 response = await client.get(
+                     f"http://localhost:{debug_port}/json/version", timeout=10
+                 )
+@@ -378,6 +381,7 @@ class CDPBrowserManager:
+             context_options = {
+                 "viewport": {"width": 1920, "height": 1080},
+                 "accept_downloads": True,
++                "locale": "zh-CN",
+             }
+ 
+             # Set user agent
+@@ -395,6 +399,22 @@ class CDPBrowserManager:
+             browser_context = await self.browser.new_context(**context_options)
+             utils.logger.info("[CDPBrowserManager] Created new browser context")
+ 
++        # 强制中文语言：CDP 模式下这台机器的真实 Chrome 装的是英文系统语言包，
++        # navigator.language 实测是 en-US（--lang=zh-CN 启动参数管不到这个），国内站
++        # （抖音等）据此下发英文版页面，MediaCrawler 里按中文文案写死的选择器（如"登录"
++        # 按钮）就找不到对应元素，登录流程直接超时崩溃。这里用 Playwright 的
++        # set_extra_http_headers + add_init_script 在 JS 层强制覆盖，对新建/复用的
++        # context 都生效，不依赖 Chrome 自身的系统语言包（复用已有 context 时
++        # new_context 的 locale 选项不会被应用，所以必须再补这一层）。
++        try:
++            await browser_context.set_extra_http_headers({"Accept-Language": "zh-CN,zh;q=0.9"})
++            await browser_context.add_init_script(
++                "Object.defineProperty(navigator, 'language', {get: () => 'zh-CN'});"
++                "Object.defineProperty(navigator, 'languages', {get: () => ['zh-CN', 'zh']});"
++            )
++        except Exception as e:
++            utils.logger.warning(f"[CDPBrowserManager] Failed to force zh-CN locale: {e}")
++
+         return browser_context
+ 
+     async def add_stealth_script(self, script_path: str = "libs/stealth.min.js"):

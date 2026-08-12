@@ -1,0 +1,95 @@
+{
+  "description": "不可变原始制品登记。每次获取都落一条，支撑复查与复跑。",
+  "properties": {
+    "artifact_id": {
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "source_id": {
+      "title": "Source Id",
+      "type": "string"
+    },
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "uri": {
+      "description": "原始定位符（URL/文件路径等，已脱敏）",
+      "title": "Uri",
+      "type": "string"
+    },
+    "media_type": {
+      "default": "application/octet-stream",
+      "title": "Media Type",
+      "type": "string"
+    },
+    "size_bytes": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Size Bytes",
+      "type": "integer"
+    },
+    "sha256": {
+      "title": "Sha256",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "fetched_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Fetched At"
+    },
+    "request_snapshot": {
+      "additionalProperties": true,
+      "description": "已脱敏的请求摘要（不含 Cookie/Token/密码/完整授权头）",
+      "title": "Request Snapshot",
+      "type": "object"
+    },
+    "response_metadata": {
+      "additionalProperties": true,
+      "description": "状态码/响应头白名单/数据库快照信息等",
+      "title": "Response Metadata",
+      "type": "object"
+    },
+    "parent_artifact_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "派生关系：解压/下载/转码的父制品",
+      "title": "Parent Artifact Id"
+    },
+    "storage_path": {
+      "description": "不可变存储路径（任务目录内相对路径）",
+      "title": "Storage Path",
+      "type": "string"
+    }
+  },
+  "required": [
+    "artifact_id",
+    "source_id",
+    "task_id",
+    "uri",
+    "sha256",
+    "storage_path"
+  ],
+  "title": "RawArtifact",
+  "type": "object"
+}

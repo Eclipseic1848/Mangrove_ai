@@ -1,0 +1,2 @@
+# Label Studio 是可选外部复核服务，不强制进入 Mangrove 主运行环境。
+label-studio-sdk==2.1.0

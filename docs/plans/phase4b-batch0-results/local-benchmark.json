@@ -1,0 +1,379 @@
+{
+  "schema_version": "1",
+  "phase": "4B",
+  "batch": 0,
+  "scope": "local_deterministic_tools",
+  "manifest_path": "tests/fixtures/semantic_harness/public/batch0/manifest.json",
+  "inventory": {
+    "python": "3.13.7 (tags/v3.13.7:bcee1c3, Aug 14 2025, 14:15:11) [MSC v.1944 64 bit (AMD64)]",
+    "packages": {
+      "duckdb": "1.5.5",
+      "polars": "1.43.0",
+      "pandas": "2.3.3",
+      "pandera": "0.32.1",
+      "deepdiff": "9.1.0",
+      "markitdown": "0.1.6",
+      "docxtpl": "0.20.2",
+      "openpyxl": "3.1.5",
+      "xlsxwriter": "3.2.9",
+      "python-docx": "1.2.0",
+      "pypdf": "6.14.2",
+      "python-pptx": "1.0.2",
+      "weasyprint": null,
+      "docling": null
+    },
+    "commands": {
+      "docker": "C:\\Program Files\\Docker\\Docker\\resources\\bin\\docker.EXE",
+      "java": null,
+      "soffice": null,
+      "pandoc": null,
+      "ffmpeg": "C:\\Users\\55672\\AppData\\Local\\Microsoft\\WinGet\\Packages\\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\\ffmpeg-8.1.2-full_build\\bin\\ffmpeg.EXE"
+    },
+    "isolation_decisions": {
+      "docling": "sidecar_required",
+      "tika": "java_or_sidecar_required",
+      "libreoffice": "sidecar_required_on_current_host",
+      "pandoc": "sidecar_or_managed_binary_required_on_current_host"
+    }
+  },
+  "table": {
+    "case_id": "workload_filter",
+    "status": "pass",
+    "winner": "table.polars",
+    "candidates": [
+      {
+        "capability_id": "table.polars",
+        "result_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_polars/result.json",
+        "tool_result_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_polars/tool-result.json",
+        "manifest_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_polars/capability-manifest.json",
+        "duration_ms": 5,
+        "verification_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_polars/verification.json",
+        "verification_status": "pass",
+        "quality_score": 100.0
+      },
+      {
+        "capability_id": "table.pandas",
+        "result_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_pandas/result.json",
+        "tool_result_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_pandas/tool-result.json",
+        "manifest_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_pandas/capability-manifest.json",
+        "duration_ms": 39,
+        "verification_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_pandas/verification.json",
+        "verification_status": "pass",
+        "quality_score": 100.0
+      },
+      {
+        "capability_id": "table.duckdb",
+        "result_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_duckdb/result.json",
+        "tool_result_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_duckdb/tool-result.json",
+        "manifest_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_duckdb/capability-manifest.json",
+        "duration_ms": 420,
+        "verification_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_duckdb/verification.json",
+        "verification_status": "pass",
+        "quality_score": 100.0
+      }
+    ],
+    "timings": {
+      "table.duckdb": {
+        "runs": [
+          11,
+          12,
+          15,
+          11,
+          11,
+          11,
+          10
+        ],
+        "warm_median_ms": 11.0,
+        "warm_p95_ms": 15
+      },
+      "table.polars": {
+        "runs": [
+          2,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "warm_median_ms": 1.0,
+        "warm_p95_ms": 1
+      },
+      "table.pandas": {
+        "runs": [
+          3,
+          3,
+          3,
+          3,
+          3,
+          3,
+          2
+        ],
+        "warm_median_ms": 3.0,
+        "warm_p95_ms": 3
+      }
+    },
+    "operation_suite": {
+      "status": "pass",
+      "results": [
+        {
+          "capability_id": "table.duckdb",
+          "status": "pass",
+          "quality_score": 1.0,
+          "checks": {
+            "merge_exact": true,
+            "merge_ledger_conserved": true,
+            "aggregate_exact": true,
+            "aggregate_recalculable": true,
+            "missing_column_rejected": true,
+            "duplicate_join_key_rejected": true
+          },
+          "duration_ms": 17
+        },
+        {
+          "capability_id": "table.polars",
+          "status": "pass",
+          "quality_score": 1.0,
+          "checks": {
+            "merge_exact": true,
+            "merge_ledger_conserved": true,
+            "aggregate_exact": true,
+            "aggregate_recalculable": true,
+            "missing_column_rejected": true,
+            "duplicate_join_key_rejected": true
+          },
+          "duration_ms": 5
+        },
+        {
+          "capability_id": "table.pandas",
+          "status": "pass",
+          "quality_score": 1.0,
+          "checks": {
+            "merge_exact": true,
+            "merge_ledger_conserved": true,
+            "aggregate_exact": true,
+            "aggregate_recalculable": true,
+            "missing_column_rejected": true,
+            "duplicate_join_key_rejected": true
+          },
+          "duration_ms": 8
+        }
+      ]
+    },
+    "scale_suite": {
+      "status": "pass",
+      "results": [
+        {
+          "capability_id": "table.duckdb",
+          "rows": 100000,
+          "status": "pass",
+          "duration_ms": 18,
+          "rss_delta_bytes": 0,
+          "source_bytes": 622385
+        },
+        {
+          "capability_id": "table.polars",
+          "rows": 100000,
+          "status": "pass",
+          "duration_ms": 1,
+          "rss_delta_bytes": 1089536,
+          "source_bytes": 622385
+        },
+        {
+          "capability_id": "table.pandas",
+          "rows": 100000,
+          "status": "pass",
+          "duration_ms": 2,
+          "rss_delta_bytes": 1064960,
+          "source_bytes": 622385
+        },
+        {
+          "capability_id": "table.duckdb",
+          "rows": 1000000,
+          "status": "pass",
+          "duration_ms": 21,
+          "rss_delta_bytes": 0,
+          "source_bytes": 4358460
+        },
+        {
+          "capability_id": "table.polars",
+          "rows": 1000000,
+          "status": "pass",
+          "duration_ms": 3,
+          "rss_delta_bytes": 4603904,
+          "source_bytes": 4358460
+        },
+        {
+          "capability_id": "table.pandas",
+          "rows": 1000000,
+          "status": "pass",
+          "duration_ms": 9,
+          "rss_delta_bytes": 1421312,
+          "source_bytes": 4358460
+        }
+      ],
+      "measurement_note": "rss_delta_bytes 是进程前后差值，不等同于采样峰值；耗时和正确性可用于本机候选排序。"
+    }
+  },
+  "markitdown": {
+    "tool": "markitdown",
+    "version": "0.1.6",
+    "passed": 8,
+    "total": 8,
+    "results": [
+      {
+        "format": "pdf",
+        "path": "documents/contract.pdf",
+        "status": "pass",
+        "expected_tokens_found": [
+          "付款条款",
+          "交付条款",
+          "违约责任"
+        ],
+        "text_chars": 109,
+        "duration_ms": 18
+      },
+      {
+        "format": "docx",
+        "path": "documents/contract.docx",
+        "status": "pass",
+        "expected_tokens_found": [
+          "付款条款",
+          "交付条款",
+          "违约责任"
+        ],
+        "text_chars": 113,
+        "duration_ms": 74
+      },
+      {
+        "format": "pptx",
+        "path": "documents/contract.pptx",
+        "status": "pass",
+        "expected_tokens_found": [
+          "付款条款",
+          "交付条款",
+          "违约责任"
+        ],
+        "text_chars": 177,
+        "duration_ms": 17
+      },
+      {
+        "format": "html",
+        "path": "documents/contract.html",
+        "status": "pass",
+        "expected_tokens_found": [
+          "付款条款",
+          "交付条款",
+          "违约责任"
+        ],
+        "text_chars": 118,
+        "duration_ms": 8
+      },
+      {
+        "format": "markdown",
+        "path": "documents/contract.md",
+        "status": "pass",
+        "expected_tokens_found": [
+          "付款条款",
+          "交付条款",
+          "违约责任"
+        ],
+        "text_chars": 119,
+        "duration_ms": 6
+      },
+      {
+        "format": "txt",
+        "path": "documents/contract.txt",
+        "status": "pass",
+        "expected_tokens_found": [
+          "付款条款",
+          "交付条款",
+          "违约责任"
+        ],
+        "text_chars": 95,
+        "duration_ms": 4
+      },
+      {
+        "format": "xml",
+        "path": "documents/contract.xml",
+        "status": "pass",
+        "expected_tokens_found": [
+          "付款条款",
+          "交付条款",
+          "违约责任"
+        ],
+        "text_chars": 228,
+        "duration_ms": 6
+      },
+      {
+        "format": "xlsx",
+        "path": "workload_filter/source.xlsx",
+        "status": "pass",
+        "expected_tokens_found": [
+          "示例人员甲",
+          "核销工作量天数",
+          "工作量费用"
+        ],
+        "text_chars": 1356,
+        "duration_ms": 29
+      }
+    ]
+  },
+  "output_reopen": {
+    "passed": 4,
+    "total": 4,
+    "results": [
+      {
+        "format": "docx",
+        "reopen": true,
+        "semantic_check": true
+      },
+      {
+        "format": "pdf",
+        "reopen": true,
+        "semantic_check": true
+      },
+      {
+        "format": "pptx",
+        "reopen": true,
+        "semantic_check": true
+      },
+      {
+        "format": "xlsx",
+        "reopen": true,
+        "semantic_check": true
+      }
+    ]
+  },
+  "document_workflow": {
+    "status": "pass",
+    "checks": {
+      "docx_extract_exact": true,
+      "pdf_extract_exact": true,
+      "contract_diff_exact": true,
+      "contract_diff_nonempty": true,
+      "docx_output_reopen": true,
+      "pdf_output_reopen": true,
+      "evidence_coverage": true
+    },
+    "changed_titles": [
+      "付款条款",
+      "交付条款",
+      "违约责任"
+    ],
+    "outputs": [
+      "docs/plans/phase4b-batch0-results/document-workflow/商务条款摘录.docx",
+      "docs/plans/phase4b-batch0-results/document-workflow/商务条款摘录.pdf"
+    ]
+  },
+  "failure_gates": {
+    "status": "pass",
+    "checks": {
+      "damaged_pdf_rejected": true,
+      "encrypted_pdf_detected": true,
+      "unsupported_format_rejected": true,
+      "conversion_timeout_stopped": true
+    }
+  },
+  "elapsed_seconds": 3.073
+}

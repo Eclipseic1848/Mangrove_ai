@@ -1,0 +1,305 @@
+import type { UploadItem } from "@/types/dataPrep";
+
+export type WorkspaceTaskStatus =
+  | "queued"
+  | "running"
+  | "needs_input"
+  | "cancelling"
+  | "cancelled"
+  | "failed"
+  | "candidate_ready"
+  | "completed";
+
+export interface WorkspaceQuestionOption {
+  value: string;
+  label: string;
+  description?: string;
+}
+
+export interface WorkspaceQuestion {
+  kind: "external" | "plan" | "binding" | "harness";
+  question_id: string;
+  prompt: string;
+  reason?: string;
+  affected_scope?: string;
+  options: WorkspaceQuestionOption[];
+  allow_free_text: boolean;
+  external_service?: string;
+  outbound_data?: string[];
+  purpose?: string;
+  risk?: string;
+}
+
+export interface WorkspaceEvent {
+  event_id: string;
+  sequence: number;
+  stage: string;
+  event_type: string;
+  summary: string;
+  details: Record<string, unknown>;
+  created_at: string;
+  source?: "harness";
+}
+
+export type ProgressStage =
+  | "understand"
+  | "inspect_sources"
+  | "prepare_capabilities"
+  | "execute"
+  | "verify"
+  | "deliver";
+
+export interface StructuredProgressEvent extends WorkspaceEvent {
+  revision: number;
+  run_id: string | null;
+  progress: { current: number; total: number | null; unit: string } | null;
+  refs: Record<string, unknown>;
+  action: Record<string, unknown> | null;
+  audience: "user" | "admin" | "all";
+}
+
+export interface TaskProgressView {
+  active_stage: ProgressStage | null;
+  stages: Array<{
+    stage: ProgressStage;
+    status: "pending" | "active" | "waiting" | "completed" | "failed";
+    summary: string;
+  }>;
+  events: StructuredProgressEvent[];
+}
+
+export interface SteeringResult {
+  result_id: string;
+  task_id: string;
+  turn_id: string;
+  delta_id: string;
+  action:
+    | "answer_only"
+    | "normalized_no_material_change"
+    | "revision_proposal"
+    | "new_task_proposal"
+    | "permission_request";
+  acknowledgement: string;
+  answer: string | null;
+  proposal_id: string | null;
+  run_id: string | null;
+  revision: number;
+}
+
+export interface WorkspaceRevision {
+  task_id: string;
+  revision: number;
+  objective_text: string;
+  output_formats: string[];
+  plan_id: string | null;
+  logical_revision: number | null;
+  binding_revision: number | null;
+  run_id: string | null;
+  status: WorkspaceTaskStatus;
+  summary: string;
+  change_summary: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceFailure {
+  error_code: string;
+  stage: string;
+  cause_summary: string;
+  attempt_count: number;
+  elapsed_ms: number;
+  source_read: boolean;
+  intermediate_created: boolean;
+  delivery_published: boolean;
+  next_actions: string[];
+  diagnostic_ref: string;
+}
+
+export interface DeliveryQA {
+  openable: boolean;
+  checks: string[];
+  warnings: string[];
+  row_count?: number | null;
+  page_count?: number | null;
+  slide_count?: number | null;
+  sheet_count?: number | null;
+}
+
+export interface DeliveryOutput {
+  output_id: string;
+  format: string;
+  filename: string;
+  media_type: string;
+  sha256: string;
+  size_bytes: number;
+  qa: DeliveryQA;
+  download_url: string;
+}
+
+export interface DeliveryManifest {
+  delivery_id: string;
+  run_id: string;
+  plan_id: string;
+  status: string;
+  outputs: DeliveryOutput[];
+  requested_formats: string[];
+  created_at: string;
+}
+
+export interface RuntimeCandidate {
+  artifact_id: string;
+  filename: string;
+  format: string;
+  sha256: string;
+  size_bytes: number;
+  openable: boolean;
+  qa_checks: string[];
+  download_url: string;
+  download_allowed?: boolean;
+}
+
+export interface RuntimeVerification {
+  status: "passed" | "failed" | "inconclusive";
+  summary: string;
+  evidence_count: number;
+  formal_delivery_eligible: boolean;
+  checks: Array<{
+    code: string;
+    passed: boolean;
+    summary: string;
+  }>;
+}
+
+export interface AgenticRuntimeInfo {
+  runtime_version: "legacy" | "pi";
+  permission_profile: "standard" | "extended" | "host_dev";
+  status: string | null;
+  run_id?: string | null;
+  session_file?: string | null;
+  summary?: string | null;
+  candidates: RuntimeCandidate[];
+  verification?: RuntimeVerification | null;
+  failure?: Record<string, unknown> | null;
+  events?: Array<Record<string, unknown>>;
+  coverage?: {
+    contract: {
+      interpretation: string;
+      result_cardinality: "first" | "count" | "all";
+      completeness: "strict" | "best_effort";
+      stop_semantics: string;
+    };
+    progress: {
+      authorized: number;
+      observed: number;
+      candidates?: number;
+      authoritatively_read: number;
+      low_quality: number;
+      unknown: number;
+      evidence: number;
+      cache_hits: number;
+    };
+    ledger: Record<string, unknown>;
+  } | null;
+}
+
+export interface WorkspaceTask {
+  task_id: string;
+  title: string;
+  objective_text: string;
+  upload_ids: string[];
+  output_formats: string[];
+  provider: string;
+  model: string | null;
+  model_connection_id?: string | null;
+  external_api_confirmed: boolean;
+  status: WorkspaceTaskStatus;
+  active_revision: number;
+  current_status?: WorkspaceTaskStatus;
+  current_revision?: number;
+  viewing_revision?: number;
+  plan_id: string | null;
+  logical_revision: number | null;
+  binding_revision: number | null;
+  run_id: string | null;
+  summary: string;
+  error: string | null;
+  failure: WorkspaceFailure | null;
+  question: WorkspaceQuestion | null;
+  cancel_requested: boolean;
+  deleted_at: string | null;
+  purge_after: string | null;
+  created_at: string;
+  updated_at: string;
+  revisions?: WorkspaceRevision[];
+  events?: WorkspaceEvent[];
+  uploads?: UploadItem[];
+  plan?: {
+    revision: number;
+    summary: string;
+    plan: Record<string, unknown>;
+    diagnostics: Array<Record<string, unknown>>;
+  } | null;
+  run?: Record<string, unknown> | null;
+  attempts?: Array<Record<string, unknown>>;
+  harness_events?: WorkspaceEvent[];
+  delivery?: DeliveryManifest | null;
+  runtime_version?: "legacy" | "pi";
+  permission_profile?: "standard" | "extended" | "host_dev";
+  agentic_runtime?: AgenticRuntimeInfo;
+  progress?: TaskProgressView;
+}
+
+export interface TablePreview {
+  kind: "table";
+  columns: string[];
+  rows: Array<Record<string, unknown>>;
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface DocumentPreviewItem {
+  type: "passage" | "difference" | "finding" | "derived";
+  id: string;
+  label: string;
+  content: string;
+  status?: string;
+  change_type?: string;
+  evidence_refs: Array<Record<string, unknown>>;
+}
+
+export interface WorkspaceDocumentPreview {
+  kind: "document";
+  action: string;
+  items: DocumentPreviewItem[];
+  total: number;
+  offset: number;
+  limit: number;
+  warnings: string[];
+}
+
+export type WorkspacePreview = TablePreview | WorkspaceDocumentPreview;
+
+export interface WorkspaceGuidance {
+  schema_version: string;
+  onboarding: Array<{ title: string; description: string }>;
+  examples: Array<{
+    id: string;
+    category: string;
+    title: string;
+    description: string;
+    required_inputs: string;
+    prompt: string;
+    output_formats: string[];
+  }>;
+}
+
+export interface WorkspaceStorage {
+  task_count: number;
+  recycle_bin_count: number;
+  upload_bytes: number;
+  delivery_bytes: number;
+  total_bytes: number;
+  retention: string;
+  calculated_at: string;
+}

@@ -1,0 +1,12 @@
+{
+  "name": "mangrove-agentic-runtime-vnext-bakeoff",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "0.80.10",
+    "@earendil-works/pi-ai": "0.80.10",
+    "opencode-ai": "1.18.9",
+    "opencode-windows-x64": "1.18.9",
+    "typebox": "1.1.38"
+  }
+}

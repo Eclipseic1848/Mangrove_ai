@@ -1,0 +1,44 @@
+{
+  "date": "2026-07-23",
+  "service": {
+    "base_url": "http://192.168.1.21:8000",
+    "health": "healthy",
+    "version": "3.4.4",
+    "protocol_version": 2
+  },
+  "backend_results": {
+    "pipeline": {
+      "status": "passed",
+      "parse_method": "ocr",
+      "fixture": "tests/fixtures/document_golden/invoice_03_scanned.pdf",
+      "pages": 5,
+      "coordinate_blocks": 26,
+      "covered_pages": [
+        1,
+        2,
+        3,
+        4,
+        5
+      ],
+      "expected_values_found": [
+        "INV-2026-003",
+        "1,464.50"
+      ],
+      "all_blocks_have_bbox": true,
+      "elapsed_seconds": 5.065
+    },
+    "hybrid-auto-engine": {
+      "status": "failed",
+      "http_status": 409,
+      "error": "Engine core initialization failed"
+    }
+  },
+  "mangrove_integration": {
+    "page_records": 5,
+    "rejects": 0,
+    "mineru_elements": 26,
+    "first_run_cache_hit": false,
+    "second_run_cache_hit": true,
+    "temporary_test_data_removed": true
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "case_count": 4,
+  "filetype_correct": 1,
+  "combined_correct": 4,
+  "adoption": "supplement_text_only",
+  "cases": [
+    {
+      "format": "csv",
+      "filetype": "unknown",
+      "filetype_plus_magika": "csv",
+      "filetype_correct": false,
+      "combined_correct": true
+    },
+    {
+      "format": "json",
+      "filetype": "unknown",
+      "filetype_plus_magika": "json",
+      "filetype_correct": false,
+      "combined_correct": true
+    },
+    {
+      "format": "xlsx",
+      "filetype": "xlsx",
+      "filetype_plus_magika": "xlsx",
+      "filetype_correct": true,
+      "combined_correct": true
+    },
+    {
+      "format": "parquet",
+      "filetype": "unknown",
+      "filetype_plus_magika": "parquet",
+      "filetype_correct": false,
+      "combined_correct": true
+    }
+  ]
+}

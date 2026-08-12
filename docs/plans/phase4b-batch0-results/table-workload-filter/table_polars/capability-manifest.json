@@ -1,0 +1,35 @@
+{
+  "capability_id": "table.polars",
+  "version": "1.43.0",
+  "accepts": [
+    "parquet"
+  ],
+  "produces": [
+    "benchmark_table_json"
+  ],
+  "operations": [
+    "filter",
+    "project"
+  ],
+  "deterministic": true,
+  "evidence_preserving": true,
+  "side_effect": "none",
+  "network": "none",
+  "resource_class": "cpu_small",
+  "limits": {
+    "max_bytes": null,
+    "max_rows": 1000000,
+    "max_pages": null,
+    "timeout_seconds": 60,
+    "max_concurrency": 1
+  },
+  "healthcheck": "table.polars.import",
+  "parameters_schema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "selection",
+      "projection"
+    ]
+  }
+}

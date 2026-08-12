@@ -1,0 +1,877 @@
+{
+  "$defs": {
+    "AggregateExpression": {
+      "additionalProperties": false,
+      "properties": {
+        "function": {
+          "$ref": "#/$defs/AggregateFunction"
+        },
+        "column": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Column"
+        },
+        "output": {
+          "minLength": 1,
+          "title": "Output",
+          "type": "string"
+        }
+      },
+      "required": [
+        "function",
+        "output"
+      ],
+      "title": "AggregateExpression",
+      "type": "object"
+    },
+    "AggregateFunction": {
+      "enum": [
+        "count",
+        "sum",
+        "min",
+        "max",
+        "avg"
+      ],
+      "title": "AggregateFunction",
+      "type": "string"
+    },
+    "AggregateStep": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "aggregate",
+          "default": "aggregate",
+          "title": "Kind",
+          "type": "string"
+        },
+        "step_id": {
+          "pattern": "^step_[a-z0-9_]+$",
+          "title": "Step Id",
+          "type": "string"
+        },
+        "input_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Input Ids",
+          "type": "array"
+        },
+        "group_by": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Group By",
+          "type": "array"
+        },
+        "aggregates": {
+          "items": {
+            "$ref": "#/$defs/AggregateExpression"
+          },
+          "minItems": 1,
+          "title": "Aggregates",
+          "type": "array"
+        }
+      },
+      "required": [
+        "step_id",
+        "input_ids",
+        "aggregates"
+      ],
+      "title": "AggregateStep",
+      "type": "object"
+    },
+    "DeduplicateStep": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "deduplicate",
+          "default": "deduplicate",
+          "title": "Kind",
+          "type": "string"
+        },
+        "step_id": {
+          "pattern": "^step_[a-z0-9_]+$",
+          "title": "Step Id",
+          "type": "string"
+        },
+        "input_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Input Ids",
+          "type": "array"
+        },
+        "keys": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Keys",
+          "type": "array"
+        },
+        "order_by": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SortKey"
+          },
+          "title": "Order By",
+          "type": "array"
+        }
+      },
+      "required": [
+        "step_id",
+        "input_ids",
+        "keys"
+      ],
+      "title": "DeduplicateStep",
+      "type": "object"
+    },
+    "FilterCondition": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "minLength": 1,
+          "title": "Column",
+          "type": "string"
+        },
+        "operator": {
+          "$ref": "#/$defs/PredicateOperator"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        },
+        "values": {
+          "default": [],
+          "items": {},
+          "title": "Values",
+          "type": "array"
+        },
+        "case_sensitive": {
+          "default": false,
+          "title": "Case Sensitive",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "column",
+        "operator"
+      ],
+      "title": "FilterCondition",
+      "type": "object"
+    },
+    "FilterStep": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "filter",
+          "default": "filter",
+          "title": "Kind",
+          "type": "string"
+        },
+        "step_id": {
+          "pattern": "^step_[a-z0-9_]+$",
+          "title": "Step Id",
+          "type": "string"
+        },
+        "input_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Input Ids",
+          "type": "array"
+        },
+        "conditions": {
+          "items": {
+            "$ref": "#/$defs/FilterCondition"
+          },
+          "minItems": 1,
+          "title": "Conditions",
+          "type": "array"
+        }
+      },
+      "required": [
+        "step_id",
+        "input_ids",
+        "conditions"
+      ],
+      "title": "FilterStep",
+      "type": "object"
+    },
+    "JoinCardinality": {
+      "enum": [
+        "one_to_one",
+        "many_to_one",
+        "one_to_many"
+      ],
+      "title": "JoinCardinality",
+      "type": "string"
+    },
+    "JoinKey": {
+      "additionalProperties": false,
+      "properties": {
+        "left": {
+          "minLength": 1,
+          "title": "Left",
+          "type": "string"
+        },
+        "right": {
+          "minLength": 1,
+          "title": "Right",
+          "type": "string"
+        }
+      },
+      "required": [
+        "left",
+        "right"
+      ],
+      "title": "JoinKey",
+      "type": "object"
+    },
+    "JoinKind": {
+      "enum": [
+        "inner",
+        "left"
+      ],
+      "title": "JoinKind",
+      "type": "string"
+    },
+    "JoinStep": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "join",
+          "default": "join",
+          "title": "Kind",
+          "type": "string"
+        },
+        "step_id": {
+          "pattern": "^step_[a-z0-9_]+$",
+          "title": "Step Id",
+          "type": "string"
+        },
+        "input_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Input Ids",
+          "type": "array"
+        },
+        "keys": {
+          "items": {
+            "$ref": "#/$defs/JoinKey"
+          },
+          "minItems": 1,
+          "title": "Keys",
+          "type": "array"
+        },
+        "join_kind": {
+          "$ref": "#/$defs/JoinKind",
+          "default": "inner"
+        },
+        "cardinality": {
+          "$ref": "#/$defs/JoinCardinality"
+        }
+      },
+      "required": [
+        "step_id",
+        "input_ids",
+        "keys",
+        "cardinality"
+      ],
+      "title": "JoinStep",
+      "type": "object"
+    },
+    "PhysicalPlanStatus": {
+      "enum": [
+        "ready",
+        "needs_user"
+      ],
+      "title": "PhysicalPlanStatus",
+      "type": "string"
+    },
+    "PhysicalSource": {
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "pattern": "^source_[a-z0-9_]+$",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "artifact_id": {
+          "minLength": 1,
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "artifact_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Artifact Sha256",
+          "type": "string"
+        },
+        "table_ref": {
+          "minLength": 1,
+          "title": "Table Ref",
+          "type": "string"
+        },
+        "table_index": {
+          "minimum": 0,
+          "title": "Table Index",
+          "type": "integer"
+        },
+        "table_name": {
+          "minLength": 1,
+          "title": "Table Name",
+          "type": "string"
+        },
+        "header_row": {
+          "minimum": 1,
+          "title": "Header Row",
+          "type": "integer"
+        },
+        "detected_format": {
+          "pattern": "^(csv|tsv|xlsx|parquet|json|jsonl)$",
+          "title": "Detected Format",
+          "type": "string"
+        },
+        "columns": {
+          "items": {
+            "$ref": "#/$defs/SourceColumn"
+          },
+          "minItems": 1,
+          "title": "Columns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_id",
+        "artifact_id",
+        "artifact_sha256",
+        "table_ref",
+        "table_index",
+        "table_name",
+        "header_row",
+        "detected_format",
+        "columns"
+      ],
+      "title": "PhysicalSource",
+      "type": "object"
+    },
+    "PredicateOperator": {
+      "enum": [
+        "eq",
+        "ne",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "contains",
+        "in",
+        "not_in",
+        "is_null",
+        "not_null",
+        "regex"
+      ],
+      "title": "PredicateOperator",
+      "type": "string"
+    },
+    "ProjectColumn": {
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "minLength": 1,
+          "title": "Source",
+          "type": "string"
+        },
+        "output": {
+          "minLength": 1,
+          "title": "Output",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "output"
+      ],
+      "title": "ProjectColumn",
+      "type": "object"
+    },
+    "ProjectStep": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "project",
+          "default": "project",
+          "title": "Kind",
+          "type": "string"
+        },
+        "step_id": {
+          "pattern": "^step_[a-z0-9_]+$",
+          "title": "Step Id",
+          "type": "string"
+        },
+        "input_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Input Ids",
+          "type": "array"
+        },
+        "columns": {
+          "items": {
+            "$ref": "#/$defs/ProjectColumn"
+          },
+          "minItems": 1,
+          "title": "Columns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "step_id",
+        "input_ids",
+        "columns"
+      ],
+      "title": "ProjectStep",
+      "type": "object"
+    },
+    "RenameStep": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "rename",
+          "default": "rename",
+          "title": "Kind",
+          "type": "string"
+        },
+        "step_id": {
+          "pattern": "^step_[a-z0-9_]+$",
+          "title": "Step Id",
+          "type": "string"
+        },
+        "input_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Input Ids",
+          "type": "array"
+        },
+        "mapping": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "minProperties": 1,
+          "title": "Mapping",
+          "type": "object"
+        }
+      },
+      "required": [
+        "step_id",
+        "input_ids",
+        "mapping"
+      ],
+      "title": "RenameStep",
+      "type": "object"
+    },
+    "RuntimePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/RuntimeProfileName"
+        },
+        "threads": {
+          "minimum": 1,
+          "title": "Threads",
+          "type": "integer"
+        },
+        "memory_limit": {
+          "pattern": "^\\d+(?:MB|GB)$",
+          "title": "Memory Limit",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "arrow_batch_rows": {
+          "minimum": 1024,
+          "title": "Arrow Batch Rows",
+          "type": "integer"
+        },
+        "max_temp_bytes": {
+          "minimum": 1,
+          "title": "Max Temp Bytes",
+          "type": "integer"
+        },
+        "max_input_bytes": {
+          "minimum": 1,
+          "title": "Max Input Bytes",
+          "type": "integer"
+        },
+        "max_input_rows": {
+          "minimum": 1,
+          "title": "Max Input Rows",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "profile",
+        "threads",
+        "memory_limit",
+        "timeout_seconds",
+        "arrow_batch_rows",
+        "max_temp_bytes",
+        "max_input_bytes",
+        "max_input_rows"
+      ],
+      "title": "RuntimePolicy",
+      "type": "object"
+    },
+    "RuntimeProfileName": {
+      "enum": [
+        "windows_local",
+        "server"
+      ],
+      "title": "RuntimeProfileName",
+      "type": "string"
+    },
+    "SortDirection": {
+      "enum": [
+        "asc",
+        "desc"
+      ],
+      "title": "SortDirection",
+      "type": "string"
+    },
+    "SortKey": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "minLength": 1,
+          "title": "Column",
+          "type": "string"
+        },
+        "direction": {
+          "$ref": "#/$defs/SortDirection",
+          "default": "asc"
+        },
+        "nulls_last": {
+          "default": true,
+          "title": "Nulls Last",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "column"
+      ],
+      "title": "SortKey",
+      "type": "object"
+    },
+    "SortStep": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "sort",
+          "default": "sort",
+          "title": "Kind",
+          "type": "string"
+        },
+        "step_id": {
+          "pattern": "^step_[a-z0-9_]+$",
+          "title": "Step Id",
+          "type": "string"
+        },
+        "input_ids": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "title": "Input Ids",
+          "type": "array"
+        },
+        "keys": {
+          "items": {
+            "$ref": "#/$defs/SortKey"
+          },
+          "minItems": 1,
+          "title": "Keys",
+          "type": "array"
+        }
+      },
+      "required": [
+        "step_id",
+        "input_ids",
+        "keys"
+      ],
+      "title": "SortStep",
+      "type": "object"
+    },
+    "SourceColumn": {
+      "additionalProperties": false,
+      "properties": {
+        "semantic_name": {
+          "minLength": 1,
+          "title": "Semantic Name",
+          "type": "string"
+        },
+        "physical_ref": {
+          "minLength": 1,
+          "title": "Physical Ref",
+          "type": "string"
+        },
+        "column_index": {
+          "minimum": 0,
+          "title": "Column Index",
+          "type": "integer"
+        },
+        "output_name": {
+          "minLength": 1,
+          "title": "Output Name",
+          "type": "string"
+        },
+        "inferred_type": {
+          "minLength": 1,
+          "title": "Inferred Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "semantic_name",
+        "physical_ref",
+        "column_index",
+        "output_name",
+        "inferred_type"
+      ],
+      "title": "SourceColumn",
+      "type": "object"
+    },
+    "UnionStep": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "union",
+          "default": "union",
+          "title": "Kind",
+          "type": "string"
+        },
+        "step_id": {
+          "pattern": "^step_[a-z0-9_]+$",
+          "title": "Step Id",
+          "type": "string"
+        },
+        "input_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 2,
+          "title": "Input Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "step_id",
+        "input_ids"
+      ],
+      "title": "UnionStep",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "只能包含已登记算子和结构化参数，禁止承载自由 SQL 或客户端路径。",
+  "properties": {
+    "spec_version": {
+      "default": "1",
+      "pattern": "^1$",
+      "title": "Spec Version",
+      "type": "string"
+    },
+    "physical_plan_id": {
+      "minLength": 1,
+      "title": "Physical Plan Id",
+      "type": "string"
+    },
+    "logical_plan_id": {
+      "minLength": 1,
+      "title": "Logical Plan Id",
+      "type": "string"
+    },
+    "logical_plan_revision": {
+      "minimum": 1,
+      "title": "Logical Plan Revision",
+      "type": "integer"
+    },
+    "logical_plan_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Logical Plan Hash",
+      "type": "string"
+    },
+    "bound_plan_id": {
+      "minLength": 1,
+      "title": "Bound Plan Id",
+      "type": "string"
+    },
+    "bound_plan_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Bound Plan Hash",
+      "type": "string"
+    },
+    "binding_revision": {
+      "minimum": 1,
+      "title": "Binding Revision",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/PhysicalPlanStatus"
+    },
+    "capability_id": {
+      "default": "table.duckdb",
+      "pattern": "^[a-z0-9._-]+$",
+      "title": "Capability Id",
+      "type": "string"
+    },
+    "capability_version": {
+      "minLength": 1,
+      "title": "Capability Version",
+      "type": "string"
+    },
+    "sources": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/PhysicalSource"
+      },
+      "title": "Sources",
+      "type": "array"
+    },
+    "steps": {
+      "default": [],
+      "items": {
+        "discriminator": {
+          "mapping": {
+            "aggregate": "#/$defs/AggregateStep",
+            "deduplicate": "#/$defs/DeduplicateStep",
+            "filter": "#/$defs/FilterStep",
+            "join": "#/$defs/JoinStep",
+            "project": "#/$defs/ProjectStep",
+            "rename": "#/$defs/RenameStep",
+            "sort": "#/$defs/SortStep",
+            "union": "#/$defs/UnionStep"
+          },
+          "propertyName": "kind"
+        },
+        "oneOf": [
+          {
+            "$ref": "#/$defs/FilterStep"
+          },
+          {
+            "$ref": "#/$defs/ProjectStep"
+          },
+          {
+            "$ref": "#/$defs/RenameStep"
+          },
+          {
+            "$ref": "#/$defs/SortStep"
+          },
+          {
+            "$ref": "#/$defs/UnionStep"
+          },
+          {
+            "$ref": "#/$defs/JoinStep"
+          },
+          {
+            "$ref": "#/$defs/DeduplicateStep"
+          },
+          {
+            "$ref": "#/$defs/AggregateStep"
+          }
+        ]
+      },
+      "title": "Steps",
+      "type": "array"
+    },
+    "final_step_id": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Final Step Id"
+    },
+    "visible_columns": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Visible Columns",
+      "type": "array"
+    },
+    "expected_row_count": {
+      "anyOf": [
+        {
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Expected Row Count"
+    },
+    "runtime_policy": {
+      "$ref": "#/$defs/RuntimePolicy"
+    },
+    "diagnostics": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Diagnostics",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "physical_plan_id",
+    "logical_plan_id",
+    "logical_plan_revision",
+    "logical_plan_hash",
+    "bound_plan_id",
+    "bound_plan_hash",
+    "binding_revision",
+    "status",
+    "capability_version",
+    "runtime_policy"
+  ],
+  "title": "PhysicalPlan",
+  "type": "object"
+}

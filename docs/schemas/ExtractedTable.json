@@ -1,0 +1,52 @@
+{
+  "description": "确定性解析器产出的原始表格。",
+  "properties": {
+    "table_id": {
+      "title": "Table Id",
+      "type": "string"
+    },
+    "name": {
+      "title": "Name",
+      "type": "string"
+    },
+    "artifact_id": {
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "page": {
+      "minimum": 1,
+      "title": "Page",
+      "type": "integer"
+    },
+    "columns": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Columns",
+      "type": "array"
+    },
+    "rows": {
+      "items": {
+        "additionalProperties": true,
+        "type": "object"
+      },
+      "title": "Rows",
+      "type": "array"
+    },
+    "evidence_element_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence Element Ids",
+      "type": "array"
+    }
+  },
+  "required": [
+    "table_id",
+    "name",
+    "artifact_id",
+    "page"
+  ],
+  "title": "ExtractedTable",
+  "type": "object"
+}

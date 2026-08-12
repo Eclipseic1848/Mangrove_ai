@@ -1,0 +1,39 @@
+name: Bug 报告
+description: 报告可以稳定复现的功能问题
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: 安全漏洞请使用 Security 页的私密漏洞报告，不要在这里公开。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题描述
+      description: 说明实际结果与期望结果。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 请提供最小、稳定的复现步骤，并删除凭据和业务数据。
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: 版本或提交
+      placeholder: main / commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境
+      description: 操作系统、Python、Node、Docker 和浏览器版本。
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 脱敏证据
+      description: 可附脱敏日志或截图；禁止粘贴 API Key、Cookie、Token、个人或企业数据。

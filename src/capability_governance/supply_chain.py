@@ -1,0 +1,276 @@
+# -*- coding: utf-8 -*-
+"""Trivy/Syft 外部工具与能力治理之间的失败关闭证据 Seam。"""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
+from pathlib import Path
+import subprocess
+import tempfile
+from typing import Any, Callable, Protocol, Sequence
+
+from .models import (
+    CapabilityGovernanceTarget,
+    CapabilitySupplyChainEvidence,
+    SupplyChainCollection,
+    SupplyChainEvidenceStatus,
+)
+from .repository import CapabilityGovernanceRepository
+
+
+class SupplyChainTools(Protocol):
+    def collect(
+        self,
+        target: CapabilityGovernanceTarget,
+        subject_root: Path,
+    ) -> SupplyChainCollection: ...
+
+
+class LockedCliSupplyChainTools:
+    """只运行哈希锁定的 Trivy/Syft，并将原始证据留在受控目录。"""
+
+    def __init__(
+        self,
+        *,
+        tool_root: str | Path,
+        evidence_root: str | Path,
+        cache_root: str | Path,
+        lock_path: str | Path,
+        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+    ) -> None:
+        self._tool_root = Path(tool_root).resolve()
+        self._evidence_root = Path(evidence_root).resolve()
+        self._cache_root = Path(cache_root).resolve()
+        self._lock_path = Path(lock_path).resolve()
+        self._runner = runner
+
+    @staticmethod
+    def _sha256(path: Path) -> str:
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _load_tool(self, name: str, expected_version: str) -> Path:
+        lock = json.loads(self._lock_path.read_text(encoding="utf-8"))
+        entry = lock.get(name)
+        if not isinstance(entry, dict) or entry.get("version") != expected_version:
+            raise ValueError(f"{name} 版本锁不存在或不匹配")
+        verification = entry.get("source_verification")
+        if not isinstance(verification, dict) or verification.get("verified") is not True:
+            raise ValueError(f"{name} 上游来源尚未验证")
+        executable = (self._tool_root / str(entry.get("executable", ""))).resolve()
+        if not executable.is_relative_to(self._tool_root) or not executable.is_file():
+            raise ValueError(f"{name} 可执行文件不在受控目录")
+        if self._sha256(executable) != entry.get("executable_sha256"):
+            raise ValueError(f"{name} 可执行文件 digest 校验失败")
+        return executable
+
+    def _run(self, command: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        completed = self._runner(
+            list(command),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=900,
+            check=False,
+        )
+        if completed.returncode != 0:
+            # 原始 stderr 可能包含宿主路径，只向上返回稳定错误类别。
+            raise RuntimeError(f"供应链工具执行失败: {Path(command[0]).stem}")
+        return completed
+
+    @staticmethod
+    def _parse_time(value: Any) -> datetime | None:
+        if not isinstance(value, str) or not value:
+            return None
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+    def collect(
+        self,
+        target: CapabilityGovernanceTarget,
+        subject_root: Path,
+    ) -> SupplyChainCollection:
+        subject = subject_root.resolve()
+        if not subject.is_dir():
+            raise ValueError("供应链扫描主体不存在")
+        marker = subject / ".mangrove-capability-digest"
+        if not marker.is_file() or marker.read_text(encoding="utf-8").strip() != target.digest:
+            raise ValueError("供应链扫描主体 digest 与治理目标不一致")
+
+        trivy = self._load_tool("trivy", "0.70.0")
+        syft = self._load_tool("syft", "1.50.0")
+        self._evidence_root.mkdir(parents=True, exist_ok=True)
+        self._cache_root.mkdir(parents=True, exist_ok=True)
+        evidence_dir = Path(tempfile.mkdtemp(prefix="scan-", dir=self._evidence_root))
+        trivy_output = evidence_dir / "trivy.json"
+        syft_output = evidence_dir / "syft.json"
+        cyclonedx_output = evidence_dir / "cyclonedx-1.6.json"
+        trivy_config = {
+            "scanners": ["vuln", "misconfig", "secret"],
+            "skip_db_update": True,
+            "skip_check_update": True,
+            "offline_scan": True,
+        }
+        config_sha256 = hashlib.sha256(
+            json.dumps(trivy_config, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        self._run(
+            [
+                str(trivy), "fs", "--scanners", "vuln,misconfig,secret",
+                "--format", "json", "--output", str(trivy_output),
+                "--cache-dir", str(self._cache_root / "trivy"),
+                "--skip-db-update", "--skip-check-update", "--offline-scan",
+                str(subject),
+            ]
+        )
+        version_result = self._run(
+            [
+                str(trivy),
+                "--version",
+                "--format",
+                "json",
+                "--cache-dir",
+                str(self._cache_root / "trivy"),
+            ]
+        )
+        self._run(
+            [str(syft), "scan", f"dir:{subject}", "--output", f"syft-json={syft_output}"]
+        )
+        self._run(
+            [
+                str(syft),
+                "scan",
+                f"dir:{subject}",
+                "--output",
+                f"cyclonedx-json@1.6={cyclonedx_output}",
+            ]
+        )
+
+        trivy_data = json.loads(trivy_output.read_text(encoding="utf-8"))
+        results = trivy_data.get("Results") or []
+        vulnerabilities = [
+            item
+            for result in results
+            for item in (result.get("Vulnerabilities") or [])
+        ]
+        secrets = [item for result in results for item in (result.get("Secrets") or [])]
+        misconfigurations = [
+            item
+            for result in results
+            for item in (result.get("Misconfigurations") or [])
+            if item.get("Status") == "FAIL"
+        ]
+        version_data = json.loads(version_result.stdout)
+        if version_data.get("Version") != "0.70.0":
+            raise ValueError("Trivy 运行版本与锁定版本不一致")
+        database = version_data.get("VulnerabilityDB") or {}
+        updated_at = self._parse_time(database.get("UpdatedAt"))
+        if updated_at is None:
+            raise RuntimeError("Trivy 漏洞库元数据不可用")
+        cyclonedx_data = json.loads(cyclonedx_output.read_text(encoding="utf-8"))
+        if cyclonedx_data.get("specVersion") != "1.6":
+            raise ValueError("CycloneDX 输出版本不是 1.6")
+        return SupplyChainCollection(
+            subject_digest=target.digest,
+            trivy_version="0.70.0",
+            trivy_config_sha256=config_sha256,
+            trivy_result_sha256=self._sha256(trivy_output),
+            trivy_database={
+                "version": database.get("Version"),
+                "updated_at": updated_at,
+                "next_update": self._parse_time(database.get("NextUpdate")),
+                "downloaded_at": self._parse_time(database.get("DownloadedAt")),
+            },
+            secret_count=len(secrets),
+            critical_count=sum(item.get("Severity") == "CRITICAL" for item in vulnerabilities),
+            fixable_high_count=sum(
+                item.get("Severity") == "HIGH" and bool(item.get("FixedVersion"))
+                for item in vulnerabilities
+            ),
+            misconfiguration_failure_count=len(misconfigurations),
+            syft_version="1.50.0",
+            syft_json_sha256=self._sha256(syft_output),
+            cyclonedx_json_sha256=self._sha256(cyclonedx_output),
+            cyclonedx_spec_version="1.6",
+        )
+
+
+class CapabilitySupplyChainEvidenceService:
+    """只接受受控 CLI 摘要，并按 ADR-0029 的硬门形成不可变结论。"""
+
+    def __init__(
+        self,
+        repository: CapabilityGovernanceRepository,
+        tools: SupplyChainTools,
+        *,
+        now: Callable[[], datetime] | None = None,
+    ) -> None:
+        self._repository = repository
+        self._tools = tools
+        self._now = now or (lambda: datetime.now(timezone.utc))
+
+    def collect(
+        self,
+        target: CapabilityGovernanceTarget,
+        subject_root: str | Path,
+    ) -> CapabilitySupplyChainEvidence:
+        collected = self._tools.collect(target, Path(subject_root))
+        if collected.subject_digest != target.digest:
+            raise ValueError("供应链证据主体 digest 与治理目标不一致")
+        blockers: list[str] = []
+        if collected.secret_count:
+            blockers.append("secret_detected")
+        if collected.critical_count:
+            blockers.append("critical_vulnerability")
+        if collected.fixable_high_count:
+            blockers.append("fixable_high_vulnerability")
+        occurred_at = self._now()
+        if occurred_at - collected.trivy_database.updated_at > timedelta(days=7):
+            blockers.append("trivy_database_stale")
+        identity = hashlib.sha256(
+            (
+                target.digest
+                + collected.trivy_result_sha256
+                + collected.syft_json_sha256
+                + collected.cyclonedx_json_sha256
+                + occurred_at.isoformat()
+            ).encode("utf-8")
+        ).hexdigest()[:20]
+        evidence = CapabilitySupplyChainEvidence(
+            evidence_id=f"supply_{identity}",
+            target=target,
+            subject_digest=collected.subject_digest,
+            status=(
+                SupplyChainEvidenceStatus.BLOCKED
+                if blockers
+                else SupplyChainEvidenceStatus.PASSED
+            ),
+            blockers=tuple(blockers),
+            secret_count=collected.secret_count,
+            critical_count=collected.critical_count,
+            fixable_high_count=collected.fixable_high_count,
+            misconfiguration_failure_count=(
+                collected.misconfiguration_failure_count
+            ),
+            trivy_version=collected.trivy_version,
+            trivy_config_sha256=collected.trivy_config_sha256,
+            trivy_result_sha256=collected.trivy_result_sha256,
+            trivy_database=collected.trivy_database,
+            syft_version=collected.syft_version,
+            syft_json_sha256=collected.syft_json_sha256,
+            cyclonedx_json_sha256=collected.cyclonedx_json_sha256,
+            cyclonedx_spec_version=collected.cyclonedx_spec_version,
+            occurred_at=occurred_at,
+        )
+        return self._repository.save_supply_chain_evidence(evidence)
+
+    def get(
+        self,
+        target: CapabilityGovernanceTarget,
+    ) -> CapabilitySupplyChainEvidence | None:
+        return self._repository.get_latest_supply_chain_evidence(target)

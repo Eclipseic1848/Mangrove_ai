@@ -1,0 +1,66 @@
+{
+  "call_id": "workload_filter_table.duckdb",
+  "capability_id": "table.duckdb",
+  "capability_version": "1.5.5",
+  "status": "succeeded",
+  "input_artifacts": [],
+  "output_artifacts": [
+    {
+      "artifact_id": "workload_filter_table.duckdb",
+      "kind": "benchmark_result",
+      "media_type": "application/json",
+      "sha256": "9376c569eac1e25083a95d8d084454447fb6b9031b661d9c71bfe9aeb0c060b7",
+      "size_bytes": 2840
+    }
+  ],
+  "ledger": {
+    "input_records": null,
+    "output_records": 11,
+    "filtered_out_records": 0,
+    "rejected_records": 0,
+    "input_bytes": 4596,
+    "output_bytes": 2840
+  },
+  "lineage": [
+    {
+      "event": "benchmark_filter_project",
+      "input_artifact_ids": [
+        "fixture_workload_filter"
+      ],
+      "output_artifact_ids": [
+        "workload_filter_table.duckdb"
+      ],
+      "details": {
+        "source_sha256": "1dca9614b80095fa355f0e2ce866fa0f716977a23855d06079f9ca00b8271aec"
+      }
+    }
+  ],
+  "facts": {
+    "table_count": 1,
+    "rows": 11,
+    "visible_columns": [
+      "核销工作量天数",
+      "工作量费用"
+    ]
+  },
+  "warnings": [],
+  "rejects": [],
+  "failure_kind": null,
+  "error_message": null,
+  "retryable": false,
+  "tool_config_summary": {
+    "selection": {
+      "姓名": "示例人员甲"
+    },
+    "projection": [
+      "核销工作量天数",
+      "工作量费用"
+    ]
+  },
+  "resource_usage": {
+    "duration_ms": 420,
+    "peak_memory_bytes": null,
+    "peak_gpu_memory_bytes": null,
+    "cpu_seconds": null
+  }
+}

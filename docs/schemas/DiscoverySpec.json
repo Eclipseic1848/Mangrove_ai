@@ -1,0 +1,36 @@
+{
+  "description": "模型和检索器允许访问的制品与范围。",
+  "properties": {
+    "artifact_ids": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Artifact Ids",
+      "type": "array"
+    },
+    "pages": {
+      "additionalProperties": {
+        "items": {
+          "type": "integer"
+        },
+        "type": "array"
+      },
+      "description": "artifact_id 到允许页码的映射；空列表表示该制品全部页",
+      "title": "Pages",
+      "type": "object"
+    },
+    "section_patterns": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Section Patterns",
+      "type": "array"
+    }
+  },
+  "required": [
+    "artifact_ids"
+  ],
+  "title": "DiscoverySpec",
+  "type": "object"
+}

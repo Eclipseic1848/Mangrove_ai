@@ -1,0 +1,175 @@
+{
+  "$defs": {
+    "CapabilityLimits": {
+      "additionalProperties": false,
+      "properties": {
+        "max_bytes": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Bytes"
+        },
+        "max_rows": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Rows"
+        },
+        "max_pages": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Pages"
+        },
+        "timeout_seconds": {
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "max_concurrency": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Max Concurrency",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "timeout_seconds"
+      ],
+      "title": "CapabilityLimits",
+      "type": "object"
+    },
+    "NetworkAccess": {
+      "enum": [
+        "none",
+        "lan",
+        "external"
+      ],
+      "title": "NetworkAccess",
+      "type": "string"
+    },
+    "ResourceClass": {
+      "enum": [
+        "cpu_small",
+        "cpu_medium",
+        "cpu_large",
+        "converter",
+        "gpu"
+      ],
+      "title": "ResourceClass",
+      "type": "string"
+    },
+    "SideEffect": {
+      "enum": [
+        "none",
+        "read_only"
+      ],
+      "title": "SideEffect",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "capability_id": {
+      "pattern": "^[a-z0-9]+(?:[._-][a-z0-9]+)*$",
+      "title": "Capability Id",
+      "type": "string"
+    },
+    "version": {
+      "minLength": 1,
+      "title": "Version",
+      "type": "string"
+    },
+    "accepts": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Accepts",
+      "type": "array"
+    },
+    "produces": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Produces",
+      "type": "array"
+    },
+    "operations": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Operations",
+      "type": "array"
+    },
+    "deterministic": {
+      "title": "Deterministic",
+      "type": "boolean"
+    },
+    "evidence_preserving": {
+      "title": "Evidence Preserving",
+      "type": "boolean"
+    },
+    "side_effect": {
+      "$ref": "#/$defs/SideEffect",
+      "default": "none"
+    },
+    "network": {
+      "$ref": "#/$defs/NetworkAccess",
+      "default": "none"
+    },
+    "resource_class": {
+      "$ref": "#/$defs/ResourceClass"
+    },
+    "limits": {
+      "$ref": "#/$defs/CapabilityLimits"
+    },
+    "healthcheck": {
+      "minLength": 1,
+      "title": "Healthcheck",
+      "type": "string"
+    },
+    "parameters_schema": {
+      "additionalProperties": true,
+      "title": "Parameters Schema",
+      "type": "object"
+    }
+  },
+  "required": [
+    "capability_id",
+    "version",
+    "accepts",
+    "produces",
+    "operations",
+    "deterministic",
+    "evidence_preserving",
+    "resource_class",
+    "limits",
+    "healthcheck"
+  ],
+  "title": "CapabilityManifest",
+  "type": "object"
+}

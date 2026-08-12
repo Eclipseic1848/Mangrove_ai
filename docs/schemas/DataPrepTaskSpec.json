@@ -1,0 +1,670 @@
+{
+  "$defs": {
+    "IncrementalSpec": {
+      "description": "增量策略：只记录游标语义，具体由连接器解释。",
+      "properties": {
+        "strategy": {
+          "description": "cursor | watermark | etag | last_modified | none",
+          "title": "Strategy",
+          "type": "string"
+        },
+        "cursor_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "水位线字段名（strategy=watermark 时）",
+          "title": "Cursor Field"
+        },
+        "last_value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "上次游标值，用于断点续跑",
+          "title": "Last Value"
+        }
+      },
+      "required": [
+        "strategy"
+      ],
+      "title": "IncrementalSpec",
+      "type": "object"
+    },
+    "OutputFormat": {
+      "description": "数据产物格式。7C 决策：首版全开 JSONL/Parquet/CSV/TSV/JSON/XLSX/SQLite。",
+      "enum": [
+        "jsonl",
+        "parquet",
+        "csv",
+        "tsv",
+        "json",
+        "xlsx",
+        "sqlite"
+      ],
+      "title": "OutputFormat",
+      "type": "string"
+    },
+    "QualityPolicy": {
+      "description": "质量门阈值策略。确定性规则计算，LLM 不参与通过判定。",
+      "properties": {
+        "max_reject_rate": {
+          "default": 0.1,
+          "description": "最大异常隔离率，超过 fail",
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Max Reject Rate",
+          "type": "number"
+        },
+        "min_completeness": {
+          "default": 0.95,
+          "description": "必填字段最低非空率",
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Min Completeness",
+          "type": "number"
+        },
+        "min_uniqueness": {
+          "default": 1.0,
+          "description": "主键/业务键最低唯一率",
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Min Uniqueness",
+          "type": "number"
+        },
+        "require_lineage": {
+          "default": true,
+          "description": "是否要求 100% 血缘覆盖",
+          "title": "Require Lineage",
+          "type": "boolean"
+        },
+        "warn_reject_rate": {
+          "default": 0.03,
+          "description": "告警级异常率阈值",
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Warn Reject Rate",
+          "type": "number"
+        }
+      },
+      "title": "QualityPolicy",
+      "type": "object"
+    },
+    "Recipe": {
+      "description": "清洗规则集合。可内联或引用已保存 Recipe。",
+      "properties": {
+        "recipe_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "已保存 Recipe 引用；内联时留空",
+          "title": "Recipe Id"
+        },
+        "version": {
+          "default": "1",
+          "title": "Version",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/RecipeRule"
+          },
+          "title": "Rules",
+          "type": "array"
+        }
+      },
+      "title": "Recipe",
+      "type": "object"
+    },
+    "RecipeRule": {
+      "description": "单条清洗规则。每条有版本、参数、影响数量与可逆性说明。",
+      "properties": {
+        "rule_id": {
+          "description": "规则唯一标识，如 web_dedup_url_prefix",
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "stage": {
+          "$ref": "#/$defs/RecipeStage"
+        },
+        "name": {
+          "description": "人可读规则名",
+          "title": "Name",
+          "type": "string"
+        },
+        "params": {
+          "additionalProperties": true,
+          "description": "规则参数",
+          "title": "Params",
+          "type": "object"
+        },
+        "version": {
+          "default": "1",
+          "description": "规则版本，便于复现",
+          "title": "Version",
+          "type": "string"
+        },
+        "reversible": {
+          "default": false,
+          "description": "是否可逆（去重/删除类应为 False）",
+          "title": "Reversible",
+          "type": "boolean"
+        },
+        "high_impact": {
+          "default": false,
+          "description": "高影响规则（字段删除/模糊去重/脱敏/强制类型）需用户显式确认",
+          "title": "High Impact",
+          "type": "boolean"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "rule_id",
+        "stage",
+        "name"
+      ],
+      "title": "RecipeRule",
+      "type": "object"
+    },
+    "RecipeStage": {
+      "description": "清洗规则阶段（plan 8.2）。引擎按阶段顺序执行。",
+      "enum": [
+        "input_validation",
+        "basic_normalize",
+        "field_normalize",
+        "value_normalize",
+        "content_clean",
+        "dedup",
+        "quality_constraint",
+        "sensitive_info",
+        "anomaly_isolation"
+      ],
+      "title": "RecipeStage",
+      "type": "string"
+    },
+    "RetentionPolicy": {
+      "description": "数据保留策略（plan 3：默认 30 天可配置）。",
+      "properties": {
+        "raw_days": {
+          "default": 30,
+          "description": "原始制品保留天数；4B 决策默认 30",
+          "minimum": 0,
+          "title": "Raw Days",
+          "type": "integer"
+        },
+        "intermediate_days": {
+          "default": 7,
+          "description": "中间产物保留天数",
+          "minimum": 0,
+          "title": "Intermediate Days",
+          "type": "integer"
+        },
+        "output_days": {
+          "default": 90,
+          "description": "输出数据保留天数",
+          "minimum": 0,
+          "title": "Output Days",
+          "type": "integer"
+        }
+      },
+      "title": "RetentionPolicy",
+      "type": "object"
+    },
+    "SelectionSpec": {
+      "description": "从数据源中选取哪些数据：表/字段/路径/关键词/时间/数量范围。",
+      "properties": {
+        "tables": {
+          "description": "数据库表名",
+          "items": {
+            "type": "string"
+          },
+          "title": "Tables",
+          "type": "array"
+        },
+        "fields": {
+          "description": "字段/列名",
+          "items": {
+            "type": "string"
+          },
+          "title": "Fields",
+          "type": "array"
+        },
+        "paths": {
+          "description": "文件内路径/Sheet/页码范围",
+          "items": {
+            "type": "string"
+          },
+          "title": "Paths",
+          "type": "array"
+        },
+        "keywords": {
+          "description": "检索关键词",
+          "items": {
+            "type": "string"
+          },
+          "title": "Keywords",
+          "type": "array"
+        },
+        "time_range": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "时间范围，自然语言或 ISO 区间",
+          "title": "Time Range"
+        },
+        "row_range": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "行范围，如 0-1000",
+          "title": "Row Range"
+        },
+        "page_range": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "页范围，如 1-10",
+          "title": "Page Range"
+        }
+      },
+      "title": "SelectionSpec",
+      "type": "object"
+    },
+    "SourceLimits": {
+      "description": "来源抽取上限，防止单任务失控。",
+      "properties": {
+        "max_bytes": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "最大字节数",
+          "title": "Max Bytes"
+        },
+        "max_records": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "最大记录数",
+          "title": "Max Records"
+        },
+        "max_pages": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "最大页数",
+          "title": "Max Pages"
+        },
+        "max_seconds": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "最大执行秒数",
+          "title": "Max Seconds"
+        }
+      },
+      "title": "SourceLimits",
+      "type": "object"
+    },
+    "SourceSpec": {
+      "description": "单个数据源规格。凭证只引用 credential_ref，不写明文。",
+      "properties": {
+        "source_id": {
+          "description": "数据源标识，任务内唯一",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "source_type": {
+          "$ref": "#/$defs/SourceType"
+        },
+        "locator": {
+          "description": "URL / 上传文件 ID / 数据库连接 ID / API endpoint 等定位符",
+          "title": "Locator",
+          "type": "string"
+        },
+        "credential_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "服务端凭证引用（不写明文）；None 表示无需凭证",
+          "title": "Credential Ref"
+        },
+        "options": {
+          "additionalProperties": true,
+          "description": "来源专属参数：编码/分页/表名/Sheet/OCR 等",
+          "title": "Options",
+          "type": "object"
+        },
+        "incremental": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/IncrementalSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "增量策略"
+        },
+        "limits": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SourceLimits"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "抽取上限"
+        }
+      },
+      "required": [
+        "source_id",
+        "source_type",
+        "locator"
+      ],
+      "title": "SourceSpec",
+      "type": "object"
+    },
+    "SourceType": {
+      "description": "数据源类型。首版覆盖 web/upload_file/http_api/database/media。",
+      "enum": [
+        "web",
+        "upload_file",
+        "http_api",
+        "database",
+        "media",
+        "object_storage"
+      ],
+      "title": "SourceType",
+      "type": "string"
+    },
+    "TargetSchema": {
+      "description": "可选的目标 Schema：清洗后字段应满足的类型与约束。",
+      "properties": {
+        "fields": {
+          "items": {
+            "$ref": "#/$defs/TargetSchemaField"
+          },
+          "title": "Fields",
+          "type": "array"
+        },
+        "primary_key": {
+          "description": "主键字段名列表",
+          "items": {
+            "type": "string"
+          },
+          "title": "Primary Key",
+          "type": "array"
+        },
+        "unique_keys": {
+          "description": "业务唯一键组合",
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Unique Keys",
+          "type": "array"
+        }
+      },
+      "title": "TargetSchema",
+      "type": "object"
+    },
+    "TargetSchemaField": {
+      "description": "目标 Schema 的单个字段定义。",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "dtype": {
+          "description": "逻辑类型：string|integer|number|boolean|datetime|date|enum|json|bytes",
+          "title": "Dtype",
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "enum_values": {
+          "description": "枚举合法值（dtype=enum 时）",
+          "items": {
+            "type": "string"
+          },
+          "title": "Enum Values",
+          "type": "array"
+        },
+        "unique": {
+          "default": false,
+          "description": "是否业务唯一键",
+          "title": "Unique",
+          "type": "boolean"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "name",
+        "dtype"
+      ],
+      "title": "TargetSchemaField",
+      "type": "object"
+    },
+    "TaskMode": {
+      "description": "任务模式：默认数据准备，旧分析仅显式选择时兼容。",
+      "enum": [
+        "data_prep",
+        "legacy_analysis"
+      ],
+      "title": "TaskMode",
+      "type": "string"
+    }
+  },
+  "description": "数据准备任务规格 v2（plan 6.1）。\n\n与旧 TaskSpec(v1) 并存：v1 仍是网页文本模型，v2 是通用数据准备契约。\n旧图按 mode=legacy_analysis 兼容，新图按 mode=data_prep 默认进入。",
+  "properties": {
+    "spec_version": {
+      "default": "2",
+      "title": "Spec Version",
+      "type": "string"
+    },
+    "mode": {
+      "$ref": "#/$defs/TaskMode",
+      "default": "data_prep"
+    },
+    "intent": {
+      "description": "对用户意图的一句话归纳",
+      "title": "Intent",
+      "type": "string"
+    },
+    "sources": {
+      "description": "数据源列表",
+      "items": {
+        "$ref": "#/$defs/SourceSpec"
+      },
+      "title": "Sources",
+      "type": "array"
+    },
+    "selection": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SelectionSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "选取范围"
+    },
+    "target_schema": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TargetSchema"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "目标 Schema"
+    },
+    "cleaning_recipe": {
+      "$ref": "#/$defs/Recipe",
+      "description": "清洗规则集合"
+    },
+    "quality_policy": {
+      "$ref": "#/$defs/QualityPolicy"
+    },
+    "outputs": {
+      "description": "输出格式；7C 决策默认 JSONL+Parquet",
+      "items": {
+        "$ref": "#/$defs/OutputFormat"
+      },
+      "title": "Outputs",
+      "type": "array"
+    },
+    "schedule": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "once@<时间> 或 cron@<5段>",
+      "title": "Schedule"
+    },
+    "retention_policy": {
+      "$ref": "#/$defs/RetentionPolicy"
+    },
+    "task_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Task Id"
+    },
+    "needs_clarification": {
+      "default": false,
+      "title": "Needs Clarification",
+      "type": "boolean"
+    },
+    "clarification_question": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Clarification Question"
+    }
+  },
+  "required": [
+    "intent"
+  ],
+  "title": "DataPrepTaskSpec",
+  "type": "object"
+}

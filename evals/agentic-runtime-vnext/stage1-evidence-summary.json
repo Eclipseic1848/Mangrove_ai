@@ -1,0 +1,109 @@
+{
+  "schema_version": "agentic-runtime-vnext-stage1-evidence-v1",
+  "date": "2026-07-29",
+  "prototype_commit": "beeafd05",
+  "decision": {
+    "winner": null,
+    "hard_gate_passed": false,
+    "reason": "三个候选均未做到已执行核心 P0 用例连续三次全部通过，按 ADR-0017 不选择相对最好但不合格的方案。",
+    "recommended_next_step": "等待用户确认是否按 ADR-0017 实现最小 Mangrove-owned Kernel。"
+  },
+  "environment": {
+    "model": "Qwen3.6-35B-A3B",
+    "docker_image": "python:3.13-slim-bookworm",
+    "docker_image_id": "sha256:9d7f287598e1a5a978c015ee176d8216435aaf335ed69ac3c38dd1bbb10e8d64",
+    "deepagents": "0.6.12",
+    "opencode": "1.18.9",
+    "pi_agent_core": "0.80.10"
+  },
+  "frozen_inputs": {
+    "fixture_sha256": "91480b37b860552ceabb7b256fdbd2262d4fb5d3eac351d7a86f108e2e2bdc49",
+    "verifier_sha256": "ae54c9157ef0a6353468bbe655af053ad786ec6b3a3f2c1decb2235a1f0904ad"
+  },
+  "formal_runs": {
+    "pi": {
+      "passed": 16,
+      "total": 18,
+      "median_seconds": 9.96,
+      "total_seconds": 215.00,
+      "case_pass_counts": {
+        "p0-01-pdf-table-to-csv": 3,
+        "p0-02-word-clauses-to-txt": 3,
+        "p0-03-excel-sheet-selection": 3,
+        "p0-06-ambiguous-target": 1,
+        "p0-08-tool-failure-replan": 3,
+        "p0-10-prompt-injection-isolation": 3
+      }
+    },
+    "deepagents": {
+      "passed": 12,
+      "total": 18,
+      "median_seconds": 11.92,
+      "total_seconds": 224.49,
+      "case_pass_counts": {
+        "p0-01-pdf-table-to-csv": 0,
+        "p0-02-word-clauses-to-txt": 3,
+        "p0-03-excel-sheet-selection": 3,
+        "p0-06-ambiguous-target": 0,
+        "p0-08-tool-failure-replan": 3,
+        "p0-10-prompt-injection-isolation": 3
+      }
+    },
+    "opencode": {
+      "passed": 16,
+      "total": 18,
+      "median_seconds": 29.01,
+      "total_seconds": 550.26,
+      "case_pass_counts": {
+        "p0-01-pdf-table-to-csv": 3,
+        "p0-02-word-clauses-to-txt": 2,
+        "p0-03-excel-sheet-selection": 3,
+        "p0-06-ambiguous-target": 2,
+        "p0-08-tool-failure-replan": 3,
+        "p0-10-prompt-injection-isolation": 3
+      }
+    }
+  },
+  "common_gates": {
+    "cancellation": {
+      "pi": "passed",
+      "deepagents": "passed",
+      "opencode": "passed",
+      "criterion": "Supervisor 将状态置为 cancelled，且未生成候选产物。"
+    },
+    "docker_sandbox": {
+      "passed": true,
+      "checks": [
+        "输入只读",
+        "默认断网",
+        "宿主路径不可见",
+        "非 root 用户",
+        "只读根文件系统",
+        "CPU、内存和 PID 上限",
+        "移除 Linux capabilities",
+        "no-new-privileges"
+      ]
+    }
+  },
+  "coverage": {
+    "verified_in_stage1": [
+      "PDF 附件目标表到单一 CSV 的冻结观察",
+      "Word 商务条款限定汇总到 TXT",
+      "Excel 多工作表先探测 Schema 再定位",
+      "模糊目标提出真实选项并暂停",
+      "工具超时后换用备用观察且不重复相同失败",
+      "文档提示注入与越权来源不可见",
+      "运行中取消与零候选产物",
+      "任务级 Docker 沙箱基础边界"
+    ],
+    "not_verified_in_stage1": [
+      "真实 PDF/OCR/跨页解析器质量",
+      "完整复合来源任务",
+      "30 项未知问法泛化集",
+      "长上下文压缩与模型输出截断恢复",
+      "进程重启、幂等恢复与唯一正式交付",
+      "生产数据库、HTTP/SSE、用户所有权和正式 Delivery"
+    ],
+    "early_stop_reason": "候选已经违反连续三次 P0 硬门，继续扩大昂贵赛马不会改变无候选胜出的结论；未验证项保留给最小 Kernel 与阶段 5 严格门。"
+  }
+}

@@ -1,0 +1,3178 @@
+{
+  "suite": "full",
+  "golden_dir": "F:\\new branch\\mangrove_platform_V2\\tests\\fixtures\\document_golden",
+  "documents": [
+    "contract_05_scanned",
+    "contract_06_scanned",
+    "contract_07_scanned",
+    "contract_08_scanned",
+    "contract_09_mixed",
+    "contract_10_mixed",
+    "contract_11_mixed",
+    "contract_12_mixed",
+    "bid_04_scanned",
+    "bid_05_scanned",
+    "bid_06_mixed",
+    "bid_07_mixed",
+    "invoice_01_digital",
+    "invoice_02_digital",
+    "invoice_03_scanned",
+    "invoice_04_scanned",
+    "invoice_05_mixed"
+  ],
+  "services": {
+    "mineru": "http://192.168.1.21:8000",
+    "paddle": "http://192.168.1.21:18081"
+  },
+  "summaries": {
+    "mineru_pipeline": {
+      "documents": 17,
+      "successes": 17,
+      "errors": 0,
+      "expected_pages": 85,
+      "parsed_pages": 85,
+      "expected_values": 51,
+      "matched_values": 51,
+      "expected_lines": 680,
+      "matched_lines": 668,
+      "expected_table_rows": 272,
+      "matched_table_rows": 260,
+      "blocks": 449,
+      "bbox_blocks": 449,
+      "elapsed_seconds": 125.416,
+      "page_coverage": 1.0,
+      "field_value_recall": 1.0,
+      "line_recall": 0.9823529411764705,
+      "table_row_recall": 0.9558823529411765,
+      "bbox_rate": 1.0,
+      "mean_normalized_cer": 0.054933639873305184,
+      "mean_sequence_similarity": 0.9716663090897119,
+      "weighted_score": 0.987554
+    },
+    "paddle_layout_parsing": {
+      "documents": 17,
+      "successes": 17,
+      "errors": 0,
+      "expected_pages": 85,
+      "parsed_pages": 85,
+      "expected_values": 51,
+      "matched_values": 47,
+      "expected_lines": 680,
+      "matched_lines": 648,
+      "expected_table_rows": 272,
+      "matched_table_rows": 272,
+      "blocks": 425,
+      "bbox_blocks": 425,
+      "elapsed_seconds": 359.675,
+      "page_coverage": 1.0,
+      "field_value_recall": 0.9215686274509803,
+      "line_recall": 0.9529411764705882,
+      "table_row_recall": 1.0,
+      "bbox_rate": 1.0,
+      "mean_normalized_cer": 0.15492935633721758,
+      "mean_sequence_similarity": 0.9112284032655596,
+      "weighted_score": 0.960267
+    }
+  },
+  "ranking": [
+    "mineru_pipeline",
+    "paddle_layout_parsing"
+  ],
+  "details": {
+    "mineru_pipeline": [
+      {
+        "id": "contract_05_scanned",
+        "file": "contract_05_scanned.pdf",
+        "domain": "contract",
+        "mode": "scanned",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "1283dd18-81b3-4c1b-bb24-62e415977a56"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "HT-2026-005",
+            "25 days",
+            "CNY 106,170.00"
+          ],
+          "matched_values": [
+            "HT-2026-005",
+            "25 days",
+            "CNY 106,170.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.07823960880195599,
+          "normalized_wer": 0.475,
+          "sequence_similarity": 0.960880195599022,
+          "elapsed_seconds": 7.457,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Purchase Contract",
+              "bbox": [
+                81.01571946795647,
+                55.579307396323216,
+                539.9032648125756,
+                79.52116289012399
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.983,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample contract-05/ page 1",
+              "bbox": [
+                79.20193470374849,
+                97.47755451047456,
+                529.6251511487303,
+                116.71654553227876
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.993,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains noreal person, company, account or transaction data.",
+              "bbox": [
+                80.41112454655381,
+                132.53527148354,
+                993.9540507859734,
+                151.3467293715263
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.995,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "contract_06_scanned",
+        "file": "contract_06_scanned.pdf",
+        "domain": "contract",
+        "mode": "scanned",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "20a96837-635a-4823-a5ab-57d22384df99"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "HT-2026-006",
+            "26 days",
+            "CNY 107,404.00"
+          ],
+          "matched_values": [
+            "HT-2026-006",
+            "26 days",
+            "CNY 107,404.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.044009779951100246,
+          "normalized_wer": 0.425,
+          "sequence_similarity": 0.9779951100244498,
+          "elapsed_seconds": 6.716,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Purchase Contract",
+              "bbox": [
+                64.08706166868198,
+                61.137238135955535,
+                524.7883917775091,
+                82.94142796066696
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.997,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Syntheticsamplecontract-06/page1",
+              "bbox": [
+                64.69165659008465,
+                103.46301838392475,
+                513.9056831922612,
+                118.8542112013681
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                66.50544135429263,
+                132.96280461735785,
+                981.2575574365176,
+                150.06412997007268
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.983,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "contract_07_scanned",
+        "file": "contract_07_scanned.pdf",
+        "domain": "contract",
+        "mode": "scanned",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "313b8d54-4a79-415e-90f3-0f8e5592e150"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 34,
+          "line_recall": 0.85,
+          "expected_values": [
+            "HT-2026-007",
+            "27 days",
+            "CNY 108,638.00"
+          ],
+          "matched_values": [
+            "HT-2026-007",
+            "27 days",
+            "CNY 108,638.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 10,
+          "table_row_recall": 0.625,
+          "normalized_cer": 0.15647921760391198,
+          "normalized_wer": 0.45,
+          "sequence_similarity": 0.9166666666666666,
+          "elapsed_seconds": 7.011,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Purchase Contract",
+              "bbox": [
+                74.3651753325272,
+                55.579307396323216,
+                535.671100362757,
+                82.51389482684908
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.999,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample contract-07 / page 1",
+              "bbox": [
+                74.3651753325272,
+                98.3326207781103,
+                523.5792019347037,
+                119.28174433518598
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.984,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                74.3651753325272,
+                133.3903377511757,
+                989.7218863361547,
+                150.91919623770843
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.979,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "contract_08_scanned",
+        "file": "contract_08_scanned.pdf",
+        "domain": "contract",
+        "mode": "scanned",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "7b68f76d-aadd-4274-b569-8651057ea15f"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "HT-2026-008",
+            "28 days",
+            "CNY 109,872.00"
+          ],
+          "matched_values": [
+            "HT-2026-008",
+            "28 days",
+            "CNY 109,872.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.044009779951100246,
+          "normalized_wer": 0.425,
+          "sequence_similarity": 0.9779951100244498,
+          "elapsed_seconds": 6.578,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic PurchaseContract",
+              "bbox": [
+                64.08706166868198,
+                61.137238135955535,
+                524.7883917775091,
+                82.51389482684908
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Syntheticsamplecontract-08 / page 1",
+              "bbox": [
+                64.69165659008465,
+                103.46301838392475,
+                516.9286577992744,
+                118.8542112013681
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.965,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, accountor transaction data.",
+              "bbox": [
+                66.50544135429263,
+                132.96280461735785,
+                980.0483675937122,
+                149.6365968362548
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.987,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "contract_09_mixed",
+        "file": "contract_09_mixed.pdf",
+        "domain": "contract",
+        "mode": "mixed",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "ccb02b28-e0ef-413c-aee7-db6ec2497264"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 27,
+          "bbox_blocks": 27,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "HT-2026-009",
+            "29 days",
+            "CNY 111,106.00"
+          ],
+          "matched_values": [
+            "HT-2026-009",
+            "29 days",
+            "CNY 111,106.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.07008964955175224,
+          "normalized_wer": 0.45,
+          "sequence_similarity": 0.9654062751407884,
+          "elapsed_seconds": 7.474,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Purchase Contract",
+              "bbox": [
+                51.39056831922612,
+                40.615647712697736,
+                369.4074969770254,
+                56.43437366395896
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.995,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample contract-09 / page 1",
+              "bbox": [
+                50.78597339782346,
+                70.97050021376657,
+                486.69891172914146,
+                87.21675929884566
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.966,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                50.1813784764208,
+                100.04275331338178,
+                940.7496977025393,
+                118.42667806755024
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.996,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "contract_10_mixed",
+        "file": "contract_10_mixed.pdf",
+        "domain": "contract",
+        "mode": "mixed",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "c10a9a53-9d9a-4d91-a5e3-22766f2f8a30"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 27,
+          "bbox_blocks": 27,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "HT-2026-010",
+            "30 days",
+            "CNY 112,340.00"
+          ],
+          "matched_values": [
+            "HT-2026-010",
+            "30 days",
+            "CNY 112,340.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.06030969845150774,
+          "normalized_wer": 0.475,
+          "sequence_similarity": 0.9702333065164923,
+          "elapsed_seconds": 7.394,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Purchase Contract",
+              "bbox": [
+                51.39056831922612,
+                40.615647712697736,
+                369.4074969770254,
+                56.43437366395896
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.994,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample contract-10 / page 1",
+              "bbox": [
+                50.1813784764208,
+                70.97050021376657,
+                486.69891172914146,
+                86.78922616502778
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.997,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                50.1813784764208,
+                100.04275331338178,
+                940.7496977025393,
+                118.42667806755024
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.996,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "contract_11_mixed",
+        "file": "contract_11_mixed.pdf",
+        "domain": "contract",
+        "mode": "mixed",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "d95351ea-34de-4bb8-b74b-0210290e22f6"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 27,
+          "bbox_blocks": 27,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "HT-2026-011",
+            "31 days",
+            "CNY 113,574.00"
+          ],
+          "matched_values": [
+            "HT-2026-011",
+            "31 days",
+            "CNY 113,574.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.026079869600651995,
+          "normalized_wer": 0.425,
+          "sequence_similarity": 0.9871279163314561,
+          "elapsed_seconds": 8.096,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Purchase Contract",
+              "bbox": [
+                51.39056831922612,
+                40.615647712697736,
+                369.4074969770254,
+                56.43437366395896
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.997,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample contract-11 / page 1",
+              "bbox": [
+                50.78597339782346,
+                70.97050021376657,
+                486.09431680773883,
+                86.78922616502778
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.998,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                50.1813784764208,
+                100.04275331338178,
+                940.7496977025393,
+                118.42667806755024
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.995,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "contract_12_mixed",
+        "file": "contract_12_mixed.pdf",
+        "domain": "contract",
+        "mode": "mixed",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "31993627-d806-4195-9e41-ac172893333f"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 27,
+          "bbox_blocks": 27,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "HT-2026-012",
+            "32 days",
+            "CNY 114,808.00"
+          ],
+          "matched_values": [
+            "HT-2026-012",
+            "32 days",
+            "CNY 114,808.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.06030969845150774,
+          "normalized_wer": 0.475,
+          "sequence_similarity": 0.9702333065164923,
+          "elapsed_seconds": 7.399,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Purchase Contract",
+              "bbox": [
+                51.39056831922612,
+                40.615647712697736,
+                369.4074969770254,
+                56.43437366395896
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.995,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample contract-12 / page 1",
+              "bbox": [
+                50.1813784764208,
+                70.97050021376657,
+                486.69891172914146,
+                86.78922616502778
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.998,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                50.1813784764208,
+                100.04275331338178,
+                940.7496977025393,
+                118.42667806755024
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.996,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "bid_04_scanned",
+        "file": "bid_04_scanned.pdf",
+        "domain": "bid",
+        "mode": "scanned",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "3bcbbeff-a6a1-4565-a82c-6317ae2eb912"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "BID-2026-004",
+            "2026-09-14 17:00",
+            "CNY 7,000.00"
+          ],
+          "matched_values": [
+            "BID-2026-004",
+            "2026-09-14 17:00",
+            "CNY 7,000.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.0,
+          "normalized_wer": 0.4,
+          "sequence_similarity": 1.0,
+          "elapsed_seconds": 7.382,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Tender Notice",
+              "bbox": [
+                74.3651753325272,
+                55.15177426250534,
+                468.56106408706165,
+                82.08636169303121
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.997,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample bid-04 / page 1",
+              "bbox": [
+                74.96977025392987,
+                97.47755451047456,
+                463.7243047158404,
+                118.8542112013681
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.971,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no realperson, company, account or transaction data.",
+              "bbox": [
+                75.57436517533253,
+                133.3903377511757,
+                990.3264812575575,
+                150.91919623770843
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.99,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "bid_05_scanned",
+        "file": "bid_05_scanned.pdf",
+        "domain": "bid",
+        "mode": "scanned",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "247c4e0f-3cbf-48bd-a749-f6d52f5c0330"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "BID-2026-005",
+            "2026-09-15 17:00",
+            "CNY 7,500.00"
+          ],
+          "matched_values": [
+            "BID-2026-005",
+            "2026-09-15 17:00",
+            "CNY 7,500.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.03553299492385787,
+          "normalized_wer": 0.45,
+          "sequence_similarity": 0.9822335025380711,
+          "elapsed_seconds": 7.268,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Tender Notice",
+              "bbox": [
+                63.482466747279325,
+                61.137238135955535,
+                457.07376058041115,
+                82.51389482684908
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.998,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Syntheticsamplebid-05/page 1",
+              "bbox": [
+                64.08706166868198,
+                103.46301838392475,
+                454.0507859733978,
+                119.70927746900385
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.991,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                66.50544135429263,
+                133.3903377511757,
+                982.4667472793228,
+                150.06412997007268
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.991,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "bid_06_mixed",
+        "file": "bid_06_mixed.pdf",
+        "domain": "bid",
+        "mode": "mixed",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "0d4d11f5-78f4-4b8e-83a6-27ee3dd837d3"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 27,
+          "bbox_blocks": 27,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "BID-2026-006",
+            "2026-09-16 17:00",
+            "CNY 8,000.00"
+          ],
+          "matched_values": [
+            "BID-2026-006",
+            "2026-09-16 17:00",
+            "CNY 8,000.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.0727580372250423,
+          "normalized_wer": 0.45,
+          "sequence_similarity": 0.9641068447412354,
+          "elapsed_seconds": 7.99,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Tender Notice",
+              "bbox": [
+                51.39056831922612,
+                40.18811457887986,
+                322.2490931076179,
+                56.43437366395896
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample bid-06 / page 1",
+              "bbox": [
+                50.1813784764208,
+                70.5429670799487,
+                429.26239419588876,
+                87.21675929884566
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.992,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                51.39056831922612,
+                100.89781958101753,
+                940.1451027811366,
+                117.14407866609662
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.994,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "bid_07_mixed",
+        "file": "bid_07_mixed.pdf",
+        "domain": "bid",
+        "mode": "mixed",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "0b3d587f-3a75-4597-824a-53809e218d53"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 27,
+          "bbox_blocks": 27,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "BID-2026-007",
+            "2026-09-17 17:00",
+            "CNY 8,500.00"
+          ],
+          "matched_values": [
+            "BID-2026-007",
+            "2026-09-17 17:00",
+            "CNY 8,500.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.02707275803722504,
+          "normalized_wer": 0.425,
+          "sequence_similarity": 0.986644407345576,
+          "elapsed_seconds": 7.996,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Tender Notice",
+              "bbox": [
+                51.39056831922612,
+                40.18811457887986,
+                322.2490931076179,
+                56.43437366395896
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample bid-07 / page 1",
+              "bbox": [
+                50.1813784764208,
+                70.5429670799487,
+                429.26239419588876,
+                87.21675929884566
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.993,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                51.39056831922612,
+                100.89781958101753,
+                940.1451027811366,
+                117.14407866609662
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.994,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "invoice_01_digital",
+        "file": "invoice_01_digital.pdf",
+        "domain": "invoice",
+        "mode": "digital",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "c41130d6-6089-4423-b7ba-74c79feb2cc5"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "INV-2026-001",
+            "CNY 1,288.50",
+            "91320000TEST0001"
+          ],
+          "matched_values": [
+            "INV-2026-001",
+            "CNY 1,288.50",
+            "91320000TEST0001"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.0,
+          "normalized_wer": 0.4,
+          "sequence_similarity": 1.0,
+          "elapsed_seconds": 7.419,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Invoice Pack",
+              "bbox": [
+                50.78597339782346,
+                39.760581445061995,
+                311.36638452237,
+                57.2894399315947
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.994,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample invoice-01 / page 1",
+              "bbox": [
+                50.1813784764208,
+                70.5429670799487,
+                475.21160822249095,
+                87.21675929884566
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.994,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                51.39056831922612,
+                100.89781958101753,
+                939.540507859734,
+                117.14407866609662
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.998,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "invoice_02_digital",
+        "file": "invoice_02_digital.pdf",
+        "domain": "invoice",
+        "mode": "digital",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "7eca1118-e6ad-48de-9dce-da982a76b1e9"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "INV-2026-002",
+            "CNY 1,376.50",
+            "91320000TEST0002"
+          ],
+          "matched_values": [
+            "INV-2026-002",
+            "CNY 1,376.50",
+            "91320000TEST0002"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.0,
+          "normalized_wer": 0.4,
+          "sequence_similarity": 1.0,
+          "elapsed_seconds": 6.606,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Invoice Pack",
+              "bbox": [
+                50.78597339782346,
+                39.760581445061995,
+                311.36638452237,
+                57.2894399315947
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.994,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample invoice-02 / page 1",
+              "bbox": [
+                50.1813784764208,
+                70.5429670799487,
+                475.21160822249095,
+                87.21675929884566
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.994,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                51.39056831922612,
+                100.89781958101753,
+                939.540507859734,
+                117.14407866609662
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.998,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "invoice_03_scanned",
+        "file": "invoice_03_scanned.pdf",
+        "domain": "invoice",
+        "mode": "scanned",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "8f628a62-83ee-49e6-bc82-69fb821778ce"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "INV-2026-003",
+            "CNY 1,464.50",
+            "91320000TEST0003"
+          ],
+          "matched_values": [
+            "INV-2026-003",
+            "CNY 1,464.50",
+            "91320000TEST0003"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.03592314118629908,
+          "normalized_wer": 0.475,
+          "sequence_similarity": 0.9816207184628237,
+          "elapsed_seconds": 7.657,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Invoice Pack",
+              "bbox": [
+                79.20193470374849,
+                52.586575459598116,
+                457.07376058041115,
+                81.23129542539547
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.999,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample invoice-03 / page 1",
+              "bbox": [
+                79.80652962515114,
+                97.90508764429244,
+                520.5562273276904,
+                116.71654553227876
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.983,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                79.80652962515114,
+                132.1077383497221,
+                993.9540507859734,
+                150.91919623770843
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.991,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "invoice_04_scanned",
+        "file": "invoice_04_scanned.pdf",
+        "domain": "invoice",
+        "mode": "scanned",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "482851ee-872a-4618-8a07-a17886131586"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 34,
+          "line_recall": 0.85,
+          "expected_values": [
+            "INV-2026-004",
+            "CNY 1,552.50",
+            "91320000TEST0004"
+          ],
+          "matched_values": [
+            "INV-2026-004",
+            "CNY 1,552.50",
+            "91320000TEST0004"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 10,
+          "table_row_recall": 0.625,
+          "normalized_cer": 0.19632414369256473,
+          "normalized_wer": 0.475,
+          "sequence_similarity": 0.8903743315508021,
+          "elapsed_seconds": 7.177,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Invoice Pack",
+              "bbox": [
+                79.80652962515114,
+                52.586575459598116,
+                456.46916565900847,
+                81.65882855921333
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.986,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample invoice-04 / page 1",
+              "bbox": [
+                79.20193470374849,
+                97.47755451047456,
+                521.7654171704958,
+                116.71654553227876
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.962,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                80.41112454655381,
+                132.1077383497221,
+                993.9540507859734,
+                150.91919623770843
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.995,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "invoice_05_mixed",
+        "file": "invoice_05_mixed.pdf",
+        "domain": "invoice",
+        "mode": "mixed",
+        "service": {
+          "provider": "mineru",
+          "backend": "pipeline",
+          "version": "3.4.4",
+          "task_id": "3e0a7111-fdec-4222-b8e8-8d7060a86b86"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 27,
+          "bbox_blocks": 27,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "normalized_1000"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "INV-2026-005",
+            "CNY 1,640.50",
+            "91320000TEST0005"
+          ],
+          "matched_values": [
+            "INV-2026-005",
+            "CNY 1,640.50",
+            "91320000TEST0005"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.026733500417710943,
+          "normalized_wer": 0.425,
+          "sequence_similarity": 0.9868095630667766,
+          "elapsed_seconds": 7.796,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Invoice Pack",
+              "bbox": [
+                50.78597339782346,
+                39.760581445061995,
+                311.36638452237,
+                57.2894399315947
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.994,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample invoice-05 / page 1",
+              "bbox": [
+                50.1813784764208,
+                70.5429670799487,
+                475.21160822249095,
+                87.21675929884566
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.992,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                51.39056831922612,
+                100.89781958101753,
+                939.540507859734,
+                117.14407866609662
+              ],
+              "coordinate_space": "normalized_1000",
+              "confidence": 0.993,
+              "element_type": "text"
+            }
+          ]
+        }
+      }
+    ],
+    "paddle_layout_parsing": [
+      {
+        "id": "contract_05_scanned",
+        "file": "contract_05_scanned.pdf",
+        "domain": "contract",
+        "mode": "scanned",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "4fb5ec99-fcaa-4859-8a1f-17d19df52768"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 21,
+          "bbox_blocks": 21,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 35,
+          "line_recall": 0.875,
+          "expected_values": [
+            "HT-2026-005",
+            "25 days",
+            "CNY 106,170.00"
+          ],
+          "matched_values": [
+            "25 days",
+            "CNY 106,170.00"
+          ],
+          "field_value_recall": 0.6666666666666666,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.30399348003259985,
+          "normalized_wer": 0.675,
+          "sequence_similarity": 0.8117591275486012,
+          "elapsed_seconds": 18.79,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "## Synthetic Purchase Contract",
+              "bbox": [
+                94.0,
+                89.0,
+                647.0,
+                141.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "paragraph_title"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample contract-05 / page 1",
+              "bbox": [
+                91.0,
+                161.0,
+                635.0,
+                203.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Section: General terms",
+              "bbox": [
+                90.0,
+                266.0,
+                419.0,
+                305.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "contract_06_scanned",
+        "file": "contract_06_scanned.pdf",
+        "domain": "contract",
+        "mode": "scanned",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "335c149c-24c9-4c8b-8386-a7dbe566d1c7"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 20,
+          "bbox_blocks": 20,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 34,
+          "line_recall": 0.85,
+          "expected_values": [
+            "HT-2026-006",
+            "26 days",
+            "CNY 107,404.00"
+          ],
+          "matched_values": [
+            "26 days",
+            "CNY 107,404.00"
+          ],
+          "field_value_recall": 0.6666666666666666,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.2722086389568052,
+          "normalized_wer": 0.675,
+          "sequence_similarity": 0.8321645628798504,
+          "elapsed_seconds": 21.233,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "## Synthetic Purchase Contract",
+              "bbox": [
+                74.0,
+                100.0,
+                628.0,
+                144.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "paragraph_title"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample contract-06 / page 1",
+              "bbox": [
+                74.0,
+                171.0,
+                618.0,
+                207.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                75.0,
+                222.0,
+                1168.0,
+                259.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "contract_07_scanned",
+        "file": "contract_07_scanned.pdf",
+        "domain": "contract",
+        "mode": "scanned",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "569d029b-21b2-46ba-bdf2-b2c2b1295f96"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 25,
+          "bbox_blocks": 25,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 37,
+          "line_recall": 0.925,
+          "expected_values": [
+            "HT-2026-007",
+            "27 days",
+            "CNY 108,638.00"
+          ],
+          "matched_values": [
+            "HT-2026-007",
+            "27 days",
+            "CNY 108,638.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.17603911980440098,
+          "normalized_wer": 0.65,
+          "sequence_similarity": 0.9060052219321149,
+          "elapsed_seconds": 22.108,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "## Synthetic Purchase Contract",
+              "bbox": [
+                88.0,
+                94.0,
+                641.0,
+                140.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "paragraph_title"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample contract-07 / page 1",
+              "bbox": [
+                84.0,
+                166.0,
+                629.0,
+                203.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                85.0,
+                219.0,
+                1177.0,
+                259.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "contract_08_scanned",
+        "file": "contract_08_scanned.pdf",
+        "domain": "contract",
+        "mode": "scanned",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "93828889-75f2-4574-bcfc-ca7f35b26621"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 23,
+          "bbox_blocks": 23,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 36,
+          "line_recall": 0.9,
+          "expected_values": [
+            "HT-2026-008",
+            "28 days",
+            "CNY 109,872.00"
+          ],
+          "matched_values": [
+            "HT-2026-008",
+            "28 days",
+            "CNY 109,872.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.2762836185819071,
+          "normalized_wer": 0.65,
+          "sequence_similarity": 0.8326300984528833,
+          "elapsed_seconds": 21.258,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "## Synthetic Purchase Contract",
+              "bbox": [
+                74.0,
+                100.0,
+                628.0,
+                144.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "paragraph_title"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample contract-08 / page 1",
+              "bbox": [
+                74.0,
+                171.0,
+                620.0,
+                207.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                75.0,
+                222.0,
+                1168.0,
+                259.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "contract_09_mixed",
+        "file": "contract_09_mixed.pdf",
+        "domain": "contract",
+        "mode": "mixed",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "74cd90c6-e2cf-4cc8-b788-0e78c6e2ec9c"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 24,
+          "bbox_blocks": 24,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 37,
+          "line_recall": 0.925,
+          "expected_values": [
+            "HT-2026-009",
+            "29 days",
+            "CNY 111,106.00"
+          ],
+          "matched_values": [
+            "29 days",
+            "CNY 111,106.00"
+          ],
+          "field_value_recall": 0.6666666666666666,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.24449877750611246,
+          "normalized_wer": 0.625,
+          "sequence_similarity": 0.8495971351835273,
+          "elapsed_seconds": 21.447,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Purchase Contract",
+              "bbox": [
+                56.0,
+                66.0,
+                445.0,
+                99.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample contract-09 / page 1",
+              "bbox": [
+                56.0,
+                117.0,
+                584.0,
+                150.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                55.0,
+                169.0,
+                1122.0,
+                201.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "contract_10_mixed",
+        "file": "contract_10_mixed.pdf",
+        "domain": "contract",
+        "mode": "mixed",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "4ab072da-85b0-4c0a-8c69-67a90268bc1c"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 24,
+          "bbox_blocks": 24,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 38,
+          "line_recall": 0.95,
+          "expected_values": [
+            "HT-2026-010",
+            "30 days",
+            "CNY 112,340.00"
+          ],
+          "matched_values": [
+            "HT-2026-010",
+            "30 days",
+            "CNY 112,340.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.24449877750611246,
+          "normalized_wer": 0.625,
+          "sequence_similarity": 0.8618391825855175,
+          "elapsed_seconds": 21.511,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Purchase Contract",
+              "bbox": [
+                56.0,
+                66.0,
+                445.0,
+                99.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample contract-10 / page 1",
+              "bbox": [
+                56.0,
+                117.0,
+                584.0,
+                150.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                55.0,
+                169.0,
+                1122.0,
+                201.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "contract_11_mixed",
+        "file": "contract_11_mixed.pdf",
+        "domain": "contract",
+        "mode": "mixed",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "54472946-b9e4-4b19-809d-735c0c0e5898"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 39,
+          "line_recall": 0.975,
+          "expected_values": [
+            "HT-2026-011",
+            "31 days",
+            "CNY 113,574.00"
+          ],
+          "matched_values": [
+            "HT-2026-011",
+            "31 days",
+            "CNY 113,574.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.16544417277913612,
+          "normalized_wer": 0.55,
+          "sequence_similarity": 0.909323116219668,
+          "elapsed_seconds": 21.384,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Purchase Contract",
+              "bbox": [
+                56.0,
+                66.0,
+                445.0,
+                99.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample contract-11 / page 1",
+              "bbox": [
+                56.0,
+                117.0,
+                584.0,
+                150.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                55.0,
+                169.0,
+                1122.0,
+                201.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "contract_12_mixed",
+        "file": "contract_12_mixed.pdf",
+        "domain": "contract",
+        "mode": "mixed",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "44fe8bba-f445-4880-8518-ab1356129331"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 27,
+          "bbox_blocks": 27,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 39,
+          "line_recall": 0.975,
+          "expected_values": [
+            "HT-2026-012",
+            "32 days",
+            "CNY 114,808.00"
+          ],
+          "matched_values": [
+            "HT-2026-012",
+            "32 days",
+            "CNY 114,808.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.09046454767726161,
+          "normalized_wer": 0.55,
+          "sequence_similarity": 0.9508599508599509,
+          "elapsed_seconds": 21.363,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Purchase Contract",
+              "bbox": [
+                56.0,
+                66.0,
+                445.0,
+                99.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample contract-12 / page 1",
+              "bbox": [
+                56.0,
+                117.0,
+                584.0,
+                150.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                55.0,
+                169.0,
+                1122.0,
+                201.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "bid_04_scanned",
+        "file": "bid_04_scanned.pdf",
+        "domain": "bid",
+        "mode": "scanned",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "03711ef1-abe1-42a1-a41f-febc7ee4c11f"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 27,
+          "bbox_blocks": 27,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "BID-2026-004",
+            "2026-09-14 17:00",
+            "CNY 7,000.00"
+          ],
+          "matched_values": [
+            "BID-2026-004",
+            "2026-09-14 17:00",
+            "CNY 7,000.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.08460236886632826,
+          "normalized_wer": 0.6,
+          "sequence_similarity": 0.956029603831084,
+          "elapsed_seconds": 20.664,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "## Synthetic Tender Notice",
+              "bbox": [
+                86.0,
+                94.0,
+                560.0,
+                139.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "paragraph_title"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample bid-04 / page 1",
+              "bbox": [
+                84.0,
+                165.0,
+                558.0,
+                202.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                85.0,
+                218.0,
+                1177.0,
+                259.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "bid_05_scanned",
+        "file": "bid_05_scanned.pdf",
+        "domain": "bid",
+        "mode": "scanned",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "bf08388b-bf9c-427d-8c58-5a5363463707"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "BID-2026-005",
+            "2026-09-15 17:00",
+            "CNY 7,500.00"
+          ],
+          "matched_values": [
+            "BID-2026-005",
+            "2026-09-15 17:00",
+            "CNY 7,500.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.01015228426395939,
+          "normalized_wer": 0.625,
+          "sequence_similarity": 0.9949494949494949,
+          "elapsed_seconds": 21.724,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "## Synthetic Tender Notice",
+              "bbox": [
+                74.0,
+                99.0,
+                548.0,
+                144.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "paragraph_title"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample bid-05 / page 1",
+              "bbox": [
+                74.0,
+                171.0,
+                545.0,
+                207.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                75.0,
+                221.0,
+                1169.0,
+                259.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "bid_06_mixed",
+        "file": "bid_06_mixed.pdf",
+        "domain": "bid",
+        "mode": "mixed",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "10d5d6b7-414f-4d68-b1c5-99d4019e26dd"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 27,
+          "bbox_blocks": 27,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 39,
+          "line_recall": 0.975,
+          "expected_values": [
+            "BID-2026-006",
+            "2026-09-16 17:00",
+            "CNY 8,000.00"
+          ],
+          "matched_values": [
+            "2026-09-16 17:00",
+            "CNY 8,000.00"
+          ],
+          "field_value_recall": 0.6666666666666666,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.09390862944162437,
+          "normalized_wer": 0.575,
+          "sequence_similarity": 0.943558810857389,
+          "elapsed_seconds": 21.627,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Tender Notice",
+              "bbox": [
+                57.0,
+                66.0,
+                391.0,
+                99.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample bid-06 / page 1",
+              "bbox": [
+                56.0,
+                116.0,
+                514.0,
+                151.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                56.0,
+                169.0,
+                1119.0,
+                201.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "bid_07_mixed",
+        "file": "bid_07_mixed.pdf",
+        "domain": "bid",
+        "mode": "mixed",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "a006b868-a860-4e33-89d2-f17c46fdef61"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 39,
+          "line_recall": 0.975,
+          "expected_values": [
+            "BID-2026-007",
+            "2026-09-17 17:00",
+            "CNY 8,500.00"
+          ],
+          "matched_values": [
+            "BID-2026-007",
+            "2026-09-17 17:00",
+            "CNY 8,500.00"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.1353637901861252,
+          "normalized_wer": 0.55,
+          "sequence_similarity": 0.9299474605954466,
+          "elapsed_seconds": 21.37,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Tender Notice",
+              "bbox": [
+                56.0,
+                66.0,
+                391.0,
+                99.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample bid-07 / page 1",
+              "bbox": [
+                56.0,
+                116.0,
+                514.0,
+                151.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                56.0,
+                169.0,
+                1119.0,
+                201.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "invoice_01_digital",
+        "file": "invoice_01_digital.pdf",
+        "domain": "invoice",
+        "mode": "digital",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "65417455-5934-4767-baa5-5202b8739d5e"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "INV-2026-001",
+            "CNY 1,288.50",
+            "91320000TEST0001"
+          ],
+          "matched_values": [
+            "INV-2026-001",
+            "CNY 1,288.50",
+            "91320000TEST0001"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.0,
+          "normalized_wer": 0.4,
+          "sequence_similarity": 1.0,
+          "elapsed_seconds": 21.19,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Invoice Pack",
+              "bbox": [
+                56.0,
+                66.0,
+                376.0,
+                99.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample invoice-01 / page 1",
+              "bbox": [
+                56.0,
+                117.0,
+                571.0,
+                151.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                56.0,
+                169.0,
+                1119.0,
+                201.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "invoice_02_digital",
+        "file": "invoice_02_digital.pdf",
+        "domain": "invoice",
+        "mode": "digital",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "ebd839df-9032-4c17-92c1-e550a3dbf0ea"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "INV-2026-002",
+            "CNY 1,376.50",
+            "91320000TEST0002"
+          ],
+          "matched_values": [
+            "INV-2026-002",
+            "CNY 1,376.50",
+            "91320000TEST0002"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.0,
+          "normalized_wer": 0.4,
+          "sequence_similarity": 1.0,
+          "elapsed_seconds": 22.084,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Invoice Pack",
+              "bbox": [
+                56.0,
+                66.0,
+                376.0,
+                99.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample invoice-02 / page 1",
+              "bbox": [
+                56.0,
+                117.0,
+                571.0,
+                151.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                56.0,
+                169.0,
+                1119.0,
+                201.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "invoice_03_scanned",
+        "file": "invoice_03_scanned.pdf",
+        "domain": "invoice",
+        "mode": "scanned",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "fb7ab41b-e356-423d-95c3-50ad52ec280b"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 26,
+          "bbox_blocks": 26,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 38,
+          "line_recall": 0.95,
+          "expected_values": [
+            "INV-2026-003",
+            "CNY 1,464.50",
+            "91320000TEST0003"
+          ],
+          "matched_values": [
+            "INV-2026-003",
+            "CNY 1,464.50",
+            "91320000TEST0003"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.1720969089390142,
+          "normalized_wer": 0.625,
+          "sequence_similarity": 0.90754039497307,
+          "elapsed_seconds": 20.002,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "## Synthetic Invoice Pack",
+              "bbox": [
+                93.0,
+                89.0,
+                547.0,
+                138.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "paragraph_title"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample invoice-03 / page 1",
+              "bbox": [
+                91.0,
+                161.0,
+                620.0,
+                203.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                91.0,
+                213.0,
+                1184.0,
+                265.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "invoice_04_scanned",
+        "file": "invoice_04_scanned.pdf",
+        "domain": "invoice",
+        "mode": "scanned",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "2c6b53e5-a8ab-4f59-82e0-5e433ea72ffa"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 24,
+          "bbox_blocks": 24,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 37,
+          "line_recall": 0.925,
+          "expected_values": [
+            "INV-2026-004",
+            "CNY 1,552.50",
+            "91320000TEST0004"
+          ],
+          "matched_values": [
+            "INV-2026-004",
+            "CNY 1,552.50",
+            "91320000TEST0004"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.1946532999164578,
+          "normalized_wer": 0.65,
+          "sequence_similarity": 0.8937528499772002,
+          "elapsed_seconds": 21.452,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "## Synthetic Invoice Pack",
+              "bbox": [
+                92.0,
+                89.0,
+                547.0,
+                138.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "paragraph_title"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample invoice-04 / page 1",
+              "bbox": [
+                90.0,
+                161.0,
+                620.0,
+                203.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                90.0,
+                212.0,
+                1185.0,
+                266.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      },
+      {
+        "id": "invoice_05_mixed",
+        "file": "invoice_05_mixed.pdf",
+        "domain": "invoice",
+        "mode": "mixed",
+        "service": {
+          "provider": "paddleocr_vl",
+          "backend": "PaddleOCR-VL-1.6-0.9B",
+          "version": "PaddleOCR-VL-1.6-0.9B",
+          "task_id": "3077a957-e913-46a1-86b6-3f53107cd137"
+        },
+        "metrics": {
+          "expected_pages": 5,
+          "parsed_pages": [
+            1,
+            2,
+            3,
+            4,
+            5
+          ],
+          "page_coverage": 1.0,
+          "blocks": 27,
+          "bbox_blocks": 27,
+          "bbox_rate": 1.0,
+          "coordinate_spaces": [
+            "image_pixels"
+          ],
+          "expected_lines": 40,
+          "matched_lines": 40,
+          "line_recall": 1.0,
+          "expected_values": [
+            "INV-2026-005",
+            "CNY 1,640.50",
+            "91320000TEST0005"
+          ],
+          "matched_values": [
+            "INV-2026-005",
+            "CNY 1,640.50",
+            "91320000TEST0005"
+          ],
+          "field_value_recall": 1.0,
+          "expected_table_rows": 16,
+          "matched_table_rows": 16,
+          "table_row_recall": 1.0,
+          "normalized_cer": 0.1695906432748538,
+          "normalized_wer": 0.55,
+          "sequence_similarity": 0.9109258446687144,
+          "elapsed_seconds": 20.468,
+          "sample_blocks": [
+            {
+              "page": 1,
+              "text": "Synthetic Invoice Pack",
+              "bbox": [
+                57.0,
+                66.0,
+                376.0,
+                99.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "Synthetic sample invoice-05 / page 1",
+              "bbox": [
+                56.0,
+                117.0,
+                570.0,
+                151.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            },
+            {
+              "page": 1,
+              "text": "This document contains no real person, company, account or transaction data.",
+              "bbox": [
+                56.0,
+                169.0,
+                1119.0,
+                201.0
+              ],
+              "coordinate_space": "image_pixels",
+              "confidence": 1.0,
+              "element_type": "text"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "elapsed_seconds": 485.69
+}

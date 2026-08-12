@@ -1,0 +1,230 @@
+{
+  "$defs": {
+    "BoundingBox": {
+      "description": "矩形坐标，坐标空间必须显式记录。",
+      "properties": {
+        "x0": {
+          "minimum": 0,
+          "title": "X0",
+          "type": "number"
+        },
+        "y0": {
+          "minimum": 0,
+          "title": "Y0",
+          "type": "number"
+        },
+        "x1": {
+          "exclusiveMinimum": 0,
+          "title": "X1",
+          "type": "number"
+        },
+        "y1": {
+          "exclusiveMinimum": 0,
+          "title": "Y1",
+          "type": "number"
+        },
+        "coordinate_space": {
+          "description": "pdf_points、image_pixels 或 normalized_1000",
+          "title": "Coordinate Space",
+          "type": "string"
+        }
+      },
+      "required": [
+        "x0",
+        "y0",
+        "x1",
+        "y1",
+        "coordinate_space"
+      ],
+      "title": "BoundingBox",
+      "type": "object"
+    },
+    "EvidenceRef": {
+      "description": "字段值指向不可变制品和文档元素的证据引用。",
+      "properties": {
+        "artifact_id": {
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "element_id": {
+          "title": "Element Id",
+          "type": "string"
+        },
+        "page": {
+          "minimum": 1,
+          "title": "Page",
+          "type": "integer"
+        },
+        "bbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BoundingBox"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "quote": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quote"
+        },
+        "quote_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quote Sha256"
+        },
+        "extractor": {
+          "title": "Extractor",
+          "type": "string"
+        },
+        "extractor_version": {
+          "title": "Extractor Version",
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "raw_result_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Result Ref"
+        },
+        "location": {
+          "additionalProperties": true,
+          "description": "无视觉 bbox 时用于复核的确定性结构位置，如 DOCX 段落或表格行",
+          "title": "Location",
+          "type": "object"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "element_id",
+        "page",
+        "extractor",
+        "extractor_version",
+        "confidence"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "ExtractedField": {
+      "description": "证据约束字段；found 状态禁止无证据填值。",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        },
+        "status": {
+          "$ref": "#/$defs/ExtractionStatus"
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "candidates": {
+          "items": {},
+          "title": "Candidates",
+          "type": "array"
+        },
+        "review_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Review Reason"
+        }
+      },
+      "required": [
+        "name",
+        "status"
+      ],
+      "title": "ExtractedField",
+      "type": "object"
+    },
+    "ExtractionStatus": {
+      "enum": [
+        "found",
+        "not_found",
+        "conflict",
+        "low_confidence"
+      ],
+      "title": "ExtractionStatus",
+      "type": "string"
+    }
+  },
+  "description": "多记录任务的一行；每个字段继续复用证据约束契约。",
+  "properties": {
+    "record_id": {
+      "title": "Record Id",
+      "type": "string"
+    },
+    "fields": {
+      "items": {
+        "$ref": "#/$defs/ExtractedField"
+      },
+      "title": "Fields",
+      "type": "array"
+    },
+    "status": {
+      "$ref": "#/$defs/ExtractionStatus",
+      "default": "found"
+    },
+    "source_artifact_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Source Artifact Ids",
+      "type": "array"
+    },
+    "review_required": {
+      "default": false,
+      "title": "Review Required",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "record_id"
+  ],
+  "title": "ExtractedRecord",
+  "type": "object"
+}

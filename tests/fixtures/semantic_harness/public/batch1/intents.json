@@ -1,0 +1,81 @@
+{
+  "schema_version": "1",
+  "description": "Phase 4B 批次 1 公开脱敏语义计划 Golden，不含真实业务文件。",
+  "cases": [
+    {
+      "case_id": "table_filter_projection_merge",
+      "objective": "只提取谢超群的数据，只保留核销工作量天数和工作量费用，合并成一张表并输出Excel。",
+      "artifact_ids": ["fixture_workload"],
+      "accepted_formats": ["pdf", "xlsx"],
+      "expected": {
+        "status": "ready",
+        "task_family": "tabular_transform",
+        "selection": [
+          {"field": "姓名", "operator": "eq", "value": "谢超群"}
+        ],
+        "projection": ["核销工作量天数", "工作量费用"],
+        "record_grain_required": true,
+        "combine_mode": "one_table",
+        "delivery_formats": ["xlsx"],
+        "content_policy": "verbatim"
+      }
+    },
+    {
+      "case_id": "contract_verbatim_extract",
+      "objective": "从这些合同中逐字摘录所有与付款、交付和违约责任有关的商务条款，按文件整理成Word，不要总结或改写。",
+      "artifact_ids": ["fixture_contract_a", "fixture_contract_b"],
+      "accepted_formats": ["docx", "pdf"],
+      "expected": {
+        "status": "ready",
+        "task_family": "extract",
+        "delivery_formats": ["docx"],
+        "content_policy": "verbatim",
+        "required_concepts": ["付款", "交付", "违约责任"]
+      }
+    },
+    {
+      "case_id": "multi_document_compare",
+      "objective": "对比三份合同的付款条件、交付期限和违约责任，只列出有原文证据的差异，整理成DOCX和PDF。",
+      "artifact_ids": [
+        "fixture_contract_a",
+        "fixture_contract_b",
+        "fixture_contract_c"
+      ],
+      "accepted_formats": ["docx", "pdf"],
+      "expected": {
+        "status": "ready",
+        "task_family": "compare",
+        "required_operations": ["compare"],
+        "delivery_formats": ["docx", "pdf"],
+        "content_policy": "verbatim",
+        "required_concepts": ["付款", "交付", "违约责任"]
+      }
+    },
+    {
+      "case_id": "table_sort_deduplicate",
+      "objective": "筛选状态为已完成的订单，每笔订单一行，只保留订单号、客户和完成日期，按完成日期降序排列，按订单号去重，输出CSV。",
+      "artifact_ids": ["fixture_orders"],
+      "accepted_formats": ["xlsx", "csv"],
+      "expected": {
+        "status": "ready",
+        "task_family": "tabular_transform",
+        "selection": [
+          {"field": "状态", "operator": "eq", "value": "已完成"}
+        ],
+        "projection": ["订单号", "客户", "完成日期"],
+        "required_operations": ["sort", "deduplicate"],
+        "delivery_formats": ["csv"],
+        "content_policy": "verbatim"
+      }
+    },
+    {
+      "case_id": "material_aggregate_ambiguity",
+      "objective": "把这些文件里的费用整理一下，每个人一行。",
+      "artifact_ids": ["fixture_costs"],
+      "accepted_formats": ["xlsx", "pdf"],
+      "expected": {
+        "status": "needs_user"
+      }
+    }
+  ]
+}

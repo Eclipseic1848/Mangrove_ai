@@ -1,0 +1,187 @@
+{
+  "$defs": {
+    "IncrementalSpec": {
+      "description": "增量策略：只记录游标语义，具体由连接器解释。",
+      "properties": {
+        "strategy": {
+          "description": "cursor | watermark | etag | last_modified | none",
+          "title": "Strategy",
+          "type": "string"
+        },
+        "cursor_field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "水位线字段名（strategy=watermark 时）",
+          "title": "Cursor Field"
+        },
+        "last_value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "上次游标值，用于断点续跑",
+          "title": "Last Value"
+        }
+      },
+      "required": [
+        "strategy"
+      ],
+      "title": "IncrementalSpec",
+      "type": "object"
+    },
+    "SourceLimits": {
+      "description": "来源抽取上限，防止单任务失控。",
+      "properties": {
+        "max_bytes": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "最大字节数",
+          "title": "Max Bytes"
+        },
+        "max_records": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "最大记录数",
+          "title": "Max Records"
+        },
+        "max_pages": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "最大页数",
+          "title": "Max Pages"
+        },
+        "max_seconds": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "最大执行秒数",
+          "title": "Max Seconds"
+        }
+      },
+      "title": "SourceLimits",
+      "type": "object"
+    },
+    "SourceType": {
+      "description": "数据源类型。首版覆盖 web/upload_file/http_api/database/media。",
+      "enum": [
+        "web",
+        "upload_file",
+        "http_api",
+        "database",
+        "media",
+        "object_storage"
+      ],
+      "title": "SourceType",
+      "type": "string"
+    }
+  },
+  "description": "单个数据源规格。凭证只引用 credential_ref，不写明文。",
+  "properties": {
+    "source_id": {
+      "description": "数据源标识，任务内唯一",
+      "title": "Source Id",
+      "type": "string"
+    },
+    "source_type": {
+      "$ref": "#/$defs/SourceType"
+    },
+    "locator": {
+      "description": "URL / 上传文件 ID / 数据库连接 ID / API endpoint 等定位符",
+      "title": "Locator",
+      "type": "string"
+    },
+    "credential_ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "服务端凭证引用（不写明文）；None 表示无需凭证",
+      "title": "Credential Ref"
+    },
+    "options": {
+      "additionalProperties": true,
+      "description": "来源专属参数：编码/分页/表名/Sheet/OCR 等",
+      "title": "Options",
+      "type": "object"
+    },
+    "incremental": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IncrementalSpec"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "增量策略"
+    },
+    "limits": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SourceLimits"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "抽取上限"
+    }
+  },
+  "required": [
+    "source_id",
+    "source_type",
+    "locator"
+  ],
+  "title": "SourceSpec",
+  "type": "object"
+}

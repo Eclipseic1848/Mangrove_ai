@@ -1,0 +1,3 @@
+*.bat text eol=crlf
+*.cmd text eol=crlf
+tests/fixtures/semantic_harness/public/** -text -diff

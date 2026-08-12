@@ -1,0 +1,4103 @@
+{
+  "documents": 17,
+  "expected_fields": 51,
+  "field_metrics": {
+    "true_positive": 51,
+    "false_positive": 0,
+    "false_negative": 0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "exact_value_accuracy": 1.0
+  },
+  "evidence_metrics": {
+    "found_fields": 51,
+    "complete": 51,
+    "complete_rate": 1.0,
+    "page_correct": 51,
+    "page_accuracy": 1.0,
+    "quote_correct": 51,
+    "quote_accuracy": 1.0,
+    "bbox_correct": 51,
+    "bbox_accuracy": 1.0,
+    "binding_correct": 51,
+    "binding_accuracy": 1.0,
+    "cross_document_references": 0,
+    "unsafe_found": 0,
+    "unexpected_found": 0
+  },
+  "acceptance_gate": {
+    "passed": true,
+    "required_exact_values": 51,
+    "required_evidence_bindings": 51,
+    "parse_pages_complete": true,
+    "parse_rejects_zero": true,
+    "run_errors_zero": true
+  },
+  "status_counts": {
+    "found": 51
+  },
+  "groups": {
+    "domain:bid": {
+      "expected": 12,
+      "correct": 12,
+      "found": 12,
+      "exact_accuracy": 1.0,
+      "found_rate": 1.0
+    },
+    "domain:contract": {
+      "expected": 24,
+      "correct": 24,
+      "found": 24,
+      "exact_accuracy": 1.0,
+      "found_rate": 1.0
+    },
+    "domain:invoice": {
+      "expected": 15,
+      "correct": 15,
+      "found": 15,
+      "exact_accuracy": 1.0,
+      "found_rate": 1.0
+    },
+    "mode:digital": {
+      "expected": 6,
+      "correct": 6,
+      "found": 6,
+      "exact_accuracy": 1.0,
+      "found_rate": 1.0
+    },
+    "mode:mixed": {
+      "expected": 21,
+      "correct": 21,
+      "found": 21,
+      "exact_accuracy": 1.0,
+      "found_rate": 1.0
+    },
+    "mode:scanned": {
+      "expected": 24,
+      "correct": 24,
+      "found": 24,
+      "exact_accuracy": 1.0,
+      "found_rate": 1.0
+    }
+  },
+  "details": [
+    {
+      "document_id": "contract_05_scanned",
+      "domain": "contract",
+      "mode": "scanned",
+      "field_name": "contract_no",
+      "expected_value": "HT-2026-005",
+      "predicted_value": "HT-2026-005",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_05_scanned",
+      "domain": "contract",
+      "mode": "scanned",
+      "field_name": "delivery_days",
+      "expected_value": "25 days",
+      "predicted_value": "25days",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_05_scanned",
+      "domain": "contract",
+      "mode": "scanned",
+      "field_name": "amount",
+      "expected_value": "CNY 106,170.00",
+      "predicted_value": "CNY 106,170.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_06_scanned",
+      "domain": "contract",
+      "mode": "scanned",
+      "field_name": "contract_no",
+      "expected_value": "HT-2026-006",
+      "predicted_value": "HT-2026-006",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_06_scanned",
+      "domain": "contract",
+      "mode": "scanned",
+      "field_name": "delivery_days",
+      "expected_value": "26 days",
+      "predicted_value": "26days",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_06_scanned",
+      "domain": "contract",
+      "mode": "scanned",
+      "field_name": "amount",
+      "expected_value": "CNY 107,404.00",
+      "predicted_value": "CNY 107,404.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_07_scanned",
+      "domain": "contract",
+      "mode": "scanned",
+      "field_name": "contract_no",
+      "expected_value": "HT-2026-007",
+      "predicted_value": "HT-2026-007",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_07_scanned",
+      "domain": "contract",
+      "mode": "scanned",
+      "field_name": "delivery_days",
+      "expected_value": "27 days",
+      "predicted_value": "27days",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_07_scanned",
+      "domain": "contract",
+      "mode": "scanned",
+      "field_name": "amount",
+      "expected_value": "CNY 108,638.00",
+      "predicted_value": "CNY 108,638.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_08_scanned",
+      "domain": "contract",
+      "mode": "scanned",
+      "field_name": "contract_no",
+      "expected_value": "HT-2026-008",
+      "predicted_value": "HT-2026-008",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_08_scanned",
+      "domain": "contract",
+      "mode": "scanned",
+      "field_name": "delivery_days",
+      "expected_value": "28 days",
+      "predicted_value": "28days",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_08_scanned",
+      "domain": "contract",
+      "mode": "scanned",
+      "field_name": "amount",
+      "expected_value": "CNY 109,872.00",
+      "predicted_value": "CNY 109,872.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_09_mixed",
+      "domain": "contract",
+      "mode": "mixed",
+      "field_name": "contract_no",
+      "expected_value": "HT-2026-009",
+      "predicted_value": "HT-2026-009",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_09_mixed",
+      "domain": "contract",
+      "mode": "mixed",
+      "field_name": "delivery_days",
+      "expected_value": "29 days",
+      "predicted_value": "29days",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_09_mixed",
+      "domain": "contract",
+      "mode": "mixed",
+      "field_name": "amount",
+      "expected_value": "CNY 111,106.00",
+      "predicted_value": "CNY 111,106.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_10_mixed",
+      "domain": "contract",
+      "mode": "mixed",
+      "field_name": "contract_no",
+      "expected_value": "HT-2026-010",
+      "predicted_value": "HT-2026-010",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_10_mixed",
+      "domain": "contract",
+      "mode": "mixed",
+      "field_name": "delivery_days",
+      "expected_value": "30 days",
+      "predicted_value": "30days",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_10_mixed",
+      "domain": "contract",
+      "mode": "mixed",
+      "field_name": "amount",
+      "expected_value": "CNY 112,340.00",
+      "predicted_value": "CNY 112,340.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_11_mixed",
+      "domain": "contract",
+      "mode": "mixed",
+      "field_name": "contract_no",
+      "expected_value": "HT-2026-011",
+      "predicted_value": "HT-2026-011",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_11_mixed",
+      "domain": "contract",
+      "mode": "mixed",
+      "field_name": "delivery_days",
+      "expected_value": "31 days",
+      "predicted_value": "31days",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_11_mixed",
+      "domain": "contract",
+      "mode": "mixed",
+      "field_name": "amount",
+      "expected_value": "CNY 113,574.00",
+      "predicted_value": "CNY 113,574.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_12_mixed",
+      "domain": "contract",
+      "mode": "mixed",
+      "field_name": "contract_no",
+      "expected_value": "HT-2026-012",
+      "predicted_value": "HT-2026-012",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_12_mixed",
+      "domain": "contract",
+      "mode": "mixed",
+      "field_name": "delivery_days",
+      "expected_value": "32 days",
+      "predicted_value": "32 days",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "contract_12_mixed",
+      "domain": "contract",
+      "mode": "mixed",
+      "field_name": "amount",
+      "expected_value": "CNY 114,808.00",
+      "predicted_value": "CNY 114,808.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "bid_04_scanned",
+      "domain": "bid",
+      "mode": "scanned",
+      "field_name": "project_no",
+      "expected_value": "BID-2026-004",
+      "predicted_value": "BID-2026-004",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "bid_04_scanned",
+      "domain": "bid",
+      "mode": "scanned",
+      "field_name": "deadline",
+      "expected_value": "2026-09-14 17:00",
+      "predicted_value": "2026-09-1417:00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "bid_04_scanned",
+      "domain": "bid",
+      "mode": "scanned",
+      "field_name": "bond",
+      "expected_value": "CNY 7,000.00",
+      "predicted_value": "CNY 7,000.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "bid_05_scanned",
+      "domain": "bid",
+      "mode": "scanned",
+      "field_name": "project_no",
+      "expected_value": "BID-2026-005",
+      "predicted_value": "BID-2026-005",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "bid_05_scanned",
+      "domain": "bid",
+      "mode": "scanned",
+      "field_name": "deadline",
+      "expected_value": "2026-09-15 17:00",
+      "predicted_value": "2026-09-1517:00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "bid_05_scanned",
+      "domain": "bid",
+      "mode": "scanned",
+      "field_name": "bond",
+      "expected_value": "CNY 7,500.00",
+      "predicted_value": "CNY 7,500.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "bid_06_mixed",
+      "domain": "bid",
+      "mode": "mixed",
+      "field_name": "project_no",
+      "expected_value": "BID-2026-006",
+      "predicted_value": "BID-2026-006",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "bid_06_mixed",
+      "domain": "bid",
+      "mode": "mixed",
+      "field_name": "deadline",
+      "expected_value": "2026-09-16 17:00",
+      "predicted_value": "2026-09-1617:00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "bid_06_mixed",
+      "domain": "bid",
+      "mode": "mixed",
+      "field_name": "bond",
+      "expected_value": "CNY 8,000.00",
+      "predicted_value": "CNY 8,000.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "bid_07_mixed",
+      "domain": "bid",
+      "mode": "mixed",
+      "field_name": "project_no",
+      "expected_value": "BID-2026-007",
+      "predicted_value": "BID-2026-007",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "bid_07_mixed",
+      "domain": "bid",
+      "mode": "mixed",
+      "field_name": "deadline",
+      "expected_value": "2026-09-17 17:00",
+      "predicted_value": "2026-09-1717:00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "bid_07_mixed",
+      "domain": "bid",
+      "mode": "mixed",
+      "field_name": "bond",
+      "expected_value": "CNY 8,500.00",
+      "predicted_value": "CNY 8,500.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_01_digital",
+      "domain": "invoice",
+      "mode": "digital",
+      "field_name": "invoice_no",
+      "expected_value": "INV-2026-001",
+      "predicted_value": "INV-2026-001",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_01_digital",
+      "domain": "invoice",
+      "mode": "digital",
+      "field_name": "total",
+      "expected_value": "CNY 1,288.50",
+      "predicted_value": "CNY 1,288.50",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_01_digital",
+      "domain": "invoice",
+      "mode": "digital",
+      "field_name": "tax_id",
+      "expected_value": "91320000TEST0001",
+      "predicted_value": "91320000TEST0001",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_02_digital",
+      "domain": "invoice",
+      "mode": "digital",
+      "field_name": "invoice_no",
+      "expected_value": "INV-2026-002",
+      "predicted_value": "INV-2026-002",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_02_digital",
+      "domain": "invoice",
+      "mode": "digital",
+      "field_name": "total",
+      "expected_value": "CNY 1,376.50",
+      "predicted_value": "CNY 1,376.50",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_02_digital",
+      "domain": "invoice",
+      "mode": "digital",
+      "field_name": "tax_id",
+      "expected_value": "91320000TEST0002",
+      "predicted_value": "91320000TEST0002",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_03_scanned",
+      "domain": "invoice",
+      "mode": "scanned",
+      "field_name": "invoice_no",
+      "expected_value": "INV-2026-003",
+      "predicted_value": "INV-2026-003",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_03_scanned",
+      "domain": "invoice",
+      "mode": "scanned",
+      "field_name": "total",
+      "expected_value": "CNY 1,464.50",
+      "predicted_value": "CNY1,464.50",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_03_scanned",
+      "domain": "invoice",
+      "mode": "scanned",
+      "field_name": "tax_id",
+      "expected_value": "91320000TEST0003",
+      "predicted_value": "91320000TEST0003",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_04_scanned",
+      "domain": "invoice",
+      "mode": "scanned",
+      "field_name": "invoice_no",
+      "expected_value": "INV-2026-004",
+      "predicted_value": "INV-2026-004",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_04_scanned",
+      "domain": "invoice",
+      "mode": "scanned",
+      "field_name": "total",
+      "expected_value": "CNY 1,552.50",
+      "predicted_value": "CNY 1,552.50",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_04_scanned",
+      "domain": "invoice",
+      "mode": "scanned",
+      "field_name": "tax_id",
+      "expected_value": "91320000TEST0004",
+      "predicted_value": "91320000TEST0004",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_05_mixed",
+      "domain": "invoice",
+      "mode": "mixed",
+      "field_name": "invoice_no",
+      "expected_value": "INV-2026-005",
+      "predicted_value": "INV-2026-005",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_05_mixed",
+      "domain": "invoice",
+      "mode": "mixed",
+      "field_name": "total",
+      "expected_value": "CNY 1,640.50",
+      "predicted_value": "CNY 1,640.50",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    },
+    {
+      "document_id": "invoice_05_mixed",
+      "domain": "invoice",
+      "mode": "mixed",
+      "field_name": "tax_id",
+      "expected_value": "91320000TEST0005",
+      "predicted_value": "91320000TEST0005",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true,
+      "bbox_correct": true,
+      "binding_correct": true,
+      "failure_reasons": []
+    }
+  ],
+  "evidence_quote_ocr_metrics": {
+    "scope": "expected_evidence_quotes",
+    "samples": 51,
+    "exact": 49,
+    "exact_rate": 0.9607843137254902,
+    "missing": 0,
+    "mean_cer": 0.060169749411235485,
+    "mean_wer": 0.47385620915032683,
+    "details": [
+      {
+        "document_id": "contract_05_scanned",
+        "domain": "contract",
+        "mode": "scanned",
+        "field_name": "contract_no",
+        "page": 2,
+        "reference": "contract_no: HT-2026-005",
+        "hypothesis": "contract_no: HT-2026-005",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "contract_05_scanned",
+        "domain": "contract",
+        "mode": "scanned",
+        "field_name": "delivery_days",
+        "page": 2,
+        "reference": "delivery_days: 25 days",
+        "hypothesis": "delivery_days: 25days",
+        "exact": true,
+        "cer": 0.045454545454545456,
+        "wer": 0.6666666666666666
+      },
+      {
+        "document_id": "contract_05_scanned",
+        "domain": "contract",
+        "mode": "scanned",
+        "field_name": "amount",
+        "page": 2,
+        "reference": "amount: CNY 106,170.00",
+        "hypothesis": "amount: CNY 106,170.00",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "contract_06_scanned",
+        "domain": "contract",
+        "mode": "scanned",
+        "field_name": "contract_no",
+        "page": 2,
+        "reference": "contract_no: HT-2026-006",
+        "hypothesis": "contract_no:HT-2026-006",
+        "exact": true,
+        "cer": 0.041666666666666664,
+        "wer": 1.0
+      },
+      {
+        "document_id": "contract_06_scanned",
+        "domain": "contract",
+        "mode": "scanned",
+        "field_name": "delivery_days",
+        "page": 2,
+        "reference": "delivery_days: 26 days",
+        "hypothesis": "delivery_days:26days",
+        "exact": true,
+        "cer": 0.09090909090909091,
+        "wer": 1.0
+      },
+      {
+        "document_id": "contract_06_scanned",
+        "domain": "contract",
+        "mode": "scanned",
+        "field_name": "amount",
+        "page": 2,
+        "reference": "amount: CNY 107,404.00",
+        "hypothesis": "amount: CNY 107,404.00",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "contract_07_scanned",
+        "domain": "contract",
+        "mode": "scanned",
+        "field_name": "contract_no",
+        "page": 2,
+        "reference": "contract_no: HT-2026-007",
+        "hypothesis": "contract_no: HT-2026-007",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "contract_07_scanned",
+        "domain": "contract",
+        "mode": "scanned",
+        "field_name": "delivery_days",
+        "page": 2,
+        "reference": "delivery_days: 27 days",
+        "hypothesis": "delivery_days:27days",
+        "exact": true,
+        "cer": 0.09090909090909091,
+        "wer": 1.0
+      },
+      {
+        "document_id": "contract_07_scanned",
+        "domain": "contract",
+        "mode": "scanned",
+        "field_name": "amount",
+        "page": 2,
+        "reference": "amount: CNY 108,638.00",
+        "hypothesis": "amount: CNY 108,638.00",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "contract_08_scanned",
+        "domain": "contract",
+        "mode": "scanned",
+        "field_name": "contract_no",
+        "page": 2,
+        "reference": "contract_no: HT-2026-008",
+        "hypothesis": "contract_no:HT-2026-008",
+        "exact": true,
+        "cer": 0.041666666666666664,
+        "wer": 1.0
+      },
+      {
+        "document_id": "contract_08_scanned",
+        "domain": "contract",
+        "mode": "scanned",
+        "field_name": "delivery_days",
+        "page": 2,
+        "reference": "delivery_days: 28 days",
+        "hypothesis": "delivery_days:28days",
+        "exact": true,
+        "cer": 0.09090909090909091,
+        "wer": 1.0
+      },
+      {
+        "document_id": "contract_08_scanned",
+        "domain": "contract",
+        "mode": "scanned",
+        "field_name": "amount",
+        "page": 2,
+        "reference": "amount: CNY 109,872.00",
+        "hypothesis": "amount: CNY 109,872.00",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "contract_09_mixed",
+        "domain": "contract",
+        "mode": "mixed",
+        "field_name": "contract_no",
+        "page": 2,
+        "reference": "contract_no: HT-2026-009",
+        "hypothesis": "contract_no: HT-2026-009",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "contract_09_mixed",
+        "domain": "contract",
+        "mode": "mixed",
+        "field_name": "delivery_days",
+        "page": 2,
+        "reference": "delivery_days: 29 days",
+        "hypothesis": "delivery_days: 29days",
+        "exact": true,
+        "cer": 0.045454545454545456,
+        "wer": 0.6666666666666666
+      },
+      {
+        "document_id": "contract_09_mixed",
+        "domain": "contract",
+        "mode": "mixed",
+        "field_name": "amount",
+        "page": 2,
+        "reference": "amount: CNY 111,106.00",
+        "hypothesis": "amount: CNY 111,106.00",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "contract_10_mixed",
+        "domain": "contract",
+        "mode": "mixed",
+        "field_name": "contract_no",
+        "page": 2,
+        "reference": "contract_no: HT-2026-010",
+        "hypothesis": "contract_no: HT-2026-010",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "contract_10_mixed",
+        "domain": "contract",
+        "mode": "mixed",
+        "field_name": "delivery_days",
+        "page": 2,
+        "reference": "delivery_days: 30 days",
+        "hypothesis": "delivery_days:30days",
+        "exact": true,
+        "cer": 0.09090909090909091,
+        "wer": 1.0
+      },
+      {
+        "document_id": "contract_10_mixed",
+        "domain": "contract",
+        "mode": "mixed",
+        "field_name": "amount",
+        "page": 2,
+        "reference": "amount: CNY 112,340.00",
+        "hypothesis": "amount: CNY 112,340.00",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "contract_11_mixed",
+        "domain": "contract",
+        "mode": "mixed",
+        "field_name": "contract_no",
+        "page": 2,
+        "reference": "contract_no: HT-2026-011",
+        "hypothesis": "contract no: HT-2026-011 delivery_days: 31days",
+        "exact": false,
+        "cer": 0.9583333333333334,
+        "wer": 2.0
+      },
+      {
+        "document_id": "contract_11_mixed",
+        "domain": "contract",
+        "mode": "mixed",
+        "field_name": "delivery_days",
+        "page": 2,
+        "reference": "delivery_days: 31 days",
+        "hypothesis": "delivery_days: 31days",
+        "exact": true,
+        "cer": 0.045454545454545456,
+        "wer": 0.6666666666666666
+      },
+      {
+        "document_id": "contract_11_mixed",
+        "domain": "contract",
+        "mode": "mixed",
+        "field_name": "amount",
+        "page": 2,
+        "reference": "amount: CNY 113,574.00",
+        "hypothesis": "amount: CNY 113,574.00",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "contract_12_mixed",
+        "domain": "contract",
+        "mode": "mixed",
+        "field_name": "contract_no",
+        "page": 2,
+        "reference": "contract_no: HT-2026-012",
+        "hypothesis": "contract_no: HT-2026-012",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "contract_12_mixed",
+        "domain": "contract",
+        "mode": "mixed",
+        "field_name": "delivery_days",
+        "page": 2,
+        "reference": "delivery_days: 32 days",
+        "hypothesis": "delivery_days: 32 days",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "contract_12_mixed",
+        "domain": "contract",
+        "mode": "mixed",
+        "field_name": "amount",
+        "page": 2,
+        "reference": "amount: CNY 114,808.00",
+        "hypothesis": "amount: CNY 114,808.00",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "bid_04_scanned",
+        "domain": "bid",
+        "mode": "scanned",
+        "field_name": "project_no",
+        "page": 2,
+        "reference": "project_no: BID-2026-004",
+        "hypothesis": "project_no:BID-2026-004",
+        "exact": true,
+        "cer": 0.041666666666666664,
+        "wer": 1.0
+      },
+      {
+        "document_id": "bid_04_scanned",
+        "domain": "bid",
+        "mode": "scanned",
+        "field_name": "deadline",
+        "page": 2,
+        "reference": "deadline: 2026-09-14 17:00",
+        "hypothesis": "deadline:2026-09-1417:00",
+        "exact": true,
+        "cer": 0.07692307692307693,
+        "wer": 1.0
+      },
+      {
+        "document_id": "bid_04_scanned",
+        "domain": "bid",
+        "mode": "scanned",
+        "field_name": "bond",
+        "page": 2,
+        "reference": "bond: CNY 7,000.00",
+        "hypothesis": "bond: CNY 7,000.00",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "bid_05_scanned",
+        "domain": "bid",
+        "mode": "scanned",
+        "field_name": "project_no",
+        "page": 2,
+        "reference": "project_no: BID-2026-005",
+        "hypothesis": "project_no:BID-2026-005",
+        "exact": true,
+        "cer": 0.041666666666666664,
+        "wer": 1.0
+      },
+      {
+        "document_id": "bid_05_scanned",
+        "domain": "bid",
+        "mode": "scanned",
+        "field_name": "deadline",
+        "page": 2,
+        "reference": "deadline: 2026-09-15 17:00",
+        "hypothesis": "deadline:2026-09-1517:00",
+        "exact": true,
+        "cer": 0.07692307692307693,
+        "wer": 1.0
+      },
+      {
+        "document_id": "bid_05_scanned",
+        "domain": "bid",
+        "mode": "scanned",
+        "field_name": "bond",
+        "page": 2,
+        "reference": "bond: CNY 7,500.00",
+        "hypothesis": "bond: CNY 7,500.00",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "bid_06_mixed",
+        "domain": "bid",
+        "mode": "mixed",
+        "field_name": "project_no",
+        "page": 2,
+        "reference": "project_no: BID-2026-006",
+        "hypothesis": "project_no:BID-2026-006",
+        "exact": true,
+        "cer": 0.041666666666666664,
+        "wer": 1.0
+      },
+      {
+        "document_id": "bid_06_mixed",
+        "domain": "bid",
+        "mode": "mixed",
+        "field_name": "deadline",
+        "page": 2,
+        "reference": "deadline: 2026-09-16 17:00",
+        "hypothesis": "deadline:2026-09-1617:00",
+        "exact": true,
+        "cer": 0.07692307692307693,
+        "wer": 1.0
+      },
+      {
+        "document_id": "bid_06_mixed",
+        "domain": "bid",
+        "mode": "mixed",
+        "field_name": "bond",
+        "page": 2,
+        "reference": "bond: CNY 8,000.00",
+        "hypothesis": "bond: CNY 8,000.00",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "bid_07_mixed",
+        "domain": "bid",
+        "mode": "mixed",
+        "field_name": "project_no",
+        "page": 2,
+        "reference": "project_no: BID-2026-007",
+        "hypothesis": "project_no:BID-2026-007",
+        "exact": true,
+        "cer": 0.041666666666666664,
+        "wer": 1.0
+      },
+      {
+        "document_id": "bid_07_mixed",
+        "domain": "bid",
+        "mode": "mixed",
+        "field_name": "deadline",
+        "page": 2,
+        "reference": "deadline: 2026-09-17 17:00",
+        "hypothesis": "deadline:2026-09-1717:00",
+        "exact": true,
+        "cer": 0.07692307692307693,
+        "wer": 1.0
+      },
+      {
+        "document_id": "bid_07_mixed",
+        "domain": "bid",
+        "mode": "mixed",
+        "field_name": "bond",
+        "page": 2,
+        "reference": "bond: CNY 8,500.00",
+        "hypothesis": "bond: CNY 8,500.00",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "invoice_01_digital",
+        "domain": "invoice",
+        "mode": "digital",
+        "field_name": "invoice_no",
+        "page": 2,
+        "reference": "invoice_no: INV-2026-001",
+        "hypothesis": "invoice_no: INV-2026-001",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "invoice_01_digital",
+        "domain": "invoice",
+        "mode": "digital",
+        "field_name": "total",
+        "page": 2,
+        "reference": "total: CNY 1,288.50",
+        "hypothesis": "total: CNY 1,288.50",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "invoice_01_digital",
+        "domain": "invoice",
+        "mode": "digital",
+        "field_name": "tax_id",
+        "page": 2,
+        "reference": "tax_id: 91320000TEST0001",
+        "hypothesis": "tax_id: 91320000TEST0001",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "invoice_02_digital",
+        "domain": "invoice",
+        "mode": "digital",
+        "field_name": "invoice_no",
+        "page": 2,
+        "reference": "invoice_no: INV-2026-002",
+        "hypothesis": "invoice_no: INV-2026-002",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "invoice_02_digital",
+        "domain": "invoice",
+        "mode": "digital",
+        "field_name": "total",
+        "page": 2,
+        "reference": "total: CNY 1,376.50",
+        "hypothesis": "total: CNY 1,376.50",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "invoice_02_digital",
+        "domain": "invoice",
+        "mode": "digital",
+        "field_name": "tax_id",
+        "page": 2,
+        "reference": "tax_id: 91320000TEST0002",
+        "hypothesis": "tax_id: 91320000TEST0002",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "invoice_03_scanned",
+        "domain": "invoice",
+        "mode": "scanned",
+        "field_name": "invoice_no",
+        "page": 2,
+        "reference": "invoice_no: INV-2026-003",
+        "hypothesis": "invoice_no: INV-2026-003",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "invoice_03_scanned",
+        "domain": "invoice",
+        "mode": "scanned",
+        "field_name": "total",
+        "page": 2,
+        "reference": "total: CNY 1,464.50",
+        "hypothesis": "total: CNY1,464.50",
+        "exact": true,
+        "cer": 0.05263157894736842,
+        "wer": 0.6666666666666666
+      },
+      {
+        "document_id": "invoice_03_scanned",
+        "domain": "invoice",
+        "mode": "scanned",
+        "field_name": "tax_id",
+        "page": 2,
+        "reference": "tax_id: 91320000TEST0003",
+        "hypothesis": "tax_id:91320000TEST0003",
+        "exact": true,
+        "cer": 0.041666666666666664,
+        "wer": 1.0
+      },
+      {
+        "document_id": "invoice_04_scanned",
+        "domain": "invoice",
+        "mode": "scanned",
+        "field_name": "invoice_no",
+        "page": 2,
+        "reference": "invoice_no: INV-2026-004",
+        "hypothesis": "invoice_no: INV-2026-004",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "invoice_04_scanned",
+        "domain": "invoice",
+        "mode": "scanned",
+        "field_name": "total",
+        "page": 2,
+        "reference": "total: CNY 1,552.50",
+        "hypothesis": "total: CNY 1,552.50",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "invoice_04_scanned",
+        "domain": "invoice",
+        "mode": "scanned",
+        "field_name": "tax_id",
+        "page": 2,
+        "reference": "tax_id: 91320000TEST0004",
+        "hypothesis": "tax_id:91320000TEST0004",
+        "exact": true,
+        "cer": 0.041666666666666664,
+        "wer": 1.0
+      },
+      {
+        "document_id": "invoice_05_mixed",
+        "domain": "invoice",
+        "mode": "mixed",
+        "field_name": "invoice_no",
+        "page": 2,
+        "reference": "invoice_no: INV-2026-005",
+        "hypothesis": "invoice_no:INV-2026-005",
+        "exact": true,
+        "cer": 0.041666666666666664,
+        "wer": 1.0
+      },
+      {
+        "document_id": "invoice_05_mixed",
+        "domain": "invoice",
+        "mode": "mixed",
+        "field_name": "total",
+        "page": 2,
+        "reference": "total: CNY 1,640.50",
+        "hypothesis": "total: CNY 1,640.50",
+        "exact": true,
+        "cer": 0.0,
+        "wer": 0.0
+      },
+      {
+        "document_id": "invoice_05_mixed",
+        "domain": "invoice",
+        "mode": "mixed",
+        "field_name": "tax_id",
+        "page": 2,
+        "reference": "tax_id: 91320000TEST0005",
+        "hypothesis": "total: CNY 1,640.50 tax id: 91320000TEST0005",
+        "exact": false,
+        "cer": 0.875,
+        "wer": 2.5
+      }
+    ]
+  },
+  "parse_metrics": {
+    "expected_pages": 85,
+    "parsed_pages": 85,
+    "page_coverage": 1.0,
+    "rejects": 0,
+    "documents_with_errors": 0,
+    "documents": {
+      "contract_05_scanned": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 26,
+        "text_elements": 26,
+        "bbox_elements": 26,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 5,
+        "reject_count": 0,
+        "parse_seconds": 0.726,
+        "extraction_seconds": 2.341
+      },
+      "contract_06_scanned": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 26,
+        "text_elements": 26,
+        "bbox_elements": 26,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 5,
+        "reject_count": 0,
+        "parse_seconds": 0.662,
+        "extraction_seconds": 2.241
+      },
+      "contract_07_scanned": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 26,
+        "text_elements": 26,
+        "bbox_elements": 26,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 5,
+        "reject_count": 0,
+        "parse_seconds": 0.658,
+        "extraction_seconds": 2.209
+      },
+      "contract_08_scanned": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 26,
+        "text_elements": 26,
+        "bbox_elements": 26,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 5,
+        "reject_count": 0,
+        "parse_seconds": 0.652,
+        "extraction_seconds": 2.223
+      },
+      "contract_09_mixed": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 154,
+        "text_elements": 154,
+        "bbox_elements": 154,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4",
+          "pdfplumber@0.11.10"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 3,
+        "reject_count": 0,
+        "parse_seconds": 0.709,
+        "extraction_seconds": 2.374
+      },
+      "contract_10_mixed": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 154,
+        "text_elements": 154,
+        "bbox_elements": 154,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4",
+          "pdfplumber@0.11.10"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 3,
+        "reject_count": 0,
+        "parse_seconds": 0.734,
+        "extraction_seconds": 2.22
+      },
+      "contract_11_mixed": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 154,
+        "text_elements": 154,
+        "bbox_elements": 154,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4",
+          "pdfplumber@0.11.10"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 3,
+        "reject_count": 0,
+        "parse_seconds": 0.697,
+        "extraction_seconds": 2.32
+      },
+      "contract_12_mixed": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 154,
+        "text_elements": 154,
+        "bbox_elements": 154,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4",
+          "pdfplumber@0.11.10"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 3,
+        "reject_count": 0,
+        "parse_seconds": 0.866,
+        "extraction_seconds": 2.288
+      },
+      "bid_04_scanned": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 26,
+        "text_elements": 26,
+        "bbox_elements": 26,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 5,
+        "reject_count": 0,
+        "parse_seconds": 0.67,
+        "extraction_seconds": 2.386
+      },
+      "bid_05_scanned": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 26,
+        "text_elements": 26,
+        "bbox_elements": 26,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 5,
+        "reject_count": 0,
+        "parse_seconds": 0.684,
+        "extraction_seconds": 2.367
+      },
+      "bid_06_mixed": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 154,
+        "text_elements": 154,
+        "bbox_elements": 154,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4",
+          "pdfplumber@0.11.10"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 3,
+        "reject_count": 0,
+        "parse_seconds": 0.685,
+        "extraction_seconds": 2.415
+      },
+      "bid_07_mixed": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 154,
+        "text_elements": 154,
+        "bbox_elements": 154,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4",
+          "pdfplumber@0.11.10"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 3,
+        "reject_count": 0,
+        "parse_seconds": 0.672,
+        "extraction_seconds": 2.416
+      },
+      "invoice_01_digital": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 293,
+        "text_elements": 293,
+        "bbox_elements": 293,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "pdfplumber@0.11.10"
+        ],
+        "actual_backends": [],
+        "cache_hits": 0,
+        "reject_count": 0,
+        "parse_seconds": 0.022,
+        "extraction_seconds": 3.298
+      },
+      "invoice_02_digital": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 293,
+        "text_elements": 293,
+        "bbox_elements": 293,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "pdfplumber@0.11.10"
+        ],
+        "actual_backends": [],
+        "cache_hits": 0,
+        "reject_count": 0,
+        "parse_seconds": 0.024,
+        "extraction_seconds": 3.213
+      },
+      "invoice_03_scanned": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 26,
+        "text_elements": 26,
+        "bbox_elements": 26,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 5,
+        "reject_count": 0,
+        "parse_seconds": 0.674,
+        "extraction_seconds": 2.313
+      },
+      "invoice_04_scanned": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 26,
+        "text_elements": 26,
+        "bbox_elements": 26,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 5,
+        "reject_count": 0,
+        "parse_seconds": 0.657,
+        "extraction_seconds": 2.343
+      },
+      "invoice_05_mixed": {
+        "expected_pages": 5,
+        "parsed_pages": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ],
+        "page_coverage": 1.0,
+        "elements": 154,
+        "text_elements": 154,
+        "bbox_elements": 154,
+        "bbox_rate": 1.0,
+        "extractors": [
+          "mineru@3.4.4",
+          "pdfplumber@0.11.10"
+        ],
+        "actual_backends": [
+          "mineru:pipeline"
+        ],
+        "cache_hits": 3,
+        "reject_count": 0,
+        "parse_seconds": 0.671,
+        "extraction_seconds": 2.404
+      }
+    }
+  },
+  "selection": {
+    "suite": "phase4a-local-gate",
+    "domains": [],
+    "modes": [],
+    "limit": 0
+  },
+  "execution": {
+    "parser_primary": "mineru",
+    "candidate_provider": "local",
+    "candidate_model": "Qwen3.6-35B-A3B",
+    "work_dir": "F:\\new branch\\mangrove_platform_V2\\.phase4a-local-gate-work"
+  },
+  "predictions": {
+    "contract_05_scanned": [
+      {
+        "name": "contract_no",
+        "value": "HT-2026-005",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-36f7298cc87482ec",
+            "element_id": "el_c88a6636b781b2e6195a3d89",
+            "page": 2,
+            "bbox": {
+              "x0": 72.55139056831922,
+              "y0": 160.3249251817016,
+              "x1": 367.5937122128174,
+              "y1": 180.8465156049594,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "contract_no: HT-2026-005",
+            "quote_sha256": "cc44143f758050949daf67a6a89e87a4368e848aa75dc9e06e22fbb1ed092682",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.99,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-36f7298cc87482ec-9183ec0a44389fbc6f903b9a.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "contract_no",
+            "value": "HT-2026-005",
+            "quote": "contract_no: HT-2026-005",
+            "element_ids": [
+              "el_c88a6636b781b2e6195a3d89"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "delivery_days",
+        "value": "25days",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-36f7298cc87482ec",
+            "element_id": "el_b80117cb0036bfb35505365e",
+            "page": 2,
+            "bbox": {
+              "x0": 74.3651753325272,
+              "y0": 191.96237708422402,
+              "x1": 344.0145102781137,
+              "y1": 212.9115006412997,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "delivery_days: 25days",
+            "quote_sha256": "6a07e90305d6a87bd14540d5d022a82849231ec029c972cd9f5423062b726f59",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.991,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-36f7298cc87482ec-9183ec0a44389fbc6f903b9a.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "delivery_days",
+            "value": "25days",
+            "quote": "delivery_days: 25days",
+            "element_ids": [
+              "el_b80117cb0036bfb35505365e"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "amount",
+        "value": "CNY 106,170.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-36f7298cc87482ec",
+            "element_id": "el_6b2a69d5b2a58fc78986c854",
+            "page": 2,
+            "bbox": {
+              "x0": 73.76058041112455,
+              "y0": 224.45489525438222,
+              "x1": 340.99153567110034,
+              "y1": 241.98375374091492,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "amount: CNY 106,170.00",
+            "quote_sha256": "a6d4c1e018d67970c93a7a68ad6099e1cb1bd29701c5b144fcdd9a282bede163",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.976,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-36f7298cc87482ec-9183ec0a44389fbc6f903b9a.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "amount",
+            "value": "CNY 106,170.00",
+            "quote": "amount: CNY 106,170.00",
+            "element_ids": [
+              "el_6b2a69d5b2a58fc78986c854"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "contract_06_scanned": [
+      {
+        "name": "contract_no",
+        "value": "HT-2026-006",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-c9cb7a591e454626",
+            "element_id": "el_ebb6916a72a388f47820627f",
+            "page": 2,
+            "bbox": {
+              "x0": 62.87787182587666,
+              "y0": 168.02052159042327,
+              "x1": 354.89721886336156,
+              "y1": 185.12184694313808,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "contract_no:HT-2026-006",
+            "quote_sha256": "e6d397666ac2773db7c0ed46688fd0e9051e1196c4a8aab969589934e1d82612",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 1.0,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-c9cb7a591e454626-0f854bb3c16560f544df1797.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "contract_no",
+            "value": "HT-2026-006",
+            "quote": "contract_no:HT-2026-006",
+            "element_ids": [
+              "el_ebb6916a72a388f47820627f"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "delivery_days",
+        "value": "26days",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-c9cb7a591e454626",
+            "element_id": "el_cb89c7fd03c961ed040dfa27",
+            "page": 2,
+            "bbox": {
+              "x0": 59.854897218863364,
+              "y0": 199.6579734929457,
+              "x1": 336.75937122128175,
+              "y1": 215.9042325780248,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "delivery_days:26days",
+            "quote_sha256": "17ae682c547252a511638da1cfdb1ec0966e789cab862488767e0f9744cb3c92",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.999,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-c9cb7a591e454626-0f854bb3c16560f544df1797.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "delivery_days",
+            "value": "26days",
+            "quote": "delivery_days:26days",
+            "element_ids": [
+              "el_cb89c7fd03c961ed040dfa27"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "amount",
+        "value": "CNY 107,404.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-c9cb7a591e454626",
+            "element_id": "el_e4c6f1d25449d7d34f034214",
+            "page": 2,
+            "bbox": {
+              "x0": 64.08706166868198,
+              "y0": 230.4403591278324,
+              "x1": 334.9455864570738,
+              "y1": 246.6866182129115,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "amount: CNY 107,404.00",
+            "quote_sha256": "a35601e154f24529cdd3ace3a375556b7849087f52bc13ebc4d275c56ba7cb26",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.981,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-c9cb7a591e454626-0f854bb3c16560f544df1797.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "amount",
+            "value": "CNY 107,404.00",
+            "quote": "amount: CNY 107,404.00",
+            "element_ids": [
+              "el_e4c6f1d25449d7d34f034214"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "contract_07_scanned": [
+      {
+        "name": "contract_no",
+        "value": "HT-2026-007",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-8b00403762c9a570",
+            "element_id": "el_2b312d91c77b9a598bc8abcf",
+            "page": 2,
+            "bbox": {
+              "x0": 77.38814993954051,
+              "y0": 159.04232578024798,
+              "x1": 371.2212817412334,
+              "y1": 179.1363830696879,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "contract_no: HT-2026-007",
+            "quote_sha256": "1cc85b3c17c551abc52d87900fc0dfcc103d74e6afab4bbf3661a000e1c13164",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.984,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-8b00403762c9a570-75f98d112f940371cffcb190.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "contract_no",
+            "value": "HT-2026-007",
+            "quote": "contract_no: HT-2026-007",
+            "element_ids": [
+              "el_2b312d91c77b9a598bc8abcf"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "delivery_days",
+        "value": "27days",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-8b00403762c9a570",
+            "element_id": "el_8aed6cd790379c0d26016f09",
+            "page": 2,
+            "bbox": {
+              "x0": 76.78355501813785,
+              "y0": 189.8247114151347,
+              "x1": 347.03748488512696,
+              "y1": 211.6289012398461,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "delivery_days:27days",
+            "quote_sha256": "11b61870ff3b3c94a72c4770367f4a8361dfe03944c279d737cafa97493862e0",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 1.0,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-8b00403762c9a570-75f98d112f940371cffcb190.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "delivery_days",
+            "value": "27days",
+            "quote": "delivery_days:27days",
+            "element_ids": [
+              "el_8aed6cd790379c0d26016f09"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "amount",
+        "value": "CNY 108,638.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-8b00403762c9a570",
+            "element_id": "el_e0748bb1a922da57ba1543bf",
+            "page": 2,
+            "bbox": {
+              "x0": 76.78355501813785,
+              "y0": 222.31722958529286,
+              "x1": 345.223700120919,
+              "y1": 241.12868747327917,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "amount: CNY 108,638.00",
+            "quote_sha256": "05cd715f8fe8d125194ff12808cfb4398d2fb16bed01d5fd2f61a95659986a5a",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.978,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-8b00403762c9a570-75f98d112f940371cffcb190.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "amount",
+            "value": "CNY 108,638.00",
+            "quote": "amount: CNY 108,638.00",
+            "element_ids": [
+              "el_e0748bb1a922da57ba1543bf"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "contract_08_scanned": [
+      {
+        "name": "contract_no",
+        "value": "HT-2026-008",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-930b4d634efbf7f4",
+            "element_id": "el_d76cfe44b6665ffad06a548c",
+            "page": 2,
+            "bbox": {
+              "x0": 66.50544135429263,
+              "y0": 166.73792218896963,
+              "x1": 359.12938331318014,
+              "y1": 182.129115006413,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "contract_no:HT-2026-008",
+            "quote_sha256": "dd4a043c77c49f192013a88d7a5134a360fe6235eab7eafd4a29d76b29f978d1",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.999,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-930b4d634efbf7f4-25cddb2d443b8d65e679fd77.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "contract_no",
+            "value": "HT-2026-008",
+            "quote": "contract_no:HT-2026-008",
+            "element_ids": [
+              "el_d76cfe44b6665ffad06a548c"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "delivery_days",
+        "value": "28days",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-930b4d634efbf7f4",
+            "element_id": "el_c68d452e0ce7e8f9a574ed7b",
+            "page": 2,
+            "bbox": {
+              "x0": 65.90084643288996,
+              "y0": 197.52030782385634,
+              "x1": 334.9455864570738,
+              "y1": 215.04916631038907,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "delivery_days:28days",
+            "quote_sha256": "e73e20145664eb3dc3b73b88303e890379e9700ff6e7df1b119ebc4cd472f5da",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 1.0,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-930b4d634efbf7f4-25cddb2d443b8d65e679fd77.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "delivery_days",
+            "value": "28days",
+            "quote": "delivery_days:28days",
+            "element_ids": [
+              "el_c68d452e0ce7e8f9a574ed7b"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "amount",
+        "value": "CNY 109,872.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-930b4d634efbf7f4",
+            "element_id": "el_f413294b8a21588a7eddd298",
+            "page": 2,
+            "bbox": {
+              "x0": 67.71463119709794,
+              "y0": 229.58529286019666,
+              "x1": 335.5501813784764,
+              "y1": 243.69388627618642,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "amount: CNY 109,872.00",
+            "quote_sha256": "5794ea7538094d8a638de43ff1ef6c80c521150888fd0302147663fc7169cb49",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.991,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-930b4d634efbf7f4-25cddb2d443b8d65e679fd77.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "amount",
+            "value": "CNY 109,872.00",
+            "quote": "amount: CNY 109,872.00",
+            "element_ids": [
+              "el_f413294b8a21588a7eddd298"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "contract_09_mixed": [
+      {
+        "name": "contract_no",
+        "value": "HT-2026-009",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-c645695cf5feca4d",
+            "element_id": "el_7800a1c7a179b290fd8af7be",
+            "page": 2,
+            "bbox": {
+              "x0": 61.668681983071345,
+              "y0": 168.02052159042327,
+              "x1": 354.2926239419589,
+              "y1": 185.12184694313808,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "contract_no: HT-2026-009",
+            "quote_sha256": "61809c003a1c2379cf14d484e994074b6764437da959ef84ebb69e6a167f4ef7",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.984,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-c645695cf5feca4d-fc31eebaebe3cffb4791eebe.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "contract_no",
+            "value": "HT-2026-009",
+            "quote": "contract_no: HT-2026-009",
+            "element_ids": [
+              "el_7800a1c7a179b290fd8af7be"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "delivery_days",
+        "value": "29days",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-c645695cf5feca4d",
+            "element_id": "el_5d0d4644122f8d0267803565",
+            "page": 2,
+            "bbox": {
+              "x0": 62.87787182587666,
+              "y0": 199.6579734929457,
+              "x1": 331.92261185006043,
+              "y1": 216.33176571184268,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "delivery_days: 29days",
+            "quote_sha256": "be62151d2e52c11c7bd982b783e263d904382a786a7fbcc5b82616c9819df996",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.984,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-c645695cf5feca4d-fc31eebaebe3cffb4791eebe.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "delivery_days",
+            "value": "29days",
+            "quote": "delivery_days: 29days",
+            "element_ids": [
+              "el_5d0d4644122f8d0267803565"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "amount",
+        "value": "CNY 111,106.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-c645695cf5feca4d",
+            "element_id": "el_545dad3cd5a6db5967bfea39",
+            "page": 2,
+            "bbox": {
+              "x0": 63.482466747279325,
+              "y0": 230.86789226165027,
+              "x1": 332.5272067714631,
+              "y1": 247.11415134672936,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "amount: CNY 111,106.00",
+            "quote_sha256": "e66597f194b37237d645f56b2955788ffdbe195b1e9068185ce803e2ff31d07d",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.975,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-c645695cf5feca4d-fc31eebaebe3cffb4791eebe.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "amount",
+            "value": "CNY 111,106.00",
+            "quote": "amount: CNY 111,106.00",
+            "element_ids": [
+              "el_545dad3cd5a6db5967bfea39"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "contract_10_mixed": [
+      {
+        "name": "contract_no",
+        "value": "HT-2026-010",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-54c5313e6dbd661a",
+            "element_id": "el_c1cc38625249aff85f424ee6",
+            "page": 2,
+            "bbox": {
+              "x0": 73.15598548972189,
+              "y0": 160.3249251817016,
+              "x1": 368.19830713422004,
+              "y1": 180.4189824711415,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "contract_no: HT-2026-010",
+            "quote_sha256": "8ba82c736c02334560e2d65c8e20a4c9c076794a59106891977f68feebe11ee2",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.988,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-54c5313e6dbd661a-cc3f7c6b1be0581039ec7e33.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "contract_no",
+            "value": "HT-2026-010",
+            "quote": "contract_no: HT-2026-010",
+            "element_ids": [
+              "el_c1cc38625249aff85f424ee6"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "delivery_days",
+        "value": "30days",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-54c5313e6dbd661a",
+            "element_id": "el_74bd1609710b4bf70de69dbe",
+            "page": 2,
+            "bbox": {
+              "x0": 72.55139056831922,
+              "y0": 191.96237708422402,
+              "x1": 342.2007255139057,
+              "y1": 212.48396750748182,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "delivery_days:30days",
+            "quote_sha256": "7da18452aef8cdcdb6c9b4ae91d1387f67de1f0f0ef0a02c87b5a8e3aaf4e74f",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 1.0,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-54c5313e6dbd661a-cc3f7c6b1be0581039ec7e33.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "delivery_days",
+            "value": "30days",
+            "quote": "delivery_days:30days",
+            "element_ids": [
+              "el_74bd1609710b4bf70de69dbe"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "amount",
+        "value": "CNY 112,340.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-54c5313e6dbd661a",
+            "element_id": "el_edde09a44a39e8c84dc9d3d0",
+            "page": 2,
+            "bbox": {
+              "x0": 73.15598548972189,
+              "y0": 224.45489525438222,
+              "x1": 341.596130592503,
+              "y1": 242.83882000855067,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "amount: CNY 112,340.00",
+            "quote_sha256": "6b6dec0b70d5d3a8bd94d2f0c0e976f58b692fab220d6bcb51f7f9d0005faeae",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.974,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-54c5313e6dbd661a-cc3f7c6b1be0581039ec7e33.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "amount",
+            "value": "CNY 112,340.00",
+            "quote": "amount: CNY 112,340.00",
+            "element_ids": [
+              "el_edde09a44a39e8c84dc9d3d0"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "contract_11_mixed": [
+      {
+        "name": "contract_no",
+        "value": "HT-2026-011",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-e409dc8636a45229",
+            "element_id": "el_990a5d1e7d57768460504b7c",
+            "page": 2,
+            "bbox": {
+              "x0": 66.50544135429263,
+              "y0": 167.59298845660538,
+              "x1": 354.89721886336156,
+              "y1": 181.27404873877725,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "contract no: HT-2026-011",
+            "quote_sha256": "44cac8453a56b04d640e93d3878b7d3db3485647b11e0b3722bcab5461feff1f",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.975,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-e409dc8636a45229-601fc89402cce6b1069d2f0b.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "contract_no",
+            "value": "HT-2026-011",
+            "quote": "contract no: HT-2026-011",
+            "element_ids": [
+              "el_990a5d1e7d57768460504b7c"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "delivery_days",
+        "value": "31days",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-e409dc8636a45229",
+            "element_id": "el_6c836d4e7ef931b90d097a33",
+            "page": 2,
+            "bbox": {
+              "x0": 65.90084643288996,
+              "y0": 197.52030782385634,
+              "x1": 334.9455864570738,
+              "y1": 214.62163317657118,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "delivery_days: 31days",
+            "quote_sha256": "636b7072512c65e563307e2e0016a9f7d193aa84c9f7623fa0429161b5449569",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.987,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-e409dc8636a45229-601fc89402cce6b1069d2f0b.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "delivery_days",
+            "value": "31days",
+            "quote": "delivery_days: 31days",
+            "element_ids": [
+              "el_6c836d4e7ef931b90d097a33"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "amount",
+        "value": "CNY 113,574.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-e409dc8636a45229",
+            "element_id": "el_bb079d9f0e3e33dd8a08a1f3",
+            "page": 2,
+            "bbox": {
+              "x0": 67.71463119709794,
+              "y0": 230.01282599401455,
+              "x1": 334.9455864570738,
+              "y1": 244.12141941000428,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "amount: CNY 113,574.00",
+            "quote_sha256": "a2b0cf32546edb416c6af9e635bcb91f6bf578a506b6bd7cec4564e004d13f28",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.982,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-e409dc8636a45229-601fc89402cce6b1069d2f0b.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "amount",
+            "value": "CNY 113,574.00",
+            "quote": "amount: CNY 113,574.00",
+            "element_ids": [
+              "el_bb079d9f0e3e33dd8a08a1f3"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "contract_12_mixed": [
+      {
+        "name": "contract_no",
+        "value": "HT-2026-012",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-5d1f92ba01a34112",
+            "element_id": "el_e9230ed055e68e9dac1cd209",
+            "page": 2,
+            "bbox": {
+              "x0": 73.76058041112455,
+              "y0": 160.3249251817016,
+              "x1": 367.5937122128174,
+              "y1": 180.4189824711415,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "contract_no: HT-2026-012",
+            "quote_sha256": "e0862ee81613ef50b33cd91d767831cfc555d24cdbec168d0c77b4d1149962f4",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.981,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-5d1f92ba01a34112-5e17305a92a628abda674c85.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "contract_no",
+            "value": "HT-2026-012",
+            "quote": "contract_no: HT-2026-012",
+            "element_ids": [
+              "el_e9230ed055e68e9dac1cd209"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "delivery_days",
+        "value": "32 days",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-5d1f92ba01a34112",
+            "element_id": "el_e9712ac84d82415d1b7d2704",
+            "page": 2,
+            "bbox": {
+              "x0": 73.76058041112455,
+              "y0": 191.96237708422402,
+              "x1": 342.2007255139057,
+              "y1": 212.9115006412997,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "delivery_days: 32 days",
+            "quote_sha256": "b8b9e435ea61b83e35a703cc436361475c9382644927b4bb34551a8b6c743d81",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.972,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-5d1f92ba01a34112-5e17305a92a628abda674c85.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "delivery_days",
+            "value": "32 days",
+            "quote": "delivery_days: 32 days",
+            "element_ids": [
+              "el_e9712ac84d82415d1b7d2704"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "amount",
+        "value": "CNY 114,808.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-5d1f92ba01a34112",
+            "element_id": "el_2c4d67f978d2c65372fdb5ca",
+            "page": 2,
+            "bbox": {
+              "x0": 74.3651753325272,
+              "y0": 224.88242838820008,
+              "x1": 341.596130592503,
+              "y1": 242.41128687473278,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "amount: CNY 114,808.00",
+            "quote_sha256": "66352039bbee3d069e5d0dc6c86a1c9dc0e891cf1229cfb0dffd66c304b7c5b9",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.977,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-5d1f92ba01a34112-5e17305a92a628abda674c85.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "amount",
+            "value": "CNY 114,808.00",
+            "quote": "amount: CNY 114,808.00",
+            "element_ids": [
+              "el_2c4d67f978d2c65372fdb5ca"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "bid_04_scanned": [
+      {
+        "name": "project_no",
+        "value": "BID-2026-004",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-1fdcde30646d295d",
+            "element_id": "el_24a56605f56cf7385455a543",
+            "page": 2,
+            "bbox": {
+              "x0": 65.2962515114873,
+              "y0": 167.59298845660538,
+              "x1": 359.12938331318014,
+              "y1": 182.129115006413,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "project_no:BID-2026-004",
+            "quote_sha256": "8bf61f31bfec4169f64ae36b53a81b85d92baf0de8671d509cab19893428da55",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.999,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-1fdcde30646d295d-310dc13e9ab2e7c5cbeda8b5.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "project_no",
+            "value": "BID-2026-004",
+            "quote": "project_no:BID-2026-004",
+            "element_ids": [
+              "el_24a56605f56cf7385455a543"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "deadline",
+        "value": "2026-09-1417:00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-1fdcde30646d295d",
+            "element_id": "el_6186f4f116dae6c45108cd9b",
+            "page": 2,
+            "bbox": {
+              "x0": 66.50544135429263,
+              "y0": 198.3753740914921,
+              "x1": 382.70858524788395,
+              "y1": 212.48396750748182,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "deadline:2026-09-1417:00",
+            "quote_sha256": "a4fb5ef79b7a227b54acaa9c8abcf81f5c47906a55d5e09fe4a51ab2ef60b39e",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.999,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-1fdcde30646d295d-310dc13e9ab2e7c5cbeda8b5.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "deadline",
+            "value": "2026-09-1417:00",
+            "quote": "deadline:2026-09-1417:00",
+            "element_ids": [
+              "el_6186f4f116dae6c45108cd9b"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "bond",
+        "value": "CNY 7,000.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-1fdcde30646d295d",
+            "element_id": "el_1a90269c8739ecc873c8237d",
+            "page": 2,
+            "bbox": {
+              "x0": 65.90084643288996,
+              "y0": 229.1577597263788,
+              "x1": 287.7871825876663,
+              "y1": 244.97648567764003,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "bond: CNY 7,000.00",
+            "quote_sha256": "0f55427c17b7256277ba6f7943a4e45ed261a6cea0ada4de40256d4b7561a1f8",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.982,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-1fdcde30646d295d-310dc13e9ab2e7c5cbeda8b5.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "bond",
+            "value": "CNY 7,000.00",
+            "quote": "bond: CNY 7,000.00",
+            "element_ids": [
+              "el_1a90269c8739ecc873c8237d"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "bid_05_scanned": [
+      {
+        "name": "project_no",
+        "value": "BID-2026-005",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-65a2dea13a32371d",
+            "element_id": "el_0a31389893d4469193979487",
+            "page": 2,
+            "bbox": {
+              "x0": 77.38814993954051,
+              "y0": 158.6147926464301,
+              "x1": 371.2212817412334,
+              "y1": 179.99144933732364,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "project_no:BID-2026-005",
+            "quote_sha256": "e13527e872a7e70c722f3c478e1c2f053a35c2fd5716fd8847b2c4f18935862e",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.999,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-65a2dea13a32371d-6c149b1f9ee5dc9bcabdea23.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "project_no",
+            "value": "BID-2026-005",
+            "quote": "project_no:BID-2026-005",
+            "element_ids": [
+              "el_0a31389893d4469193979487"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "deadline",
+        "value": "2026-09-1517:00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-65a2dea13a32371d",
+            "element_id": "el_c7247d3a305300ade1b27752",
+            "page": 2,
+            "bbox": {
+              "x0": 77.38814993954051,
+              "y0": 191.1073108165883,
+              "x1": 394.19588875453445,
+              "y1": 209.06370243693885,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "deadline:2026-09-1517:00",
+            "quote_sha256": "dff3419178d78c0c87ee7e67ec4780457c44cf9ae83065e0184ed00619ca31d7",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 1.0,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-65a2dea13a32371d-6c149b1f9ee5dc9bcabdea23.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "deadline",
+            "value": "2026-09-1517:00",
+            "quote": "deadline:2026-09-1517:00",
+            "element_ids": [
+              "el_c7247d3a305300ade1b27752"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "bond",
+        "value": "CNY 7,500.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-65a2dea13a32371d",
+            "element_id": "el_8de9caefabe0789329c52791",
+            "page": 2,
+            "bbox": {
+              "x0": 76.78355501813785,
+              "y0": 220.60709705002137,
+              "x1": 298.0652962515115,
+              "y1": 241.12868747327917,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "bond: CNY 7,500.00",
+            "quote_sha256": "5059642d5d34ac823f1fe1462f7322fc8111dbef2ecfeb0b91f97ee25219d479",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.974,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-65a2dea13a32371d-6c149b1f9ee5dc9bcabdea23.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "bond",
+            "value": "CNY 7,500.00",
+            "quote": "bond: CNY 7,500.00",
+            "element_ids": [
+              "el_8de9caefabe0789329c52791"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "bid_06_mixed": [
+      {
+        "name": "project_no",
+        "value": "BID-2026-006",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-92a2a1247ef7776e",
+            "element_id": "el_0e500ec14b7b1f510b6b4ffb",
+            "page": 2,
+            "bbox": {
+              "x0": 74.96977025392987,
+              "y0": 163.31765711842667,
+              "x1": 371.2212817412334,
+              "y1": 179.1363830696879,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "project_no:BID-2026-006",
+            "quote_sha256": "1e8e2228a1e13ed4512c97ea3106e10983add6eed6d6ff7e2eed9a1e3e28f7e8",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 1.0,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-92a2a1247ef7776e-d21c0fb840649e7640ccc7fa.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "project_no",
+            "value": "BID-2026-006",
+            "quote": "project_no:BID-2026-006",
+            "element_ids": [
+              "el_0e500ec14b7b1f510b6b4ffb"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "deadline",
+        "value": "2026-09-1617:00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-92a2a1247ef7776e",
+            "element_id": "el_4491ad68c889d1fab61be25e",
+            "page": 2,
+            "bbox": {
+              "x0": 74.3651753325272,
+              "y0": 193.24497648567765,
+              "x1": 391.17291414752117,
+              "y1": 211.2013681060282,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "deadline:2026-09-1617:00",
+            "quote_sha256": "9a6ae8b51a7287705fd207da8e71c8bf7450f066d2bb0557c632f55fb25d891f",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 1.0,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-92a2a1247ef7776e-d21c0fb840649e7640ccc7fa.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "deadline",
+            "value": "2026-09-1617:00",
+            "quote": "deadline:2026-09-1617:00",
+            "element_ids": [
+              "el_4491ad68c889d1fab61be25e"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "bond",
+        "value": "CNY 8,000.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-92a2a1247ef7776e",
+            "element_id": "el_d716d70f9f127d7a4f07401d",
+            "page": 2,
+            "bbox": {
+              "x0": 72.55139056831922,
+              "y0": 223.59982898674647,
+              "x1": 293.83313180169284,
+              "y1": 242.41128687473278,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "bond: CNY 8,000.00",
+            "quote_sha256": "39f510c5bfa75007f938d72ee1d93a1436936a808fcf48c11ecf61fdca1f03af",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.974,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-92a2a1247ef7776e-d21c0fb840649e7640ccc7fa.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "bond",
+            "value": "CNY 8,000.00",
+            "quote": "bond: CNY 8,000.00",
+            "element_ids": [
+              "el_d716d70f9f127d7a4f07401d"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "bid_07_mixed": [
+      {
+        "name": "project_no",
+        "value": "BID-2026-007",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-5ce0edbe5a46d178",
+            "element_id": "el_dc225639508952db726501fd",
+            "page": 2,
+            "bbox": {
+              "x0": 62.273276904474,
+              "y0": 167.59298845660538,
+              "x1": 354.89721886336156,
+              "y1": 184.69431380932022,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "project_no:BID-2026-007",
+            "quote_sha256": "c181e8bc07518730c397891eaea807c2c55708829f29bedf1670e000197d5de6",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 1.0,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-5ce0edbe5a46d178-6abb0ab32834d907d8832bc3.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "project_no",
+            "value": "BID-2026-007",
+            "quote": "project_no:BID-2026-007",
+            "element_ids": [
+              "el_dc225639508952db726501fd"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "deadline",
+        "value": "2026-09-1717:00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-5ce0edbe5a46d178",
+            "element_id": "el_536102a5a847b6db8dc64d1f",
+            "page": 2,
+            "bbox": {
+              "x0": 63.482466747279325,
+              "y0": 197.94784095767423,
+              "x1": 379.6856106408706,
+              "y1": 215.47669944420693,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "deadline:2026-09-1717:00",
+            "quote_sha256": "c5251ef8f28fbe328a4efadcdd619a9f71f0117aee21f390e7b4474275e4513d",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 1.0,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-5ce0edbe5a46d178-6abb0ab32834d907d8832bc3.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "deadline",
+            "value": "2026-09-1717:00",
+            "quote": "deadline:2026-09-1717:00",
+            "element_ids": [
+              "el_536102a5a847b6db8dc64d1f"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "bond",
+        "value": "CNY 8,500.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-5ce0edbe5a46d178",
+            "element_id": "el_24b529ffaa029c41a4b5ad09",
+            "page": 2,
+            "bbox": {
+              "x0": 62.87787182587666,
+              "y0": 231.29542539546816,
+              "x1": 284.1596130592503,
+              "y1": 246.6866182129115,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "bond: CNY 8,500.00",
+            "quote_sha256": "c5e3e817e8fe221aea34230e58aae3ededc201ec7b090fd51490488f43d8797c",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.963,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-5ce0edbe5a46d178-6abb0ab32834d907d8832bc3.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "bond",
+            "value": "CNY 8,500.00",
+            "quote": "bond: CNY 8,500.00",
+            "element_ids": [
+              "el_24b529ffaa029c41a4b5ad09"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "invoice_01_digital": [
+      {
+        "name": "invoice_no",
+        "value": "INV-2026-001",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-1d69ff40913ef578",
+            "element_id": "el_87ba56f1fce1d8c109b69103",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 109.81400000000008,
+              "x1": 108.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "invoice_no:",
+            "quote_sha256": "59f384cc3ee3177a1bee682838c703b61c44cb0707802b4cca8fb52c00d76274",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-1d69ff40913ef578",
+            "element_id": "el_eedb8b08669cb104104bec87",
+            "page": 2,
+            "bbox": {
+              "x0": 115.18,
+              "y0": 109.81400000000008,
+              "x1": 199.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "INV-2026-001",
+            "quote_sha256": "b2458d7cb216405ec38dddbaf5359f5418e58da1bbc9aec3fe98105b26cda6fd",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "invoice_no",
+            "value": "INV-2026-001",
+            "quote": "invoice_no: INV-2026-001",
+            "element_ids": [
+              "el_87ba56f1fce1d8c109b69103",
+              "el_eedb8b08669cb104104bec87"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "total",
+        "value": "CNY 1,288.50",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-1d69ff40913ef578",
+            "element_id": "el_997e8320b872424d4c851420",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 135.32400000000007,
+              "x1": 73.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "total:",
+            "quote_sha256": "483eb4df417625bb33d8d1e816a010aa1c952153e08404be59696ae5f80b7284",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-1d69ff40913ef578",
+            "element_id": "el_89e6cb99e116945102d6211d",
+            "page": 2,
+            "bbox": {
+              "x0": 80.18,
+              "y0": 135.32400000000007,
+              "x1": 101.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "CNY",
+            "quote_sha256": "d9a248aa1fe16b27e2445be76826e59119de2023ebb8b5bfebc98def37d997f5",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-1d69ff40913ef578",
+            "element_id": "el_0a9e71f7c911cf4280734759",
+            "page": 2,
+            "bbox": {
+              "x0": 108.18,
+              "y0": 135.32400000000007,
+              "x1": 164.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "1,288.50",
+            "quote_sha256": "c0c07a1b33a1eaaf9d0f31601df700949a199565aae88fc1d2ff750913f6e61a",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "total",
+            "value": "CNY 1,288.50",
+            "quote": "total: CNY 1,288.50",
+            "element_ids": [
+              "el_997e8320b872424d4c851420",
+              "el_89e6cb99e116945102d6211d",
+              "el_0a9e71f7c911cf4280734759"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "tax_id",
+        "value": "91320000TEST0001",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-1d69ff40913ef578",
+            "element_id": "el_8205a0b9c056bfb9c8353a3b",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 160.83400000000006,
+              "x1": 80.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "tax_id:",
+            "quote_sha256": "193741d61c0749001be99f64db01959ee5ac51736e7218ea73b6bbeac2e06fef",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-1d69ff40913ef578",
+            "element_id": "el_439a3d499736a9327be926a9",
+            "page": 2,
+            "bbox": {
+              "x0": 87.18,
+              "y0": 160.83400000000006,
+              "x1": 199.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "91320000TEST0001",
+            "quote_sha256": "861b9b8951a9dcc1c9e6427abb9de5681f425ed3e27706062793500bd1d4b46a",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "tax_id",
+            "value": "91320000TEST0001",
+            "quote": "tax_id: 91320000TEST0001",
+            "element_ids": [
+              "el_8205a0b9c056bfb9c8353a3b",
+              "el_439a3d499736a9327be926a9"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "invoice_02_digital": [
+      {
+        "name": "invoice_no",
+        "value": "INV-2026-002",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-c51608590b2d3957",
+            "element_id": "el_f8a3bc0489cd4ed024fb95cc",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 109.81400000000008,
+              "x1": 108.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "invoice_no:",
+            "quote_sha256": "59f384cc3ee3177a1bee682838c703b61c44cb0707802b4cca8fb52c00d76274",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-c51608590b2d3957",
+            "element_id": "el_6b7c8ae60c99054679164a78",
+            "page": 2,
+            "bbox": {
+              "x0": 115.18,
+              "y0": 109.81400000000008,
+              "x1": 199.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "INV-2026-002",
+            "quote_sha256": "5606bb525b7c3dd419a503954417bc2c9a5967ca3153fae7717d516d543dd30f",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "invoice_no",
+            "value": "INV-2026-002",
+            "quote": "invoice_no: INV-2026-002",
+            "element_ids": [
+              "el_f8a3bc0489cd4ed024fb95cc",
+              "el_6b7c8ae60c99054679164a78"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "total",
+        "value": "CNY 1,376.50",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-c51608590b2d3957",
+            "element_id": "el_46665e858af06ec111c2a43a",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 135.32400000000007,
+              "x1": 73.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "total:",
+            "quote_sha256": "483eb4df417625bb33d8d1e816a010aa1c952153e08404be59696ae5f80b7284",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-c51608590b2d3957",
+            "element_id": "el_93e244be58486869995abfe7",
+            "page": 2,
+            "bbox": {
+              "x0": 80.18,
+              "y0": 135.32400000000007,
+              "x1": 101.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "CNY",
+            "quote_sha256": "d9a248aa1fe16b27e2445be76826e59119de2023ebb8b5bfebc98def37d997f5",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-c51608590b2d3957",
+            "element_id": "el_65f62ff61902a4ac5bcf1345",
+            "page": 2,
+            "bbox": {
+              "x0": 108.18,
+              "y0": 135.32400000000007,
+              "x1": 164.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "1,376.50",
+            "quote_sha256": "fb69246e72d6da5e0a30e398b1c46dfc9fa2cc97d4b8e34608916e4c271f6878",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "total",
+            "value": "CNY 1,376.50",
+            "quote": "total: CNY 1,376.50",
+            "element_ids": [
+              "el_46665e858af06ec111c2a43a",
+              "el_93e244be58486869995abfe7",
+              "el_65f62ff61902a4ac5bcf1345"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "tax_id",
+        "value": "91320000TEST0002",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-c51608590b2d3957",
+            "element_id": "el_2d1b8121ffbbeec0ae5cd911",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 160.83400000000006,
+              "x1": 80.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "tax_id:",
+            "quote_sha256": "193741d61c0749001be99f64db01959ee5ac51736e7218ea73b6bbeac2e06fef",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-c51608590b2d3957",
+            "element_id": "el_2bbaed436136b6d5915e3293",
+            "page": 2,
+            "bbox": {
+              "x0": 87.18,
+              "y0": 160.83400000000006,
+              "x1": 199.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "91320000TEST0002",
+            "quote_sha256": "d8d77f161dd652c3c2a561b2979f156d3886e7408ce7fbd10a4ff2ee49bc11f3",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "tax_id",
+            "value": "91320000TEST0002",
+            "quote": "tax_id: 91320000TEST0002",
+            "element_ids": [
+              "el_2d1b8121ffbbeec0ae5cd911",
+              "el_2bbaed436136b6d5915e3293"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "invoice_03_scanned": [
+      {
+        "name": "invoice_no",
+        "value": "INV-2026-003",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-e1bce52a76da5a14",
+            "element_id": "el_9e11f111495247a35e977abf",
+            "page": 2,
+            "bbox": {
+              "x0": 79.80652962515114,
+              "y0": 158.18725951261223,
+              "x1": 371.825876662636,
+              "y1": 179.56391620350578,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "invoice_no: INV-2026-003",
+            "quote_sha256": "2ed8d33fa898881f8a4f48cbe1ff6bd38292255f7fafdd8f0349229dc34b5c9c",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.986,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-e1bce52a76da5a14-8fb8357d575bc5bbb2a082c3.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "invoice_no",
+            "value": "INV-2026-003",
+            "quote": "invoice_no: INV-2026-003",
+            "element_ids": [
+              "el_9e11f111495247a35e977abf"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "total",
+        "value": "CNY1,464.50",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-e1bce52a76da5a14",
+            "element_id": "el_8ba1e1283ef2f9633df12c4e",
+            "page": 2,
+            "bbox": {
+              "x0": 77.99274486094316,
+              "y0": 189.8247114151347,
+              "x1": 310.15719467956467,
+              "y1": 210.34630183839246,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "total: CNY1,464.50",
+            "quote_sha256": "b63f209f48b5d8b2c483ad73109cc809579a46ade1227ab2b14ca117dd7aebc2",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.976,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-e1bce52a76da5a14-8fb8357d575bc5bbb2a082c3.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "total",
+            "value": "CNY1,464.50",
+            "quote": "total: CNY1,464.50",
+            "element_ids": [
+              "el_8ba1e1283ef2f9633df12c4e"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "tax_id",
+        "value": "91320000TEST0003",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-e1bce52a76da5a14",
+            "element_id": "el_f321dd2ccbfe39602ad89c76",
+            "page": 2,
+            "bbox": {
+              "x0": 74.3651753325272,
+              "y0": 222.74476271911072,
+              "x1": 368.19830713422004,
+              "y1": 241.55622060709706,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "tax_id:91320000TEST0003",
+            "quote_sha256": "3b8d914a6f3d08690ad6bf0503cb38519422add7ad63191903b238fa8b3e0c20",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.997,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-e1bce52a76da5a14-8fb8357d575bc5bbb2a082c3.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "tax_id",
+            "value": "91320000TEST0003",
+            "quote": "tax_id:91320000TEST0003",
+            "element_ids": [
+              "el_f321dd2ccbfe39602ad89c76"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "invoice_04_scanned": [
+      {
+        "name": "invoice_no",
+        "value": "INV-2026-004",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-06075c7be6e8ec7b",
+            "element_id": "el_2229da4fc9253001b45d4396",
+            "page": 2,
+            "bbox": {
+              "x0": 81.01571946795647,
+              "y0": 158.18725951261223,
+              "x1": 371.825876662636,
+              "y1": 179.56391620350578,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "invoice_no: INV-2026-004",
+            "quote_sha256": "ffb5f9de5d6ebcc261924217d58ea78788794c464082f249d069d183848209b9",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.984,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-06075c7be6e8ec7b-1542a4a7772f6467a539288d.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "invoice_no",
+            "value": "INV-2026-004",
+            "quote": "invoice_no: INV-2026-004",
+            "element_ids": [
+              "el_2229da4fc9253001b45d4396"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "total",
+        "value": "CNY 1,552.50",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-06075c7be6e8ec7b",
+            "element_id": "el_003833ef6cd21ea346ff6001",
+            "page": 2,
+            "bbox": {
+              "x0": 77.38814993954051,
+              "y0": 189.8247114151347,
+              "x1": 310.15719467956467,
+              "y1": 210.34630183839246,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "total: CNY 1,552.50",
+            "quote_sha256": "b0aed084074f623ff2cc344414e3ced22d360d4bf7e141f3148f24baf1f2ec58",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.969,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-06075c7be6e8ec7b-1542a4a7772f6467a539288d.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "total",
+            "value": "CNY 1,552.50",
+            "quote": "total: CNY 1,552.50",
+            "element_ids": [
+              "el_003833ef6cd21ea346ff6001"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "tax_id",
+        "value": "91320000TEST0004",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-06075c7be6e8ec7b",
+            "element_id": "el_38111f85a78fb87203f4f3f7",
+            "page": 2,
+            "bbox": {
+              "x0": 76.78355501813785,
+              "y0": 221.46216331765712,
+              "x1": 370.012091898428,
+              "y1": 241.55622060709706,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "tax_id:91320000TEST0004",
+            "quote_sha256": "9b8c2d343edd22fd515cefb464bde9f14401d11dcd79e85c7cab03e60a86a6d5",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.997,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-06075c7be6e8ec7b-1542a4a7772f6467a539288d.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "tax_id",
+            "value": "91320000TEST0004",
+            "quote": "tax_id:91320000TEST0004",
+            "element_ids": [
+              "el_38111f85a78fb87203f4f3f7"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "invoice_05_mixed": [
+      {
+        "name": "invoice_no",
+        "value": "INV-2026-005",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-dc2fbc0fb894e816",
+            "element_id": "el_3561451fc25948223973a696",
+            "page": 2,
+            "bbox": {
+              "x0": 68.31922611850061,
+              "y0": 166.73792218896963,
+              "x1": 358.5247883917775,
+              "y1": 182.129115006413,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "invoice_no:INV-2026-005",
+            "quote_sha256": "adbd232230b4c78fa0cb9a4467c191797a2bd66611a7d29bd61bc8ee5c3fd1e7",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.996,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-dc2fbc0fb894e816-f7fa68dc944d99902075f243.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "invoice_no",
+            "value": "INV-2026-005",
+            "quote": "invoice_no:INV-2026-005",
+            "element_ids": [
+              "el_3561451fc25948223973a696"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "total",
+        "value": "CNY 1,640.50",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-dc2fbc0fb894e816",
+            "element_id": "el_c1ff4f2a011907ab485afe66",
+            "page": 2,
+            "bbox": {
+              "x0": 65.2962515114873,
+              "y0": 197.52030782385634,
+              "x1": 301.08827085852477,
+              "y1": 213.76656690893543,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "total: CNY 1,640.50",
+            "quote_sha256": "486e3f2575ddff87eb090bc35fd2f03a90a238b318bf5b070eef12ec2b1c4952",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.981,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-dc2fbc0fb894e816-f7fa68dc944d99902075f243.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "total",
+            "value": "CNY 1,640.50",
+            "quote": "total: CNY 1,640.50",
+            "element_ids": [
+              "el_c1ff4f2a011907ab485afe66"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "tax_id",
+        "value": "91320000TEST0005",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-dc2fbc0fb894e816",
+            "element_id": "el_6159703ec130cdcdc3307144",
+            "page": 2,
+            "bbox": {
+              "x0": 66.50544135429263,
+              "y0": 230.01282599401455,
+              "x1": 358.5247883917775,
+              "y1": 243.69388627618642,
+              "coordinate_space": "normalized_1000"
+            },
+            "quote": "tax id: 91320000TEST0005",
+            "quote_sha256": "c19c9e9aa1423212b92e8a50299898cbe2e4f4e5072e38bf117ac89bf8b3eee5",
+            "extractor": "mineru",
+            "extractor_version": "3.4.4",
+            "confidence": 0.965,
+            "raw_result_ref": "phase4a-field-eval/third_party/mineru/golden-dc2fbc0fb894e816-f7fa68dc944d99902075f243.json"
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "tax_id",
+            "value": "91320000TEST0005",
+            "quote": "tax id: 91320000TEST0005",
+            "element_ids": [
+              "el_6159703ec130cdcdc3307144"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ]
+  },
+  "parse_rejects": {},
+  "run_errors": {},
+  "elapsed_seconds": 51.868
+}

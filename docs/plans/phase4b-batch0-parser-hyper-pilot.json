@@ -1,0 +1,140 @@
+{
+  "suite": "pilot",
+  "golden_dir": "tests/fixtures/document_golden",
+  "documents": [
+    "contract_05_scanned",
+    "bid_04_scanned",
+    "invoice_05_mixed"
+  ],
+  "services": {
+    "mineru": "http://192.168.1.21:8000",
+    "paddle": "http://192.168.1.21:18081"
+  },
+  "summaries": {
+    "mineru_hybrid_medium": {
+      "documents": 3,
+      "successes": 0,
+      "errors": 3,
+      "expected_pages": 0,
+      "parsed_pages": 0,
+      "expected_values": 0,
+      "matched_values": 0,
+      "expected_lines": 0,
+      "matched_lines": 0,
+      "expected_table_rows": 0,
+      "matched_table_rows": 0,
+      "blocks": 0,
+      "bbox_blocks": 0,
+      "elapsed_seconds": 0,
+      "page_coverage": 0.0,
+      "field_value_recall": 0.0,
+      "line_recall": 0.0,
+      "table_row_recall": 0.0,
+      "bbox_rate": 0.0,
+      "mean_normalized_cer": null,
+      "mean_sequence_similarity": null,
+      "weighted_score": 0.0
+    },
+    "mineru_hybrid_high": {
+      "documents": 3,
+      "successes": 0,
+      "errors": 3,
+      "expected_pages": 0,
+      "parsed_pages": 0,
+      "expected_values": 0,
+      "matched_values": 0,
+      "expected_lines": 0,
+      "matched_lines": 0,
+      "expected_table_rows": 0,
+      "matched_table_rows": 0,
+      "blocks": 0,
+      "bbox_blocks": 0,
+      "elapsed_seconds": 0,
+      "page_coverage": 0.0,
+      "field_value_recall": 0.0,
+      "line_recall": 0.0,
+      "table_row_recall": 0.0,
+      "bbox_rate": 0.0,
+      "mean_normalized_cer": null,
+      "mean_sequence_similarity": null,
+      "weighted_score": 0.0
+    }
+  },
+  "ranking": [
+    "mineru_hybrid_medium",
+    "mineru_hybrid_high"
+  ],
+  "details": {
+    "mineru_hybrid_medium": [
+      {
+        "id": "contract_05_scanned",
+        "file": "contract_05_scanned.pdf",
+        "domain": "contract",
+        "mode": "scanned",
+        "error": {
+          "type": "RuntimeError",
+          "message": "MinerU HTTP 409: {\"task_id\":\"fe4132bf-f8ef-497c-ad44-0daba6b84719\",\"status\":\"failed\",\"backend\":\"hybrid-engine\",\"file_names\":[\"contract_05_scanned\"],\"created_at\":\"2026-07-27T01:13:27.323266+00:00\",\"started_at\":\"2026-07-27T01:13:27.323679+00:00\",\"completed_at\":\"2026-07-27T01:13:27.350393+00:00\",\"error\":\"Device string must not be empty\",\"status_url\":\"http://192.168.1.21:8000/tasks/fe4132bf-f8ef-497c-ad44-0daba6b84719\",\"result_url\":\"http://192.168.1.21:8000/tasks/fe4132bf-f8ef-497c-ad44-0daba6b84719/result\",\"message\":\"Task execution failed\"}",
+          "elapsed_seconds": 1.287
+        }
+      },
+      {
+        "id": "bid_04_scanned",
+        "file": "bid_04_scanned.pdf",
+        "domain": "bid",
+        "mode": "scanned",
+        "error": {
+          "type": "RuntimeError",
+          "message": "MinerU HTTP 409: {\"task_id\":\"70a34433-b406-42fd-8b43-9266a16e486b\",\"status\":\"failed\",\"backend\":\"hybrid-engine\",\"file_names\":[\"bid_04_scanned\"],\"created_at\":\"2026-07-27T01:13:28.359856+00:00\",\"started_at\":\"2026-07-27T01:13:28.360034+00:00\",\"completed_at\":\"2026-07-27T01:13:28.374966+00:00\",\"error\":\"Device string must not be empty\",\"status_url\":\"http://192.168.1.21:8000/tasks/70a34433-b406-42fd-8b43-9266a16e486b\",\"result_url\":\"http://192.168.1.21:8000/tasks/70a34433-b406-42fd-8b43-9266a16e486b/result\",\"message\":\"Task execution failed\"}",
+          "elapsed_seconds": 1.019
+        }
+      },
+      {
+        "id": "invoice_05_mixed",
+        "file": "invoice_05_mixed.pdf",
+        "domain": "invoice",
+        "mode": "mixed",
+        "error": {
+          "type": "RuntimeError",
+          "message": "MinerU HTTP 409: {\"task_id\":\"a57f9771-f975-40b2-8fd1-31df52d6d5fc\",\"status\":\"failed\",\"backend\":\"hybrid-engine\",\"file_names\":[\"invoice_05_mixed\"],\"created_at\":\"2026-07-27T01:13:29.359832+00:00\",\"started_at\":\"2026-07-27T01:13:29.360005+00:00\",\"completed_at\":\"2026-07-27T01:13:29.371695+00:00\",\"error\":\"Device string must not be empty\",\"status_url\":\"http://192.168.1.21:8000/tasks/a57f9771-f975-40b2-8fd1-31df52d6d5fc\",\"result_url\":\"http://192.168.1.21:8000/tasks/a57f9771-f975-40b2-8fd1-31df52d6d5fc/result\",\"message\":\"Task execution failed\"}",
+          "elapsed_seconds": 0.993
+        }
+      }
+    ],
+    "mineru_hybrid_high": [
+      {
+        "id": "contract_05_scanned",
+        "file": "contract_05_scanned.pdf",
+        "domain": "contract",
+        "mode": "scanned",
+        "error": {
+          "type": "RuntimeError",
+          "message": "MinerU HTTP 409: {\"task_id\":\"9311cb94-0ab8-4f5e-8e5c-8787e4f45f25\",\"status\":\"failed\",\"backend\":\"hybrid-engine\",\"file_names\":[\"contract_05_scanned\"],\"created_at\":\"2026-07-27T01:13:30.481398+00:00\",\"started_at\":\"2026-07-27T01:13:30.481524+00:00\",\"completed_at\":\"2026-07-27T01:13:30.491229+00:00\",\"error\":\"Device string must not be empty\",\"status_url\":\"http://192.168.1.21:8000/tasks/9311cb94-0ab8-4f5e-8e5c-8787e4f45f25\",\"result_url\":\"http://192.168.1.21:8000/tasks/9311cb94-0ab8-4f5e-8e5c-8787e4f45f25/result\",\"message\":\"Task execution failed\"}",
+          "elapsed_seconds": 1.119
+        }
+      },
+      {
+        "id": "bid_04_scanned",
+        "file": "bid_04_scanned.pdf",
+        "domain": "bid",
+        "mode": "scanned",
+        "error": {
+          "type": "RuntimeError",
+          "message": "MinerU HTTP 409: {\"task_id\":\"a625eb9f-9867-44b8-b514-221dab2ad5d0\",\"status\":\"failed\",\"backend\":\"hybrid-engine\",\"file_names\":[\"bid_04_scanned\"],\"created_at\":\"2026-07-27T01:13:31.522860+00:00\",\"started_at\":\"2026-07-27T01:13:31.522977+00:00\",\"completed_at\":\"2026-07-27T01:13:31.533951+00:00\",\"error\":\"Device string must not be empty\",\"status_url\":\"http://192.168.1.21:8000/tasks/a625eb9f-9867-44b8-b514-221dab2ad5d0\",\"result_url\":\"http://192.168.1.21:8000/tasks/a625eb9f-9867-44b8-b514-221dab2ad5d0/result\",\"message\":\"Task execution failed\"}",
+          "elapsed_seconds": 1.043
+        }
+      },
+      {
+        "id": "invoice_05_mixed",
+        "file": "invoice_05_mixed.pdf",
+        "domain": "invoice",
+        "mode": "mixed",
+        "error": {
+          "type": "RuntimeError",
+          "message": "MinerU HTTP 409: {\"task_id\":\"7438a299-8214-4062-b236-1ea29a74cfc9\",\"status\":\"failed\",\"backend\":\"hybrid-engine\",\"file_names\":[\"invoice_05_mixed\"],\"created_at\":\"2026-07-27T01:13:32.589592+00:00\",\"started_at\":\"2026-07-27T01:13:32.589713+00:00\",\"completed_at\":\"2026-07-27T01:13:32.599153+00:00\",\"error\":\"Device string must not be empty\",\"status_url\":\"http://192.168.1.21:8000/tasks/7438a299-8214-4062-b236-1ea29a74cfc9\",\"result_url\":\"http://192.168.1.21:8000/tasks/7438a299-8214-4062-b236-1ea29a74cfc9/result\",\"message\":\"Task execution failed\"}",
+          "elapsed_seconds": 1.063
+        }
+      }
+    ]
+  },
+  "elapsed_seconds": 6.529
+}

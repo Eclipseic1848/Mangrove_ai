@@ -1,0 +1,37 @@
+{
+  "case_id": "workload_filter",
+  "status": "pass",
+  "winner": "table.polars",
+  "candidates": [
+    {
+      "capability_id": "table.polars",
+      "result_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_polars/result.json",
+      "tool_result_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_polars/tool-result.json",
+      "manifest_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_polars/capability-manifest.json",
+      "duration_ms": 5,
+      "verification_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_polars/verification.json",
+      "verification_status": "pass",
+      "quality_score": 100.0
+    },
+    {
+      "capability_id": "table.pandas",
+      "result_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_pandas/result.json",
+      "tool_result_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_pandas/tool-result.json",
+      "manifest_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_pandas/capability-manifest.json",
+      "duration_ms": 39,
+      "verification_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_pandas/verification.json",
+      "verification_status": "pass",
+      "quality_score": 100.0
+    },
+    {
+      "capability_id": "table.duckdb",
+      "result_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_duckdb/result.json",
+      "tool_result_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_duckdb/tool-result.json",
+      "manifest_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_duckdb/capability-manifest.json",
+      "duration_ms": 420,
+      "verification_path": "docs/plans/phase4b-batch0-results/table-workload-filter/table_duckdb/verification.json",
+      "verification_status": "pass",
+      "quality_score": 100.0
+    }
+  ]
+}

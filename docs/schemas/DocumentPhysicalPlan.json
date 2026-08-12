@@ -1,0 +1,399 @@
+{
+  "$defs": {
+    "AuditOperator": {
+      "enum": [
+        "exists",
+        "not_exists",
+        "contains",
+        "regex",
+        "numeric_eq",
+        "numeric_lte",
+        "numeric_gte",
+        "date_lte",
+        "date_gte",
+        "semantic"
+      ],
+      "title": "AuditOperator",
+      "type": "string"
+    },
+    "AuditRule": {
+      "additionalProperties": false,
+      "properties": {
+        "rule_id": {
+          "pattern": "^rule_[a-z0-9_]+$",
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "label": {
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "query": {
+          "minLength": 1,
+          "title": "Query",
+          "type": "string"
+        },
+        "operator": {
+          "$ref": "#/$defs/AuditOperator"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Unit"
+        },
+        "pattern": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Pattern"
+        }
+      },
+      "required": [
+        "rule_id",
+        "label",
+        "query",
+        "operator"
+      ],
+      "title": "AuditRule",
+      "type": "object"
+    },
+    "ContentPolicy": {
+      "enum": [
+        "verbatim",
+        "normalized",
+        "summarized",
+        "rewritten",
+        "translated",
+        "analyzed"
+      ],
+      "title": "ContentPolicy",
+      "type": "string"
+    },
+    "DocumentAction": {
+      "enum": [
+        "verbatim",
+        "compare",
+        "audit",
+        "summarize",
+        "rewrite",
+        "translate",
+        "compose"
+      ],
+      "title": "DocumentAction",
+      "type": "string"
+    },
+    "DocumentPlanStatus": {
+      "enum": [
+        "ready",
+        "needs_user"
+      ],
+      "title": "DocumentPlanStatus",
+      "type": "string"
+    },
+    "DocumentSelection": {
+      "additionalProperties": false,
+      "properties": {
+        "semantic_ref": {
+          "minLength": 1,
+          "title": "Semantic Ref",
+          "type": "string"
+        },
+        "label": {
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "artifact_element_ids": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "title": "Artifact Element Ids",
+          "type": "object"
+        }
+      },
+      "required": [
+        "semantic_ref",
+        "label"
+      ],
+      "title": "DocumentSelection",
+      "type": "object"
+    },
+    "DocumentSource": {
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "artifact_id": {
+          "minLength": 1,
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "artifact_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Artifact Sha256",
+          "type": "string"
+        },
+        "detected_format": {
+          "minLength": 1,
+          "title": "Detected Format",
+          "type": "string"
+        },
+        "original_name": {
+          "minLength": 1,
+          "title": "Original Name",
+          "type": "string"
+        },
+        "element_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Element Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "source_id",
+        "artifact_id",
+        "artifact_sha256",
+        "detected_format",
+        "original_name"
+      ],
+      "title": "DocumentSource",
+      "type": "object"
+    },
+    "RuntimePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/RuntimeProfileName"
+        },
+        "threads": {
+          "minimum": 1,
+          "title": "Threads",
+          "type": "integer"
+        },
+        "memory_limit": {
+          "pattern": "^\\d+(?:MB|GB)$",
+          "title": "Memory Limit",
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        },
+        "arrow_batch_rows": {
+          "minimum": 1024,
+          "title": "Arrow Batch Rows",
+          "type": "integer"
+        },
+        "max_temp_bytes": {
+          "minimum": 1,
+          "title": "Max Temp Bytes",
+          "type": "integer"
+        },
+        "max_input_bytes": {
+          "minimum": 1,
+          "title": "Max Input Bytes",
+          "type": "integer"
+        },
+        "max_input_rows": {
+          "minimum": 1,
+          "title": "Max Input Rows",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "profile",
+        "threads",
+        "memory_limit",
+        "timeout_seconds",
+        "arrow_batch_rows",
+        "max_temp_bytes",
+        "max_input_bytes",
+        "max_input_rows"
+      ],
+      "title": "RuntimePolicy",
+      "type": "object"
+    },
+    "RuntimeProfileName": {
+      "enum": [
+        "windows_local",
+        "server"
+      ],
+      "title": "RuntimeProfileName",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "spec_version": {
+      "default": "1",
+      "pattern": "^1$",
+      "title": "Spec Version",
+      "type": "string"
+    },
+    "physical_plan_id": {
+      "minLength": 1,
+      "title": "Physical Plan Id",
+      "type": "string"
+    },
+    "logical_plan_id": {
+      "minLength": 1,
+      "title": "Logical Plan Id",
+      "type": "string"
+    },
+    "logical_plan_revision": {
+      "minimum": 1,
+      "title": "Logical Plan Revision",
+      "type": "integer"
+    },
+    "logical_plan_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Logical Plan Hash",
+      "type": "string"
+    },
+    "bound_plan_id": {
+      "minLength": 1,
+      "title": "Bound Plan Id",
+      "type": "string"
+    },
+    "bound_plan_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Bound Plan Hash",
+      "type": "string"
+    },
+    "binding_revision": {
+      "minimum": 1,
+      "title": "Binding Revision",
+      "type": "integer"
+    },
+    "status": {
+      "$ref": "#/$defs/DocumentPlanStatus"
+    },
+    "capability_id": {
+      "default": "document.evidence",
+      "pattern": "^[a-z0-9._-]+$",
+      "title": "Capability Id",
+      "type": "string"
+    },
+    "capability_version": {
+      "default": "1.0.0",
+      "minLength": 1,
+      "title": "Capability Version",
+      "type": "string"
+    },
+    "action": {
+      "$ref": "#/$defs/DocumentAction"
+    },
+    "content_policy": {
+      "$ref": "#/$defs/ContentPolicy"
+    },
+    "sources": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DocumentSource"
+      },
+      "title": "Sources",
+      "type": "array"
+    },
+    "selections": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DocumentSelection"
+      },
+      "title": "Selections",
+      "type": "array"
+    },
+    "whole_document": {
+      "default": false,
+      "title": "Whole Document",
+      "type": "boolean"
+    },
+    "audit_rules": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AuditRule"
+      },
+      "title": "Audit Rules",
+      "type": "array"
+    },
+    "instruction": {
+      "minLength": 1,
+      "title": "Instruction",
+      "type": "string"
+    },
+    "target_language": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Target Language"
+    },
+    "runtime_policy": {
+      "$ref": "#/$defs/RuntimePolicy"
+    },
+    "diagnostics": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Diagnostics",
+      "type": "array"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "physical_plan_id",
+    "logical_plan_id",
+    "logical_plan_revision",
+    "logical_plan_hash",
+    "bound_plan_id",
+    "bound_plan_hash",
+    "binding_revision",
+    "status",
+    "action",
+    "content_policy",
+    "instruction",
+    "runtime_policy"
+  ],
+  "title": "DocumentPhysicalPlan",
+  "type": "object"
+}

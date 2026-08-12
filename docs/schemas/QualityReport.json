@@ -1,0 +1,103 @@
+{
+  "$defs": {
+    "QualityDimensionResult": {
+      "description": "单个质量维度结果（plan 9：正确/完整/有效/唯一/一致/新鲜/可追溯）。",
+      "properties": {
+        "name": {
+          "description": "维度名，如 采集完整性/字段有效性",
+          "title": "Name",
+          "type": "string"
+        },
+        "value": {
+          "description": "实际值，通常 0-1",
+          "title": "Value",
+          "type": "number"
+        },
+        "threshold": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "阈值",
+          "title": "Threshold"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "details": {
+          "additionalProperties": true,
+          "description": "明细：覆盖率/违规数/样本等",
+          "title": "Details",
+          "type": "object"
+        }
+      },
+      "required": [
+        "name",
+        "value",
+        "passed"
+      ],
+      "title": "QualityDimensionResult",
+      "type": "object"
+    },
+    "QualityResult": {
+      "description": "质量门结论。fail 时只交付原始/隔离/失败报告，不标\"干净数据\"。",
+      "enum": [
+        "pass",
+        "warn",
+        "fail"
+      ],
+      "title": "QualityResult",
+      "type": "string"
+    }
+  },
+  "description": "质量报告。机器读取，强制生成。",
+  "properties": {
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "overall": {
+      "$ref": "#/$defs/QualityResult"
+    },
+    "dimensions": {
+      "items": {
+        "$ref": "#/$defs/QualityDimensionResult"
+      },
+      "title": "Dimensions",
+      "type": "array"
+    },
+    "issues": {
+      "description": "问题清单，人可读",
+      "items": {
+        "type": "string"
+      },
+      "title": "Issues",
+      "type": "array"
+    },
+    "counts": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "description": "记录账本：raw/parsed/clean/rejects_parse/rejects_clean/merged",
+      "title": "Counts",
+      "type": "object"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "title": "Generated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "task_id",
+    "overall"
+  ],
+  "title": "QualityReport",
+  "type": "object"
+}

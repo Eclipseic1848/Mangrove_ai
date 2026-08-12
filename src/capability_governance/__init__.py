@@ -1,0 +1,78 @@
+# -*- coding: utf-8 -*-
+"""CapabilityGovernance 公共 Interface。"""
+
+from .models import (
+    CapabilitySupplyChainEvidence,
+    CapabilityEligibility,
+    CapabilityGovernanceEvent,
+    CapabilityGovernanceProjection,
+    CapabilityGovernanceTarget,
+    CapabilityGovernanceView,
+    CapabilityValidationRun,
+    CapabilityLifecycle,
+    CapabilityMaturity,
+    SupplyChainCollection,
+    SupplyChainEvidenceStatus,
+    TrivyDatabaseMetadata,
+    ValidationRunStatus,
+    ValidationTaskRef,
+    ValidationTaskOption,
+    ValidationEvidence,
+    ValidationStep,
+    ValidationStepStatus,
+)
+from .supply_chain import (
+    CapabilitySupplyChainEvidenceService,
+    LockedCliSupplyChainTools,
+    SupplyChainTools,
+)
+from .repository import (
+    CapabilityGovernanceRepository,
+    InMemoryCapabilityGovernanceRepository,
+)
+from .service import CapabilityGovernance, CapabilityValidationExecutor
+from .sqlite_repository import (
+    SqliteCapabilityGovernanceRepository,
+    migrate_capability_governance,
+)
+from .task_replay import SqliteValidationTaskResolver, ValidationTaskResolver
+from .validation_runtime import (
+    CapabilityValidationManager,
+    PiTaskReplayRunner,
+    TaskEvidenceValidationExecutor,
+)
+
+__all__ = [
+    "CapabilityEligibility",
+    "CapabilityGovernance",
+    "CapabilityGovernanceEvent",
+    "CapabilityGovernanceProjection",
+    "CapabilityGovernanceRepository",
+    "CapabilityGovernanceTarget",
+    "CapabilityGovernanceView",
+    "CapabilityValidationRun",
+    "CapabilityValidationExecutor",
+    "CapabilityLifecycle",
+    "CapabilityMaturity",
+    "CapabilitySupplyChainEvidence",
+    "CapabilitySupplyChainEvidenceService",
+    "LockedCliSupplyChainTools",
+    "SupplyChainCollection",
+    "SupplyChainEvidenceStatus",
+    "SupplyChainTools",
+    "TrivyDatabaseMetadata",
+    "ValidationRunStatus",
+    "ValidationTaskRef",
+    "ValidationTaskOption",
+    "ValidationEvidence",
+    "ValidationStep",
+    "ValidationStepStatus",
+    "InMemoryCapabilityGovernanceRepository",
+    "SqliteCapabilityGovernanceRepository",
+    "SqliteValidationTaskResolver",
+    "ValidationTaskResolver",
+    "CapabilityValidationManager",
+    "PiTaskReplayRunner",
+    "TaskEvidenceValidationExecutor",
+    "migrate_capability_governance",
+]

@@ -1,0 +1,14 @@
+# SearXNG 自托管元搜索（开源、免费、无额度）——作为 search 采集器的免费后端。
+# 启动：cd docker/searxng && docker compose up -d
+# 之后在项目 .env 配置：SEARXNG_BASE_URL=http://localhost:8080
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: mangrove-searxng
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+    restart: unless-stopped

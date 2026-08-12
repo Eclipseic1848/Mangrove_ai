@@ -1,0 +1,298 @@
+{
+  "manifest_version": "1",
+  "generated_by": "scripts/generate_semantic_batch0_fixtures.py",
+  "deidentified": true,
+  "core_formats": [
+    "xlsx",
+    "csv",
+    "tsv",
+    "json",
+    "jsonl",
+    "parquet",
+    "pdf",
+    "docx",
+    "pptx",
+    "html",
+    "markdown"
+  ],
+  "compatibility_formats": [
+    "xls",
+    "ods",
+    "doc",
+    "odt",
+    "rtf",
+    "txt",
+    "xml",
+    "epub",
+    "ppt",
+    "odp",
+    "png",
+    "jpg",
+    "webp",
+    "tiff",
+    "bmp",
+    "zip",
+    "rar",
+    "7z"
+  ],
+  "files": [
+    {
+      "path": "assets/batch0-safe.zip",
+      "format": "zip",
+      "role": "input",
+      "sha256": "66575b59d756fd4c85ba6816232a1100fbe344c8d7fbe31bfba5de246195e8b9",
+      "size_bytes": 40856
+    },
+    {
+      "path": "assets/form.bmp",
+      "format": "bmp",
+      "role": "input",
+      "sha256": "8e03a95dc489b0df4e18e8400e33e892476fcd3fcbe0d4f28700744a656f6710",
+      "size_bytes": 1800054
+    },
+    {
+      "path": "assets/form.jpg",
+      "format": "jpg",
+      "role": "input",
+      "sha256": "4adfd7e445cbc759e8075c4c59f4de5373ec58d68efacef121b7f034aab54208",
+      "size_bytes": 29179
+    },
+    {
+      "path": "assets/form.png",
+      "format": "png",
+      "role": "input",
+      "sha256": "1ddcd6c9c315b9f6538ffb85299418c90d89544b39866f54fa2e5518cb330f55",
+      "size_bytes": 28045
+    },
+    {
+      "path": "assets/form.tiff",
+      "format": "tiff",
+      "role": "input",
+      "sha256": "f425a2b694dd5aec17228a2ecd87e4acaba70ac613a3e72bba32a89b2e86a3a1",
+      "size_bytes": 1800140
+    },
+    {
+      "path": "assets/form.webp",
+      "format": "webp",
+      "role": "input",
+      "sha256": "26b289578524711738feb81a3034d18ce776384a99679e535084a3080d219946",
+      "size_bytes": 12404
+    },
+    {
+      "path": "documents/contract-v2.docx",
+      "format": "docx",
+      "role": "input",
+      "sha256": "0d5d86c18eefdf82ff8374b198a5fe90c97319a2cbef10fd3732195764d923d7",
+      "size_bytes": 36896
+    },
+    {
+      "path": "documents/contract-v2.pdf",
+      "format": "pdf",
+      "role": "input",
+      "sha256": "a72ee2c57b6d87047ec0c70092dd897ef88f6eceeade91c8eb4e1740ed9e6dce",
+      "size_bytes": 40989
+    },
+    {
+      "path": "documents/contract.docx",
+      "format": "docx",
+      "role": "input",
+      "sha256": "55d0e69c0ded8308a41f530cb479efde78f5d623e36de97882dc3da17ea0446f",
+      "size_bytes": 36884
+    },
+    {
+      "path": "documents/contract.html",
+      "format": "html",
+      "role": "input",
+      "sha256": "7ee572bb69928e8dd9fe251bbbee566ee4d05073d8edc757abe05adb6b62688b",
+      "size_bytes": 451
+    },
+    {
+      "path": "documents/contract.md",
+      "format": "md",
+      "role": "input",
+      "sha256": "26c3ef5efdb03595c26bbb9586615afd2efa7eaaedd073f57e80838e6fd410ad",
+      "size_bytes": 322
+    },
+    {
+      "path": "documents/contract.pdf",
+      "format": "pdf",
+      "role": "input",
+      "sha256": "fb8900a62d5a12902cb1705f2fb0b977e55884ba8e9bd46d9c91036992d00a88",
+      "size_bytes": 39607
+    },
+    {
+      "path": "documents/contract.pptx",
+      "format": "pptx",
+      "role": "input",
+      "sha256": "205e62c975900bb2dd2d7e567aec9cba309d5747a37ddd72813d41fae7cec84f",
+      "size_bytes": 30230
+    },
+    {
+      "path": "documents/contract.txt",
+      "format": "txt",
+      "role": "input",
+      "sha256": "30a5e9c4831d2c2bd4a34f4edb8c68e3e4241b7ecda125ee4b895173527379f6",
+      "size_bytes": 282
+    },
+    {
+      "path": "documents/contract.xml",
+      "format": "xml",
+      "role": "input",
+      "sha256": "c6063fe4a612afa84397fd98f91a36fd4d9543571f9c37476eb5984b399a19bc",
+      "size_bytes": 408
+    },
+    {
+      "path": "documents/damaged.pdf",
+      "format": "pdf",
+      "role": "input",
+      "sha256": "8aa12592b63f02a33452b8db8c5f44681cd9e91e459feb659cd18550573dcd07",
+      "size_bytes": 128
+    },
+    {
+      "path": "documents/encrypted.pdf",
+      "format": "pdf",
+      "role": "input",
+      "sha256": "b0fd36b3f0e922925d481cc0916eb38aff6037ea3829226a76521a92fa72701f",
+      "size_bytes": 39507
+    },
+    {
+      "path": "documents/expected-clauses-and-diff.json",
+      "format": "json",
+      "role": "expected",
+      "sha256": "3cf8d575ee479944d064eed8c8cd7c861fad718d9dcb6a73deaabf6ba5607427",
+      "size_bytes": 980
+    },
+    {
+      "path": "documents/unsupported.bin",
+      "format": "bin",
+      "role": "input",
+      "sha256": "f292691de8b86d3d4759a1514613c7fe43d256994bc27f921ff21f6386699c9d",
+      "size_bytes": 20
+    },
+    {
+      "path": "table_operations/departments-duplicate.parquet",
+      "format": "parquet",
+      "role": "input",
+      "sha256": "8ae5c393a55d6d12bb379b7d87bc53e5c8e8b44e887bac1dc7dbacc39c1784cb",
+      "size_bytes": 1778
+    },
+    {
+      "path": "table_operations/departments.parquet",
+      "format": "parquet",
+      "role": "input",
+      "sha256": "63b734c68b2469588f43f00e50175505c3b797d94c1b857c15fc217f651d37b6",
+      "size_bytes": 1771
+    },
+    {
+      "path": "table_operations/expected.json",
+      "format": "json",
+      "role": "expected",
+      "sha256": "db44786b8537443fe6ad95598527ca327823f69f8c73ec1a3873a6765e6630c1",
+      "size_bytes": 861
+    },
+    {
+      "path": "table_operations/facts.parquet",
+      "format": "parquet",
+      "role": "input",
+      "sha256": "64c3dc7b3da10963e462235b716214596944d2d8081ef1b0d53e595ac01c97f5",
+      "size_bytes": 3585
+    },
+    {
+      "path": "workload_filter/expected-records.json",
+      "format": "json",
+      "role": "expected",
+      "sha256": "069919d6b57767203b03b3ca49d2b10a48cac2a0e56b041d42af6237bed31787",
+      "size_bytes": 905
+    },
+    {
+      "path": "workload_filter/expected.csv",
+      "format": "csv",
+      "role": "expected",
+      "sha256": "ae60e271a0a0c843a331c6b27e66b1f762fef42260f59028ae101203dbb2ec3c",
+      "size_bytes": 182
+    },
+    {
+      "path": "workload_filter/source.csv",
+      "format": "csv",
+      "role": "input",
+      "sha256": "fab82ca3ecdc4ba2e37aa7580e0a1de79d54dd11feb871c25c9b7933014b78d7",
+      "size_bytes": 1233
+    },
+    {
+      "path": "workload_filter/source.html",
+      "format": "html",
+      "role": "input",
+      "sha256": "4a162b97a1164a4b3b08b04dfa1dba22871a4551defc188147a6bb3ce4fd4266",
+      "size_bytes": 3183
+    },
+    {
+      "path": "workload_filter/source.json",
+      "format": "json",
+      "role": "input",
+      "sha256": "e5dbc34759d78a871491a5f6845a064a6d0efc80228af29e3a8138517f14a899",
+      "size_bytes": 3515
+    },
+    {
+      "path": "workload_filter/source.jsonl",
+      "format": "jsonl",
+      "role": "input",
+      "sha256": "ac8e1ea73efc0416d5c4132e36517e14ff854850f1aab6cf3645124f6a9d7d13",
+      "size_bytes": 2904
+    },
+    {
+      "path": "workload_filter/source.parquet",
+      "format": "parquet",
+      "role": "input",
+      "sha256": "1dca9614b80095fa355f0e2ce866fa0f716977a23855d06079f9ca00b8271aec",
+      "size_bytes": 4596
+    },
+    {
+      "path": "workload_filter/source.tsv",
+      "format": "tsv",
+      "role": "input",
+      "sha256": "92ced091fcddfd2dc2ce276b30dd00f3d192c03db74e3b870264a292fa412b47",
+      "size_bytes": 1233
+    },
+    {
+      "path": "workload_filter/source.xlsx",
+      "format": "xlsx",
+      "role": "input",
+      "sha256": "ecec0786d06f11feea200f8615b2fdbe98e3113b3b7bee1e755e3c1a30b55579",
+      "size_bytes": 6978
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "workload_filter",
+      "task_family": "tabular_transform",
+      "plan_id": "plan_workload_filter_v1",
+      "canonical_input": "workload_filter/source.parquet",
+      "input_paths": {
+        "csv": "workload_filter/source.csv",
+        "tsv": "workload_filter/source.tsv",
+        "xlsx": "workload_filter/source.xlsx",
+        "json": "workload_filter/source.json",
+        "jsonl": "workload_filter/source.jsonl",
+        "parquet": "workload_filter/source.parquet",
+        "html": "workload_filter/source.html"
+      },
+      "selection": {
+        "姓名": "示例人员甲"
+      },
+      "projection": [
+        "核销工作量天数",
+        "工作量费用"
+      ],
+      "expected": {
+        "records_path": "workload_filter/expected-records.json",
+        "row_count": 11,
+        "visible_columns": [
+          "核销工作量天数",
+          "工作量费用"
+        ],
+        "table_count": 1,
+        "evidence_coverage": 1.0
+      }
+    }
+  ]
+}

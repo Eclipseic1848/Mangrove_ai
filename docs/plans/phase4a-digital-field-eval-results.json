@@ -1,0 +1,1816 @@
+{
+  "documents": 7,
+  "expected_fields": 21,
+  "field_metrics": {
+    "true_positive": 21,
+    "false_positive": 0,
+    "false_negative": 0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "exact_value_accuracy": 1.0
+  },
+  "evidence_metrics": {
+    "found_fields": 21,
+    "complete": 21,
+    "complete_rate": 1.0,
+    "page_correct": 21,
+    "page_accuracy": 1.0,
+    "quote_correct": 21,
+    "quote_accuracy": 1.0,
+    "cross_document_references": 0,
+    "unsafe_found": 0
+  },
+  "status_counts": {
+    "found": 21
+  },
+  "groups": {
+    "domain:bid": {
+      "expected": 9,
+      "correct": 9,
+      "found": 9,
+      "exact_accuracy": 1.0,
+      "found_rate": 1.0
+    },
+    "domain:contract": {
+      "expected": 12,
+      "correct": 12,
+      "found": 12,
+      "exact_accuracy": 1.0,
+      "found_rate": 1.0
+    },
+    "mode:digital": {
+      "expected": 21,
+      "correct": 21,
+      "found": 21,
+      "exact_accuracy": 1.0,
+      "found_rate": 1.0
+    }
+  },
+  "details": [
+    {
+      "document_id": "contract_01_digital",
+      "domain": "contract",
+      "mode": "digital",
+      "field_name": "contract_no",
+      "expected_value": "HT-2026-001",
+      "predicted_value": "HT-2026-001",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "contract_01_digital",
+      "domain": "contract",
+      "mode": "digital",
+      "field_name": "delivery_days",
+      "expected_value": "21 days",
+      "predicted_value": "21 days",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "contract_01_digital",
+      "domain": "contract",
+      "mode": "digital",
+      "field_name": "amount",
+      "expected_value": "CNY 101,234.00",
+      "predicted_value": "CNY 101,234.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "contract_02_digital",
+      "domain": "contract",
+      "mode": "digital",
+      "field_name": "contract_no",
+      "expected_value": "HT-2026-002",
+      "predicted_value": "HT-2026-002",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "contract_02_digital",
+      "domain": "contract",
+      "mode": "digital",
+      "field_name": "delivery_days",
+      "expected_value": "22 days",
+      "predicted_value": "22 days",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "contract_02_digital",
+      "domain": "contract",
+      "mode": "digital",
+      "field_name": "amount",
+      "expected_value": "CNY 102,468.00",
+      "predicted_value": "CNY 102,468.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "contract_03_digital",
+      "domain": "contract",
+      "mode": "digital",
+      "field_name": "contract_no",
+      "expected_value": "HT-2026-003",
+      "predicted_value": "HT-2026-003",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "contract_03_digital",
+      "domain": "contract",
+      "mode": "digital",
+      "field_name": "delivery_days",
+      "expected_value": "23 days",
+      "predicted_value": "23 days",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "contract_03_digital",
+      "domain": "contract",
+      "mode": "digital",
+      "field_name": "amount",
+      "expected_value": "CNY 103,702.00",
+      "predicted_value": "CNY 103,702.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "contract_04_digital",
+      "domain": "contract",
+      "mode": "digital",
+      "field_name": "contract_no",
+      "expected_value": "HT-2026-004",
+      "predicted_value": "HT-2026-004",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "contract_04_digital",
+      "domain": "contract",
+      "mode": "digital",
+      "field_name": "delivery_days",
+      "expected_value": "24 days",
+      "predicted_value": "24 days",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "contract_04_digital",
+      "domain": "contract",
+      "mode": "digital",
+      "field_name": "amount",
+      "expected_value": "CNY 104,936.00",
+      "predicted_value": "CNY 104,936.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "bid_01_digital",
+      "domain": "bid",
+      "mode": "digital",
+      "field_name": "project_no",
+      "expected_value": "BID-2026-001",
+      "predicted_value": "BID-2026-001",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "bid_01_digital",
+      "domain": "bid",
+      "mode": "digital",
+      "field_name": "deadline",
+      "expected_value": "2026-09-11 17:00",
+      "predicted_value": "2026-09-11 17:00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "bid_01_digital",
+      "domain": "bid",
+      "mode": "digital",
+      "field_name": "bond",
+      "expected_value": "CNY 5,500.00",
+      "predicted_value": "CNY 5,500.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "bid_02_digital",
+      "domain": "bid",
+      "mode": "digital",
+      "field_name": "project_no",
+      "expected_value": "BID-2026-002",
+      "predicted_value": "BID-2026-002",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "bid_02_digital",
+      "domain": "bid",
+      "mode": "digital",
+      "field_name": "deadline",
+      "expected_value": "2026-09-12 17:00",
+      "predicted_value": "2026-09-12 17:00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "bid_02_digital",
+      "domain": "bid",
+      "mode": "digital",
+      "field_name": "bond",
+      "expected_value": "CNY 6,000.00",
+      "predicted_value": "CNY 6,000.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "bid_03_digital",
+      "domain": "bid",
+      "mode": "digital",
+      "field_name": "project_no",
+      "expected_value": "BID-2026-003",
+      "predicted_value": "BID-2026-003",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "bid_03_digital",
+      "domain": "bid",
+      "mode": "digital",
+      "field_name": "deadline",
+      "expected_value": "2026-09-13 17:00",
+      "predicted_value": "2026-09-13 17:00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    },
+    {
+      "document_id": "bid_03_digital",
+      "domain": "bid",
+      "mode": "digital",
+      "field_name": "bond",
+      "expected_value": "CNY 6,500.00",
+      "predicted_value": "CNY 6,500.00",
+      "status": "found",
+      "value_correct": true,
+      "evidence_complete": true,
+      "artifact_correct": true,
+      "page_correct": true,
+      "quote_correct": true
+    }
+  ],
+  "selection": {
+    "domains": [
+      "bid",
+      "contract"
+    ],
+    "modes": [
+      "digital"
+    ],
+    "limit": 0
+  },
+  "predictions": {
+    "contract_01_digital": [
+      {
+        "name": "contract_no",
+        "value": "HT-2026-001",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-2b4cb1661c77b137",
+            "element_id": "el_253ef9220df335b5fb28aa74",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 109.81400000000008,
+              "x1": 115.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "contract_no:",
+            "quote_sha256": "b42a7d13d79513180b60d76cca94854bf5d2a31cd0928582866acddc4b84564d",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-2b4cb1661c77b137",
+            "element_id": "el_2211e1429617389cea2535e1",
+            "page": 2,
+            "bbox": {
+              "x0": 122.18,
+              "y0": 109.81400000000008,
+              "x1": 199.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "HT-2026-001",
+            "quote_sha256": "16c2b9106c770e353d61d9ec647d8ac9317f95ec365139588f1b4415000749a6",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "contract_no",
+            "value": "HT-2026-001",
+            "quote": "contract_no: HT-2026-001",
+            "element_ids": [
+              "el_253ef9220df335b5fb28aa74",
+              "el_2211e1429617389cea2535e1"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "delivery_days",
+        "value": "21 days",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-2b4cb1661c77b137",
+            "element_id": "el_72c21e9389de478d135f8e51",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 135.32400000000007,
+              "x1": 129.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "delivery_days:",
+            "quote_sha256": "8b456dfd5cce98fd167296179e4f86678ab5e3425a35336f1f4e28c5952fe937",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-2b4cb1661c77b137",
+            "element_id": "el_cf860d88362d3d4e59b3cab5",
+            "page": 2,
+            "bbox": {
+              "x0": 136.18,
+              "y0": 135.32400000000007,
+              "x1": 150.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "21",
+            "quote_sha256": "6f4b6612125fb3a0daecd2799dfd6c9c299424fd920f9b308110a2c1fbd8f443",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-2b4cb1661c77b137",
+            "element_id": "el_5d3944b4cad39c917807a5fa",
+            "page": 2,
+            "bbox": {
+              "x0": 157.18,
+              "y0": 135.32400000000007,
+              "x1": 185.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "days",
+            "quote_sha256": "ab51004e9d71a485f160f655fb9e72bcdef8f5ca4178b26938b49471456fd11c",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "delivery_days",
+            "value": "21 days",
+            "quote": "delivery_days: 21 days",
+            "element_ids": [
+              "el_72c21e9389de478d135f8e51",
+              "el_cf860d88362d3d4e59b3cab5",
+              "el_5d3944b4cad39c917807a5fa"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "amount",
+        "value": "CNY 101,234.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-2b4cb1661c77b137",
+            "element_id": "el_1021d8d02c75158361475284",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 160.83400000000006,
+              "x1": 80.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "amount:",
+            "quote_sha256": "2aff7595608a884d6efb03b3b59d881079c256fc55185ecabaa7272586207a36",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-2b4cb1661c77b137",
+            "element_id": "el_f4b7509905694cd9bc340a05",
+            "page": 2,
+            "bbox": {
+              "x0": 87.18,
+              "y0": 160.83400000000006,
+              "x1": 108.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "CNY",
+            "quote_sha256": "d9a248aa1fe16b27e2445be76826e59119de2023ebb8b5bfebc98def37d997f5",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-2b4cb1661c77b137",
+            "element_id": "el_128341a1bb9fd1e0aed1a972",
+            "page": 2,
+            "bbox": {
+              "x0": 115.18,
+              "y0": 160.83400000000006,
+              "x1": 185.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "101,234.00",
+            "quote_sha256": "447522556cd035e99e3c89931be4805a39d67bd4b98c6fe1fd5e588f78d5a91e",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "amount",
+            "value": "CNY 101,234.00",
+            "quote": "amount: CNY 101,234.00",
+            "element_ids": [
+              "el_1021d8d02c75158361475284",
+              "el_f4b7509905694cd9bc340a05",
+              "el_128341a1bb9fd1e0aed1a972"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "contract_02_digital": [
+      {
+        "name": "contract_no",
+        "value": "HT-2026-002",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-e5a33d7f0293e749",
+            "element_id": "el_9dc34728bf8a15ef4f1bd0ff",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 109.81400000000008,
+              "x1": 115.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "contract_no:",
+            "quote_sha256": "b42a7d13d79513180b60d76cca94854bf5d2a31cd0928582866acddc4b84564d",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-e5a33d7f0293e749",
+            "element_id": "el_a73a992faeeee7bd1c7ed726",
+            "page": 2,
+            "bbox": {
+              "x0": 122.18,
+              "y0": 109.81400000000008,
+              "x1": 199.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "HT-2026-002",
+            "quote_sha256": "f0d02d5678838366db1ac7ac361cd3f423c63c2865f129e6de1f23296a8737d9",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "contract_no",
+            "value": "HT-2026-002",
+            "quote": "contract_no: HT-2026-002",
+            "element_ids": [
+              "el_9dc34728bf8a15ef4f1bd0ff",
+              "el_a73a992faeeee7bd1c7ed726"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "delivery_days",
+        "value": "22 days",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-e5a33d7f0293e749",
+            "element_id": "el_5f6511be062f5e969d9bd36a",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 135.32400000000007,
+              "x1": 129.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "delivery_days:",
+            "quote_sha256": "8b456dfd5cce98fd167296179e4f86678ab5e3425a35336f1f4e28c5952fe937",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-e5a33d7f0293e749",
+            "element_id": "el_8fed4fa465fb9771ca6e5503",
+            "page": 2,
+            "bbox": {
+              "x0": 136.18,
+              "y0": 135.32400000000007,
+              "x1": 150.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "22",
+            "quote_sha256": "785f3ec7eb32f30b90cd0fcf3657d388b5ff4297f2f9716ff66e9b69c05ddd09",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-e5a33d7f0293e749",
+            "element_id": "el_5a45bf0d4f693ab00534f3cc",
+            "page": 2,
+            "bbox": {
+              "x0": 157.18,
+              "y0": 135.32400000000007,
+              "x1": 185.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "days",
+            "quote_sha256": "ab51004e9d71a485f160f655fb9e72bcdef8f5ca4178b26938b49471456fd11c",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "delivery_days",
+            "value": "22 days",
+            "quote": "delivery_days: 22 days",
+            "element_ids": [
+              "el_5f6511be062f5e969d9bd36a",
+              "el_8fed4fa465fb9771ca6e5503",
+              "el_5a45bf0d4f693ab00534f3cc"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "amount",
+        "value": "CNY 102,468.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-e5a33d7f0293e749",
+            "element_id": "el_d112e3df7b051e69f7e25dde",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 160.83400000000006,
+              "x1": 80.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "amount:",
+            "quote_sha256": "2aff7595608a884d6efb03b3b59d881079c256fc55185ecabaa7272586207a36",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-e5a33d7f0293e749",
+            "element_id": "el_8e71671fdfe21b83420a3ace",
+            "page": 2,
+            "bbox": {
+              "x0": 87.18,
+              "y0": 160.83400000000006,
+              "x1": 108.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "CNY",
+            "quote_sha256": "d9a248aa1fe16b27e2445be76826e59119de2023ebb8b5bfebc98def37d997f5",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-e5a33d7f0293e749",
+            "element_id": "el_93b81439f76aff91adfbe33e",
+            "page": 2,
+            "bbox": {
+              "x0": 115.18,
+              "y0": 160.83400000000006,
+              "x1": 185.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "102,468.00",
+            "quote_sha256": "c11dd349c414e01b9364f15fd4c9c221f4e76931cee03158020a2b34c44e8e18",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "amount",
+            "value": "CNY 102,468.00",
+            "quote": "amount: CNY 102,468.00",
+            "element_ids": [
+              "el_d112e3df7b051e69f7e25dde",
+              "el_8e71671fdfe21b83420a3ace",
+              "el_93b81439f76aff91adfbe33e"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "contract_03_digital": [
+      {
+        "name": "contract_no",
+        "value": "HT-2026-003",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-c9462eecb22f4680",
+            "element_id": "el_c64885ac3d27ed92d7991418",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 109.81400000000008,
+              "x1": 115.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "contract_no:",
+            "quote_sha256": "b42a7d13d79513180b60d76cca94854bf5d2a31cd0928582866acddc4b84564d",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-c9462eecb22f4680",
+            "element_id": "el_b8ee3753f5bc6f603f55521d",
+            "page": 2,
+            "bbox": {
+              "x0": 122.18,
+              "y0": 109.81400000000008,
+              "x1": 199.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "HT-2026-003",
+            "quote_sha256": "786ae6535f80521018065aaf9645c286370d5a5852fd0be2a36ec2cc286e6f21",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "contract_no",
+            "value": "HT-2026-003",
+            "quote": "contract_no: HT-2026-003",
+            "element_ids": [
+              "el_c64885ac3d27ed92d7991418",
+              "el_b8ee3753f5bc6f603f55521d"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "delivery_days",
+        "value": "23 days",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-c9462eecb22f4680",
+            "element_id": "el_75638e10800c1ad386299d5b",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 135.32400000000007,
+              "x1": 129.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "delivery_days:",
+            "quote_sha256": "8b456dfd5cce98fd167296179e4f86678ab5e3425a35336f1f4e28c5952fe937",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-c9462eecb22f4680",
+            "element_id": "el_f516139f60860d7357b48713",
+            "page": 2,
+            "bbox": {
+              "x0": 136.18,
+              "y0": 135.32400000000007,
+              "x1": 150.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "23",
+            "quote_sha256": "535fa30d7e25dd8a49f1536779734ec8286108d115da5045d77f3b4185d8f790",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-c9462eecb22f4680",
+            "element_id": "el_9291d16858317e1255354e74",
+            "page": 2,
+            "bbox": {
+              "x0": 157.18,
+              "y0": 135.32400000000007,
+              "x1": 185.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "days",
+            "quote_sha256": "ab51004e9d71a485f160f655fb9e72bcdef8f5ca4178b26938b49471456fd11c",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "delivery_days",
+            "value": "23 days",
+            "quote": "delivery_days: 23 days",
+            "element_ids": [
+              "el_75638e10800c1ad386299d5b",
+              "el_f516139f60860d7357b48713",
+              "el_9291d16858317e1255354e74"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "amount",
+        "value": "CNY 103,702.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-c9462eecb22f4680",
+            "element_id": "el_66e93c8a4ad1c8d734004c4d",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 160.83400000000006,
+              "x1": 80.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "amount:",
+            "quote_sha256": "2aff7595608a884d6efb03b3b59d881079c256fc55185ecabaa7272586207a36",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-c9462eecb22f4680",
+            "element_id": "el_d6c62bbc467d3a3294eaa772",
+            "page": 2,
+            "bbox": {
+              "x0": 87.18,
+              "y0": 160.83400000000006,
+              "x1": 108.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "CNY",
+            "quote_sha256": "d9a248aa1fe16b27e2445be76826e59119de2023ebb8b5bfebc98def37d997f5",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-c9462eecb22f4680",
+            "element_id": "el_1df71d0b91a269d40d0d2b92",
+            "page": 2,
+            "bbox": {
+              "x0": 115.18,
+              "y0": 160.83400000000006,
+              "x1": 185.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "103,702.00",
+            "quote_sha256": "cf16d4ce81f18c8d2626b00ae9964fb229a00d0a6e47ad9b1da2765564c9c1d5",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "amount",
+            "value": "CNY 103,702.00",
+            "quote": "amount: CNY 103,702.00",
+            "element_ids": [
+              "el_66e93c8a4ad1c8d734004c4d",
+              "el_d6c62bbc467d3a3294eaa772",
+              "el_1df71d0b91a269d40d0d2b92"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "contract_04_digital": [
+      {
+        "name": "contract_no",
+        "value": "HT-2026-004",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-41ee88ccb0213de9",
+            "element_id": "el_9a7138cb2a25ab5409b88eb4",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 109.81400000000008,
+              "x1": 115.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "contract_no:",
+            "quote_sha256": "b42a7d13d79513180b60d76cca94854bf5d2a31cd0928582866acddc4b84564d",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-41ee88ccb0213de9",
+            "element_id": "el_a29984efc87ca4722148aae8",
+            "page": 2,
+            "bbox": {
+              "x0": 122.18,
+              "y0": 109.81400000000008,
+              "x1": 199.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "HT-2026-004",
+            "quote_sha256": "7d5736170ed4de0c6a9bcb720cbd8ea5b06e99de46666d45eb65f53c203553b3",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "contract_no",
+            "value": "HT-2026-004",
+            "quote": "contract_no: HT-2026-004",
+            "element_ids": [
+              "el_9a7138cb2a25ab5409b88eb4",
+              "el_a29984efc87ca4722148aae8"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "delivery_days",
+        "value": "24 days",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-41ee88ccb0213de9",
+            "element_id": "el_d1e77a2b88390a315bdfd5a0",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 135.32400000000007,
+              "x1": 129.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "delivery_days:",
+            "quote_sha256": "8b456dfd5cce98fd167296179e4f86678ab5e3425a35336f1f4e28c5952fe937",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-41ee88ccb0213de9",
+            "element_id": "el_a9be00a491741c6a00936371",
+            "page": 2,
+            "bbox": {
+              "x0": 136.18,
+              "y0": 135.32400000000007,
+              "x1": 150.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "24",
+            "quote_sha256": "c2356069e9d1e79ca924378153cfbbfb4d4416b1f99d41a2940bfdb66c5319db",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-41ee88ccb0213de9",
+            "element_id": "el_a4fbc7508150ec46bc90d401",
+            "page": 2,
+            "bbox": {
+              "x0": 157.18,
+              "y0": 135.32400000000007,
+              "x1": 185.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "days",
+            "quote_sha256": "ab51004e9d71a485f160f655fb9e72bcdef8f5ca4178b26938b49471456fd11c",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "delivery_days",
+            "value": "24 days",
+            "quote": "delivery_days: 24 days",
+            "element_ids": [
+              "el_d1e77a2b88390a315bdfd5a0",
+              "el_a9be00a491741c6a00936371",
+              "el_a4fbc7508150ec46bc90d401"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "amount",
+        "value": "CNY 104,936.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-41ee88ccb0213de9",
+            "element_id": "el_cd70b9d92511741c654334a7",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 160.83400000000006,
+              "x1": 80.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "amount:",
+            "quote_sha256": "2aff7595608a884d6efb03b3b59d881079c256fc55185ecabaa7272586207a36",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-41ee88ccb0213de9",
+            "element_id": "el_be1b72c56a78cbf9517ed1d0",
+            "page": 2,
+            "bbox": {
+              "x0": 87.18,
+              "y0": 160.83400000000006,
+              "x1": 108.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "CNY",
+            "quote_sha256": "d9a248aa1fe16b27e2445be76826e59119de2023ebb8b5bfebc98def37d997f5",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-41ee88ccb0213de9",
+            "element_id": "el_e6ebb9be2e1f56f79923d485",
+            "page": 2,
+            "bbox": {
+              "x0": 115.18,
+              "y0": 160.83400000000006,
+              "x1": 185.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "104,936.00",
+            "quote_sha256": "ad54660e49eba799e8de6777b2396547dfa8fe7f551255687bcd000aa06dafa3",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "amount",
+            "value": "CNY 104,936.00",
+            "quote": "amount: CNY 104,936.00",
+            "element_ids": [
+              "el_cd70b9d92511741c654334a7",
+              "el_be1b72c56a78cbf9517ed1d0",
+              "el_e6ebb9be2e1f56f79923d485"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "bid_01_digital": [
+      {
+        "name": "project_no",
+        "value": "BID-2026-001",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-51667d8cf6cff0aa",
+            "element_id": "el_0f558717d2f490a62a996377",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 109.81400000000008,
+              "x1": 108.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "project_no:",
+            "quote_sha256": "284767bd31192385def0426efbe789104a717c5358447dd23a343ab614ef2341",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-51667d8cf6cff0aa",
+            "element_id": "el_eee38969d60ac38dd6824a57",
+            "page": 2,
+            "bbox": {
+              "x0": 115.18,
+              "y0": 109.81400000000008,
+              "x1": 199.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "BID-2026-001",
+            "quote_sha256": "c39ec9c127009b3b04be71befb8f76cdc6190acff8e6c51eb0dc2aae63b238ca",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "project_no",
+            "value": "BID-2026-001",
+            "quote": "project_no: BID-2026-001",
+            "element_ids": [
+              "el_0f558717d2f490a62a996377",
+              "el_eee38969d60ac38dd6824a57"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "deadline",
+        "value": "2026-09-11 17:00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-51667d8cf6cff0aa",
+            "element_id": "el_6d835876e92a187b50e88b8b",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 135.32400000000007,
+              "x1": 94.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "deadline:",
+            "quote_sha256": "0abd5ea18648969d242759c1c3e12cb0908fa24f67c0a7999d9c8ad4fd9c8553",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-51667d8cf6cff0aa",
+            "element_id": "el_989164c167ecb50f23097a65",
+            "page": 2,
+            "bbox": {
+              "x0": 101.18,
+              "y0": 135.32400000000007,
+              "x1": 171.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "2026-09-11",
+            "quote_sha256": "d31fac478f875d3f8fa95a8a9a30f31d7f5d90946da706c50a45be42524934ba",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-51667d8cf6cff0aa",
+            "element_id": "el_2b2d0cd325cb43c54a0b807e",
+            "page": 2,
+            "bbox": {
+              "x0": 178.18,
+              "y0": 135.32400000000007,
+              "x1": 213.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "17:00",
+            "quote_sha256": "5fb7a8a9f0eec5311a89064381cfa76911b7a2a3aea25da45583ebb83009eb84",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "deadline",
+            "value": "2026-09-11 17:00",
+            "quote": "deadline: 2026-09-11 17:00",
+            "element_ids": [
+              "el_6d835876e92a187b50e88b8b",
+              "el_989164c167ecb50f23097a65",
+              "el_2b2d0cd325cb43c54a0b807e"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "bond",
+        "value": "CNY 5,500.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-51667d8cf6cff0aa",
+            "element_id": "el_17fa90fa22c3277771187d8f",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 160.83400000000006,
+              "x1": 66.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "bond:",
+            "quote_sha256": "56a3bb001441de921f2b690729aa5df2df06a9ca717f662edd58ee9a3e2db41e",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-51667d8cf6cff0aa",
+            "element_id": "el_f7aca6098156e29d2a962169",
+            "page": 2,
+            "bbox": {
+              "x0": 73.18,
+              "y0": 160.83400000000006,
+              "x1": 94.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "CNY",
+            "quote_sha256": "d9a248aa1fe16b27e2445be76826e59119de2023ebb8b5bfebc98def37d997f5",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-51667d8cf6cff0aa",
+            "element_id": "el_974beb63a36ae274ac96b09e",
+            "page": 2,
+            "bbox": {
+              "x0": 101.18,
+              "y0": 160.83400000000006,
+              "x1": 157.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "5,500.00",
+            "quote_sha256": "4087f831a636463d281aeca4ccd41b506c98964fabf19f1aa9de767de92c2eb6",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "bond",
+            "value": "CNY 5,500.00",
+            "quote": "bond: CNY 5,500.00",
+            "element_ids": [
+              "el_17fa90fa22c3277771187d8f",
+              "el_f7aca6098156e29d2a962169",
+              "el_974beb63a36ae274ac96b09e"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "bid_02_digital": [
+      {
+        "name": "project_no",
+        "value": "BID-2026-002",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-1e80002fa76d5979",
+            "element_id": "el_b246ff0eb5be18a9b95630e6",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 109.81400000000008,
+              "x1": 108.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "project_no:",
+            "quote_sha256": "284767bd31192385def0426efbe789104a717c5358447dd23a343ab614ef2341",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-1e80002fa76d5979",
+            "element_id": "el_0c2be86bfb3ddba33b0d78af",
+            "page": 2,
+            "bbox": {
+              "x0": 115.18,
+              "y0": 109.81400000000008,
+              "x1": 199.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "BID-2026-002",
+            "quote_sha256": "be2b32b5c2940a5be2d22eabf464c4673d2101fe2d40b3e328a6ae4d4e578a77",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "project_no",
+            "value": "BID-2026-002",
+            "quote": "project_no: BID-2026-002",
+            "element_ids": [
+              "el_b246ff0eb5be18a9b95630e6",
+              "el_0c2be86bfb3ddba33b0d78af"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "deadline",
+        "value": "2026-09-12 17:00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-1e80002fa76d5979",
+            "element_id": "el_ec0d73ec5874d559d35bba97",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 135.32400000000007,
+              "x1": 94.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "deadline:",
+            "quote_sha256": "0abd5ea18648969d242759c1c3e12cb0908fa24f67c0a7999d9c8ad4fd9c8553",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-1e80002fa76d5979",
+            "element_id": "el_9aeb54472fd1f3a90a4c438f",
+            "page": 2,
+            "bbox": {
+              "x0": 101.18,
+              "y0": 135.32400000000007,
+              "x1": 171.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "2026-09-12",
+            "quote_sha256": "97348e41854303762d25ff4d8aacd913230fd787b3a48e2a13d45b812597f4f9",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-1e80002fa76d5979",
+            "element_id": "el_dec268fa4b468d53a7974488",
+            "page": 2,
+            "bbox": {
+              "x0": 178.18,
+              "y0": 135.32400000000007,
+              "x1": 213.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "17:00",
+            "quote_sha256": "5fb7a8a9f0eec5311a89064381cfa76911b7a2a3aea25da45583ebb83009eb84",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "deadline",
+            "value": "2026-09-12 17:00",
+            "quote": "deadline: 2026-09-12 17:00",
+            "element_ids": [
+              "el_ec0d73ec5874d559d35bba97",
+              "el_9aeb54472fd1f3a90a4c438f",
+              "el_dec268fa4b468d53a7974488"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "bond",
+        "value": "CNY 6,000.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-1e80002fa76d5979",
+            "element_id": "el_11e26cc748c5f9026e221e59",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 160.83400000000006,
+              "x1": 66.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "bond:",
+            "quote_sha256": "56a3bb001441de921f2b690729aa5df2df06a9ca717f662edd58ee9a3e2db41e",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-1e80002fa76d5979",
+            "element_id": "el_7d1f0991c7413f40d23f394b",
+            "page": 2,
+            "bbox": {
+              "x0": 73.18,
+              "y0": 160.83400000000006,
+              "x1": 94.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "CNY",
+            "quote_sha256": "d9a248aa1fe16b27e2445be76826e59119de2023ebb8b5bfebc98def37d997f5",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-1e80002fa76d5979",
+            "element_id": "el_580c05998067eb8bcb5ffa61",
+            "page": 2,
+            "bbox": {
+              "x0": 101.18,
+              "y0": 160.83400000000006,
+              "x1": 157.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "6,000.00",
+            "quote_sha256": "3396ec65799a2eef52629bb1288716d71e5285bafdffddd49a9d54a596026846",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "bond",
+            "value": "CNY 6,000.00",
+            "quote": "bond: CNY 6,000.00",
+            "element_ids": [
+              "el_11e26cc748c5f9026e221e59",
+              "el_7d1f0991c7413f40d23f394b",
+              "el_580c05998067eb8bcb5ffa61"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ],
+    "bid_03_digital": [
+      {
+        "name": "project_no",
+        "value": "BID-2026-003",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-b2037bdff03f71f3",
+            "element_id": "el_49721b04857a89333eacad3e",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 109.81400000000008,
+              "x1": 108.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "project_no:",
+            "quote_sha256": "284767bd31192385def0426efbe789104a717c5358447dd23a343ab614ef2341",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-b2037bdff03f71f3",
+            "element_id": "el_8d817e86a0f75dcf81d52052",
+            "page": 2,
+            "bbox": {
+              "x0": 115.18,
+              "y0": 109.81400000000008,
+              "x1": 199.18,
+              "y1": 123.81400000000008,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "BID-2026-003",
+            "quote_sha256": "8d0f4e793f3a302276581812d4a052e940ebf48b52ea63c9744dc6947c1d3f76",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "project_no",
+            "value": "BID-2026-003",
+            "quote": "project_no: BID-2026-003",
+            "element_ids": [
+              "el_49721b04857a89333eacad3e",
+              "el_8d817e86a0f75dcf81d52052"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "deadline",
+        "value": "2026-09-13 17:00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-b2037bdff03f71f3",
+            "element_id": "el_85f95ecdc89a71c38f9bd036",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 135.32400000000007,
+              "x1": 94.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "deadline:",
+            "quote_sha256": "0abd5ea18648969d242759c1c3e12cb0908fa24f67c0a7999d9c8ad4fd9c8553",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-b2037bdff03f71f3",
+            "element_id": "el_76d2ec92f08892c8f73b7e7e",
+            "page": 2,
+            "bbox": {
+              "x0": 101.18,
+              "y0": 135.32400000000007,
+              "x1": 171.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "2026-09-13",
+            "quote_sha256": "92135a0bf009ebabf01414e498c31793ade22145e56b3a745976f8a04784c132",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-b2037bdff03f71f3",
+            "element_id": "el_812674375ff144611a1ddf14",
+            "page": 2,
+            "bbox": {
+              "x0": 178.18,
+              "y0": 135.32400000000007,
+              "x1": 213.18,
+              "y1": 149.32400000000007,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "17:00",
+            "quote_sha256": "5fb7a8a9f0eec5311a89064381cfa76911b7a2a3aea25da45583ebb83009eb84",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "deadline",
+            "value": "2026-09-13 17:00",
+            "quote": "deadline: 2026-09-13 17:00",
+            "element_ids": [
+              "el_85f95ecdc89a71c38f9bd036",
+              "el_76d2ec92f08892c8f73b7e7e",
+              "el_812674375ff144611a1ddf14"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      },
+      {
+        "name": "bond",
+        "value": "CNY 6,500.00",
+        "status": "found",
+        "evidence_refs": [
+          {
+            "artifact_id": "golden-b2037bdff03f71f3",
+            "element_id": "el_31df5de8f8858d82f9a5584d",
+            "page": 2,
+            "bbox": {
+              "x0": 31.18,
+              "y0": 160.83400000000006,
+              "x1": 66.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "bond:",
+            "quote_sha256": "56a3bb001441de921f2b690729aa5df2df06a9ca717f662edd58ee9a3e2db41e",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-b2037bdff03f71f3",
+            "element_id": "el_98bcec0b5a850fdae99d0a41",
+            "page": 2,
+            "bbox": {
+              "x0": 73.18,
+              "y0": 160.83400000000006,
+              "x1": 94.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "CNY",
+            "quote_sha256": "d9a248aa1fe16b27e2445be76826e59119de2023ebb8b5bfebc98def37d997f5",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          },
+          {
+            "artifact_id": "golden-b2037bdff03f71f3",
+            "element_id": "el_cfcfeec61900672e9527fae0",
+            "page": 2,
+            "bbox": {
+              "x0": 101.18,
+              "y0": 160.83400000000006,
+              "x1": 157.18,
+              "y1": 174.83400000000006,
+              "coordinate_space": "pdf_points"
+            },
+            "quote": "6,500.00",
+            "quote_sha256": "dcffadef46738cbb36e91fd56151c1f9c68ba59ff2b0ccea2881f3ec5b287ea4",
+            "extractor": "pdfplumber",
+            "extractor_version": "0.11.10",
+            "confidence": 1.0,
+            "raw_result_ref": null
+          }
+        ],
+        "candidates": [
+          {
+            "field_name": "bond",
+            "value": "CNY 6,500.00",
+            "quote": "bond: CNY 6,500.00",
+            "element_ids": [
+              "el_31df5de8f8858d82f9a5584d",
+              "el_98bcec0b5a850fdae99d0a41",
+              "el_cfcfeec61900672e9527fae0"
+            ],
+            "confidence": 1.0
+          }
+        ],
+        "review_reason": null
+      }
+    ]
+  },
+  "parse_rejects": {},
+  "elapsed_seconds": 574.625
+}

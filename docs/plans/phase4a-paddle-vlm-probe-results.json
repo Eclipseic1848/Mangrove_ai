@@ -1,0 +1,26 @@
+{
+  "date": "2026-07-23",
+  "service": {
+    "base_url": "http://192.168.1.21:18080",
+    "health_http_status": 200,
+    "runtime": "vLLM",
+    "runtime_version": "0.10.2",
+    "model": "PaddleOCR-VL-1.6-0.9B",
+    "max_model_len": 16384
+  },
+  "capability": {
+    "openai_chat_completions": true,
+    "layout_parsing": false,
+    "role": "VLM inference subservice",
+    "can_replace_full_pipeline": false
+  },
+  "mangrove_integration": {
+    "vlm_base_url_recorded": "http://192.168.1.21:18080/v1",
+    "full_pipeline_enabled": false,
+    "full_pipeline_base_url": "",
+    "primary_parser": "mineru",
+    "secondary_parser": "paddleocr_vl",
+    "misconfiguration_guard": "enabled",
+    "next_requirement": "部署或提供包含 PP-DocLayoutV2 且暴露 POST /layout-parsing 的完整 PaddleOCR-VL Pipeline 网关"
+  }
+}

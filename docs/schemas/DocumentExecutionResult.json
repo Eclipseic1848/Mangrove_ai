@@ -1,0 +1,551 @@
+{
+  "$defs": {
+    "AuditFinding": {
+      "additionalProperties": false,
+      "properties": {
+        "finding_id": {
+          "minLength": 1,
+          "title": "Finding Id",
+          "type": "string"
+        },
+        "rule_id": {
+          "minLength": 1,
+          "title": "Rule Id",
+          "type": "string"
+        },
+        "label": {
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/FindingStatus"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "observed_value": {
+          "default": null,
+          "title": "Observed Value"
+        },
+        "evidence_refs": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "finding_id",
+        "rule_id",
+        "label",
+        "status",
+        "message"
+      ],
+      "title": "AuditFinding",
+      "type": "object"
+    },
+    "BoundingBox": {
+      "description": "矩形坐标，坐标空间必须显式记录。",
+      "properties": {
+        "x0": {
+          "minimum": 0,
+          "title": "X0",
+          "type": "number"
+        },
+        "y0": {
+          "minimum": 0,
+          "title": "Y0",
+          "type": "number"
+        },
+        "x1": {
+          "exclusiveMinimum": 0,
+          "title": "X1",
+          "type": "number"
+        },
+        "y1": {
+          "exclusiveMinimum": 0,
+          "title": "Y1",
+          "type": "number"
+        },
+        "coordinate_space": {
+          "description": "pdf_points、image_pixels 或 normalized_1000",
+          "title": "Coordinate Space",
+          "type": "string"
+        }
+      },
+      "required": [
+        "x0",
+        "y0",
+        "x1",
+        "y1",
+        "coordinate_space"
+      ],
+      "title": "BoundingBox",
+      "type": "object"
+    },
+    "DerivedContent": {
+      "additionalProperties": false,
+      "properties": {
+        "content_id": {
+          "minLength": 1,
+          "title": "Content Id",
+          "type": "string"
+        },
+        "action": {
+          "$ref": "#/$defs/DocumentAction"
+        },
+        "content": {
+          "minLength": 1,
+          "title": "Content",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "provider": {
+          "minLength": 1,
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "minLength": 1,
+          "title": "Model",
+          "type": "string"
+        }
+      },
+      "required": [
+        "content_id",
+        "action",
+        "content",
+        "evidence_refs",
+        "provider",
+        "model"
+      ],
+      "title": "DerivedContent",
+      "type": "object"
+    },
+    "DocumentAST": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "default": "1",
+          "pattern": "^1$",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "ast_id": {
+          "minLength": 1,
+          "title": "Ast Id",
+          "type": "string"
+        },
+        "source_artifact_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Source Artifact Ids",
+          "type": "array"
+        },
+        "root": {
+          "$ref": "#/$defs/DocumentASTNode"
+        }
+      },
+      "required": [
+        "ast_id",
+        "source_artifact_ids",
+        "root"
+      ],
+      "title": "DocumentAST",
+      "type": "object"
+    },
+    "DocumentASTNode": {
+      "additionalProperties": false,
+      "properties": {
+        "node_id": {
+          "minLength": 1,
+          "title": "Node Id",
+          "type": "string"
+        },
+        "node_type": {
+          "$ref": "#/$defs/DocumentNodeType"
+        },
+        "text": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Text"
+        },
+        "children": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DocumentASTNode"
+          },
+          "title": "Children",
+          "type": "array"
+        },
+        "evidence_refs": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        },
+        "derived_from": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Derived From",
+          "type": "array"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "title": "Metadata",
+          "type": "object"
+        }
+      },
+      "required": [
+        "node_id",
+        "node_type"
+      ],
+      "title": "DocumentASTNode",
+      "type": "object"
+    },
+    "DocumentAction": {
+      "enum": [
+        "verbatim",
+        "compare",
+        "audit",
+        "summarize",
+        "rewrite",
+        "translate",
+        "compose"
+      ],
+      "title": "DocumentAction",
+      "type": "string"
+    },
+    "DocumentDiff": {
+      "additionalProperties": false,
+      "properties": {
+        "diff_id": {
+          "minLength": 1,
+          "title": "Diff Id",
+          "type": "string"
+        },
+        "label": {
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "change_type": {
+          "pattern": "^(added|removed|modified|table_cell)$",
+          "title": "Change Type",
+          "type": "string"
+        },
+        "before": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Before"
+        },
+        "after": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "After"
+        },
+        "before_evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "title": "Before Evidence",
+          "type": "array"
+        },
+        "after_evidence": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "title": "After Evidence",
+          "type": "array"
+        },
+        "impact": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Impact"
+        },
+        "impact_evidence_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Impact Evidence Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "diff_id",
+        "label",
+        "change_type"
+      ],
+      "title": "DocumentDiff",
+      "type": "object"
+    },
+    "DocumentNodeType": {
+      "enum": [
+        "document",
+        "section",
+        "heading",
+        "paragraph",
+        "list_item",
+        "table",
+        "quote",
+        "comparison",
+        "finding",
+        "derived_content"
+      ],
+      "title": "DocumentNodeType",
+      "type": "string"
+    },
+    "EvidenceRef": {
+      "description": "字段值指向不可变制品和文档元素的证据引用。",
+      "properties": {
+        "artifact_id": {
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "element_id": {
+          "title": "Element Id",
+          "type": "string"
+        },
+        "page": {
+          "minimum": 1,
+          "title": "Page",
+          "type": "integer"
+        },
+        "bbox": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/BoundingBox"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "quote": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quote"
+        },
+        "quote_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Quote Sha256"
+        },
+        "extractor": {
+          "title": "Extractor",
+          "type": "string"
+        },
+        "extractor_version": {
+          "title": "Extractor Version",
+          "type": "string"
+        },
+        "confidence": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "raw_result_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Raw Result Ref"
+        },
+        "location": {
+          "additionalProperties": true,
+          "description": "无视觉 bbox 时用于复核的确定性结构位置，如 DOCX 段落或表格行",
+          "title": "Location",
+          "type": "object"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "element_id",
+        "page",
+        "extractor",
+        "extractor_version",
+        "confidence"
+      ],
+      "title": "EvidenceRef",
+      "type": "object"
+    },
+    "FindingStatus": {
+      "enum": [
+        "pass",
+        "fail",
+        "not_found",
+        "cannot_determine"
+      ],
+      "title": "FindingStatus",
+      "type": "string"
+    },
+    "Passage": {
+      "additionalProperties": false,
+      "properties": {
+        "passage_id": {
+          "minLength": 1,
+          "title": "Passage Id",
+          "type": "string"
+        },
+        "label": {
+          "minLength": 1,
+          "title": "Label",
+          "type": "string"
+        },
+        "text": {
+          "minLength": 1,
+          "title": "Text",
+          "type": "string"
+        },
+        "evidence_refs": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRef"
+          },
+          "minItems": 1,
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "passage_id",
+        "label",
+        "text",
+        "evidence_refs"
+      ],
+      "title": "Passage",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "result_id": {
+      "minLength": 1,
+      "title": "Result Id",
+      "type": "string"
+    },
+    "action": {
+      "$ref": "#/$defs/DocumentAction"
+    },
+    "passages": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/Passage"
+      },
+      "title": "Passages",
+      "type": "array"
+    },
+    "differences": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DocumentDiff"
+      },
+      "title": "Differences",
+      "type": "array"
+    },
+    "findings": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AuditFinding"
+      },
+      "title": "Findings",
+      "type": "array"
+    },
+    "derived_content": {
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/DerivedContent"
+      },
+      "title": "Derived Content",
+      "type": "array"
+    },
+    "ast": {
+      "$ref": "#/$defs/DocumentAST"
+    },
+    "warnings": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Warnings",
+      "type": "array"
+    }
+  },
+  "required": [
+    "result_id",
+    "action",
+    "ast"
+  ],
+  "title": "DocumentExecutionResult",
+  "type": "object"
+}

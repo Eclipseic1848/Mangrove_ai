@@ -1,0 +1,28 @@
+{
+  "description": "用户确认后的文档任务目标。",
+  "properties": {
+    "objective": {
+      "title": "Objective",
+      "type": "string"
+    },
+    "document_types": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Document Types",
+      "type": "array"
+    },
+    "success_criteria": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Success Criteria",
+      "type": "array"
+    }
+  },
+  "required": [
+    "objective"
+  ],
+  "title": "TaskGoal",
+  "type": "object"
+}

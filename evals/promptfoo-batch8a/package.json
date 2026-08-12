@@ -1,0 +1,11 @@
+{
+  "name": "mangrove-batch8a-promptfoo-poc",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "eval": "promptfoo eval --no-cache --no-share --no-progress-bar --no-table --output results.json"
+  },
+  "devDependencies": {
+    "promptfoo": "0.121.19"
+  }
+}

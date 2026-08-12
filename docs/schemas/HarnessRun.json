@@ -1,0 +1,188 @@
+{
+  "$defs": {
+    "HarnessLoopPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "max_transient_retries": {
+          "default": 2,
+          "maximum": 10,
+          "minimum": 0,
+          "title": "Max Transient Retries",
+          "type": "integer"
+        },
+        "max_semantic_replans": {
+          "default": 2,
+          "maximum": 2,
+          "minimum": 0,
+          "title": "Max Semantic Replans",
+          "type": "integer"
+        },
+        "max_total_repair_rounds": {
+          "default": 5,
+          "maximum": 20,
+          "minimum": 0,
+          "title": "Max Total Repair Rounds",
+          "type": "integer"
+        },
+        "max_same_failure": {
+          "default": 2,
+          "maximum": 10,
+          "minimum": 1,
+          "title": "Max Same Failure",
+          "type": "integer"
+        },
+        "allow_external_api": {
+          "default": false,
+          "title": "Allow External Api",
+          "type": "boolean"
+        }
+      },
+      "title": "HarnessLoopPolicy",
+      "type": "object"
+    },
+    "HarnessNode": {
+      "enum": [
+        "interpret",
+        "inspect",
+        "bind",
+        "plan",
+        "execute",
+        "verify",
+        "repair",
+        "needs_user",
+        "deliver"
+      ],
+      "title": "HarnessNode",
+      "type": "string"
+    },
+    "HarnessStatus": {
+      "enum": [
+        "running",
+        "needs_user",
+        "succeeded",
+        "failed",
+        "cancelled"
+      ],
+      "title": "HarnessStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "user_id": {
+      "minLength": 1,
+      "title": "User Id",
+      "type": "string"
+    },
+    "thread_id": {
+      "minLength": 1,
+      "title": "Thread Id",
+      "type": "string"
+    },
+    "logical_plan_id": {
+      "minLength": 1,
+      "title": "Logical Plan Id",
+      "type": "string"
+    },
+    "logical_plan_revision": {
+      "minimum": 1,
+      "title": "Logical Plan Revision",
+      "type": "integer"
+    },
+    "logical_plan_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Logical Plan Hash",
+      "type": "string"
+    },
+    "binding_revision": {
+      "minimum": 1,
+      "title": "Binding Revision",
+      "type": "integer"
+    },
+    "binding_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Binding Hash",
+      "type": "string"
+    },
+    "capability_id": {
+      "minLength": 1,
+      "title": "Capability Id",
+      "type": "string"
+    },
+    "capability_version": {
+      "minLength": 1,
+      "title": "Capability Version",
+      "type": "string"
+    },
+    "runtime_profile": {
+      "minLength": 1,
+      "title": "Runtime Profile",
+      "type": "string"
+    },
+    "policy": {
+      "$ref": "#/$defs/HarnessLoopPolicy"
+    },
+    "status": {
+      "$ref": "#/$defs/HarnessStatus",
+      "default": "running"
+    },
+    "current_node": {
+      "$ref": "#/$defs/HarnessNode",
+      "default": "interpret"
+    },
+    "repair_rounds": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Repair Rounds",
+      "type": "integer"
+    },
+    "semantic_replans": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Semantic Replans",
+      "type": "integer"
+    },
+    "transient_retries": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Transient Retries",
+      "type": "integer"
+    },
+    "same_failure_count": {
+      "default": 0,
+      "minimum": 0,
+      "title": "Same Failure Count",
+      "type": "integer"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "run_id",
+    "user_id",
+    "thread_id",
+    "logical_plan_id",
+    "logical_plan_revision",
+    "logical_plan_hash",
+    "binding_revision",
+    "binding_hash",
+    "capability_id",
+    "capability_version",
+    "runtime_profile"
+  ],
+  "title": "HarnessRun",
+  "type": "object"
+}

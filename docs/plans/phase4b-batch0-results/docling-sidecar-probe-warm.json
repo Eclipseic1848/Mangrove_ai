@@ -1,0 +1,81 @@
+{
+  "tool": "docling",
+  "version": "2.115.0",
+  "execution_mode": "isolated_python_sidecar_probe",
+  "passed": 6,
+  "total": 6,
+  "results": [
+    {
+      "format": "pdf",
+      "path": "documents/contract.pdf",
+      "status": "pass",
+      "expected_tokens_found": [
+        "付款条款",
+        "交付条款",
+        "违约责任"
+      ],
+      "text_chars": 119,
+      "duration_ms": 16270
+    },
+    {
+      "format": "docx",
+      "path": "documents/contract.docx",
+      "status": "pass",
+      "expected_tokens_found": [
+        "付款条款",
+        "交付条款",
+        "违约责任"
+      ],
+      "text_chars": 118,
+      "duration_ms": 49
+    },
+    {
+      "format": "pptx",
+      "path": "documents/contract.pptx",
+      "status": "pass",
+      "expected_tokens_found": [
+        "付款条款",
+        "交付条款",
+        "违约责任"
+      ],
+      "text_chars": 111,
+      "duration_ms": 28
+    },
+    {
+      "format": "html",
+      "path": "documents/contract.html",
+      "status": "pass",
+      "expected_tokens_found": [
+        "付款条款",
+        "交付条款",
+        "违约责任"
+      ],
+      "text_chars": 118,
+      "duration_ms": 16
+    },
+    {
+      "format": "markdown",
+      "path": "documents/contract.md",
+      "status": "pass",
+      "expected_tokens_found": [
+        "付款条款",
+        "交付条款",
+        "违约责任"
+      ],
+      "text_chars": 118,
+      "duration_ms": 7
+    },
+    {
+      "format": "xlsx",
+      "path": "workload_filter/source.xlsx",
+      "status": "pass",
+      "expected_tokens_found": [
+        "示例人员甲",
+        "核销工作量天数",
+        "工作量费用"
+      ],
+      "text_chars": 1628,
+      "duration_ms": 20
+    }
+  ]
+}

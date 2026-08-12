@@ -1,0 +1,742 @@
+{
+  "schema_version": "1",
+  "provider": "local",
+  "model": "Qwen3.6-35B-A3B",
+  "prompt_version": "stp-v1",
+  "prompt_sha256": "0db0fd4ecd50133159f2c2ed2440590c8c427a5ef0d4036afed8977798b83fd7",
+  "passed": true,
+  "passed_cases": 5,
+  "total_cases": 5,
+  "cases": [
+    {
+      "case_id": "table_filter_projection_merge",
+      "passed": true,
+      "checks": {
+        "status": true,
+        "task_family": true,
+        "content_policy": true,
+        "delivery_formats": true,
+        "selection": true,
+        "projection": true,
+        "record_grain": true,
+        "combine_mode": true
+      },
+      "actual": {
+        "plan_id": "batch1_eval_table_filter_projection_merge",
+        "task_id": "batch1_eval_table_filter_projection_merge",
+        "revision": 1,
+        "status": "ready",
+        "plan": {
+          "spec_version": "1",
+          "plan_id": "batch1_eval_table_filter_projection_merge",
+          "task_id": "batch1_eval_table_filter_projection_merge",
+          "revision": 1,
+          "task_family": "tabular_transform",
+          "objective": {
+            "original_text": "只提取谢超群的数据，只保留核销工作量天数和工作量费用，合并成一张表并输出Excel。",
+            "normalized_text": "提取谢超群的核销工作量天数和工作量费用，合并为单表并输出Excel格式。"
+          },
+          "source_scope": {
+            "artifact_ids": [
+              "fixture_workload"
+            ],
+            "source_ids": [],
+            "table_scope": null,
+            "pages": {},
+            "section_patterns": [],
+            "time_ranges": []
+          },
+          "input_contract": {
+            "accepted_formats": [
+              "pdf",
+              "xlsx"
+            ],
+            "accepted_media_types": [],
+            "allow_internal_conversion": true,
+            "encrypted_policy": "reject",
+            "corrupt_policy": "reject"
+          },
+          "selection": [
+            {
+              "field": "姓名",
+              "operator": "eq",
+              "value": "谢超群",
+              "values": [],
+              "case_sensitive": false
+            }
+          ],
+          "projection": [
+            {
+              "name": "核销工作量天数",
+              "alias": null
+            },
+            {
+              "name": "工作量费用",
+              "alias": null
+            }
+          ],
+          "record_grain": "source_detail_row",
+          "operations": [],
+          "combine": {
+            "mode": "one_table"
+          },
+          "content_policy": "verbatim",
+          "evidence_policy": {
+            "require_evidence": true,
+            "minimum_coverage": 1.0,
+            "require_source_position": true
+          },
+          "delivery": {
+            "formats": [
+              "xlsx"
+            ],
+            "output_name": null,
+            "requested_file_count": null
+          },
+          "postconditions": {
+            "table_count": 1,
+            "exact_visible_columns": [
+              "核销工作量天数",
+              "工作量费用"
+            ],
+            "expected_row_count": null,
+            "predicates": [
+              {
+                "field": "姓名",
+                "operator": "eq",
+                "value": "谢超群",
+                "values": [],
+                "required_ratio": 1.0
+              }
+            ],
+            "minimum_evidence_coverage": 1.0,
+            "require_lineage": true,
+            "require_openable_output": true
+          },
+          "risk_policy": {
+            "execution_boundary": "local_or_lan",
+            "external_api_confirmed": false,
+            "allow_side_effects": false
+          },
+          "budgets": {
+            "max_bytes": null,
+            "max_rows": null,
+            "max_pages": null,
+            "max_seconds": null,
+            "max_tool_calls": 20,
+            "max_repair_attempts": 2
+          },
+          "ambiguities": []
+        },
+        "summary": "目标：提取谢超群的核销工作量天数和工作量费用，合并为单表并输出Excel格式。\n筛选：姓名 等于 谢超群\n可见字段：核销工作量天数、工作量费用\n结果粒度：source_detail_row\n结果形态：合并为一张表\n内容政策：原文摘录\n输出格式：XLSX",
+        "diagnostics": [],
+        "clarification": null,
+        "provenance": {
+          "provider": "local",
+          "model": "Qwen3.6-35B-A3B",
+          "prompt_version": "stp-v1",
+          "prompt_sha256": "0db0fd4ecd50133159f2c2ed2440590c8c427a5ef0d4036afed8977798b83fd7",
+          "schema_version": "1",
+          "repair_attempts": 0,
+          "generated_at": "2026-07-27T03:45:50.463681Z"
+        }
+      }
+    },
+    {
+      "case_id": "contract_verbatim_extract",
+      "passed": true,
+      "checks": {
+        "status": true,
+        "task_family": true,
+        "content_policy": true,
+        "delivery_formats": true,
+        "required_concepts": true
+      },
+      "actual": {
+        "plan_id": "batch1_eval_contract_verbatim_extract",
+        "task_id": "batch1_eval_contract_verbatim_extract",
+        "revision": 1,
+        "status": "ready",
+        "plan": {
+          "spec_version": "1",
+          "plan_id": "batch1_eval_contract_verbatim_extract",
+          "task_id": "batch1_eval_contract_verbatim_extract",
+          "revision": 1,
+          "task_family": "extract",
+          "objective": {
+            "original_text": "从这些合同中逐字摘录所有与付款、交付和违约责任有关的商务条款，按文件整理成Word，不要总结或改写。",
+            "normalized_text": "逐字摘录合同中与付款、交付和违约责任有关的商务条款，按文件整理成Word文档。"
+          },
+          "source_scope": {
+            "artifact_ids": [
+              "fixture_contract_a",
+              "fixture_contract_b"
+            ],
+            "source_ids": [],
+            "table_scope": null,
+            "pages": {},
+            "section_patterns": [],
+            "time_ranges": []
+          },
+          "input_contract": {
+            "accepted_formats": [
+              "docx",
+              "pdf"
+            ],
+            "accepted_media_types": [],
+            "allow_internal_conversion": true,
+            "encrypted_policy": "reject",
+            "corrupt_policy": "reject"
+          },
+          "selection": [
+            {
+              "field": "content",
+              "operator": "contains",
+              "value": "付款",
+              "values": [],
+              "case_sensitive": false
+            },
+            {
+              "field": "content",
+              "operator": "contains",
+              "value": "交付",
+              "values": [],
+              "case_sensitive": false
+            },
+            {
+              "field": "content",
+              "operator": "contains",
+              "value": "违约责任",
+              "values": [],
+              "case_sensitive": false
+            }
+          ],
+          "projection": [
+            {
+              "name": "content",
+              "alias": null
+            }
+          ],
+          "record_grain": "clause",
+          "operations": [],
+          "combine": {
+            "mode": "preserve"
+          },
+          "content_policy": "verbatim",
+          "evidence_policy": {
+            "require_evidence": true,
+            "minimum_coverage": 1.0,
+            "require_source_position": true
+          },
+          "delivery": {
+            "formats": [
+              "docx"
+            ],
+            "output_name": null,
+            "requested_file_count": null
+          },
+          "postconditions": {
+            "table_count": null,
+            "exact_visible_columns": [
+              "content"
+            ],
+            "expected_row_count": null,
+            "predicates": [
+              {
+                "field": "content",
+                "operator": "contains",
+                "value": "付款",
+                "values": [],
+                "required_ratio": 1.0
+              },
+              {
+                "field": "content",
+                "operator": "contains",
+                "value": "交付",
+                "values": [],
+                "required_ratio": 1.0
+              },
+              {
+                "field": "content",
+                "operator": "contains",
+                "value": "违约责任",
+                "values": [],
+                "required_ratio": 1.0
+              }
+            ],
+            "minimum_evidence_coverage": 1.0,
+            "require_lineage": true,
+            "require_openable_output": true
+          },
+          "risk_policy": {
+            "execution_boundary": "local_or_lan",
+            "external_api_confirmed": false,
+            "allow_side_effects": false
+          },
+          "budgets": {
+            "max_bytes": null,
+            "max_rows": null,
+            "max_pages": null,
+            "max_seconds": null,
+            "max_tool_calls": 20,
+            "max_repair_attempts": 2
+          },
+          "ambiguities": []
+        },
+        "summary": "目标：逐字摘录合同中与付款、交付和违约责任有关的商务条款，按文件整理成Word文档。\n筛选：content 包含 付款\n筛选：content 包含 交付\n筛选：content 包含 违约责任\n可见字段：content\n结果粒度：clause\n内容政策：原文摘录\n输出格式：DOCX",
+        "diagnostics": [],
+        "clarification": null,
+        "provenance": {
+          "provider": "local",
+          "model": "Qwen3.6-35B-A3B",
+          "prompt_version": "stp-v1",
+          "prompt_sha256": "0db0fd4ecd50133159f2c2ed2440590c8c427a5ef0d4036afed8977798b83fd7",
+          "schema_version": "1",
+          "repair_attempts": 0,
+          "generated_at": "2026-07-27T03:46:21.997681Z"
+        }
+      }
+    },
+    {
+      "case_id": "multi_document_compare",
+      "passed": true,
+      "checks": {
+        "status": true,
+        "task_family": true,
+        "content_policy": true,
+        "delivery_formats": true,
+        "required_operations": true,
+        "required_concepts": true
+      },
+      "actual": {
+        "plan_id": "batch1_eval_multi_document_compare",
+        "task_id": "batch1_eval_multi_document_compare",
+        "revision": 1,
+        "status": "ready",
+        "plan": {
+          "spec_version": "1",
+          "plan_id": "batch1_eval_multi_document_compare",
+          "task_id": "batch1_eval_multi_document_compare",
+          "revision": 1,
+          "task_family": "compare",
+          "objective": {
+            "original_text": "对比三份合同的付款条件、交付期限和违约责任，只列出有原文证据的差异，整理成DOCX和PDF。",
+            "normalized_text": "对比三份合同的付款条件、交付期限和违约责任，仅列出有原文证据的差异，并整理为DOCX和PDF格式交付。"
+          },
+          "source_scope": {
+            "artifact_ids": [
+              "fixture_contract_a",
+              "fixture_contract_b",
+              "fixture_contract_c"
+            ],
+            "source_ids": [],
+            "table_scope": null,
+            "pages": {},
+            "section_patterns": [],
+            "time_ranges": []
+          },
+          "input_contract": {
+            "accepted_formats": [
+              "docx",
+              "pdf"
+            ],
+            "accepted_media_types": [],
+            "allow_internal_conversion": true,
+            "encrypted_policy": "reject",
+            "corrupt_policy": "reject"
+          },
+          "selection": [],
+          "projection": [
+            {
+              "name": "付款条件",
+              "alias": null
+            },
+            {
+              "name": "交付期限",
+              "alias": null
+            },
+            {
+              "name": "违约责任",
+              "alias": null
+            }
+          ],
+          "record_grain": null,
+          "operations": [
+            {
+              "operation": "compare",
+              "params": {
+                "fields": [
+                  "付款条件",
+                  "交付期限",
+                  "违约责任"
+                ],
+                "evidence_required": true
+              }
+            }
+          ],
+          "combine": {
+            "mode": "preserve"
+          },
+          "content_policy": "verbatim",
+          "evidence_policy": {
+            "require_evidence": true,
+            "minimum_coverage": 1.0,
+            "require_source_position": true
+          },
+          "delivery": {
+            "formats": [
+              "docx",
+              "pdf"
+            ],
+            "output_name": null,
+            "requested_file_count": null
+          },
+          "postconditions": {
+            "table_count": null,
+            "exact_visible_columns": [
+              "付款条件",
+              "交付期限",
+              "违约责任"
+            ],
+            "expected_row_count": null,
+            "predicates": [],
+            "minimum_evidence_coverage": 1.0,
+            "require_lineage": true,
+            "require_openable_output": true
+          },
+          "risk_policy": {
+            "execution_boundary": "local_or_lan",
+            "external_api_confirmed": false,
+            "allow_side_effects": false
+          },
+          "budgets": {
+            "max_bytes": null,
+            "max_rows": null,
+            "max_pages": null,
+            "max_seconds": null,
+            "max_tool_calls": 20,
+            "max_repair_attempts": 2
+          },
+          "ambiguities": []
+        },
+        "summary": "目标：对比三份合同的付款条件、交付期限和违约责任，仅列出有原文证据的差异，并整理为DOCX和PDF格式交付。\n可见字段：付款条件、交付期限、违约责任\n处理操作：比较\n内容政策：原文摘录\n输出格式：DOCX、PDF",
+        "diagnostics": [
+          {
+            "code": "invalid_plan",
+            "message": "[{\"path\":\"\",\"message\":\"Value error, one_table 只能用于表格变换\",\"type\":\"value_error\"}]",
+            "severity": "error",
+            "path": null,
+            "repairable": true,
+            "attempt": 0
+          }
+        ],
+        "clarification": null,
+        "provenance": {
+          "provider": "local",
+          "model": "Qwen3.6-35B-A3B",
+          "prompt_version": "stp-v1",
+          "prompt_sha256": "0db0fd4ecd50133159f2c2ed2440590c8c427a5ef0d4036afed8977798b83fd7",
+          "schema_version": "1",
+          "repair_attempts": 1,
+          "generated_at": "2026-07-27T03:47:26.034210Z"
+        }
+      }
+    },
+    {
+      "case_id": "table_sort_deduplicate",
+      "passed": true,
+      "checks": {
+        "status": true,
+        "task_family": true,
+        "content_policy": true,
+        "delivery_formats": true,
+        "selection": true,
+        "projection": true,
+        "required_operations": true
+      },
+      "actual": {
+        "plan_id": "batch1_eval_table_sort_deduplicate",
+        "task_id": "batch1_eval_table_sort_deduplicate",
+        "revision": 1,
+        "status": "ready",
+        "plan": {
+          "spec_version": "1",
+          "plan_id": "batch1_eval_table_sort_deduplicate",
+          "task_id": "batch1_eval_table_sort_deduplicate",
+          "revision": 1,
+          "task_family": "tabular_transform",
+          "objective": {
+            "original_text": "筛选状态为已完成的订单，每笔订单一行，只保留订单号、客户和完成日期，按完成日期降序排列，按订单号去重，输出CSV。",
+            "normalized_text": "筛选状态为已完成的订单，保留订单号、客户和完成日期，按完成日期降序排列并按订单号去重，输出CSV。"
+          },
+          "source_scope": {
+            "artifact_ids": [
+              "fixture_orders"
+            ],
+            "source_ids": [],
+            "table_scope": null,
+            "pages": {},
+            "section_patterns": [],
+            "time_ranges": []
+          },
+          "input_contract": {
+            "accepted_formats": [
+              "xlsx",
+              "csv"
+            ],
+            "accepted_media_types": [],
+            "allow_internal_conversion": true,
+            "encrypted_policy": "reject",
+            "corrupt_policy": "reject"
+          },
+          "selection": [
+            {
+              "field": "状态",
+              "operator": "eq",
+              "value": "已完成",
+              "values": [],
+              "case_sensitive": false
+            }
+          ],
+          "projection": [
+            {
+              "name": "订单号",
+              "alias": null
+            },
+            {
+              "name": "客户",
+              "alias": null
+            },
+            {
+              "name": "完成日期",
+              "alias": null
+            }
+          ],
+          "record_grain": "订单",
+          "operations": [
+            {
+              "operation": "sort",
+              "params": {
+                "field": "完成日期",
+                "order": "desc"
+              }
+            },
+            {
+              "operation": "deduplicate",
+              "params": {
+                "field": "订单号"
+              }
+            }
+          ],
+          "combine": {
+            "mode": "preserve"
+          },
+          "content_policy": "verbatim",
+          "evidence_policy": {
+            "require_evidence": true,
+            "minimum_coverage": 1.0,
+            "require_source_position": true
+          },
+          "delivery": {
+            "formats": [
+              "csv"
+            ],
+            "output_name": null,
+            "requested_file_count": null
+          },
+          "postconditions": {
+            "table_count": 1,
+            "exact_visible_columns": [
+              "订单号",
+              "客户",
+              "完成日期"
+            ],
+            "expected_row_count": null,
+            "predicates": [
+              {
+                "field": "状态",
+                "operator": "eq",
+                "value": "已完成",
+                "values": [],
+                "required_ratio": 1.0
+              }
+            ],
+            "minimum_evidence_coverage": 1.0,
+            "require_lineage": true,
+            "require_openable_output": true
+          },
+          "risk_policy": {
+            "execution_boundary": "local_or_lan",
+            "external_api_confirmed": false,
+            "allow_side_effects": false
+          },
+          "budgets": {
+            "max_bytes": null,
+            "max_rows": null,
+            "max_pages": null,
+            "max_seconds": null,
+            "max_tool_calls": 20,
+            "max_repair_attempts": 2
+          },
+          "ambiguities": []
+        },
+        "summary": "目标：筛选状态为已完成的订单，保留订单号、客户和完成日期，按完成日期降序排列并按订单号去重，输出CSV。\n筛选：状态 等于 已完成\n可见字段：订单号、客户、完成日期\n结果粒度：订单\n处理操作：排序 → 去重\n内容政策：原文摘录\n输出格式：CSV",
+        "diagnostics": [],
+        "clarification": null,
+        "provenance": {
+          "provider": "local",
+          "model": "Qwen3.6-35B-A3B",
+          "prompt_version": "stp-v1",
+          "prompt_sha256": "0db0fd4ecd50133159f2c2ed2440590c8c427a5ef0d4036afed8977798b83fd7",
+          "schema_version": "1",
+          "repair_attempts": 0,
+          "generated_at": "2026-07-27T03:48:02.958367Z"
+        }
+      }
+    },
+    {
+      "case_id": "material_aggregate_ambiguity",
+      "passed": true,
+      "checks": {
+        "status": true
+      },
+      "actual": {
+        "plan_id": "batch1_eval_material_aggregate_ambiguity",
+        "task_id": "batch1_eval_material_aggregate_ambiguity",
+        "revision": 1,
+        "status": "needs_user",
+        "plan": {
+          "spec_version": "1",
+          "plan_id": "batch1_eval_material_aggregate_ambiguity",
+          "task_id": "batch1_eval_material_aggregate_ambiguity",
+          "revision": 1,
+          "task_family": "tabular_transform",
+          "objective": {
+            "original_text": "把这些文件里的费用整理一下，每个人一行。",
+            "normalized_text": "从提供的文件中提取费用信息，按人员整理为单表，每人一行。"
+          },
+          "source_scope": {
+            "artifact_ids": [
+              "fixture_costs"
+            ],
+            "source_ids": [],
+            "table_scope": null,
+            "pages": {},
+            "section_patterns": [],
+            "time_ranges": []
+          },
+          "input_contract": {
+            "accepted_formats": [
+              "xlsx",
+              "pdf"
+            ],
+            "accepted_media_types": [],
+            "allow_internal_conversion": true,
+            "encrypted_policy": "reject",
+            "corrupt_policy": "reject"
+          },
+          "selection": [],
+          "projection": [
+            {
+              "name": "人员",
+              "alias": null
+            },
+            {
+              "name": "费用",
+              "alias": null
+            }
+          ],
+          "record_grain": "人员",
+          "operations": [],
+          "combine": {
+            "mode": "one_table"
+          },
+          "content_policy": "verbatim",
+          "evidence_policy": {
+            "require_evidence": true,
+            "minimum_coverage": 1.0,
+            "require_source_position": true
+          },
+          "delivery": {
+            "formats": [
+              "xlsx"
+            ],
+            "output_name": null,
+            "requested_file_count": null
+          },
+          "postconditions": {
+            "table_count": 1,
+            "exact_visible_columns": [
+              "人员",
+              "费用"
+            ],
+            "expected_row_count": null,
+            "predicates": [],
+            "minimum_evidence_coverage": 1.0,
+            "require_lineage": true,
+            "require_openable_output": true
+          },
+          "risk_policy": {
+            "execution_boundary": "local_or_lan",
+            "external_api_confirmed": false,
+            "allow_side_effects": false
+          },
+          "budgets": {
+            "max_bytes": null,
+            "max_rows": null,
+            "max_pages": null,
+            "max_seconds": null,
+            "max_tool_calls": 20,
+            "max_repair_attempts": 2
+          },
+          "ambiguities": [
+            {
+              "ambiguity_id": "amb_1",
+              "question": "“费用”具体指代哪些数据或计算方式？",
+              "candidates": [
+                "原始费用明细条目",
+                "费用汇总总额",
+                "特定类别的费用"
+              ],
+              "material": true,
+              "resolved": false,
+              "resolution": null
+            },
+            {
+              "ambiguity_id": "amb_2",
+              "question": "“每个人”的标识依据是什么？",
+              "candidates": [
+                "姓名",
+                "员工编号",
+                "部门"
+              ],
+              "material": true,
+              "resolved": false,
+              "resolution": null
+            }
+          ]
+        },
+        "summary": "目标：从提供的文件中提取费用信息，按人员整理为单表，每人一行。\n可见字段：人员、费用\n结果粒度：人员\n结果形态：合并为一张表\n内容政策：原文摘录\n输出格式：XLSX\n待确认：“费用”具体指代哪些数据或计算方式？",
+        "diagnostics": [],
+        "clarification": {
+          "ambiguity_id": "amb_1",
+          "question": "“费用”具体指代哪些数据或计算方式？",
+          "candidates": [
+            "原始费用明细条目",
+            "费用汇总总额",
+            "特定类别的费用"
+          ]
+        },
+        "provenance": {
+          "provider": "local",
+          "model": "Qwen3.6-35B-A3B",
+          "prompt_version": "stp-v1",
+          "prompt_sha256": "0db0fd4ecd50133159f2c2ed2440590c8c427a5ef0d4036afed8977798b83fd7",
+          "schema_version": "1",
+          "repair_attempts": 0,
+          "generated_at": "2026-07-27T03:48:48.679395Z"
+        }
+      }
+    }
+  ]
+}

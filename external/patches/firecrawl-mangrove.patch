@@ -1,0 +1,37 @@
+diff --git a/docker-compose.yaml b/docker-compose.yaml
+index abf6980..42fbccf 100644
+--- a/docker-compose.yaml
++++ b/docker-compose.yaml
+@@ -3,8 +3,8 @@ name: firecrawl
+ x-common-service: &common-service
+   # NOTE: If you don't want to build the service locally,
+   # comment out the build: statement and uncomment the image: statement
+-  # image: ghcr.io/firecrawl/firecrawl
+-  build: apps/api
++  image: ghcr.io/firecrawl/firecrawl
++  # build: apps/api
+ 
+   ulimits:
+     nofile:
+@@ -63,8 +63,8 @@ services:
+   playwright-service:
+     # NOTE: If you don't want to build the service locally,
+     # comment out the build: statement and uncomment the image: statement
+-    # image: ghcr.io/firecrawl/playwright-service:latest
+-    build: apps/playwright-service-ts
++    image: ghcr.io/firecrawl/playwright-service:latest
++    # build: apps/playwright-service-ts
+     environment:
+       PORT: 3000
+       PROXY_SERVER: ${PROXY_SERVER}
+@@ -156,8 +156,8 @@ services:
+   nuq-postgres:
+     # NOTE: If you don't want to build the image locally,
+     # comment out the build: statement and uncomment the image: statement
+-    # image: ghcr.io/firecrawl/nuq-postgres:latest
+-    build: apps/nuq-postgres
++    image: ghcr.io/firecrawl/nuq-postgres:latest
++    # build: apps/nuq-postgres
+     environment:
+       POSTGRES_USER: ${POSTGRES_USER:-postgres}
+       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}

@@ -1,0 +1,899 @@
+{
+  "schema_version": "1",
+  "generated_by": "scripts/generate_document_golden.py",
+  "seed_strategy": "stable per domain-number-mode",
+  "document_count": 24,
+  "page_count": 120,
+  "distribution": {
+    "contract": 12,
+    "bid": 7,
+    "invoice": 5
+  },
+  "documents": [
+    {
+      "id": "contract_01_digital",
+      "file": "contract_01_digital.pdf",
+      "domain": "contract",
+      "mode": "digital",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "digital",
+        "digital",
+        "digital",
+        "digital"
+      ],
+      "expected_fields": {
+        "contract_no": {
+          "value": "HT-2026-001",
+          "page": 2,
+          "quote": "contract_no: HT-2026-001"
+        },
+        "delivery_days": {
+          "value": "21 days",
+          "page": 2,
+          "quote": "delivery_days: 21 days"
+        },
+        "amount": {
+          "value": "CNY 101,234.00",
+          "page": 2,
+          "quote": "amount: CNY 101,234.00"
+        }
+      },
+      "features": [
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "contract_02_digital",
+      "file": "contract_02_digital.pdf",
+      "domain": "contract",
+      "mode": "digital",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "digital",
+        "digital",
+        "digital",
+        "digital"
+      ],
+      "expected_fields": {
+        "contract_no": {
+          "value": "HT-2026-002",
+          "page": 2,
+          "quote": "contract_no: HT-2026-002"
+        },
+        "delivery_days": {
+          "value": "22 days",
+          "page": 2,
+          "quote": "delivery_days: 22 days"
+        },
+        "amount": {
+          "value": "CNY 102,468.00",
+          "page": 2,
+          "quote": "amount: CNY 102,468.00"
+        }
+      },
+      "features": [
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "contract_03_digital",
+      "file": "contract_03_digital.pdf",
+      "domain": "contract",
+      "mode": "digital",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "digital",
+        "digital",
+        "digital",
+        "digital"
+      ],
+      "expected_fields": {
+        "contract_no": {
+          "value": "HT-2026-003",
+          "page": 2,
+          "quote": "contract_no: HT-2026-003"
+        },
+        "delivery_days": {
+          "value": "23 days",
+          "page": 2,
+          "quote": "delivery_days: 23 days"
+        },
+        "amount": {
+          "value": "CNY 103,702.00",
+          "page": 2,
+          "quote": "amount: CNY 103,702.00"
+        }
+      },
+      "features": [
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "contract_04_digital",
+      "file": "contract_04_digital.pdf",
+      "domain": "contract",
+      "mode": "digital",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "digital",
+        "digital",
+        "digital",
+        "digital"
+      ],
+      "expected_fields": {
+        "contract_no": {
+          "value": "HT-2026-004",
+          "page": 2,
+          "quote": "contract_no: HT-2026-004"
+        },
+        "delivery_days": {
+          "value": "24 days",
+          "page": 2,
+          "quote": "delivery_days: 24 days"
+        },
+        "amount": {
+          "value": "CNY 104,936.00",
+          "page": 2,
+          "quote": "amount: CNY 104,936.00"
+        }
+      },
+      "features": [
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "contract_05_scanned",
+      "file": "contract_05_scanned.pdf",
+      "domain": "contract",
+      "mode": "scanned",
+      "pages": 5,
+      "page_modes": [
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned"
+      ],
+      "expected_fields": {
+        "contract_no": {
+          "value": "HT-2026-005",
+          "page": 2,
+          "quote": "contract_no: HT-2026-005"
+        },
+        "delivery_days": {
+          "value": "25 days",
+          "page": 2,
+          "quote": "delivery_days: 25 days"
+        },
+        "amount": {
+          "value": "CNY 106,170.00",
+          "page": 2,
+          "quote": "amount: CNY 106,170.00"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "contract_06_scanned",
+      "file": "contract_06_scanned.pdf",
+      "domain": "contract",
+      "mode": "scanned",
+      "pages": 5,
+      "page_modes": [
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned"
+      ],
+      "expected_fields": {
+        "contract_no": {
+          "value": "HT-2026-006",
+          "page": 2,
+          "quote": "contract_no: HT-2026-006"
+        },
+        "delivery_days": {
+          "value": "26 days",
+          "page": 2,
+          "quote": "delivery_days: 26 days"
+        },
+        "amount": {
+          "value": "CNY 107,404.00",
+          "page": 2,
+          "quote": "amount: CNY 107,404.00"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "contract_07_scanned",
+      "file": "contract_07_scanned.pdf",
+      "domain": "contract",
+      "mode": "scanned",
+      "pages": 5,
+      "page_modes": [
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned"
+      ],
+      "expected_fields": {
+        "contract_no": {
+          "value": "HT-2026-007",
+          "page": 2,
+          "quote": "contract_no: HT-2026-007"
+        },
+        "delivery_days": {
+          "value": "27 days",
+          "page": 2,
+          "quote": "delivery_days: 27 days"
+        },
+        "amount": {
+          "value": "CNY 108,638.00",
+          "page": 2,
+          "quote": "amount: CNY 108,638.00"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "contract_08_scanned",
+      "file": "contract_08_scanned.pdf",
+      "domain": "contract",
+      "mode": "scanned",
+      "pages": 5,
+      "page_modes": [
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned"
+      ],
+      "expected_fields": {
+        "contract_no": {
+          "value": "HT-2026-008",
+          "page": 2,
+          "quote": "contract_no: HT-2026-008"
+        },
+        "delivery_days": {
+          "value": "28 days",
+          "page": 2,
+          "quote": "delivery_days: 28 days"
+        },
+        "amount": {
+          "value": "CNY 109,872.00",
+          "page": 2,
+          "quote": "amount: CNY 109,872.00"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "contract_09_mixed",
+      "file": "contract_09_mixed.pdf",
+      "domain": "contract",
+      "mode": "mixed",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "scanned",
+        "mixed",
+        "digital",
+        "scanned"
+      ],
+      "expected_fields": {
+        "contract_no": {
+          "value": "HT-2026-009",
+          "page": 2,
+          "quote": "contract_no: HT-2026-009"
+        },
+        "delivery_days": {
+          "value": "29 days",
+          "page": 2,
+          "quote": "delivery_days: 29 days"
+        },
+        "amount": {
+          "value": "CNY 111,106.00",
+          "page": 2,
+          "quote": "amount: CNY 111,106.00"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "contract_10_mixed",
+      "file": "contract_10_mixed.pdf",
+      "domain": "contract",
+      "mode": "mixed",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "scanned",
+        "mixed",
+        "digital",
+        "scanned"
+      ],
+      "expected_fields": {
+        "contract_no": {
+          "value": "HT-2026-010",
+          "page": 2,
+          "quote": "contract_no: HT-2026-010"
+        },
+        "delivery_days": {
+          "value": "30 days",
+          "page": 2,
+          "quote": "delivery_days: 30 days"
+        },
+        "amount": {
+          "value": "CNY 112,340.00",
+          "page": 2,
+          "quote": "amount: CNY 112,340.00"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "contract_11_mixed",
+      "file": "contract_11_mixed.pdf",
+      "domain": "contract",
+      "mode": "mixed",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "scanned",
+        "mixed",
+        "digital",
+        "scanned"
+      ],
+      "expected_fields": {
+        "contract_no": {
+          "value": "HT-2026-011",
+          "page": 2,
+          "quote": "contract_no: HT-2026-011"
+        },
+        "delivery_days": {
+          "value": "31 days",
+          "page": 2,
+          "quote": "delivery_days: 31 days"
+        },
+        "amount": {
+          "value": "CNY 113,574.00",
+          "page": 2,
+          "quote": "amount: CNY 113,574.00"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "contract_12_mixed",
+      "file": "contract_12_mixed.pdf",
+      "domain": "contract",
+      "mode": "mixed",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "scanned",
+        "mixed",
+        "digital",
+        "scanned"
+      ],
+      "expected_fields": {
+        "contract_no": {
+          "value": "HT-2026-012",
+          "page": 2,
+          "quote": "contract_no: HT-2026-012"
+        },
+        "delivery_days": {
+          "value": "32 days",
+          "page": 2,
+          "quote": "delivery_days: 32 days"
+        },
+        "amount": {
+          "value": "CNY 114,808.00",
+          "page": 2,
+          "quote": "amount: CNY 114,808.00"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "bid_01_digital",
+      "file": "bid_01_digital.pdf",
+      "domain": "bid",
+      "mode": "digital",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "digital",
+        "digital",
+        "digital",
+        "digital"
+      ],
+      "expected_fields": {
+        "project_no": {
+          "value": "BID-2026-001",
+          "page": 2,
+          "quote": "project_no: BID-2026-001"
+        },
+        "deadline": {
+          "value": "2026-09-11 17:00",
+          "page": 2,
+          "quote": "deadline: 2026-09-11 17:00"
+        },
+        "bond": {
+          "value": "CNY 5,500.00",
+          "page": 2,
+          "quote": "bond: CNY 5,500.00"
+        }
+      },
+      "features": [
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "bid_02_digital",
+      "file": "bid_02_digital.pdf",
+      "domain": "bid",
+      "mode": "digital",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "digital",
+        "digital",
+        "digital",
+        "digital"
+      ],
+      "expected_fields": {
+        "project_no": {
+          "value": "BID-2026-002",
+          "page": 2,
+          "quote": "project_no: BID-2026-002"
+        },
+        "deadline": {
+          "value": "2026-09-12 17:00",
+          "page": 2,
+          "quote": "deadline: 2026-09-12 17:00"
+        },
+        "bond": {
+          "value": "CNY 6,000.00",
+          "page": 2,
+          "quote": "bond: CNY 6,000.00"
+        }
+      },
+      "features": [
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "bid_03_digital",
+      "file": "bid_03_digital.pdf",
+      "domain": "bid",
+      "mode": "digital",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "digital",
+        "digital",
+        "digital",
+        "digital"
+      ],
+      "expected_fields": {
+        "project_no": {
+          "value": "BID-2026-003",
+          "page": 2,
+          "quote": "project_no: BID-2026-003"
+        },
+        "deadline": {
+          "value": "2026-09-13 17:00",
+          "page": 2,
+          "quote": "deadline: 2026-09-13 17:00"
+        },
+        "bond": {
+          "value": "CNY 6,500.00",
+          "page": 2,
+          "quote": "bond: CNY 6,500.00"
+        }
+      },
+      "features": [
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "bid_04_scanned",
+      "file": "bid_04_scanned.pdf",
+      "domain": "bid",
+      "mode": "scanned",
+      "pages": 5,
+      "page_modes": [
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned"
+      ],
+      "expected_fields": {
+        "project_no": {
+          "value": "BID-2026-004",
+          "page": 2,
+          "quote": "project_no: BID-2026-004"
+        },
+        "deadline": {
+          "value": "2026-09-14 17:00",
+          "page": 2,
+          "quote": "deadline: 2026-09-14 17:00"
+        },
+        "bond": {
+          "value": "CNY 7,000.00",
+          "page": 2,
+          "quote": "bond: CNY 7,000.00"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "bid_05_scanned",
+      "file": "bid_05_scanned.pdf",
+      "domain": "bid",
+      "mode": "scanned",
+      "pages": 5,
+      "page_modes": [
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned"
+      ],
+      "expected_fields": {
+        "project_no": {
+          "value": "BID-2026-005",
+          "page": 2,
+          "quote": "project_no: BID-2026-005"
+        },
+        "deadline": {
+          "value": "2026-09-15 17:00",
+          "page": 2,
+          "quote": "deadline: 2026-09-15 17:00"
+        },
+        "bond": {
+          "value": "CNY 7,500.00",
+          "page": 2,
+          "quote": "bond: CNY 7,500.00"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "bid_06_mixed",
+      "file": "bid_06_mixed.pdf",
+      "domain": "bid",
+      "mode": "mixed",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "scanned",
+        "mixed",
+        "digital",
+        "scanned"
+      ],
+      "expected_fields": {
+        "project_no": {
+          "value": "BID-2026-006",
+          "page": 2,
+          "quote": "project_no: BID-2026-006"
+        },
+        "deadline": {
+          "value": "2026-09-16 17:00",
+          "page": 2,
+          "quote": "deadline: 2026-09-16 17:00"
+        },
+        "bond": {
+          "value": "CNY 8,000.00",
+          "page": 2,
+          "quote": "bond: CNY 8,000.00"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "bid_07_mixed",
+      "file": "bid_07_mixed.pdf",
+      "domain": "bid",
+      "mode": "mixed",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "scanned",
+        "mixed",
+        "digital",
+        "scanned"
+      ],
+      "expected_fields": {
+        "project_no": {
+          "value": "BID-2026-007",
+          "page": 2,
+          "quote": "project_no: BID-2026-007"
+        },
+        "deadline": {
+          "value": "2026-09-17 17:00",
+          "page": 2,
+          "quote": "deadline: 2026-09-17 17:00"
+        },
+        "bond": {
+          "value": "CNY 8,500.00",
+          "page": 2,
+          "quote": "bond: CNY 8,500.00"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "invoice_01_digital",
+      "file": "invoice_01_digital.pdf",
+      "domain": "invoice",
+      "mode": "digital",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "digital",
+        "digital",
+        "digital",
+        "digital"
+      ],
+      "expected_fields": {
+        "invoice_no": {
+          "value": "INV-2026-001",
+          "page": 2,
+          "quote": "invoice_no: INV-2026-001"
+        },
+        "total": {
+          "value": "CNY 1,288.50",
+          "page": 2,
+          "quote": "total: CNY 1,288.50"
+        },
+        "tax_id": {
+          "value": "91320000TEST0001",
+          "page": 2,
+          "quote": "tax_id: 91320000TEST0001"
+        }
+      },
+      "features": [
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "invoice_02_digital",
+      "file": "invoice_02_digital.pdf",
+      "domain": "invoice",
+      "mode": "digital",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "digital",
+        "digital",
+        "digital",
+        "digital"
+      ],
+      "expected_fields": {
+        "invoice_no": {
+          "value": "INV-2026-002",
+          "page": 2,
+          "quote": "invoice_no: INV-2026-002"
+        },
+        "total": {
+          "value": "CNY 1,376.50",
+          "page": 2,
+          "quote": "total: CNY 1,376.50"
+        },
+        "tax_id": {
+          "value": "91320000TEST0002",
+          "page": 2,
+          "quote": "tax_id: 91320000TEST0002"
+        }
+      },
+      "features": [
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "invoice_03_scanned",
+      "file": "invoice_03_scanned.pdf",
+      "domain": "invoice",
+      "mode": "scanned",
+      "pages": 5,
+      "page_modes": [
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned"
+      ],
+      "expected_fields": {
+        "invoice_no": {
+          "value": "INV-2026-003",
+          "page": 2,
+          "quote": "invoice_no: INV-2026-003"
+        },
+        "total": {
+          "value": "CNY 1,464.50",
+          "page": 2,
+          "quote": "total: CNY 1,464.50"
+        },
+        "tax_id": {
+          "value": "91320000TEST0003",
+          "page": 2,
+          "quote": "tax_id: 91320000TEST0003"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "invoice_04_scanned",
+      "file": "invoice_04_scanned.pdf",
+      "domain": "invoice",
+      "mode": "scanned",
+      "pages": 5,
+      "page_modes": [
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned",
+        "scanned"
+      ],
+      "expected_fields": {
+        "invoice_no": {
+          "value": "INV-2026-004",
+          "page": 2,
+          "quote": "invoice_no: INV-2026-004"
+        },
+        "total": {
+          "value": "CNY 1,552.50",
+          "page": 2,
+          "quote": "total: CNY 1,552.50"
+        },
+        "tax_id": {
+          "value": "91320000TEST0004",
+          "page": 2,
+          "quote": "tax_id: 91320000TEST0004"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    },
+    {
+      "id": "invoice_05_mixed",
+      "file": "invoice_05_mixed.pdf",
+      "domain": "invoice",
+      "mode": "mixed",
+      "pages": 5,
+      "page_modes": [
+        "digital",
+        "scanned",
+        "mixed",
+        "digital",
+        "scanned"
+      ],
+      "expected_fields": {
+        "invoice_no": {
+          "value": "INV-2026-005",
+          "page": 2,
+          "quote": "invoice_no: INV-2026-005"
+        },
+        "total": {
+          "value": "CNY 1,640.50",
+          "page": 2,
+          "quote": "total: CNY 1,640.50"
+        },
+        "tax_id": {
+          "value": "91320000TEST0005",
+          "page": 2,
+          "quote": "tax_id: 91320000TEST0005"
+        }
+      },
+      "features": [
+        "rotation",
+        "noise",
+        "stamp",
+        "cross_page_table"
+      ],
+      "license": "CC0-1.0 synthetic"
+    }
+  ]
+}

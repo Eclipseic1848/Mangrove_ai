@@ -1,0 +1,132 @@
+{
+  "table_count": 1,
+  "visible_columns": [
+    "核销工作量天数",
+    "工作量费用"
+  ],
+  "records": [
+    {
+      "核销工作量天数": "1.0",
+      "工作量费用": "680.00"
+    },
+    {
+      "核销工作量天数": "2.0",
+      "工作量费用": "2040.00"
+    },
+    {
+      "核销工作量天数": "2.5",
+      "工作量费用": "2720.00"
+    },
+    {
+      "核销工作量天数": "1.0",
+      "工作量费用": "4080.00"
+    },
+    {
+      "核销工作量天数": "1.5",
+      "工作量费用": "4760.00"
+    },
+    {
+      "核销工作量天数": "2.0",
+      "工作量费用": "5440.00"
+    },
+    {
+      "核销工作量天数": "0.5",
+      "工作量费用": "6800.00"
+    },
+    {
+      "核销工作量天数": "1.0",
+      "工作量费用": "7480.00"
+    },
+    {
+      "核销工作量天数": "1.5",
+      "工作量费用": "8160.00"
+    },
+    {
+      "核销工作量天数": "2.5",
+      "工作量费用": "9520.00"
+    },
+    {
+      "核销工作量天数": "0.5",
+      "工作量费用": "10200.00"
+    }
+  ],
+  "evidence": [
+    {
+      "record_index": 0,
+      "source_ref": "source.parquet#row=1",
+      "selection": {
+        "姓名": "示例人员甲"
+      }
+    },
+    {
+      "record_index": 1,
+      "source_ref": "source.parquet#row=3",
+      "selection": {
+        "姓名": "示例人员甲"
+      }
+    },
+    {
+      "record_index": 2,
+      "source_ref": "source.parquet#row=4",
+      "selection": {
+        "姓名": "示例人员甲"
+      }
+    },
+    {
+      "record_index": 3,
+      "source_ref": "source.parquet#row=6",
+      "selection": {
+        "姓名": "示例人员甲"
+      }
+    },
+    {
+      "record_index": 4,
+      "source_ref": "source.parquet#row=7",
+      "selection": {
+        "姓名": "示例人员甲"
+      }
+    },
+    {
+      "record_index": 5,
+      "source_ref": "source.parquet#row=8",
+      "selection": {
+        "姓名": "示例人员甲"
+      }
+    },
+    {
+      "record_index": 6,
+      "source_ref": "source.parquet#row=10",
+      "selection": {
+        "姓名": "示例人员甲"
+      }
+    },
+    {
+      "record_index": 7,
+      "source_ref": "source.parquet#row=11",
+      "selection": {
+        "姓名": "示例人员甲"
+      }
+    },
+    {
+      "record_index": 8,
+      "source_ref": "source.parquet#row=12",
+      "selection": {
+        "姓名": "示例人员甲"
+      }
+    },
+    {
+      "record_index": 9,
+      "source_ref": "source.parquet#row=14",
+      "selection": {
+        "姓名": "示例人员甲"
+      }
+    },
+    {
+      "record_index": 10,
+      "source_ref": "source.parquet#row=15",
+      "selection": {
+        "姓名": "示例人员甲"
+      }
+    }
+  ]
+}

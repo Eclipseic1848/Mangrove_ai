@@ -1,0 +1,23 @@
+{
+  "properties": {
+    "min_confidence": {
+      "default": 0.9,
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Min Confidence",
+      "type": "number"
+    },
+    "require_bbox": {
+      "default": true,
+      "title": "Require Bbox",
+      "type": "boolean"
+    },
+    "review_conflicts": {
+      "default": true,
+      "title": "Review Conflicts",
+      "type": "boolean"
+    }
+  },
+  "title": "ReviewPolicy",
+  "type": "object"
+}

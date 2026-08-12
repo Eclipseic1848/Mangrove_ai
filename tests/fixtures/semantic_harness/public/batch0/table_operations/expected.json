@@ -1,0 +1,44 @@
+{
+  "merge": [
+    {
+      "记录号": "R1",
+      "姓名": "示例人员甲",
+      "区域": "华东"
+    },
+    {
+      "记录号": "R2",
+      "姓名": "示例人员乙",
+      "区域": "华东"
+    },
+    {
+      "记录号": "R3",
+      "姓名": "示例人员丙",
+      "区域": "华南"
+    },
+    {
+      "记录号": "R4",
+      "姓名": "示例人员丁",
+      "区域": "华南"
+    }
+  ],
+  "aggregate": [
+    {
+      "部门": "交付一部",
+      "费用合计": "700.00"
+    },
+    {
+      "部门": "研发一部",
+      "费用合计": "300.00"
+    }
+  ],
+  "negative_cases": [
+    {
+      "case_id": "missing_projection_column",
+      "expected_error": "missing_column"
+    },
+    {
+      "case_id": "non_unique_join_key",
+      "expected_error": "join_cardinality_violation"
+    }
+  ]
+}

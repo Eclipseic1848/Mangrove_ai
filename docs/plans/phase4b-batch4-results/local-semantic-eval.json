@@ -1,0 +1,40 @@
+{
+  "schema_version": "1",
+  "evaluated_at": "2026-07-27",
+  "provider": "local",
+  "model": "Qwen3.6-35B-A3B",
+  "base_url_class": "LAN",
+  "fixture": "tests/fixtures/semantic_harness/public/batch0/documents/contract*.docx",
+  "task": "比较付款、交付和违约责任的实质变化，并返回双方证据 ID",
+  "passed": 3,
+  "total": 3,
+  "accuracy": 1.0,
+  "unsupported_claims": 0,
+  "evidence_binding_coverage": 1.0,
+  "duration_ms": 48600,
+  "cases": [
+    {
+      "label": "付款条款",
+      "status": "pass",
+      "expected_change": "付款比例从60%提高到70%",
+      "evidence_side_count": 2
+    },
+    {
+      "label": "交付条款",
+      "status": "pass",
+      "expected_change": "交付日期从2026-09-30延至2026-10-15",
+      "evidence_side_count": 2
+    },
+    {
+      "label": "违约责任",
+      "status": "pass",
+      "expected_change": "每日违约比例从千分之一提高到千分之二",
+      "evidence_side_count": 2
+    }
+  ],
+  "limits": [
+    "仅代表公开脱敏小型 Golden，不代表全部业务场景准确率",
+    "客观差异由确定性代码产生；模型失败时保留客观差异并放弃实质影响判断",
+    "正式服务器并发、长文档和更多语义类别仍属于后续批次 8 门禁"
+  ]
+}

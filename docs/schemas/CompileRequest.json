@@ -1,0 +1,921 @@
+{
+  "$defs": {
+    "Ambiguity": {
+      "additionalProperties": false,
+      "properties": {
+        "ambiguity_id": {
+          "minLength": 1,
+          "title": "Ambiguity Id",
+          "type": "string"
+        },
+        "question": {
+          "minLength": 1,
+          "title": "Question",
+          "type": "string"
+        },
+        "candidates": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 2,
+          "title": "Candidates",
+          "type": "array"
+        },
+        "material": {
+          "default": true,
+          "title": "Material",
+          "type": "boolean"
+        },
+        "resolved": {
+          "default": false,
+          "title": "Resolved",
+          "type": "boolean"
+        },
+        "resolution": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resolution"
+        }
+      },
+      "required": [
+        "ambiguity_id",
+        "question",
+        "candidates"
+      ],
+      "title": "Ambiguity",
+      "type": "object"
+    },
+    "BudgetSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "max_bytes": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Bytes"
+        },
+        "max_rows": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Rows"
+        },
+        "max_pages": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Pages"
+        },
+        "max_seconds": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Max Seconds"
+        },
+        "max_tool_calls": {
+          "default": 20,
+          "minimum": 1,
+          "title": "Max Tool Calls",
+          "type": "integer"
+        },
+        "max_repair_attempts": {
+          "default": 2,
+          "maximum": 2,
+          "minimum": 0,
+          "title": "Max Repair Attempts",
+          "type": "integer"
+        }
+      },
+      "title": "BudgetSpec",
+      "type": "object"
+    },
+    "ClarificationResolution": {
+      "additionalProperties": false,
+      "description": "一次结构化澄清；不得只把回答拼接回自然语言后丢弃上一版语义。",
+      "properties": {
+        "ambiguity_id": {
+          "minLength": 1,
+          "title": "Ambiguity Id",
+          "type": "string"
+        },
+        "question": {
+          "minLength": 1,
+          "title": "Question",
+          "type": "string"
+        },
+        "answer": {
+          "minLength": 1,
+          "title": "Answer",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ambiguity_id",
+        "question",
+        "answer"
+      ],
+      "title": "ClarificationResolution",
+      "type": "object"
+    },
+    "CombineMode": {
+      "enum": [
+        "preserve",
+        "one_table"
+      ],
+      "title": "CombineMode",
+      "type": "string"
+    },
+    "CombineSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/CombineMode",
+          "default": "preserve"
+        }
+      },
+      "title": "CombineSpec",
+      "type": "object"
+    },
+    "ContentPolicy": {
+      "enum": [
+        "verbatim",
+        "normalized",
+        "summarized",
+        "rewritten",
+        "translated",
+        "analyzed"
+      ],
+      "title": "ContentPolicy",
+      "type": "string"
+    },
+    "DeliveryFormat": {
+      "enum": [
+        "json",
+        "jsonl",
+        "csv",
+        "tsv",
+        "xlsx",
+        "parquet",
+        "docx",
+        "pdf",
+        "html",
+        "markdown",
+        "txt",
+        "pptx"
+      ],
+      "title": "DeliveryFormat",
+      "type": "string"
+    },
+    "DeliverySpec": {
+      "additionalProperties": false,
+      "properties": {
+        "formats": {
+          "items": {
+            "$ref": "#/$defs/DeliveryFormat"
+          },
+          "minItems": 1,
+          "title": "Formats",
+          "type": "array"
+        },
+        "output_name": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Output Name"
+        },
+        "requested_file_count": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requested File Count"
+        }
+      },
+      "required": [
+        "formats"
+      ],
+      "title": "DeliverySpec",
+      "type": "object"
+    },
+    "EvidencePolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "require_evidence": {
+          "default": true,
+          "title": "Require Evidence",
+          "type": "boolean"
+        },
+        "minimum_coverage": {
+          "default": 1.0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Minimum Coverage",
+          "type": "number"
+        },
+        "require_source_position": {
+          "default": true,
+          "title": "Require Source Position",
+          "type": "boolean"
+        }
+      },
+      "title": "EvidencePolicy",
+      "type": "object"
+    },
+    "ExecutionBoundary": {
+      "enum": [
+        "local_or_lan",
+        "external_api"
+      ],
+      "title": "ExecutionBoundary",
+      "type": "string"
+    },
+    "InputContract": {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_formats": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Accepted Formats",
+          "type": "array"
+        },
+        "accepted_media_types": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Accepted Media Types",
+          "type": "array"
+        },
+        "allow_internal_conversion": {
+          "default": true,
+          "title": "Allow Internal Conversion",
+          "type": "boolean"
+        },
+        "encrypted_policy": {
+          "default": "reject",
+          "pattern": "^(reject|needs_user)$",
+          "title": "Encrypted Policy",
+          "type": "string"
+        },
+        "corrupt_policy": {
+          "default": "reject",
+          "pattern": "^(reject|isolate)$",
+          "title": "Corrupt Policy",
+          "type": "string"
+        }
+      },
+      "title": "InputContract",
+      "type": "object"
+    },
+    "ObjectiveSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "original_text": {
+          "minLength": 1,
+          "title": "Original Text",
+          "type": "string"
+        },
+        "normalized_text": {
+          "minLength": 1,
+          "title": "Normalized Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "original_text",
+        "normalized_text"
+      ],
+      "title": "ObjectiveSpec",
+      "type": "object"
+    },
+    "OperationSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "$ref": "#/$defs/OperationType"
+        },
+        "params": {
+          "additionalProperties": true,
+          "title": "Params",
+          "type": "object"
+        }
+      },
+      "required": [
+        "operation"
+      ],
+      "title": "OperationSpec",
+      "type": "object"
+    },
+    "OperationType": {
+      "enum": [
+        "sort",
+        "union",
+        "join",
+        "group",
+        "aggregate",
+        "deduplicate",
+        "normalize",
+        "compare",
+        "audit"
+      ],
+      "title": "OperationType",
+      "type": "string"
+    },
+    "PostconditionSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "table_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Table Count"
+        },
+        "exact_visible_columns": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Exact Visible Columns",
+          "type": "array"
+        },
+        "expected_row_count": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Expected Row Count"
+        },
+        "predicates": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PredicatePostcondition"
+          },
+          "title": "Predicates",
+          "type": "array"
+        },
+        "minimum_evidence_coverage": {
+          "default": 1.0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Minimum Evidence Coverage",
+          "type": "number"
+        },
+        "require_lineage": {
+          "default": true,
+          "title": "Require Lineage",
+          "type": "boolean"
+        },
+        "require_openable_output": {
+          "default": true,
+          "title": "Require Openable Output",
+          "type": "boolean"
+        }
+      },
+      "title": "PostconditionSpec",
+      "type": "object"
+    },
+    "PredicateOperator": {
+      "enum": [
+        "eq",
+        "ne",
+        "gt",
+        "gte",
+        "lt",
+        "lte",
+        "contains",
+        "in",
+        "not_in",
+        "is_null",
+        "not_null",
+        "regex"
+      ],
+      "title": "PredicateOperator",
+      "type": "string"
+    },
+    "PredicatePostcondition": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "title": "Field",
+          "type": "string"
+        },
+        "operator": {
+          "$ref": "#/$defs/PredicateOperator"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        },
+        "values": {
+          "default": [],
+          "items": {},
+          "title": "Values",
+          "type": "array"
+        },
+        "required_ratio": {
+          "default": 1.0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Required Ratio",
+          "type": "number"
+        }
+      },
+      "required": [
+        "field",
+        "operator"
+      ],
+      "title": "PredicatePostcondition",
+      "type": "object"
+    },
+    "ProjectionField": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "alias": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Alias"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ProjectionField",
+      "type": "object"
+    },
+    "RiskPolicy": {
+      "additionalProperties": false,
+      "properties": {
+        "execution_boundary": {
+          "$ref": "#/$defs/ExecutionBoundary",
+          "default": "local_or_lan"
+        },
+        "external_api_confirmed": {
+          "default": false,
+          "title": "External Api Confirmed",
+          "type": "boolean"
+        },
+        "allow_side_effects": {
+          "default": false,
+          "title": "Allow Side Effects",
+          "type": "boolean"
+        }
+      },
+      "title": "RiskPolicy",
+      "type": "object"
+    },
+    "SelectionPredicate": {
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "minLength": 1,
+          "title": "Field",
+          "type": "string"
+        },
+        "operator": {
+          "$ref": "#/$defs/PredicateOperator"
+        },
+        "value": {
+          "default": null,
+          "title": "Value"
+        },
+        "values": {
+          "default": [],
+          "items": {},
+          "title": "Values",
+          "type": "array"
+        },
+        "case_sensitive": {
+          "default": false,
+          "title": "Case Sensitive",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "field",
+        "operator"
+      ],
+      "title": "SelectionPredicate",
+      "type": "object"
+    },
+    "SemanticTaskPlan": {
+      "additionalProperties": false,
+      "description": "来源无关的逻辑计划；后续绑定和物理选型不得改写这里的用户语义。",
+      "properties": {
+        "spec_version": {
+          "default": "1",
+          "pattern": "^1$",
+          "title": "Spec Version",
+          "type": "string"
+        },
+        "plan_id": {
+          "minLength": 1,
+          "title": "Plan Id",
+          "type": "string"
+        },
+        "task_id": {
+          "minLength": 1,
+          "title": "Task Id",
+          "type": "string"
+        },
+        "revision": {
+          "default": 1,
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "task_family": {
+          "$ref": "#/$defs/TaskFamily"
+        },
+        "objective": {
+          "$ref": "#/$defs/ObjectiveSpec"
+        },
+        "source_scope": {
+          "$ref": "#/$defs/SourceScope"
+        },
+        "input_contract": {
+          "$ref": "#/$defs/InputContract"
+        },
+        "selection": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/SelectionPredicate"
+          },
+          "title": "Selection",
+          "type": "array"
+        },
+        "projection": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ProjectionField"
+          },
+          "title": "Projection",
+          "type": "array"
+        },
+        "record_grain": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Record Grain"
+        },
+        "operations": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/OperationSpec"
+          },
+          "title": "Operations",
+          "type": "array"
+        },
+        "combine": {
+          "$ref": "#/$defs/CombineSpec"
+        },
+        "content_policy": {
+          "$ref": "#/$defs/ContentPolicy",
+          "default": "verbatim"
+        },
+        "evidence_policy": {
+          "$ref": "#/$defs/EvidencePolicy"
+        },
+        "delivery": {
+          "$ref": "#/$defs/DeliverySpec"
+        },
+        "postconditions": {
+          "$ref": "#/$defs/PostconditionSpec"
+        },
+        "risk_policy": {
+          "$ref": "#/$defs/RiskPolicy"
+        },
+        "budgets": {
+          "$ref": "#/$defs/BudgetSpec"
+        },
+        "ambiguities": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Ambiguity"
+          },
+          "title": "Ambiguities",
+          "type": "array"
+        }
+      },
+      "required": [
+        "plan_id",
+        "task_id",
+        "task_family",
+        "objective",
+        "source_scope",
+        "delivery"
+      ],
+      "title": "SemanticTaskPlan",
+      "type": "object"
+    },
+    "SourceScope": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Artifact Ids",
+          "type": "array"
+        },
+        "source_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Ids",
+          "type": "array"
+        },
+        "table_scope": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Table Scope"
+        },
+        "pages": {
+          "additionalProperties": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "title": "Pages",
+          "type": "object"
+        },
+        "section_patterns": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Section Patterns",
+          "type": "array"
+        },
+        "time_ranges": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Time Ranges",
+          "type": "array"
+        },
+        "whole_document": {
+          "default": false,
+          "title": "Whole Document",
+          "type": "boolean"
+        }
+      },
+      "title": "SourceScope",
+      "type": "object"
+    },
+    "TaskFamily": {
+      "enum": [
+        "extract",
+        "tabular_transform",
+        "compare",
+        "audit",
+        "compose",
+        "summarize",
+        "translate",
+        "convert",
+        "transcribe",
+        "discover"
+      ],
+      "title": "TaskFamily",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "description": "服务端可信范围与用户目标；来源 ID 不允许由模型生成。",
+  "properties": {
+    "task_id": {
+      "minLength": 1,
+      "title": "Task Id",
+      "type": "string"
+    },
+    "objective_text": {
+      "minLength": 1,
+      "title": "Objective Text",
+      "type": "string"
+    },
+    "artifact_ids": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Artifact Ids",
+      "type": "array"
+    },
+    "source_ids": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Source Ids",
+      "type": "array"
+    },
+    "pages": {
+      "additionalProperties": {
+        "items": {
+          "type": "integer"
+        },
+        "type": "array"
+      },
+      "title": "Pages",
+      "type": "object"
+    },
+    "table_scope": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Table Scope"
+    },
+    "section_patterns": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Section Patterns",
+      "type": "array"
+    },
+    "time_ranges": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Time Ranges",
+      "type": "array"
+    },
+    "accepted_formats": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Accepted Formats",
+      "type": "array"
+    },
+    "accepted_media_types": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Accepted Media Types",
+      "type": "array"
+    },
+    "provider": {
+      "default": "local",
+      "minLength": 1,
+      "title": "Provider",
+      "type": "string"
+    },
+    "model": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model"
+    },
+    "external_api_confirmed": {
+      "default": false,
+      "title": "External Api Confirmed",
+      "type": "boolean"
+    },
+    "max_repair_attempts": {
+      "default": 2,
+      "maximum": 2,
+      "minimum": 0,
+      "title": "Max Repair Attempts",
+      "type": "integer"
+    },
+    "prior_plan": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SemanticTaskPlan"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "clarification": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ClarificationResolution"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "task_id",
+    "objective_text"
+  ],
+  "title": "CompileRequest",
+  "type": "object"
+}

@@ -1,0 +1,193 @@
+{
+  "$defs": {
+    "ManifestArtifactEntry": {
+      "description": "Manifest 中单个制品条目。",
+      "properties": {
+        "artifact_id": {
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "kind": {
+          "description": "raw|parsed|clean|rejects|lineage|schema|quality|recipe|trace",
+          "title": "Kind",
+          "type": "string"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "size_bytes": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Size Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "kind",
+        "path",
+        "sha256"
+      ],
+      "title": "ManifestArtifactEntry",
+      "type": "object"
+    },
+    "ManifestOutputEntry": {
+      "description": "Manifest 中单个输出文件条目。",
+      "properties": {
+        "format": {
+          "$ref": "#/$defs/OutputFormat"
+        },
+        "path": {
+          "title": "Path",
+          "type": "string"
+        },
+        "sha256": {
+          "title": "Sha256",
+          "type": "string"
+        },
+        "records": {
+          "default": 0,
+          "minimum": 0,
+          "title": "Records",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "format",
+        "path",
+        "sha256"
+      ],
+      "title": "ManifestOutputEntry",
+      "type": "object"
+    },
+    "OutputFormat": {
+      "description": "数据产物格式。7C 决策：首版全开 JSONL/Parquet/CSV/TSV/JSON/XLSX/SQLite。",
+      "enum": [
+        "jsonl",
+        "parquet",
+        "csv",
+        "tsv",
+        "json",
+        "xlsx",
+        "sqlite"
+      ],
+      "title": "OutputFormat",
+      "type": "string"
+    },
+    "TaskMode": {
+      "description": "任务模式：默认数据准备，旧分析仅显式选择时兼容。",
+      "enum": [
+        "data_prep",
+        "legacy_analysis"
+      ],
+      "title": "TaskMode",
+      "type": "string"
+    }
+  },
+  "description": "任务产物总清单，唯一入口（plan 6.4）。\n\n严禁包含 Cookie/Token/密码/完整授权头。",
+  "properties": {
+    "task_id": {
+      "title": "Task Id",
+      "type": "string"
+    },
+    "spec_version": {
+      "default": "2",
+      "description": "契约版本",
+      "title": "Spec Version",
+      "type": "string"
+    },
+    "mode": {
+      "$ref": "#/$defs/TaskMode",
+      "default": "data_prep"
+    },
+    "recipe_version": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Recipe Version"
+    },
+    "artifacts": {
+      "items": {
+        "$ref": "#/$defs/ManifestArtifactEntry"
+      },
+      "title": "Artifacts",
+      "type": "array"
+    },
+    "outputs": {
+      "items": {
+        "$ref": "#/$defs/ManifestOutputEntry"
+      },
+      "title": "Outputs",
+      "type": "array"
+    },
+    "record_counts": {
+      "additionalProperties": {
+        "type": "integer"
+      },
+      "description": "记录账本：raw/parsed/clean/rejects_parse/rejects_clean/merged",
+      "title": "Record Counts",
+      "type": "object"
+    },
+    "schema_ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "schema.json 路径",
+      "title": "Schema Ref"
+    },
+    "quality_ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "quality_report.json 路径",
+      "title": "Quality Ref"
+    },
+    "lineage_ref": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "lineage/records.jsonl 路径",
+      "title": "Lineage Ref"
+    },
+    "environment": {
+      "additionalProperties": true,
+      "description": "执行环境：python/engine_version/created_at",
+      "title": "Environment",
+      "type": "object"
+    }
+  },
+  "required": [
+    "task_id"
+  ],
+  "title": "DatasetManifest",
+  "type": "object"
+}

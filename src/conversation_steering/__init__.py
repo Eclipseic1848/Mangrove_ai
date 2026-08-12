@@ -1,0 +1,78 @@
+# -*- coding: utf-8 -*-
+"""任务对话转向深 Module 的公共 Interface。"""
+
+from .models import (
+    AcquisitionBudget,
+    AcquisitionRun,
+    AcquisitionStatus,
+    AutomationProcedure,
+    CapabilityMaturity,
+    CapabilityPack,
+    CompiledContext,
+    ContextCompileRequest,
+    ContextCompositionItem,
+    ContextDelta,
+    DeltaConfidence,
+    ProcedureScope,
+    ProgressAudience,
+    ProgressStage,
+    ProgressStageView,
+    ProgressValue,
+    RawUserTurn,
+    RevisionDecision,
+    RevisionDecisionStatus,
+    RevisionProposal,
+    RevisionProposalStatus,
+    RevisionSwitchMode,
+    SteeringAction,
+    SteeringRequest,
+    SteeringResult,
+    StructuredProgressEvent,
+    TaskProgressView,
+    TurnIntent,
+)
+from .context import ContextCompiler
+from .memory import InMemoryContractRegistry, InMemorySteeringRepository
+from .progress import ProgressProjection
+from .rewriter import build_context_rewriter
+from .repository import SqliteSteeringRepository
+from .service import ConversationSteering, SemanticDiffGate
+
+__all__ = [
+    "AcquisitionBudget",
+    "AcquisitionRun",
+    "AcquisitionStatus",
+    "AutomationProcedure",
+    "CapabilityMaturity",
+    "CapabilityPack",
+    "CompiledContext",
+    "ContextCompileRequest",
+    "ContextCompiler",
+    "ContextCompositionItem",
+    "ContextDelta",
+    "ConversationSteering",
+    "DeltaConfidence",
+    "InMemoryContractRegistry",
+    "InMemorySteeringRepository",
+    "ProcedureScope",
+    "ProgressAudience",
+    "ProgressProjection",
+    "ProgressStage",
+    "ProgressStageView",
+    "ProgressValue",
+    "RawUserTurn",
+    "RevisionDecision",
+    "RevisionDecisionStatus",
+    "RevisionProposal",
+    "RevisionProposalStatus",
+    "RevisionSwitchMode",
+    "SemanticDiffGate",
+    "SqliteSteeringRepository",
+    "SteeringAction",
+    "SteeringRequest",
+    "SteeringResult",
+    "StructuredProgressEvent",
+    "TaskProgressView",
+    "TurnIntent",
+    "build_context_rewriter",
+]

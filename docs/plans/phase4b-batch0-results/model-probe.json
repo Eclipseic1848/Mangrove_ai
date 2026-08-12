@@ -1,0 +1,232 @@
+{
+  "schema_version": "1",
+  "fixture": "public_deidentified_combined_plan_and_clause",
+  "results": [
+    {
+      "provider": "local",
+      "model": "Qwen3.6-35B-A3B",
+      "status": "pass",
+      "score": {
+        "passed": 12,
+        "total": 12,
+        "score": 1.0,
+        "checks": {
+          "selection": true,
+          "projection": true,
+          "row_policy": true,
+          "table_count": true,
+          "no_extra_columns": true,
+          "付款条款_text": true,
+          "付款条款_evidence": true,
+          "交付条款_text": true,
+          "交付条款_evidence": true,
+          "违约责任_text": true,
+          "违约责任_evidence": true,
+          "no_invented_clause": true
+        }
+      },
+      "normalized_output": {
+        "table_plan": {
+          "selection": {
+            "姓名": "示例人员甲"
+          },
+          "projection": [
+            "核销工作量天数",
+            "工作量费用"
+          ],
+          "row_policy": "filter_only",
+          "table_count": 1,
+          "include_extra_columns": false
+        },
+        "clauses": [
+          {
+            "title": "付款条款",
+            "text": "验收通过后十五个工作日内支付合同金额的百分之六十。",
+            "source_quote": "付款条款：验收通过后十五个工作日内支付合同金额的百分之六十。"
+          },
+          {
+            "title": "交付条款",
+            "text": "乙方应在二零二六年九月三十日前完成全部成果交付。",
+            "source_quote": "交付条款：乙方应在二零二六年九月三十日前完成全部成果交付。"
+          },
+          {
+            "title": "违约责任",
+            "text": "逾期交付的，每日按未交付部分金额的千分之一承担违约责任。",
+            "source_quote": "违约责任：逾期交付的，每日按未交付部分金额的千分之一承担违约责任。"
+          }
+        ]
+      },
+      "usage_metadata": {
+        "input_tokens": 247,
+        "output_tokens": 1873,
+        "total_tokens": 2120,
+        "input_token_details": {},
+        "output_token_details": {}
+      },
+      "response_metadata": {
+        "token_usage": {
+          "completion_tokens": 1873,
+          "prompt_tokens": 247,
+          "total_tokens": 2120,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": null
+        },
+        "model_name": "Qwen3.6-35B-A3B",
+        "finish_reason": "stop"
+      },
+      "duration_ms": 15295
+    },
+    {
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "status": "pass",
+      "score": {
+        "passed": 12,
+        "total": 12,
+        "score": 1.0,
+        "checks": {
+          "selection": true,
+          "projection": true,
+          "row_policy": true,
+          "table_count": true,
+          "no_extra_columns": true,
+          "付款条款_text": true,
+          "付款条款_evidence": true,
+          "交付条款_text": true,
+          "交付条款_evidence": true,
+          "违约责任_text": true,
+          "违约责任_evidence": true,
+          "no_invented_clause": true
+        }
+      },
+      "normalized_output": {
+        "table_plan": {
+          "selection": {
+            "姓名": "示例人员甲"
+          },
+          "projection": [
+            "核销工作量天数",
+            "工作量费用"
+          ],
+          "row_policy": "filter_only",
+          "table_count": 1,
+          "include_extra_columns": false
+        },
+        "clauses": [
+          {
+            "title": "付款条款",
+            "text": "验收通过后十五个工作日内支付合同金额的百分之六十。",
+            "source_quote": "付款条款：验收通过后十五个工作日内支付合同金额的百分之六十。"
+          },
+          {
+            "title": "交付条款",
+            "text": "乙方应在二零二六年九月三十日前完成全部成果交付。",
+            "source_quote": "交付条款：乙方应在二零二六年九月三十日前完成全部成果交付。"
+          },
+          {
+            "title": "违约责任",
+            "text": "逾期交付的，每日按未交付部分金额的千分之一承担违约责任。",
+            "source_quote": "违约责任：逾期交付的，每日按未交付部分金额的千分之一承担违约责任。"
+          }
+        ]
+      },
+      "usage_metadata": {
+        "input_tokens": 234,
+        "output_tokens": 487,
+        "total_tokens": 721,
+        "input_token_details": {
+          "cache_read": 128
+        },
+        "output_token_details": {
+          "reasoning": 243
+        }
+      },
+      "response_metadata": {
+        "token_usage": {
+          "completion_tokens": 487,
+          "prompt_tokens": 234,
+          "total_tokens": 721,
+          "completion_tokens_details": {
+            "accepted_prediction_tokens": null,
+            "audio_tokens": null,
+            "reasoning_tokens": 243,
+            "rejected_prediction_tokens": null
+          },
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 128
+          },
+          "prompt_cache_hit_tokens": 128,
+          "prompt_cache_miss_tokens": 106
+        },
+        "model_name": "deepseek-v4-pro",
+        "finish_reason": "stop"
+      },
+      "duration_ms": 13988
+    },
+    {
+      "provider": "qwen",
+      "model": "qwen3.7-plus",
+      "status": "fail",
+      "score": {
+        "passed": 5,
+        "total": 12,
+        "score": 0.416667,
+        "checks": {
+          "selection": true,
+          "projection": true,
+          "row_policy": true,
+          "table_count": true,
+          "no_extra_columns": true,
+          "付款条款_text": false,
+          "付款条款_evidence": false,
+          "交付条款_text": false,
+          "交付条款_evidence": false,
+          "违约责任_text": false,
+          "违约责任_evidence": false,
+          "no_invented_clause": false
+        }
+      },
+      "normalized_output": {
+        "table_plan": {
+          "selection": {
+            "姓名": "示例人员甲"
+          },
+          "projection": [
+            "核销工作量天数",
+            "工作量费用"
+          ],
+          "row_policy": "filter_only",
+          "table_count": 1,
+          "include_extra_columns": false
+        },
+        "clauses": []
+      },
+      "usage_metadata": {
+        "input_tokens": 249,
+        "output_tokens": 89,
+        "total_tokens": 338,
+        "input_token_details": {
+          "cache_read": 0
+        },
+        "output_token_details": {}
+      },
+      "response_metadata": {
+        "token_usage": {
+          "completion_tokens": 89,
+          "prompt_tokens": 249,
+          "total_tokens": 338,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": {
+            "audio_tokens": null,
+            "cached_tokens": 0,
+            "text_tokens": 249
+          }
+        },
+        "model_name": "qwen3.7-plus",
+        "finish_reason": "stop"
+      },
+      "duration_ms": 9562
+    }
+  ]
+}

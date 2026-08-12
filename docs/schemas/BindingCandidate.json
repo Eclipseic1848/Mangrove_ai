@@ -1,0 +1,115 @@
+{
+  "$defs": {
+    "TargetKind": {
+      "enum": [
+        "table_column",
+        "document_section",
+        "document_element",
+        "document_table_cell"
+      ],
+      "title": "TargetKind",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "semantic_ref": {
+      "minLength": 1,
+      "title": "Semantic Ref",
+      "type": "string"
+    },
+    "semantic_label": {
+      "minLength": 1,
+      "title": "Semantic Label",
+      "type": "string"
+    },
+    "physical_ref": {
+      "minLength": 1,
+      "title": "Physical Ref",
+      "type": "string"
+    },
+    "artifact_id": {
+      "minLength": 1,
+      "title": "Artifact Id",
+      "type": "string"
+    },
+    "target_kind": {
+      "$ref": "#/$defs/TargetKind"
+    },
+    "name_score": {
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Name Score",
+      "type": "number"
+    },
+    "semantic_score": {
+      "default": 0,
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Semantic Score",
+      "type": "number"
+    },
+    "literal_support": {
+      "default": 0,
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Literal Support",
+      "type": "number"
+    },
+    "type_support": {
+      "default": 0.5,
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Type Support",
+      "type": "number"
+    },
+    "evidence_quality": {
+      "default": 1,
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Evidence Quality",
+      "type": "number"
+    },
+    "contradiction_penalty": {
+      "default": 0,
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Contradiction Penalty",
+      "type": "number"
+    },
+    "total_score": {
+      "maximum": 1,
+      "minimum": 0,
+      "title": "Total Score",
+      "type": "number"
+    },
+    "evidence_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Evidence Reasons",
+      "type": "array"
+    },
+    "evidence_samples": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence Samples",
+      "type": "array"
+    }
+  },
+  "required": [
+    "semantic_ref",
+    "semantic_label",
+    "physical_ref",
+    "artifact_id",
+    "target_kind",
+    "name_score",
+    "total_score",
+    "evidence_reasons"
+  ],
+  "title": "BindingCandidate",
+  "type": "object"
+}

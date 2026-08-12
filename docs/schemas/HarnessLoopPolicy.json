@@ -1,0 +1,40 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "max_transient_retries": {
+      "default": 2,
+      "maximum": 10,
+      "minimum": 0,
+      "title": "Max Transient Retries",
+      "type": "integer"
+    },
+    "max_semantic_replans": {
+      "default": 2,
+      "maximum": 2,
+      "minimum": 0,
+      "title": "Max Semantic Replans",
+      "type": "integer"
+    },
+    "max_total_repair_rounds": {
+      "default": 5,
+      "maximum": 20,
+      "minimum": 0,
+      "title": "Max Total Repair Rounds",
+      "type": "integer"
+    },
+    "max_same_failure": {
+      "default": 2,
+      "maximum": 10,
+      "minimum": 1,
+      "title": "Max Same Failure",
+      "type": "integer"
+    },
+    "allow_external_api": {
+      "default": false,
+      "title": "Allow External Api",
+      "type": "boolean"
+    }
+  },
+  "title": "HarnessLoopPolicy",
+  "type": "object"
+}

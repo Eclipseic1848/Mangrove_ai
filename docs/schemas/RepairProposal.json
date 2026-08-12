@@ -1,0 +1,105 @@
+{
+  "$defs": {
+    "FailureKind": {
+      "enum": [
+        "transient",
+        "tool_incompatible",
+        "invalid_plan",
+        "insufficient_data",
+        "needs_user",
+        "policy_denied",
+        "resource_exhausted"
+      ],
+      "title": "FailureKind",
+      "type": "string"
+    },
+    "RepairAction": {
+      "enum": [
+        "retry_same_tool",
+        "switch_compatible_tool",
+        "rebind_source",
+        "recompile_physical_plan",
+        "semantic_replan",
+        "request_user",
+        "stop"
+      ],
+      "title": "RepairAction",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "proposal_id": {
+      "minLength": 1,
+      "title": "Proposal Id",
+      "type": "string"
+    },
+    "run_id": {
+      "minLength": 1,
+      "title": "Run Id",
+      "type": "string"
+    },
+    "failure_kind": {
+      "$ref": "#/$defs/FailureKind"
+    },
+    "failure_fingerprint": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Failure Fingerprint",
+      "type": "string"
+    },
+    "action": {
+      "$ref": "#/$defs/RepairAction"
+    },
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "changes_user_semantics": {
+      "default": false,
+      "title": "Changes User Semantics",
+      "type": "boolean"
+    },
+    "before_hash": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Before Hash"
+    },
+    "after_hash": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "After Hash"
+    },
+    "diff": {
+      "additionalProperties": true,
+      "title": "Diff",
+      "type": "object"
+    }
+  },
+  "required": [
+    "proposal_id",
+    "run_id",
+    "failure_kind",
+    "failure_fingerprint",
+    "action",
+    "reason"
+  ],
+  "title": "RepairProposal",
+  "type": "object"
+}

@@ -1,0 +1,73 @@
+{
+  "$defs": {
+    "ResultCardinality": {
+      "enum": [
+        "one",
+        "many",
+        "all"
+      ],
+      "title": "ResultCardinality",
+      "type": "string"
+    },
+    "ResultShape": {
+      "description": "与业务领域无关的结果形态；新场景通过组合而非新增专用任务类型。",
+      "enum": [
+        "fields",
+        "records",
+        "tables",
+        "document",
+        "aggregate"
+      ],
+      "title": "ResultShape",
+      "type": "string"
+    }
+  },
+  "description": "意图规划后、执行前由用户确认的结果契约。",
+  "properties": {
+    "shape": {
+      "$ref": "#/$defs/ResultShape",
+      "default": "fields"
+    },
+    "cardinality": {
+      "$ref": "#/$defs/ResultCardinality",
+      "default": "one"
+    },
+    "record_grain": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Record Grain"
+    },
+    "renderer": {
+      "default": "field_cards",
+      "title": "Renderer",
+      "type": "string"
+    },
+    "output_formats": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Output Formats",
+      "type": "array"
+    },
+    "exhaustive": {
+      "default": false,
+      "title": "Exhaustive",
+      "type": "boolean"
+    },
+    "merge_tables": {
+      "default": false,
+      "description": "仅在用户明确要求时，将多张原表按列位置无损合并为一张表",
+      "title": "Merge Tables",
+      "type": "boolean"
+    }
+  },
+  "title": "ResultContract",
+  "type": "object"
+}

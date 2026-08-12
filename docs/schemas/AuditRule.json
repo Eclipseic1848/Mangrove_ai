@@ -1,0 +1,79 @@
+{
+  "$defs": {
+    "AuditOperator": {
+      "enum": [
+        "exists",
+        "not_exists",
+        "contains",
+        "regex",
+        "numeric_eq",
+        "numeric_lte",
+        "numeric_gte",
+        "date_lte",
+        "date_gte",
+        "semantic"
+      ],
+      "title": "AuditOperator",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "rule_id": {
+      "pattern": "^rule_[a-z0-9_]+$",
+      "title": "Rule Id",
+      "type": "string"
+    },
+    "label": {
+      "minLength": 1,
+      "title": "Label",
+      "type": "string"
+    },
+    "query": {
+      "minLength": 1,
+      "title": "Query",
+      "type": "string"
+    },
+    "operator": {
+      "$ref": "#/$defs/AuditOperator"
+    },
+    "value": {
+      "default": null,
+      "title": "Value"
+    },
+    "unit": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Unit"
+    },
+    "pattern": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Pattern"
+    }
+  },
+  "required": [
+    "rule_id",
+    "label",
+    "query",
+    "operator"
+  ],
+  "title": "AuditRule",
+  "type": "object"
+}

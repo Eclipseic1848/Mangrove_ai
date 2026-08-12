@@ -1,0 +1,58 @@
+{
+  "fixture_version": "1",
+  "case_count": 6,
+  "passed": 6,
+  "failed": 0,
+  "wrong_auto_bindings": 0,
+  "duration_ms": 176.821,
+  "cases": [
+    {
+      "case_id": "table_exact",
+      "expected_status": "ready",
+      "actual_status": "ready",
+      "passed": true,
+      "duration_ms": 85.982,
+      "bound_target_count": 3
+    },
+    {
+      "case_id": "table_multi_artifact",
+      "expected_status": "ready",
+      "actual_status": "ready",
+      "passed": true,
+      "duration_ms": 41.604,
+      "bound_target_count": 6
+    },
+    {
+      "case_id": "table_duplicate_header",
+      "expected_status": "needs_user",
+      "actual_status": "needs_user",
+      "passed": true,
+      "duration_ms": 6.547,
+      "bound_target_count": 2
+    },
+    {
+      "case_id": "table_missing_in_second_source",
+      "expected_status": "needs_user",
+      "actual_status": "needs_user",
+      "passed": true,
+      "duration_ms": 37.873,
+      "bound_target_count": 4
+    },
+    {
+      "case_id": "document_multi_section",
+      "expected_status": "ready",
+      "actual_status": "ready",
+      "passed": true,
+      "duration_ms": 0.334,
+      "bound_target_count": 2
+    },
+    {
+      "case_id": "document_weak_evidence",
+      "expected_status": "needs_user",
+      "actual_status": "needs_user",
+      "passed": true,
+      "duration_ms": 0.21,
+      "bound_target_count": 0
+    }
+  ]
+}

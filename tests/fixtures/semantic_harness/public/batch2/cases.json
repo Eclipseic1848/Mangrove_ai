@@ -1,0 +1,60 @@
+{
+  "version": "1",
+  "cases": [
+    {
+      "case_id": "table_exact",
+      "kind": "table",
+      "artifacts": [
+        ["姓名", "核销工作量天数", "工作量费用"]
+      ],
+      "expected_status": "ready",
+      "expected_bound_target_count": 3
+    },
+    {
+      "case_id": "table_multi_artifact",
+      "kind": "table",
+      "artifacts": [
+        ["姓名", "核销工作量天数", "工作量费用"],
+        ["姓名", "核销工作量天数", "工作量费用"]
+      ],
+      "expected_status": "ready",
+      "expected_bound_target_count": 6
+    },
+    {
+      "case_id": "table_duplicate_header",
+      "kind": "table",
+      "artifacts": [
+        ["姓名", "核销工作量天数", "核销工作量天数", "工作量费用"]
+      ],
+      "expected_status": "needs_user"
+    },
+    {
+      "case_id": "table_missing_in_second_source",
+      "kind": "table",
+      "artifacts": [
+        ["姓名", "核销工作量天数", "工作量费用"],
+        ["姓名", "核销工作量天数", "其他费用"]
+      ],
+      "expected_status": "needs_user"
+    },
+    {
+      "case_id": "document_multi_section",
+      "kind": "document",
+      "sections": [
+        "商务条款：付款条件",
+        "商务条款：交付与验收"
+      ],
+      "expected_status": "ready",
+      "expected_bound_target_count": 2
+    },
+    {
+      "case_id": "document_weak_evidence",
+      "kind": "document",
+      "sections": [
+        "商务条款：付款条件"
+      ],
+      "weak_evidence": true,
+      "expected_status": "needs_user"
+    }
+  ]
+}

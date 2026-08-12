@@ -1,0 +1,14 @@
+[
+  {"id":"personal-visible","actor":"owner","scope":"personal","expected":"allow"},
+  {"id":"personal-other-user","actor":"other_user","scope":"personal","expected":"deny"},
+  {"id":"personal-admin-business-artifact","actor":"admin","scope":"personal","expected":"deny"},
+  {"id":"platform-user","actor":"user","scope":"platform","maturity":"verified","expected":"allow"},
+  {"id":"platform-draft","actor":"user","scope":"platform","maturity":"draft","expected":"invalid"},
+  {"id":"platform-task-ref","actor":"admin","scope":"platform","task_refs":["private-task"],"expected":"invalid"},
+  {"id":"external-unconfirmed","provider":"external","confirmed":false,"expected":"permission_request"},
+  {"id":"external-confirmed","provider":"external","confirmed":true,"expected":"allow"},
+  {"id":"new-secret","request":"new_secret","expected":"permission_request"},
+  {"id":"new-network-target","request":"unknown_url","expected":"permission_request"},
+  {"id":"delete-source","request":"irreversible_delete","expected":"permission_request"},
+  {"id":"local-existing-capability","provider":"local","existing":true,"expected":"allow"}
+]

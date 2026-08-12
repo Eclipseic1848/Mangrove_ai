@@ -1,0 +1,119 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+.venv-*/
+env*
+venv*
+ENV/
+env.bak/
+venv.bak/
+.pytest_cache/
+.pytest-tmp/
+.pytest-tmp-*/
+.hypothesis/
+.coverage
+htmlcov/
+*.egg-info/
+*.egg
+MANIFEST
+
+# Logs
+logs/
+*.log
+*.log.*
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 本机 Windows 一键启停脚本包含固定解释器、局域网地址和本地服务编排，不进入公开版本。
+/start_all.bat
+/stop_all.bat
+
+# IDE
+.idea/
+.superpowers/sdd/
+
+# Agent 本机权限、绝对路径、工作树和运行状态不得进入仓库。
+.claude/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build files
+build/
+dist/
+*.so
+*.dylib
+*.dll
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+tmp/
+.artifacts/
+
+# Agent 运行产物
+data/*
+!data/templates/
+!data/lessons/
+data/templates/*
+!data/templates/README.md
+data/lessons/*
+!data/lessons/README.md
+memory/*
+!memory/README.md
+analysis/
+downloads/
+# SQLite 数据库（真实运行库在 data/webui.db，已被上面 data/* 忽略；
+# 根目录 webui.db 是历史遗留误提交，一并忽略防止再次被 git 追踪）
+webui.db
+*.db
+# 历史真实采集样本只保存在本机，不作为应用源码发布。
+src/services/voc_processor/data/*.json
+# 生成的部署文档可能含现场路径或网络信息，公开仓库只保留可编辑源文档/生成脚本。
+docs/*.docx
+# 模板向量缓存（派生数据，按模型+文本哈希自动重算）
+data/templates/_vectors.json
+
+# 前端（Web UI）
+node_modules/
+frontend/node_modules/
+evals/agentic-runtime-vnext/runs/
+frontend/dist/
+frontend/test-results/
+*.tsbuildinfo
+
+# 可选第三方依赖由 scripts/setup_external_dependencies.ps1 固定版本重建。
+external/MediaCrawler/repo/
+external/firecrawl/
+
+# Phase 4B 真实业务评测文件只允许保存在本地私有目录
+tests/fixtures/semantic_harness/private/
+
+# Agent 运行时截图
+screenshots/
+
+# 备份文件
+*.bak
+
+# Windows 保留设备名（Git 无法索引）
+NUL

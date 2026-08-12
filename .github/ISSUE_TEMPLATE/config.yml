@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞
+    url: https://github.com/Eclipseic1848/Mangrove_ai/security/advisories/new
+    about: 请使用私密漏洞报告，禁止公开披露利用细节或凭据。

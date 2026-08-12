@@ -1,0 +1,31 @@
+name: 功能建议
+description: 建议一个有明确价值和边界的能力
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: scenario
+    attributes:
+      label: 使用场景与痛点
+      description: 谁在什么情况下遇到了什么问题？
+    validations:
+      required: true
+  - type: textarea
+    id: outcome
+    attributes:
+      label: 期望结果与价值
+      description: 说明应达到的业务结果，不要只描述界面按钮。
+    validations:
+      required: true
+  - type: textarea
+    id: boundaries
+    attributes:
+      label: 范围与安全边界
+      description: 涉及哪些数据、权限、外部服务、网络或不可逆操作？
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 已考虑的替代方案
+      description: 是否有成熟开源组件或现有能力可以复用？

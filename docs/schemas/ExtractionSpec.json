@@ -1,0 +1,223 @@
+{
+  "$defs": {
+    "DiscoverySpec": {
+      "description": "模型和检索器允许访问的制品与范围。",
+      "properties": {
+        "artifact_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Artifact Ids",
+          "type": "array"
+        },
+        "pages": {
+          "additionalProperties": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "description": "artifact_id 到允许页码的映射；空列表表示该制品全部页",
+          "title": "Pages",
+          "type": "object"
+        },
+        "section_patterns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Section Patterns",
+          "type": "array"
+        }
+      },
+      "required": [
+        "artifact_ids"
+      ],
+      "title": "DiscoverySpec",
+      "type": "object"
+    },
+    "ExtractionFieldSpec": {
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "dtype": {
+          "default": "string",
+          "title": "Dtype",
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        },
+        "require_evidence": {
+          "default": true,
+          "title": "Require Evidence",
+          "type": "boolean"
+        },
+        "min_confidence": {
+          "default": 0.9,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Min Confidence",
+          "type": "number"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "ExtractionFieldSpec",
+      "type": "object"
+    },
+    "ResultCardinality": {
+      "enum": [
+        "one",
+        "many",
+        "all"
+      ],
+      "title": "ResultCardinality",
+      "type": "string"
+    },
+    "ResultContract": {
+      "description": "意图规划后、执行前由用户确认的结果契约。",
+      "properties": {
+        "shape": {
+          "$ref": "#/$defs/ResultShape",
+          "default": "fields"
+        },
+        "cardinality": {
+          "$ref": "#/$defs/ResultCardinality",
+          "default": "one"
+        },
+        "record_grain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Record Grain"
+        },
+        "renderer": {
+          "default": "field_cards",
+          "title": "Renderer",
+          "type": "string"
+        },
+        "output_formats": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Output Formats",
+          "type": "array"
+        },
+        "exhaustive": {
+          "default": false,
+          "title": "Exhaustive",
+          "type": "boolean"
+        },
+        "merge_tables": {
+          "default": false,
+          "description": "仅在用户明确要求时，将多张原表按列位置无损合并为一张表",
+          "title": "Merge Tables",
+          "type": "boolean"
+        }
+      },
+      "title": "ResultContract",
+      "type": "object"
+    },
+    "ResultShape": {
+      "description": "与业务领域无关的结果形态；新场景通过组合而非新增专用任务类型。",
+      "enum": [
+        "fields",
+        "records",
+        "tables",
+        "document",
+        "aggregate"
+      ],
+      "title": "ResultShape",
+      "type": "string"
+    },
+    "TaskGoal": {
+      "description": "用户确认后的文档任务目标。",
+      "properties": {
+        "objective": {
+          "title": "Objective",
+          "type": "string"
+        },
+        "document_types": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Document Types",
+          "type": "array"
+        },
+        "success_criteria": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Success Criteria",
+          "type": "array"
+        }
+      },
+      "required": [
+        "objective"
+      ],
+      "title": "TaskGoal",
+      "type": "object"
+    }
+  },
+  "description": "经用户确认后才用于字段抽取的规格。",
+  "properties": {
+    "spec_version": {
+      "default": "3",
+      "title": "Spec Version",
+      "type": "string"
+    },
+    "goal": {
+      "$ref": "#/$defs/TaskGoal"
+    },
+    "discovery": {
+      "$ref": "#/$defs/DiscoverySpec"
+    },
+    "fields": {
+      "items": {
+        "$ref": "#/$defs/ExtractionFieldSpec"
+      },
+      "maxItems": 30,
+      "title": "Fields",
+      "type": "array"
+    },
+    "result_contract": {
+      "$ref": "#/$defs/ResultContract"
+    },
+    "conflict_policy": {
+      "default": "review",
+      "pattern": "^(review|keep_all|reject)$",
+      "title": "Conflict Policy",
+      "type": "string"
+    }
+  },
+  "required": [
+    "goal",
+    "discovery"
+  ],
+  "title": "ExtractionSpec",
+  "type": "object"
+}

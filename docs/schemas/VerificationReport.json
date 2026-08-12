@@ -1,0 +1,129 @@
+{
+  "$defs": {
+    "VerificationCheck": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "minLength": 1,
+          "title": "Code",
+          "type": "string"
+        },
+        "passed": {
+          "title": "Passed",
+          "type": "boolean"
+        },
+        "expected": {
+          "default": null,
+          "title": "Expected"
+        },
+        "actual": {
+          "default": null,
+          "title": "Actual"
+        },
+        "message": {
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "repairable": {
+          "default": false,
+          "title": "Repairable",
+          "type": "boolean"
+        },
+        "evidence_refs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "code",
+        "passed",
+        "message"
+      ],
+      "title": "VerificationCheck",
+      "type": "object"
+    },
+    "VerificationStatus": {
+      "enum": [
+        "pass",
+        "fail",
+        "needs_user"
+      ],
+      "title": "VerificationStatus",
+      "type": "string"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "report_id": {
+      "minLength": 1,
+      "title": "Report Id",
+      "type": "string"
+    },
+    "logical_plan_id": {
+      "minLength": 1,
+      "title": "Logical Plan Id",
+      "type": "string"
+    },
+    "logical_plan_revision": {
+      "minimum": 1,
+      "title": "Logical Plan Revision",
+      "type": "integer"
+    },
+    "logical_plan_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Logical Plan Hash",
+      "type": "string"
+    },
+    "status": {
+      "$ref": "#/$defs/VerificationStatus"
+    },
+    "checks": {
+      "items": {
+        "$ref": "#/$defs/VerificationCheck"
+      },
+      "minItems": 1,
+      "title": "Checks",
+      "type": "array"
+    },
+    "repair_attempt": {
+      "default": 0,
+      "maximum": 2,
+      "minimum": 0,
+      "title": "Repair Attempt",
+      "type": "integer"
+    },
+    "failure_fingerprint": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Failure Fingerprint"
+    },
+    "generated_at": {
+      "format": "date-time",
+      "title": "Generated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "report_id",
+    "logical_plan_id",
+    "logical_plan_revision",
+    "logical_plan_hash",
+    "status",
+    "checks"
+  ],
+  "title": "VerificationReport",
+  "type": "object"
+}

@@ -1,0 +1,86 @@
+{
+  "$defs": {
+    "TargetSchemaField": {
+      "description": "目标 Schema 的单个字段定义。",
+      "properties": {
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "dtype": {
+          "description": "逻辑类型：string|integer|number|boolean|datetime|date|enum|json|bytes",
+          "title": "Dtype",
+          "type": "string"
+        },
+        "required": {
+          "default": false,
+          "title": "Required",
+          "type": "boolean"
+        },
+        "enum_values": {
+          "description": "枚举合法值（dtype=enum 时）",
+          "items": {
+            "type": "string"
+          },
+          "title": "Enum Values",
+          "type": "array"
+        },
+        "unique": {
+          "default": false,
+          "description": "是否业务唯一键",
+          "title": "Unique",
+          "type": "boolean"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Description"
+        }
+      },
+      "required": [
+        "name",
+        "dtype"
+      ],
+      "title": "TargetSchemaField",
+      "type": "object"
+    }
+  },
+  "description": "可选的目标 Schema：清洗后字段应满足的类型与约束。",
+  "properties": {
+    "fields": {
+      "items": {
+        "$ref": "#/$defs/TargetSchemaField"
+      },
+      "title": "Fields",
+      "type": "array"
+    },
+    "primary_key": {
+      "description": "主键字段名列表",
+      "items": {
+        "type": "string"
+      },
+      "title": "Primary Key",
+      "type": "array"
+    },
+    "unique_keys": {
+      "description": "业务唯一键组合",
+      "items": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "title": "Unique Keys",
+      "type": "array"
+    }
+  },
+  "title": "TargetSchema",
+  "type": "object"
+}
