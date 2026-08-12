@@ -83,7 +83,7 @@ langgraph-checkpoint==3.0.1
 # 断点续跑用的持久检查点后端（CHECKPOINT_ENABLED=True 时需要）。
 # 注意：版本须与 langgraph/langgraph-checkpoint 配套——上面声明的是 1.0.x/3.0.x 栈，故配 sqlite-saver 3.0.x；
 # 若实际运行环境是 langgraph 0.6.x（checkpoint 2.x），请改用 langgraph-checkpoint-sqlite==2.0.11。
-langgraph-checkpoint-sqlite==3.0.3
+langgraph-checkpoint-sqlite==3.1.1
 langgraph-prebuilt==1.0.5
 langgraph-sdk==0.3.1
 langsmith==0.6.1
