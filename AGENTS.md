@@ -91,3 +91,20 @@
 - `docs/plans/`：规格、任务拆分和执行证据；完成后不再充当当前状态。
 
 架构、约定或产品边界发生变化时，修改对应的唯一权威文档，禁止把同一状态复制到多个文件。
+
+## Agent skills
+
+### Issue tracker
+
+Issue 和 PRD 统一使用 `Eclipseic1848/Mangrove_ai` 的 GitHub Issues。参见
+`docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+使用五个默认分诊标签：`needs-triage`、`needs-info`、`ready-for-agent`、
+`ready-for-human`、`wontfix`。参见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+采用单上下文领域文档布局，使用根目录 `CONTEXT.md` 和 `docs/adr/`。参见
+`docs/agents/domain.md`。

@@ -1,3 +1,19 @@
+<p align="center">
+  <strong>Mangrove（红树林）</strong><br>
+  <sub>统一数据任务平台</sub>
+</p>
+
+<p align="center">
+  <a href="./README.md">README</a> ·
+  <a href="./CONTRIBUTING.md">参与贡献</a> ·
+  <a href="./CODE_OF_CONDUCT.md">行为准则</a> ·
+  <a href="./SECURITY.md">安全策略</a> ·
+  <a href="./THIRD_PARTY_NOTICES.md">第三方许可</a> ·
+  <a href="./LICENSE">MIT License</a>
+</p>
+
+---
+
 # 第三方组件与许可证说明
 
 根目录 `LICENSE` 中的 MIT 许可证只适用于 Mangrove 项目自有代码和文档，不会覆盖或替换

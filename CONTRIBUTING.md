@@ -1,3 +1,19 @@
+<p align="center">
+  <strong>Mangrove（红树林）</strong><br>
+  <sub>统一数据任务平台</sub>
+</p>
+
+<p align="center">
+  <a href="./README.md">README</a> ·
+  <a href="./CONTRIBUTING.md">参与贡献</a> ·
+  <a href="./CODE_OF_CONDUCT.md">行为准则</a> ·
+  <a href="./SECURITY.md">安全策略</a> ·
+  <a href="./THIRD_PARTY_NOTICES.md">第三方许可</a> ·
+  <a href="./LICENSE">MIT License</a>
+</p>
+
+---
+
 # 为 Mangrove 贡献
 
 感谢你关注 Mangrove。项目仍处于快速迭代期，贡献应优先保持任务语义、权限边界、证据链和
