@@ -15,9 +15,11 @@ type GovernanceItem = {
   eligibility: "eligible" | "quarantined";
   source: "governance_event" | "legacy_compat";
   owner_id: string | null;
-  digest: string;
+  digest: string | null;
   can_validate: boolean;
 };
+
+type ResolvedGovernanceItem = GovernanceItem & { digest: string };
 
 type ValidationTaskOption = {
   task_id: string;
@@ -43,9 +45,16 @@ type ValidationRun = {
   created_at: string;
 };
 
+type SupplyChainBlocker =
+  | "secret_detected"
+  | "critical_vulnerability"
+  | "fixable_high_vulnerability"
+  | "misconfiguration_failure"
+  | "trivy_database_stale";
+
 type SupplyChainEvidence = {
   status: "passed" | "blocked";
-  blockers: string[];
+  blockers: SupplyChainBlocker[];
   secret_count: number;
   critical_count: number;
   fixable_high_count: number;
@@ -82,6 +91,13 @@ const STEP_LABEL = {
   verifier: "独立 Verifier",
   cleanup: "资源清理",
 } as const;
+const BLOCKER_LABEL: Record<SupplyChainBlocker, string> = {
+  secret_detected: "检测到 Secret",
+  critical_vulnerability: "存在 Critical 漏洞",
+  fixable_high_vulnerability: "存在可修复 High 漏洞",
+  misconfiguration_failure: "存在 Critical 或可修复 High 安全误配置",
+  trivy_database_stale: "Trivy 漏洞库已过期",
+};
 
 function shortDigest(digest: string) {
   if (digest.length <= 32) return digest;
@@ -92,13 +108,23 @@ function itemKey(item: GovernanceItem) {
   return `${item.scope}:${item.owner_id ?? "platform"}:${item.pack_id}:${item.version}:${item.digest}`;
 }
 
+function hasDigest(item: GovernanceItem): item is ResolvedGovernanceItem {
+  return typeof item.digest === "string" && item.digest.length > 0;
+}
+
+function utcMinute(value: string) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return "不可判定";
+  return `${parsed.toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+
 export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: boolean }) {
   const [items, setItems] = useState<GovernanceItem[]>([]);
   const [runs, setRuns] = useState<ValidationRun[]>([]);
   const [supplyChainEvidence, setSupplyChainEvidence] = useState<Record<string, SupplyChainEvidence | null>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [target, setTarget] = useState<GovernanceItem | null>(null);
+  const [target, setTarget] = useState<ResolvedGovernanceItem | null>(null);
   const [taskOptions, setTaskOptions] = useState<ValidationTaskOption[]>([]);
   const [selectedTask, setSelectedTask] = useState("");
   const [modalLoading, setModalLoading] = useState(false);
@@ -114,7 +140,10 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
     const nextItems: GovernanceItem[] = packData.items ?? [];
     setItems(nextItems);
     setRuns(runData.items ?? []);
-    const evidencePairs = await Promise.all(nextItems.map(async (item) => {
+    const evidenceItems = nextItems
+      .filter(hasDigest)
+      .filter((item) => !ownerOnly || item.can_validate);
+    const evidencePairs = await Promise.all(evidenceItems.map(async (item) => {
       try {
         const data = await api.get(
           `/api/capability-governance/packs/${encodeURIComponent(item.pack_id)}/${encodeURIComponent(item.version)}/supply-chain-evidence?digest=${encodeURIComponent(item.digest)}`,
@@ -151,6 +180,10 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
   const visibleItems = ownerOnly ? items.filter((item) => item.can_validate) : items;
 
   async function openValidation(item: GovernanceItem) {
+    if (!hasDigest(item)) {
+      setError("能力 digest 已脱敏，不能发起验证");
+      return;
+    }
     setTarget(item);
     setTaskOptions([]);
     setSelectedTask("");
@@ -245,6 +278,9 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
             ));
             const run = matchingRuns.find((candidate) => candidate.run_id === focusedRunId) ?? matchingRuns[0];
             const completedSteps = new Set(run?.evidence.map((evidence) => evidence.step) ?? []);
+            const validationSteps = Object.keys(STEP_LABEL) as Array<keyof typeof STEP_LABEL>;
+            const totalSteps = validationSteps.length;
+            const hasAllValidationSteps = validationSteps.every((step) => completedSteps.has(step));
             return (
             <article
               key={itemKey(item)}
@@ -274,7 +310,7 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                 </div>
               </div>
               <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border/60 pt-3 text-xs text-muted-foreground">
-                <code>{shortDigest(item.digest)}</code>
+                <code>{item.digest ? shortDigest(item.digest) : "digest 已脱敏"}</code>
                 <div className="flex items-center gap-2">
                   <span>{item.source === "legacy_compat" ? "兼容读取" : "治理事件"}</span>
                   {item.can_validate && (
@@ -297,10 +333,17 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                   )}
                 </div>
                 {supplyEvidence && (
-                  <p className="mt-1.5 text-muted-foreground">
-                    Trivy {supplyEvidence.trivy_version} · DB v{supplyEvidence.trivy_database.version} · Syft {supplyEvidence.syft_version} · CycloneDX {supplyEvidence.cyclonedx_spec_version}；
-                    Secret {supplyEvidence.secret_count}，Critical {supplyEvidence.critical_count}，可修复 High {supplyEvidence.fixable_high_count}，配置失败 {supplyEvidence.misconfiguration_failure_count}
-                  </p>
+                  <div className="mt-1.5 space-y-1 text-muted-foreground">
+                    <p>
+                      Trivy {supplyEvidence.trivy_version} · DB v{supplyEvidence.trivy_database.version} · DB 更新 {utcMinute(supplyEvidence.trivy_database.updated_at)} · Syft {supplyEvidence.syft_version} · CycloneDX {supplyEvidence.cyclonedx_spec_version}；
+                      Secret {supplyEvidence.secret_count}，Critical {supplyEvidence.critical_count}，可修复 High {supplyEvidence.fixable_high_count}，配置失败 {supplyEvidence.misconfiguration_failure_count}
+                    </p>
+                    {supplyEvidence.blockers.length > 0 && (
+                      <p className="text-destructive">
+                        阻断原因：{supplyEvidence.blockers.map((blocker) => BLOCKER_LABEL[blocker]).join("、")}
+                      </p>
+                    )}
+                  </div>
                 )}
               </div>
               {run && (
@@ -325,7 +368,9 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                       {["queued", "running", "cancelling"].includes(run.status)
                         ? "验证正在后台执行，本页每 1.5 秒自动更新；你可以留在本页查看，也可以稍后返回能力治理。"
                         : run.status === "succeeded"
-                          ? "五项验证步骤已通过。该结果只形成验证证据，不会自动晋级或发布能力。"
+                          ? hasAllValidationSteps
+                            ? "五项验证步骤已通过。该结果只形成验证证据，不会自动晋级或发布能力。"
+                            : `该验证记录仅包含 ${completedSteps.size}/${totalSteps} 项，不能视为五项均通过。`
                           : run.status === "failed"
                             ? "验证未通过。请查看下方标记为“未通过”的步骤及其说明。"
                             : "验证已取消；下方仍保留已产生的步骤证据和资源清理结果。"}
@@ -353,7 +398,7 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                       </div>
                     )}
                     <p className="text-xs text-muted-foreground">
-                      已完成 {completedSteps.size}/5 个步骤。一次业务成功不会自动改变能力成熟度。
+                      已完成 {completedSteps.size}/{totalSteps} 个步骤。一次业务成功不会自动改变能力成熟度。
                     </p>
                   </div>
                 </details>

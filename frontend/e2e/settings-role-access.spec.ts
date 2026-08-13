@@ -276,12 +276,12 @@ test("管理员从能力卡片创建验证并渐进查看步骤缺口", async ({
   await page.route("**/api/capability-governance/packs/*/*/supply-chain-evidence?*", (route) => route.fulfill({
     json: {
       evidence: {
-        status: "passed",
-        blockers: [],
+        status: "blocked",
+        blockers: ["misconfiguration_failure", "trivy_database_stale"],
         secret_count: 0,
         critical_count: 0,
         fixable_high_count: 0,
-        misconfiguration_failure_count: 0,
+        misconfiguration_failure_count: 1,
         trivy_version: "0.70.0",
         trivy_database: { version: 2, updated_at: "2026-08-07T00:00:00Z" },
         syft_version: "1.50.0",
@@ -316,8 +316,9 @@ test("管理员从能力卡片创建验证并渐进查看步骤缺口", async ({
   await expect(page.getByText("可运行")).toHaveCount(2);
   await expect(page.getByText("兼容读取").first()).toBeVisible();
   await expect(grayCard).toContainText("供应链证据");
-  await expect(grayCard).toContainText("扫描通过");
-  await expect(grayCard).toContainText("Trivy 0.70.0 · DB v2 · Syft 1.50.0 · CycloneDX 1.6");
+  await expect(grayCard).toContainText("存在硬门");
+  await expect(grayCard).toContainText("阻断原因：存在 Critical 或可修复 High 安全误配置、Trivy 漏洞库已过期");
+  await expect(grayCard).toContainText("DB 更新 2026-08-07 00:00 UTC");
   await expect(page.getByText("sha256:bbbbbbbbbbbb…bbbbbbbbbbbb").first()).toBeVisible();
   await grayCard.getByRole("button", { name: "发起验证" }).click();
   await expect(page.getByRole("dialog", { name: "发起能力验证" })).toBeVisible();
@@ -330,7 +331,123 @@ test("管理员从能力卡片创建验证并渐进查看步骤缺口", async ({
   await expect(progress).toContainText("验证进度与结果 · 等待验证 · 任务 workspace-table-1 V2");
   await expect(progress).toContainText("本页每 1.5 秒自动更新");
   await expect(progress.getByText("合成 Smoke")).toBeVisible();
+  await expect(progress.getByText("供应链扫描与 SBOM")).toHaveCount(0);
   await expect(progress.getByText("已完成 0/5 个步骤。一次业务成功不会自动改变能力成熟度。")).toBeVisible();
+});
+
+test("五步成功记录与独立供应链证据分别展示", async ({ page }) => {
+  await mockSettings(page, "admin");
+  const digest = `sha256:${"c".repeat(64)}`;
+  await page.route("**/api/capability-governance/packs", (route) => route.fulfill({
+    json: {
+      items: [{
+        pack_id: "legacy-five-step",
+        version: "1.0.0",
+        scope: "platform",
+        maturity: "verified",
+        lifecycle: "active",
+        eligibility: "eligible",
+        source: "legacy_compat",
+        owner_id: null,
+        digest,
+        can_validate: true,
+      }],
+    },
+  }));
+  await page.route("**/api/capability-governance/validations", (route) => route.fulfill({
+    json: {
+      items: [{
+        run_id: "legacy-five-step-run",
+        owner_id: "admin-a",
+        target: { pack_id: "legacy-five-step", version: "1.0.0", digest },
+        task_ref: { task_id: "legacy-task", revision: 1 },
+        status: "succeeded",
+        evidence: [
+          "synthetic_smoke",
+          "owner_task_replay",
+          "fail_closed",
+          "verifier",
+          "cleanup",
+        ].map((step) => ({
+          step,
+          status: "passed",
+          summary: "历史验证步骤已通过",
+          occurred_at: "2026-08-06T00:00:00Z",
+        })),
+        created_at: "2026-08-06T00:00:00Z",
+      }],
+    },
+  }));
+  await page.route("**/api/capability-governance/packs/*/*/supply-chain-evidence?*", (route) => route.fulfill({
+    json: { evidence: null },
+  }));
+
+  await page.goto("/settings?section=governance");
+
+  const progress = page.getByRole("group", { name: "验证进度与结果：legacy-five-step" });
+  await progress.locator("summary").click();
+  await expect(progress).toContainText(
+    "五项验证步骤已通过。该结果只形成验证证据，不会自动晋级或发布能力。",
+  );
+  await expect(progress).not.toContainText("供应链扫描与 SBOM");
+  await expect(progress).toContainText("已完成 5/5 个步骤");
+  const card = page.locator("article").filter({ hasText: "legacy-five-step" });
+  await expect(card).toContainText("供应链证据");
+  await expect(card).toContainText("尚未扫描");
+});
+
+test("普通用户只为自己的非脱敏能力读取供应链证据", async ({ page }) => {
+  await mockSettings(page, "user");
+  const personalDigest = `sha256:${"a".repeat(64)}`;
+  const evidenceRequests: string[] = [];
+  await page.route("**/api/capability-governance/packs", (route) => route.fulfill({
+    json: {
+      items: [
+        {
+          pack_id: "gray-python-table",
+          version: "1.0.0",
+          scope: "platform",
+          maturity: "verified",
+          lifecycle: "active",
+          eligibility: "eligible",
+          source: "legacy_compat",
+          owner_id: null,
+          digest: null,
+          can_validate: false,
+        },
+        {
+          pack_id: "owner-python-table",
+          version: "1.0.0",
+          scope: "personal",
+          maturity: "draft",
+          lifecycle: "active",
+          eligibility: "eligible",
+          source: "governance_event",
+          owner_id: "user-a",
+          digest: personalDigest,
+          can_validate: true,
+        },
+      ],
+    },
+  }));
+  await page.route(
+    "**/api/capability-governance/packs/*/*/supply-chain-evidence?*",
+    (route) => {
+      evidenceRequests.push(route.request().url());
+      return route.fulfill({ json: { evidence: null } });
+    },
+  );
+
+  await page.goto("/settings");
+
+  await expect(page.getByRole("heading", { name: "我的能力验证" })).toBeVisible();
+  await expect(page.getByText("owner-python-table")).toBeVisible();
+  await expect(page.getByText("gray-python-table")).toHaveCount(0);
+  expect(evidenceRequests.length).toBeGreaterThan(0);
+  expect(evidenceRequests.every((url) => (
+    url.includes("/owner-python-table/1.0.0/")
+    && url.includes(encodeURIComponent(personalDigest))
+  ))).toBe(true);
 });
 
 test("普通用户可创建并区分同一 Provider 的多套命名连接", async ({ page }) => {

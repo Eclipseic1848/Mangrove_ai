@@ -267,6 +267,8 @@ class SupplyChainCollection(BaseModel):
     critical_count: int = Field(ge=0)
     fixable_high_count: int = Field(ge=0)
     misconfiguration_failure_count: int = Field(ge=0)
+    critical_misconfiguration_count: int = Field(default=0, ge=0)
+    fixable_high_misconfiguration_count: int = Field(default=0, ge=0)
     syft_version: Literal["1.50.0"]
     syft_json_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     cyclonedx_json_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -287,6 +289,7 @@ class CapabilitySupplyChainEvidence(BaseModel):
             "secret_detected",
             "critical_vulnerability",
             "fixable_high_vulnerability",
+            "misconfiguration_failure",
             "trivy_database_stale",
         ],
         ...,
@@ -295,6 +298,8 @@ class CapabilitySupplyChainEvidence(BaseModel):
     critical_count: int = Field(ge=0)
     fixable_high_count: int = Field(ge=0)
     misconfiguration_failure_count: int = Field(ge=0)
+    critical_misconfiguration_count: int = Field(default=0, ge=0)
+    fixable_high_misconfiguration_count: int = Field(default=0, ge=0)
     trivy_version: Literal["0.70.0"]
     trivy_config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     trivy_result_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")

@@ -9,6 +9,11 @@ import uuid
 from filelock import FileLock
 
 from .catalog import CapabilityCatalog
+from .integrity import (
+    capability_integrity_record_exists,
+    verify_capability_integrity,
+    write_capability_integrity,
+)
 from .models import CatalogActor
 from .models import PublicCapabilityDescriptor
 from .oci_store import OrasOciLayoutStore
@@ -57,6 +62,39 @@ class CapabilityMountResolver:
                 if marker.is_file():
                     if marker.read_text(encoding="utf-8") != ref.digest:
                         raise RuntimeError("能力挂载缓存 digest 标记失配")
+                    if capability_integrity_record_exists(destination):
+                        verify_capability_integrity(destination, ref.digest)
+                    else:
+                        # 旧缓存不能就地补签；必须从冻结 OCI 重建，避免把已变内容登记为可信。
+                        temporary = destination.with_name(
+                            f"{destination.name}.tmp-{uuid.uuid4().hex[:12]}"
+                        )
+                        previous = destination.with_name(
+                            f"{destination.name}.previous-{uuid.uuid4().hex[:12]}"
+                        )
+                        try:
+                            self._artifact_store.materialize(
+                                artifact_name=ref.pack_id,
+                                version=ref.version,
+                                digest=ref.digest,
+                                destination=temporary,
+                            )
+                            (temporary / ".mangrove-capability-digest").write_text(
+                                ref.digest,
+                                encoding="utf-8",
+                            )
+                            destination.replace(previous)
+                            try:
+                                temporary.replace(destination)
+                                write_capability_integrity(destination, ref.digest)
+                            except Exception:
+                                shutil.rmtree(destination, ignore_errors=True)
+                                previous.replace(destination)
+                                raise
+                            shutil.rmtree(previous)
+                        except Exception:
+                            shutil.rmtree(temporary, ignore_errors=True)
+                            raise
                 else:
                     temporary = destination.with_name(
                         f"{destination.name}.tmp-{uuid.uuid4().hex[:12]}"
@@ -74,6 +112,11 @@ class CapabilityMountResolver:
                         )
                         destination.parent.mkdir(parents=True, exist_ok=True)
                         temporary.replace(destination)
+                        try:
+                            write_capability_integrity(destination, ref.digest)
+                        except Exception:
+                            shutil.rmtree(destination, ignore_errors=True)
+                            raise
                     except Exception:
                         shutil.rmtree(temporary, ignore_errors=True)
                         raise

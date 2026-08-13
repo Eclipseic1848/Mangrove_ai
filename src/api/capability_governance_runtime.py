@@ -12,7 +12,9 @@ from src.capability_catalog import (
 )
 from src.capability_governance import (
     CapabilityGovernance,
+    CapabilitySupplyChainEvidenceService,
     CapabilityValidationManager,
+    LockedCliSupplyChainTools,
     PiTaskReplayRunner,
     SqliteCapabilityGovernanceRepository,
     SqliteValidationTaskResolver,
@@ -37,11 +39,23 @@ def get_capability_validation_manager() -> CapabilityValidationManager:
             settings.webui_db_path,
             capability_mounts=mounts,
         )
+        repository = SqliteCapabilityGovernanceRepository(
+            settings.webui_db_path
+        )
+        supply_chain_evidence = CapabilitySupplyChainEvidenceService(
+            repository,
+            LockedCliSupplyChainTools(
+                tool_root=settings.capability_supply_chain_tool_root,
+                evidence_root=settings.capability_supply_chain_evidence_root,
+                cache_root=settings.capability_supply_chain_cache_root,
+                lock_path=settings.capability_supply_chain_lock_path,
+            ),
+        )
         governance = CapabilityGovernance(
             CapabilityCatalog(
                 SqliteCapabilityCatalogRepository(settings.webui_db_path)
             ),
-            SqliteCapabilityGovernanceRepository(settings.webui_db_path),
+            repository,
             task_resolver=task_resolver,
         )
         _manager = CapabilityValidationManager(
@@ -76,5 +90,7 @@ def get_capability_validation_manager() -> CapabilityValidationManager:
                     ).cancel_requested,
                 ),
             ),
+            supply_chain_evidence=supply_chain_evidence,
+            capability_mounts=mounts,
         )
     return _manager

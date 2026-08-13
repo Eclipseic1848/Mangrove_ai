@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
-from typing import Callable
+from typing import Callable, Protocol
 import uuid
 
 from src.agentic_runtime.document_retrieval import DocumentRetrievalModule
@@ -24,6 +24,8 @@ from src.config.settings import settings
 from src.model_connections import get_default_broker
 
 from .models import (
+    CapabilityGovernanceTarget,
+    CapabilitySupplyChainEvidence,
     CapabilityValidationRun,
     ValidationEvidence,
     ValidationRunStatus,
@@ -35,6 +37,19 @@ from .task_replay import ValidationTaskResolver
 
 
 logger = logging.getLogger(__name__)
+
+
+class SupplyChainEvidenceCollector(Protocol):
+    def requires_collection(
+        self,
+        target: CapabilityGovernanceTarget,
+    ) -> bool: ...
+
+    def collect(
+        self,
+        target: CapabilityGovernanceTarget,
+        subject_root: str | Path,
+    ) -> CapabilitySupplyChainEvidence: ...
 
 
 def _hash(value: object) -> str:
@@ -329,6 +344,143 @@ class TaskEvidenceValidationExecutor(CapabilityValidationExecutor):
     def _network_name(self, run: CapabilityValidationRun) -> str:
         return f"mangrove-capval-{hashlib.sha256(run.run_id.encode('utf-8')).hexdigest()[:12]}"
 
+    @staticmethod
+    def _verify_declared_permissions(mounts: tuple[Path, ...]) -> None:
+        mounted = load_runtime_manifests(mounts)
+        if not mounted:
+            raise RuntimeError("冻结能力制品缺少可验证运行清单")
+        for item in mounted:
+            required = {"network:none"}
+            if item.manifest.entrypoint is not None:
+                required.add("process:child")
+            if item.manifest.kind == "mcp_local":
+                required.add("mcp:stdio")
+            missing = required - set(item.manifest.permissions)
+            if missing:
+                # 能力不能依赖实际运行时隐式赋予、却未在冻结清单声明的权限。
+                raise RuntimeError("能力运行清单存在未声明的必需权限")
+
+    @staticmethod
+    def _same_host_path(value: object, expected: Path) -> bool:
+        if not isinstance(value, str) or not value:
+            return False
+        try:
+            return Path(value).resolve() == expected.resolve()
+        except OSError:
+            return False
+
+    def _verify_isolation(
+        self,
+        run: CapabilityValidationRun,
+        capability_mounts: tuple[Path, ...],
+    ) -> None:
+        if self._lease is None:
+            self._lease = self._stale_lease(run)
+        inspected = self._docker(
+            "container",
+            "inspect",
+            self._lease.container_name,
+            "--format",
+            "{{json .}}",
+        )
+        if inspected.returncode != 0:
+            raise RuntimeError("Capability Host 隔离配置不可判定")
+        try:
+            payload = json.loads(inspected.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("Capability Host 隔离配置不可判定") from error
+        host_config = payload.get("HostConfig") if isinstance(payload, dict) else None
+        mounts = payload.get("Mounts") if isinstance(payload, dict) else None
+        network_settings = (
+            payload.get("NetworkSettings") if isinstance(payload, dict) else None
+        )
+        attached_networks = (
+            network_settings.get("Networks")
+            if isinstance(network_settings, dict)
+            else None
+        )
+        if (
+            not isinstance(host_config, dict)
+            or not isinstance(mounts, list)
+            or not isinstance(attached_networks, dict)
+        ):
+            raise RuntimeError("Capability Host 隔离配置不可判定")
+        cap_drop = {str(value).casefold() for value in (host_config.get("CapDrop") or [])}
+        security_options = {
+            str(value).casefold()
+            for value in (host_config.get("SecurityOpt") or [])
+        }
+        tmpfs = host_config.get("Tmpfs")
+        tmp_options = (
+            {
+                value.strip().casefold()
+                for value in str(tmpfs.get("/tmp") or "").split(",")
+                if value.strip()
+            }
+            if isinstance(tmpfs, dict)
+            else set()
+        )
+        expected_network = self._network_name(run)
+        # 容器只能附着本次验证专属的 internal 网络；第二网络会绕过 network:none 与治理出口边界。
+        if (
+            host_config.get("ReadonlyRootfs") is not True
+            or host_config.get("Privileged") is not False
+            or "all" not in cap_drop
+            or not any(
+                value.startswith("no-new-privileges")
+                for value in security_options
+            )
+            or not isinstance(tmpfs, dict)
+            or set(tmpfs) != {"/tmp"}
+            or tmp_options != {"rw", "noexec", "nosuid", "size=64m"}
+            or host_config.get("PidsLimit") != 128
+            or host_config.get("Memory") != 2 * 1024**3
+            or host_config.get("NanoCpus") != 2 * 10**9
+            or host_config.get("NetworkMode") != expected_network
+            or set(attached_networks) != {expected_network}
+        ):
+            raise RuntimeError("Capability Host 隔离硬门未通过")
+        # 只读额外挂载仍可能注入其他 Owner 或未冻结内容，因此必须与本次 digest 请求一一对应。
+        mounted_capabilities = load_runtime_manifests(capability_mounts)
+        expected_mounts = {
+            "/opt/mangrove-host": self._lease.runtime_dir,
+            **{
+                f"/capabilities/{item.mount_index}": item.root
+                for item in mounted_capabilities
+            },
+        }
+        if len(mounts) != len(expected_mounts):
+            raise RuntimeError("Capability Host 挂载集合与冻结请求不一致")
+        remaining_destinations = set(expected_mounts)
+        for mount in mounts:
+            if not isinstance(mount, dict):
+                raise RuntimeError("Capability Host 挂载配置不可判定")
+            destination = str(mount.get("Destination") or "")
+            source = mount.get("Source")
+            if "docker.sock" in str(source or "").casefold() or (
+                "docker.sock" in destination.casefold()
+            ):
+                raise RuntimeError("Capability Host 禁止挂载 Docker Socket")
+            if (
+                destination not in remaining_destinations
+                or mount.get("Type") != "bind"
+                or mount.get("RW") is not False
+                or not self._same_host_path(source, expected_mounts[destination])
+            ):
+                raise RuntimeError("Capability Host 挂载身份与冻结请求不一致")
+            remaining_destinations.remove(destination)
+        if remaining_destinations:
+            raise RuntimeError("Capability Host 缺少冻结请求挂载")
+        network = self._docker(
+            "network",
+            "inspect",
+            expected_network,
+            "--format",
+            "{{json .Internal}}",
+        )
+        if network.returncode != 0 or network.stdout.strip().casefold() != "true":
+            raise RuntimeError("Capability Host 未使用 internal 隔离网络")
+
     def _stale_lease(self, run: CapabilityValidationRun) -> CapabilityHostLease:
         identity = self._identity(run)
         safe_task = re.sub(
@@ -472,6 +624,15 @@ class TaskEvidenceValidationExecutor(CapabilityValidationExecutor):
                 {"task_ref": current.model_dump(mode="json"), "replay": replay},
             )
         if step is ValidationStep.FAIL_CLOSED:
+            mounts = _target_mounts(
+                run,
+                self._capability_mounts(
+                    run.owner_id,
+                    run.task_ref.task_id,
+                    run.task_ref.revision,
+                ),
+            )
+            self._verify_declared_permissions(mounts)
             altered = run.task_ref.model_copy(update={"output_sha256": "0" * 64})
             try:
                 self._task_resolver.verify(actor, run.target, altered)
@@ -498,10 +659,17 @@ class TaskEvidenceValidationExecutor(CapabilityValidationExecutor):
             )
             if unauthorized.returncode != 0:
                 raise RuntimeError("Capability Host 未正确拒绝无效 Token")
+            self._verify_isolation(run, mounts)
             return self._evidence(
                 run,
                 step,
-                {"tamper": "rejected", "cross_owner": "rejected", "invalid_token": "rejected"},
+                {
+                    "tamper": "rejected",
+                    "cross_owner": "rejected",
+                    "invalid_token": "rejected",
+                    "permissions": "declared",
+                    "isolation": "verified",
+                },
             )
         if step is ValidationStep.VERIFIER:
             replay_evidence = next(
@@ -532,10 +700,14 @@ class CapabilityValidationManager:
         governance: CapabilityGovernance,
         executor_factory: Callable[[CapabilityValidationRun], CapabilityValidationExecutor],
         *,
+        supply_chain_evidence: SupplyChainEvidenceCollector | None = None,
+        capability_mounts: Callable[[str, str, int], tuple] | None = None,
         poll_seconds: float = 1.0,
     ) -> None:
         self._governance = governance
         self._executor_factory = executor_factory
+        self._supply_chain_evidence = supply_chain_evidence
+        self._capability_mounts = capability_mounts
         self._poll_seconds = poll_seconds
         self._worker_id = f"capval-worker-{uuid.uuid4().hex[:12]}"
         self._task: asyncio.Task[None] | None = None
@@ -574,6 +746,33 @@ class CapabilityValidationManager:
         )
         for run in pending:
             actor = CatalogActor(owner_id=run.owner_id, role=run.actor_role)
+
+            def collect_supply_chain_evidence(
+                current: CapabilityValidationRun,
+            ) -> None:
+                if (
+                    self._supply_chain_evidence is None
+                    or self._capability_mounts is None
+                ):
+                    return
+                try:
+                    if not self._supply_chain_evidence.requires_collection(
+                        current.target
+                    ):
+                        return
+                    mounts = _target_mounts(
+                        current,
+                        self._capability_mounts(
+                            current.owner_id,
+                            current.task_ref.task_id,
+                            current.task_ref.revision,
+                        ),
+                    )
+                    self._supply_chain_evidence.collect(current.target, mounts[0])
+                except Exception:
+                    # 供应链证据是独立硬门；采集失败留待晋级门处理，不篡改五步运行结果。
+                    logger.exception("能力供应链证据采集失败：%s", current.run_id)
+
             try:
                 await asyncio.to_thread(
                     self._governance.execute_validation,
@@ -581,6 +780,7 @@ class CapabilityValidationManager:
                     run.run_id,
                     worker_id=self._worker_id,
                     executor=self._executor_factory(run),
+                    lease_guarded_preflight=collect_supply_chain_evidence,
                 )
             except Exception:
                 # 单条坏记录不能杀死恢复循环；运行本身仍保持持久化状态供下一轮接管。

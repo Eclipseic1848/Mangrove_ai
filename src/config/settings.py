@@ -295,6 +295,22 @@ class Settings(BaseSettings):
         default="data/capabilities/mounts",
         description="按 OCI digest 物化的业务只读能力目录",
     )
+    capability_supply_chain_tool_root: str = Field(
+        default="data/platform-tools/supply-chain",
+        description="固定 Trivy 与 Syft 可执行文件根目录",
+    )
+    capability_supply_chain_evidence_root: str = Field(
+        default="data/capability-governance/evidence",
+        description="供应链原始受控证据目录",
+    )
+    capability_supply_chain_cache_root: str = Field(
+        default="data/platform-tools/supply-chain/cache",
+        description="供应链工具离线数据库与缓存目录",
+    )
+    capability_supply_chain_lock_path: str = Field(
+        default="config/supply-chain-tools.lock.json",
+        description="供应链工具版本与来源锁文件",
+    )
     # Agentic Runtime vNext 灰度：Legacy 仍为工作台默认；管理员控制总开关，
     # 普通用户只有显式选择自己的或平台发布的连接后才能进入标准任务 Runtime。
     pi_runtime_enabled: bool = Field(

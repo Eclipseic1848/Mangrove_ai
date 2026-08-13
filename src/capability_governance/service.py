@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import threading
-from typing import Protocol
+from typing import Callable, Protocol
 
 from src.capability_catalog import (
     CapabilityCatalog,
@@ -407,6 +407,9 @@ class CapabilityGovernance:
         *,
         worker_id: str,
         executor: CapabilityValidationExecutor,
+        lease_guarded_preflight: (
+            Callable[[CapabilityValidationRun], None] | None
+        ) = None,
         now: datetime | None = None,
         lease_seconds: int = 60,
     ) -> CapabilityValidationRun:
@@ -470,6 +473,8 @@ class CapabilityGovernance:
             )
             heartbeat.start()
         try:
+            if lease_guarded_preflight is not None and not run.cancel_requested:
+                lease_guarded_preflight(run)
             completed = {item.step for item in run.evidence}
             failed = any(
                 item.status is ValidationStepStatus.FAILED
