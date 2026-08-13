@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.capability_catalog import (
     CapabilityCatalog,
     CapabilityPackRef,
@@ -1349,7 +1351,503 @@ def test_validation_manager_executes_queued_run_and_rechecks_task(tmp_path) -> N
     completed = governance.get_validation(owner, run.run_id)
     assert completed.status is ValidationRunStatus.SUCCEEDED
     assert [item.step for item in completed.evidence] == list(ValidationStep)
+    assert "supply_chain" not in {item.step.value for item in completed.evidence}
     assert resolver.verify_calls >= 5
+
+
+@pytest.mark.parametrize("scan_fails", [False, True])
+def test_validation_manager_keeps_supply_chain_collection_outside_five_steps(
+    tmp_path,
+    scan_fails,
+) -> None:
+    import asyncio
+    from datetime import datetime, timezone
+    import threading
+
+    from src.capability_governance import (
+        CapabilityGovernanceTarget,
+        CapabilitySupplyChainEvidenceService,
+        SupplyChainCollection,
+        SupplyChainEvidenceStatus,
+        TrivyDatabaseMetadata,
+    )
+
+    catalog = CapabilityCatalog(InMemoryCapabilityCatalogRepository())
+    repository = InMemoryCapabilityGovernanceRepository()
+    owner = CatalogActor(owner_id="owner-a", role="user")
+    pack = _personal_pack("1.0.0", "a")
+    catalog.register_pack(owner, pack)
+    target = CapabilityGovernanceTarget(
+        owner_id=pack.owner_id,
+        scope=pack.scope,
+        pack_id=pack.pack_id,
+        version=pack.version,
+        digest=pack.digest,
+    )
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    (mount / ".mangrove-capability-digest").write_text(
+        target.digest,
+        encoding="utf-8",
+    )
+
+    event_loop_progressed = threading.Event()
+
+    class BlockingSupplyChainTools:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def collect(self, collected_target, subject_root):
+            assert collected_target == target
+            assert subject_root == mount
+            self.calls += 1
+            if not event_loop_progressed.wait(timeout=1):
+                raise RuntimeError("供应链扫描阻塞了事件循环")
+            if scan_fails:
+                raise RuntimeError("受控供应链扫描器不可用")
+            return SupplyChainCollection(
+                subject_digest=target.digest,
+                trivy_version="0.70.0",
+                trivy_config_sha256="1" * 64,
+                trivy_result_sha256="2" * 64,
+                trivy_database=TrivyDatabaseMetadata(
+                    version=2,
+                    updated_at=datetime(2026, 8, 7, tzinfo=timezone.utc),
+                ),
+                secret_count=0,
+                critical_count=1,
+                fixable_high_count=0,
+                misconfiguration_failure_count=0,
+                syft_version="1.50.0",
+                syft_json_sha256="3" * 64,
+                cyclonedx_json_sha256="4" * 64,
+                cyclonedx_spec_version="1.6",
+            )
+
+    tools = BlockingSupplyChainTools()
+    current_time = {"value": datetime(2026, 8, 7, tzinfo=timezone.utc)}
+    supply_chain = CapabilitySupplyChainEvidenceService(
+        repository,
+        tools,
+        now=lambda: current_time["value"],
+    )
+    if not scan_fails:
+        event_loop_progressed.set()
+        supply_chain.collect(target, mount)
+        event_loop_progressed.clear()
+        current_time["value"] = datetime(2026, 8, 14, 0, 0, 1, tzinfo=timezone.utc)
+
+    class Executor:
+        def execute(self, run, step):
+            return ValidationEvidence(
+                step=step,
+                status=ValidationStepStatus.PASSED,
+                evidence_ref=f"evidence://validation/{run.run_id}/{step.value}",
+                evidence_sha256="e" * 64,
+                summary="受控结果",
+            )
+
+    governance = CapabilityGovernance(catalog, repository)
+    run = governance.request_validation(
+        owner,
+        pack_ref=CapabilityPackRef(
+            pack_id=pack.pack_id,
+            version=pack.version,
+            digest=pack.digest,
+        ),
+        task_ref=ValidationTaskRef(
+            task_id="workspace-blocked-supply-chain",
+            revision=1,
+            source_snapshot_sha256="b" * 64,
+            input_sha256="c" * 64,
+            output_sha256="d" * 64,
+            capability_digest=pack.digest,
+            authorization_id="selection-blocked-supply-chain",
+        ),
+        idempotency_key=f"blocked-supply-chain-{scan_fails}",
+    )
+
+    manager = CapabilityValidationManager(
+        governance,
+        lambda _run: Executor(),
+        supply_chain_evidence=supply_chain,
+        capability_mounts=lambda *_args: (mount,),
+    )
+
+    async def run_with_event_loop_probe() -> int:
+        async def mark_progress() -> None:
+            await asyncio.sleep(0)
+            event_loop_progressed.set()
+
+        marker = asyncio.create_task(mark_progress())
+        processed = await manager.run_once()
+        await marker
+        return processed
+
+    assert asyncio.run(run_with_event_loop_probe()) == 1
+    completed = governance.get_validation(owner, run.run_id)
+
+    assert completed.status is ValidationRunStatus.SUCCEEDED
+    if scan_fails:
+        assert supply_chain.get(target) is None
+    else:
+        assert supply_chain.get(target).status is SupplyChainEvidenceStatus.BLOCKED
+        assert tools.calls == 2
+    assert [item.step for item in completed.evidence] == [
+        ValidationStep.SYNTHETIC_SMOKE,
+        ValidationStep.OWNER_TASK_REPLAY,
+        ValidationStep.FAIL_CLOSED,
+        ValidationStep.VERIFIER,
+        ValidationStep.CLEANUP,
+    ]
+
+
+def test_validation_managers_merge_supply_chain_collection_by_persistent_lease(
+    tmp_path,
+) -> None:
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import datetime, timezone
+    import threading
+
+    from src.capability_governance import (
+        CapabilityGovernanceTarget,
+        CapabilitySupplyChainEvidenceService,
+        SupplyChainCollection,
+        TrivyDatabaseMetadata,
+    )
+
+    catalog = CapabilityCatalog(InMemoryCapabilityCatalogRepository())
+    repository = InMemoryCapabilityGovernanceRepository()
+    owner = CatalogActor(owner_id="owner-a", role="user")
+    pack = _personal_pack("1.0.0", "a")
+    catalog.register_pack(owner, pack)
+    target = CapabilityGovernanceTarget(
+        owner_id=pack.owner_id,
+        scope=pack.scope,
+        pack_id=pack.pack_id,
+        version=pack.version,
+        digest=pack.digest,
+    )
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    (mount / ".mangrove-capability-digest").write_text(
+        target.digest,
+        encoding="utf-8",
+    )
+    scan_started = threading.Event()
+    allow_scan_to_finish = threading.Event()
+
+    class BlockingSupplyChainTools:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.lock = threading.Lock()
+
+        def collect(self, collected_target, subject_root):
+            assert collected_target == target
+            assert subject_root == mount
+            with self.lock:
+                self.calls += 1
+            scan_started.set()
+            if not allow_scan_to_finish.wait(timeout=2):
+                raise RuntimeError("测试未释放供应链扫描")
+            return SupplyChainCollection(
+                subject_digest=target.digest,
+                trivy_version="0.70.0",
+                trivy_config_sha256="1" * 64,
+                trivy_result_sha256="2" * 64,
+                trivy_database=TrivyDatabaseMetadata(
+                    version=2,
+                    updated_at=datetime(2026, 8, 7, tzinfo=timezone.utc),
+                ),
+                secret_count=0,
+                critical_count=0,
+                fixable_high_count=0,
+                misconfiguration_failure_count=0,
+                syft_version="1.50.0",
+                syft_json_sha256="3" * 64,
+                cyclonedx_json_sha256="4" * 64,
+                cyclonedx_spec_version="1.6",
+            )
+
+    class Executor:
+        def execute(self, current_run, step):
+            return ValidationEvidence(
+                step=step,
+                status=ValidationStepStatus.PASSED,
+                evidence_ref=(
+                    f"evidence://validation/{current_run.run_id}/{step.value}"
+                ),
+                evidence_sha256="e" * 64,
+                summary="受控结果",
+            )
+
+    tools = BlockingSupplyChainTools()
+    supply_chain = CapabilitySupplyChainEvidenceService(
+        repository,
+        tools,
+        now=lambda: datetime(2026, 8, 7, tzinfo=timezone.utc),
+    )
+    governance = CapabilityGovernance(catalog, repository)
+    run = governance.request_validation(
+        owner,
+        pack_ref=CapabilityPackRef(
+            pack_id=pack.pack_id,
+            version=pack.version,
+            digest=pack.digest,
+        ),
+        task_ref=ValidationTaskRef(
+            task_id="workspace-concurrent-supply-chain",
+            revision=1,
+            source_snapshot_sha256="b" * 64,
+            input_sha256="c" * 64,
+            output_sha256="d" * 64,
+            capability_digest=pack.digest,
+            authorization_id="selection-concurrent-supply-chain",
+        ),
+        idempotency_key="concurrent-supply-chain",
+    )
+    first = CapabilityValidationManager(
+        governance,
+        lambda _run: Executor(),
+        supply_chain_evidence=supply_chain,
+        capability_mounts=lambda *_args: (mount,),
+    )
+    second = CapabilityValidationManager(
+        governance,
+        lambda _run: Executor(),
+        supply_chain_evidence=supply_chain,
+        capability_mounts=lambda *_args: (mount,),
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_result = pool.submit(lambda: asyncio.run(first.run_once()))
+        assert scan_started.wait(timeout=1)
+        second_result = pool.submit(lambda: asyncio.run(second.run_once()))
+        try:
+            assert second_result.result(timeout=1) == 1
+        finally:
+            allow_scan_to_finish.set()
+        assert first_result.result(timeout=2) == 1
+
+    assert tools.calls == 1
+    assert governance.get_validation(owner, run.run_id).status is (
+        ValidationRunStatus.SUCCEEDED
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "permissions",
+        "docker_socket_mounted",
+        "host_config_updates",
+        "isolation_mutation",
+    ),
+    [
+        (["network:none"], False, {}, None),
+        (["process:child", "network:none"], True, {}, None),
+        (
+            ["process:child", "network:none"],
+            False,
+            {"Tmpfs": {"/tmp": "rw,nosuid,size=64m"}},
+            None,
+        ),
+        (["process:child", "network:none"], False, {"PidsLimit": 129}, None),
+        (["process:child", "network:none"], False, {"Memory": 1024**3}, None),
+        (["process:child", "network:none"], False, {"NanoCpus": 10**9}, None),
+        (
+            ["process:child", "network:none"],
+            False,
+            {"NetworkMode": "another-internal-network"},
+            None,
+        ),
+        (["process:child", "network:none"], False, {}, "wrong_source"),
+        (["process:child", "network:none"], False, {}, "extra_mount"),
+        (["process:child", "network:none"], False, {}, "extra_network"),
+    ],
+)
+def test_governance_validation_rejects_undeclared_permission_or_docker_socket(
+    tmp_path,
+    monkeypatch,
+    permissions,
+    docker_socket_mounted,
+    host_config_updates,
+    isolation_mutation,
+) -> None:
+    import subprocess
+
+    from src.capability_governance import CapabilityGovernanceTarget
+
+    catalog = CapabilityCatalog(InMemoryCapabilityCatalogRepository())
+    repository = InMemoryCapabilityGovernanceRepository()
+    owner = CatalogActor(owner_id="owner-a", role="user")
+    pack = _personal_pack("1.0.0", "a")
+    catalog.register_pack(owner, pack)
+    target = CapabilityGovernanceTarget(
+        owner_id=pack.owner_id,
+        scope=pack.scope,
+        pack_id=pack.pack_id,
+        version=pack.version,
+        digest=pack.digest,
+    )
+    mount = tmp_path / "mount"
+    mount.mkdir()
+    (mount / ".mangrove-capability-digest").write_text(
+        target.digest,
+        encoding="utf-8",
+    )
+    (mount / "mangrove-capability.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": "python-table-summary",
+                "version": "1.0.0",
+                "kind": "python",
+                "purpose": "表格汇总",
+                "entrypoint": {
+                    "program": "python",
+                    "arguments": ["tool.py"],
+                },
+                "permissions": permissions,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    class Resolver:
+        def verify(self, actor, resolved_target, task_ref):
+            if actor.owner_id != resolved_target.owner_id:
+                raise PermissionError("跨 Owner")
+            if task_ref.output_sha256 == "0" * 64:
+                raise ValueError("输出 hash 被篡改")
+            return task_ref
+
+    production = TaskEvidenceValidationExecutor(
+        task_resolver=Resolver(),
+        capability_mounts=lambda *_args: (mount,),
+        capability_host=object(),
+        execution_root=tmp_path / "runtime",
+        task_replay=lambda _run: {},
+    )
+    def docker(*arguments, check=False):
+        if arguments[0] == "exec":
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+        if arguments[:2] == ("container", "inspect"):
+            mounts = [
+                {
+                    "Type": "bind",
+                    "Source": str(production._stale_lease(run).runtime_dir),
+                    "Destination": "/opt/mangrove-host",
+                    "RW": False,
+                },
+                {
+                    "Type": "bind",
+                    "Source": str(mount),
+                    "Destination": "/capabilities/1",
+                    "RW": False,
+                },
+            ]
+            if docker_socket_mounted:
+                mounts.append(
+                    {
+                        "Type": "bind",
+                        "Source": "/var/run/docker.sock",
+                        "Destination": "/var/run/docker.sock",
+                        "RW": True,
+                    }
+                )
+            if isolation_mutation == "wrong_source":
+                mounts[1]["Source"] = str(tmp_path / "another-capability")
+            if isolation_mutation == "extra_mount":
+                mounts.append(
+                    {
+                        "Type": "bind",
+                        "Source": str(tmp_path / "extra-capability"),
+                        "Destination": "/capabilities/2",
+                        "RW": False,
+                    }
+                )
+            host_config = {
+                "ReadonlyRootfs": True,
+                "Privileged": False,
+                "CapDrop": ["ALL"],
+                "SecurityOpt": ["no-new-privileges"],
+                "NetworkMode": production._network_name(run),
+                "Tmpfs": {"/tmp": "rw,noexec,nosuid,size=64m"},
+                "PidsLimit": 128,
+                "Memory": 2 * 1024**3,
+                "NanoCpus": 2 * 10**9,
+            }
+            host_config.update(host_config_updates)
+            networks = {production._network_name(run): {}}
+            if isolation_mutation == "extra_network":
+                networks["unexpected-network"] = {}
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                json.dumps(
+                    {
+                        "HostConfig": host_config,
+                        "Mounts": mounts,
+                        "NetworkSettings": {"Networks": networks},
+                    }
+                ),
+                "",
+            )
+        if arguments[:2] == ("network", "inspect"):
+            return subprocess.CompletedProcess(arguments, 0, "true", "")
+        return subprocess.CompletedProcess(arguments, 1, "", "not found")
+
+    class Executor:
+        def execute(self, current_run, step):
+            if step is ValidationStep.FAIL_CLOSED:
+                return production.execute(current_run, step)
+            return ValidationEvidence(
+                step=step,
+                status=ValidationStepStatus.PASSED,
+                evidence_ref=(
+                    f"evidence://validation/{current_run.run_id}/{step.value}"
+                ),
+                evidence_sha256="e" * 64,
+                summary="受控结果",
+            )
+
+    governance = CapabilityGovernance(catalog, repository)
+    run = governance.request_validation(
+        owner,
+        pack_ref=CapabilityPackRef(
+            pack_id=pack.pack_id,
+            version=pack.version,
+            digest=pack.digest,
+        ),
+        task_ref=ValidationTaskRef(
+            task_id="workspace-isolation-gate",
+            revision=1,
+            source_snapshot_sha256="b" * 64,
+            input_sha256="c" * 64,
+            output_sha256="d" * 64,
+            capability_digest=pack.digest,
+            authorization_id="selection-isolation-gate",
+        ),
+        idempotency_key="isolation-gate",
+    )
+    monkeypatch.setattr(production, "_docker", docker)
+
+    completed = governance.execute_validation(
+        owner,
+        run.run_id,
+        worker_id="worker-isolation-gate",
+        executor=Executor(),
+    )
+
+    assert completed.status is ValidationRunStatus.FAILED
+    assert [item.step for item in completed.evidence] == [
+        ValidationStep.SYNTHETIC_SMOKE,
+        ValidationStep.OWNER_TASK_REPLAY,
+        ValidationStep.FAIL_CLOSED,
+        ValidationStep.CLEANUP,
+    ]
 
 
 def test_production_validation_executor_runs_host_denial_verifier_and_cleanup(
@@ -1360,7 +1858,10 @@ def test_production_validation_executor_runs_host_denial_verifier_and_cleanup(
     import json
     import subprocess
 
-    from src.capability_governance import CapabilityGovernanceTarget, CapabilityValidationRun
+    from src.capability_governance import (
+        CapabilityGovernanceTarget,
+        CapabilityValidationRun,
+    )
     from src.capability_host import CapabilityHostLease
 
     mount = tmp_path / "mount"
@@ -1374,6 +1875,7 @@ def test_production_validation_executor_runs_host_denial_verifier_and_cleanup(
                 "kind": "python",
                 "purpose": "表格汇总",
                 "entrypoint": {"program": "python", "arguments": ["tool.py"]},
+                "permissions": ["process:child", "network:none"],
             },
             ensure_ascii=False,
         ),
@@ -1456,6 +1958,46 @@ def test_production_validation_executor_runs_host_denial_verifier_and_cleanup(
     )
 
     def docker(*arguments, check=False):
+        if arguments[:2] == ("container", "inspect") and "--format" in arguments:
+            return subprocess.CompletedProcess(
+                arguments,
+                0,
+                json.dumps(
+                    {
+                        "HostConfig": {
+                            "ReadonlyRootfs": True,
+                            "Privileged": False,
+                            "CapDrop": ["ALL"],
+                            "SecurityOpt": ["no-new-privileges"],
+                            "NetworkMode": executor._network_name(run),
+                            "Tmpfs": {"/tmp": "rw,noexec,nosuid,size=64m"},
+                            "PidsLimit": 128,
+                            "Memory": 2 * 1024**3,
+                            "NanoCpus": 2 * 10**9,
+                        },
+                        "Mounts": [
+                            {
+                                "Type": "bind",
+                                "Source": str(tmp_path / "runtime" / "active"),
+                                "Destination": "/opt/mangrove-host",
+                                "RW": False,
+                            },
+                            {
+                                "Type": "bind",
+                                "Source": str(mount),
+                                "Destination": "/capabilities/1",
+                                "RW": False,
+                            },
+                        ],
+                        "NetworkSettings": {
+                            "Networks": {executor._network_name(run): {}}
+                        },
+                    }
+                ),
+                "",
+            )
+        if arguments[:2] == ("network", "inspect") and "--format" in arguments:
+            return subprocess.CompletedProcess(arguments, 0, "true", "")
         returncode = 1 if arguments[:2] in {
             ("container", "inspect"),
             ("network", "inspect"),

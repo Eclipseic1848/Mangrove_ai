@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import stat
 import sqlite3
 import subprocess
 
@@ -199,6 +200,125 @@ def test_mount_resolver_uses_owner_selection_and_frozen_digest(tmp_path) -> None
         encoding="utf-8"
     ) == pack.digest
     assert resolver.resolve_for_owner("user-b", "workspace-mount", 1) == ()
+
+
+@pytest.mark.parametrize("mutation", ["content", "mode"])
+def test_mount_resolver_rejects_changed_materialized_content_or_mode(
+    tmp_path,
+    mutation,
+) -> None:
+    repository = InMemoryCapabilityCatalogRepository()
+    catalog = CapabilityCatalog(repository)
+    actor = CatalogActor(owner_id="user-a", role="user")
+    pack = _pack(
+        "private-a",
+        owner_id=actor.owner_id,
+        scope=ProcedureScope.PERSONAL,
+        digest_char="a",
+    )
+    catalog.register_pack(actor, pack)
+    catalog.freeze_selection(
+        actor,
+        task_id="workspace-integrity",
+        revision=1,
+        pack_refs=(
+            CapabilityPackRef(
+                pack_id=pack.pack_id,
+                version=pack.version,
+                digest=pack.digest,
+            ),
+        ),
+    )
+
+    class FakeArtifactStore:
+        def materialize(self, *, artifact_name, version, digest, destination):
+            destination.mkdir(parents=True)
+            (destination / "payload").write_bytes(b"frozen")
+            return destination
+
+    resolver = CapabilityMountResolver(
+        catalog,
+        FakeArtifactStore(),
+        tmp_path / "mounts",
+    )
+    mount = resolver.resolve_for_owner(
+        actor.owner_id,
+        "workspace-integrity",
+        1,
+    )[0]
+    payload = mount / "payload"
+    if mutation == "content":
+        payload.write_bytes(b"changed")
+    else:
+        payload.chmod(stat.S_IREAD)
+
+    try:
+        with pytest.raises(RuntimeError, match="完整性"):
+            resolver.resolve_for_owner(actor.owner_id, "workspace-integrity", 1)
+    finally:
+        payload.chmod(stat.S_IREAD | stat.S_IWRITE)
+
+
+def test_mount_resolver_rematerializes_legacy_cache_without_integrity_record(
+    tmp_path,
+) -> None:
+    repository = InMemoryCapabilityCatalogRepository()
+    catalog = CapabilityCatalog(repository)
+    actor = CatalogActor(owner_id="user-a", role="user")
+    pack = _pack(
+        "private-a",
+        owner_id=actor.owner_id,
+        scope=ProcedureScope.PERSONAL,
+        digest_char="b",
+    )
+    catalog.register_pack(actor, pack)
+    catalog.freeze_selection(
+        actor,
+        task_id="workspace-legacy-cache",
+        revision=1,
+        pack_refs=(
+            CapabilityPackRef(
+                pack_id=pack.pack_id,
+                version=pack.version,
+                digest=pack.digest,
+            ),
+        ),
+    )
+    mount_root = tmp_path / "mounts"
+    legacy_mount = mount_root / pack.digest.removeprefix("sha256:")
+    legacy_mount.mkdir(parents=True)
+    (legacy_mount / ".mangrove-capability-digest").write_text(
+        pack.digest,
+        encoding="utf-8",
+    )
+    (legacy_mount / "payload").write_bytes(b"legacy-untrusted")
+
+    class FrozenArtifactStore:
+        def materialize(self, *, artifact_name, version, digest, destination):
+            assert (artifact_name, version, digest) == (
+                pack.pack_id,
+                pack.version,
+                pack.digest,
+            )
+            destination.mkdir(parents=True)
+            (destination / "payload").write_bytes(b"frozen-from-oci")
+            return destination
+
+    resolver = CapabilityMountResolver(
+        catalog,
+        FrozenArtifactStore(),
+        mount_root,
+    )
+
+    mounted = resolver.resolve_for_owner(
+        actor.owner_id,
+        "workspace-legacy-cache",
+        1,
+    )[0]
+
+    assert mounted == legacy_mount.resolve()
+    assert (mounted / "payload").read_bytes() == b"frozen-from-oci"
+    assert (mounted.parent / f"{mounted.name}.integrity.json").is_file()
 
 
 def test_mount_resolver_describes_selected_components_without_sensitive_fields(

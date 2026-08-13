@@ -155,6 +155,41 @@ async def test_capability_host_starts_one_isolated_sidecar_for_multiple_packs(
 
 
 @pytest.mark.asyncio
+async def test_capability_host_preserves_manifest_index_after_legacy_directory(
+    tmp_path: Path,
+) -> None:
+    docker = RecordingDocker()
+    legacy = tmp_path / "legacy-pack"
+    legacy.mkdir()
+    native = _native_pack(tmp_path / "native", "prettier")
+    host = CapabilityHost(
+        image="mangrove/pi-coding-agent:0.80.10",
+        execution_root=tmp_path / "hosts",
+        command_runner=docker,
+    )
+
+    lease = await host.start(
+        CapabilityHostRequest(
+            user_id="user-a",
+            task_id="task-legacy-index",
+            revision=1,
+            run_id="run-legacy-index",
+            network_name="mangrove-pi-net-legacy-index",
+            capability_dirs=(legacy, native),
+        )
+    )
+    run_command = next(
+        command
+        for command in docker.commands
+        if command[:3] == ("docker", "run", "-d")
+    )
+
+    assert any("target=/capabilities/2" in argument for argument in run_command)
+
+    await host.stop(lease)
+
+
+@pytest.mark.asyncio
 async def test_capability_host_preserves_runtime_evidence_when_forced_remove_fails(
     tmp_path: Path,
 ) -> None:
