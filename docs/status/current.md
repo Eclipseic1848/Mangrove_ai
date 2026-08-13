@@ -39,7 +39,7 @@ PDF、Word、Excel、CSV 文件主链；数据库具备连接与测试基础。�
 | AC-06 本地 Adapter + Sidecar | 用户灰度验收通过，默认关闭 | 远程 MCP、Registry 发现和普通用户开放 |
 | AC-07 #33 三轴治理投影 | 完成并关闭 | 无 |
 | AC-07 #34 可恢复 ValidationRun | 工程实现、双轴审查、生产迁移完成 | 真实能力灰度闭环与最终用户确认 |
-| AC-07 #35 Trivy/Syft 证据 | 工程实现、双轴复审、带备份生产 `0003` 迁移与 8088 用户验收完成；工作分支已提交并推送 | PR、合并和旧仓库工单处理仍需单独授权 |
+| AC-07 #35 Trivy/Syft 证据 | 工程实现、双轴复审、带备份生产 `0003` 迁移与 8088 用户验收完成；Draft PR #6 已创建且发布门复核通过 | 转 Ready、合并和旧仓库工单处理仍需分别授权 |
 | AC-07 #36～#44 | 未开始 | 签名、晋级、平台快照、审计、清理和后续发布门 |
 
 AC-06 两项历史 `admin_gray_only` 包是迁移兼容例外：管理员/超管只能使用自己拥有的
@@ -60,8 +60,8 @@ TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍
 
 `main` 从 2026-08-12 的已验证工作树生成干净公开快照，不继承旧私有仓库历史。当前
 `origin/main` 为 `ce71188f`；#35 最终审查修复和验收状态已提交并推送到
-`origin/codex/ac07-35-review-fixes`，但尚未创建 PR 或合并，不能把工作分支状态误写成 `main`
-已经同步。
+`origin/codex/ac07-35-review-fixes`，并创建面向 `main` 的 Draft PR #6；PR 尚未转为 Ready 或
+合并，不能把工作分支状态误写成 `main` 已经同步。
 
 以下内容只保存在本机或受控运行存储，不进入 Git：Secret、数据库、上传/下载、日志、任务制品、
 浏览器登录态、运行学习库、个人偏好、Agent 本机配置、虚拟环境和本地审计。MediaCrawler 与 Firecrawl
@@ -91,11 +91,15 @@ TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍
   `passed`，Secret、Critical、可修复 High 和严重误配置计数均为 0；
 - 用户确认 8088 管理员摘要和普通用户隔离验收通过；该结论不代表能力晋级、签名、平台发布、
   普通用户受众开放或整个 AC-07/Phase 4 完成。
+- Draft PR #6 发布门现场复核：七个 Capability 测试文件 `118 passed`，设置页角色与治理
+  Playwright `13 passed`，TypeScript 与 Vite 生产构建通过，8088 `/api/health` 返回 `200`，
+  `git diff --check` 通过；PR 为 `CLEAN`、`MERGEABLE`。当前公开仓库没有 GitHub Actions、
+  `main` 分支保护或 Ruleset，因此没有可替代上述本地门禁的远端 CI 结果。
 
 ## 7. 当前优先顺序
 
-1. #35 工作分支已提交并推送；PR、合并及旧仓库 `Eclipseic1848/Mangrove_platform` 的
-   Issue #35 处理仍需用户单独授权。
+1. #35 Draft PR #6 已创建并完成发布门复核；转 Ready、合并及旧仓库
+   `Eclipseic1848/Mangrove_platform` 的 Issue #35 处理仍需用户分别授权。
 2. 补齐 #34 两项真实能力灰度闭环与最终用户确认，不改写历史 TaskRevision。
 3. #34/#35 形成可信事实后，再由用户决定是否进入 #36 Cosign 本地 OCI 签名路径 PoC；不得
    自动生成密钥、晋级或发布能力。
