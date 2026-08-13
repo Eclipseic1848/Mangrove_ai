@@ -52,6 +52,7 @@ from src.agentic_runtime.pi_runtime import (
 from src.agentic_runtime.document_tools import DocumentToolGrant
 from src.agentic_runtime.coverage import CoverageLedger, ProposedResult
 from src.agentic_runtime.repository import AgenticRuntimeRepository
+from src.capability_host.models import CapabilityHostLease
 from src.model_connections import (
     ConnectionBroker,
     GrantError,
@@ -648,6 +649,48 @@ def test_pi_docker_command_forces_isolated_egress_proxy(
         assert f"{name}=http://mangrove-pi-proxy-test:3128" in joined
     assert "NODE_USE_ENV_PROXY=1" in joined
     assert "NO_PROXY=" in joined
+
+
+def test_pi_docker_command_bypasses_proxy_only_for_capability_host(
+    tmp_path: Path,
+) -> None:
+    """任务内能力 Host 走专用网络，其余请求仍必须经过外发代理。"""
+
+    paths = {}
+    for name in ("input", "work", "output", "session", "config", "host"):
+        paths[name] = tmp_path / name
+        paths[name].mkdir()
+    host_name = "mangrove-cap-host-task-a-fixed"
+    lease = CapabilityHostLease(
+        container_name=host_name,
+        relay_url=f"http://{host_name}:8765",
+        relay_token="short-lived-token",
+        capability_names=("python-table-summary",),
+        capability_kinds=(("python-table-summary", "python"),),
+        runtime_dir=paths["host"],
+    )
+
+    command = build_docker_command(
+        image="mangrove/pi-coding-agent:0.80.10",
+        container_name="mangrove-pi-capability-test",
+        input_dir=paths["input"],
+        work_dir=paths["work"],
+        output_dir=paths["output"],
+        session_dir=paths["session"],
+        config_dir=paths["config"],
+        model="Qwen3.6-35B-A3B",
+        memory="8g",
+        cpus=4,
+        network_name="mangrove-pi-net-test",
+        egress_proxy_url="http://mangrove-pi-proxy-test:3128",
+        mount_sources=True,
+        capability_host_lease=lease,
+    )
+
+    joined = "\n".join(command)
+    assert f"NO_PROXY={host_name}" in joined
+    assert f"no_proxy={host_name}" in joined
+    assert "HTTP_PROXY=http://mangrove-pi-proxy-test:3128" in joined
 
 
 @pytest.mark.asyncio
