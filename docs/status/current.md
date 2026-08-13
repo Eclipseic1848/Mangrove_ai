@@ -4,9 +4,9 @@
 >
 > last_verified: 2026-08-13
 >
-> branch: `codex/ac07-35-review-fixes`
+> branch: `codex/ac07-34-capability-host-proxy`
 >
-> baseline: 当前工作分支基于 `origin/main` 的 `ce71188faeec5a63409cef8405972a3d1c5fe1ae`；精确分支头以 `git rev-parse HEAD` 为准
+> baseline: 当前 `HEAD` 与 `origin/main` 均为 `e72ca4c9b1771b3a3b303131b5705783e725db2a`
 
 本文件是当前产品能力、工程状态和后续路线的唯一滚动台账。历史规格、ADR 和执行报告只提供
 设计与验证证据，不应重复维护“当前状态”。
@@ -38,8 +38,8 @@ PDF、Word、Excel、CSV 文件主链；数据库具备连接与测试基础。�
 | AC-05 隔离能力获取 | 工程验证通过 | 生产迁移与用户验收；不得与业务来源同时联网 |
 | AC-06 本地 Adapter + Sidecar | 用户灰度验收通过，默认关闭 | 远程 MCP、Registry 发现和普通用户开放 |
 | AC-07 #33 三轴治理投影 | 完成并关闭 | 无 |
-| AC-07 #34 可恢复 ValidationRun | 工程实现、双轴审查、生产迁移完成 | 真实能力灰度闭环与最终用户确认 |
-| AC-07 #35 Trivy/Syft 证据 | 工程实现、双轴复审、带备份生产 `0003` 迁移与 8088 用户验收完成；PR #6 承载主线交付且发布门复核通过 | 旧仓库工单处理仍需单独授权 |
+| AC-07 #34 可恢复 ValidationRun | 工程实现、双轴审查、生产迁移、两项真实能力灰度、取消后重新发起和 8088 用户验收完成 | 本轮 Capability Host 代理绕过修复待审查和主线集成；旧工单仍开放 |
+| AC-07 #35 Trivy/Syft 证据 | 工程实现、双轴复审、带备份生产 `0003` 迁移与 8088 用户验收完成；PR #6 已合并到 `main`，旧仓库 Issue #35 已关闭 | 无 |
 | AC-07 #36～#44 | 未开始 | 签名、晋级、平台快照、审计、清理和后续发布门 |
 
 AC-06 两项历史 `admin_gray_only` 包是迁移兼容例外：管理员/超管只能使用自己拥有的
@@ -58,10 +58,10 @@ TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍
 
 ## 5. 公开发布边界
 
-`main` 从 2026-08-12 的已验证工作树生成干净公开快照，不继承旧私有仓库历史。当前
-`origin/main` 为 `ce71188f`；#35 最终审查修复和验收状态已提交并推送到
-`origin/codex/ac07-35-review-fixes`，并由面向 `main` 的 PR #6 承载主线交付。PR 的实时状态和
-`main` 是否包含该变更必须现场核对 GitHub 与 `origin/main`，不能根据本文所在工作分支推断。
+`main` 从 2026-08-12 的已验证工作树生成干净公开快照，不继承旧私有仓库历史。2026-08-13
+现场核对：PR #6 已合并，merge commit 为 `e72ca4c9b1771b3a3b303131b5705783e725db2a`；本地
+`main`、`HEAD` 与 `origin/main` 一致。本轮 #34 Capability Host 代理绕过修复仍是未提交工作树变更，
+不得表述为已进入公开主线。
 
 以下内容只保存在本机或受控运行存储，不进入 Git：Secret、数据库、上传/下载、日志、任务制品、
 浏览器登录态、运行学习库、个人偏好、Agent 本机配置、虚拟环境和本地审计。MediaCrawler 与 Firecrawl
@@ -96,12 +96,25 @@ TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍
   `git diff --check` 通过；PR 为 `CLEAN`、`MERGEABLE`。当前公开仓库没有 GitHub Actions、
   `main` 分支保护或 Ruleset，因此没有可替代上述本地门禁的远端 CI 结果。
 
+2026-08-13，AC-07 #34 完成两项真实能力灰度与 8088 用户验收：
+
+- 真实任务 `workspace_16e574e208e440e1` 成功调用 `gray-python-table@1.0.0`，
+  `workspace_d759e1a3fcdf482b` 成功调用 `gray-everything-mcp@2026.7.4` 的 `echo`；
+- Python ValidationRun `capval_e2eaa8c0938243aaa62b` 五步全部通过；MCP 首次运行
+  `capval_3247730d04e94246bd1c` 按用户取消进入 `cancelled` 且清理通过，同一冻结任务以新幂等键
+  重新发起的 `capval_54d7850d99404070bd4b` 五步全部通过；
+- 两项供应链证据均精确绑定目标 digest 且为 `passed`；验证后 Lease、Capability Host
+  容器、专用网络和运行目录零残留；
+- 真实任务暴露的 Capability Host 内网请求被外发代理接管问题已使用窄范围
+  `NO_PROXY=<当前任务 Host DNS>` 修复；Agentic Runtime 与 Capability Host 回归 `50 passed`；
+- 用户确认 #34 的 8088 验收通过。该结论不代表能力自动晋级、签名、平台发布、
+  普通用户开放或整个 AC-07/Phase 4 完成。
+
 ## 7. 当前优先顺序
 
-1. 完成 PR #6 主线落地后，现场核对 `origin/main`；旧仓库
-   `Eclipseic1848/Mangrove_platform` 的 Issue #35 仍需单独决定是否更新或关闭。
-2. 补齐 #34 两项真实能力灰度闭环与最终用户确认，不改写历史 TaskRevision。
-3. #34/#35 形成可信事实后，再由用户决定是否进入 #36 Cosign 本地 OCI 签名路径 PoC；不得
+1. 对 #34 Capability Host 窄范围代理绕过修复执行 Standards/Spec 双轴审查，确认后再决定提交、
+   推送和旧仓库 Issue #34 处理。
+2. #34 修复完成主线集成后，由用户决定是否进入 #36 Cosign 本地 OCI 签名路径 PoC；不得
    自动生成密钥、晋级或发布能力。
 
 ## 8. 权威证据

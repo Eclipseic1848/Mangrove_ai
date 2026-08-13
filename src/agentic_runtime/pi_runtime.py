@@ -277,6 +277,13 @@ def build_docker_command(
     if egress_proxy_url:
         # Node 22.21+ 只有显式启用此开关，内置 fetch 才会遵循代理变量。
         # 同时设置大小写版本，覆盖 curl、pip、npm 等成熟工具的常见读取方式。
+        # Capability Host 与 Pi 位于同一任务专用网络；仅绕过该内网 DNS，
+        # 避免能力调用被当成业务外发，其余流量仍必须经过代理。
+        no_proxy = (
+            capability_host_lease.container_name
+            if capability_host_lease is not None
+            else ""
+        )
         for key in (
             "HTTP_PROXY",
             "HTTPS_PROXY",
@@ -286,8 +293,8 @@ def build_docker_command(
             command.extend(("--env", f"{key}={egress_proxy_url}"))
         for key, value in (
             ("NODE_USE_ENV_PROXY", "1"),
-            ("NO_PROXY", ""),
-            ("no_proxy", ""),
+            ("NO_PROXY", no_proxy),
+            ("no_proxy", no_proxy),
         ):
             command.extend(("--env", f"{key}={value}"))
     if mount_sources:
