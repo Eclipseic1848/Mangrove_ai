@@ -1,11 +1,13 @@
 # -*- coding: utf-8 -*-
-"""能力治理三轴状态的认证只读产品 Interface。"""
+"""能力治理三轴状态的认证产品 Interface；管理员审核视图与审计查看命令见 admin_router。"""
 from __future__ import annotations
+
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.api.auth import get_current_user
+from src.api.auth import get_current_user, require_admin
 from src.api.catalog_actor import catalog_actor_from_user
 from src.capability_catalog import (
     CapabilityCatalog,
@@ -22,6 +24,11 @@ from src.config.settings import settings
 
 router = APIRouter(
     prefix="/api/capability-governance",
+    tags=["capability-governance"],
+)
+
+admin_router = APIRouter(
+    prefix="/api/capability-governance/admin",
     tags=["capability-governance"],
 )
 
@@ -181,3 +188,83 @@ def cancel_capability_validation(run_id: str, user=Depends(get_current_user)):
     except (PermissionError, KeyError, ValueError) as error:
         raise _http_error(error) from error
     return run.model_dump(mode="json")
+
+
+class AuditViewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pack_id: str = Field(min_length=1, max_length=120)
+    version: str = Field(min_length=1, max_length=80)
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    task_id: str = Field(min_length=1, max_length=160)
+    revision: int = Field(ge=1)
+    subject_type: Literal["task_prompt", "task_sources", "task_output"]
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+@admin_router.get("/review")
+def list_admin_review(admin=Depends(require_admin)):
+    actor = catalog_actor_from_user(admin)
+    items = _governance().list_admin_review(actor)
+    return {"items": [item.model_dump(mode="json") for item in items]}
+
+
+@admin_router.get("/review/{pack_id}/{version}")
+def get_admin_review(
+    pack_id: str,
+    version: str,
+    digest: str,
+    admin=Depends(require_admin),
+):
+    actor = catalog_actor_from_user(admin)
+    for item in _governance().list_admin_review(actor):
+        if (
+            item.pack_id == pack_id
+            and item.version == version
+            and item.digest == digest
+        ):
+            return item.model_dump(mode="json")
+    raise HTTPException(status_code=404, detail="能力审核项不存在")
+
+
+@admin_router.post("/audit-view")
+def audit_view_business_content(
+    body: AuditViewRequest,
+    admin=Depends(require_admin),
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=200,
+        alias="Idempotency-Key",
+    ),
+):
+    actor = catalog_actor_from_user(admin)
+    try:
+        outcome = _governance().audit_view_business_content(
+            actor,
+            pack_ref=CapabilityPackRef(
+                pack_id=body.pack_id,
+                version=body.version,
+                digest=body.digest,
+            ),
+            task_id=body.task_id,
+            revision=body.revision,
+            subject_type=body.subject_type,
+            reason=body.reason,
+            idempotency_key=idempotency_key,
+        )
+    except (PermissionError, KeyError, RuntimeError, ValueError) as error:
+        raise _http_error(error) from error
+    return outcome.model_dump(mode="json")
+
+
+@admin_router.get("/audit-log")
+def list_audit_log(admin=Depends(require_admin)):
+    actor = catalog_actor_from_user(admin)
+    records = _governance().list_audit_records(actor)
+    # 界面按时间倒序展示最新记录在前。
+    return {
+        "items": [
+            record.model_dump(mode="json")
+            for record in reversed(records)
+        ]
+    }

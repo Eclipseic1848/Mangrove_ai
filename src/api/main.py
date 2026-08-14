@@ -98,6 +98,7 @@ for r in (auth_routes, conversations, chat, confirm, tasks, models, downloads,
           semantic_harness, semantic_deliveries, semantic_workspace,
           document_tools):
     app.include_router(r.router)
+app.include_router(capability_governance.admin_router)
 
 
 @app.get("/api/health")

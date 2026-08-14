@@ -111,6 +111,16 @@ class CapabilityGovernanceRepository(Protocol):
         target: CapabilityGovernanceTarget,
     ) -> CapabilityValidationRun | None: ...
 
+    def save_audit_view_event(
+        self,
+        event: CapabilityGovernanceEvent,
+    ) -> CapabilityGovernanceEvent: ...
+
+    def list_audit_view_events(
+        self,
+        target: CapabilityGovernanceTarget | None = None,
+    ) -> tuple[CapabilityGovernanceEvent, ...]: ...
+
 
 def _target_key(target: CapabilityGovernanceTarget) -> tuple[str | None, str, str, str]:
     return (target.owner_id, target.pack_id, target.version, target.digest)
@@ -135,7 +145,12 @@ class InMemoryCapabilityGovernanceRepository:
         self,
         event: CapabilityGovernanceEvent,
     ) -> CapabilityGovernanceEvent:
-        idempotency_key = (*_target_key(event.target), event.idempotency_key)
+        # 幂等键按事件类型隔离；跨类型复用同一键不得互相命中（与 SQLite 语义一致）。
+        idempotency_key = (
+            *_target_key(event.target),
+            event.event_type,
+            event.idempotency_key,
+        )
         existing_id = self._idempotency.get(idempotency_key)
         if existing_id is not None:
             return self._events[existing_id]
@@ -162,7 +177,10 @@ class InMemoryCapabilityGovernanceRepository:
         target: CapabilityGovernanceTarget,
         idempotency_key: str,
     ) -> CapabilityGovernanceEvent | None:
-        event_id = self._idempotency.get((*_target_key(target), idempotency_key))
+        # 登记命令只用 registered 键；晋级与审计事件有各自专用入口。
+        event_id = self._idempotency.get(
+            (*_target_key(target), "registered", idempotency_key)
+        )
         return self._events.get(event_id) if event_id is not None else None
 
     def list_events(
@@ -372,4 +390,27 @@ class InMemoryCapabilityGovernanceRepository:
             max(succeeded, key=lambda item: (item.updated_at, item.run_id))
             if succeeded
             else None
+        )
+
+    def save_audit_view_event(
+        self,
+        event: CapabilityGovernanceEvent,
+    ) -> CapabilityGovernanceEvent:
+        if event.event_type != "audit_viewed":
+            raise ValueError("审计查看事件专用入口只接受 audit_viewed 事件")
+        # 幂等键查重复用 _insert_event 的原子语义：同 target+键 返回既有事件。
+        return self._insert_event(event)
+
+    def list_audit_view_events(
+        self,
+        target: CapabilityGovernanceTarget | None = None,
+    ) -> tuple[CapabilityGovernanceEvent, ...]:
+        events = [
+            item
+            for item in self._events.values()
+            if item.event_type == "audit_viewed"
+            and (target is None or item.target == target)
+        ]
+        return tuple(
+            sorted(events, key=lambda item: (item.occurred_at, item.event_id))
         )

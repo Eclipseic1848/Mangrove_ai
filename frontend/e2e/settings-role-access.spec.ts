@@ -890,3 +890,156 @@ test("三角色明暗主题设置主视图没有自动化可访问性违规", as
     }
   }
 });
+
+test("管理员审核视图分组渐进披露并完成一次审计查看", async ({ page }) => {
+  await mockSettings(page, "admin");
+  const draftDigest = `sha256:${"a".repeat(64)}`;
+  const verifiedDigest = `sha256:${"b".repeat(64)}`;
+  const baseItem = (packId: string, digest: string) => ({
+    pack_id: packId,
+    version: "1.0.0",
+    scope: packId === "pending-draft" ? "personal" : "platform",
+    maturity: packId === "pending-draft" ? "draft" : "verified",
+    lifecycle: "active",
+    eligibility: "eligible",
+    source: packId === "pending-draft" ? "governance_event" : "legacy_compat",
+    owner_id: packId === "pending-draft" ? "owner-a" : null,
+    digest,
+    can_validate: false,
+  });
+  await page.route("**/api/capability-governance/packs", (route) => route.fulfill({
+    json: {
+      items: [
+        {
+          ...baseItem("pending-draft", draftDigest),
+          promotion_gaps: ["validation_incomplete"],
+        },
+        baseItem("gray-python-table", verifiedDigest),
+      ],
+    },
+  }));
+  await page.route("**/api/capability-governance/validations", (route) => route.fulfill({
+    json: { items: [] },
+  }));
+  await page.route("**/api/capability-governance/packs/*/*/supply-chain-evidence?*", (route) => route.fulfill({
+    json: { evidence: null },
+  }));
+  await page.route("**/api/capability-governance/admin/review", (route) => route.fulfill({
+    json: {
+      items: [
+        {
+          ...baseItem("pending-draft", draftDigest),
+          promotion_gaps: ["validation_incomplete"],
+          validation: null,
+          supply_chain: null,
+          task_metadata: {
+            task_id: "workspace-owner-a",
+            revision: 2,
+            owner_id: "owner-a",
+            task_status: "completed",
+            created_at: "2026-08-14T00:00:00Z",
+            updated_at: "2026-08-14T01:00:00Z",
+            input_count: 1,
+            input_types: ["csv"],
+            output_count: 1,
+            output_formats: ["csv"],
+          },
+          audit_history: [
+            {
+              event_id: "capgov_prior_audit",
+              actor_id: "admin-b",
+              actor_role: "admin",
+              reason: "排障：验证输出与任务不符，先行核对",
+              subject_type: "task_prompt",
+              subject_sha256: "f".repeat(64),
+              result: "succeeded",
+              task_id: "workspace-owner-a",
+              revision: 2,
+              failure_reason: null,
+              occurred_at: "2026-08-14T01:30:00Z",
+            },
+          ],
+        },
+        {
+          ...baseItem("gray-python-table", verifiedDigest),
+          promotion_gaps: [],
+          validation: null,
+          supply_chain: null,
+          task_metadata: null,
+          audit_history: [],
+        },
+      ],
+    },
+  }));
+  let auditBody: Record<string, unknown> | null = null;
+  await page.route("**/api/capability-governance/admin/audit-view", (route) => {
+    auditBody = route.request().postDataJSON();
+    return route.fulfill({
+      json: {
+        status: "succeeded",
+        content: "审计正文：任务 workspace-owner-a 的 task_sources",
+        truncated: false,
+        failure_reason: null,
+        event: {
+          event_id: "capgov_e2e_audit",
+          actor_id: "admin-a",
+          actor_role: "admin",
+          reason: auditBody?.reason,
+          subject_type: "task_sources",
+          subject_sha256: "e".repeat(64),
+          result: "succeeded",
+          task_id: "workspace-owner-a",
+          revision: 2,
+          failure_reason: null,
+          occurred_at: "2026-08-14T02:00:00Z",
+        },
+      },
+    });
+  });
+
+  // 1366 宽度验收：无横向滚动。
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await page.goto("/settings?section=governance");
+
+  // 分组与计数：状态不只依赖颜色，用文本标题表达。
+  await expect(page.getByRole("heading", { name: "待验证（1）" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "已晋级（1）" })).toBeVisible();
+
+  // 1366 宽度下无横向滚动。
+  const scrolls = await page.evaluate(() => ({
+    scrollWidth: document.scrollingElement!.scrollWidth,
+    clientWidth: document.scrollingElement!.clientWidth,
+  }));
+  expect(scrolls.scrollWidth).toBeLessThanOrEqual(scrolls.clientWidth);
+
+  // 渐进披露：任务管理元数据与审计历史。
+  const draftCard = page.locator("article").filter({ hasText: "pending-draft" });
+  const meta = draftCard.locator("summary").filter({ hasText: "任务管理元数据" });
+  await meta.click();
+  await expect(draftCard).toContainText("workspace-owner-a");
+  await expect(draftCard).toContainText("输入 1 个（csv）");
+  await expect(draftCard).toContainText("输出 1 个（csv）");
+  const auditLog = draftCard.locator("summary").filter({ hasText: "审计记录" });
+  await auditLog.click();
+  await expect(draftCard).toContainText("任务 workspace-owner-a V2");
+
+  // 审计查看：原因未填写前不可提交。
+  await draftCard.getByRole("button", { name: "审计查看业务内容" }).click();
+  const dialog = page.getByRole("dialog", { name: "审计查看业务内容" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("会读取任务业务正文并写入不可变审计记录");
+  const submit = dialog.getByRole("button", { name: "确认查看并写入审计记录" });
+  await expect(submit).toBeDisabled();
+  await dialog.getByLabel("查看对象").selectOption("task_sources");
+  await dialog.getByLabel("查看原因").fill("排障：核对来源正文内容");
+  await expect(submit).toBeEnabled();
+  await submit.click();
+  await expect(dialog).toContainText("审计正文");
+  await expect(dialog).toContainText("审计记录已写入");
+  expect(auditBody).toMatchObject({
+    pack_id: "pending-draft",
+    task_id: "workspace-owner-a",
+    revision: 2,
+    subject_type: "task_sources",
+  });
+});

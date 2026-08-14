@@ -19,6 +19,9 @@ from src.conversation_steering import (
 )
 
 from .models import (
+    AdminReviewItem,
+    AuditSubjectType,
+    AuditViewOutcome,
     CapabilityEligibility,
     CapabilityGovernanceEvent,
     CapabilityGovernanceProjection,
@@ -256,7 +259,11 @@ class CapabilityGovernance:
         pack: CapabilityPack,
     ) -> CapabilityGovernanceProjection:
         target = self._target(pack)
-        events = self._repository.list_events(target)
+        events = [
+            event
+            for event in self._repository.list_events(target)
+            if event.event_type != "audit_viewed"
+        ]
         if events:
             latest = events[-1]
             return CapabilityGovernanceProjection(
@@ -320,6 +327,149 @@ class CapabilityGovernance:
                 )
             )
         return tuple(views)
+
+    def list_admin_review(
+        self,
+        actor: CatalogActor,
+    ) -> tuple[AdminReviewItem, ...]:
+        """管理员跨 Owner 审核聚合；正文永不进入此投影，逐项尽力呈现。"""
+        if not actor.is_admin:
+            raise PermissionError("只有管理员可以读取能力审核视图")
+        packs = self._catalog.list_governable_packs(actor)
+        items: list[AdminReviewItem] = []
+        for pack in sorted(packs, key=lambda item: (item.pack_id, item.version)):
+            target = self._target(pack)
+            projection = self._projection_for_pack(pack)
+            gaps: tuple[PromotionGap, ...] = ()
+            if projection.maturity is not CapabilityMaturity.VERIFIED:
+                gaps = self.evaluate_promotion(target)
+            run = self._repository.get_latest_succeeded_validation_run(target)
+            task_metadata = None
+            if run is not None and self._task_resolver is not None:
+                try:
+                    task_metadata = self._task_resolver.read_task_metadata(
+                        actor,
+                        run.task_ref.task_id,
+                        run.task_ref.revision,
+                        task_owner_id=run.owner_id,
+                    )
+                except (KeyError, PermissionError, ValueError):
+                    # 任务已清理、JSON 元数据损坏或当前不可读时，管理元数据留空，
+                    # 不阻断审核列表（JSONDecodeError 是 ValueError 子类）。
+                    task_metadata = None
+            items.append(
+                AdminReviewItem(
+                    pack_id=target.pack_id,
+                    version=target.version,
+                    scope=target.scope,
+                    maturity=projection.maturity,
+                    lifecycle=projection.lifecycle,
+                    eligibility=projection.eligibility,
+                    source=projection.source,
+                    owner_id=target.owner_id,
+                    digest=target.digest,
+                    promotion_gaps=gaps,
+                    validation=run,
+                    supply_chain=(
+                        self._repository.get_latest_supply_chain_evidence(target)
+                    ),
+                    task_metadata=task_metadata,
+                    audit_history=self._repository.list_audit_view_events(target),
+                )
+            )
+        return tuple(items)
+
+    def audit_view_business_content(
+        self,
+        actor: CatalogActor,
+        *,
+        pack_ref: CapabilityPackRef,
+        task_id: str,
+        revision: int,
+        subject_type: AuditSubjectType,
+        reason: str,
+        idempotency_key: str,
+    ) -> AuditViewOutcome:
+        """有原因、可审计的业务正文读取；失败也留痕，正文不落任何副本。"""
+        if not actor.is_admin:
+            raise PermissionError("只有管理员可以发起审计查看")
+        reason = reason.strip()
+        if len(reason) < 5:
+            raise ValueError("审计查看原因过短，至少 5 个字符")
+        if self._task_resolver is None:
+            raise RuntimeError("能力治理未配置真实任务解析器")
+        pack = next(
+            (
+                item
+                for item in self._catalog.list_governable_packs(actor)
+                if item.pack_id == pack_ref.pack_id
+                and item.version == pack_ref.version
+                and item.digest == pack_ref.digest
+            ),
+            None,
+        )
+        if pack is None:
+            raise KeyError("能力包不存在或当前 Actor 不可见")
+        target = self._target(pack)
+        run = self._repository.get_latest_succeeded_validation_run(target)
+        if run is None:
+            raise ValueError("该能力尚无成功验证运行，无可审计查看的关联任务")
+        if (
+            task_id != run.task_ref.task_id
+            or revision != run.task_ref.revision
+        ):
+            # 审计查看只针对验证证据实际关联的冻结任务，防止借能力包读取任意任务正文。
+            raise ValueError("审计查看任务与验证证据不一致")
+        content = self._task_resolver.read_business_content(
+            actor,
+            task_id,
+            revision,
+            subject_type,
+            task_owner_id=run.owner_id,
+        )
+        event = CapabilityGovernanceEvent(
+            event_type="audit_viewed",
+            idempotency_key=idempotency_key,
+            target=target,
+            actor_id=actor.owner_id,
+            actor_role=actor.role,
+            reason=reason,
+            subject_type=subject_type,
+            subject_sha256=(
+                content.content_sha256
+                if content.status == "succeeded"
+                else None
+            ),
+            result=content.status,
+            task_id=task_id,
+            revision=revision,
+            failure_reason=(
+                content.failure_reason
+                if content.status == "failed"
+                else None
+            ),
+        )
+        saved = self._repository.save_audit_view_event(event)
+        return AuditViewOutcome(
+            status=content.status,
+            content=content.content if content.status == "succeeded" else None,
+            truncated=content.truncated,
+            failure_reason=(
+                content.failure_reason
+                if content.status == "failed"
+                else None
+            ),
+            event=saved,
+        )
+
+    def list_audit_records(
+        self,
+        actor: CatalogActor,
+    ) -> tuple[CapabilityGovernanceEvent, ...]:
+        """管理员读取全量审计查看记录（升序）；记录不含正文，只含 hash 与原因。"""
+        if not actor.is_admin:
+            raise PermissionError("只有管理员可以读取审计查看记录")
+        return self._repository.list_audit_view_events(None)
 
     def get_supply_chain_evidence(
         self,

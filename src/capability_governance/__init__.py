@@ -2,12 +2,17 @@
 """CapabilityGovernance 公共 Interface。"""
 
 from .models import (
+    AdminReviewItem,
+    AuditSubjectType,
+    AuditViewOutcome,
+    BusinessContent,
     CapabilitySupplyChainEvidence,
     CapabilityEligibility,
     CapabilityGovernanceEvent,
     CapabilityGovernanceProjection,
     CapabilityGovernanceTarget,
     CapabilityGovernanceView,
+    CapabilityTaskMetadata,
     CapabilityValidationRun,
     CapabilityLifecycle,
     CapabilityMaturity,
@@ -45,6 +50,10 @@ from .validation_runtime import (
 )
 
 __all__ = [
+    "AdminReviewItem",
+    "AuditSubjectType",
+    "AuditViewOutcome",
+    "BusinessContent",
     "CapabilityEligibility",
     "CapabilityGovernance",
     "CapabilityGovernanceEvent",
@@ -52,6 +61,7 @@ __all__ = [
     "CapabilityGovernanceRepository",
     "CapabilityGovernanceTarget",
     "CapabilityGovernanceView",
+    "CapabilityTaskMetadata",
     "CapabilityValidationRun",
     "CapabilityValidationExecutor",
     "CapabilityLifecycle",
