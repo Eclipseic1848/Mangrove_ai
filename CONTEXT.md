@@ -313,6 +313,19 @@ _Avoid_: 公共插件市场、可变标签、管理员无痕全盘读取
 不得继承旧版本的验证状态。
 _Avoid_: 生命周期、运行资格、一次成功即验证通过
 
+**能力晋级门（CapabilityPromotionGate）**：
+同一精确 digest 的五步验证全部 succeeded 且供应链证据 passed（漏洞库按判定时刻未过期）后，
+系统确定性把个人能力成熟度从 `draft` 晋级为 `verified` 的有界判定；任何缺口都保持 `draft`
+并以脱敏字面量解释。晋级只追加治理事件流，不改目录、不自动发布，也不改变生命周期与运行
+资格。
+_Avoid_: 单次任务成功即晋级、部分证据通过即晋级、把"已验证"表述为"已发布"
+
+**能力验证缺口（PromotionGap）**：
+晋级判定门返回的脱敏缺口字面量（如 `validation_incomplete`、`supply_chain_evidence_missing`、
+`trivy_database_stale`），Owner 与管理员可见，但不会暴露内部路径、命令、Token 或原始扫描
+日志。
+_Avoid_: 向 Owner 暴露原始扫描报告、内部路径、命令细节
+
 **能力生命周期（CapabilityLifecycle）**：
 能力版本的治理状态，只允许 `active | deprecated | revoked`；弃用允许历史冻结任务继续使用，
 安全撤销则禁止新任务、重试和恢复。
