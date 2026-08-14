@@ -20,6 +20,7 @@ from .models import (
     SupplyChainEvidenceStatus,
 )
 from .repository import CapabilityGovernanceRepository
+from .tool_lock import load_locked_executable, sha256_file
 
 
 class SupplyChainTools(Protocol):
@@ -48,28 +49,14 @@ class LockedCliSupplyChainTools:
         self._lock_path = Path(lock_path).resolve()
         self._runner = runner
 
-    @staticmethod
-    def _sha256(path: Path) -> str:
-        digest = hashlib.sha256()
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
-        return digest.hexdigest()
-
     def _load_tool(self, name: str, expected_version: str) -> Path:
         lock = json.loads(self._lock_path.read_text(encoding="utf-8"))
-        entry = lock.get(name)
-        if not isinstance(entry, dict) or entry.get("version") != expected_version:
-            raise ValueError(f"{name} 版本锁不存在或不匹配")
-        verification = entry.get("source_verification")
-        if not isinstance(verification, dict) or verification.get("verified") is not True:
-            raise ValueError(f"{name} 上游来源尚未验证")
-        executable = (self._tool_root / str(entry.get("executable", ""))).resolve()
-        if not executable.is_relative_to(self._tool_root) or not executable.is_file():
-            raise ValueError(f"{name} 可执行文件不在受控目录")
-        if self._sha256(executable) != entry.get("executable_sha256"):
-            raise ValueError(f"{name} 可执行文件 digest 校验失败")
-        return executable
+        return load_locked_executable(
+            lock=lock,
+            name=name,
+            expected_version=expected_version,
+            tool_root=self._tool_root,
+        )
 
     def _run(self, command: Sequence[str]) -> subprocess.CompletedProcess[str]:
         completed = self._runner(
@@ -332,7 +319,7 @@ class LockedCliSupplyChainTools:
             subject_digest=target.digest,
             trivy_version="0.70.0",
             trivy_config_sha256=config_sha256,
-            trivy_result_sha256=self._sha256(trivy_output),
+            trivy_result_sha256=sha256_file(trivy_output),
             trivy_database={
                 "version": database.get("Version"),
                 "updated_at": updated_at,
@@ -354,8 +341,8 @@ class LockedCliSupplyChainTools:
                 for item in misconfigurations
             ),
             syft_version="1.50.0",
-            syft_json_sha256=self._sha256(syft_output),
-            cyclonedx_json_sha256=self._sha256(cyclonedx_output),
+            syft_json_sha256=sha256_file(syft_output),
+            cyclonedx_json_sha256=sha256_file(cyclonedx_output),
             cyclonedx_spec_version="1.6",
         )
 
