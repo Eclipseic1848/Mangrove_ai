@@ -20,9 +20,11 @@ from src.capability_governance import (
     CapabilityGovernanceTarget,
     CapabilitySupplyChainEvidence,
     InMemoryCapabilityGovernanceRepository,
+    SqliteCapabilityGovernanceRepository,
     ValidationTaskRef,
     SupplyChainEvidenceStatus,
     TrivyDatabaseMetadata,
+    migrate_capability_governance,
 )
 from src.config.settings import settings
 from src.conversation_steering import (
@@ -179,6 +181,32 @@ def test_owner_starts_and_reads_validation_without_supplying_hashes(
     assert [item["run_id"] for item in listed.json()["items"]] == [
         response.json()["run_id"]
     ]
+    app.dependency_overrides.clear()
+
+
+def test_packs_endpoint_serializes_sanitized_promotion_gaps(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    db_path = tmp_path / "webui.db"
+    _seed_catalog(str(db_path))
+    migrate_capability_governance(db_path, tmp_path / "backup.db")
+    monkeypatch.setattr(settings, "webui_db_path", str(db_path))
+    app.dependency_overrides[get_current_user] = lambda: {
+        "user_id": "owner-a",
+        "role": "user",
+    }
+    client = TestClient(app)
+
+    response = client.get("/api/capability-governance/packs")
+
+    assert response.status_code == 200
+    items = {item["version"]: item for item in response.json()["items"]}
+    gaps = items["1.0.0"]["promotion_gaps"]
+    assert "validation_incomplete" in gaps
+    assert "supply_chain_evidence_missing" in gaps
+    # 平台 verified 历史包没有缺口。
+    assert items["2026.7.4"]["promotion_gaps"] == []
     app.dependency_overrides.clear()
 
 

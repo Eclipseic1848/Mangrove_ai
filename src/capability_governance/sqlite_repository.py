@@ -21,7 +21,30 @@ _MIGRATIONS = Path(__file__).parent / "migrations"
 _DDL = "\n".join(
     path.read_text(encoding="utf-8")
     for path in sorted(_MIGRATIONS.glob("*.sql"))
+    # 0004 依赖迁移入口先幂等补充 event_type 列，因此单独执行，不参与基础拼接。
+    if path.name != "0004_promotion_gate.sql"
 )
+_PROMOTION_GATE_DDL = (
+    _MIGRATIONS / "0004_promotion_gate.sql"
+).read_text(encoding="utf-8")
+
+
+def _ensure_promotion_gate(connection: sqlite3.Connection) -> None:
+    """幂等补充晋级门列与部分唯一索引；旧库升级与全量重放均可安全执行。"""
+
+    columns = {
+        row[1]
+        for row in connection.execute(
+            "PRAGMA table_info(capability_governance_events)"
+        )
+    }
+    if "event_type" not in columns:
+        # 默认值保证旧行自动视为 registered，历史事实零改写。
+        connection.execute(
+            "ALTER TABLE capability_governance_events "
+            "ADD COLUMN event_type TEXT NOT NULL DEFAULT 'registered'"
+        )
+    connection.executescript(_PROMOTION_GATE_DDL)
 
 
 def _validation_request_hash(run: CapabilityValidationRun) -> str:
@@ -87,6 +110,7 @@ def migrate_capability_governance(
             source.backup(destination)
         # 只有备份完整关闭后才触碰源库，迁移脚本本身仅包含新增 DDL。
         source.executescript(_DDL)
+        _ensure_promotion_gate(source)
     return backup
 
 
@@ -113,6 +137,9 @@ class SqliteCapabilityGovernanceRepository:
         self,
         event: CapabilityGovernanceEvent,
     ) -> CapabilityGovernanceEvent:
+        if event.event_type != "registered":
+            # 晋级事件只能走专用入口，防止把 promoted 事实落成默认 registered 行。
+            raise ValueError("通用事件入口只接受能力登记事件")
         target = event.target
         with self._connect() as connection:
             if not self._schema_exists(connection):
@@ -512,6 +539,114 @@ class SqliteCapabilityGovernanceRepository:
             ).fetchone()
         return (
             CapabilitySupplyChainEvidence.model_validate_json(row["payload_json"])
+            if row is not None
+            else None
+        )
+
+    def save_promotion_event(
+        self,
+        event: CapabilityGovernanceEvent,
+    ) -> CapabilityGovernanceEvent:
+        if event.event_type != "promoted_to_verified":
+            raise ValueError("晋级事件专用入口只接受 promoted_to_verified 事件")
+        target = event.target
+        with self._connect() as connection:
+            if not self._schema_exists(connection):
+                raise RuntimeError("能力治理数据库尚未执行带备份迁移")
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT payload_json FROM capability_governance_events "
+                "WHERE owner_key=? AND pack_id=? AND version=? AND digest=? "
+                "AND event_type='promoted_to_verified' "
+                "ORDER BY occurred_at DESC, event_id DESC LIMIT 1",
+                (
+                    _owner_key(target),
+                    target.pack_id,
+                    target.version,
+                    target.digest,
+                ),
+            ).fetchone()
+            if existing is not None:
+                # 同一 digest 至多一个晋级结果；并发后写者拿到已有事件，不覆盖。
+                return CapabilityGovernanceEvent.model_validate_json(
+                    existing["payload_json"]
+                )
+            connection.execute(
+                "INSERT INTO capability_governance_events "
+                "(event_id, owner_key, scope, pack_id, version, digest, "
+                "idempotency_key, event_type, payload_json, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.event_id,
+                    _owner_key(target),
+                    target.scope.value,
+                    target.pack_id,
+                    target.version,
+                    target.digest,
+                    event.idempotency_key,
+                    "promoted_to_verified",
+                    event.model_dump_json(),
+                    event.occurred_at.isoformat(),
+                ),
+            )
+            row = connection.execute(
+                "SELECT payload_json FROM capability_governance_events "
+                "WHERE event_id=?",
+                (event.event_id,),
+            ).fetchone()
+        assert row is not None
+        return CapabilityGovernanceEvent.model_validate_json(row["payload_json"])
+
+    def get_latest_promotion_event(
+        self,
+        target: CapabilityGovernanceTarget,
+    ) -> CapabilityGovernanceEvent | None:
+        with self._connect() as connection:
+            if not self._schema_exists(connection):
+                return None
+            row = connection.execute(
+                "SELECT payload_json FROM capability_governance_events "
+                "WHERE owner_key=? AND pack_id=? AND version=? AND digest=? "
+                "AND event_type='promoted_to_verified' "
+                "ORDER BY occurred_at DESC, event_id DESC LIMIT 1",
+                (
+                    _owner_key(target),
+                    target.pack_id,
+                    target.version,
+                    target.digest,
+                ),
+            ).fetchone()
+        return (
+            CapabilityGovernanceEvent.model_validate_json(row["payload_json"])
+            if row is not None
+            else None
+        )
+
+    def get_latest_succeeded_validation_run(
+        self,
+        target: CapabilityGovernanceTarget,
+    ) -> CapabilityValidationRun | None:
+        with self._connect() as connection:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='capability_validation_runs'"
+            ).fetchone()
+            if table is None:
+                return None
+            row = connection.execute(
+                "SELECT payload_json FROM capability_validation_runs "
+                "WHERE owner_id=? AND pack_id=? AND version=? AND digest=? "
+                "AND status='succeeded' "
+                "ORDER BY updated_at DESC, run_id DESC LIMIT 1",
+                (
+                    target.owner_id or "",
+                    target.pack_id,
+                    target.version,
+                    target.digest,
+                ),
+            ).fetchone()
+        return (
+            CapabilityValidationRun.model_validate_json(row["payload_json"])
             if row is not None
             else None
         )

@@ -2,7 +2,7 @@
 """能力治理的不可变事实与三轴投影契约。"""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from typing import Literal
 import uuid
@@ -27,6 +27,10 @@ class CapabilityLifecycle(StrEnum):
 class CapabilityEligibility(StrEnum):
     ELIGIBLE = "eligible"
     QUARANTINED = "quarantined"
+
+
+# ADR-0029 决策 4：Trivy 漏洞库有效期 7 天；按 DB UpdatedAt 计算，过期禁止新晋级与发布。
+TRIVY_DATABASE_MAX_AGE = timedelta(days=7)
 
 
 class CapabilityGovernanceTarget(BaseModel):
@@ -67,8 +71,21 @@ def is_ac06_admin_gray_validation_target(
     )
 
 
+class PromotionGap(StrEnum):
+    """能力晋级门的脱敏缺口字面量；不含路径、命令、Token 或原始日志。"""
+
+    VALIDATION_INCOMPLETE = "validation_incomplete"
+    EVIDENCE_REFERENCE_MISMATCH = "evidence_reference_mismatch"
+    SUPPLY_CHAIN_EVIDENCE_MISSING = "supply_chain_evidence_missing"
+    SECRET_DETECTED = "secret_detected"
+    CRITICAL_VULNERABILITY = "critical_vulnerability"
+    FIXABLE_HIGH_VULNERABILITY = "fixable_high_vulnerability"
+    MISCONFIGURATION_FAILURE = "misconfiguration_failure"
+    TRIVY_DATABASE_STALE = "trivy_database_stale"
+
+
 class CapabilityGovernanceEvent(BaseModel):
-    """只追加的治理事实；AC07-01 仅允许登记安全初始态。"""
+    """只追加的治理事实；登记建立初始态，晋级由有界命令生成。"""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -77,25 +94,71 @@ class CapabilityGovernanceEvent(BaseModel):
     )
     idempotency_key: str = Field(min_length=1, max_length=200)
     target: CapabilityGovernanceTarget
-    event_type: Literal["registered"] = "registered"
+    event_type: Literal["registered", "promoted_to_verified"] = "registered"
     maturity: CapabilityMaturity = CapabilityMaturity.DRAFT
     lifecycle: CapabilityLifecycle = CapabilityLifecycle.ACTIVE
     eligibility: CapabilityEligibility = CapabilityEligibility.ELIGIBLE
     actor_id: str = Field(min_length=1, max_length=120)
     actor_role: Literal["user", "admin", "superadmin"]
+    source_validation_run_id: str | None = Field(
+        default=None, min_length=1, max_length=120
+    )
+    source_supply_chain_evidence_id: str | None = Field(
+        default=None, pattern=r"^supply_[0-9a-f]{20}$"
+    )
     occurred_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
 
     @model_validator(mode="after")
-    def validate_registered_state(self) -> "CapabilityGovernanceEvent":
-        if (
-            self.maturity is not CapabilityMaturity.DRAFT
-            or self.lifecycle is not CapabilityLifecycle.ACTIVE
-            or self.eligibility is not CapabilityEligibility.ELIGIBLE
-        ):
-            # 后续晋级和隔离必须由各自有界命令产生，不能借“登记”绕过治理门。
-            raise ValueError("能力登记事件只能建立 draft/active/eligible 初始态")
+    def validate_event_state(self) -> "CapabilityGovernanceEvent":
+        if self.event_type == "registered":
+            if (
+                self.maturity is not CapabilityMaturity.DRAFT
+                or self.lifecycle is not CapabilityLifecycle.ACTIVE
+                or self.eligibility is not CapabilityEligibility.ELIGIBLE
+            ):
+                # 后续晋级和隔离必须由各自有界命令产生，不能借“登记”绕过治理门。
+                raise ValueError("能力登记事件只能建立 draft/active/eligible 初始态")
+            if (
+                self.source_validation_run_id is not None
+                or self.source_supply_chain_evidence_id is not None
+            ):
+                raise ValueError("能力登记事件不得携带晋级证据引用")
+            return self
+        if self.event_type == "promoted_to_verified":
+            if (
+                self.maturity is not CapabilityMaturity.VERIFIED
+                or self.lifecycle is not CapabilityLifecycle.ACTIVE
+                or self.eligibility is not CapabilityEligibility.ELIGIBLE
+            ):
+                # 晋级只改变成熟度；生命周期与运行资格仍由 #13/#14 的独立命令治理。
+                raise ValueError("能力晋级事件必须携带 verified/active/eligible 状态")
+            if (
+                self.source_validation_run_id is None
+                or self.source_supply_chain_evidence_id is None
+            ):
+                raise ValueError("能力晋级事件必须引用验证运行与供应链证据")
+            return self
+        raise ValueError("未知能力治理事件类型")
+
+
+class PromotionOutcome(BaseModel):
+    """晋级命令的显式结果；调用方必须区分晋级、幂等命中与证据不足。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["promoted", "already_verified", "held"]
+    gaps: tuple[PromotionGap, ...] = ()
+    event: CapabilityGovernanceEvent | None = None
+
+    @model_validator(mode="after")
+    def validate_outcome_shape(self) -> "PromotionOutcome":
+        if self.status == "held":
+            if not self.gaps or self.event is not None:
+                raise ValueError("保持草稿的结果必须携带缺口且不携带事件")
+        elif self.gaps or self.event is None:
+            raise ValueError("晋级结果必须携带事件且无缺口")
         return self
 
 
@@ -124,6 +187,7 @@ class CapabilityGovernanceView(BaseModel):
     owner_id: str | None = None
     digest: str | None = None
     can_validate: bool = False
+    promotion_gaps: tuple[PromotionGap, ...] = ()
 
     @classmethod
     def from_projection(

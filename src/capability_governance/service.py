@@ -28,6 +28,10 @@ from .models import (
     CapabilityValidationRun,
     CapabilityLifecycle,
     CapabilityMaturity,
+    PromotionGap,
+    PromotionOutcome,
+    SupplyChainEvidenceStatus,
+    TRIVY_DATABASE_MAX_AGE,
     ValidationTaskRef,
     ValidationEvidence,
     ValidationRunStatus,
@@ -171,6 +175,82 @@ class CapabilityGovernance:
             )
         )
 
+    def evaluate_promotion(
+        self,
+        target: CapabilityGovernanceTarget,
+        *,
+        now: datetime | None = None,
+    ) -> tuple[PromotionGap, ...]:
+        """晋级判定门：只读既有证据并返回脱敏缺口；空元组表示全部硬门通过。"""
+
+        gaps: list[PromotionGap] = []
+        run = self._repository.get_latest_succeeded_validation_run(target)
+        if run is None:
+            gaps.append(PromotionGap.VALIDATION_INCOMPLETE)
+        else:
+            by_step = {item.step for item in run.evidence}
+            if (
+                # 成功状态必须与五步 evidence 一一对应；缺步、重复步骤或任一未
+                # 通过都可能说明记录残缺或被改写，不能只看步骤集合相等。
+                set(by_step) != set(ValidationStep)
+                or len(run.evidence) != len(ValidationStep)
+                or any(
+                    item.status is not ValidationStepStatus.PASSED
+                    for item in run.evidence
+                )
+            ):
+                gaps.append(PromotionGap.EVIDENCE_REFERENCE_MISMATCH)
+        evidence = self._repository.get_latest_supply_chain_evidence(target)
+        if evidence is None:
+            gaps.append(PromotionGap.SUPPLY_CHAIN_EVIDENCE_MISSING)
+        elif evidence.status is SupplyChainEvidenceStatus.BLOCKED:
+            # blocker 字面量与 PromotionGap 值一一对应，按证据逐项映射。
+            gaps.extend(PromotionGap(blocker) for blocker in evidence.blockers)
+        else:
+            current = now or datetime.now(timezone.utc)
+            if current - evidence.trivy_database.updated_at > TRIVY_DATABASE_MAX_AGE:
+                # 漏洞库时效按判定时刻复查；采集时未过期不等于晋级时仍有效。
+                gaps.append(PromotionGap.TRIVY_DATABASE_STALE)
+        return tuple(gaps)
+
+    def maybe_promote(
+        self,
+        target: CapabilityGovernanceTarget,
+        *,
+        actor: CatalogActor | None = None,
+        now: datetime | None = None,
+    ) -> PromotionOutcome:
+        """确定性晋级命令：证据全过写晋级事件；任何缺口保持草稿且不写事件。"""
+
+        existing = self._repository.get_latest_promotion_event(target)
+        if existing is not None:
+            return PromotionOutcome(status="already_verified", event=existing)
+        gaps = self.evaluate_promotion(target, now=now)
+        if gaps:
+            return PromotionOutcome(status="held", gaps=gaps)
+        run = self._repository.get_latest_succeeded_validation_run(target)
+        evidence = self._repository.get_latest_supply_chain_evidence(target)
+        assert run is not None and evidence is not None  # evaluate 已保证
+        if actor is None:
+            # 审计归因于验证运行的所有者：Owner 发起验证即授权自动晋级。
+            actor = CatalogActor(owner_id=run.owner_id, role=run.actor_role)
+        new_event = CapabilityGovernanceEvent(
+            event_type="promoted_to_verified",
+            idempotency_key=(
+                f"promotion:{target.digest}:validation:{run.run_id}"
+            ),
+            target=target,
+            maturity=CapabilityMaturity.VERIFIED,
+            actor_id=actor.owner_id,
+            actor_role=actor.role,
+            source_validation_run_id=run.run_id,
+            source_supply_chain_evidence_id=evidence.evidence_id,
+        )
+        saved = self._repository.save_promotion_event(new_event)
+        # 并发后写者拿到既有事件：本次调用没有产生新事实，按幂等命中返回。
+        status = "promoted" if saved.event_id == new_event.event_id else "already_verified"
+        return PromotionOutcome(status=status, event=saved)
+
     def _projection_for_pack(
         self,
         pack: CapabilityPack,
@@ -220,18 +300,26 @@ class CapabilityGovernance:
             if actor.is_admin
             else self._catalog.list_visible_packs(actor)
         )
-        return tuple(
-            CapabilityGovernanceView.from_projection(
-                self._projection_for_pack(pack),
-                actor,
-            ).model_copy(
-                update={"can_validate": self._can_validate_pack(actor, pack)}
+        views: list[CapabilityGovernanceView] = []
+        for pack in sorted(
+            packs,
+            key=lambda item: (item.pack_id, item.version),
+        ):
+            projection = self._projection_for_pack(pack)
+            view = CapabilityGovernanceView.from_projection(projection, actor)
+            gaps: tuple[PromotionGap, ...] = ()
+            if projection.maturity is not CapabilityMaturity.VERIFIED:
+                # 草稿能力给出脱敏缺口，让 Owner 知道还缺哪些证据。
+                gaps = self.evaluate_promotion(self._target(pack))
+            views.append(
+                view.model_copy(
+                    update={
+                        "can_validate": self._can_validate_pack(actor, pack),
+                        "promotion_gaps": gaps,
+                    }
+                )
             )
-            for pack in sorted(
-                packs,
-                key=lambda item: (item.pack_id, item.version),
-            )
-        )
+        return tuple(views)
 
     def get_supply_chain_evidence(
         self,

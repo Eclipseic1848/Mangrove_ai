@@ -769,12 +769,15 @@ class CapabilityValidationManager:
                         ),
                     )
                     self._supply_chain_evidence.collect(current.target, mounts[0])
+                    # 供应链证据落库是晋级判定的第二触发时点；验证未完成时
+                    # 命令保持 held 且不写事件，终态时点会再次判定。
+                    self._governance.maybe_promote(current.target, actor=actor)
                 except Exception:
                     # 供应链证据是独立硬门；采集失败留待晋级门处理，不篡改五步运行结果。
                     logger.exception("能力供应链证据采集失败：%s", current.run_id)
 
             try:
-                await asyncio.to_thread(
+                completed = await asyncio.to_thread(
                     self._governance.execute_validation,
                     actor,
                     run.run_id,
@@ -782,6 +785,9 @@ class CapabilityValidationManager:
                     executor=self._executor_factory(run),
                     lease_guarded_preflight=collect_supply_chain_evidence,
                 )
+                if completed.status is ValidationRunStatus.SUCCEEDED:
+                    # 验证终态是晋级判定的第一触发时点；全部证据通过时确定性晋级。
+                    self._governance.maybe_promote(completed.target, actor=actor)
             except Exception:
                 # 单条坏记录不能杀死恢复循环；运行本身仍保持持久化状态供下一轮接管。
                 logger.exception("能力验证运行执行失败：%s", run.run_id)

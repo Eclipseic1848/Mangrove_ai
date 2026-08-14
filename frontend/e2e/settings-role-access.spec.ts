@@ -387,13 +387,49 @@ test("五步成功记录与独立供应链证据分别展示", async ({ page }) 
   const progress = page.getByRole("group", { name: "验证进度与结果：legacy-five-step" });
   await progress.locator("summary").click();
   await expect(progress).toContainText(
-    "五项验证步骤已通过。该结果只形成验证证据，不会自动晋级或发布能力。",
+    "五项验证步骤已通过。全部证据通过后，该能力会自动晋级为已验证。",
   );
   await expect(progress).not.toContainText("供应链扫描与 SBOM");
   await expect(progress).toContainText("已完成 5/5 个步骤");
   const card = page.locator("article").filter({ hasText: "legacy-five-step" });
   await expect(card).toContainText("供应链证据");
   await expect(card).toContainText("尚未扫描");
+});
+
+test("草稿能力卡片展示脱敏缺口并提示自动晋级", async ({ page }) => {
+  await mockSettings(page, "admin");
+  const digest = `sha256:${"d".repeat(64)}`;
+  await page.route("**/api/capability-governance/packs", (route) => route.fulfill({
+    json: {
+      items: [{
+        pack_id: "pending-draft",
+        version: "1.0.0",
+        scope: "personal",
+        maturity: "draft",
+        lifecycle: "active",
+        eligibility: "eligible",
+        source: "governance_event",
+        owner_id: "admin-a",
+        digest,
+        can_validate: true,
+        promotion_gaps: ["validation_incomplete", "supply_chain_evidence_missing"],
+      }],
+    },
+  }));
+  await page.route("**/api/capability-governance/validations", (route) => route.fulfill({
+    json: { items: [] },
+  }));
+  await page.route("**/api/capability-governance/packs/*/*/supply-chain-evidence?*", (route) => route.fulfill({
+    json: { evidence: null },
+  }));
+
+  await page.goto("/settings?section=governance");
+
+  const card = page.locator("article").filter({ hasText: "pending-draft" });
+  await expect(card).toContainText("草稿");
+  await expect(card).toContainText("距已验证还缺");
+  await expect(card).toContainText("尚无全部通过的验证运行");
+  await expect(card).toContainText("尚未形成供应链扫描证据");
 });
 
 test("普通用户只为自己的非脱敏能力读取供应链证据", async ({ page }) => {

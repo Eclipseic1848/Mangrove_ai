@@ -40,7 +40,7 @@ PDF、Word、Excel、CSV 文件主链；数据库具备连接与测试基础。�
 | AC-07 旧 #33 三轴治理投影 | 完成并关闭 | 历史工单保留在旧仓库 |
 | AC-07 旧 #34 可恢复 ValidationRun | 工程实现、双轴审查、生产迁移、两项真实能力灰度、取消后重新发起和 8088 用户验收完成；Capability Host 代理修复经 PR #7 合并，旧工单已关闭 | 无 |
 | AC-07 旧 #35 Trivy/Syft 证据 | 工程实现、双轴复审、带备份生产 `0003` 迁移与 8088 用户验收完成；PR #6 已合并到 `main`，旧工单已关闭 | 无 |
-| AC-07 新 #8～#17 | #9 Cosign PoC 工程实现、真实双包验证、最终双轴复审和用户验收均已通过；其余工单未开始 | 下一工单为 #10 个人能力自动晋级 `verified` |
+| AC-07 新 #8～#17 | #9 Cosign PoC、#10 自动晋级机制均完成工程实现、双轴复审与用户验收；其余工单未开始 | 下一工单为 #11 管理员审核与业务内容审计查看 |
 
 AC-06 两项历史 `admin_gray_only` 包是迁移兼容例外：管理员/超管只能使用自己拥有的
 TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍失败关闭。
@@ -111,18 +111,32 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
 - 用户确认 #34 的 8088 验收通过。该结论不代表能力自动晋级、签名、平台发布、
   普通用户开放或整个 AC-07/Phase 4 完成。
 
+2026-08-14，AC-07 #10 完成本地闭环：
+
+- 晋级判定门、晋级命令、幂等/并发（InMemory 锁 + SQLite 部分唯一索引）、缺口投影、
+  worker 双触发点与 Python/MCP 双夹具双向验证共 30 项新测试通过；
+- Capability 九文件全集合 `164 passed`（既有 133 零回退）；前端构建与设置页
+  Playwright `14 passed`；
+- Standards/Spec 最终双轴复审均为 PASS；
+- 生产 `data/webui.db` 在 SQLite 在线一致性备份后幂等执行 `0004_promotion_gate.sql`，
+  源库与备份 `integrity_check` 均为 `ok`，既有治理表零改写；
+- 8088 用户验收通过（能力治理页面无回归）。该结论不代表任何能力已自动晋级、平台已发布、
+  普通用户受众扩大或整个 AC-07/Phase 4 完成。
+
 ## 7. 当前优先顺序
 
-1. 新仓库 [#9](https://github.com/Eclipseic1848/Mangrove_ai/issues/9) 已完成工程 PoC、真实双包验证、
-   取消/崩溃/篡改失败关闭、最终双轴复审和用户验收。
-2. 下一工单为新仓库 [#10](https://github.com/Eclipseic1848/Mangrove_ai/issues/10)：个人能力自动晋级
-   `verified`。开始实现前先核对 #10 规格与当前代码，不得把 #9 的 PoC 直接扩展成平台发布。
-3. #9 完成不代表任何能力已经晋级、平台能力已经发布或普通用户受众已经扩大。
+1. 新仓库 #9 与 #10 已完成工程实现、双轴复审与用户验收；#10 建立个人能力自动晋级机制，
+   真实灰度包晋级留待 #15/#16 纵切面。
+2. 下一工单为新仓库 [#11](https://github.com/Eclipseic1848/Mangrove_ai/issues/11)：管理员审核与
+   业务内容审计查看。
+3. #9/#10 完成不代表任何能力已经晋级、平台能力已经发布或普通用户受众已经扩大。
 
 ## 8. 权威证据
 
 - AC-07 规格：`docs/plans/2026-08-06-agentic-capability-ac07-spec.md`
 - AC-07 ADR：`docs/adr/0029-capability-validation-lifecycle-and-platform-publication.md`
+- #10 需求复核：`docs/plans/2026-08-14-agentic-capability-ac07-05-requirements-review.md`
+- #10 设计：`docs/plans/2026-08-14-agentic-capability-ac07-05-design.md`
 - #34 报告：`docs/plans/2026-08-07-agentic-capability-ac07-02-execution-report.md`
 - #35 报告：`docs/plans/2026-08-07-agentic-capability-ac07-03-execution-report.md`
 - vNext Publisher：`docs/plans/2026-08-04-vnext-delivery-publisher-execution-report.md`
