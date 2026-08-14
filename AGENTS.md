@@ -77,6 +77,9 @@
 - #35 已完成 Trivy/Syft 工程实现、真实双包扫描、双轴审查、带备份生产迁移与用户验收。
 - 新仓库 #9 已完成标准 OCI image signature 本地 PoC、双轴审查和用户验收；该结论不代表
   能力晋级、平台发布或普通用户开放。
+- 新仓库 #10 已完成个人能力自动晋级机制（判定门、幂等/并发、缺口投影、双轴审查、生产迁移
+  0004 与 PR #20 合并）；该结论不代表任何能力已自动晋级、平台已发布或普通用户受众扩大，
+  真实灰度包晋级留待 #15/#16 纵切面。
 - AC-06 两项历史 `admin_gray_only` 兼容包只是过渡例外，不扩大普通用户权限。
 - 30 项泛化集、完整 PG-05、真实外部 Provider 安全端到端、远程 MCP 与 8B 仍未完成。
 
@@ -108,3 +111,25 @@ Issue 和 PRD 统一使用 `Eclipseic1848/Mangrove_ai` 的 GitHub Issues。参�
 
 采用单上下文领域文档布局，使用根目录 `CONTEXT.md` 和 `docs/adr/`。参见
 `docs/agents/domain.md`。
+
+### 默认技能集（Matt Pocock skills）
+
+本仓库的工程工作默认使用 Matt Pocock 技能集（`mattpocock/skills` 仓库）。装有该技能集
+的 Agent 默认按以下路由工作；技能文件的本机位置不入库，按本机技能系统定位（例如
+`npx skills ls -g`）：
+
+- 打磨想法：有代码库走 `grill-with-docs`（驱动 `grilling` + `domain-modeling`，即时
+  更新 `CONTEXT.md` 与 ADR）；无代码库走 `grill-me`。
+- 多会话构建：`to-spec` 产出规格并发布到 GitHub Issues，`to-tickets` 拆成带阻塞边的
+  垂直切片工单，再逐单 `implement`（工单之间清空上下文）；单会话则直接 `implement`。
+- 实现：`implement` 内以 `tdd` 红绿循环在约定接缝处写测试，收尾 `code-review` 双轴
+  审查（Standards + Spec）后再提交。
+- 外部工单：`triage` 五角色分诊（标签映射见上）；`to-tickets` 产出的工单不再分诊。
+- 硬 Bug：`diagnosing-bugs`，先建立能变红的紧反馈回路，再谈假设。
+- 大型模糊工作：`wayfinder` 决策票地图，清空后并入 `to-spec` 主流程。
+- 架构维护：`improve-codebase-architecture` 找深化机会，设计用 `codebase-design`
+  深模块词汇。
+- 跨会话与调研：`handoff` 写交接文档；后台调研用 `research`；路由不确定时 `ask-matt`。
+
+以上技能与本文件既有规则冲突时，以本文件为准。技能所需的仓库配置已由上文三个小节和
+`docs/agents/` 定义，无需重复。
