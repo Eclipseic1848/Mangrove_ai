@@ -40,7 +40,7 @@ PDF、Word、Excel、CSV 文件主链；数据库具备连接与测试基础。�
 | AC-07 旧 #33 三轴治理投影 | 完成并关闭 | 历史工单保留在旧仓库 |
 | AC-07 旧 #34 可恢复 ValidationRun | 工程实现、双轴审查、生产迁移、两项真实能力灰度、取消后重新发起和 8088 用户验收完成；Capability Host 代理修复经 PR #7 合并，旧工单已关闭 | 无 |
 | AC-07 旧 #35 Trivy/Syft 证据 | 工程实现、双轴复审、带备份生产 `0003` 迁移与 8088 用户验收完成；PR #6 已合并到 `main`，旧工单已关闭 | 无 |
-| AC-07 新 #8～#17 | #9 Cosign PoC、#10 自动晋级机制均完成工程实现、双轴复审与用户验收；其余工单未开始 | 下一工单为 #11 管理员审核与业务内容审计查看 |
+| AC-07 新 #8～#17 | #9 Cosign PoC、#10 自动晋级机制、#11 管理员审核与业务内容审计查看均完成工程实现、双轴复审与用户验收；其余工单未开始 | 下一工单为 #12 独立平台快照、签名与 admin_gray 发布 |
 
 AC-06 两项历史 `admin_gray_only` 包是迁移兼容例外：管理员/超管只能使用自己拥有的
 TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍失败关闭。
@@ -123,13 +123,31 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
 - 8088 用户验收通过（能力治理页面无回归）。该结论不代表任何能力已自动晋级、平台已发布、
   普通用户受众扩大或整个 AC-07/Phase 4 完成。
 
+2026-08-14，AC-07 #11 完成本地闭环：
+
+- 管理员审核聚合视图（跨 Owner 任务身份/状态/时间/输入输出类型数量/验证摘要）、三组分组
+  （待验证/已晋级/已弃用·撤销）、渐进披露与审计查看命令（原因必填、任务与验证证据绑定、
+  失败留痕、2MiB 按块截断、前端固定幂等键）全部实现；
+- 新增测试 63 项（模型/Repository 双实现/投影过滤/任务解析器/服务层/HTTP/Playwright）；
+  后端全量 `1381 passed`（2 项环境基线失败：DNS 解析与端口监听，修复前即存在）；
+  前端构建通过；Playwright `57 passed`（1 项并发偶发，单独复验通过）；
+- Standards/Spec 双轴审查首轮 FAIL（2 阻断：大文件整读 OOM 风险、审计记录缺任务字段），
+  修复后复核双轴 PASS；
+- 零 DDL：`audit_viewed` 事件复用 `capability_governance_events` 表（0004 起支持），
+  生产库无需新迁移；
+- 验收暴露并修复 #10 遗留缺陷：平台能力（无个人 Owner）的验证摘要与任务元数据查询
+  按能力身份过滤而非 owner 列；
+- 8088 用户验收通过（分组、任务管理元数据、审计查看弹窗、审计记录、普通用户无入口）；
+  验收期间产生 1 条真实审计记录（gray-everything-mcp 关联任务的 Prompt 正文）。
+  该结论不代表平台已发布、普通用户受众扩大或整个 AC-07/Phase 4 完成。
+
 ## 7. 当前优先顺序
 
-1. 新仓库 #9 与 #10 已完成工程实现、双轴复审与用户验收；#10 建立个人能力自动晋级机制，
-   真实灰度包晋级留待 #15/#16 纵切面。
-2. 下一工单为新仓库 [#11](https://github.com/Eclipseic1848/Mangrove_ai/issues/11)：管理员审核与
-   业务内容审计查看。
-3. #9/#10 完成不代表任何能力已经晋级、平台能力已经发布或普通用户受众已经扩大。
+1. 新仓库 #9、#10、#11 已完成工程实现、双轴复审与用户验收；#10 建立个人能力自动晋级机制，
+   #11 建立管理员审核与审计查看，真实灰度包晋级留待 #15/#16 纵切面。
+2. 下一工单为新仓库 [#12](https://github.com/Eclipseic1848/Mangrove_ai/issues/12)：独立平台
+   快照、签名与 `admin_gray` 发布（依赖 #9、#10、#11）。
+3. #9/#10/#11 完成不代表任何能力已经晋级、平台能力已经发布或普通用户受众已经扩大。
 
 ## 8. 权威证据
 
@@ -137,6 +155,9 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
 - AC-07 ADR：`docs/adr/0029-capability-validation-lifecycle-and-platform-publication.md`
 - #10 需求复核：`docs/plans/2026-08-14-agentic-capability-ac07-05-requirements-review.md`
 - #10 设计：`docs/plans/2026-08-14-agentic-capability-ac07-05-design.md`
+- #11 需求复核：`docs/plans/2026-08-14-agentic-capability-ac07-06-requirements-review.md`
+- #11 设计：`docs/plans/2026-08-14-agentic-capability-ac07-06-design.md`
+- #11 任务拆分：`docs/plans/2026-08-14-agentic-capability-ac07-06-task-breakdown.md`
 - #34 报告：`docs/plans/2026-08-07-agentic-capability-ac07-02-execution-report.md`
 - #35 报告：`docs/plans/2026-08-07-agentic-capability-ac07-03-execution-report.md`
 - vNext Publisher：`docs/plans/2026-08-04-vnext-delivery-publisher-execution-report.md`

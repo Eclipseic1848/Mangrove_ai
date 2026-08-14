@@ -84,8 +84,11 @@ class PromotionGap(StrEnum):
     TRIVY_DATABASE_STALE = "trivy_database_stale"
 
 
+AuditSubjectType = Literal["task_prompt", "task_sources", "task_output"]
+
+
 class CapabilityGovernanceEvent(BaseModel):
-    """只追加的治理事实；登记建立初始态，晋级由有界命令生成。"""
+    """只追加的治理事实；登记建立初始态，晋级由有界命令生成，审计查看独立留痕。"""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -94,7 +97,9 @@ class CapabilityGovernanceEvent(BaseModel):
     )
     idempotency_key: str = Field(min_length=1, max_length=200)
     target: CapabilityGovernanceTarget
-    event_type: Literal["registered", "promoted_to_verified"] = "registered"
+    event_type: Literal[
+        "registered", "promoted_to_verified", "audit_viewed"
+    ] = "registered"
     maturity: CapabilityMaturity = CapabilityMaturity.DRAFT
     lifecycle: CapabilityLifecycle = CapabilityLifecycle.ACTIVE
     eligibility: CapabilityEligibility = CapabilityEligibility.ELIGIBLE
@@ -106,12 +111,31 @@ class CapabilityGovernanceEvent(BaseModel):
     source_supply_chain_evidence_id: str | None = Field(
         default=None, pattern=r"^supply_[0-9a-f]{20}$"
     )
+    # 审计查看专用字段；其余事件类型必须为 None，保证事件身份不串味。
+    reason: str | None = Field(default=None, min_length=1, max_length=1000)
+    subject_type: AuditSubjectType | None = None
+    subject_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    result: Literal["succeeded", "failed"] | None = None
+    # 审计查看必须精确记录"查看了哪个任务的哪次 revision"（AC3 任务字段）。
+    task_id: str | None = Field(default=None, min_length=1, max_length=160)
+    revision: int | None = Field(default=None, ge=1)
+    # 失败读取的类型化原因（task_not_found 等）；不含正文，审计可区分失败类型。
+    failure_reason: str | None = Field(default=None, min_length=1, max_length=120)
     occurred_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
 
     @model_validator(mode="after")
     def validate_event_state(self) -> "CapabilityGovernanceEvent":
+        audit_fields = (
+            self.reason,
+            self.subject_type,
+            self.subject_sha256,
+            self.result,
+            self.task_id,
+            self.revision,
+            self.failure_reason,
+        )
         if self.event_type == "registered":
             if (
                 self.maturity is not CapabilityMaturity.DRAFT
@@ -125,6 +149,8 @@ class CapabilityGovernanceEvent(BaseModel):
                 or self.source_supply_chain_evidence_id is not None
             ):
                 raise ValueError("能力登记事件不得携带晋级证据引用")
+            if any(field is not None for field in audit_fields):
+                raise ValueError("能力登记事件不得携带审计查看字段")
             return self
         if self.event_type == "promoted_to_verified":
             if (
@@ -139,6 +165,39 @@ class CapabilityGovernanceEvent(BaseModel):
                 or self.source_supply_chain_evidence_id is None
             ):
                 raise ValueError("能力晋级事件必须引用验证运行与供应链证据")
+            if any(field is not None for field in audit_fields):
+                raise ValueError("能力晋级事件不得携带审计查看字段")
+            return self
+        if self.event_type == "audit_viewed":
+            # 审计查看不改变三轴状态；若被写入投影，治理事实会被一次查看污染。
+            if (
+                self.maturity is not CapabilityMaturity.DRAFT
+                or self.lifecycle is not CapabilityLifecycle.ACTIVE
+                or self.eligibility is not CapabilityEligibility.ELIGIBLE
+            ):
+                raise ValueError("审计查看事件不得改变三轴状态")
+            if (
+                self.source_validation_run_id is not None
+                or self.source_supply_chain_evidence_id is not None
+            ):
+                raise ValueError("审计查看事件不得携带晋级证据引用")
+            if not self.reason:
+                raise ValueError("审计查看事件必须携带非空原因")
+            if self.subject_type is None or self.result is None:
+                raise ValueError("审计查看事件必须携带查看对象与结果")
+            if not self.task_id or self.revision is None:
+                # AC3：审计记录必须能回答"查看了哪个任务的哪次 revision"。
+                raise ValueError("审计查看事件必须携带任务身份与 revision")
+            if self.result == "succeeded":
+                if not self.subject_sha256:
+                    raise ValueError("成功的审计查看必须携带内容 hash")
+                if self.failure_reason is not None:
+                    raise ValueError("成功的审计查看不得携带失败原因")
+            else:
+                if self.subject_sha256 is not None:
+                    raise ValueError("失败的审计查看不得携带内容 hash")
+                if self.failure_reason is None:
+                    raise ValueError("失败的审计查看必须携带类型化失败原因")
             return self
         raise ValueError("未知能力治理事件类型")
 
@@ -160,6 +219,106 @@ class PromotionOutcome(BaseModel):
         elif self.gaps or self.event is None:
             raise ValueError("晋级结果必须携带事件且无缺口")
         return self
+
+
+class AuditViewOutcome(BaseModel):
+    """审计查看命令的显式结果；失败也返回记录，保证“看过”不可抵赖。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["succeeded", "failed"]
+    content: str | None = None
+    truncated: bool = False
+    failure_reason: str | None = None
+    event: CapabilityGovernanceEvent
+
+    @model_validator(mode="after")
+    def validate_outcome(self) -> "AuditViewOutcome":
+        if self.event.result != self.status:
+            raise ValueError("审计查看结果必须与审计记录一致")
+        if self.status == "succeeded":
+            if self.content is None:
+                raise ValueError("成功的审计查看必须携带正文")
+            if self.failure_reason is not None:
+                raise ValueError("成功的审计查看不得携带失败原因")
+        else:
+            if self.content is not None:
+                raise ValueError("失败的审计查看不得携带正文")
+            if self.failure_reason is None:
+                raise ValueError("失败的审计查看必须携带类型化失败原因")
+            if self.failure_reason != self.event.failure_reason:
+                raise ValueError("审计查看失败原因必须与审计记录一致")
+        return self
+
+
+class BusinessContent(BaseModel):
+    """审计查看的正文对象；只含内容与受控元数据，失败时给出类型化原因。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["succeeded", "failed"]
+    subject_type: AuditSubjectType
+    content: str = ""
+    content_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    size_bytes: int = Field(default=0, ge=0)
+    truncated: bool = False
+    failure_reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_content(self) -> "BusinessContent":
+        if self.status == "succeeded":
+            if not self.content_sha256:
+                raise ValueError("成功读取的正文必须携带内容 hash")
+            if self.failure_reason is not None:
+                raise ValueError("成功读取的正文不得携带失败原因")
+        else:
+            if self.failure_reason is None:
+                raise ValueError("失败读取的正文必须携带类型化原因")
+            if self.content_sha256 is not None:
+                raise ValueError("失败读取的正文不得携带内容 hash")
+            if self.content:
+                raise ValueError("失败读取的正文不得携带内容")
+        return self
+
+
+class CapabilityTaskMetadata(BaseModel):
+    """任务管理元数据（脱敏白名单）；不含标题、Prompt 或任何文件内容。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    task_id: str = Field(min_length=1, max_length=160)
+    revision: int = Field(ge=1)
+    owner_id: str = Field(min_length=1, max_length=120)
+    task_status: str = Field(min_length=1, max_length=60)
+    created_at: str
+    updated_at: str
+    input_count: int = Field(default=0, ge=0)
+    input_types: tuple[str, ...] = ()
+    output_count: int = Field(default=0, ge=0)
+    output_formats: tuple[str, ...] = ()
+
+
+class AdminReviewItem(BaseModel):
+    """管理员审核聚合项；字段即脱敏白名单，业务正文永不进入此模型。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    pack_id: str = Field(min_length=1, max_length=120)
+    version: str = Field(min_length=1, max_length=80)
+    scope: ProcedureScope
+    maturity: CapabilityMaturity
+    lifecycle: CapabilityLifecycle
+    eligibility: CapabilityEligibility
+    source: Literal["governance_event", "legacy_compat"]
+    owner_id: str | None = None
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    promotion_gaps: tuple[PromotionGap, ...] = ()
+    validation: CapabilityValidationRun | None = None
+    supply_chain: CapabilitySupplyChainEvidence | None = None
+    task_metadata: CapabilityTaskMetadata | None = None
+    audit_history: tuple[CapabilityGovernanceEvent, ...] = ()
 
 
 class CapabilityGovernanceProjection(BaseModel):

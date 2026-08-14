@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Boxes, ChevronDown, Loader2, Play, ShieldCheck, X } from "lucide-react";
+import { Boxes, ChevronDown, Eye, Loader2, Play, ShieldCheck, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -116,6 +116,98 @@ const GAP_LABEL: Record<PromotionGap, string> = {
   ...BLOCKER_LABEL,
 };
 
+type AuditSubject = "task_prompt" | "task_sources" | "task_output";
+
+type AuditRecord = {
+  event_id: string;
+  actor_id: string;
+  actor_role: string;
+  reason: string;
+  subject_type: AuditSubject;
+  subject_sha256: string | null;
+  result: "succeeded" | "failed";
+  task_id: string;
+  revision: number;
+  failure_reason: string | null;
+  occurred_at: string;
+};
+
+type TaskMetadata = {
+  task_id: string;
+  revision: number;
+  owner_id: string;
+  task_status: string;
+  created_at: string;
+  updated_at: string;
+  input_count: number;
+  input_types: string[];
+  output_count: number;
+  output_formats: string[];
+};
+
+type AdminReviewItem = {
+  pack_id: string;
+  version: string;
+  scope: "personal" | "platform";
+  maturity: "draft" | "verified";
+  lifecycle: "active" | "deprecated" | "revoked";
+  eligibility: "eligible" | "quarantined";
+  source: "governance_event" | "legacy_compat";
+  owner_id: string | null;
+  digest: string;
+  promotion_gaps: PromotionGap[];
+  validation: ValidationRun | null;
+  supply_chain: SupplyChainEvidence | null;
+  task_metadata: TaskMetadata | null;
+  audit_history: AuditRecord[];
+};
+
+type AuditViewResult = {
+  status: "succeeded" | "failed";
+  content: string | null;
+  truncated: boolean;
+  failure_reason: string | null;
+  event: AuditRecord;
+};
+
+const AUDIT_SUBJECT_LABEL: Record<AuditSubject, string> = {
+  task_prompt: "任务 Prompt 正文",
+  task_sources: "来源正文",
+  task_output: "输出正文",
+};
+
+const AUDIT_RESULT_LABEL = { succeeded: "成功", failed: "失败" } as const;
+
+const FAILURE_REASON_LABEL: Record<string, string> = {
+  task_not_found: "任务或 revision 不存在",
+  source_missing: "来源文件缺失",
+  source_invalid: "来源文件无效或路径越界",
+  source_unreadable: "来源文件不可读",
+  output_missing: "输出文件缺失",
+  output_invalid: "输出文件无效或路径越界",
+  output_unreadable: "输出文件不可读",
+};
+
+const REVIEW_GROUPS = [
+  {
+    key: "draft",
+    label: "待验证",
+    match: (item: GovernanceItem) => item.maturity === "draft",
+  },
+  {
+    key: "verified",
+    label: "已晋级",
+    match: (item: GovernanceItem) =>
+      item.maturity === "verified" && item.lifecycle === "active",
+  },
+  {
+    key: "retired",
+    label: "已弃用·撤销",
+    match: (item: GovernanceItem) =>
+      item.lifecycle === "deprecated" || item.lifecycle === "revoked",
+  },
+] as const;
+
 function shortDigest(digest: string) {
   if (digest.length <= 32) return digest;
   return `${digest.slice(0, 19)}…${digest.slice(-12)}`;
@@ -148,15 +240,34 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
   const [submitting, setSubmitting] = useState(false);
   const [focusedRunId, setFocusedRunId] = useState("");
   const [expandedRunId, setExpandedRunId] = useState("");
+  const [reviewItems, setReviewItems] = useState<Record<string, AdminReviewItem>>({});
+  const [auditTarget, setAuditTarget] = useState<AdminReviewItem | null>(null);
+  const [auditSubject, setAuditSubject] = useState<AuditSubject>("task_prompt");
+  const [auditReason, setAuditReason] = useState("");
+  const [auditSubmitting, setAuditSubmitting] = useState(false);
+  const [auditOutcome, setAuditOutcome] = useState<AuditViewResult | null>(null);
+  // 弹窗生命周期内固定幂等键：网络重试不会落第二条审计记录。
+  const [auditIdempotencyKey, setAuditIdempotencyKey] = useState("");
   const runElementRef = useRef<HTMLDetailsElement | null>(null);
 
   const reload = () => Promise.all([
     api.get("/api/capability-governance/packs"),
     api.get("/api/capability-governance/validations"),
-  ]).then(async ([packData, runData]) => {
+    ownerOnly
+      ? Promise.resolve(null)
+      // 审核聚合是新增只读投影；后端未升级时不阻断既有治理页面。
+      : api.get("/api/capability-governance/admin/review").catch(() => null),
+  ]).then(async ([packData, runData, reviewData]) => {
     const nextItems: GovernanceItem[] = packData.items ?? [];
     setItems(nextItems);
     setRuns(runData.items ?? []);
+    if (reviewData) {
+      const nextReview: Record<string, AdminReviewItem> = {};
+      for (const item of reviewData.items ?? []) {
+        nextReview[reviewKey(item)] = item;
+      }
+      setReviewItems(nextReview);
+    }
     const evidenceItems = nextItems
       .filter(hasDigest)
       .filter((item) => !ownerOnly || item.can_validate);
@@ -195,6 +306,49 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
   }, [focusedRunId, runs, target]);
 
   const visibleItems = ownerOnly ? items.filter((item) => item.can_validate) : items;
+
+  function reviewKey(item: { pack_id: string; version: string; scope: string; owner_id: string | null; digest: string | null }) {
+    return `${item.scope}:${item.owner_id ?? "platform"}:${item.pack_id}:${item.version}:${item.digest}`;
+  }
+
+  function openAuditView(item: AdminReviewItem) {
+    if (!item.task_metadata) {
+      setError("该能力没有可审计查看的关联任务");
+      return;
+    }
+    setAuditTarget(item);
+    setAuditSubject("task_prompt");
+    setAuditReason("");
+    setAuditOutcome(null);
+    setAuditIdempotencyKey(crypto.randomUUID());
+    setError("");
+  }
+
+  async function submitAuditView() {
+    if (!auditTarget?.task_metadata) return;
+    setAuditSubmitting(true);
+    setError("");
+    try {
+      const data = await api.post(
+        "/api/capability-governance/admin/audit-view",
+        {
+          pack_id: auditTarget.pack_id,
+          version: auditTarget.version,
+          digest: auditTarget.digest,
+          task_id: auditTarget.task_metadata.task_id,
+          revision: auditTarget.task_metadata.revision,
+          subject_type: auditSubject,
+          reason: auditReason.trim(),
+        },
+        { "Idempotency-Key": auditIdempotencyKey },
+      );
+      setAuditOutcome(data);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "审计查看失败");
+    } finally {
+      setAuditSubmitting(false);
+    }
+  }
 
   async function openValidation(item: GovernanceItem) {
     if (!hasDigest(item)) {
@@ -257,6 +411,17 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
     }
   }
 
+  // 管理员视图按成熟度与生命周期分组；空组不占位（#12 引入平台候选/管理员灰度分组）。
+  const groups = ownerOnly
+    ? [{ key: "owner", label: "", items: visibleItems }]
+    : REVIEW_GROUPS
+        .map((group) => ({
+          key: group.key,
+          label: group.label,
+          items: visibleItems.filter(group.match),
+        }))
+        .filter((group) => group.items.length > 0);
+
   return (
     <Card>
       <CardHeader className="border-b border-border/60">
@@ -285,8 +450,16 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
             当前没有可治理的能力包
           </div>
         ) : (
-          visibleItems.map((item) => {
+          groups.map((group) => (
+          <section key={group.key} className="space-y-3">
+            {group.label !== "" && (
+              <h3 className="flex items-center gap-2 text-sm font-medium">
+                {group.label}（{group.items.length}）
+              </h3>
+            )}
+          {group.items.map((item) => {
             const supplyEvidence = supplyChainEvidence[itemKey(item)];
+            const reviewItem = ownerOnly ? undefined : reviewItems[itemKey(item)];
             const matchingRuns = runs.filter((candidate) => (
               candidate.target.pack_id === item.pack_id
               && candidate.target.version === item.version
@@ -432,8 +605,48 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                   </div>
                 </details>
               )}
+              {!ownerOnly && reviewItem?.task_metadata && (
+                <details className="mt-3 rounded-md border border-border/60 bg-muted/20 p-3">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-sm font-medium">
+                    <span>任务管理元数据</span>
+                    <ChevronDown className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                  </summary>
+                  <div className="mt-3 space-y-1 text-xs text-muted-foreground">
+                    <p>
+                      任务 {reviewItem.task_metadata.task_id} · V{reviewItem.task_metadata.revision} · 状态 {reviewItem.task_metadata.task_status} · 更新 {utcMinute(reviewItem.task_metadata.updated_at)}
+                    </p>
+                    <p>输入 {reviewItem.task_metadata.input_count} 个（{reviewItem.task_metadata.input_types.join("、") || "无"}）</p>
+                    <p>输出 {reviewItem.task_metadata.output_count} 个（{reviewItem.task_metadata.output_formats.join("、") || "无"}）</p>
+                  </div>
+                </details>
+              )}
+              {!ownerOnly && reviewItem && reviewItem.audit_history.length > 0 && (
+                <details className="mt-3 rounded-md border border-border/60 bg-muted/20 p-3">
+                  <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-sm font-medium">
+                    <span>审计记录（{reviewItem.audit_history.length}）</span>
+                    <ChevronDown className="h-4 w-4 text-muted-foreground" aria-hidden="true" />
+                  </summary>
+                  <ul className="mt-3 list-inside list-disc space-y-0.5 text-xs text-muted-foreground">
+                    {reviewItem.audit_history.map((record) => (
+                      <li key={record.event_id}>
+                        {record.actor_id} · {utcMinute(record.occurred_at)} · 任务 {record.task_id} V{record.revision} · {AUDIT_SUBJECT_LABEL[record.subject_type]} · {AUDIT_RESULT_LABEL[record.result]}{record.result === "failed" && record.failure_reason ? `（${FAILURE_REASON_LABEL[record.failure_reason] ?? record.failure_reason}）` : ""} · 原因：{record.reason}
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+              {!ownerOnly && reviewItem?.task_metadata && (
+                <div className="mt-3 flex justify-end">
+                  <Button variant="outline" size="sm" onClick={() => openAuditView(reviewItem)}>
+                    <Eye className="h-3.5 w-3.5" aria-hidden="true" />
+                    审计查看业务内容
+                  </Button>
+                </div>
+              )}
             </article>
-          );})
+          );})}
+          </section>
+          ))
         )}
       </CardContent>
       <Modal open={target !== null} onClose={() => !submitting && setTarget(null)} title="发起能力验证">
@@ -476,6 +689,69 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
               确认并创建验证运行
             </Button>
           </div>
+        </div>
+      </Modal>
+      <Modal open={auditTarget !== null} onClose={() => !auditSubmitting && setAuditTarget(null)} title="审计查看业务内容">
+        <div className="space-y-4">
+          {auditOutcome === null ? (
+            <>
+              <p className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-foreground">
+                此操作会读取任务业务正文并写入不可变审计记录（记录 actor、时间、任务、对象、用途和结果）；不提供批量导出。
+              </p>
+              <label className="block space-y-1.5 text-sm">
+                <span className="font-medium">查看对象</span>
+                <select
+                  className="h-10 w-full rounded-md border border-input bg-background px-3"
+                  value={auditSubject}
+                  onChange={(event) => setAuditSubject(event.target.value as AuditSubject)}
+                >
+                  {(Object.keys(AUDIT_SUBJECT_LABEL) as AuditSubject[]).map((key) => (
+                    <option key={key} value={key}>{AUDIT_SUBJECT_LABEL[key]}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="block space-y-1.5 text-sm">
+                <span className="font-medium">查看原因</span>
+                <textarea
+                  className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2"
+                  value={auditReason}
+                  onChange={(event) => setAuditReason(event.target.value)}
+                  placeholder="说明排障或审核用途，至少 5 个字符"
+                />
+              </label>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setAuditTarget(null)} disabled={auditSubmitting}>取消</Button>
+                <Button onClick={submitAuditView} disabled={auditReason.trim().length < 5 || auditSubmitting}>
+                  {auditSubmitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+                  确认查看并写入审计记录
+                </Button>
+              </div>
+            </>
+          ) : auditOutcome.status === "succeeded" ? (
+            <>
+              <div role="status" aria-live="polite" className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-foreground">
+                审计记录已写入（{auditOutcome.event.event_id}）。
+              </div>
+              {auditOutcome.truncated && (
+                <p className="text-xs text-muted-foreground">
+                  内容超过单对象读取上限，以下只展示截断前段；hash 按截断后内容计算。
+                </p>
+              )}
+              <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs">{auditOutcome.content}</pre>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setAuditTarget(null)}>关闭</Button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
+                读取失败：{auditOutcome.failure_reason ? (FAILURE_REASON_LABEL[auditOutcome.failure_reason] ?? auditOutcome.failure_reason) : "未知原因"}；失败尝试已写入审计记录（{auditOutcome.event.event_id}）。
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setAuditTarget(null)}>关闭</Button>
+              </div>
+            </>
+          )}
         </div>
       </Modal>
     </Card>

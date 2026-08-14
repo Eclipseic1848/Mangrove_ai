@@ -16,11 +16,34 @@ from src.config.settings import settings
 from src.services.upload_store import UploadStore
 
 from .models import (
+    AuditSubjectType,
+    BusinessContent,
     CapabilityGovernanceTarget,
+    CapabilityTaskMetadata,
     ValidationTaskOption,
     ValidationTaskRef,
     is_ac06_admin_gray_validation_target,
 )
+
+# 审计查看单对象读取上限；超出只返回截断前段，hash 按实际返回内容计算。
+_BUSINESS_CONTENT_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _read_limited(path: Path, limit: int) -> tuple[bytes, bool]:
+    """按块读取至多 limit 字节；返回内容与是否被截断，避免大文件整读进内存。"""
+
+    with path.open("rb") as stream:
+        chunks: list[bytes] = []
+        total = 0
+        while total < limit:
+            chunk = stream.read(min(1024 * 1024, limit - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        # 多读 1 字节判定是否还有剩余；审计查看从不把超限尾部读进内存。
+        truncated = bool(stream.read(1))
+        return b"".join(chunks), truncated
 
 
 def _canonical_hash(value: object) -> str:
@@ -63,6 +86,25 @@ class ValidationTaskResolver(Protocol):
         target: CapabilityGovernanceTarget,
         task_ref: ValidationTaskRef,
     ) -> ValidationTaskRef: ...
+
+    def read_task_metadata(
+        self,
+        actor: CatalogActor,
+        task_id: str,
+        revision: int,
+        *,
+        task_owner_id: str,
+    ) -> CapabilityTaskMetadata: ...
+
+    def read_business_content(
+        self,
+        actor: CatalogActor,
+        task_id: str,
+        revision: int,
+        subject_type: AuditSubjectType,
+        *,
+        task_owner_id: str,
+    ) -> BusinessContent: ...
 
     def verify_independent_verifier(
         self,
@@ -464,6 +506,276 @@ class SqliteValidationTaskResolver:
                 "checks": [item.get("code") for item in checks],
                 "evidence_count": payload.get("evidence_count"),
             }
+        )
+
+    @staticmethod
+    def _failed_content(
+        subject_type: AuditSubjectType,
+        failure_reason: str,
+    ) -> BusinessContent:
+        return BusinessContent(
+            status="failed",
+            subject_type=subject_type,
+            failure_reason=failure_reason,
+        )
+
+    @staticmethod
+    def _content_result(
+        subject_type: AuditSubjectType,
+        content: str,
+        *,
+        truncated: bool = False,
+    ) -> BusinessContent:
+        # 大文件已在读取层按块截断；这里只负责 hash 与包装，不再整读任何内容。
+        raw = content.encode("utf-8")
+        return BusinessContent(
+            status="succeeded",
+            subject_type=subject_type,
+            content=content,
+            content_sha256=hashlib.sha256(raw).hexdigest(),
+            size_bytes=len(raw),
+            truncated=truncated,
+        )
+
+    @staticmethod
+    def _assert_audit_reader(actor: CatalogActor, task_owner_id: str) -> None:
+        if not actor.is_admin and actor.owner_id != task_owner_id:
+            raise PermissionError("不能读取其他用户的任务管理信息")
+
+    def _upload_extension_types(
+        self,
+        task_owner_id: str,
+        upload_ids: list[str],
+    ) -> tuple[str, ...]:
+        # 管理元数据只呈现可解析的来源类型；单个来源缺失不阻断整行投影。
+        types: list[str] = []
+        for upload_id in upload_ids:
+            try:
+                item = self._uploads.resolve(task_owner_id, str(upload_id))
+            except Exception:
+                continue
+            # upload_id 是无扩展名的随机标识，类型来自原始文件名；兜底取存储路径。
+            name = item.original_name or item.storage_path
+            extension = Path(name).suffix.lstrip(".").lower()
+            if extension and extension not in types:
+                types.append(extension)
+        return tuple(types)
+
+    @staticmethod
+    def _delivery_output_rows(
+        connection: sqlite3.Connection,
+        owner_id: str,
+        run_id: str,
+    ) -> list[sqlite3.Row]:
+        for table, owner_column in (
+            ("formal_delivery_outputs", "owner_id"),
+            ("semantic_delivery_outputs", "user_id"),
+        ):
+            if not SqliteValidationTaskResolver._table_exists(connection, table):
+                continue
+            rows = connection.execute(
+                f"SELECT file_path FROM {table} "
+                f"WHERE {owner_column}=? AND run_id=? ORDER BY output_id",
+                (owner_id, run_id),
+            ).fetchall()
+            if rows:
+                return rows
+        return []
+
+    @staticmethod
+    def _count_delivery_outputs(
+        connection: sqlite3.Connection,
+        owner_id: str,
+        run_id: str,
+    ) -> int:
+        for table, owner_column in (
+            ("formal_delivery_outputs", "owner_id"),
+            ("semantic_delivery_outputs", "user_id"),
+        ):
+            if not SqliteValidationTaskResolver._table_exists(connection, table):
+                continue
+            row = connection.execute(
+                f"SELECT COUNT(*) AS count FROM {table} "
+                f"WHERE {owner_column}=? AND run_id=?",
+                (owner_id, run_id),
+            ).fetchone()
+            if row["count"] > 0:
+                return int(row["count"])
+        return 0
+
+    def read_task_metadata(
+        self,
+        actor: CatalogActor,
+        task_id: str,
+        revision: int,
+        *,
+        task_owner_id: str,
+    ) -> CapabilityTaskMetadata:
+        self._assert_audit_reader(actor, task_owner_id)
+        with self._connect() as connection:
+            task = connection.execute(
+                "SELECT user_id, status, created_at, updated_at, "
+                "upload_ids_json, output_formats_json "
+                "FROM semantic_workspace_tasks "
+                "WHERE user_id=? AND task_id=?",
+                (task_owner_id, task_id),
+            ).fetchone()
+            frozen = connection.execute(
+                "SELECT status, run_id FROM semantic_workspace_revisions "
+                "WHERE user_id=? AND task_id=? AND revision=?",
+                (task_owner_id, task_id, revision),
+            ).fetchone()
+            if task is None or frozen is None:
+                raise KeyError("任务管理信息不存在")
+            upload_ids = json.loads(task["upload_ids_json"] or "[]")
+            output_count = (
+                self._count_delivery_outputs(
+                    connection, task_owner_id, str(frozen["run_id"] or "")
+                )
+                if frozen["run_id"]
+                else 0
+            )
+            return CapabilityTaskMetadata(
+                task_id=task_id,
+                revision=revision,
+                owner_id=task_owner_id,
+                task_status=str(frozen["status"]),
+                created_at=str(task["created_at"]),
+                updated_at=str(task["updated_at"]),
+                input_count=len(upload_ids),
+                input_types=self._upload_extension_types(
+                    task_owner_id, upload_ids
+                ),
+                output_count=output_count,
+                output_formats=tuple(
+                    json.loads(task["output_formats_json"] or "[]")
+                ),
+            )
+
+    def read_business_content(
+        self,
+        actor: CatalogActor,
+        task_id: str,
+        revision: int,
+        subject_type: AuditSubjectType,
+        *,
+        task_owner_id: str,
+    ) -> BusinessContent:
+        self._assert_audit_reader(actor, task_owner_id)
+        if subject_type == "task_prompt":
+            with self._connect() as connection:
+                row = connection.execute(
+                    "SELECT objective_text FROM semantic_workspace_revisions "
+                    "WHERE user_id=? AND task_id=? AND revision=?",
+                    (task_owner_id, task_id, revision),
+                ).fetchone()
+            if row is None:
+                return self._failed_content(subject_type, "task_not_found")
+            return self._content_result(
+                subject_type, str(row["objective_text"] or "")
+            )
+        if subject_type == "task_sources":
+            with self._connect() as connection:
+                task = connection.execute(
+                    "SELECT upload_ids_json FROM semantic_workspace_tasks "
+                    "WHERE user_id=? AND task_id=?",
+                    (task_owner_id, task_id),
+                ).fetchone()
+            if task is None:
+                return self._failed_content(subject_type, "task_not_found")
+            upload_ids = json.loads(task["upload_ids_json"] or "[]")
+            if not upload_ids:
+                return self._failed_content(subject_type, "source_missing")
+            safe_owner = "".join(
+                character
+                for character in task_owner_id
+                if character.isalnum() or character in "-_"
+            )
+            owner_objects = (self._upload_root / safe_owner / "objects").resolve()
+            # 不经过 UploadStore.resolve：其无 sidecar 兜底会整读文件，违反流式截断。
+            parts: list[bytes] = []
+            remaining = _BUSINESS_CONTENT_MAX_BYTES
+            truncated = False
+            for index, upload_id in enumerate(upload_ids):
+                safe_id = "".join(
+                    character
+                    for character in str(upload_id)
+                    if character.isalnum() or character in "-_"
+                )
+                if not safe_id or safe_id != str(upload_id):
+                    return self._failed_content(subject_type, "source_missing")
+                raw_path = owner_objects / str(upload_id)
+                source_path = raw_path.resolve()
+                if (
+                    owner_objects not in source_path.parents
+                    or not source_path.is_file()
+                    or raw_path.is_symlink()
+                ):
+                    return self._failed_content(subject_type, "source_invalid")
+                try:
+                    content, file_truncated = _read_limited(
+                        source_path, remaining
+                    )
+                except OSError:
+                    return self._failed_content(subject_type, "source_unreadable")
+                parts.append(content)
+                remaining -= len(content)
+                if file_truncated:
+                    truncated = True
+                    break
+                if remaining <= 0:
+                    # 预算耗尽：只有后面还有文件未读才算截断。
+                    truncated = index < len(upload_ids) - 1
+                    break
+            content_bytes = b"\n".join(parts)
+            return self._content_result(
+                subject_type,
+                content_bytes.decode("utf-8", errors="replace"),
+                truncated=truncated,
+            )
+        with self._connect() as connection:
+            frozen = connection.execute(
+                "SELECT run_id FROM semantic_workspace_revisions "
+                "WHERE user_id=? AND task_id=? AND revision=?",
+                (task_owner_id, task_id, revision),
+            ).fetchone()
+            if frozen is None:
+                return self._failed_content(subject_type, "task_not_found")
+            outputs = self._delivery_output_rows(
+                connection, task_owner_id, str(frozen["run_id"] or "")
+            )
+        if not outputs:
+            return self._failed_content(subject_type, "output_missing")
+        parts: list[bytes] = []
+        remaining = _BUSINESS_CONTENT_MAX_BYTES
+        truncated = False
+        for index, row in enumerate(outputs):
+            file_path = str(row["file_path"])
+            output_path = Path(file_path).expanduser().resolve()
+            if (
+                self._execution_root not in output_path.parents
+                or not output_path.is_file()
+                or Path(file_path).is_symlink()
+            ):
+                return self._failed_content(subject_type, "output_invalid")
+            try:
+                content, file_truncated = _read_limited(output_path, remaining)
+            except OSError:
+                return self._failed_content(subject_type, "output_unreadable")
+            parts.append(content)
+            remaining -= len(content)
+            if file_truncated:
+                truncated = True
+                break
+            if remaining <= 0:
+                # 预算耗尽：只有后面还有文件未读才算截断。
+                truncated = index < len(outputs) - 1
+                break
+        content_bytes = b"\n".join(parts)
+        return self._content_result(
+            subject_type,
+            content_bytes.decode("utf-8", errors="replace"),
+            truncated=truncated,
         )
 
     def load_replay_request(

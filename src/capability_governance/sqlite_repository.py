@@ -633,20 +633,120 @@ class SqliteCapabilityGovernanceRepository:
             ).fetchone()
             if table is None:
                 return None
-            row = connection.execute(
-                "SELECT payload_json FROM capability_validation_runs "
-                "WHERE owner_id=? AND pack_id=? AND version=? AND digest=? "
-                "AND status='succeeded' "
-                "ORDER BY updated_at DESC, run_id DESC LIMIT 1",
-                (
-                    target.owner_id or "",
-                    target.pack_id,
-                    target.version,
-                    target.digest,
-                ),
-            ).fetchone()
+            if target.owner_id is not None:
+                row = connection.execute(
+                    "SELECT payload_json FROM capability_validation_runs "
+                    "WHERE owner_id=? AND pack_id=? AND version=? AND digest=? "
+                    "AND status='succeeded' "
+                    "ORDER BY updated_at DESC, run_id DESC LIMIT 1",
+                    (
+                        target.owner_id,
+                        target.pack_id,
+                        target.version,
+                        target.digest,
+                    ),
+                ).fetchone()
+            else:
+                # 平台能力没有个人 Owner；验证运行的 owner 是发起验证的管理员，
+                # 按能力身份（pack/version/digest）过滤而非 owner 列。
+                row = connection.execute(
+                    "SELECT payload_json FROM capability_validation_runs "
+                    "WHERE pack_id=? AND version=? AND digest=? "
+                    "AND status='succeeded' "
+                    "ORDER BY updated_at DESC, run_id DESC LIMIT 1",
+                    (
+                        target.pack_id,
+                        target.version,
+                        target.digest,
+                    ),
+                ).fetchone()
         return (
             CapabilityValidationRun.model_validate_json(row["payload_json"])
             if row is not None
             else None
+        )
+
+    def save_audit_view_event(
+        self,
+        event: CapabilityGovernanceEvent,
+    ) -> CapabilityGovernanceEvent:
+        if event.event_type != "audit_viewed":
+            raise ValueError("审计查看事件专用入口只接受 audit_viewed 事件")
+        target = event.target
+        with self._connect() as connection:
+            if not self._schema_exists(connection):
+                raise RuntimeError("能力治理数据库尚未执行带备份迁移")
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT payload_json FROM capability_governance_events "
+                "WHERE owner_key=? AND pack_id=? AND version=? AND digest=? "
+                "AND idempotency_key=? AND event_type='audit_viewed'",
+                (
+                    _owner_key(target),
+                    target.pack_id,
+                    target.version,
+                    target.digest,
+                    event.idempotency_key,
+                ),
+            ).fetchone()
+            if existing is not None:
+                # 同幂等键重试返回既有审计记录；审计不可变，不覆盖、不重复落行。
+                return CapabilityGovernanceEvent.model_validate_json(
+                    existing["payload_json"]
+                )
+            connection.execute(
+                "INSERT INTO capability_governance_events "
+                "(event_id, owner_key, scope, pack_id, version, digest, "
+                "idempotency_key, event_type, payload_json, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.event_id,
+                    _owner_key(target),
+                    target.scope.value,
+                    target.pack_id,
+                    target.version,
+                    target.digest,
+                    event.idempotency_key,
+                    "audit_viewed",
+                    event.model_dump_json(),
+                    event.occurred_at.isoformat(),
+                ),
+            )
+            row = connection.execute(
+                "SELECT payload_json FROM capability_governance_events "
+                "WHERE event_id=?",
+                (event.event_id,),
+            ).fetchone()
+        assert row is not None
+        return CapabilityGovernanceEvent.model_validate_json(row["payload_json"])
+
+    def list_audit_view_events(
+        self,
+        target: CapabilityGovernanceTarget | None = None,
+    ) -> tuple[CapabilityGovernanceEvent, ...]:
+        with self._connect() as connection:
+            if not self._schema_exists(connection):
+                return ()
+            if target is None:
+                rows = connection.execute(
+                    "SELECT payload_json FROM capability_governance_events "
+                    "WHERE event_type='audit_viewed' "
+                    "ORDER BY occurred_at, event_id"
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    "SELECT payload_json FROM capability_governance_events "
+                    "WHERE owner_key=? AND pack_id=? AND version=? AND digest=? "
+                    "AND event_type='audit_viewed' "
+                    "ORDER BY occurred_at, event_id",
+                    (
+                        _owner_key(target),
+                        target.pack_id,
+                        target.version,
+                        target.digest,
+                    ),
+                ).fetchall()
+        return tuple(
+            CapabilityGovernanceEvent.model_validate_json(row["payload_json"])
+            for row in rows
         )
