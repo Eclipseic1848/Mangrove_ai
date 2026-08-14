@@ -17,7 +17,18 @@ type GovernanceItem = {
   owner_id: string | null;
   digest: string | null;
   can_validate: boolean;
+  promotion_gaps: PromotionGap[];
 };
+
+type PromotionGap =
+  | "validation_incomplete"
+  | "evidence_reference_mismatch"
+  | "supply_chain_evidence_missing"
+  | "secret_detected"
+  | "critical_vulnerability"
+  | "fixable_high_vulnerability"
+  | "misconfiguration_failure"
+  | "trivy_database_stale";
 
 type ResolvedGovernanceItem = GovernanceItem & { digest: string };
 
@@ -97,6 +108,12 @@ const BLOCKER_LABEL: Record<SupplyChainBlocker, string> = {
   fixable_high_vulnerability: "存在可修复 High 漏洞",
   misconfiguration_failure: "存在 Critical 或可修复 High 安全误配置",
   trivy_database_stale: "Trivy 漏洞库已过期",
+};
+const GAP_LABEL: Record<PromotionGap, string> = {
+  validation_incomplete: "尚无全部通过的验证运行",
+  evidence_reference_mismatch: "验证证据引用不一致",
+  supply_chain_evidence_missing: "尚未形成供应链扫描证据",
+  ...BLOCKER_LABEL,
 };
 
 function shortDigest(digest: string) {
@@ -321,6 +338,18 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                   )}
                 </div>
               </div>
+              {(item.promotion_gaps ?? []).length > 0 && (
+                <div className="mt-3 rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium text-foreground">距已验证还缺</span>
+                  </div>
+                  <ul className="mt-1.5 list-inside list-disc space-y-0.5 text-muted-foreground">
+                    {(item.promotion_gaps ?? []).map((gap) => (
+                      <li key={gap}>{GAP_LABEL[gap] ?? gap}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
               <div className="mt-3 rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-medium text-foreground">供应链证据</span>
@@ -369,7 +398,7 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                         ? "验证正在后台执行，本页每 1.5 秒自动更新；你可以留在本页查看，也可以稍后返回能力治理。"
                         : run.status === "succeeded"
                           ? hasAllValidationSteps
-                            ? "五项验证步骤已通过。该结果只形成验证证据，不会自动晋级或发布能力。"
+                            ? "五项验证步骤已通过。全部证据通过后，该能力会自动晋级为已验证。"
                             : `该验证记录仅包含 ${completedSteps.size}/${totalSteps} 项，不能视为五项均通过。`
                           : run.status === "failed"
                             ? "验证未通过。请查看下方标记为“未通过”的步骤及其说明。"
@@ -413,7 +442,7 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
             选择一个曾冻结此精确能力版本并已正式交付的任务。平台会复核来源、输入、输出和授权，并使用该 TaskRevision 原已确认的模型连接重新执行，可能产生 Token 消耗；不会覆盖原任务或发布新结果。
           </p>
           <p className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-foreground">
-            确认后弹窗会关闭，并自动定位到当前能力卡片下方的“验证进度与结果”；执行状态会在本页自动刷新。
+            确认后弹窗会关闭，并自动定位到当前能力卡片下方的“验证进度与结果”；执行状态会在本页自动刷新。验证与供应链证据全部通过后，该能力会自动晋级为已验证。
           </p>
           {modalLoading ? (
             <div className="flex items-center gap-2 py-4 text-sm text-muted-foreground">

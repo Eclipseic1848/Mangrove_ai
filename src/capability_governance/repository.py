@@ -96,6 +96,21 @@ class CapabilityGovernanceRepository(Protocol):
         target: CapabilityGovernanceTarget,
     ) -> CapabilitySupplyChainEvidence | None: ...
 
+    def save_promotion_event(
+        self,
+        event: CapabilityGovernanceEvent,
+    ) -> CapabilityGovernanceEvent: ...
+
+    def get_latest_promotion_event(
+        self,
+        target: CapabilityGovernanceTarget,
+    ) -> CapabilityGovernanceEvent | None: ...
+
+    def get_latest_succeeded_validation_run(
+        self,
+        target: CapabilityGovernanceTarget,
+    ) -> CapabilityValidationRun | None: ...
+
 
 def _target_key(target: CapabilityGovernanceTarget) -> tuple[str | None, str, str, str]:
     return (target.owner_id, target.pack_id, target.version, target.digest)
@@ -107,6 +122,7 @@ class InMemoryCapabilityGovernanceRepository:
         self._idempotency: dict[
             tuple[str | None, str, str, str, str], str
         ] = {}
+        self._events_lock = threading.Lock()
         self._validation_runs: dict[str, CapabilityValidationRun] = {}
         self._validation_idempotency: dict[
             tuple[str, str, str], tuple[str, str]
@@ -115,7 +131,7 @@ class InMemoryCapabilityGovernanceRepository:
         self._validation_lock = threading.Lock()
         self._supply_chain_evidence: dict[str, CapabilitySupplyChainEvidence] = {}
 
-    def save_event(
+    def _insert_event(
         self,
         event: CapabilityGovernanceEvent,
     ) -> CapabilityGovernanceEvent:
@@ -131,6 +147,15 @@ class InMemoryCapabilityGovernanceRepository:
         self._events[event.event_id] = event
         self._idempotency[idempotency_key] = event.event_id
         return event
+
+    def save_event(
+        self,
+        event: CapabilityGovernanceEvent,
+    ) -> CapabilityGovernanceEvent:
+        if event.event_type != "registered":
+            # 晋级事件只能走专用入口，防止把 promoted 事实落成默认 registered 行。
+            raise ValueError("通用事件入口只接受能力登记事件")
+        return self._insert_event(event)
 
     def get_by_idempotency(
         self,
@@ -295,3 +320,56 @@ class InMemoryCapabilityGovernanceRepository:
             if item.target == target
         ]
         return max(items, key=lambda item: (item.occurred_at, item.evidence_id)) if items else None
+
+    def save_promotion_event(
+        self,
+        event: CapabilityGovernanceEvent,
+    ) -> CapabilityGovernanceEvent:
+        if event.event_type != "promoted_to_verified":
+            raise ValueError("晋级事件专用入口只接受 promoted_to_verified 事件")
+        # 检查与插入必须原子，否则并发晋级会同时写入两个不同事件 ID。
+        with self._events_lock:
+            promoted = [
+                item
+                for item in self._events.values()
+                if item.target == event.target
+                and item.event_type == "promoted_to_verified"
+            ]
+            if promoted:
+                # 同一 digest 至多一个晋级结果；并发后写者拿到已有事件，不覆盖。
+                return max(
+                    promoted, key=lambda item: (item.occurred_at, item.event_id)
+                )
+            return self._insert_event(event)
+
+    def get_latest_promotion_event(
+        self,
+        target: CapabilityGovernanceTarget,
+    ) -> CapabilityGovernanceEvent | None:
+        promoted = [
+            item
+            for item in self._events.values()
+            if item.target == target
+            and item.event_type == "promoted_to_verified"
+        ]
+        return (
+            max(promoted, key=lambda item: (item.occurred_at, item.event_id))
+            if promoted
+            else None
+        )
+
+    def get_latest_succeeded_validation_run(
+        self,
+        target: CapabilityGovernanceTarget,
+    ) -> CapabilityValidationRun | None:
+        succeeded = [
+            item
+            for item in self._validation_runs.values()
+            if item.target == target
+            and item.status is ValidationRunStatus.SUCCEEDED
+        ]
+        return (
+            max(succeeded, key=lambda item: (item.updated_at, item.run_id))
+            if succeeded
+            else None
+        )

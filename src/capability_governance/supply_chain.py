@@ -2,7 +2,7 @@
 """Trivy/Syft 外部工具与能力治理之间的失败关闭证据 Seam。"""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -18,6 +18,7 @@ from .models import (
     CapabilitySupplyChainEvidence,
     SupplyChainCollection,
     SupplyChainEvidenceStatus,
+    TRIVY_DATABASE_MAX_AGE,
 )
 from .repository import CapabilityGovernanceRepository
 from .tool_lock import load_locked_executable, sha256_file
@@ -382,7 +383,7 @@ class CapabilitySupplyChainEvidenceService:
         ):
             blockers.append("misconfiguration_failure")
         occurred_at = self._now()
-        if occurred_at - collected.trivy_database.updated_at > timedelta(days=7):
+        if occurred_at - collected.trivy_database.updated_at > TRIVY_DATABASE_MAX_AGE:
             blockers.append("trivy_database_stale")
         identity = hashlib.sha256(
             (
@@ -436,5 +437,5 @@ class CapabilitySupplyChainEvidenceService:
     def requires_collection(self, target: CapabilityGovernanceTarget) -> bool:
         evidence = self.get(target)
         return evidence is None or (
-            self._now() - evidence.trivy_database.updated_at > timedelta(days=7)
+            self._now() - evidence.trivy_database.updated_at > TRIVY_DATABASE_MAX_AGE
         )
