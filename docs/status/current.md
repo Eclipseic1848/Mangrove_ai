@@ -40,7 +40,7 @@ PDF、Word、Excel、CSV 文件主链；数据库具备连接与测试基础。�
 | AC-07 旧 #33 三轴治理投影 | 完成并关闭 | 历史工单保留在旧仓库 |
 | AC-07 旧 #34 可恢复 ValidationRun | 工程实现、双轴审查、生产迁移、两项真实能力灰度、取消后重新发起和 8088 用户验收完成；Capability Host 代理修复经 PR #7 合并，旧工单已关闭 | 无 |
 | AC-07 旧 #35 Trivy/Syft 证据 | 工程实现、双轴复审、带备份生产 `0003` 迁移与 8088 用户验收完成；PR #6 已合并到 `main`，旧工单已关闭 | 无 |
-| AC-07 新 #8～#17 | #9 Cosign PoC、#10 自动晋级机制、#11 管理员审核与业务内容审计查看均完成工程实现、双轴复审与用户验收；其余工单未开始 | 下一工单为 #12 独立平台快照、签名与 admin_gray 发布 |
+| AC-07 新 #8～#17 | #9 Cosign PoC、#10 自动晋级机制、#11 管理员审核与业务内容审计查看、#12 独立平台快照、签名与 admin_gray 发布均完成工程实现、双轴复审与用户验收；其余工单未开始 | 下一工单为 #13 CapabilityMountResolver 运行时治理门 |
 
 AC-06 两项历史 `admin_gray_only` 包是迁移兼容例外：管理员/超管只能使用自己拥有的
 TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍失败关闭。
@@ -141,13 +141,35 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
   验收期间产生 1 条真实审计记录（gray-everything-mcp 关联任务的 Prompt 正文）。
   该结论不代表平台已发布、普通用户受众扩大或整个 AC-07/Phase 4 完成。
 
+2026-08-14，AC-07 #12 完成本地闭环：
+
+- 平台发布机制链：候选门（verified/active/eligible 个人精确 digest）、脱敏快照生成
+  （白名单重写 purpose/connection_ref/secret_ref、清空 environment、确定性重打包同源同
+  digest）、平台六步验证（Smoke/失败关闭/Trivy/Syft/装载结构探针/独立验证）、#9 签名
+  事务直用、发布命令（预期状态/幂等键服务端派生/受众固定 admin_gray）与受众变更命令
+  （约束检查、无产品入口）全部实现；
+- 生产接线完整：双 Layout 生成器、目录级六步执行器、签名事务与发布 Adapter 装配，
+  平台 worker 挂入 lifespan；digest 标记与完整性记录补齐（供应链扫描两段式身份复核可过）；
+- 平台验证 digest Lease（0005 表）与 FAILED 候选重试路径；
+- 新增测试 75 项（模型/Repository/快照/执行器/服务层/worker/HTTP/前端 e2e）；后端全量
+  `1448 passed`（2 项环境基线失败：端口监听与 DNS 白名单，修复前即存在）；
+  前端构建通过；Playwright `59 passed`；
+- Standards/Spec 双轴审查首轮 FAIL（3 阻断：生产接线缺失、真实探针未实现、AC7 约束缺失），
+  四轮复核修复后双轴 PASS；
+- 生产迁移 `0005_platform_publication.sql`：一致性备份
+  `data/backups/webui-before-ac07-07-20260814-200229.db`，源库与备份 quick/integrity 均 ok；
+- 8088 用户验收通过（页面无回归、无 verified 个人能力时候选区空态不占位、普通用户无
+  入口）。真实装载执行探针与真实签名冻结夹具留待 #15/#16 纵切面（需求复核 Q4 已标注）；
+  生产库无 verified 个人能力，真实发布全链演示留待纵切面。
+  该结论不代表平台已发布、普通用户受众扩大或整个 AC-07/Phase 4 完成。
+
 ## 7. 当前优先顺序
 
-1. 新仓库 #9、#10、#11 已完成工程实现、双轴复审与用户验收；#10 建立个人能力自动晋级机制，
-   #11 建立管理员审核与审计查看，真实灰度包晋级留待 #15/#16 纵切面。
-2. 下一工单为新仓库 [#12](https://github.com/Eclipseic1848/Mangrove_ai/issues/12)：独立平台
-   快照、签名与 `admin_gray` 发布（依赖 #9、#10、#11）。
-3. #9/#10/#11 完成不代表任何能力已经晋级、平台能力已经发布或普通用户受众已经扩大。
+1. 新仓库 #9、#10、#11、#12 已完成工程实现、双轴复审与用户验收；真实灰度包晋级与
+   真实平台发布纵切面留待 #15/#16。
+2. 下一工单为新仓库 [#13](https://github.com/Eclipseic1848/Mangrove_ai/issues/13)：
+   CapabilityMountResolver 运行时治理门（依赖旧 #33、新 #12）。
+3. #9～#12 完成不代表任何能力已经晋级、平台能力已经发布或普通用户受众已经扩大。
 
 ## 8. 权威证据
 
@@ -158,6 +180,9 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
 - #11 需求复核：`docs/plans/2026-08-14-agentic-capability-ac07-06-requirements-review.md`
 - #11 设计：`docs/plans/2026-08-14-agentic-capability-ac07-06-design.md`
 - #11 任务拆分：`docs/plans/2026-08-14-agentic-capability-ac07-06-task-breakdown.md`
+- #12 需求复核：`docs/plans/2026-08-14-agentic-capability-ac07-07-requirements-review.md`
+- #12 设计：`docs/plans/2026-08-14-agentic-capability-ac07-07-design.md`
+- #12 任务拆分：`docs/plans/2026-08-14-agentic-capability-ac07-07-task-breakdown.md`
 - #34 报告：`docs/plans/2026-08-07-agentic-capability-ac07-02-execution-report.md`
 - #35 报告：`docs/plans/2026-08-07-agentic-capability-ac07-03-execution-report.md`
 - vNext Publisher：`docs/plans/2026-08-04-vnext-delivery-publisher-execution-report.md`
