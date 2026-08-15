@@ -1043,3 +1043,119 @@ test("管理员审核视图分组渐进披露并完成一次审计查看", async
     subject_type: "task_sources",
   });
 });
+
+test("管理员提交平台候选并发布到管理员灰度", async ({ page }) => {
+  await mockSettings(page, "admin");
+  const personalDigest = `sha256:${"a".repeat(64)}`;
+  const platformDigest = `sha256:${"b".repeat(64)}`;
+  const verifiedItem = {
+    pack_id: "verified-personal-tool",
+    version: "1.0.0",
+    scope: "personal",
+    maturity: "verified",
+    lifecycle: "active",
+    eligibility: "eligible",
+    source: "governance_event",
+    owner_id: "owner-a",
+    digest: personalDigest,
+    can_validate: true,
+    promotion_gaps: [],
+  };
+  await page.route("**/api/capability-governance/packs", (route) => route.fulfill({
+    json: { items: [verifiedItem] },
+  }));
+  await page.route("**/api/capability-governance/validations", (route) => route.fulfill({
+    json: { items: [] },
+  }));
+  await page.route("**/api/capability-governance/packs/*/*/supply-chain-evidence?*", (route) => route.fulfill({
+    json: { evidence: null },
+  }));
+  await page.route("**/api/capability-governance/admin/review", (route) => route.fulfill({
+    json: { items: [] },
+  }));
+  const candidates: Record<string, unknown>[] = [];
+  await page.route("**/api/capability-governance/admin/platform-candidates", (route) => {
+    if (route.request().method() === "POST") {
+      const body = route.request().postDataJSON();
+      const outcome = {
+        status: "created",
+        snapshot: {
+          pack_id: body.pack_id,
+          version: body.version,
+          source_digest: personalDigest,
+          platform_digest: platformDigest,
+          manifest_summary: ["entrypoint"],
+        },
+        event: {
+          event_id: "capgov_candidate_e2e",
+          reason: body.reason,
+          occurred_at: "2026-08-15T00:00:00Z",
+        },
+      };
+      candidates.push({
+        pack_id: body.pack_id,
+        version: body.version,
+        source_digest: personalDigest,
+        platform_digest: platformDigest,
+        validation_status: "queued",
+        steps_passed: 0,
+        steps_total: 6,
+        signed: false,
+        submitted_at: "2026-08-15T00:00:00Z",
+        reason: body.reason,
+      });
+      return route.fulfill({ json: outcome });
+    }
+    return route.fulfill({ json: { items: candidates } });
+  });
+  let publishBody: Record<string, unknown> | null = null;
+  await page.route("**/api/capability-governance/admin/platform-publish", (route) => {
+    publishBody = route.request().postDataJSON();
+    return route.fulfill({
+      json: {
+        status: "published",
+        event: {
+          event_id: "capgov_publish_e2e",
+          reason: publishBody?.reason,
+          audience: "admin_gray",
+          platform_validation_run_id: "pfval_e2e",
+          signing_signature_digest: `sha256:${"c".repeat(64)}`,
+          signing_public_key_sha256: "d".repeat(64),
+          occurred_at: "2026-08-15T01:00:00Z",
+        },
+      },
+    });
+  });
+
+  await page.goto("/settings?section=governance");
+
+  // 已验证个人能力卡片出现"提交平台候选"按钮。
+  const card = page.locator("article").filter({ hasText: "verified-personal-tool" });
+  await card.getByRole("button", { name: "提交平台候选" }).click();
+  const dialog = page.getByRole("dialog", { name: "提交平台候选" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("删除 Owner、任务引用、业务字段与敏感引用");
+  const submit = dialog.getByRole("button", { name: "确认提交平台候选" });
+  await expect(submit).toBeDisabled();
+  await dialog.getByLabel("提交原因").fill("平台候选：个人验证已完成并通过审核");
+  await expect(submit).toBeEnabled();
+  await submit.click();
+
+  // 候选分组出现，展示平台 digest 与原因。
+  await expect(page.getByRole("heading", { name: "平台候选（1）" })).toBeVisible();
+  const candidateCard = page.locator("article").filter({ hasText: "平台 digest" }).first();
+  await expect(candidateCard).toContainText("verified-personal-tool");
+  await expect(candidateCard).toContainText("平台候选：个人验证已完成并通过审核");
+  await candidateCard.getByRole("button", { name: "发布" }).click();
+  const publishDialog = page.getByRole("dialog", { name: "发布平台能力" });
+  await expect(publishDialog).toBeVisible();
+  await expect(publishDialog).toContainText("受众固定为管理员灰度");
+  const publishSubmit = publishDialog.getByRole("button", { name: "确认发布" });
+  await expect(publishSubmit).toBeDisabled();
+  await publishDialog.getByLabel("发布原因").fill("发布：验证与签名全部通过");
+  await publishSubmit.click();
+  expect(publishBody).toMatchObject({
+    pack_id: "verified-personal-tool",
+    platform_digest: platformDigest,
+  });
+});

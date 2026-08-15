@@ -13,6 +13,7 @@ from .models import (
     CapabilityGovernanceTarget,
     CapabilityValidationRun,
     CapabilitySupplyChainEvidence,
+    PlatformValidationRun,
     ValidationRunStatus,
 )
 
@@ -121,6 +122,65 @@ class CapabilityGovernanceRepository(Protocol):
         target: CapabilityGovernanceTarget | None = None,
     ) -> tuple[CapabilityGovernanceEvent, ...]: ...
 
+    def save_platform_event(
+        self,
+        event: CapabilityGovernanceEvent,
+    ) -> CapabilityGovernanceEvent: ...
+
+    def get_latest_platform_event(
+        self,
+        target: CapabilityGovernanceTarget,
+        event_type: str,
+    ) -> CapabilityGovernanceEvent | None: ...
+
+    def list_platform_events(
+        self,
+        target: CapabilityGovernanceTarget,
+    ) -> tuple[CapabilityGovernanceEvent, ...]: ...
+
+    def create_platform_validation_run(
+        self,
+        run: PlatformValidationRun,
+    ) -> PlatformValidationRun: ...
+
+    def get_platform_validation_run(
+        self,
+        run_id: str,
+    ) -> PlatformValidationRun | None: ...
+
+    def list_platform_validation_runs(self) -> tuple[PlatformValidationRun, ...]: ...
+
+    def save_platform_validation_run(
+        self,
+        run: PlatformValidationRun,
+    ) -> PlatformValidationRun: ...
+
+    def acquire_platform_validation_lease(
+        self,
+        *,
+        run_id: str,
+        digest: str,
+        worker_id: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> bool: ...
+
+    def release_platform_validation_lease(
+        self,
+        run_id: str,
+        worker_id: str,
+    ) -> None: ...
+
+    def renew_platform_validation_lease(
+        self,
+        *,
+        run_id: str,
+        digest: str,
+        worker_id: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> bool: ...
+
 
 def _target_key(target: CapabilityGovernanceTarget) -> tuple[str | None, str, str, str]:
     return (target.owner_id, target.pack_id, target.version, target.digest)
@@ -140,6 +200,10 @@ class InMemoryCapabilityGovernanceRepository:
         self._validation_leases: dict[str, tuple[str, str, datetime]] = {}
         self._validation_lock = threading.Lock()
         self._supply_chain_evidence: dict[str, CapabilitySupplyChainEvidence] = {}
+        self._platform_validation_runs: dict[
+            tuple[str, str, str], PlatformValidationRun
+        ] = {}
+        self._platform_validation_leases: dict[str, tuple[str, str, datetime]] = {}
 
     def _insert_event(
         self,
@@ -414,3 +478,175 @@ class InMemoryCapabilityGovernanceRepository:
         return tuple(
             sorted(events, key=lambda item: (item.occurred_at, item.event_id))
         )
+
+    def save_platform_event(
+        self,
+        event: CapabilityGovernanceEvent,
+    ) -> CapabilityGovernanceEvent:
+        if event.event_type not in {
+            "platform_candidate",
+            "platform_published",
+            "audience_changed",
+        }:
+            raise ValueError("平台事件专用入口只接受发布类事件")
+        return self._insert_event(event)
+
+    def get_latest_platform_event(
+        self,
+        target: CapabilityGovernanceTarget,
+        event_type: str,
+    ) -> CapabilityGovernanceEvent | None:
+        matching = [
+            item
+            for item in self._events.values()
+            if item.target == target and item.event_type == event_type
+        ]
+        return (
+            max(matching, key=lambda item: (item.occurred_at, item.event_id))
+            if matching
+            else None
+        )
+
+    def list_platform_events(
+        self,
+        target: CapabilityGovernanceTarget,
+    ) -> tuple[CapabilityGovernanceEvent, ...]:
+        events = [
+            item
+            for item in self._events.values()
+            if item.target == target
+            and item.event_type
+            in {
+                "platform_candidate",
+                "platform_published",
+                "audience_changed",
+            }
+        ]
+        return tuple(
+            sorted(events, key=lambda item: (item.occurred_at, item.event_id))
+        )
+
+    def create_platform_validation_run(
+        self,
+        run: PlatformValidationRun,
+    ) -> PlatformValidationRun:
+        with self._validation_lock:
+            # 幂等键按能力身份（pack/version）+ 键查重；同键换 digest 是请求改写。
+            key = (run.target.pack_id, run.target.version, run.idempotency_key)
+            existing = self._platform_validation_runs.get(key)
+            if existing is not None:
+                if existing.target != run.target:
+                    raise ValueError("同一平台验证幂等键不得改写请求")
+                return existing
+            self._platform_validation_runs[key] = run
+            return run
+
+    def acquire_platform_validation_lease(
+        self,
+        *,
+        run_id: str,
+        digest: str,
+        worker_id: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> bool:
+        with self._validation_lock:
+            lease = self._platform_validation_leases.get(digest)
+            if lease is not None and lease[2] > now:
+                return lease[0] == run_id and lease[1] == worker_id
+            self._platform_validation_leases[digest] = (
+                run_id,
+                worker_id,
+                now + timedelta(seconds=lease_seconds),
+            )
+            return True
+
+    def release_platform_validation_lease(
+        self,
+        run_id: str,
+        worker_id: str,
+    ) -> None:
+        with self._validation_lock:
+            for digest, lease in tuple(self._platform_validation_leases.items()):
+                if lease[:2] == (run_id, worker_id):
+                    del self._platform_validation_leases[digest]
+
+    def renew_platform_validation_lease(
+        self,
+        *,
+        run_id: str,
+        digest: str,
+        worker_id: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> bool:
+        with self._validation_lock:
+            lease = self._platform_validation_leases.get(digest)
+            if lease is None or lease[:2] != (run_id, worker_id):
+                return False
+            self._platform_validation_leases[digest] = (
+                run_id,
+                worker_id,
+                now + timedelta(seconds=lease_seconds),
+            )
+            return True
+
+    def get_platform_validation_run(
+        self,
+        run_id: str,
+    ) -> PlatformValidationRun | None:
+        return next(
+            (
+                run
+                for run in self._platform_validation_runs.values()
+                if run.run_id == run_id
+            ),
+            None,
+        )
+
+    def list_platform_validation_runs(self) -> tuple[PlatformValidationRun, ...]:
+        return tuple(
+            sorted(
+                self._platform_validation_runs.values(),
+                key=lambda item: (item.created_at, item.run_id),
+                reverse=True,
+            )
+        )
+
+    def save_platform_validation_run(
+        self,
+        run: PlatformValidationRun,
+    ) -> PlatformValidationRun:
+        with self._validation_lock:
+            key = (run.target.pack_id, run.target.version, run.idempotency_key)
+            existing = self._platform_validation_runs.get(key)
+            if existing is None or existing.run_id != run.run_id:
+                raise ValueError("平台验证运行不存在或目标身份不一致")
+            if existing.status in {
+                ValidationRunStatus.SUCCEEDED,
+                ValidationRunStatus.FAILED,
+                ValidationRunStatus.CANCELLED,
+            } and existing != run:
+                # 终态运行只允许补充签名证据（从无到有），其他变化一律拒绝；
+                # 只有 SUCCEEDED 运行有资格获得签名证据。
+                signing_only = (
+                    existing.status is ValidationRunStatus.SUCCEEDED
+                    and existing.signing_signature_digest is None
+                    and run.signing_signature_digest is not None
+                    and existing.model_copy(
+                        update={
+                            "signing_signature_digest": (
+                                run.signing_signature_digest
+                            ),
+                            "signing_public_key_sha256": (
+                                run.signing_public_key_sha256
+                            ),
+                            "updated_at": run.updated_at,
+                        }
+                    )
+                    == run
+                )
+                if not signing_only:
+                    return existing
+            self._platform_validation_runs[key] = run
+            return run

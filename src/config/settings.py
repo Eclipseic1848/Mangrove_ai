@@ -291,6 +291,18 @@ class Settings(BaseSettings):
         default="data/capabilities/oci",
         description="冻结能力包的本机 OCI Image Layout",
     )
+    capability_platform_oci_layout_path: str = Field(
+        default="data/capabilities/oci-platform",
+        description="脱敏平台快照的独立 OCI Image Layout（与个人 Layout 分离）",
+    )
+    capability_platform_signing_private_key: str = Field(
+        default="",
+        description="平台签名私钥路径（加密 Sigstore 格式，位于项目与数据库之外）",
+    )
+    capability_platform_signing_public_key: str = Field(
+        default="",
+        description="平台签名公钥路径（与私钥同目录，.pub）",
+    )
     capability_mount_cache_path: str = Field(
         default="data/capabilities/mounts",
         description="按 OCI digest 物化的业务只读能力目录",

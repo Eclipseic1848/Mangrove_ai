@@ -68,13 +68,17 @@ async def lifespan(app: FastAPI):
     workspace_manager.start()
     from src.api.capability_governance_runtime import (
         get_capability_validation_manager,
+        get_platform_validation_manager,
     )
     capability_validation_manager = get_capability_validation_manager()
     capability_validation_manager.start()
+    platform_validation_manager = get_platform_validation_manager()
+    platform_validation_manager.start()
     try:
         yield
     finally:
         await capability_validation_manager.stop()
+        await platform_validation_manager.stop()
         await workspace_manager.stop()
         shutdown_workspace_telemetry()
 

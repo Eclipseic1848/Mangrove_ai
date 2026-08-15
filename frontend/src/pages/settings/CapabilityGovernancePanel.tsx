@@ -170,6 +170,19 @@ type AuditViewResult = {
   event: AuditRecord;
 };
 
+type PlatformCandidate = {
+  pack_id: string;
+  version: string;
+  source_digest: string;
+  platform_digest: string;
+  validation_status: string;
+  steps_passed: number;
+  steps_total: number;
+  signed: boolean;
+  submitted_at: string;
+  reason: string;
+};
+
 const AUDIT_SUBJECT_LABEL: Record<AuditSubject, string> = {
   task_prompt: "任务 Prompt 正文",
   task_sources: "来源正文",
@@ -248,6 +261,15 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
   const [auditOutcome, setAuditOutcome] = useState<AuditViewResult | null>(null);
   // 弹窗生命周期内固定幂等键：网络重试不会落第二条审计记录。
   const [auditIdempotencyKey, setAuditIdempotencyKey] = useState("");
+  const [candidates, setCandidates] = useState<PlatformCandidate[]>([]);
+  const [candidateTarget, setCandidateTarget] = useState<ResolvedGovernanceItem | null>(null);
+  const [candidateReason, setCandidateReason] = useState("");
+  const [candidateSubmitting, setCandidateSubmitting] = useState(false);
+  const [candidateIdempotencyKey, setCandidateIdempotencyKey] = useState("");
+  const [publishTarget, setPublishTarget] = useState<PlatformCandidate | null>(null);
+  const [publishReason, setPublishReason] = useState("");
+  const [publishSubmitting, setPublishSubmitting] = useState(false);
+  const [publishIdempotencyKey, setPublishIdempotencyKey] = useState("");
   const runElementRef = useRef<HTMLDetailsElement | null>(null);
 
   const reload = () => Promise.all([
@@ -257,7 +279,10 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
       ? Promise.resolve(null)
       // 审核聚合是新增只读投影；后端未升级时不阻断既有治理页面。
       : api.get("/api/capability-governance/admin/review").catch(() => null),
-  ]).then(async ([packData, runData, reviewData]) => {
+    ownerOnly
+      ? Promise.resolve(null)
+      : api.get("/api/capability-governance/admin/platform-candidates").catch(() => null),
+  ]).then(async ([packData, runData, reviewData, candidateData]) => {
     const nextItems: GovernanceItem[] = packData.items ?? [];
     setItems(nextItems);
     setRuns(runData.items ?? []);
@@ -267,6 +292,9 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
         nextReview[reviewKey(item)] = item;
       }
       setReviewItems(nextReview);
+    }
+    if (candidateData) {
+      setCandidates(candidateData.items ?? []);
     }
     const evidenceItems = nextItems
       .filter(hasDigest)
@@ -322,6 +350,54 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
     setAuditOutcome(null);
     setAuditIdempotencyKey(crypto.randomUUID());
     setError("");
+  }
+
+  async function submitPlatformCandidate() {
+    if (!candidateTarget) return;
+    setCandidateSubmitting(true);
+    setError("");
+    try {
+      await api.post(
+        "/api/capability-governance/admin/platform-candidates",
+        {
+          pack_id: candidateTarget.pack_id,
+          version: candidateTarget.version,
+          digest: candidateTarget.digest,
+          reason: candidateReason.trim(),
+        },
+        { "Idempotency-Key": candidateIdempotencyKey },
+      );
+      setCandidateTarget(null);
+      await reload();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "平台候选提交失败");
+    } finally {
+      setCandidateSubmitting(false);
+    }
+  }
+
+  async function submitPlatformPublish() {
+    if (!publishTarget) return;
+    setPublishSubmitting(true);
+    setError("");
+    try {
+      await api.post(
+        "/api/capability-governance/admin/platform-publish",
+        {
+          pack_id: publishTarget.pack_id,
+          version: publishTarget.version,
+          platform_digest: publishTarget.platform_digest,
+          reason: publishReason.trim(),
+        },
+        { "Idempotency-Key": publishIdempotencyKey },
+      );
+      setPublishTarget(null);
+      await reload();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "平台发布失败");
+    } finally {
+      setPublishSubmitting(false);
+    }
   }
 
   async function submitAuditView() {
@@ -509,6 +585,20 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                       发起验证
                     </Button>
                   )}
+                  {!ownerOnly && item.scope === "personal" && item.maturity === "verified" && hasDigest(item) && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setCandidateTarget(item);
+                        setCandidateReason("");
+                        setCandidateIdempotencyKey(crypto.randomUUID());
+                        setError("");
+                      }}
+                    >
+                      提交平台候选
+                    </Button>
+                  )}
                 </div>
               </div>
               {(item.promotion_gaps ?? []).length > 0 && (
@@ -648,6 +738,50 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
           </section>
           ))
         )}
+        {!ownerOnly && candidates.length > 0 && (
+          <section className="space-y-3">
+            <h3 className="flex items-center gap-2 text-sm font-medium">
+              平台候选（{candidates.length}）
+            </h3>
+            {candidates.map((candidate) => (
+              <article
+                key={candidate.platform_digest}
+                className="rounded-lg border border-border/70 p-4"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <Boxes className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                      <h4 className="truncate text-sm font-semibold">{candidate.pack_id}</h4>
+                      <Badge variant="outline">{candidate.version}</Badge>
+                    </div>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      平台 digest {shortDigest(candidate.platform_digest)} · 来源 {shortDigest(candidate.source_digest)}
+                    </p>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      验证 {candidate.steps_passed}/{candidate.steps_total} 步 · {candidate.signed ? "已签名" : "未签名"} · 提交于 {utcMinute(candidate.submitted_at)} · 原因：{candidate.reason}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Badge variant="outline">候选</Badge>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setPublishTarget(candidate);
+                        setPublishReason("");
+                        setPublishIdempotencyKey(crypto.randomUUID());
+                        setError("");
+                      }}
+                    >
+                      发布
+                    </Button>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </section>
+        )}
       </CardContent>
       <Modal open={target !== null} onClose={() => !submitting && setTarget(null)} title="发起能力验证">
         <div className="space-y-4">
@@ -752,6 +886,52 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
               </div>
             </>
           )}
+        </div>
+      </Modal>
+      <Modal open={candidateTarget !== null} onClose={() => !candidateSubmitting && setCandidateTarget(null)} title="提交平台候选">
+        <div className="space-y-4">
+          <p className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-foreground">
+            会把该已验证个人能力复制为脱敏平台快照（删除 Owner、任务引用、业务字段与敏感引用），重新生成平台 digest，并由后台执行六步验证与 Cosign 签名；全部通过后才能在候选区发布。
+          </p>
+          <label className="block space-y-1.5 text-sm">
+            <span className="font-medium">提交原因</span>
+            <textarea
+              className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2"
+              value={candidateReason}
+              onChange={(event) => setCandidateReason(event.target.value)}
+              placeholder="说明提交平台候选的用途，至少 5 个字符"
+            />
+          </label>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setCandidateTarget(null)} disabled={candidateSubmitting}>取消</Button>
+            <Button onClick={submitPlatformCandidate} disabled={candidateReason.trim().length < 5 || candidateSubmitting}>
+              {candidateSubmitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+              确认提交平台候选
+            </Button>
+          </div>
+        </div>
+      </Modal>
+      <Modal open={publishTarget !== null} onClose={() => !publishSubmitting && setPublishTarget(null)} title="发布平台能力">
+        <div className="space-y-4">
+          <p className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-foreground">
+            发布后受众固定为管理员灰度（admin_gray），不会自动开放普通用户。候选必须六步验证全绿且已完成 Cosign 签名；未就绪会被拒绝并说明缺口。
+          </p>
+          <label className="block space-y-1.5 text-sm">
+            <span className="font-medium">发布原因</span>
+            <textarea
+              className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2"
+              value={publishReason}
+              onChange={(event) => setPublishReason(event.target.value)}
+              placeholder="说明发布决定依据，至少 5 个字符"
+            />
+          </label>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setPublishTarget(null)} disabled={publishSubmitting}>取消</Button>
+            <Button onClick={submitPlatformPublish} disabled={publishReason.trim().length < 5 || publishSubmitting}>
+              {publishSubmitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+              确认发布
+            </Button>
+          </div>
         </div>
       </Modal>
     </Card>

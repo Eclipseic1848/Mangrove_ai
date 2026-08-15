@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import threading
-from typing import Callable, Protocol
+from typing import Callable, Literal, Protocol
 
 from src.capability_catalog import (
     CapabilityCatalog,
@@ -20,6 +20,7 @@ from src.conversation_steering import (
 
 from .models import (
     AdminReviewItem,
+    AudienceOutcome,
     AuditSubjectType,
     AuditViewOutcome,
     CapabilityEligibility,
@@ -31,8 +32,14 @@ from .models import (
     CapabilityValidationRun,
     CapabilityLifecycle,
     CapabilityMaturity,
+    PlatformCandidateOutcome,
+    PlatformCandidateSummary,
+    PlatformSnapshot,
+    PlatformValidationRun,
+    PlatformValidationStep,
     PromotionGap,
     PromotionOutcome,
+    PublishOutcome,
     SupplyChainEvidenceStatus,
     TRIVY_DATABASE_MAX_AGE,
     ValidationTaskRef,
@@ -103,6 +110,14 @@ def _executor_failure_evidence(
     )
 
 
+class PlatformSnapshotGeneratorContract(Protocol):
+    def generate(self, pack: CapabilityPack) -> PlatformSnapshot: ...
+
+
+class PlatformPublisherContract(Protocol):
+    def save_pack(self, pack: CapabilityPack) -> CapabilityPack: ...
+
+
 class CapabilityGovernance:
     def __init__(
         self,
@@ -110,10 +125,16 @@ class CapabilityGovernance:
         repository: CapabilityGovernanceRepository,
         *,
         task_resolver: ValidationTaskResolver | None = None,
+        platform_snapshot_generator: (
+            PlatformSnapshotGeneratorContract | None
+        ) = None,
+        platform_publisher: PlatformPublisherContract | None = None,
     ) -> None:
         self._catalog = catalog
         self._repository = repository
         self._task_resolver = task_resolver
+        self._platform_snapshot_generator = platform_snapshot_generator
+        self._platform_publisher = platform_publisher
 
     @staticmethod
     def _target(pack: CapabilityPack) -> CapabilityGovernanceTarget:
@@ -266,18 +287,30 @@ class CapabilityGovernance:
         ]
         if events:
             latest = events[-1]
+            audience = None
+            if target.scope is ProcedureScope.PLATFORM:
+                # 受众只由发布/受众变更事件决定；候选事件不携带受众。
+                for event in reversed(events):
+                    if event.event_type in {
+                        "platform_published",
+                        "audience_changed",
+                    }:
+                        audience = event.audience
+                        break
             return CapabilityGovernanceProjection(
                 target=target,
                 maturity=latest.maturity,
                 lifecycle=latest.lifecycle,
                 eligibility=latest.eligibility,
                 source="governance_event",
+                audience=audience,
             )
         legacy_deprecated = (
             pack.maturity is LegacyCapabilityMaturity.DEPRECATED
         )
         # Legacy 只有单轴状态：已验证/已弃用必须保留原含义，安全资格没有历史反证时仅作
         # 兼容 eligible 投影；该映射只读且不写回 Pack，后续真实治理事件会覆盖它。
+        # AC-06 历史灰度包语义上只对管理员开放，受众兼容投影固定 admin_gray。
         return CapabilityGovernanceProjection(
             target=target,
             maturity=(
@@ -296,6 +329,11 @@ class CapabilityGovernance:
             ),
             eligibility=CapabilityEligibility.ELIGIBLE,
             source="legacy_compat",
+            audience=(
+                "admin_gray"
+                if target.scope is ProcedureScope.PLATFORM
+                else None
+            ),
         )
 
     def list_visible_projections(
@@ -470,6 +508,306 @@ class CapabilityGovernance:
         if not actor.is_admin:
             raise PermissionError("只有管理员可以读取审计查看记录")
         return self._repository.list_audit_view_events(None)
+
+    def submit_platform_candidate(
+        self,
+        actor: CatalogActor,
+        *,
+        pack_ref: CapabilityPackRef,
+        reason: str,
+        idempotency_key: str,
+    ) -> PlatformCandidateOutcome:
+        """把已验证个人能力复制为脱敏平台快照并登记平台候选。"""
+        if not actor.is_admin:
+            raise PermissionError("只有管理员可以提交平台候选")
+        # 管理员跨 Owner 审核个人能力，必须走治理投影而非 Owner 可见目录。
+        pack = next(
+            (
+                item
+                for item in self._catalog.list_governable_packs(actor)
+                if item.pack_id == pack_ref.pack_id
+                and item.version == pack_ref.version
+                and item.digest == pack_ref.digest
+            ),
+            None,
+        )
+        if pack is None:
+            raise KeyError("能力包不存在或当前 Actor 不可见")
+        if pack.scope is not ProcedureScope.PERSONAL:
+            # 平台能力不能再次候选；个人 Owner 身份是候选的前提。
+            return PlatformCandidateOutcome(
+                status="rejected",
+                gaps=("platform_scope",),
+            )
+        projection = self._projection_for_pack(pack)
+        gaps: list[str] = []
+        if projection.maturity is not CapabilityMaturity.VERIFIED:
+            gaps.append("not_verified")
+        if projection.lifecycle is not CapabilityLifecycle.ACTIVE:
+            gaps.append("not_active")
+        if projection.eligibility is not CapabilityEligibility.ELIGIBLE:
+            gaps.append("not_eligible")
+        if gaps:
+            return PlatformCandidateOutcome(status="rejected", gaps=tuple(gaps))
+        if self._platform_snapshot_generator is None:
+            raise RuntimeError("能力治理未配置平台快照生成器")
+        snapshot = self._platform_snapshot_generator.generate(pack)
+        platform_target = CapabilityGovernanceTarget(
+            owner_id=None,
+            scope=ProcedureScope.PLATFORM,
+            pack_id=pack.pack_id,
+            version=pack.version,
+            digest=snapshot.platform_digest,
+        )
+        # 确定性重打包保证同源快照 digest 相同：既有候选按平台目标命中幂等。
+        existing = self._repository.get_latest_platform_event(
+            platform_target, "platform_candidate"
+        )
+        if existing is not None:
+            existing_runs = [
+                run
+                for run in self._repository.list_platform_validation_runs()
+                if run.target == platform_target
+            ]
+            if existing_runs and all(
+                run.status is ValidationRunStatus.FAILED
+                for run in existing_runs
+            ):
+                # 候选事件幂等保留；验证失败后允许新运行重试（幂等键带序号），
+                # 失败记录不覆盖（#34 同一纪律）。
+                self._repository.create_platform_validation_run(
+                    PlatformValidationRun(
+                        actor_id=actor.owner_id,
+                        actor_role=actor.role,
+                        idempotency_key=(
+                            f"candidate:{snapshot.platform_digest}"
+                            f":retry:{len(existing_runs) + 1}"
+                        ),
+                        target=platform_target,
+                        status=ValidationRunStatus.QUEUED,
+                    )
+                )
+            return PlatformCandidateOutcome(
+                status="already_submitted",
+                snapshot=snapshot,
+                event=existing,
+            )
+        event = CapabilityGovernanceEvent(
+            event_type="platform_candidate",
+            idempotency_key=idempotency_key,
+            target=platform_target,
+            maturity=CapabilityMaturity.VERIFIED,
+            actor_id=actor.owner_id,
+            actor_role=actor.role,
+            reason=reason,
+            source_digest=pack.digest,
+            platform_digest=snapshot.platform_digest,
+        )
+        saved = self._repository.save_platform_event(event)
+        # 候选登记后由平台 worker 推进六步验证与签名；运行幂等键绑定平台 digest。
+        self._repository.create_platform_validation_run(
+            PlatformValidationRun(
+                actor_id=actor.owner_id,
+                actor_role=actor.role,
+                idempotency_key=f"candidate:{snapshot.platform_digest}",
+                target=platform_target,
+                status=ValidationRunStatus.QUEUED,
+            )
+        )
+        return PlatformCandidateOutcome(
+            status="created",
+            snapshot=snapshot,
+            event=saved,
+        )
+
+    def list_platform_candidates(
+        self,
+        actor: CatalogActor,
+    ) -> tuple[PlatformCandidateSummary, ...]:
+        """管理员读取平台候选脱敏摘要（含验证六步与签名状态）。"""
+        if not actor.is_admin:
+            raise PermissionError("只有管理员可以读取平台候选列表")
+        items: list[PlatformCandidateSummary] = []
+        for run in self._repository.list_platform_validation_runs():
+            candidate = self._repository.get_latest_platform_event(
+                run.target, "platform_candidate"
+            )
+            if candidate is None or candidate.source_digest is None:
+                continue
+            passed_steps = [
+                item.step
+                for item in run.evidence
+                if item.status is ValidationStepStatus.PASSED
+            ]
+            items.append(
+                PlatformCandidateSummary(
+                    pack_id=run.target.pack_id,
+                    version=run.target.version,
+                    source_digest=candidate.source_digest,
+                    platform_digest=run.target.digest,
+                    validation_status=run.status.value,
+                    steps_passed=len(passed_steps),
+                    steps_total=len(PlatformValidationStep),
+                    signed=(
+                        run.signing_signature_digest is not None
+                        and run.signing_public_key_sha256 is not None
+                    ),
+                    submitted_at=candidate.occurred_at,
+                    reason=candidate.reason or "",
+                )
+            )
+        return tuple(items)
+
+    def publish_platform(
+        self,
+        actor: CatalogActor,
+        *,
+        pack_ref: CapabilityPackRef,
+        reason: str,
+        idempotency_key: str,
+    ) -> PublishOutcome:
+        """发布平台快照：候选存在 + 六步验证全绿 + 签名证据齐备才生效。"""
+        if not actor.is_admin:
+            raise PermissionError("只有管理员可以发布平台能力")
+        platform_target = CapabilityGovernanceTarget(
+            owner_id=None,
+            scope=ProcedureScope.PLATFORM,
+            pack_id=pack_ref.pack_id,
+            version=pack_ref.version,
+            digest=pack_ref.digest,
+        )
+        published = self._repository.get_latest_platform_event(
+            platform_target, "platform_published"
+        )
+        if published is not None:
+            return PublishOutcome(status="already_published", event=published)
+        candidate = self._repository.get_latest_platform_event(
+            platform_target, "platform_candidate"
+        )
+        if candidate is None:
+            return PublishOutcome(status="not_ready", gaps=("no_candidate",))
+        green_runs = [
+            run
+            for run in self._repository.list_platform_validation_runs()
+            if run.target == platform_target
+            and run.status is ValidationRunStatus.SUCCEEDED
+            and len(run.evidence) == len(PlatformValidationStep)
+            and {item.step for item in run.evidence}
+            == set(PlatformValidationStep)
+            and all(
+                item.status is ValidationStepStatus.PASSED
+                for item in run.evidence
+            )
+        ]
+        if not green_runs:
+            return PublishOutcome(
+                status="not_ready",
+                gaps=("validation_not_green",),
+            )
+        run = green_runs[0]
+        if (
+            run.signing_signature_digest is None
+            or run.signing_public_key_sha256 is None
+        ):
+            # 签名由平台 worker 在验证全绿后执行并写回运行记录，不复用个人签名。
+            return PublishOutcome(
+                status="not_ready",
+                gaps=("signing_missing",),
+            )
+        if self._platform_publisher is None:
+            # 发布目录写入是生效动作；缺失必须失败关闭，不能留下"投影已发布但
+            # 目录无 pack"的永久孤儿（事件不可改写，重试会被 already_published 吞掉）。
+            raise RuntimeError("能力治理未配置平台发布 Adapter")
+        # 先写目录（INSERT OR IGNORE 幂等）再写不可变事件：目录失败时事件不落库，
+        # 重试可完整重走；事件失败时目录多一行 pack，由下一次发布幂等覆盖。
+        self._platform_publisher.save_pack(
+            CapabilityPack(
+                pack_id=platform_target.pack_id,
+                version=platform_target.version,
+                digest=platform_target.digest,
+                scope=ProcedureScope.PLATFORM,
+                maturity=LegacyCapabilityMaturity.VERIFIED,
+            )
+        )
+        event = CapabilityGovernanceEvent(
+            event_type="platform_published",
+            # 幂等键由平台 digest 派生，调用方任意键不得产生第二条发布事实。
+            idempotency_key=f"publish:{platform_target.digest}",
+            target=platform_target,
+            maturity=CapabilityMaturity.VERIFIED,
+            actor_id=actor.owner_id,
+            actor_role=actor.role,
+            reason=reason,
+            source_digest=candidate.source_digest,
+            platform_digest=platform_target.digest,
+            audience="admin_gray",
+            platform_validation_run_id=run.run_id,
+            signing_signature_digest=run.signing_signature_digest,
+            signing_public_key_sha256=run.signing_public_key_sha256,
+        )
+        saved = self._repository.save_platform_event(event)
+        return PublishOutcome(status="published", event=saved)
+
+    def change_audience(
+        self,
+        actor: CatalogActor,
+        *,
+        pack_ref: CapabilityPackRef,
+        audience: Literal["admin_gray", "users"],
+        reason: str,
+        idempotency_key: str,
+    ) -> AudienceOutcome:
+        """改变已发布平台能力的受众；#12 只实现命令，产品入口留待后续授权。"""
+        if not actor.is_admin:
+            raise PermissionError("只有管理员可以改变平台能力受众")
+        platform_target = CapabilityGovernanceTarget(
+            owner_id=None,
+            scope=ProcedureScope.PLATFORM,
+            pack_id=pack_ref.pack_id,
+            version=pack_ref.version,
+            digest=pack_ref.digest,
+        )
+        published = self._repository.get_latest_platform_event(
+            platform_target, "platform_published"
+        )
+        if published is None:
+            raise ValueError("平台能力尚未发布，不能改变受众")
+        # AC7：受众变更必须重查当前事实——验证六步全绿（含 Trivy/Syft 扫描）
+        # 且签名证据仍齐备，不能只凭历史发布事件放行。
+        green_runs = [
+            run
+            for run in self._repository.list_platform_validation_runs()
+            if run.target == platform_target
+            and run.status is ValidationRunStatus.SUCCEEDED
+            and len(run.evidence) == len(PlatformValidationStep)
+            and {item.step for item in run.evidence}
+            == set(PlatformValidationStep)
+            and all(
+                item.status is ValidationStepStatus.PASSED
+                for item in run.evidence
+            )
+            and run.signing_signature_digest is not None
+            and run.signing_public_key_sha256 is not None
+        ]
+        if not green_runs:
+            raise ValueError("平台能力验证或签名证据不再有效，不能改变受众")
+        current = self._repository.get_latest_platform_event(
+            platform_target, "audience_changed"
+        )
+        if current is not None and current.audience == audience:
+            return AudienceOutcome(status="already", event=current)
+        event = CapabilityGovernanceEvent(
+            event_type="audience_changed",
+            idempotency_key=idempotency_key,
+            target=platform_target,
+            maturity=CapabilityMaturity.VERIFIED,
+            actor_id=actor.owner_id,
+            actor_role=actor.role,
+            reason=reason,
+            audience=audience,
+        )
+        saved = self._repository.save_platform_event(event)
+        return AudienceOutcome(status="changed", event=saved)
 
     def get_supply_chain_evidence(
         self,

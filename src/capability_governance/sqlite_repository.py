@@ -13,6 +13,7 @@ from .models import (
     CapabilityGovernanceTarget,
     CapabilityValidationRun,
     CapabilitySupplyChainEvidence,
+    PlatformValidationRun,
     ValidationRunStatus,
 )
 
@@ -77,7 +78,9 @@ def _governance_schema_exists(database: Path) -> bool:
             "AND name IN ('capability_governance_events', "
             "'capability_validation_runs', 'capability_validation_leases', "
             "'capability_validation_idempotency', "
-            "'capability_supply_chain_evidence')"
+            "'capability_supply_chain_evidence', "
+            "'capability_platform_validation_runs', "
+            "'capability_platform_validation_leases')"
         ).fetchall()
     return {row[0] for row in rows} == {
         "capability_governance_events",
@@ -85,6 +88,8 @@ def _governance_schema_exists(database: Path) -> bool:
         "capability_validation_leases",
         "capability_validation_idempotency",
         "capability_supply_chain_evidence",
+        "capability_platform_validation_runs",
+        "capability_platform_validation_leases",
     }
 
 
@@ -750,3 +755,334 @@ class SqliteCapabilityGovernanceRepository:
             CapabilityGovernanceEvent.model_validate_json(row["payload_json"])
             for row in rows
         )
+
+    def save_platform_event(
+        self,
+        event: CapabilityGovernanceEvent,
+    ) -> CapabilityGovernanceEvent:
+        if event.event_type not in {
+            "platform_candidate",
+            "platform_published",
+            "audience_changed",
+        }:
+            raise ValueError("平台事件专用入口只接受发布类事件")
+        target = event.target
+        with self._connect() as connection:
+            if not self._schema_exists(connection):
+                raise RuntimeError("能力治理数据库尚未执行带备份迁移")
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT payload_json FROM capability_governance_events "
+                "WHERE owner_key=? AND pack_id=? AND version=? AND digest=? "
+                "AND idempotency_key=? AND event_type=?",
+                (
+                    _owner_key(target),
+                    target.pack_id,
+                    target.version,
+                    target.digest,
+                    event.idempotency_key,
+                    event.event_type,
+                ),
+            ).fetchone()
+            if existing is not None:
+                # 同幂等键重试返回既有事件；发布事实不可变、不可覆盖。
+                return CapabilityGovernanceEvent.model_validate_json(
+                    existing["payload_json"]
+                )
+            connection.execute(
+                "INSERT INTO capability_governance_events "
+                "(event_id, owner_key, scope, pack_id, version, digest, "
+                "idempotency_key, event_type, payload_json, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.event_id,
+                    _owner_key(target),
+                    target.scope.value,
+                    target.pack_id,
+                    target.version,
+                    target.digest,
+                    event.idempotency_key,
+                    event.event_type,
+                    event.model_dump_json(),
+                    event.occurred_at.isoformat(),
+                ),
+            )
+            row = connection.execute(
+                "SELECT payload_json FROM capability_governance_events "
+                "WHERE event_id=?",
+                (event.event_id,),
+            ).fetchone()
+        assert row is not None
+        return CapabilityGovernanceEvent.model_validate_json(row["payload_json"])
+
+    def get_latest_platform_event(
+        self,
+        target: CapabilityGovernanceTarget,
+        event_type: str,
+    ) -> CapabilityGovernanceEvent | None:
+        with self._connect() as connection:
+            if not self._schema_exists(connection):
+                return None
+            row = connection.execute(
+                "SELECT payload_json FROM capability_governance_events "
+                "WHERE owner_key=? AND pack_id=? AND version=? AND digest=? "
+                "AND event_type=? "
+                "ORDER BY occurred_at DESC, event_id DESC LIMIT 1",
+                (
+                    _owner_key(target),
+                    target.pack_id,
+                    target.version,
+                    target.digest,
+                    event_type,
+                ),
+            ).fetchone()
+        return (
+            CapabilityGovernanceEvent.model_validate_json(row["payload_json"])
+            if row is not None
+            else None
+        )
+
+    def list_platform_events(
+        self,
+        target: CapabilityGovernanceTarget,
+    ) -> tuple[CapabilityGovernanceEvent, ...]:
+        with self._connect() as connection:
+            if not self._schema_exists(connection):
+                return ()
+            rows = connection.execute(
+                "SELECT payload_json FROM capability_governance_events "
+                "WHERE owner_key=? AND pack_id=? AND version=? AND digest=? "
+                "AND event_type IN ('platform_candidate', "
+                "'platform_published', 'audience_changed') "
+                "ORDER BY occurred_at, event_id",
+                (
+                    _owner_key(target),
+                    target.pack_id,
+                    target.version,
+                    target.digest,
+                ),
+            ).fetchall()
+        return tuple(
+            CapabilityGovernanceEvent.model_validate_json(row["payload_json"])
+            for row in rows
+        )
+
+    def create_platform_validation_run(
+        self,
+        run: PlatformValidationRun,
+    ) -> PlatformValidationRun:
+        target = run.target
+        with self._connect() as connection:
+            if not self._schema_exists(connection):
+                raise RuntimeError("能力治理数据库尚未执行带备份迁移")
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='capability_platform_validation_runs'"
+            ).fetchone()
+            if table is None:
+                raise RuntimeError("平台验证数据库尚未执行带备份迁移")
+            connection.execute("BEGIN IMMEDIATE")
+            # 幂等键按能力身份（pack/version）+ 键查重；同键换 digest 是请求改写。
+            row = connection.execute(
+                "SELECT payload_json FROM capability_platform_validation_runs "
+                "WHERE pack_id=? AND version=? AND idempotency_key=?",
+                (
+                    target.pack_id,
+                    target.version,
+                    run.idempotency_key,
+                ),
+            ).fetchone()
+            if row is not None:
+                existing = PlatformValidationRun.model_validate_json(
+                    row["payload_json"]
+                )
+                if existing.target != target:
+                    raise ValueError("同一平台验证幂等键不得改写请求")
+                return existing
+            connection.execute(
+                "INSERT INTO capability_platform_validation_runs "
+                "(run_id, pack_id, version, digest, idempotency_key, status, "
+                "payload_json, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    run.run_id,
+                    target.pack_id,
+                    target.version,
+                    target.digest,
+                    run.idempotency_key,
+                    run.status.value,
+                    run.model_dump_json(),
+                    run.created_at.isoformat(),
+                    run.updated_at.isoformat(),
+                ),
+            )
+            saved = connection.execute(
+                "SELECT payload_json FROM capability_platform_validation_runs "
+                "WHERE run_id=?",
+                (run.run_id,),
+            ).fetchone()
+        assert saved is not None
+        return PlatformValidationRun.model_validate_json(saved["payload_json"])
+
+    def get_platform_validation_run(
+        self,
+        run_id: str,
+    ) -> PlatformValidationRun | None:
+        with self._connect() as connection:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='capability_platform_validation_runs'"
+            ).fetchone()
+            if table is None:
+                return None
+            row = connection.execute(
+                "SELECT payload_json FROM capability_platform_validation_runs "
+                "WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+        return (
+            PlatformValidationRun.model_validate_json(row["payload_json"])
+            if row is not None
+            else None
+        )
+
+    def list_platform_validation_runs(self) -> tuple[PlatformValidationRun, ...]:
+        with self._connect() as connection:
+            table = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='capability_platform_validation_runs'"
+            ).fetchone()
+            if table is None:
+                return ()
+            rows = connection.execute(
+                "SELECT payload_json FROM capability_platform_validation_runs "
+                "ORDER BY created_at DESC, run_id DESC"
+            ).fetchall()
+        return tuple(
+            PlatformValidationRun.model_validate_json(row["payload_json"])
+            for row in rows
+        )
+
+    def save_platform_validation_run(
+        self,
+        run: PlatformValidationRun,
+    ) -> PlatformValidationRun:
+        target = run.target
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT payload_json FROM capability_platform_validation_runs "
+                "WHERE run_id=?",
+                (run.run_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("平台验证运行不存在")
+            existing = PlatformValidationRun.model_validate_json(
+                row["payload_json"]
+            )
+            if existing.target != target:
+                raise ValueError("平台验证目标身份不一致")
+            if existing.status in {
+                ValidationRunStatus.SUCCEEDED,
+                ValidationRunStatus.FAILED,
+                ValidationRunStatus.CANCELLED,
+            } and existing != run:
+                # 终态运行只允许补充签名证据（从无到有），其他变化一律拒绝；
+                # 只有 SUCCEEDED 运行有资格获得签名证据。
+                signing_only = (
+                    existing.status is ValidationRunStatus.SUCCEEDED
+                    and existing.signing_signature_digest is None
+                    and run.signing_signature_digest is not None
+                    and existing.model_copy(
+                        update={
+                            "signing_signature_digest": (
+                                run.signing_signature_digest
+                            ),
+                            "signing_public_key_sha256": (
+                                run.signing_public_key_sha256
+                            ),
+                            "updated_at": run.updated_at,
+                        }
+                    )
+                    == run
+                )
+                if not signing_only:
+                    return existing
+            connection.execute(
+                "UPDATE capability_platform_validation_runs SET status=?, "
+                "payload_json=?, updated_at=? WHERE run_id=?",
+                (
+                    run.status.value,
+                    run.model_dump_json(),
+                    run.updated_at.isoformat(),
+                    run.run_id,
+                ),
+            )
+        return run
+
+    def acquire_platform_validation_lease(
+        self,
+        *,
+        run_id: str,
+        digest: str,
+        worker_id: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> bool:
+        expires_at = now + timedelta(seconds=lease_seconds)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT run_id, worker_id, expires_at "
+                "FROM capability_platform_validation_leases WHERE digest=?",
+                (digest,),
+            ).fetchone()
+            if row is not None and datetime.fromisoformat(row["expires_at"]) > now:
+                return row["run_id"] == run_id and row["worker_id"] == worker_id
+            connection.execute(
+                "INSERT INTO capability_platform_validation_leases "
+                "(digest, run_id, worker_id, acquired_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(digest) DO UPDATE SET run_id=excluded.run_id, "
+                "worker_id=excluded.worker_id, acquired_at=excluded.acquired_at, "
+                "expires_at=excluded.expires_at",
+                (
+                    digest,
+                    run_id,
+                    worker_id,
+                    now.isoformat(),
+                    expires_at.isoformat(),
+                ),
+            )
+            return True
+
+    def release_platform_validation_lease(
+        self,
+        run_id: str,
+        worker_id: str,
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM capability_platform_validation_leases "
+                "WHERE run_id=? AND worker_id=?",
+                (run_id, worker_id),
+            )
+
+    def renew_platform_validation_lease(
+        self,
+        *,
+        run_id: str,
+        digest: str,
+        worker_id: str,
+        now: datetime,
+        lease_seconds: int,
+    ) -> bool:
+        expires_at = now + timedelta(seconds=lease_seconds)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "UPDATE capability_platform_validation_leases SET expires_at=? "
+                "WHERE digest=? AND run_id=? AND worker_id=?",
+                (expires_at.isoformat(), digest, run_id, worker_id),
+            )
+            return cursor.rowcount == 1

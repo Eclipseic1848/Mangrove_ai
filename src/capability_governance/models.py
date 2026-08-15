@@ -85,6 +85,7 @@ class PromotionGap(StrEnum):
 
 
 AuditSubjectType = Literal["task_prompt", "task_sources", "task_output"]
+CapabilityAudience = Literal["admin_gray", "users"]
 
 
 class CapabilityGovernanceEvent(BaseModel):
@@ -98,7 +99,12 @@ class CapabilityGovernanceEvent(BaseModel):
     idempotency_key: str = Field(min_length=1, max_length=200)
     target: CapabilityGovernanceTarget
     event_type: Literal[
-        "registered", "promoted_to_verified", "audit_viewed"
+        "registered",
+        "promoted_to_verified",
+        "audit_viewed",
+        "platform_candidate",
+        "platform_published",
+        "audience_changed",
     ] = "registered"
     maturity: CapabilityMaturity = CapabilityMaturity.DRAFT
     lifecycle: CapabilityLifecycle = CapabilityLifecycle.ACTIVE
@@ -121,6 +127,21 @@ class CapabilityGovernanceEvent(BaseModel):
     revision: int | None = Field(default=None, ge=1)
     # 失败读取的类型化原因（task_not_found 等）；不含正文，审计可区分失败类型。
     failure_reason: str | None = Field(default=None, min_length=1, max_length=120)
+    # 平台发布专用字段；其余事件类型必须为 None。
+    source_digest: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    platform_digest: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    audience: CapabilityAudience | None = None
+    platform_validation_run_id: str | None = Field(
+        default=None, min_length=1, max_length=120
+    )
+    signing_signature_digest: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    signing_public_key_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     occurred_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -128,13 +149,20 @@ class CapabilityGovernanceEvent(BaseModel):
     @model_validator(mode="after")
     def validate_event_state(self) -> "CapabilityGovernanceEvent":
         audit_fields = (
-            self.reason,
             self.subject_type,
             self.subject_sha256,
             self.result,
             self.task_id,
             self.revision,
             self.failure_reason,
+        )
+        platform_fields = (
+            self.source_digest,
+            self.platform_digest,
+            self.audience,
+            self.platform_validation_run_id,
+            self.signing_signature_digest,
+            self.signing_public_key_sha256,
         )
         if self.event_type == "registered":
             if (
@@ -149,8 +177,12 @@ class CapabilityGovernanceEvent(BaseModel):
                 or self.source_supply_chain_evidence_id is not None
             ):
                 raise ValueError("能力登记事件不得携带晋级证据引用")
-            if any(field is not None for field in audit_fields):
+            if self.reason is not None or any(
+                field is not None for field in audit_fields
+            ):
                 raise ValueError("能力登记事件不得携带审计查看字段")
+            if any(field is not None for field in platform_fields):
+                raise ValueError("能力登记事件不得携带平台发布字段")
             return self
         if self.event_type == "promoted_to_verified":
             if (
@@ -165,8 +197,12 @@ class CapabilityGovernanceEvent(BaseModel):
                 or self.source_supply_chain_evidence_id is None
             ):
                 raise ValueError("能力晋级事件必须引用验证运行与供应链证据")
-            if any(field is not None for field in audit_fields):
+            if self.reason is not None or any(
+                field is not None for field in audit_fields
+            ):
                 raise ValueError("能力晋级事件不得携带审计查看字段")
+            if any(field is not None for field in platform_fields):
+                raise ValueError("能力晋级事件不得携带平台发布字段")
             return self
         if self.event_type == "audit_viewed":
             # 审计查看不改变三轴状态；若被写入投影，治理事实会被一次查看污染。
@@ -198,6 +234,77 @@ class CapabilityGovernanceEvent(BaseModel):
                     raise ValueError("失败的审计查看不得携带内容 hash")
                 if self.failure_reason is None:
                     raise ValueError("失败的审计查看必须携带类型化失败原因")
+            if any(field is not None for field in platform_fields):
+                raise ValueError("审计查看事件不得携带平台发布字段")
+            return self
+        if self.event_type == "platform_candidate":
+            # 候选只把已验证个人能力复制为平台快照，不改变任何现有投影。
+            if (
+                self.maturity is not CapabilityMaturity.VERIFIED
+                or self.lifecycle is not CapabilityLifecycle.ACTIVE
+                or self.eligibility is not CapabilityEligibility.ELIGIBLE
+            ):
+                raise ValueError("平台候选事件必须携带 verified/active/eligible 状态")
+            if self.target.scope is not ProcedureScope.PLATFORM:
+                raise ValueError("平台候选事件只能针对平台目标")
+            if not self.reason:
+                raise ValueError("平台候选事件必须携带非空原因")
+            if self.source_digest is None or self.platform_digest is None:
+                raise ValueError("平台候选事件必须携带来源与平台 digest")
+            if (
+                self.audience is not None
+                or self.platform_validation_run_id is not None
+                or self.signing_signature_digest is not None
+                or self.signing_public_key_sha256 is not None
+            ):
+                raise ValueError("平台候选事件不得携带受众或验证/签名引用")
+            return self
+        if self.event_type == "platform_published":
+            # 发布是候选全绿后的生效动作；#12 阶段受众固定 admin_gray。
+            if (
+                self.maturity is not CapabilityMaturity.VERIFIED
+                or self.lifecycle is not CapabilityLifecycle.ACTIVE
+                or self.eligibility is not CapabilityEligibility.ELIGIBLE
+            ):
+                raise ValueError("平台发布事件必须携带 verified/active/eligible 状态")
+            if self.target.scope is not ProcedureScope.PLATFORM:
+                raise ValueError("平台发布事件只能针对平台目标")
+            if not self.reason:
+                raise ValueError("平台发布事件必须携带非空原因")
+            if self.source_digest is None or self.platform_digest is None:
+                raise ValueError("平台发布事件必须携带来源与平台 digest")
+            if self.audience != "admin_gray":
+                # 普通用户受众必须由独立的受众变更命令产生，不能借发布扩大权限。
+                raise ValueError("平台发布事件受众固定为 admin_gray")
+            if (
+                self.platform_validation_run_id is None
+                or self.signing_signature_digest is None
+                or self.signing_public_key_sha256 is None
+            ):
+                raise ValueError("平台发布事件必须引用平台验证与签名证据")
+            return self
+        if self.event_type == "audience_changed":
+            # 受众变更不改变三轴状态，只改变已发布平台能力的可见范围。
+            if (
+                self.maturity is not CapabilityMaturity.VERIFIED
+                or self.lifecycle is not CapabilityLifecycle.ACTIVE
+                or self.eligibility is not CapabilityEligibility.ELIGIBLE
+            ):
+                raise ValueError("受众变更事件必须携带 verified/active/eligible 状态")
+            if self.target.scope is not ProcedureScope.PLATFORM:
+                raise ValueError("受众变更事件只能针对平台目标")
+            if not self.reason:
+                raise ValueError("受众变更事件必须携带非空原因")
+            if self.audience is None:
+                raise ValueError("受众变更事件必须携带新受众")
+            if (
+                self.source_digest is not None
+                or self.platform_digest is not None
+                or self.platform_validation_run_id is not None
+                or self.signing_signature_digest is not None
+                or self.signing_public_key_sha256 is not None
+            ):
+                raise ValueError("受众变更事件不得携带候选/验证/签名字段")
             return self
         raise ValueError("未知能力治理事件类型")
 
@@ -329,6 +436,8 @@ class CapabilityGovernanceProjection(BaseModel):
     lifecycle: CapabilityLifecycle
     eligibility: CapabilityEligibility
     source: Literal["governance_event", "legacy_compat"]
+    # 平台能力受众；#12 发布固定 admin_gray，受众变更命令是唯一改变途径。
+    audience: CapabilityAudience | None = None
 
 
 class CapabilityGovernanceView(BaseModel):
@@ -347,6 +456,7 @@ class CapabilityGovernanceView(BaseModel):
     digest: str | None = None
     can_validate: bool = False
     promotion_gaps: tuple[PromotionGap, ...] = ()
+    audience: CapabilityAudience | None = None
 
     @classmethod
     def from_projection(
@@ -377,6 +487,7 @@ class CapabilityGovernanceView(BaseModel):
                 target.scope is ProcedureScope.PERSONAL
                 and target.owner_id == actor.owner_id
             ),
+            audience=projection.audience,
         )
 
 
@@ -532,3 +643,144 @@ class CapabilitySupplyChainEvidence(BaseModel):
     cyclonedx_json_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     cyclonedx_spec_version: Literal["1.6"]
     occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class PlatformValidationStep(StrEnum):
+    """平台快照验证六步；不含个人任务重放，脱敏快照与个人证据语义分离。"""
+
+    SYNTHETIC_SMOKE = "synthetic_smoke"
+    FAIL_CLOSED = "fail_closed"
+    TRIVY = "trivy"
+    SYFT = "syft"
+    MOUNT_PROBE = "mount_probe"
+    INDEPENDENT_VERIFIER = "independent_verifier"
+
+
+class PlatformValidationEvidence(BaseModel):
+    """平台验证步骤的受控证据摘要；正文、Secret 和宿主路径不得进入此记录。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    step: PlatformValidationStep
+    status: ValidationStepStatus
+    evidence_ref: str = Field(
+        pattern=r"^evidence://[A-Za-z0-9._/-]{1,500}$"
+    )
+    evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    summary: str = Field(min_length=1, max_length=300)
+    occurred_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class PlatformValidationRun(BaseModel):
+    """绑定平台快照 digest 的不可变验证运行；六步全过 + 签名证据是发布前置。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    run_id: str = Field(default_factory=lambda: f"pfval_{uuid.uuid4().hex[:20]}")
+    actor_id: str = Field(min_length=1, max_length=120)
+    actor_role: Literal["user", "admin", "superadmin"]
+    idempotency_key: str = Field(min_length=1, max_length=200)
+    target: CapabilityGovernanceTarget
+    status: ValidationRunStatus = ValidationRunStatus.QUEUED
+    evidence: tuple[PlatformValidationEvidence, ...] = ()
+    # 签名证据随运行保存：发布命令从全绿运行读取，不复用个人签名。
+    signing_signature_digest: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+    signing_public_key_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @model_validator(mode="after")
+    def validate_platform_target(self) -> "PlatformValidationRun":
+        if self.target.scope is not ProcedureScope.PLATFORM:
+            raise ValueError("平台验证运行只能针对平台快照目标")
+        return self
+
+
+class PlatformSnapshot(BaseModel):
+    """脱敏平台快照的冻结身份；manifest 摘要只列保留字段名，不含业务值。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    pack_id: str = Field(min_length=1, max_length=120)
+    version: str = Field(min_length=1, max_length=80)
+    source_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    platform_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    manifest_summary: tuple[str, ...] = ()
+
+
+class PlatformCandidateOutcome(BaseModel):
+    """平台候选提交的显式结果；调用方必须区分新建、幂等命中与拒绝。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["created", "already_submitted", "rejected"]
+    snapshot: PlatformSnapshot | None = None
+    gaps: tuple[str, ...] = ()
+    event: CapabilityGovernanceEvent | None = None
+
+    @model_validator(mode="after")
+    def validate_outcome_shape(self) -> "PlatformCandidateOutcome":
+        if self.status == "rejected":
+            if not self.gaps or self.snapshot is not None or self.event is not None:
+                raise ValueError("拒绝的候选必须携带缺口且不携带快照或事件")
+        else:
+            if self.snapshot is None or self.event is None:
+                raise ValueError("候选结果必须携带快照与事件")
+        return self
+
+
+class PublishOutcome(BaseModel):
+    """平台发布的显式结果；发布只对候选全绿的平台版本生效。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["published", "already_published", "not_ready"]
+    gaps: tuple[str, ...] = ()
+    event: CapabilityGovernanceEvent | None = None
+
+    @model_validator(mode="after")
+    def validate_outcome_shape(self) -> "PublishOutcome":
+        if self.status == "not_ready":
+            if not self.gaps or self.event is not None:
+                raise ValueError("未就绪的发布必须携带缺口且不携带事件")
+        elif self.event is None:
+            raise ValueError("发布结果必须携带事件")
+        return self
+
+
+class AudienceOutcome(BaseModel):
+    """受众变更命令的显式结果；只改变平台能力可见范围。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["changed", "already"]
+    event: CapabilityGovernanceEvent
+
+    @model_validator(mode="after")
+    def validate_outcome_shape(self) -> "AudienceOutcome":
+        if self.event.event_type != "audience_changed":
+            raise ValueError("受众变更结果必须携带受众变更事件")
+        return self
+
+
+class PlatformCandidateSummary(BaseModel):
+    """管理员候选列表的脱敏摘要；含验证六步与签名状态，不含任何业务正文。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    pack_id: str = Field(min_length=1, max_length=120)
+    version: str = Field(min_length=1, max_length=80)
+    source_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    platform_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    validation_status: str = Field(min_length=1, max_length=60)
+    steps_passed: int = Field(default=0, ge=0)
+    steps_total: int = Field(default=6, ge=0, le=6)
+    signed: bool = False
+    submitted_at: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc)
+    )
+    reason: str = Field(min_length=1, max_length=1000)

@@ -34,12 +34,19 @@ admin_router = APIRouter(
 
 
 def _governance() -> CapabilityGovernance:
+    from src.api.capability_governance_runtime import (
+        get_platform_publication_dependencies,
+    )
+
+    generator, publisher = get_platform_publication_dependencies()
     return CapabilityGovernance(
         CapabilityCatalog(
             SqliteCapabilityCatalogRepository(settings.webui_db_path)
         ),
         SqliteCapabilityGovernanceRepository(settings.webui_db_path),
         task_resolver=SqliteValidationTaskResolver(settings.webui_db_path),
+        platform_snapshot_generator=generator,
+        platform_publisher=publisher,
     )
 
 
@@ -268,3 +275,88 @@ def list_audit_log(admin=Depends(require_admin)):
             for record in reversed(records)
         ]
     }
+
+
+class PlatformCandidateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pack_id: str = Field(min_length=1, max_length=120)
+    version: str = Field(min_length=1, max_length=80)
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class PlatformPublishRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pack_id: str = Field(min_length=1, max_length=120)
+    version: str = Field(min_length=1, max_length=80)
+    platform_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+@admin_router.post("/platform-candidates")
+def submit_platform_candidate(
+    body: PlatformCandidateRequest,
+    admin=Depends(require_admin),
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=200,
+        alias="Idempotency-Key",
+    ),
+):
+    actor = catalog_actor_from_user(admin)
+    try:
+        outcome = _governance().submit_platform_candidate(
+            actor,
+            pack_ref=CapabilityPackRef(
+                pack_id=body.pack_id,
+                version=body.version,
+                digest=body.digest,
+            ),
+            reason=body.reason,
+            idempotency_key=idempotency_key,
+        )
+    except (PermissionError, KeyError, RuntimeError, ValueError) as error:
+        raise _http_error(error) from error
+    return outcome.model_dump(mode="json")
+
+
+@admin_router.get("/platform-candidates")
+def list_platform_candidates(admin=Depends(require_admin)):
+    actor = catalog_actor_from_user(admin)
+    items = _governance().list_platform_candidates(actor)
+    return {"items": [item.model_dump(mode="json") for item in items]}
+
+
+@admin_router.post("/platform-publish")
+def publish_platform(
+    body: PlatformPublishRequest,
+    admin=Depends(require_admin),
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=200,
+        alias="Idempotency-Key",
+    ),
+):
+    actor = catalog_actor_from_user(admin)
+    try:
+        outcome = _governance().publish_platform(
+            actor,
+            pack_ref=CapabilityPackRef(
+                pack_id=body.pack_id,
+                version=body.version,
+                digest=body.platform_digest,
+            ),
+            reason=body.reason,
+            idempotency_key=idempotency_key,
+        )
+    except (PermissionError, KeyError, RuntimeError, ValueError) as error:
+        raise _http_error(error) from error
+    if outcome.status == "not_ready":
+        # 发布前置未满足：预期状态冲突语义，不让未全绿候选静默生效。
+        raise HTTPException(
+            status_code=409,
+            detail=f"平台候选未就绪：{'、'.join(outcome.gaps)}",
+        )
+    return outcome.model_dump(mode="json")

@@ -542,3 +542,174 @@ def test_audit_view_endpoint_requires_reason_idempotency_and_admin(
     )
     assert unbound.status_code == 422
     app.dependency_overrides.clear()
+
+
+def _platform_candidate_governance(monkeypatch) -> None:
+    """替身治理：快照生成器返回固定平台 digest，发布记录调用。"""
+    from src.capability_governance import (
+        CapabilityGovernanceEvent,
+        CapabilityMaturity,
+        PlatformSnapshot,
+        PlatformValidationRun,
+        ValidationRunStatus,
+    )
+
+    catalog = CapabilityCatalog(InMemoryCapabilityCatalogRepository())
+    owner = CatalogActor(owner_id="owner-a", role="user")
+    pack = CapabilityPack(
+        pack_id="python-table-summary",
+        version="1.0.0",
+        digest="sha256:" + "a" * 64,
+        scope=ProcedureScope.PERSONAL,
+        maturity=CapabilityMaturity.DRAFT,
+        owner_id="owner-a",
+    )
+    catalog.register_pack(owner, pack)
+    repository = InMemoryCapabilityGovernanceRepository()
+    target = CapabilityGovernanceTarget(
+        owner_id="owner-a",
+        scope=ProcedureScope.PERSONAL,
+        pack_id=pack.pack_id,
+        version=pack.version,
+        digest=pack.digest,
+    )
+    repository.save_event(
+        CapabilityGovernanceEvent(
+            idempotency_key="register-a",
+            target=target,
+            actor_id="owner-a",
+            actor_role="user",
+        )
+    )
+    repository.save_promotion_event(
+        CapabilityGovernanceEvent(
+            event_type="promoted_to_verified",
+            idempotency_key="promotion:run-a",
+            target=target,
+            maturity=CapabilityMaturity.VERIFIED,
+            actor_id="owner-a",
+            actor_role="user",
+            source_validation_run_id="capval_a1b2c3d4e5f6a1b2c3d4",
+            source_supply_chain_evidence_id="supply_" + "a" * 20,
+        )
+    )
+    platform_snapshot = PlatformSnapshot(
+        pack_id=pack.pack_id,
+        version=pack.version,
+        source_digest=pack.digest,
+        platform_digest="sha256:" + "b" * 64,
+        manifest_summary=("entrypoint",),
+    )
+
+    class StubGenerator:
+        def generate(self, source_pack):
+            return platform_snapshot
+
+    published_packs: list = []
+
+    class StubPublisher:
+        def save_pack(self, platform_pack):
+            published_packs.append(platform_pack)
+            return platform_pack
+
+    governance = CapabilityGovernance(
+        catalog,
+        repository,
+        platform_snapshot_generator=StubGenerator(),
+        platform_publisher=StubPublisher(),
+    )
+    monkeypatch.setattr(governance_routes, "_governance", lambda: governance)
+
+
+def test_platform_candidate_endpoints_enforce_admin_and_serialize(
+    monkeypatch,
+) -> None:
+    _platform_candidate_governance(monkeypatch)
+    app.dependency_overrides[get_current_user] = lambda: {
+        "user_id": "owner-a",
+        "role": "user",
+    }
+    client = TestClient(app)
+    forbidden = client.post(
+        "/api/capability-governance/admin/platform-candidates",
+        headers={"Idempotency-Key": "candidate:one"},
+        json={
+            "pack_id": "python-table-summary",
+            "version": "1.0.0",
+            "digest": "sha256:" + "a" * 64,
+            "reason": "平台候选",
+        },
+    )
+    assert forbidden.status_code == 403
+
+    app.dependency_overrides[get_current_user] = lambda: {
+        "user_id": "admin-a",
+        "role": "admin",
+    }
+    missing_key = client.post(
+        "/api/capability-governance/admin/platform-candidates",
+        json={
+            "pack_id": "python-table-summary",
+            "version": "1.0.0",
+            "digest": "sha256:" + "a" * 64,
+            "reason": "平台候选",
+        },
+    )
+    assert missing_key.status_code == 422
+
+    created = client.post(
+        "/api/capability-governance/admin/platform-candidates",
+        headers={"Idempotency-Key": "candidate:one"},
+        json={
+            "pack_id": "python-table-summary",
+            "version": "1.0.0",
+            "digest": "sha256:" + "a" * 64,
+            "reason": "平台候选：个人验证已完成",
+        },
+    )
+    assert created.status_code == 200
+    body = created.json()
+    assert body["status"] == "created"
+    assert body["snapshot"]["platform_digest"] == "sha256:" + "b" * 64
+    assert body["event"]["event_type"] == "platform_candidate"
+
+    listed = client.get("/api/capability-governance/admin/platform-candidates")
+    assert listed.status_code == 200
+    assert len(listed.json()["items"]) == 1
+    item = listed.json()["items"][0]
+    assert item["platform_digest"] == "sha256:" + "b" * 64
+    assert item["steps_total"] == 6
+    assert item["validation_status"] in {"queued", "running"}
+    assert item["signed"] is False
+    serialized = str(listed.json()).lower()
+    assert "purpose" not in serialized
+    assert "secret" not in serialized
+
+    # 发布前未就绪：候选验证未完成返回 409。
+    not_ready = client.post(
+        "/api/capability-governance/admin/platform-publish",
+        headers={"Idempotency-Key": "publish:one"},
+        json={
+            "pack_id": "python-table-summary",
+            "version": "1.0.0",
+            "platform_digest": "sha256:" + "b" * 64,
+            "reason": "发布",
+        },
+    )
+    assert not_ready.status_code == 409
+
+    # 受众变更无端点（#12 只实现命令，产品不暴露）；SPA fallback 可能令
+    # 未知 POST 路径返回 405（路径被 GET fallback 占用），404/405 都视为无端点。
+    audience = client.post(
+        "/api/capability-governance/admin/platform-audience",
+        headers={"Idempotency-Key": "audience:one"},
+        json={
+            "pack_id": "python-table-summary",
+            "version": "1.0.0",
+            "platform_digest": "sha256:" + "b" * 64,
+            "audience": "users",
+            "reason": "开放普通用户",
+        },
+    )
+    assert audience.status_code in (404, 405)
+    app.dependency_overrides.clear()
