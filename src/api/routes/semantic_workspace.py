@@ -493,9 +493,8 @@ def list_gray_capabilities(user=Depends(get_current_user)):
     for pack in catalog.list_visible_packs(actor):
         if pack.maturity is not CapabilityMaturity.VERIFIED:
             continue
-        if not _selectable_for_task(
-            governance.runtime_projection_for_pack(pack)
-        ):
+        projection = governance.runtime_projection_for_pack(pack)
+        if not _selectable_for_task(projection):
             # deprecated/revoked/quarantined 不进入新任务选择（AC3）。
             continue
         manifest = dict(pack.manifest)
@@ -519,7 +518,13 @@ def list_gray_capabilities(user=Depends(get_current_user)):
                 or "提供当前任务所需的专业处理能力"
             ),
             "scope": pack.scope.value,
+            # 推荐指针（#14 回滚命令折叠）；推荐是默认值不是约束。
+            "recommended": (
+                projection.recommended_version == pack.version
+            ),
         })
+    # 推荐版本置顶；无指针的 pack 保持目录既有顺序（旧路径零回归）。
+    items.sort(key=lambda item: not item["recommended"])
     return {"enabled": True, "items": items}
 
 

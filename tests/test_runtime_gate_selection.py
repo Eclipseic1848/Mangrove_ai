@@ -89,6 +89,7 @@ def _save_platform_pack(
     db_path: Path,
     *,
     pack_id: str,
+    version: str = "1.0.0",
     maturity: LegacyCapabilityMaturity = LegacyCapabilityMaturity.VERIFIED,
     digest_char: str = "a",
 ) -> str:
@@ -98,7 +99,7 @@ def _save_platform_pack(
     SqliteCapabilityCatalogRepository(str(db_path)).save_pack(
         CapabilityPack(
             pack_id=pack_id,
-            version="1.0.0",
+            version=version,
             digest=digest,
             scope=ProcedureScope.PLATFORM,
             maturity=maturity,
@@ -388,6 +389,76 @@ class TestS5FreezeGate:
         # legacy 装载路径放行（历史恢复），但冻结被可选谓词拒绝。
         assert created.status_code == 409, created.text
         assert "新任务" in created.json()["detail"]
+
+
+class TestS6RecommendedPointer:
+    def test_recommended_version_marks_and_sorts(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """回滚指针：recommendation_changed 折叠出的推荐版本标记并置顶。"""
+        client = _client(tmp_path, monkeypatch)
+        db_path = tmp_path / "workspace.db"
+        _save_platform_pack(
+            db_path,
+            pack_id="gray-python-table",
+            version="1.0.0",
+            digest_char="a",
+        )
+        _save_platform_pack(
+            db_path,
+            pack_id="gray-python-table",
+            version="2.0.0",
+            digest_char="c",
+        )
+        _governance_schema(db_path)
+        from src.capability_governance import (
+            SqliteCapabilityGovernanceRepository,
+        )
+
+        SqliteCapabilityGovernanceRepository(str(db_path)).save_governance_event(
+            CapabilityGovernanceEvent(
+                event_type="recommendation_changed",
+                idempotency_key="recommend:rollback",
+                # 指针挂在被推荐的目标版本上（与 rollback 命令语义一致）。
+                target=CapabilityGovernanceTarget(
+                    owner_id=None,
+                    scope=ProcedureScope.PLATFORM,
+                    pack_id="gray-python-table",
+                    version="1.0.0",
+                    digest="sha256:" + "a" * 64,
+                ),
+                maturity=CapabilityMaturity.VERIFIED,
+                lifecycle=CapabilityLifecycle.ACTIVE,
+                eligibility=CapabilityEligibility.ELIGIBLE,
+                actor_id="admin-a",
+                actor_role="admin",
+                reason="回滚：推荐切回 1.0.0",
+                recommended_version="1.0.0",
+            )
+        )
+        with client:
+            listed = client.get("/api/semantic-workspace/capabilities")
+        assert listed.status_code == 200, listed.text
+        items = listed.json()["items"]
+        versions = [item["version"] for item in items]
+        assert "1.0.0" in versions and "2.0.0" in versions
+        # 推荐版本标记并置顶。
+        assert items[0]["version"] == "1.0.0"
+        assert items[0]["recommended"] is True
+        assert items[1]["recommended"] is False
+
+    def test_no_pointer_marks_nothing(
+        self, tmp_path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client = _client(tmp_path, monkeypatch)
+        _save_platform_pack(
+            tmp_path / "workspace.db",
+            pack_id="gray-python-table",
+        )
+        with client:
+            listed = client.get("/api/semantic-workspace/capabilities")
+        items = listed.json()["items"]
+        assert all(item["recommended"] is False for item in items)
 
     def test_freeze_ac06_legacy_platform_pack_still_allowed(
         self, tmp_path, monkeypatch: pytest.MonkeyPatch

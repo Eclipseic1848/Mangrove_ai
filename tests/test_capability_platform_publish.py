@@ -27,6 +27,7 @@ from src.capability_governance import (
     CapabilityGovernanceTarget,
     CapabilityLifecycle,
     CapabilityMaturity,
+    CapabilitySupplyChainEvidence,
     InMemoryCapabilityGovernanceRepository,
     PlatformCandidateOutcome,
     PlatformSnapshot,
@@ -34,6 +35,8 @@ from src.capability_governance import (
     PlatformValidationRun,
     PlatformValidationStep,
     PublishOutcome,
+    SupplyChainEvidenceStatus,
+    TrivyDatabaseMetadata,
     ValidationRunStatus,
     ValidationStepStatus,
 )
@@ -633,6 +636,37 @@ class _StubPublisher:
         return pack
 
 
+def _save_platform_evidence(
+    repository: InMemoryCapabilityGovernanceRepository,
+    target: CapabilityGovernanceTarget,
+) -> None:
+    """平台六步验证的 Trivy/Syft 共享供应链采集证据（#14 发布门复查时效）。"""
+    repository.save_supply_chain_evidence(
+        CapabilitySupplyChainEvidence(
+            evidence_id="supply_" + "b" * 20,
+            target=target,
+            subject_digest=target.digest,
+            status=SupplyChainEvidenceStatus.PASSED,
+            blockers=(),
+            secret_count=0,
+            critical_count=0,
+            fixable_high_count=0,
+            misconfiguration_failure_count=0,
+            trivy_version="0.70.0",
+            trivy_config_sha256="c" * 64,
+            trivy_result_sha256="d" * 64,
+            trivy_database=TrivyDatabaseMetadata(
+                version=2,
+                updated_at=datetime.now(timezone.utc),
+            ),
+            syft_version="1.50.0",
+            syft_json_sha256="e" * 64,
+            cyclonedx_json_sha256="f" * 64,
+            cyclonedx_spec_version="1.6",
+        )
+    )
+
+
 def _verified_personal_governance(
     repository: InMemoryCapabilityGovernanceRepository,
     snapshot_generator: _StubSnapshotGenerator,
@@ -937,6 +971,8 @@ class TestS5ServiceCommands:
                 signing_public_key_sha256="d" * 64,
             )
         )
+        # 平台验证的 Trivy/Syft 共享供应链采集证据（#14 发布门复查其时效）。
+        _save_platform_evidence(repository, platform_target)
         return repository, governance, personal, publisher, platform_target
 
     def test_publish_requires_candidate_and_green_validation(self) -> None:
@@ -1018,6 +1054,7 @@ class TestS5ServiceCommands:
                 ),
             )
         )
+        _save_platform_evidence(repository, platform_target)
         result = governance.publish_platform(
             self._admin(),
             pack_ref=CapabilityPackRef(
@@ -1171,6 +1208,7 @@ class TestS5ServiceCommands:
                 signing_public_key_sha256="d" * 64,
             )
         )
+        _save_platform_evidence(repository, platform_target)
         with pytest.raises(RuntimeError):
             governance.publish_platform(
                 self._admin(),
