@@ -40,7 +40,7 @@ PDF、Word、Excel、CSV 文件主链；数据库具备连接与测试基础。�
 | AC-07 旧 #33 三轴治理投影 | 完成并关闭 | 历史工单保留在旧仓库 |
 | AC-07 旧 #34 可恢复 ValidationRun | 工程实现、双轴审查、生产迁移、两项真实能力灰度、取消后重新发起和 8088 用户验收完成；Capability Host 代理修复经 PR #7 合并，旧工单已关闭 | 无 |
 | AC-07 旧 #35 Trivy/Syft 证据 | 工程实现、双轴复审、带备份生产 `0003` 迁移与 8088 用户验收完成；PR #6 已合并到 `main`，旧工单已关闭 | 无 |
-| AC-07 新 #8～#17 | #9 Cosign PoC、#10 自动晋级机制、#11 管理员审核与业务内容审计查看、#12 独立平台快照、签名与 admin_gray 发布均完成工程实现、双轴复审与用户验收；其余工单未开始 | 下一工单为 #13 CapabilityMountResolver 运行时治理门 |
+| AC-07 新 #8～#17 | #9 Cosign PoC、#10 自动晋级机制、#11 管理员审核与业务内容审计查看、#12 独立平台快照、签名与 admin_gray 发布、#13 运行时装载治理门均完成工程实现、双轴复审与 8088 验收；其余工单未开始 | 下一工单为 #14 弃用/回滚/隔离/撤销与限期风险接受 |
 
 AC-06 两项历史 `admin_gray_only` 包是迁移兼容例外：管理员/超管只能使用自己拥有的
 TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍失败关闭。
@@ -163,13 +163,32 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
   生产库无 verified 个人能力，真实发布全链演示留待纵切面。
   该结论不代表平台已发布、普通用户受众扩大或整个 AC-07/Phase 4 完成。
 
+2026-08-15，AC-07 #13 完成本地闭环：
+
+- 运行时装载治理门：`CapabilityMountResolver.resolve_for_owner` 收敛为唯一装载 Seam，
+  装载前执行个人三轴（Owner/verified/{active,deprecated}/eligible）与平台受众/签名证据
+  门；legacy 平台 Pack（无发布事件）维持 AC-06 旧路径放行（Q2，直至 #17）；
+- 冻结与监督：创建/冻结走同一 `check_mount` 接口，追加三轴可选谓词（deprecated 不进入
+  新任务选择）；`_run_pi_task` 以 30s 节奏只读投影监督（零 DDL），命中隔离/撤销即停
+  Sidecar + 取消执行 + 禁止发布 Candidate/Delivery；无能力任务零负担；
+- 新增测试 61 项（门矩阵/装载集成/装配/选择与冻结 HTTP/运行期监督/验证重放门）；后端全量
+  `1092 passed`（1 项环境基线失败：DNS 白名单解析，修复前即存在）；前端构建通过；
+  Playwright settings + semantic-workspace `38 passed`；
+- Standards/Spec 双轴审查首轮 FAIL（2+1 阻断：监督竞态、digest 失配 422 回归、DEPRECATED
+  历史恢复缺失），修复后复审发现并修复平台三轴缺查与冻结层 DEPRECATED 拦截（A1-A5/B1-B6
+  全部落地）；复审后无残留阻断；
+- 8088 验收：AC-06 历史包真实物化装载（legacy 放行）、digest 失配 422、未知包 404、
+  draft 冻结 409、deprecated 冻结 409、列表过滤、运行中取消后容器/网络/Lease/临时目录
+  零残留；完整任务执行受本地 LLM 环境限制未达成（非治理门问题，可复跑）。
+  该结论不代表平台已发布、普通用户受众扩大或整个 AC-07/Phase 4 完成。
+
 ## 7. 当前优先顺序
 
-1. 新仓库 #9、#10、#11、#12 已完成工程实现、双轴复审与用户验收；真实灰度包晋级与
+1. 新仓库 #9、#10、#11、#12、#13 已完成工程实现、双轴复审与 8088 验收；真实灰度包晋级与
    真实平台发布纵切面留待 #15/#16。
-2. 下一工单为新仓库 [#13](https://github.com/Eclipseic1848/Mangrove_ai/issues/13)：
-   CapabilityMountResolver 运行时治理门（依赖旧 #33、新 #12）。
-3. #9～#12 完成不代表任何能力已经晋级、平台能力已经发布或普通用户受众已经扩大。
+2. 下一工单为新仓库 [#14](https://github.com/Eclipseic1848/Mangrove_ai/issues/14)：
+   弃用、回滚、隔离、撤销与限期风险接受（依赖旧 #35、新 #13）。
+3. #9～#13 完成不代表任何能力已经晋级、平台能力已经发布或普通用户受众已经扩大。
 
 ## 8. 权威证据
 
@@ -183,6 +202,9 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
 - #12 需求复核：`docs/plans/2026-08-14-agentic-capability-ac07-07-requirements-review.md`
 - #12 设计：`docs/plans/2026-08-14-agentic-capability-ac07-07-design.md`
 - #12 任务拆分：`docs/plans/2026-08-14-agentic-capability-ac07-07-task-breakdown.md`
+- #13 需求复核：`docs/plans/2026-08-14-agentic-capability-ac07-08-requirements-review.md`
+- #13 设计：`docs/plans/2026-08-14-agentic-capability-ac07-08-design.md`
+- #13 任务拆分：`docs/plans/2026-08-14-agentic-capability-ac07-08-task-breakdown.md`
 - #34 报告：`docs/plans/2026-08-07-agentic-capability-ac07-02-execution-report.md`
 - #35 报告：`docs/plans/2026-08-07-agentic-capability-ac07-03-execution-report.md`
 - vNext Publisher：`docs/plans/2026-08-04-vnext-delivery-publisher-execution-report.md`

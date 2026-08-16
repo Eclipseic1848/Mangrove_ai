@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 import uuid
+from typing import Callable, Literal
 
 from filelock import FileLock
 
@@ -17,21 +18,54 @@ from .integrity import (
 from .models import CatalogActor
 from .models import PublicCapabilityDescriptor
 from .oci_store import OrasOciLayoutStore
+from .runtime_gate import RuntimeGateContract
 
 
 class CapabilityMountResolver:
-    """Owner 校验、digest 校验和 OCI 物化收敛在同一深 Module。"""
+    """Owner 校验、治理门、digest 校验和 OCI 物化收敛在同一深 Module。"""
 
     def __init__(
         self,
         catalog: CapabilityCatalog,
         artifact_store: OrasOciLayoutStore,
         mount_root: str | Path,
+        *,
+        runtime_gate: RuntimeGateContract | None = None,
+        platform_artifact_store: OrasOciLayoutStore | None = None,
+        actor_role_resolver: Callable[
+            [str], Literal["user", "admin", "superadmin"]
+        ]
+        | None = None,
     ) -> None:
         self._catalog = catalog
         self._artifact_store = artifact_store
+        self._platform_artifact_store = platform_artifact_store
+        self._runtime_gate = runtime_gate
+        self._actor_role_resolver = actor_role_resolver
         self._mount_root = Path(mount_root).resolve()
         self._mount_root.mkdir(parents=True, exist_ok=True)
+
+    def _actor(self, owner_id: str) -> CatalogActor:
+        role: Literal["user", "admin", "superadmin"] = "user"
+        if self._actor_role_resolver is not None:
+            resolved = self._actor_role_resolver(owner_id)
+            role = (
+                resolved
+                if resolved in {"user", "admin", "superadmin"}
+                else "user"
+            )
+        return CatalogActor(owner_id=owner_id, role=role)
+
+    def _store_for(self, pack) -> OrasOciLayoutStore:
+        """平台 Pack 从平台 Layout 物化（#12 发布写入处）；个人 Pack 从个人 Layout。"""
+        from src.conversation_steering import ProcedureScope
+
+        if (
+            pack.scope is ProcedureScope.PLATFORM
+            and self._platform_artifact_store is not None
+        ):
+            return self._platform_artifact_store
+        return self._artifact_store
 
     def resolve_for_owner(
         self,
@@ -39,7 +73,7 @@ class CapabilityMountResolver:
         task_id: str,
         revision: int,
     ) -> tuple[Path, ...]:
-        actor = CatalogActor(owner_id=owner_id, role="user")
+        actor = self._actor(owner_id)
         selection = self._catalog.resolve_selection(
             actor,
             task_id=task_id,
@@ -52,6 +86,10 @@ class CapabilityMountResolver:
             pack = self._catalog.resolve_pack(actor, ref.pack_id, ref.version)
             if pack is None or pack.digest != ref.digest:
                 raise PermissionError("冻结能力包不存在、不可见或 digest 已失配")
+            # 三轴/受众/签名门在物化前失败关闭；拒绝不降级、不换版本。
+            if self._runtime_gate is not None:
+                self._runtime_gate.check_mount(actor, pack)
+            store = self._store_for(pack)
             digest_key = ref.digest.removeprefix("sha256:")
             destination = (self._mount_root / digest_key).resolve()
             if self._mount_root not in destination.parents:
@@ -73,7 +111,7 @@ class CapabilityMountResolver:
                             f"{destination.name}.previous-{uuid.uuid4().hex[:12]}"
                         )
                         try:
-                            self._artifact_store.materialize(
+                            store.materialize(
                                 artifact_name=ref.pack_id,
                                 version=ref.version,
                                 digest=ref.digest,
@@ -100,7 +138,7 @@ class CapabilityMountResolver:
                         f"{destination.name}.tmp-{uuid.uuid4().hex[:12]}"
                     )
                     try:
-                        self._artifact_store.materialize(
+                        store.materialize(
                             artifact_name=ref.pack_id,
                             version=ref.version,
                             digest=ref.digest,

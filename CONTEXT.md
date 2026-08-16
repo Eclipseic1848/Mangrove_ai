@@ -366,6 +366,16 @@ _Avoid_: 无痕读取、批量导出、审计记录可修改、借能力包读�
 但撤销或恢复仍是管理员治理决定。
 _Avoid_: 生命周期、验证结果、自动撤销
 
+**运行时装载治理门（RuntimeMountGate）**：
+创建、重试、恢复与每次原生能力调用都必须经过的唯一装载 Seam（CapabilityMountResolver
+注入的同一公开 Interface，API 与 Pi Runtime 均不可绕过）：个人 Pack 校验 Owner、
+verified、`active | deprecated`、eligible；平台 Pack 还必须满足受众与 Cosign 签名证据
+比对；legacy 平台 Pack（无发布事件）维持 AC-06 旧路径放行。新任务冻结还要通过三轴可选
+谓词（deprecated/revoked/quarantined/draft 一律拒绝）。运行中由 30s 节奏的只读投影监督
+检测隔离/撤销，命中即停 Sidecar、取消执行并禁止发布 Candidate/Delivery。代码注释中
+「装载门/治理门/运行时门」均指本概念。
+_Avoid_: 绕过 Seam 直连物化、装载与冻结两套语义、deprecated 进入新任务选择
+
 **能力验证运行（CapabilityValidationRun）**：
 针对一个精确能力 digest 保存合成 Smoke、Owner 真实任务重放、失败关闭、独立 Verifier 和
 资源清理证据的不可变验证记录；Run 通过持久化幂等键与 digest Lease 在中断后恢复，清理失败

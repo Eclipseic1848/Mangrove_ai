@@ -210,7 +210,8 @@ class OciSigningRequest(BaseModel):
         pattern=r"^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+$"
     )
     subject_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    private_key_path: Path
+    # 签名必填；纯验证（装载重验）不需要私钥。
+    private_key_path: Path | None = None
     public_key_path: Path
 
 
@@ -546,6 +547,8 @@ class LockedCliOciSigningRuntime:
     ) -> SigningStepResult:
         source_layout = request.source_layout.resolve()
         output_layout = request.output_layout.resolve()
+        if request.private_key_path is None:
+            raise ValueError("OCI 签名请求缺少私钥；纯验证请使用 verify_local")
         private_key = request.private_key_path.resolve()
         public_key = request.public_key_path.resolve()
         if not source_layout.is_dir():
