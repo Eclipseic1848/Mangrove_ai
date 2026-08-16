@@ -65,6 +65,26 @@ _TERMINAL_STATUSES = {
     "failed",
     "cancelled",
 }
+# 运行期治理监督的投影检查节奏（秒）。
+RUNTIME_GATE_POLL_SECONDS = 30
+
+
+class _GateViolationAbort(RuntimeError):
+    """运行期治理门命中：任务已标记取消，调用方不得再覆盖状态。"""
+
+
+def _capability_selections_table_exists() -> bool:
+    """只读检查目录冻结选择表是否存在；监督路径零 DDL。"""
+    import sqlite3
+
+    if not Path(settings.webui_db_path).is_file():
+        return False
+    with sqlite3.connect(settings.webui_db_path, timeout=30) as connection:
+        row = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='capability_selections'"
+        ).fetchone()
+    return row is not None
 _HEAVY_FORMATS = {"docx", "pdf", "pptx"}
 _HEAVY_SUFFIXES = {
     ".pdf",
@@ -88,6 +108,33 @@ def _upload_store() -> UploadStore:
         root=settings.data_prep_upload_root,
         max_bytes=settings.data_prep_max_upload_bytes,
     )
+
+
+def _platform_signing_runtime_factory():
+    """#13 装载验签的签名运行时；延迟装配避免 API 模块装载环。"""
+    from src.api.capability_governance_runtime import (
+        get_platform_signing_runtime,
+    )
+
+    return get_platform_signing_runtime()
+
+
+def _platform_oras_executable() -> str:
+    """平台 Layout 物化用的锁定 ORAS 路径；延迟装配避免 API 模块装载环。"""
+    from src.api.capability_governance_runtime import (
+        get_locked_signing_toolchain,
+    )
+
+    return str(get_locked_signing_toolchain().oras_executable)
+
+
+def _resolve_actor_role(owner_id: str) -> str:
+    """装载门的真实角色解析；未知角色失败关闭为普通用户。"""
+    user = get_store().get_user(owner_id)
+    role = str((user or {}).get("role") or "user")
+    if role == "super_admin":
+        return "superadmin"
+    return role if role in {"user", "admin"} else "user"
 
 
 def _is_heavy(task: dict[str, Any]) -> bool:
@@ -140,6 +187,15 @@ class SemanticWorkspaceManager:
                 db_path=settings.webui_db_path,
                 oci_layout_path=settings.capability_oci_layout_path,
                 mount_root=settings.capability_mount_cache_path,
+                platform_oci_layout_path=(
+                    settings.capability_platform_oci_layout_path
+                ),
+                platform_oras_executable_factory=_platform_oras_executable,
+                platform_signing_public_key_path=(
+                    settings.capability_platform_signing_public_key
+                ),
+                signing_runtime_factory=_platform_signing_runtime_factory,
+                actor_role_resolver=_resolve_actor_role,
             ),
             capability_host=(
                 CapabilityHost(
@@ -211,6 +267,185 @@ class SemanticWorkspaceManager:
         while True:
             await asyncio.sleep(3600)
             get_store().purge_expired_semantic_workspace_tasks()
+
+    async def _selection_has_capabilities(
+        self,
+        user_id: str,
+        task_id: str,
+        revision: int,
+    ) -> bool:
+        """运行期监督的前置短路：无能力任务零负担（AC6）。"""
+        from src.capability_catalog import (
+            CapabilityCatalog,
+            CatalogActor,
+            SqliteCapabilityCatalogRepository,
+        )
+
+        if not _capability_selections_table_exists():
+            # 零 DDL 读取路径：目录表不存在即无冻结选择，无能力任务。
+            return False
+        catalog = CapabilityCatalog(
+            SqliteCapabilityCatalogRepository(
+                settings.webui_db_path,
+                initialize_schema=False,
+            )
+        )
+        selection = catalog.resolve_selection(
+            CatalogActor(owner_id=user_id, role=_resolve_actor_role(user_id)),
+            task_id=task_id,
+            revision=revision,
+        )
+        return bool(selection is not None and selection.pack_refs)
+
+    async def _runtime_gate_violation(
+        self,
+        user_id: str,
+        task_id: str,
+        revision: int,
+    ) -> bool:
+        """运行期只读投影检查：隔离或撤销返回 True；不写事件、不写投影。"""
+        from src.capability_catalog import (
+            CapabilityCatalog,
+            CatalogActor,
+            SqliteCapabilityCatalogRepository,
+        )
+        from src.capability_governance import (
+            CapabilityEligibility,
+            CapabilityGovernance,
+            CapabilityLifecycle,
+            SqliteCapabilityGovernanceRepository,
+        )
+
+        if not _capability_selections_table_exists():
+            # 零 DDL 读取路径：目录表不存在即无冻结选择，无违规可判定。
+            return False
+        catalog = CapabilityCatalog(
+            SqliteCapabilityCatalogRepository(
+                settings.webui_db_path,
+                initialize_schema=False,
+            )
+        )
+        actor = CatalogActor(
+            owner_id=user_id, role=_resolve_actor_role(user_id)
+        )
+        selection = catalog.resolve_selection(
+            actor,
+            task_id=task_id,
+            revision=revision,
+        )
+        if selection is None:
+            return False
+        governance = CapabilityGovernance(
+            catalog,
+            SqliteCapabilityGovernanceRepository(settings.webui_db_path),
+        )
+        for ref in selection.pack_refs:
+            pack = catalog.resolve_pack(actor, ref.pack_id, ref.version)
+            if pack is None or pack.digest != ref.digest:
+                # 身份失配是硬门；运行中失配同样失败关闭。
+                return True
+            projection = governance.runtime_projection_for_pack(pack)
+            if projection.lifecycle is CapabilityLifecycle.REVOKED:
+                return True
+            if projection.eligibility is CapabilityEligibility.QUARANTINED:
+                return True
+        return False
+
+    async def _supervise_runtime_gate(
+        self,
+        user_id: str,
+        task_id: str,
+        revision: int,
+        execution: asyncio.Future,
+    ) -> bool:
+        """运行期治理监督：命中隔离/撤销 → 停容器与 Sidecar + 标记取消。
+
+        返回 True 表示硬门命中（已标记取消并取消执行）；False 表示执行已
+        正常结束。「当前原子调用完成后停止后续调用」由 Sidecar 停止提供；
+        违反硬门时立即取消并禁止发布 Candidate/Delivery（复用 _mark_cancelled）。
+        """
+        while True:
+            await asyncio.sleep(RUNTIME_GATE_POLL_SECONDS)
+            if execution.done():
+                return False
+            try:
+                violated = await self._runtime_gate_violation(
+                    user_id,
+                    task_id,
+                    revision,
+                )
+            except Exception:
+                # 投影读取异常不是确定性违反：跳过本轮继续监督，
+                # 避免数据库瞬时故障误杀正常任务。
+                continue
+            if not violated:
+                continue
+            # 硬门命中：先停容器与 Sidecar（阻断后续能力调用），
+            # 再标记取消，最后取消执行协程并等待其清理收尾。
+            try:
+                await self._pi_runtime.cancel(user_id, task_id, revision)
+            except Exception as error:
+                # 容器清理失败不能掩盖治理取消事实；留痕供审计。
+                get_store().append_semantic_workspace_event(
+                    user_id,
+                    task_id,
+                    stage="cancelled",
+                    event_type="gate_cancel_cleanup_failed",
+                    summary="治理门取消：容器清理失败",
+                    details={
+                        "error": str(error) or type(error).__name__,
+                    },
+                )
+            self._mark_cancelled(user_id, task_id, revision)
+            execution.cancel()
+            with suppress(asyncio.CancelledError):
+                await execution
+            return True
+
+    async def _await_with_gate_supervision(
+        self,
+        user_id: str,
+        task_id: str,
+        revision: int,
+        execution: asyncio.Future,
+    ) -> object:
+        """并发等待执行与运行期监督；无能力任务直接等待执行。"""
+        if not await self._selection_has_capabilities(
+            user_id,
+            task_id,
+            revision,
+        ):
+            return await execution
+        supervisor = asyncio.ensure_future(
+            self._supervise_runtime_gate(
+                user_id,
+                task_id,
+                revision,
+                execution,
+            )
+        )
+        try:
+            done, _pending = await asyncio.wait(
+                {execution, supervisor},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            if not supervisor.done():
+                supervisor.cancel()
+            with suppress(asyncio.CancelledError):
+                await supervisor
+        if supervisor in done:
+            # 监督先完成即监督优先：命中硬门（True）或监督异常都失败关闭，
+            # 即使 cancel 期间执行恰好正常完成也不返回其结果（竞态防护）。
+            try:
+                hit = supervisor.result()
+            except BaseException:
+                hit = True
+            if hit:
+                raise _GateViolationAbort(
+                    "能力运行期治理门触发：已被隔离或撤销"
+                )
+        return execution.result()
 
     def enqueue(self, user_id: str, task_id: str) -> None:
         active = self._active.get(task_id)
@@ -1082,20 +1317,34 @@ class SemanticWorkspaceManager:
         )
         try:
             if checkpoint is not None:
-                result = await self._pi_runtime.resume(
-                    request,
-                    checkpoint=checkpoint,
-                    on_event=on_event,
+                execution: asyncio.Future = asyncio.ensure_future(
+                    self._pi_runtime.resume(
+                        request,
+                        checkpoint=checkpoint,
+                        on_event=on_event,
+                    )
                 )
             else:
-                result = await self._pi_runtime.start(
-                    request,
-                    on_event=on_event,
+                execution = asyncio.ensure_future(
+                    self._pi_runtime.start(
+                        request,
+                        on_event=on_event,
+                    )
                 )
+            result = await self._await_with_gate_supervision(
+                user_id,
+                task_id,
+                revision,
+                execution,
+            )
         except _RevisionSwitchAtSafePoint:
             # 新 revision 已冻结后，显式终止旧版本容器；旧工作区仍保留为
             # 审计证据，但不会被登记成新版本候选或正式交付。
             await self._pi_runtime.cancel(user_id, task_id, revision)
+            return
+        except _GateViolationAbort:
+            # 治理门命中：状态已由监督标记为 cancelled，静默退出；
+            # 不覆盖状态，也不发布 Candidate/Delivery。
             return
         if result.status is RuntimeStatus.NEEDS_INPUT:
             repository.update(

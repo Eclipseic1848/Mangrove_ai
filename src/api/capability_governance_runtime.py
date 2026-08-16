@@ -27,6 +27,134 @@ from src.config.settings import settings
 _manager: CapabilityValidationManager | None = None
 _platform_manager: object | None = None
 _platform_dependencies: tuple[object, object] | None = None
+_signing_toolchain: object | None = None
+_signing_runtime: object | None = None
+_runtime_gate: object | None = None
+
+
+def get_locked_signing_toolchain():
+    """#12 发布与 #13 装载验签共享的工具链单例。"""
+    global _signing_toolchain
+    if _signing_toolchain is None:
+        from src.capability_governance.oci_signing import (
+            LockedOciSigningToolchain,
+        )
+
+        _signing_toolchain = LockedOciSigningToolchain.load(
+            tool_root=settings.capability_supply_chain_tool_root,
+            lock_path=settings.capability_supply_chain_lock_path,
+        )
+    return _signing_toolchain
+
+
+def get_platform_signing_runtime():
+    """#12 签名事务与 #13 装载验签共享的签名运行时单例。"""
+    global _signing_runtime
+    if _signing_runtime is None:
+        from src.capability_governance.oci_signing import (
+            LockedCliOciSigningRuntime,
+        )
+
+        project_root = (
+            Path(settings.webui_db_path).resolve().parent.parent
+        )
+        toolchain = get_locked_signing_toolchain()
+        _signing_runtime = LockedCliOciSigningRuntime(
+            toolchain=toolchain,
+            work_root=(
+                project_root / "data/capability-governance/signing-runtime"
+            ),
+            project_root=project_root,
+            protected_key_roots=(project_root / "data",),
+        )
+    return _signing_runtime
+
+
+def get_runtime_gate():
+    """#13 冻结拦截与选择过滤共用的运行时门装配（同一 check_mount 实现）。"""
+    global _runtime_gate
+    if _runtime_gate is None:
+        from src.capability_catalog import SqliteCapabilityCatalogRepository
+        from src.capability_governance import (
+            CapabilityGovernance,
+            CapabilityGovernanceTarget,
+            SqliteCapabilityGovernanceRepository,
+        )
+        from src.capability_governance.runtime_gate import (
+            CapabilityGovernanceRuntimeGate,
+            OciPlatformSignatureVerifier,
+        )
+        from src.conversation_steering import ProcedureScope
+
+        governance_repository = SqliteCapabilityGovernanceRepository(
+            settings.webui_db_path
+        )
+        governance = CapabilityGovernance(
+            CapabilityCatalog(
+                SqliteCapabilityCatalogRepository(settings.webui_db_path)
+            ),
+            governance_repository,
+        )
+
+        def platform_publication_for(pack):
+            return governance_repository.get_latest_platform_event(
+                CapabilityGovernanceTarget(
+                    owner_id=None,
+                    scope=ProcedureScope.PLATFORM,
+                    pack_id=pack.pack_id,
+                    version=pack.version,
+                    digest=pack.digest,
+                ),
+                "platform_published",
+            )
+
+        verifier = None
+        public_key = settings.capability_platform_signing_public_key
+        if public_key:
+            try:
+                verifier = OciPlatformSignatureVerifier(
+                    signing_runtime=get_platform_signing_runtime(),
+                    platform_layout=Path(
+                        settings.capability_platform_oci_layout_path
+                    ),
+                    public_key_path=Path(public_key),
+                )
+            except Exception:
+                # 签名运行时不可用时，有发布事件的平台 Pack 冻结被门拒绝
+                # （fail-closed）；个人 Pack 与 legacy 平台 Pack 不受影响。
+                verifier = None
+        _runtime_gate = CapabilityGovernanceRuntimeGate(
+            projection_for=governance.runtime_projection_for_pack,
+            platform_publication_for=platform_publication_for,
+            signature_verifier=verifier,
+        )
+    return _runtime_gate
+
+
+def _replay_guard(catalog, governance):
+    """重放前投影检查：被隔离/撤销的目标拒绝重放（draft 验证目标允许）。"""
+
+    def guard(run) -> None:
+        from src.capability_governance import (
+            CapabilityEligibility,
+            CapabilityLifecycle,
+        )
+
+        actor = CatalogActor(
+            owner_id=run.owner_id, role=run.actor_role
+        )
+        pack = catalog.resolve_pack(
+            actor, run.target.pack_id, run.target.version
+        )
+        if pack is None:
+            raise RuntimeError("验证目标能力不存在或不可见")
+        projection = governance.runtime_projection_for_pack(pack)
+        if projection.lifecycle is CapabilityLifecycle.REVOKED:
+            raise RuntimeError("验证目标能力已被撤销")
+        if projection.eligibility is CapabilityEligibility.QUARANTINED:
+            raise RuntimeError("验证目标能力已被隔离")
+
+    return guard
 
 
 def get_capability_validation_manager() -> CapabilityValidationManager:
@@ -90,6 +218,10 @@ def get_capability_validation_manager() -> CapabilityValidationManager:
                         ),
                         run.run_id,
                     ).cancel_requested,
+                    replay_guard=_replay_guard(
+                        catalog,
+                        governance,
+                    ),
                 ),
             ),
             supply_chain_evidence=supply_chain_evidence,
@@ -106,17 +238,11 @@ def get_platform_publication_dependencies() -> tuple[object, object]:
             OrasOciLayoutStore,
             SqliteCapabilityCatalogRepository,
         )
-        from src.capability_governance.oci_signing import (
-            LockedOciSigningToolchain,
-        )
         from src.capability_governance.platform_snapshot import (
             PlatformSnapshotGenerator,
         )
 
-        toolchain = LockedOciSigningToolchain.load(
-            tool_root=settings.capability_supply_chain_tool_root,
-            lock_path=settings.capability_supply_chain_lock_path,
-        )
+        toolchain = get_locked_signing_toolchain()
         generator = PlatformSnapshotGenerator(
             OrasOciLayoutStore(
                 settings.capability_oci_layout_path,
@@ -145,8 +271,6 @@ def get_platform_validation_manager() -> object:
             SqliteCapabilityGovernanceRepository,
         )
         from src.capability_governance.oci_signing import (
-            LockedCliOciSigningRuntime,
-            LockedOciSigningToolchain,
             OciSigningTransaction,
         )
         from src.capability_governance.platform_executors import (
@@ -159,21 +283,8 @@ def get_platform_validation_manager() -> object:
             LockedPlatformValidationExecutor,
         )
 
-        project_root = (
-            Path(settings.webui_db_path).resolve().parent.parent
-        )
-        toolchain = LockedOciSigningToolchain.load(
-            tool_root=settings.capability_supply_chain_tool_root,
-            lock_path=settings.capability_supply_chain_lock_path,
-        )
-        signing_runtime = LockedCliOciSigningRuntime(
-            toolchain=toolchain,
-            work_root=(
-                project_root / "data/capability-governance/signing-runtime"
-            ),
-            project_root=project_root,
-            protected_key_roots=(project_root / "data",),
-        )
+        toolchain = get_locked_signing_toolchain()
+        signing_runtime = get_platform_signing_runtime()
         repository = SqliteCapabilityGovernanceRepository(
             settings.webui_db_path
         )

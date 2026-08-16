@@ -95,6 +95,7 @@ class PiTaskReplayRunner:
         cancel_requested: Callable[[], bool],
         cleanup_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
         grant_revoker: Callable[[str, str, int, str], object] | None = None,
+        replay_guard: Callable[[CapabilityValidationRun], None] | None = None,
     ) -> None:
         self._task_resolver = task_resolver
         self._capability_mounts = capability_mounts
@@ -102,6 +103,7 @@ class PiTaskReplayRunner:
         self._cancel_requested = cancel_requested
         self._cleanup_runner = cleanup_runner or self._docker_cleanup
         self._grant_revoker = grant_revoker or self._revoke_grants
+        self._replay_guard = replay_guard
 
     @staticmethod
     def _actor(run: CapabilityValidationRun) -> CatalogActor:
@@ -201,6 +203,10 @@ class PiTaskReplayRunner:
 
     def __call__(self, run: CapabilityValidationRun) -> dict[str, object]:
         actor = self._actor(run)
+        if self._replay_guard is not None:
+            # 重放启动前再查一次治理投影：装载之后被隔离/撤销的目标
+            # 不得继续重放执行（draft 验证目标不受影响）。
+            self._replay_guard(run)
         request = self._task_resolver.load_replay_request(
             actor,
             run.target,

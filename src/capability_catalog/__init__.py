@@ -16,6 +16,7 @@ from .sqlite_repository import SqliteCapabilityCatalogRepository
 from .legacy import LegacyCapabilityManifestAdapter, LegacyDraftImporter
 from .oci_store import OciArtifactDescriptor, OrasOciLayoutStore
 from .mount_resolver import CapabilityMountResolver
+from .runtime_gate import CapabilityMountGateRejected, RuntimeGateContract
 from .default_mounts import DefaultCapabilityMounts
 
 __all__ = [
@@ -35,5 +36,7 @@ __all__ = [
     "OciArtifactDescriptor",
     "OrasOciLayoutStore",
     "CapabilityMountResolver",
+    "CapabilityMountGateRejected",
+    "RuntimeGateContract",
     "DefaultCapabilityMounts",
 ]

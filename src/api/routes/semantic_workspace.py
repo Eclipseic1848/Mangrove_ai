@@ -39,6 +39,7 @@ from src.api.semantic_workspace_runtime import (
 )
 from src.capability_catalog import (
     CapabilityCatalog,
+    CapabilityMountGateRejected,
     CapabilityPackRef,
     DefaultCapabilityMounts,
     SqliteCapabilityCatalogRepository,
@@ -117,6 +118,86 @@ def _require_capability_gray(user: dict[str, Any]) -> None:
             status_code=status.HTTP_409_CONFLICT,
             detail="任务级能力 Sidecar 灰度尚未启用",
         )
+
+
+def _runtime_gate():
+    """#13 冻结拦截共用的运行时门；与装载 Seam 是同一 check_mount 实现。"""
+    from src.api.capability_governance_runtime import get_runtime_gate
+
+    return get_runtime_gate()
+
+
+def _runtime_gate_projection_governance():
+    """选择列表的只读投影装配；不装配平台发布/签名依赖。"""
+    from src.capability_governance import (
+        CapabilityGovernance,
+        SqliteCapabilityGovernanceRepository,
+    )
+
+    return CapabilityGovernance(
+        _capability_catalog(),
+        SqliteCapabilityGovernanceRepository(settings.webui_db_path),
+    )
+
+
+def _selectable_for_task(projection) -> bool:
+    """新任务选择的三轴过滤；deprecated/revoked/quarantined/draft 不可选。
+
+    历史冻结任务的恢复走 resolve_selection 路径，不受此谓词影响。
+    """
+    from src.capability_governance import (
+        CapabilityEligibility,
+        CapabilityLifecycle,
+        CapabilityMaturity,
+    )
+
+    return (
+        projection.maturity is CapabilityMaturity.VERIFIED
+        and projection.lifecycle is CapabilityLifecycle.ACTIVE
+        and projection.eligibility is CapabilityEligibility.ELIGIBLE
+    )
+
+
+def _check_freeze_gate(
+    actor,
+    pack_refs: tuple[CapabilityPackRef, ...],
+    catalog: CapabilityCatalog,
+) -> None:
+    """冻结前执行完整装载门 + 新任务可选谓词；拒绝以 409 失败关闭。
+
+    装载门放行 DEPRECATED 是为历史恢复装载；冻结是「新任务」入口，
+    必须再按三轴可选谓词拦截（AC3：deprecated 不进入新任务选择）。
+    """
+    gate = _runtime_gate()
+    governance = _runtime_gate_projection_governance()
+    for ref in pack_refs:
+        pack = catalog.resolve_pack(actor, ref.pack_id, ref.version)
+        if pack is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="能力包不存在或当前用户不可见",
+            )
+        if pack.digest != ref.digest:
+            # 身份失配是调用方输入错误（引用伪造或版本漂移），
+            # 保持 422 语义；目录 freeze_selection 仍二次复核。
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="能力包 digest 与引用不一致",
+            )
+        try:
+            gate.check_mount(actor, pack)
+        except CapabilityMountGateRejected as error:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(error),
+            ) from error
+        if not _selectable_for_task(
+            governance.runtime_projection_for_pack(pack)
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="能力当前不可用于新任务选择",
+            )
 
 
 def _inherit_capability_selection(
@@ -406,9 +487,16 @@ def list_gray_capabilities(user=Depends(get_current_user)):
 
     _require_capability_gray(user)
     actor = catalog_actor_from_user(user)
+    catalog = _capability_catalog()
+    governance = _runtime_gate_projection_governance()
     items = []
-    for pack in _capability_catalog().list_visible_packs(actor):
+    for pack in catalog.list_visible_packs(actor):
         if pack.maturity is not CapabilityMaturity.VERIFIED:
+            continue
+        if not _selectable_for_task(
+            governance.runtime_projection_for_pack(pack)
+        ):
+            # deprecated/revoked/quarantined 不进入新任务选择（AC3）。
             continue
         manifest = dict(pack.manifest)
         kind = manifest.get("kind", "capability_pack")
@@ -723,21 +811,13 @@ async def create_task(
             )
         capability_catalog = _capability_catalog()
         actor = catalog_actor_from_user(user)
-        for ref in payload.capability_pack_refs:
-            pack = capability_catalog.resolve_pack(
-                actor,
-                ref.pack_id,
-                ref.version,
-            )
-            if (
-                pack is None
-                or pack.maturity is not CapabilityMaturity.VERIFIED
-                or pack.digest != ref.digest
-            ):
-                raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail="所选能力不存在、未验证或版本身份已变化",
-                )
+        # 创建与冻结共用装载门（AC4 同一公开 Interface）；digest 精确
+        # 匹配仍由目录 freeze_selection 复核。
+        _check_freeze_gate(
+            actor,
+            payload.capability_pack_refs,
+            capability_catalog,
+        )
     connection_binding = None
     if (
         payload.runtime_version is RuntimeVersion.PI
@@ -976,7 +1056,7 @@ async def create_task(
         )
         if capability_catalog is not None:
             capability_catalog.freeze_selection(
-        catalog_actor_from_user(user),
+                catalog_actor_from_user(user),
                 task_id=task_id,
                 revision=1,
                 pack_refs=payload.capability_pack_refs,

@@ -275,10 +275,11 @@ class CapabilityGovernance:
         status = "promoted" if saved.event_id == new_event.event_id else "already_verified"
         return PromotionOutcome(status=status, event=saved)
 
-    def _projection_for_pack(
+    def runtime_projection_for_pack(
         self,
         pack: CapabilityPack,
     ) -> CapabilityGovernanceProjection:
+        """按 pack 折叠治理事件的公开只读投影；运行时门与新任务选择共用的单一来源。"""
         target = self._target(pack)
         events = [
             event
@@ -350,7 +351,7 @@ class CapabilityGovernance:
             packs,
             key=lambda item: (item.pack_id, item.version),
         ):
-            projection = self._projection_for_pack(pack)
+            projection = self.runtime_projection_for_pack(pack)
             view = CapabilityGovernanceView.from_projection(projection, actor)
             gaps: tuple[PromotionGap, ...] = ()
             if projection.maturity is not CapabilityMaturity.VERIFIED:
@@ -377,7 +378,7 @@ class CapabilityGovernance:
         items: list[AdminReviewItem] = []
         for pack in sorted(packs, key=lambda item: (item.pack_id, item.version)):
             target = self._target(pack)
-            projection = self._projection_for_pack(pack)
+            projection = self.runtime_projection_for_pack(pack)
             gaps: tuple[PromotionGap, ...] = ()
             if projection.maturity is not CapabilityMaturity.VERIFIED:
                 gaps = self.evaluate_promotion(target)
@@ -539,7 +540,7 @@ class CapabilityGovernance:
                 status="rejected",
                 gaps=("platform_scope",),
             )
-        projection = self._projection_for_pack(pack)
+        projection = self.runtime_projection_for_pack(pack)
         gaps: list[str] = []
         if projection.maturity is not CapabilityMaturity.VERIFIED:
             gaps.append("not_verified")
