@@ -105,6 +105,10 @@ class CapabilityGovernanceEvent(BaseModel):
         "platform_candidate",
         "platform_published",
         "audience_changed",
+        "lifecycle_changed",
+        "eligibility_changed",
+        "risk_accepted",
+        "recommendation_changed",
     ] = "registered"
     maturity: CapabilityMaturity = CapabilityMaturity.DRAFT
     lifecycle: CapabilityLifecycle = CapabilityLifecycle.ACTIVE
@@ -142,6 +146,14 @@ class CapabilityGovernanceEvent(BaseModel):
     signing_public_key_sha256: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
+    # 生命周期/隔离/风险接受/推荐指针专用字段；其余事件类型必须为 None。
+    expires_at: datetime | None = None
+    recommended_version: str | None = Field(
+        default=None, min_length=1, max_length=120
+    )
+    finding_ref: str | None = Field(
+        default=None, min_length=1, max_length=200
+    )
     occurred_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -156,6 +168,18 @@ class CapabilityGovernanceEvent(BaseModel):
             self.revision,
             self.failure_reason,
         )
+        lifecycle_fields = (
+            self.expires_at,
+            self.recommended_version,
+            self.finding_ref,
+        )
+        if self.event_type not in {
+            "lifecycle_changed",
+            "eligibility_changed",
+            "risk_accepted",
+            "recommendation_changed",
+        } and any(field is not None for field in lifecycle_fields):
+            raise ValueError("生命周期治理字段只允许出现在对应治理事件中")
         platform_fields = (
             self.source_digest,
             self.platform_digest,
@@ -306,6 +330,116 @@ class CapabilityGovernanceEvent(BaseModel):
             ):
                 raise ValueError("受众变更事件不得携带候选/验证/签名字段")
             return self
+        if self.event_type == "lifecycle_changed":
+            # 弃用/撤销/恢复只改变生命周期轴；成熟度与运行资格不借道变化。
+            if self.maturity is not CapabilityMaturity.VERIFIED:
+                raise ValueError("生命周期变更事件必须携带 verified 成熟度")
+            if self.eligibility not in {
+                CapabilityEligibility.ELIGIBLE,
+                CapabilityEligibility.QUARANTINED,
+            }:
+                # 携带当前运行资格快照：隔离中的包被弃用/撤销时，事件快照
+                # 必须与当时投影一致，不得冒充 eligible（AC7 预期状态真实性）。
+                raise ValueError("生命周期变更事件必须携带当前运行资格快照")
+            if not self.reason:
+                raise ValueError("生命周期变更事件必须携带非空原因")
+            if (
+                self.source_validation_run_id is not None
+                or self.source_supply_chain_evidence_id is not None
+            ):
+                raise ValueError("生命周期变更事件不得携带晋级证据引用")
+            if any(field is not None for field in audit_fields):
+                raise ValueError("生命周期变更事件不得携带审计查看字段")
+            if any(field is not None for field in platform_fields):
+                raise ValueError("生命周期变更事件不得携带平台发布字段")
+            if any(field is not None for field in lifecycle_fields):
+                raise ValueError("生命周期变更事件不得携带其他治理字段")
+            return self
+        if self.event_type == "eligibility_changed":
+            # 隔离/解除隔离只改变运行资格轴；已撤销的能力不适用隔离语义。
+            if self.maturity is not CapabilityMaturity.VERIFIED:
+                raise ValueError("运行资格变更事件必须携带 verified 成熟度")
+            if self.lifecycle not in {
+                CapabilityLifecycle.ACTIVE,
+                CapabilityLifecycle.DEPRECATED,
+            }:
+                raise ValueError(
+                    "运行资格变更事件的生命周期必须为 active 或 deprecated"
+                )
+            if not self.reason:
+                raise ValueError("运行资格变更事件必须携带非空原因")
+            if (
+                self.source_validation_run_id is not None
+                or self.source_supply_chain_evidence_id is not None
+            ):
+                raise ValueError("运行资格变更事件不得携带晋级证据引用")
+            if any(field is not None for field in audit_fields):
+                raise ValueError("运行资格变更事件不得携带审计查看字段")
+            if any(field is not None for field in platform_fields):
+                raise ValueError("运行资格变更事件不得携带平台发布字段")
+            if any(field is not None for field in lifecycle_fields):
+                raise ValueError("运行资格变更事件不得携带其他治理字段")
+            return self
+        if self.event_type == "risk_accepted":
+            # 限期风险接受：隔离之后恢复到 eligible 的有界事实。
+            if (
+                self.maturity is not CapabilityMaturity.VERIFIED
+                or self.lifecycle
+                not in {
+                    CapabilityLifecycle.ACTIVE,
+                    CapabilityLifecycle.DEPRECATED,
+                }
+                or self.eligibility is not CapabilityEligibility.ELIGIBLE
+            ):
+                raise ValueError(
+                    "风险接受事件必须携带 verified/(active|deprecated)/eligible 状态"
+                )
+            if self.expires_at is None:
+                raise ValueError("风险接受事件必须携带到期时间")
+            if self.finding_ref is None:
+                raise ValueError("风险接受事件必须引用验证运行证据")
+            if self.recommended_version is not None:
+                raise ValueError("风险接受事件不得携带推荐版本")
+            if not self.reason:
+                raise ValueError("风险接受事件必须携带非空原因")
+            if (
+                self.source_validation_run_id is not None
+                or self.source_supply_chain_evidence_id is not None
+            ):
+                raise ValueError("风险接受事件不得携带晋级证据引用")
+            if any(field is not None for field in audit_fields):
+                raise ValueError("风险接受事件不得携带审计查看字段")
+            if any(field is not None for field in platform_fields):
+                raise ValueError("风险接受事件不得携带平台发布字段")
+            return self
+        if self.event_type == "recommendation_changed":
+            # 回滚只改变新任务推荐指针，不改变任何三轴事实。
+            if self.target.scope is not ProcedureScope.PLATFORM:
+                raise ValueError("推荐指针变更事件只能针对平台目标")
+            if (
+                self.maturity is not CapabilityMaturity.VERIFIED
+                or self.lifecycle is not CapabilityLifecycle.ACTIVE
+                or self.eligibility is not CapabilityEligibility.ELIGIBLE
+            ):
+                raise ValueError(
+                    "推荐指针变更事件必须携带 verified/active/eligible 状态"
+                )
+            if self.recommended_version is None:
+                raise ValueError("推荐指针变更事件必须携带推荐版本")
+            if self.expires_at is not None or self.finding_ref is not None:
+                raise ValueError("推荐指针变更事件不得携带风险接受字段")
+            if not self.reason:
+                raise ValueError("推荐指针变更事件必须携带非空原因")
+            if (
+                self.source_validation_run_id is not None
+                or self.source_supply_chain_evidence_id is not None
+            ):
+                raise ValueError("推荐指针变更事件不得携带晋级证据引用")
+            if any(field is not None for field in audit_fields):
+                raise ValueError("推荐指针变更事件不得携带审计查看字段")
+            if any(field is not None for field in platform_fields):
+                raise ValueError("推荐指针变更事件不得携带平台发布字段")
+            return self
         raise ValueError("未知能力治理事件类型")
 
 
@@ -326,6 +460,16 @@ class PromotionOutcome(BaseModel):
         elif self.gaps or self.event is None:
             raise ValueError("晋级结果必须携带事件且无缺口")
         return self
+
+
+class GovernanceCommandOutcome(BaseModel):
+    """治理状态命令的显式结果；rejected 的 gaps 给出脱敏字面量原因。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    status: Literal["applied", "already_applied", "rejected"]
+    gaps: tuple[str, ...] = ()
+    event: CapabilityGovernanceEvent | None = None
 
 
 class AuditViewOutcome(BaseModel):
@@ -438,6 +582,8 @@ class CapabilityGovernanceProjection(BaseModel):
     source: Literal["governance_event", "legacy_compat"]
     # 平台能力受众；#12 发布固定 admin_gray，受众变更命令是唯一改变途径。
     audience: CapabilityAudience | None = None
+    # 新任务推荐指针（#14 回滚命令折叠）；None 表示无显式指针。
+    recommended_version: str | None = None
 
 
 class CapabilityGovernanceView(BaseModel):

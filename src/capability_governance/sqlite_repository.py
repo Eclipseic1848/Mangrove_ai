@@ -815,6 +815,94 @@ class SqliteCapabilityGovernanceRepository:
         assert row is not None
         return CapabilityGovernanceEvent.model_validate_json(row["payload_json"])
 
+    def save_governance_event(
+        self,
+        event: CapabilityGovernanceEvent,
+    ) -> CapabilityGovernanceEvent:
+        if event.event_type not in {
+            "lifecycle_changed",
+            "eligibility_changed",
+            "risk_accepted",
+            "recommendation_changed",
+        }:
+            raise ValueError("治理事件专用入口只接受生命周期/资格/风险接受/推荐指针事件")
+        target = event.target
+        with self._connect() as connection:
+            if not self._schema_exists(connection):
+                raise RuntimeError("能力治理数据库尚未执行带备份迁移")
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT payload_json FROM capability_governance_events "
+                "WHERE owner_key=? AND pack_id=? AND version=? AND digest=? "
+                "AND idempotency_key=? AND event_type=?",
+                (
+                    _owner_key(target),
+                    target.pack_id,
+                    target.version,
+                    target.digest,
+                    event.idempotency_key,
+                    event.event_type,
+                ),
+            ).fetchone()
+            if existing is not None:
+                # 同幂等键重试返回既有事件；治理事实不可变、不可覆盖。
+                return CapabilityGovernanceEvent.model_validate_json(
+                    existing["payload_json"]
+                )
+            connection.execute(
+                "INSERT INTO capability_governance_events "
+                "(event_id, owner_key, scope, pack_id, version, digest, "
+                "idempotency_key, event_type, payload_json, occurred_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    event.event_id,
+                    _owner_key(target),
+                    target.scope.value,
+                    target.pack_id,
+                    target.version,
+                    target.digest,
+                    event.idempotency_key,
+                    event.event_type,
+                    event.model_dump_json(),
+                    event.occurred_at.isoformat(),
+                ),
+            )
+            row = connection.execute(
+                "SELECT payload_json FROM capability_governance_events "
+                "WHERE event_id=?",
+                (event.event_id,),
+            ).fetchone()
+        assert row is not None
+        return CapabilityGovernanceEvent.model_validate_json(row["payload_json"])
+
+    def get_governance_event_by_idempotency(
+        self,
+        target: CapabilityGovernanceTarget,
+        event_type: str,
+        idempotency_key: str,
+    ) -> CapabilityGovernanceEvent | None:
+        with self._connect() as connection:
+            if not self._schema_exists(connection):
+                return None
+            row = connection.execute(
+                "SELECT payload_json FROM capability_governance_events "
+                "WHERE owner_key=? AND pack_id=? AND version=? AND digest=? "
+                "AND event_type=? AND idempotency_key=?",
+                (
+                    _owner_key(target),
+                    target.pack_id,
+                    target.version,
+                    target.digest,
+                    event_type,
+                    idempotency_key,
+                ),
+            ).fetchone()
+        return (
+            CapabilityGovernanceEvent.model_validate_json(row["payload_json"])
+            if row is not None
+            else None
+        )
+
     def get_latest_platform_event(
         self,
         target: CapabilityGovernanceTarget,

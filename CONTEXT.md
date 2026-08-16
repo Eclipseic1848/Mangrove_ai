@@ -376,6 +376,18 @@ verified、`active | deprecated`、eligible；平台 Pack 还必须满足受众�
 「装载门/治理门/运行时门」均指本概念。
 _Avoid_: 绕过 Seam 直连物化、装载与冻结两套语义、deprecated 进入新任务选择
 
+**生命周期治理命令（GovernanceCommand）**：
+管理员（superadmin 同权限）通过 CapabilityGovernance 公开接口改变三轴状态与推荐指针的
+六个有界命令：弃用（新任务不再推荐，历史冻结可恢复）、撤销（禁止新任务/重试/恢复）、
+隔离（安全刹车，最终由管理员决定撤销或恢复）、恢复（完整复查链：漏洞库 7 天时效 +
+发布/签名证据 + 供应链证据 + 验证运行全绿）、限期风险接受（仅平台 admin_gray 受众、
+隔离中、任何 blocker 不可接受、引用本包验证运行证据、1-90 天默认 30）与回滚（推荐指针
+原子变更，目标全绿且证据齐备，历史 TaskRevision 不变）。全部命令要求 actor、原因、
+幂等键和预期状态；事件快照与写入时刻投影一致。风险接受到期在投影读取时惰性判定为
+quarantined（零调度零 DDL）。推荐指针由 `recommendation_changed` 事件折叠，选择列表
+置顶标记。
+_Avoid_: 修改历史事件、风险接受自动续期、跨包引用证据、回滚改写 TaskRevision
+
 **能力验证运行（CapabilityValidationRun）**：
 针对一个精确能力 digest 保存合成 Smoke、Owner 真实任务重放、失败关闭、独立 Verifier 和
 资源清理证据的不可变验证记录；Run 通过持久化幂等键与 digest Lease 在中断后恢复，清理失败

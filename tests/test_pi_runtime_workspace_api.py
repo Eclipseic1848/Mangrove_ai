@@ -1407,6 +1407,7 @@ def test_admin_can_freeze_visible_capability_when_creating_pi_task(
                     "kind": "tool",
                     "purpose": "按任务要求处理表格数据",
                     "scope": "platform",
+                    "recommended": False,
                 }
             ],
         }

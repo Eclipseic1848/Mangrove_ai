@@ -127,6 +127,18 @@ class CapabilityGovernanceRepository(Protocol):
         event: CapabilityGovernanceEvent,
     ) -> CapabilityGovernanceEvent: ...
 
+    def save_governance_event(
+        self,
+        event: CapabilityGovernanceEvent,
+    ) -> CapabilityGovernanceEvent: ...
+
+    def get_governance_event_by_idempotency(
+        self,
+        target: CapabilityGovernanceTarget,
+        event_type: str,
+        idempotency_key: str,
+    ) -> CapabilityGovernanceEvent | None: ...
+
     def get_latest_platform_event(
         self,
         target: CapabilityGovernanceTarget,
@@ -490,6 +502,30 @@ class InMemoryCapabilityGovernanceRepository:
         }:
             raise ValueError("平台事件专用入口只接受发布类事件")
         return self._insert_event(event)
+
+    def save_governance_event(
+        self,
+        event: CapabilityGovernanceEvent,
+    ) -> CapabilityGovernanceEvent:
+        if event.event_type not in {
+            "lifecycle_changed",
+            "eligibility_changed",
+            "risk_accepted",
+            "recommendation_changed",
+        }:
+            raise ValueError("治理事件专用入口只接受生命周期/资格/风险接受/推荐指针事件")
+        return self._insert_event(event)
+
+    def get_governance_event_by_idempotency(
+        self,
+        target: CapabilityGovernanceTarget,
+        event_type: str,
+        idempotency_key: str,
+    ) -> CapabilityGovernanceEvent | None:
+        event_id = self._idempotency.get(
+            (*_target_key(target), event_type, idempotency_key)
+        )
+        return self._events.get(event_id) if event_id is not None else None
 
     def get_latest_platform_event(
         self,

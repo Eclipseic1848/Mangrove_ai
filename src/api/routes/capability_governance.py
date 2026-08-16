@@ -360,3 +360,184 @@ def publish_platform(
             detail=f"平台候选未就绪：{'、'.join(outcome.gaps)}",
         )
     return outcome.model_dump(mode="json")
+
+
+# ---- #14 治理状态命令端点：弃用/撤销/隔离/风险接受/恢复/回滚/受众变更 ----
+
+class GovernancePackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    pack_id: str = Field(min_length=1, max_length=120)
+    version: str = Field(min_length=1, max_length=80)
+    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class RiskAcceptRequest(GovernancePackRequest):
+    finding_ref: str = Field(min_length=1, max_length=200)
+    days: int = Field(default=30, ge=1, le=90)
+
+
+class AudienceChangeRequest(GovernancePackRequest):
+    audience: Literal["admin_gray", "users"]
+
+
+def _governance_command(
+    method: str,
+    body: GovernancePackRequest,
+    admin,
+    idempotency_key: str,
+) -> dict:
+    """六个治理命令的统一执行与拒绝映射。"""
+    actor = catalog_actor_from_user(admin)
+    governance = _governance()
+    try:
+        outcome = getattr(governance, method)(
+            actor,
+            pack_ref=CapabilityPackRef(
+                pack_id=body.pack_id,
+                version=body.version,
+                digest=body.digest,
+            ),
+            reason=body.reason,
+            idempotency_key=idempotency_key,
+        )
+    except (PermissionError, KeyError, RuntimeError, ValueError) as error:
+        raise _http_error(error) from error
+    if outcome.status == "rejected":
+        # 预期状态不符或前置未满足：409 失败关闭，不静默生效。
+        raise HTTPException(
+            status_code=409,
+            detail=f"治理命令被拒绝：{'、'.join(outcome.gaps)}",
+        )
+    return outcome.model_dump(mode="json")
+
+
+@admin_router.post("/deprecate")
+def deprecate_pack(
+    body: GovernancePackRequest,
+    admin=Depends(require_admin),
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=200,
+        alias="Idempotency-Key",
+    ),
+):
+    return _governance_command("deprecate_pack", body, admin, idempotency_key)
+
+
+@admin_router.post("/revoke")
+def revoke_pack(
+    body: GovernancePackRequest,
+    admin=Depends(require_admin),
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=200,
+        alias="Idempotency-Key",
+    ),
+):
+    return _governance_command("revoke_pack", body, admin, idempotency_key)
+
+
+@admin_router.post("/quarantine")
+def quarantine_pack(
+    body: GovernancePackRequest,
+    admin=Depends(require_admin),
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=200,
+        alias="Idempotency-Key",
+    ),
+):
+    return _governance_command("quarantine_pack", body, admin, idempotency_key)
+
+
+@admin_router.post("/restore")
+def restore_pack(
+    body: GovernancePackRequest,
+    admin=Depends(require_admin),
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=200,
+        alias="Idempotency-Key",
+    ),
+):
+    return _governance_command("restore_pack", body, admin, idempotency_key)
+
+
+@admin_router.post("/rollback")
+def rollback_recommendation(
+    body: GovernancePackRequest,
+    admin=Depends(require_admin),
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=200,
+        alias="Idempotency-Key",
+    ),
+):
+    return _governance_command(
+        "rollback_recommendation", body, admin, idempotency_key
+    )
+
+
+@admin_router.post("/risk-accept")
+def accept_pack_risk(
+    body: RiskAcceptRequest,
+    admin=Depends(require_admin),
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=200,
+        alias="Idempotency-Key",
+    ),
+):
+    actor = catalog_actor_from_user(admin)
+    try:
+        outcome = _governance().accept_pack_risk(
+            actor,
+            pack_ref=CapabilityPackRef(
+                pack_id=body.pack_id,
+                version=body.version,
+                digest=body.digest,
+            ),
+            reason=body.reason,
+            finding_ref=body.finding_ref,
+            days=body.days,
+            idempotency_key=idempotency_key,
+        )
+    except (PermissionError, KeyError, RuntimeError, ValueError) as error:
+        raise _http_error(error) from error
+    if outcome.status == "rejected":
+        raise HTTPException(
+            status_code=409,
+            detail=f"治理命令被拒绝：{'、'.join(outcome.gaps)}",
+        )
+    return outcome.model_dump(mode="json")
+
+
+@admin_router.post("/change-audience")
+def change_audience(
+    body: AudienceChangeRequest,
+    admin=Depends(require_admin),
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=200,
+        alias="Idempotency-Key",
+    ),
+):
+    """#12 受众变更命令的 HTTP 入口（#14 补齐）。"""
+    actor = catalog_actor_from_user(admin)
+    try:
+        outcome = _governance().change_audience(
+            actor,
+            pack_ref=CapabilityPackRef(
+                pack_id=body.pack_id,
+                version=body.version,
+                digest=body.digest,
+            ),
+            audience=body.audience,
+            reason=body.reason,
+            idempotency_key=idempotency_key,
+        )
+    except (PermissionError, KeyError, RuntimeError, ValueError) as error:
+        raise _http_error(error) from error
+    return outcome.model_dump(mode="json")

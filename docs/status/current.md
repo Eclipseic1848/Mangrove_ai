@@ -40,7 +40,7 @@ PDF、Word、Excel、CSV 文件主链；数据库具备连接与测试基础。�
 | AC-07 旧 #33 三轴治理投影 | 完成并关闭 | 历史工单保留在旧仓库 |
 | AC-07 旧 #34 可恢复 ValidationRun | 工程实现、双轴审查、生产迁移、两项真实能力灰度、取消后重新发起和 8088 用户验收完成；Capability Host 代理修复经 PR #7 合并，旧工单已关闭 | 无 |
 | AC-07 旧 #35 Trivy/Syft 证据 | 工程实现、双轴复审、带备份生产 `0003` 迁移与 8088 用户验收完成；PR #6 已合并到 `main`，旧工单已关闭 | 无 |
-| AC-07 新 #8～#17 | #9 Cosign PoC、#10 自动晋级机制、#11 管理员审核与业务内容审计查看、#12 独立平台快照、签名与 admin_gray 发布、#13 运行时装载治理门均完成工程实现、双轴复审与 8088 验收；其余工单未开始 | 下一工单为 #14 弃用/回滚/隔离/撤销与限期风险接受 |
+| AC-07 新 #8～#17 | #9 Cosign PoC、#10 自动晋级机制、#11 管理员审核与业务内容审计查看、#12 独立平台快照、签名与 admin_gray 发布、#13 运行时装载治理门、#14 弃用/回滚/隔离/撤销与限期风险接受均完成工程实现、双轴复审与 8088 验收；其余工单未开始 | 下一工单为 #15 Python 表格 Tool 真实治理纵切面 |
 
 AC-06 两项历史 `admin_gray_only` 包是迁移兼容例外：管理员/超管只能使用自己拥有的
 TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍失败关闭。
@@ -182,13 +182,36 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
   零残留；完整任务执行受本地 LLM 环境限制未达成（非治理门问题，可复跑）。
   该结论不代表平台已发布、普通用户受众扩大或整个 AC-07/Phase 4 完成。
 
+2026-08-16，AC-07 #14 完成本地闭环：
+
+- 治理命令与事件：lifecycle_changed（弃用/撤销/恢复）、eligibility_changed（隔离/解除）、
+  risk_accepted（限期接受）、recommendation_changed（回滚指针）四类事件与 validator；
+  六个管理员命令（deprecate/revoke/quarantine/restore/risk_accept/rollback）+ 补
+  change_audience HTTP 路由；全部 actor/原因/幂等键/预期状态，事件快照与写入时刻投影一致；
+- 投影折叠升级：三轴逐轴取最后事实；风险接受惰性到期（读取时过期即按 quarantined 投影，
+  零调度零 DDL）；推荐指针折叠并置顶标记选择列表；
+- 门检查强化：发布门/受众变更门/恢复复查链补 Trivy 漏洞库 7 天时效复查（按内容 UpdatedAt）；
+  恢复完整复查链（发布/签名证据 + 供应链证据 + 验证运行）；
+- 风险接受约束：仅平台 admin_gray 受众、隔离中、任何 blocker（Secret/Critical/可修复
+  High/误配置/库过期）不可接受、finding_ref 实引本包验证运行、1-90 天（默认 30）；
+- 零 DDL：全部事件复用既有治理事件表，无新迁移；
+- 新增测试 68 项（事件/折叠/命令/门/HTTP/推荐指针）；后端全量
+  `1166 passed`（1 项环境基线失败：DNS 白名单解析，修复前即存在）；前端构建通过；
+  Playwright settings + semantic-workspace `38 passed`；
+- Standards/Spec 双轴审查首轮发现 4 项（签名受众检查、restore 幂等、事件快照冒充他态、
+  风险接受约束），两轮修复复核后双轴「无新问题，可合入」；
+- 8088 验收：9 个真实命令演练（applied/幂等/409 拒绝矩阵/403）全部符合预期，投影
+  （deprecated+quarantined 两轴独立）与选择列表生效，事件留痕可审计，容器/网络零残留；
+  真实 risk_accept applied 链与自动隔离触发接线留待 #15/#16 纵切面。
+  该结论不代表平台已发布、普通用户受众扩大或整个 AC-07/Phase 4 完成。
+
 ## 7. 当前优先顺序
 
-1. 新仓库 #9、#10、#11、#12、#13 已完成工程实现、双轴复审与 8088 验收；真实灰度包晋级与
+1. 新仓库 #9～#14 已完成工程实现、双轴复审与 8088 验收；真实灰度包晋级与
    真实平台发布纵切面留待 #15/#16。
-2. 下一工单为新仓库 [#14](https://github.com/Eclipseic1848/Mangrove_ai/issues/14)：
-   弃用、回滚、隔离、撤销与限期风险接受（依赖旧 #35、新 #13）。
-3. #9～#13 完成不代表任何能力已经晋级、平台能力已经发布或普通用户受众已经扩大。
+2. 下一工单为新仓库 [#15](https://github.com/Eclipseic1848/Mangrove_ai/issues/15)：
+   Python 表格 Tool 真实治理纵切面（依赖 #14）。
+3. #9～#14 完成不代表任何能力已经晋级、平台能力已经发布或普通用户受众已经扩大。
 
 ## 8. 权威证据
 
@@ -205,6 +228,9 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
 - #13 需求复核：`docs/plans/2026-08-14-agentic-capability-ac07-08-requirements-review.md`
 - #13 设计：`docs/plans/2026-08-14-agentic-capability-ac07-08-design.md`
 - #13 任务拆分：`docs/plans/2026-08-14-agentic-capability-ac07-08-task-breakdown.md`
+- #14 需求复核：`docs/plans/2026-08-16-agentic-capability-ac07-09-requirements-review.md`
+- #14 设计：`docs/plans/2026-08-16-agentic-capability-ac07-09-design.md`
+- #14 验收方案：`docs/plans/2026-08-16-agentic-capability-ac07-09-acceptance-plan.md`
 - #34 报告：`docs/plans/2026-08-07-agentic-capability-ac07-02-execution-report.md`
 - #35 报告：`docs/plans/2026-08-07-agentic-capability-ac07-03-execution-report.md`
 - vNext Publisher：`docs/plans/2026-08-04-vnext-delivery-publisher-execution-report.md`
