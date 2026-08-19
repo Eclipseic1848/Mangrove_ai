@@ -824,8 +824,9 @@ class SqliteCapabilityGovernanceRepository:
             "eligibility_changed",
             "risk_accepted",
             "recommendation_changed",
+            "rescan_completed",
         }:
-            raise ValueError("治理事件专用入口只接受生命周期/资格/风险接受/推荐指针事件")
+            raise ValueError("治理事件专用入口只接受生命周期/资格/风险接受/推荐指针/重扫事件")
         target = event.target
         with self._connect() as connection:
             if not self._schema_exists(connection):

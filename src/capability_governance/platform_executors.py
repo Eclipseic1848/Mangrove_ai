@@ -18,7 +18,18 @@ from src.capability_adapters.models import CapabilityRuntimeManifest
 from .models import PlatformValidationEvidence, PlatformValidationStep, ValidationStepStatus
 
 # 物化目录的确定性 hash：用于 smoke 输出与独立验证的一致性复核。
-_HASHED_FILES = ("manifest.json",)
+# 真实能力归档 manifest 的标准名是 mangrove-capability.json（mount_resolver
+# 物化展开也校验该名）；manifest.json 仅测试夹具沿用名，两者都纳入 hash。
+_HASHED_FILES = ("mangrove-capability.json", "manifest.json")
+
+
+def _resolve_manifest(root: Path) -> Path:
+    """返回物化目录中的能力 manifest（标准名优先，兼容测试旧名）。"""
+    for name in ("mangrove-capability.json", "manifest.json"):
+        path = root / name
+        if path.is_file():
+            return path
+    raise RuntimeError("快照物化目录缺少能力 manifest")
 
 
 def _directory_sha256(root: Path) -> str:
@@ -41,9 +52,7 @@ class SyntheticSmokeDirectoryRunner:
     """合成 Smoke（目录级）：物化快照结构合法、manifest 白名单可解析、内容可 hash。"""
 
     def run(self, subject: Path) -> PlatformValidationEvidence:
-        manifest_path = subject / "manifest.json"
-        if not manifest_path.is_file():
-            raise RuntimeError("快照物化目录缺少 manifest.json")
+        manifest_path = _resolve_manifest(subject)
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
         # 快照 manifest 是白名单子集；用完整模型校验会因缺失 purpose 失败，
         # 这里只做结构级解析：字段类型与入口存在性。
@@ -65,8 +74,11 @@ class FailClosedDirectoryRunner:
         for path in subject.rglob("*"):
             if path.is_symlink():
                 raise RuntimeError("快照物化目录包含符号链接")
-        manifest_path = subject / "manifest.json"
-        if manifest_path.is_file():
+        try:
+            manifest_path = _resolve_manifest(subject)
+        except RuntimeError:
+            manifest_path = None
+        if manifest_path is not None:
             raw = json.loads(manifest_path.read_text(encoding="utf-8"))
             permissions = raw.get("permissions") or ()
             # 权限面复核：快照 manifest 只能声明运行时白名单权限（复用 #34 语义）。
@@ -91,9 +103,7 @@ class MountProbeDirectoryRunner:
     """
 
     def run(self, subject: Path) -> PlatformValidationEvidence:
-        manifest_path = subject / "manifest.json"
-        if not manifest_path.is_file():
-            raise RuntimeError("快照物化目录缺少 manifest.json")
+        manifest_path = _resolve_manifest(subject)
         raw = json.loads(manifest_path.read_text(encoding="utf-8"))
         kind = raw.get("kind")
         entrypoint = raw.get("entrypoint")

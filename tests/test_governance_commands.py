@@ -37,6 +37,7 @@ from src.conversation_steering import (
 
 
 _FINDING_RUN_ID = "capval_f1f2f3f4e5e6a1b2c3d4"
+_PLATFORM_FINDING_RUN_ID = "pfval_f1f2f3f4e5e6a1b2c3d4"
 
 
 def _admin() -> CatalogActor:
@@ -247,6 +248,42 @@ def _succeeded_run(
     )
 
 
+def _succeeded_platform_run(
+    repository: InMemoryCapabilityGovernanceRepository,
+    target: CapabilityGovernanceTarget,
+    *,
+    run_id: str = _PLATFORM_FINDING_RUN_ID,
+) -> None:
+    """六步全绿平台验证运行（#15 阶段 6：平台包 finding_ref 取平台验证运行表）。"""
+    from src.capability_governance.models import (
+        PlatformValidationEvidence,
+        PlatformValidationRun,
+        PlatformValidationStep,
+    )
+
+    run = PlatformValidationRun(
+        run_id=run_id,
+        actor_id="admin-a",
+        actor_role="admin",
+        idempotency_key=f"candidate:{target.digest}",
+        target=target,
+        status=ValidationRunStatus.SUCCEEDED,
+        evidence=tuple(
+            PlatformValidationEvidence(
+                step=step,
+                status=ValidationStepStatus.PASSED,
+                evidence_ref=f"evidence://platform/{step.value}",
+                evidence_sha256="a" * 64,
+                summary="通过",
+            )
+            for step in PlatformValidationStep
+        ),
+        signing_signature_digest="sha256:" + "c" * 64,
+        signing_public_key_sha256="d" * 64,
+    )
+    repository.create_platform_validation_run(run)
+
+
 class TestDeprecateCommand:
     def test_active_pack_deprecates(self) -> None:
         repository = InMemoryCapabilityGovernanceRepository()
@@ -411,6 +448,8 @@ class TestRiskAcceptCommand:
         repository = InMemoryCapabilityGovernanceRepository()
         governance, target = _governance(repository)
         # 风险接受前置：admin_gray 受众 + 供应链证据 + finding_ref 实引。
+        # 平台包 finding_ref 必须实引平台验证运行表（#15 阶段 6 修复：
+        # 个人表只有个人 digest，平台 digest 永不匹配）。
         _publish_event(repository, target)
         _supply_evidence(
             repository,
@@ -418,7 +457,7 @@ class TestRiskAcceptCommand:
             secret_count=secret_count,
             critical_count=critical_count,
         )
-        _succeeded_run(repository, target, run_id=_FINDING_RUN_ID)
+        _succeeded_platform_run(repository, target, run_id=_PLATFORM_FINDING_RUN_ID)
         _quarantine(repository, target)
         return governance, repository, target
 
@@ -428,7 +467,7 @@ class TestRiskAcceptCommand:
             _admin(),
             pack_ref=_ref(target),
             reason="风险接受：无修复且路径不可达的 High",
-            finding_ref=_FINDING_RUN_ID,
+            finding_ref=_PLATFORM_FINDING_RUN_ID,
             idempotency_key="risk:test",
         )
         assert outcome.status == "applied"
@@ -442,7 +481,7 @@ class TestRiskAcceptCommand:
             _admin(),
             pack_ref=_ref(target),
             reason="风险接受",
-            finding_ref=_FINDING_RUN_ID,
+            finding_ref=_PLATFORM_FINDING_RUN_ID,
             days=90,
             idempotency_key="risk:90",
         )
@@ -483,7 +522,7 @@ class TestRiskAcceptCommand:
             _admin(),
             pack_ref=_ref(target),
             reason="风险接受",
-            finding_ref=_FINDING_RUN_ID,
+            finding_ref=_PLATFORM_FINDING_RUN_ID,
             idempotency_key="risk:secret",
         )
         assert outcome.status == "rejected"
@@ -498,6 +537,28 @@ class TestRiskAcceptCommand:
             reason="风险接受",
             finding_ref="capval_" + "0" * 20,
             idempotency_key="risk:unknown-ref",
+        )
+        assert outcome.status == "rejected"
+        assert "finding_ref_unknown" in outcome.gaps
+
+    def test_platform_pack_requires_platform_run_ref(self) -> None:
+        """#15 阶段 6 回归：平台包 finding_ref 必须实引平台验证运行。
+
+        个人验证运行表只有个人 digest，平台 digest 永不匹配；引用个人表
+        运行必须被拒（Q2A 引用存档真实性，不得跨表引用）。
+        """
+        repository = InMemoryCapabilityGovernanceRepository()
+        governance, target = _governance(repository)
+        _publish_event(repository, target)
+        _supply_evidence(repository, target)
+        _succeeded_run(repository, target, run_id=_FINDING_RUN_ID)
+        _quarantine(repository, target)
+        outcome = governance.accept_pack_risk(
+            _admin(),
+            pack_ref=_ref(target),
+            reason="风险接受",
+            finding_ref=_FINDING_RUN_ID,
+            idempotency_key="risk:platform-ref",
         )
         assert outcome.status == "rejected"
         assert "finding_ref_unknown" in outcome.gaps
@@ -551,7 +612,7 @@ class TestRestoreCommand:
         _supply_evidence(
             repository, target, updated_at_days_ago=updated_at_days_ago
         )
-        _succeeded_run(repository, target)
+        _succeeded_platform_run(repository, target)
         _lifecycle(repository, target, CapabilityLifecycle.REVOKED)
         return governance, repository, target
 
@@ -598,7 +659,7 @@ class TestRestoreCommand:
         governance, target = _governance(repository)
         _publish_event(repository, target)
         _supply_evidence(repository, target)
-        _succeeded_run(repository, target)
+        _succeeded_platform_run(repository, target)
         now = datetime.now(timezone.utc)
         _quarantine(repository, target, occurred_at=now - timedelta(days=40))
         repository.save_governance_event(
@@ -637,7 +698,7 @@ class TestRestoreCommand:
         governance, target = _governance(repository)
         _publish_event(repository, target)
         _supply_evidence(repository, target)
-        _succeeded_run(repository, target)
+        _succeeded_platform_run(repository, target)
         now = datetime.now(timezone.utc)
         _quarantine(repository, target, occurred_at=now - timedelta(days=40))
         repository.save_governance_event(
@@ -680,7 +741,7 @@ class TestRestoreCommand:
         governance, target = _governance(repository)
         _publish_event(repository, target)
         _supply_evidence(repository, target)
-        _succeeded_run(repository, target)
+        _succeeded_platform_run(repository, target)
         _quarantine(repository, target)
         _lifecycle(repository, target, CapabilityLifecycle.REVOKED)
         outcome = governance.restore_pack(

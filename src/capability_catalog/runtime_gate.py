@@ -30,10 +30,16 @@ class CapabilityMountGateRejected(RuntimeError):
 
 
 class RuntimeGateContract(Protocol):
-    """装载前检查三轴、受众与签名的门；不满足时抛 CapabilityMountGateRejected。"""
+    """装载前检查三轴、受众与签名的门；不满足时抛 CapabilityMountGateRejected。
+
+    validation_exempt：验证任务标记（#15 D9）匹配时放行个人 draft；
+    平台分支永不豁免；其余三轴条件仍强制。
+    """
 
     def check_mount(
         self,
         actor: CatalogActor,
         pack: CapabilityPack,
+        *,
+        validation_exempt: bool = False,
     ) -> None: ...

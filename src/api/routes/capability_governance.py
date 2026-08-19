@@ -36,9 +36,11 @@ admin_router = APIRouter(
 def _governance() -> CapabilityGovernance:
     from src.api.capability_governance_runtime import (
         get_platform_publication_dependencies,
+        get_rescan_dependencies,
     )
 
     generator, publisher = get_platform_publication_dependencies()
+    materialize, collector = get_rescan_dependencies()
     return CapabilityGovernance(
         CapabilityCatalog(
             SqliteCapabilityCatalogRepository(settings.webui_db_path)
@@ -47,6 +49,8 @@ def _governance() -> CapabilityGovernance:
         task_resolver=SqliteValidationTaskResolver(settings.webui_db_path),
         platform_snapshot_generator=generator,
         platform_publisher=publisher,
+        platform_materialize=materialize,
+        supply_chain_collector=collector,
     )
 
 
@@ -541,3 +545,17 @@ def change_audience(
     except (PermissionError, KeyError, RuntimeError, ValueError) as error:
         raise _http_error(error) from error
     return outcome.model_dump(mode="json")
+
+
+@admin_router.post("/supply-chain-rescan")
+def rescan_supply_chain(
+    body: GovernancePackRequest,
+    admin=Depends(require_admin),
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=200,
+        alias="Idempotency-Key",
+    ),
+):
+    """#15 手动重扫：追加供应链证据；新硬门自动隔离。"""
+    return _governance_command("rescan_supply_chain", body, admin, idempotency_key)

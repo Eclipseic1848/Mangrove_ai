@@ -109,6 +109,7 @@ class CapabilityGovernanceEvent(BaseModel):
         "eligibility_changed",
         "risk_accepted",
         "recommendation_changed",
+        "rescan_completed",
     ] = "registered"
     maturity: CapabilityMaturity = CapabilityMaturity.DRAFT
     lifecycle: CapabilityLifecycle = CapabilityLifecycle.ACTIVE
@@ -439,6 +440,26 @@ class CapabilityGovernanceEvent(BaseModel):
                 raise ValueError("推荐指针变更事件不得携带审计查看字段")
             if any(field is not None for field in platform_fields):
                 raise ValueError("推荐指针变更事件不得携带平台发布字段")
+            return self
+        if self.event_type == "rescan_completed":
+            # 手动重扫只追加供应链证据；三轴快照 = 写入时刻投影，不借道变化
+            # （触发隔离时快照携带 quarantined，与隔离事件写入后的投影一致）。
+            if self.target.scope is not ProcedureScope.PLATFORM:
+                raise ValueError("重扫事件只能针对平台目标")
+            if self.maturity is not CapabilityMaturity.VERIFIED:
+                raise ValueError("重扫事件必须携带 verified 成熟度")
+            if not self.reason:
+                raise ValueError("重扫事件必须携带非空原因")
+            if self.source_supply_chain_evidence_id is None:
+                raise ValueError("重扫事件必须引用新供应链证据")
+            if self.source_validation_run_id is not None:
+                raise ValueError("重扫事件不得携带验证运行引用")
+            if any(field is not None for field in audit_fields):
+                raise ValueError("重扫事件不得携带审计查看字段")
+            if any(field is not None for field in platform_fields):
+                raise ValueError("重扫事件不得携带平台发布字段")
+            if any(field is not None for field in lifecycle_fields):
+                raise ValueError("重扫事件不得携带其他治理字段")
             return self
         raise ValueError("未知能力治理事件类型")
 

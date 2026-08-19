@@ -63,7 +63,10 @@ class _RecordingGate:
         self.calls: list[tuple[CatalogActor, CapabilityPack]] = []
         self.reject: CapabilityMountGateRejected | None = None
 
-    def check_mount(self, actor, pack) -> None:
+    def check_mount(
+        self, actor, pack, *, validation_exempt: bool = False
+    ) -> None:
+        # #15 D9 协议新增豁免参数；录制 mock 保持既有行为。
         self.calls.append((actor, pack))
         if self.reject is not None:
             raise self.reject

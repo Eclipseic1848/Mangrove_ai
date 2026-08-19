@@ -171,6 +171,7 @@ class CapabilityCatalog:
         revision: int,
         pack_refs: tuple[CapabilityPackRef, ...],
         procedure_refs: tuple[AutomationProcedureRef, ...] = (),
+        validation_target: CapabilityPackRef | None = None,
     ) -> CapabilitySelection:
         for ref in pack_refs:
             pack = self.resolve_pack(actor, ref.pack_id, ref.version)
@@ -206,6 +207,7 @@ class CapabilityCatalog:
                 revision=revision,
                 pack_refs=pack_refs,
                 procedure_refs=procedure_refs,
+                validation_target=validation_target,
             )
         )
 

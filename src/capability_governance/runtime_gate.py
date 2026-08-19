@@ -30,7 +30,14 @@ class PlatformSignatureVerifier(Protocol):
 
 
 class OciPlatformSignatureVerifier:
-    """按 #12 签名侧构造对齐（signed/<run_id> Layout、digest 引用）做装载重验。"""
+    """按 #12 签名侧构造对齐（signed/<run_id> Layout、digest 引用）做装载重验。
+
+    #15 AC07-10 阶段 5 修复：签名验证前必须校验主布局 subject blob 内容哈希。
+    verify_local 只对 signed/<run_id> 独立副本重验签名；若主布局（实际物化
+    来源）的 subject blob 被篡改，仅靠物化阶段 ORAS digest 校验兜底，自动
+    隔离不会触发。这里在签名重验前先从主布局读取 subject blob 并比对内容
+    哈希，失配即拒绝（fail-closed 并把篡改证据交给自动隔离钩子）。
+    """
 
     def __init__(
         self,
@@ -56,6 +63,24 @@ class OciPlatformSignatureVerifier:
             or publication.platform_digest != pack.digest
         ):
             raise RuntimeError("发布事件 platform_digest 与 Pack 不一致")
+        # 主布局 subject blob 内容哈希必须与冻结 digest 一致（#15 阶段 5）。
+        # 篡改主布局 blob -> 哈希失配 -> 拒绝，触发自动隔离（S1 钩子）。
+        import hashlib
+
+        from pathlib import Path
+
+        subject_blob = (
+            Path(self._platform_layout)
+            / "blobs/sha256"
+            / pack.digest.removeprefix("sha256:")
+        )
+        if not subject_blob.is_file():
+            raise RuntimeError("平台主布局缺少主体 manifest blob")
+        actual = "sha256:" + hashlib.sha256(
+            subject_blob.read_bytes()
+        ).hexdigest()
+        if actual != pack.digest:
+            raise RuntimeError("平台主布局主体 manifest blob 内容与 digest 不一致")
         from .oci_signing import OciSigningRequest
 
         request = OciSigningRequest(
@@ -86,10 +111,14 @@ class CapabilityGovernanceRuntimeGate:
             [CapabilityPack], CapabilityGovernanceEvent | None
         ],
         signature_verifier: PlatformSignatureVerifier | None = None,
+        auto_quarantine: Callable[[CapabilityPack, str], None] | None = None,
     ) -> None:
         self._projection_for = projection_for
         self._platform_publication_for = platform_publication_for
         self._signature_verifier = signature_verifier
+        # 自动隔离钩子（#15 AC07-10）：默认为 None 保持 #13 只读行为；
+        # 装配层注入真实实现后，真实验签失败会自动写隔离事件。
+        self._auto_quarantine = auto_quarantine
 
     def _reject(
         self,
@@ -103,16 +132,33 @@ class CapabilityGovernanceRuntimeGate:
             reason=reason,
         )
 
+    def _trigger_auto_quarantine(self, pack: CapabilityPack, reason: str) -> None:
+        if self._auto_quarantine is None:
+            return
+        try:
+            self._auto_quarantine(pack, reason)
+        except Exception:
+            # 自动隔离失败不得改变门的拒绝契约：装载照常失败关闭，
+            # 隔离留待下次触发机会或管理员人工命令补写。
+            pass
+
     def check_mount(
         self,
         actor: CatalogActor,
         pack: CapabilityPack,
+        *,
+        validation_exempt: bool = False,
     ) -> None:
         projection = self._projection_for(pack)
         if pack.scope is ProcedureScope.PERSONAL:
             if pack.owner_id != actor.owner_id:
                 raise self._reject(pack, "个人能力不属于当前用户")
-            if projection.maturity is not CapabilityMaturity.VERIFIED:
+            if (
+                projection.maturity is not CapabilityMaturity.VERIFIED
+                and not validation_exempt
+            ):
+                # #15 D9 验证任务豁免：仅验证目标（冻结 selection 携带标记、
+                # 本人所有、active、eligible）放行 draft；其余条件仍强制。
                 raise self._reject(pack, "成熟度未达到 verified")
             if projection.lifecycle not in {
                 CapabilityLifecycle.ACTIVE,
@@ -150,12 +196,19 @@ class CapabilityGovernanceRuntimeGate:
         try:
             result = self._signature_verifier.verify(pack, publication)
         except Exception as error:
-            raise self._reject(
-                pack, f"平台签名重验失败：{type(error).__name__}"
-            ) from error
+            reason = f"平台签名重验失败：{type(error).__name__}"
+            # 真实验签失败是篡改/签名损坏证据，触发自动隔离（#15 AC07-10）。
+            self._trigger_auto_quarantine(pack, reason)
+            raise self._reject(pack, reason) from error
         if result.subject_digest != pack.digest:
-            raise self._reject(pack, "签名主体 digest 与平台 Pack 不一致")
+            reason = "签名主体 digest 与平台 Pack 不一致"
+            self._trigger_auto_quarantine(pack, reason)
+            raise self._reject(pack, reason)
         if result.signature_digest != publication.signing_signature_digest:
-            raise self._reject(pack, "签名 digest 与发布事件证据不一致")
+            reason = "签名 digest 与发布事件证据不一致"
+            self._trigger_auto_quarantine(pack, reason)
+            raise self._reject(pack, reason)
         if result.public_key_sha256 != publication.signing_public_key_sha256:
-            raise self._reject(pack, "签名公钥与发布事件证据不一致")
+            reason = "签名公钥与发布事件证据不一致"
+            self._trigger_auto_quarantine(pack, reason)
+            raise self._reject(pack, reason)
