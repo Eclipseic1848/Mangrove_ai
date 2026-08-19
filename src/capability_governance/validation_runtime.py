@@ -504,6 +504,56 @@ class TaskEvidenceValidationExecutor(CapabilityValidationExecutor):
         )
 
     @staticmethod
+    def _smoke_mcp_invoke(
+        container_name: str,
+        capability: str,
+        arguments: dict,
+        tool: str = "echo",
+    ) -> str:
+        """容器内真实 MCP 工具调用（Smoke 的 mcp_local 增量，#16）。
+
+        通过 docker exec + node fetch 调 Host /invoke；Host 启动时已完成
+        协议握手与 list_tools 冻结。echo 返回必须含 "Echo:" 才通过
+        （server-everything echo 工具的输出模式）。
+        """
+        payload = json.dumps(
+            {"capability": capability, "tool": tool, "arguments": arguments}
+        )
+        # Windows 侧 docker.exe 对含空格/引号的参数重新拼接命令行，内联 JS
+        # 的任何引号字面量都会被破坏（node 语法错误 [eval]:1）。可靠路径：
+        # 脚本 base64 编码后经单行 wrapper 传递（#16 阶段 2 真实首跑暴露）。
+        import base64
+
+        script = (
+            "fetch('http://127.0.0.1:8765/invoke',"
+            "{method:'POST',headers:{'content-type':'application/json',"
+            "authorization:'Bearer '+process.env.MANGROVE_CAPABILITY_TOKEN},"
+            "body:JSON.stringify({capability:process.argv[1],tool:process.argv[2],"
+            "arguments:JSON.parse(process.argv[3])})})"
+            ".then(r=>r.text()).then(t=>{if(!t.includes('Echo:'))process.exit(1);"
+            "process.stdout.write(t)})"
+        )
+        script_b64 = base64.b64encode(script.encode("utf-8")).decode("ascii")
+        wrapper = f"eval(Buffer.from('{script_b64}','base64').toString())"
+        completed = subprocess.run(
+            (
+                "docker", "exec", container_name, "node", "-e", wrapper,
+                capability, tool, json.dumps(arguments),
+            ),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=45,
+            check=False,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"MCP 合成 Smoke 调用失败：{completed.stdout.strip()[-200:]}"
+            )
+        return completed.stdout.strip()[-200:]
+
+    @staticmethod
     def _docker(*arguments: str, check: bool = False) -> subprocess.CompletedProcess[str]:
         completed = subprocess.run(
             ("docker", *arguments),
@@ -602,6 +652,19 @@ class TaskEvidenceValidationExecutor(CapabilityValidationExecutor):
                     )
                 )
             )
+            # #16 增量：mcp_local 能力真实 MCP 工具调用（协议握手与
+            # list_tools 在 Host 启动时已完成；这里真实 invoke echo）。
+            mcp_calls = []
+            for item in manifests:
+                if item.manifest.kind == "mcp_local":
+                    echoed = self._smoke_mcp_invoke(
+                        self._lease.container_name,
+                        item.manifest.name,
+                        {"message": "ac07-11-smoke"},
+                    )
+                    mcp_calls.append(
+                        {"capability": item.manifest.name, "echo": echoed}
+                    )
             return self._evidence(
                 run,
                 step,
@@ -611,6 +674,7 @@ class TaskEvidenceValidationExecutor(CapabilityValidationExecutor):
                         (item.manifest.name, item.manifest.version, item.manifest.kind)
                         for item in manifests
                     ],
+                    "mcp_smoke": mcp_calls,
                 },
             )
         if step is ValidationStep.OWNER_TASK_REPLAY:

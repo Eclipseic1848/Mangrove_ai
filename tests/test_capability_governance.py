@@ -139,6 +139,110 @@ def test_registration_uses_exact_pack_ref_when_platform_identity_collides() -> N
     assert event.target.digest == personal.digest
 
 
+def test_registration_resolves_same_digest_personal_row_over_platform() -> None:
+    """#16 回归：个人 draft 与平台 legacy 行同归档同 digest 并存时，
+    register_pack 必须登记个人行，不得被 resolve 顺序歧义成平台行拒绝。
+
+    everything-mcp@2026.7.4 个人行复用 AC-06 冻结归档（digest 相同），
+    平台行排序在前导致 resolve_pack 命中平台行（PermissionError）。"""
+    catalog_repository = InMemoryCapabilityCatalogRepository()
+    catalog = CapabilityCatalog(catalog_repository)
+    governance = CapabilityGovernance(
+        catalog,
+        InMemoryCapabilityGovernanceRepository(),
+    )
+    owner = CatalogActor(owner_id="owner-a", role="user")
+    digest = "sha256:" + "a" * 64
+    personal = _personal_pack("1.0.0", "a")
+    platform = personal.model_copy(
+        update={
+            "scope": ProcedureScope.PLATFORM,
+            "owner_id": None,
+            "maturity": LegacyCapabilityMaturity.VERIFIED,
+        }
+    )
+    catalog.register_pack(owner, personal)
+    catalog_repository.save_pack(platform)
+
+    event = governance.register_pack(
+        owner,
+        pack_ref=CapabilityPackRef(
+            pack_id=personal.pack_id,
+            version=personal.version,
+            digest=digest,
+        ),
+        idempotency_key="register-same-digest",
+    )
+
+    assert event.target.owner_id == "owner-a"
+    assert event.target.scope is ProcedureScope.PERSONAL
+    assert event.target.digest == digest
+
+
+def test_validation_task_resolves_same_digest_personal_row() -> None:
+    """#16 回归：request_validation_for_task 对同归档同 digest 并存行必须
+    解析个人行（验证运行归属个人 target），不得歧义到平台 legacy 行。"""
+
+    class _Resolver:
+        def __init__(self, task_ref: ValidationTaskRef) -> None:
+            self.task_ref = task_ref
+
+        def list_options(self, actor, target):
+            return ("owner-task",)
+
+        def resolve(self, actor, target, *, task_id, revision):
+            # 修复前这里收到 PLATFORM target（resolve 命中平台行）。
+            assert target.scope is ProcedureScope.PERSONAL
+            assert target.owner_id == "owner-a"
+            return self.task_ref
+
+        def verify(self, actor, target, task_ref):
+            return task_ref
+
+    catalog_repository = InMemoryCapabilityCatalogRepository()
+    catalog = CapabilityCatalog(catalog_repository)
+    owner = CatalogActor(owner_id="owner-a", role="user")
+    admin = CatalogActor(owner_id="owner-a", role="admin")
+    digest = "sha256:" + "a" * 64
+    personal = _personal_pack("1.0.0", "a")
+    platform = personal.model_copy(
+        update={
+            "scope": ProcedureScope.PLATFORM,
+            "owner_id": None,
+            "maturity": LegacyCapabilityMaturity.VERIFIED,
+        }
+    )
+    catalog.register_pack(owner, personal)
+    catalog_repository.save_pack(platform)
+    task_ref = ValidationTaskRef(
+        task_id="workspace-v",
+        revision=1,
+        source_snapshot_sha256="c" * 64,
+        input_sha256="d" * 64,
+        output_sha256="e" * 64,
+        capability_digest=digest,
+        authorization_id="selection-v",
+    )
+    governance = CapabilityGovernance(
+        catalog,
+        InMemoryCapabilityGovernanceRepository(),
+        task_resolver=_Resolver(task_ref),
+    )
+    run = governance.request_validation_for_task(
+        admin,
+        pack_ref=CapabilityPackRef(
+            pack_id=personal.pack_id,
+            version=personal.version,
+            digest=digest,
+        ),
+        task_id="workspace-v",
+        revision=1,
+        idempotency_key="validate-same-digest",
+    )
+    assert run.target.scope is ProcedureScope.PERSONAL
+    assert run.target.owner_id == "owner-a"
+
+
 def test_ac06_admin_gray_platform_pack_exposes_owner_validation_bridge() -> None:
     class Resolver:
         def __init__(self, task_ref: ValidationTaskRef) -> None:

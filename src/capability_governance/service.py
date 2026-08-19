@@ -207,8 +207,26 @@ class CapabilityGovernance:
         if pack is None:
             raise PermissionError("能力包不存在或当前 Actor 不可见")
         if pack.scope is ProcedureScope.PLATFORM:
-            # 平台治理事实必须由后续 Publisher 生成，不能借登记接口写入。
-            raise PermissionError("平台能力包只能由发布治理流程登记")
+            # 个人 draft 与平台 legacy 行同归档同 digest 并存时（#16：
+            # everything-mcp 个人行复用 AC-06 冻结归档），resolve 按可见性
+            # 顺序命中平台行；登记语义只接受本人个人行，按 Owner 重查。
+            personal = next(
+                (
+                    candidate
+                    for candidate in self._catalog.list_visible_packs(actor)
+                    if candidate.scope is ProcedureScope.PERSONAL
+                    and candidate.owner_id == actor.owner_id
+                    and candidate.pack_id == pack_ref.pack_id
+                    and candidate.version == pack_ref.version
+                    and candidate.digest == pack_ref.digest
+                ),
+                None,
+            )
+            if personal is not None:
+                pack = personal
+            else:
+                # 平台治理事实必须由后续 Publisher 生成，不能借登记接口写入。
+                raise PermissionError("平台能力包只能由发布治理流程登记")
         target = self._target(pack)
         existing = self._repository.get_by_idempotency(
             target,
@@ -1596,6 +1614,7 @@ class CapabilityGovernance:
             pack_ref.pack_id,
             pack_ref.version,
             pack_ref.digest,
+            prefer_owner=actor.owner_id,
         )
         if pack is None:
             raise PermissionError("能力包不存在或当前 Actor 不可见")
@@ -1633,6 +1652,7 @@ class CapabilityGovernance:
             pack_ref.pack_id,
             pack_ref.version,
             pack_ref.digest,
+            prefer_owner=actor.owner_id,
         )
         if pack is None:
             raise PermissionError("能力包不存在或当前 Actor 不可见")
@@ -1662,6 +1682,7 @@ class CapabilityGovernance:
             pack_ref.pack_id,
             pack_ref.version,
             pack_ref.digest,
+            prefer_owner=actor.owner_id,
         )
         if pack is None or not self._can_validate_pack(actor, pack):
             return ()

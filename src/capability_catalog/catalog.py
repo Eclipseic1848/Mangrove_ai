@@ -151,17 +151,32 @@ class CapabilityCatalog:
         pack_id: str,
         version: str,
         digest: str | None = None,
+        *,
+        prefer_owner: str | None = None,
     ) -> CapabilityPack | None:
-        return next(
-            (
-                pack
-                for pack in self.list_visible_packs(actor)
-                if pack.pack_id == pack_id
-                and pack.version == version
-                and (digest is None or pack.digest == digest)
-            ),
-            None,
-        )
+        matches = [
+            pack
+            for pack in self.list_visible_packs(actor)
+            if pack.pack_id == pack_id
+            and pack.version == version
+            and (digest is None or pack.digest == digest)
+        ]
+        if prefer_owner is not None:
+            # #16：同归档同 digest 的个人 draft 与平台 legacy 行并存时
+            # （everything-mcp 个人行复用 AC-06 冻结归档），可见性顺序会命中
+            # 平台行；调用方显式要求本人个人行时优先返回（默认行为不变）。
+            owned = next(
+                (
+                    pack
+                    for pack in matches
+                    if pack.scope is ProcedureScope.PERSONAL
+                    and pack.owner_id == prefer_owner
+                ),
+                None,
+            )
+            if owned is not None:
+                return owned
+        return matches[0] if matches else None
 
     def freeze_selection(
         self,
