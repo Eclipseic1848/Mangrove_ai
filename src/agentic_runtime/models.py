@@ -230,7 +230,10 @@ class SemanticDecision(BaseModel):
     passed: bool
     contains_unrequested_content: bool
     reason: str = Field(min_length=1, max_length=1000)
-    missing_requirements: tuple[str, ...] = ()
+    # list 而非 tuple：instructor v2 JSON 模式 strict 解析下，LLM 输出
+    # JSON 数组无法转 tuple，会造成「候选语义验证未形成结论」的既有缺陷
+    # （#15 纵切面真实暴露）。
+    missing_requirements: list[str] = []
 
     @field_validator("missing_requirements", mode="before")
     @classmethod
@@ -239,7 +242,7 @@ class SemanticDecision(BaseModel):
         # 规范化为单元素数组可保留失败语义，不能把它吞掉或误判为通过。
         if isinstance(value, str):
             normalized = value.strip()
-            return (normalized,) if normalized else ()
+            return [normalized] if normalized else []
         return value
 
 

@@ -152,7 +152,7 @@ def test_semantic_decision_normalizes_single_missing_requirement() -> None:
         }
     )
 
-    assert decision.missing_requirements == ("缺少完整小计证据",)
+    assert decision.missing_requirements == ["缺少完整小计证据"]
 
 
 def test_semantic_judge_allows_one_bounded_structured_output_retry() -> None:

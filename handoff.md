@@ -2,57 +2,69 @@
 
 > 文档用途：写给完全没有历史对话的新会话
 >
-> 最后现场核验：2026-08-16
+> 最后现场核验：2026-08-18
 >
-> 当前分支：`main`
->
-> 当前提交：`5ad3a472`（#14 PR #25 合并）；工作树干净
+> 当前分支：`main`；HEAD = `87227ab0`（#14 收口）；**工作树有 #15 大量未提交改动**
 >
 > 公开远端：`origin` → `https://github.com/Eclipseic1848/Mangrove_ai.git`
 >
-> 当前阶段：AC-07 能力信任与发布治理；#9～#14 已关闭，下一工单为 #15（未开工）
+> 当前阶段：**#15（AC07-10）真实治理纵切面进行中**——需求/设计/代码/阶段 0-6 已完成，
+> 停在阶段 7（收口：Issue 对照/执行报告/文档同步/发布链）的授权门
 
 ## 0. 一句话结论
 
-Mangrove 正在把“能运行的个人能力”推进为“证据完整、可审计、可失败关闭、以后可以由管理员
-发布的平台能力”。AC-07 的验证运行、供应链扫描、本地标准 OCI 签名、个人能力自动晋级机制、
-管理员审核/审计查看、平台快照发布机制、运行时装载治理门与生命周期治理命令（弃用/回滚/
-隔离/撤销/限期风险接受）已经完成；下一步是新仓库 #15“Python 表格 Tool 真实治理纵切面”。
+Mangrove 正在把「能运行的个人能力」推进为「证据完整、可审计、可失败关闭、以后可以由管理员
+发布的平台能力」。AC-07 #9～#14（签名、自动晋级、审核、平台快照、运行时门、生命周期治理）
+已全部关闭；**#15 已真实走通「个人 draft → 验证五步 → 供应链 → 晋级 verified → 脱敏快照
+→ Cosign 签名 → 六步 → admin_gray 发布 → 管理员真实装载 → 治理动作链（回滚/deprecated/
+revoked/跨用户拒绝/篡改→自动隔离→restore→真实 risk_accept applied 链→惰性到期→手动重扫）」
+全链**；生产库现有两条 verified 个人能力、两条已发布平台能力
+（gray-python-table@2.0.0/3.0.0，admin_gray）、完整治理事件流（32 条，含 risk_accepted×1、
+rescan_completed×1）。下一步是阶段 7（收口），停在用户授权门。
 
-不要把 #9～#14 完成、测试通过、Capability 可运行或管理员灰度可用表述成能力已经自动晋级、
-平台已经发布、普通用户已经开放、Phase 4 已完成或 `v0.0.8` 已发布。库内能力没有被晋级，
-真实灰度包晋级与真实平台发布纵切面留待 #15/#16。
+不要把 #15 阶段 6 完成表述成能力已向普通用户开放、Phase 4 已完成或任何版本已发布。
+平台发布受众固定 admin_gray，普通用户开放与版本发布均未发生。
 
 ## 1. 新会话必须先做什么
 
-本文件是第一个入口。打开本文件后，按以下顺序继续读取，不要直接改代码：
+本文件是第一个入口。打开本文件后按以下顺序继续读取，不要直接改代码：
 
 1. `AGENTS.md`：仓库工程规则、稳定业务边界和 Git/发布权限。
 2. `docs/status/current.md`：当前能力与路线状态的唯一滚动台账。
 3. `CONTEXT.md`：领域词汇和长期语义。
 4. `docs/agents/`：Issue、标签和领域文档约定。
-5. 当前工单 #15、AC-07 规格、ADR-0029，以及旧
-   `Eclipseic1848/Mangrove_platform#34/#35`、新 `Eclipseic1848/Mangrove_ai#9～#14`
-   的需求复核/设计文档与执行报告。
+5. 当前工单 #15、AC-07 规格、ADR-0029，以及 #15 的
+   `docs/plans/2026-08-16-agentic-capability-ac07-10-{requirements-review,design,task-breakdown,acceptance-plan}.md`。
+   （注：本次需求复核未单独成文，Q1-Q8 决策记录在设计文档；#15 阶段执行证据在
+   `scripts/ac07_10_*.py` 与生产库。）
 
 现场执行：
 
 ```powershell
 git status --short --branch --untracked-files=all
-git branch --show-current
 git rev-parse HEAD
 git rev-parse origin/main
-git remote -v
 gh issue view 15 --repo Eclipseic1848/Mangrove_ai --comments
 ```
 
 预期现场状态是：
 
-- 本地 `main`、`HEAD` 与 `origin/main` 均为 #14 PR #25 的合并提交（SHA 以现场为准）；
-- 工作树应干净；
-- 新仓库 #9、#10、#11、#12、#13、#14 为 `CLOSED / COMPLETED`；
-- 新仓库 #15～#17 为开放工单；
-- 只有现场命令能证明当前状态，本段 SHA 只是 2026-08-16 的交接快照。
+- 本地 `main` 在 `87227ab0`；**工作树有 #15 未提交改动**（22 个修改文件 + 19 个新文件）；
+- 新仓库 #9～#14 为 `CLOSED`；#15/#16/#17 为开放；
+- 生产库 `data/webui.db`：
+  - `gray-python-table@2.0.0`（personal digest `59076f40…`）/ `3.0.0`（`0ca80afd…`）
+    为 personal verified；同版本另有 platform 行（2.0.0 平台 digest `e5556f83…`，
+    3.0.0 平台 digest `9379fe29…`，admin_gray，`platform_published` 事件各 1 条）；
+  - 1.0.0 仍是 legacy 平台包；everything-mcp、accept-s8-* 样本未动；
+  - 治理事件：`platform_published`×4、`platform_candidate`×4、`promoted_to_verified`×2、
+    `recommendation_changed`×2、`lifecycle_changed`×2（deprecated+revoked 2.0.0）、
+    `eligibility_changed`×9（含篡改演示自动隔离 actor=system、阶段 6 隔离与恢复）、
+    `risk_accepted`×1（阶段 6 applied 链）、`rescan_completed`×1（阶段 6 真实重扫）、
+    `audit_viewed`×1、`registered`×6（含重建留痕）；共 32 条；
+  - 平台验证运行 4 条（两条初版 + 两条重建后）；Lease 0；3.0.0 供应链证据 4 行（追加不覆盖）；
+- 平台签名密钥在 `~/.mangrove-signing/`（加密 Sigstore，项目外），`.env` 已配置
+  `CAPABILITY_PLATFORM_SIGNING_PRIVATE_KEY/PUBLIC_KEY`（gitignored）；
+- 只有现场命令能证明当前状态，本段 SHA/digest 只是 2026-08-18 的交接快照。
 
 如果现场不同，先解释漂移并更新 `docs/status/current.md`，不得套用本文快照继续执行。
 
@@ -72,19 +84,18 @@ Mangrove 是统一数据任务平台。用户用自然语言描述目标，平�
   → 正式 Delivery
 ```
 
-当前主线 AC-07 解决最后一段“能力如何建立信任并被治理”：
+当前主线 AC-07 解决最后一段「能力如何建立信任并被治理」：
 
 ```text
 个人 draft 能力
-  → 精确 digest 的 ValidationRun
-  → 真实任务、失败关闭、权限和清理证据
-  → Trivy / Syft / 来源锁
-  → verified
-  → 管理员审计
-  → 独立脱敏平台快照 + Cosign 签名
-  → admin_gray
-  → 运行时签名/受众/三轴治理门
-  → 弃用/回滚/隔离/撤销/限期风险接受（管理员命令）
+  → 精确 digest 的 ValidationRun（五步：Smoke/真实重放/失败关闭/Verifier/清理）
+  → Trivy / Syft 供应链证据（7 天漏洞库时效是硬门）
+  → verified（自动晋级，判定门 + 幂等）
+  → 管理员审核（#11）
+  → 独立脱敏平台快照 + Cosign 签名（#12）
+  → admin_gray 发布
+  → 运行时签名/受众/三轴治理门（#13）
+  → 弃用/回滚/隔离/撤销/限期风险接受（#14）
   → 另行确认是否向普通用户开放
 ```
 
@@ -101,236 +112,214 @@ Mangrove 是统一数据任务平台。用户用自然语言描述目标，平�
 ### 3.1 仓库与公开开发基线
 
 - 权威公开仓库是 `Eclipseic1848/Mangrove_ai`，默认开发分支是 `main`。
-- 旧仓库保留为 `legacy-origin` / `legacy-platform`，只用于历史证据；没有删除或重写。
-- 首次公开快照不继承旧私有 Git 历史，避免本机 Agent 配置、数据库和运行数据进入公开历史。
-- README、MIT License、贡献、安全、行为准则、Issue/PR 模板和第三方声明已齐备。
-- 本机 `start_all.bat`、`stop_all.bat`、`.env`、数据库、日志、任务制品、浏览器登录态和本地审计
+- 旧仓库保留为 `legacy-origin` / `legacy-platform`，只用于历史证据。
+- 首次公开快照不继承旧私有 Git 历史；本机 Agent 配置、数据库和运行数据不入库。
+- README、License、贡献/安全/行为准则、Issue/PR 模板齐备；`v0.0.4` 是唯一稳定封板标签。
+- 本机 `start_all.bat`/`stop_all.bat`、`.env`、数据库、日志、任务制品、浏览器登录态、本地审计
   不进入 Git。
-- #9 经 PR #19 合并到 `main`，merge commit 为 `5587043c...`，Issue #9 已关闭。
 
 ### 3.2 产品与交付主链
 
-- Conductor 公域采集主链可用。
-- `/data-prep` 是统一正式工作台，支持不可变 revision、取消、恢复、版本、来源、结果预览、
-  回收站和正式交付。
-- PDF、Word、Excel、CSV 等本地文件代表主链可用。
-- CSV、JSONL、Parquet、XLSX、JSON、DOCX、PDF、HTML、Markdown、TXT、PPTX 共 11 种交付
-  预览已工程验证；TSV 不是界面正式交付格式。
-- vNext Delivery Publisher 已实现：只有独立验证、完整性和 QA 通过的 Candidate 才能形成
-  正式 Delivery。
-- 覆盖感知文档检索、对话转向/上下文编译、多模型连接和 TaskRevision 冻结已工程实现或通过
-  代表任务验证。
+- Conductor 公域采集主链可用；`/data-prep` 统一正式工作台（不可变 revision、取消、恢复、
+  版本、来源、结果预览、回收站、正式交付）。
+- 11 种交付预览已工程验证；vNext Delivery Publisher：只有独立验证、完整性和 QA 通过的
+  Candidate 才能形成正式 Delivery。
+- 覆盖感知文档检索、对话转向/上下文编译、多模型连接和 TaskRevision 冻结已实现或通过代表任务验证。
 
-必须继续使用的交付语义：只有 `delivery_published` 且完整性/QA 通过的 `output_id` 是正式
-交付。Candidate、`eligible_for_delivery`、中间 AST、Parquet、工具成功或验证通过状态都不能
-冒充正式交付。
+必须继续使用的交付语义：只有 `delivery_published` 且完整性/QA 通过的 `output_id` 是正式交付。
 
-### 3.3 Agentic Capability 基础
+### 3.3 Agentic Capability 各工单状态
 
-| 能力 | 当前事实 | 仍缺 |
-| --- | --- | --- |
-| AC-04 能力目录 | Pack/Component/Procedure/Validation/Selection、Owner 隔离、digest 冻结与 OCI Layout Adapter 已实现 | 完整用户代表验收按后续票推进 |
-| AC-05 隔离能力获取 | 来源、Grant、获取网络、离线构建、缓存、预算、取消、恢复和清理门已工程验证 | 生产迁移与用户验收 |
-| AC-06 Adapter + Sidecar | Python Tool、stdio MCP、任务级 Capability Host、工作台选择和冻结 revision 已通过管理员灰度验收；默认关闭 | 远程 MCP、Registry 发现、普通用户开放 |
-| `Eclipseic1848/Mangrove_platform#33` | 三轴治理投影、兼容读取、迁移和用户验收完成 | 无；保留历史记录 |
-| `Eclipseic1848/Mangrove_platform#34` | 精确 digest 的可恢复 ValidationRun、两项真实能力灰度、取消后重新发起、生产迁移和 8088 验收完成 | 无；保留历史记录 |
-| `Eclipseic1848/Mangrove_platform#35` | Trivy/Syft 供应链证据、真实双包扫描、双轴复审、生产迁移和 8088 验收完成 | 无；保留历史记录 |
-| 新仓库 #9 | 标准 OCI image signature 本地 PoC、双轴复审、真实验收和发布闭环完成 | 无；Issue 已关闭 |
-| 新仓库 #10 | 个人能力自动晋级 `verified`：判定门、幂等/并发、缺口投影、worker 双触发、Python/MCP 双夹具、双轴复审、生产迁移 0004、8088 页面验收与 PR #20 合并完成 | 无；Issue 已关闭；真实灰度包晋级留待 #15/#16 |
-| 新仓库 #11 | 管理员审核与业务内容审计查看：跨 Owner 审核聚合、三组分组、渐进披露、审计查看命令（原因必填、任务与验证证据绑定、失败留痕、2MiB 按块截断）、零 DDL、双轴审查修复复核、8088 用户验收完成 | 无；Issue 已关闭 |
-| 新仓库 #12 | 独立平台快照、签名与 admin_gray 发布机制：候选门、脱敏快照（白名单重写/确定性重打包）、平台六步验证（目录级探针）、#9 签名直用、发布/受众变更命令、生产接线、Lease、四轮双轴复核、生产迁移 0005、8088 用户验收完成 | 真实装载执行探针与真实发布纵切面留待 #15/#16；Issue 已关闭 |
-| 新仓库 #13 | CapabilityMountResolver 运行时装载治理门：唯一装载 Seam 的个人三轴（Owner/verified/{active,deprecated}/eligible）与平台受众/签名门、冻结三轴可选谓词、30s 只读投影运行期监督（隔离/撤销 → 停 Sidecar + 取消 + 禁发布）、legacy 平台包旧路径放行、无能力任务零负担、验证重放前置门；61 项新测试、双轴审查两轮（A1-A5/B1-B6 全部修复）、8088 验收（真实物化/422/404/409×2/列表过滤/取消零残留）完成 | 完整任务执行受本地 LLM 环境限制未达成（非治理门问题）；PR #24 已合并，Issue 已关闭 |
-| 新仓库 #14 | 弃用/回滚/隔离/撤销与限期风险接受：四类治理事件与 validator（事件快照=写入时刻投影）、六个管理员命令 + change_audience 路由（幂等键/预期状态/409 失败关闭）、投影逐轴折叠 + 风险接受惰性到期（零调度零 DDL）+ 推荐指针置顶、发布/受众/恢复三门补 7 天漏洞库时效复查、风险接受硬约束（admin_gray/blocker 全拒绝/finding_ref 实引/1-90 天）、零 DDL；68 项新测试、双轴审查两轮复核「无新问题，可合入」、8088 验收（9 命令演练 + 两轴投影 + 零残留）；PR #25 合并，Issue 已关闭 | 真实 risk_accept applied 链与自动隔离触发接线留待 #15/#16 |
+| 工单 | 当前事实 |
+| --- | --- |
+| AC-04 能力目录 | 工程验证通过；完整用户代表验收按后续票推进 |
+| AC-05 隔离能力获取 | 工程验证通过；生产迁移与用户验收 |
+| AC-06 Adapter + Sidecar | 管理员灰度验收通过，默认关闭；远程 MCP/Registry/普通用户开放未做 |
+| 旧 #33/#34/#35 | 三轴投影、可恢复 ValidationRun、Trivy/Syft 证据——完成并关闭（历史） |
+| 新 #9 | Cosign 本地 OCI image signature PoC——完成并关闭 |
+| 新 #10 | 个人能力自动晋级 verified——完成并关闭；真实晋级在 #15 已发生 |
+| 新 #11 | 管理员审核与业务内容审计查看——完成并关闭 |
+| 新 #12 | 独立平台快照、签名与 admin_gray 发布机制——完成并关闭；**真实发布链在 #15 阶段 3 已首次执行** |
+| 新 #13 | CapabilityMountResolver 运行时装载治理门——完成并关闭 |
+| 新 #14 | 弃用/回滚/隔离/撤销与限期风险接受——完成并关闭 |
+| 新 #15 | **进行中**：见 §3.4 |
 
-### 3.4 #9 本地标准 OCI 签名闭环
+### 3.4 #15（AC07-10）Python 表格 Tool 真实治理纵切面——进行中（阶段 0-6 完成）
 
-#9 固定并验证：
+已完成：
 
-- Cosign `3.0.6`
-- ORAS `1.3.2`
-- Zot `2.1.20`
-- 官方来源方法、可执行文件 SHA-256、镜像版本/tag/digest 和 Zot release commit
+1. **需求复核 Q1-Q8**（全部 A）与设计 D1-D9、任务拆分 S1-S7、验收方案——已确认入库。
+   阶段 3-5 真实执行又暴露若干设计未覆盖缺陷，均已修复（见下）。
+2. **代码实现（S1-S5 + D9）**：
+   - 装载门自动隔离钩子（`auto_quarantine` 可选注入，四验签失败分支触发；默认 None 保持 #13 只读）；
+   - 手动重扫命令（`rescan_supply_chain` 服务方法 + `POST /admin/supply-chain-rescan` 端点；
+     证据追加不覆盖、BLOCKED 自动隔离、崩溃窗口补写、`rescan_completed` 新事件类型）；
+   - **D9 验证任务 Seam**（本票核心新增）：`WorkspaceTaskCreateIn.validation_target` 标记 →
+     `CapabilitySelection.validation_target` 冻结持久化 → `check_mount(validation_exempt)` 装载豁免
+     （个人+Owner 自己+active+eligible 仍强制；平台包永不豁免）→ `copy_selection_for_owner` 丢弃标记。
+     这是「个人 draft 永远无法进入真实任务」断链的补齐。
+   - 真实注册脚本 `scripts/prepare_ac07_10_packs.py`、驱动脚本
+     `scripts/ac07_10_validation_drive.py`（阶段 2）、`scripts/ac07_10_publish_drive.py`
+     （阶段 3）、`scripts/ac07_10_rebuild_platform.py`（方案 A 重建）、
+     `scripts/ac07_10_stage4_drive.py`/`ac07_10_stage4_mount_drive.py`（阶段 4）、
+     `scripts/ac07_10_stage5_drive.py`（阶段 5）、`scripts/ac07_10_verify_platform_signatures.py`
+     （独立 Layout 复验）。
+   - 新增测试 60+ 项（钩子/重扫/HTTP/脚本/D9/快照/执行器/签名验证器/restore 复查链），
+     聚焦回归全部通过。
+3. **阶段 0-2 真实纵切面**：LLM（Qwen3.6-35B-A3B @ 192.168.121.32:6012）与 Docker 可用；
+   注册个人 draft 2.0.0/3.0.0（Owner=liyi）；两条真实验证链完成（真实 Pi 任务真实调用
+   `capability_python_table_summary`、五步全 passed、供应链 passed、`promoted_to_verified`、
+   投影 verified/active/eligible）。
+4. **阶段 3 真实平台发布**：平台签名密钥就绪（`~/.mangrove-signing/` 加密 Sigstore 密钥对 +
+   口令文件注入，`.env` 配置）；2.0.0/3.0.0 各自独立链（候选→脱敏快照新 digest→六步全绿→
+   Cosign 签名同一公钥 `103de227…`→admin_gray 发布）；生产库首次 `platform_published` ×2；
+   幂等重放通过；独立 Layout 复验双 PASS；装载门对签名平台包闭环通过。
+5. **阶段 4 治理动作链 + 真实装载**：管理员选择列表核验；rollback 推荐指针切 2.0.0↔3.0.0
+   （`recommendation_changed`）；deprecate 2.0.0（新任务不可选 + 冻结被拒 + 历史冻结恢复装载
+   通过）；**平台能力首次真实装载并调用**（真实 Pi 任务 completed + `capability_python_table_summary`
+   工具调用确认）。
+6. **阶段 5 revoke/跨用户/篡改**：revoke 2.0.0（历史恢复装载被拒）；跨用户拒绝（liyi111
+   普通用户对 admin_gray 被拒）；**篡改演示**（备份→篡改 1 字节→装载 409 fail-closed→自动隔离
+   actor=system→restore 复查链→逐字节还原→密码学复验→装载成功）。
+7. **阶段 6 真实 risk_accept + 重扫 + 零残留**（2026-08-19 完成）：人工隔离 3.0.0 →
+   `accept_pack_risk`（finding_ref 实引平台验证运行 `pfval_2d816c74…`，30 天）→ applied →
+   投影 eligible → **惰性到期演示**（验收专用改写 expires_at 为过去，改前记录、改后恢复）→
+   投影重新 quarantined（零新事件）→ restore（复查链全绿）→ eligible → **手动重扫**
+   （真实采集器：物化 + Trivy/Syft，PASSED 追加证据行 `supply_3402df2c…`，不覆盖旧行）→
+   `rescan_completed` → 零残留核验（Lease 全 0、探针无残留、事件计数、投影复验）。
+   驱动脚本 `scripts/ac07_10_stage6_drive.py`（支持 `--verify-only` 重跑核验）。
 
-真实路径：
+**阶段 3-6 暴露并修复的真实缺陷**（都是真实首跑才暴露，绝对不要再踩，详见 §10.5）：
 
-```text
-冻结 OCI Layout
-  → 仅监听 127.0.0.1 的短期 Zot Registry
-  → Cosign 按主体 digest 生成标准 OCI image signature
-  → ORAS 递归复制主体和 Referrers
-  → 新的独立 OCI Layout
-  → 重新上传并由 Cosign 使用公钥验证
-```
+- 阶段 3：平台快照生成器/六步执行器硬编码 `manifest.json`（真实归档是
+  `mangrove-capability.json`）→ 兼容标准名；`materialize_platform` 路径拼接 `Path+str`
+  TypeError → 修正括号；发布 Adapter 传绑定方法 vs 对象 AttributeError → 改传实例。
+- 阶段 3 重建（方案 A）：平台快照白名单删 `purpose` 导致真实装载 `PI_RUNTIME_FAILED`
+  → 快照写中性脱敏 purpose（`_SANITIZED_PURPOSE`），重建发布链（删旧 tag+目录行→新快照
+  新 digest→六步→签名→发布）。
+- 阶段 5：装载门签名验证只验 signed/<run_id> 副本，篡改主布局 blob 不被检测、自动隔离
+  不触发 → `OciPlatformSignatureVerifier.verify` 先校验主布局 subject blob 内容哈希；
+  平台 restore 复查链误查个人验证表（validation_incomplete）→ 改查平台验证运行表。
+- 阶段 6：`accept_pack_risk` 的 finding_ref 校验误查个人验证运行表（`get_validation_run`
+  只查个人表，平台 digest 永不匹配 → 任何平台包 risk_accept 必被拒 finding_ref_unknown）
+  → 平台 scope 改从平台验证运行表取证（digest 匹配 + SUCCEEDED，与 restore 复查链同源）；
+  回归测试 `test_platform_pack_requires_platform_run_ref` + `TestRiskAcceptCommand`/
+  `TestRestoreCommand` 取证表全部同步为平台表（141 项通过）。
 
-已验证成功与失败路径：
-
-- Python 表格 Tool 与 Everything MCP 两个冻结 digest 均签名成功；
-- 首次写 `passed` 前重开独立 Layout，验证主体 digest、签名、Referrers 和公钥身份；
-- 错误公钥和主体 manifest blob 篡改被拒绝；
-- 预启动取消、ORAS 重验期间取消、取消回调自身异常、真实进程崩溃和重复执行均失败关闭；
-- Windows 只读 OCI blob 可以在本事务失败时安全清理；
-- 非法 transaction ID 不能借递归清理逃出专用 work root；
-- 临时 Registry、容器、运行存储和命名网络零残留；
-- 私钥使用加密 Sigstore 格式，位于项目、数据库和任务目录之外；口令不进入 argv、日志或证据；
-- `sign-blob` 没有被当作标准 OCI image signature 的替代方案。
-
-最终工程证据：八个 Capability 测试文件 `133 passed`，Standards 与 Spec 最终复审均为 PASS，
-用户验收通过。详见：
-
-- `docs/plans/2026-08-13-agentic-capability-ac07-04-execution-report.md`
-- `src/capability_governance/oci_signing.py`
-- `src/capability_governance/tool_lock.py`
-- `scripts/verify_capability_signing_ac07.py`
-- `tests/test_capability_signing.py`
-
-### 3.5 近期较大范围验证快照
-
-这些数字是历史验证证据，接手后不得当成当前未经复跑仍成立的结果：
-
-- 后端全仓：`1249 passed, 4 skipped`
-- 首次公开快照 Capability 聚焦：`75 passed`
-- 前端 TypeScript 与 Vite 生产构建：通过
-- Playwright 单 worker：`54 passed`
-- 本机启停专项：`3 passed`
-- #35 最终供应链/治理回归：`92 passed`
-- #9 合并前八个 Capability 文件：`133 passed`
-- #13 合并前：Capability 九文件 `118 passed`、后端全量 `1092 passed`（1 项 DNS 环境基线失败）、
-  Playwright settings + semantic-workspace `38 passed`
-- #14 合并前：治理/运行时门回归 `256 passed`、后端全量 `1166 passed`（1 项 DNS 环境基线失败）、
-  前端构建通过、Playwright `38 passed`
+未完成（停在授权门）：阶段 7（收口：Issue AC1-AC7 逐条对照 → 执行报告 → 文档同步 → 发布链）。
 
 ## 4. 当前卡在哪里
 
-没有已知代码级硬阻塞，也没有在运行的实现任务。当前停在“进入 #15 前的人控阶段门”：
+**没有代码级硬阻塞**。当前停在「#15 阶段 7（收口）授权门」：
 
-1. #15 Issue 已存在，但新会话仍要核对其规格与当前代码是否漂移。
-2. 用户尚未授权 #15 开工；不要把“下一任务是 #15”理解为已授权实现。
-3. #15 是真实治理纵切面：涉及真实验证证据、晋级、平台发布与治理命令 applied 链，
-   对生产灰度包（gray-python-table）执行任何治理动作都必须单独授权。
+1. 阶段 0-6 已真实完成（个人 draft→验证→供应链→晋级→脱敏快照→签名→发布→装载→治理动作链
+   →篡改隔离恢复→risk_accept applied 链→惰性到期→手动重扫→零残留核验全部走通）；
+2. 阶段 7 计划：Issue AC1-AC7 逐条对照 → 执行报告 → `docs/status/current.md`/handoff.md
+   同步 → 发布链（codex 分支→提交→推送→PR→合并），逐项授权；
+3. 会话尚未提交/推送任何 #15 代码；全部改动在工作树（22 修改 + 19 新增）。
 
-另有开放环境事实（现场核验）：
+开放环境事实（现场核验）：
 
 - 8088 上运行着一个开发后端进程（受 logs/dev_reload.log 记录的热更新监督进程自动重启）；
-  生产库 `data/webui.db` 中保留两个 #13/#14 验收样本
-  （`accept-s8-draft-sample` 个人 draft、`accept-s8-deprecated-sample` 平台
-  deprecated+quarantined，幂等键 `accept:q1`），是 #15/#16 夹具；复原或删除需用户授权。
+  本会话修改的 src/*.py 已由热更新加载；
+- 生产库 `data/webui.db`：两条 verified 个人能力（2.0.0/3.0.0）、两条已发布平台能力
+  （2.0.0 平台 digest `e5556f83…` / 3.0.0 平台 digest `9379fe29…`，admin_gray）、
+  两条 legacy 平台包（1.0.0/everything-mcp）与两个 #13/#14 验收样本（accept-s8-*，未动）；
+  2.0.0 平台投影 `verified/revoked/eligible`（阶段 5 revoke 已 applied）、
+  3.0.0 平台投影 `verified/active/eligible`（篡改演示后已 restore）；
+- 平台签名密钥：`~/.mangrove-signing/mangrove-platform-signing.{key,pub}`（加密 Sigstore，
+  项目外），口令文件 `COSIGN_PASSWORD.txt` 权限收紧，`.env` 已配置（gitignored）；
+  公钥 SHA-256 `103de227b8f5…`；
+- 本机 Trivy DB 已更新（UpdatedAt 2026-08-17，7 天时效内）；再次过期后用
+  `trivy image --download-db-only --cache-dir data/platform-tools/supply-chain/cache/trivy` 更新
+  （mirror.gcr.io 约 4 分钟）；
+- 语义验证依赖真实 LLM（Qwen3.6-35B-A3B @ 192.168.121.32:6012），结果有随机性；
+  已验证的稳定口径见 §10.5；
+- 8088 签名运行时 `get_platform_signing_runtime` 装配了 `password_provider`
+  （`_platform_signing_password` 从私钥同目录 `COSIGN_PASSWORD.txt` 读取，失败回退环境变量）。
 
-另有不属于 #10 的开放风险：
+另有不属于 #15 的开放风险（#10 起保留）：30 项泛化集、完整 PG-05、真实外部 Provider
+安全端到端、P0 GateSnapshot 与默认入口切换、远程 MCP/Secret、Registry 自动发现、
+平台能力普通用户开放、8B Linux/Compose/并发/故障与目标服务器验证、GitHub Dependabot
+告警（时效信息需现场重查）。
 
-- 30 项泛化集未完成；
-- Word/Excel 连续生产门与完整 PG-05 未完成；
-- 真实外部 Provider 的 Pi→Relay→Provider 安全端到端未完成；
-- Rollout P0 GateSnapshot 与默认入口切换未完成；
-- 远程 MCP/Secret、Registry 自动发现和平台能力普通用户开放未完成；
-- 8B Linux/Compose/并发/故障注入与目标服务器验证未完成；
-- GitHub 最近一次 push 提示默认分支存在大量 Dependabot 告警；数量和严重度是时效信息，后续
-  安全工作必须从 GitHub 现场重新查询，不要引用旧数字直接决策。
+## 5. 下一步计划：#15 阶段 7（收口，待授权）
 
-上述任一项都不能因 #9 或局部回归通过被表述为 Phase 4、生产门或稳定版本完成。
+### 阶段 6 已完成（2026-08-19，详见 §3.4 第 7 项）
 
-## 5. 下一步计划：新仓库 #15
+真实 risk_accept applied 链、惰性到期（零新事件）、restore 复查链、手动重扫（真实采集器
+PASSED 追加）、零残留核验（Lease 0/探针无残留/投影复验）全部走通；驱动脚本
+`scripts/ac07_10_stage6_drive.py` 支持 `--verify-only`。
 
-工单：`Eclipseic1848/Mangrove_ai#15`，Python 表格 Tool 真实治理纵切面。
+### 阶段 7 收口
 
-### 5.1 前置状态
+- Issue AC1-AC7 逐条对照 → 执行报告 → `docs/status/current.md`/handoff.md 同步 →
+  发布链（codex 分支→提交→推送→PR→合并，逐项授权）。
 
-#14 发布链已收口（PR #25 合并 `5ad3a472`，Issue #14 已关闭，本地 main 与 origin/main
-一致，工作树干净）。#15 开工前按历史 PR 流程走 `codex/ac07-10-*` 分支。
+### 3.0.0 之后
 
-### 5.2 #15 目标（开工前仍需现场复核 Issue 与规格）
-
-- gray-python-table 的真实治理纵切面：真实验证证据、晋级、平台发布、治理命令与
-  #14 机制的真实 applied 链（含 risk_accept、自动隔离触发接线）。
-- #14 预留的自动隔离触发点（Q1A 留 #15/#16）接入真实证据链。
-
-### 5.3 参考流程
-
-沿用 #10～#14 的纵向流程：需求/规格复核 → 领域/接口设计 → 任务拆分 → TDD 实现 →
-冻结夹具验证 → Standards/Spec 双轴审查 → 用户验收 → 发布动作逐项授权。
+- #16：Everything MCP 同一纵切面（依赖 #14，可复用 #15 全部机制与踩坑经验）；
+- #17：AC-06 兼容切换与 AC-07 综合验收门（完成前不能称 AC-07 收口）。
 
 ## 6. AC-07 工单 Roadmap
 
-权威父工单是新仓库 #8。本文 AC-07 的历史 #33～#35 均指
-`Eclipseic1848/Mangrove_platform`，不能静默解释成新仓库同号 Issue，也不能误投到
-`Eclipseic1848/mangrove`。
+权威父工单是新仓库 #8。历史 #33～#35 均指 `Eclipseic1848/Mangrove_platform`，不能混淆。
 
-| 顺序 | 工单 | 目标 | 依赖与现场状态 |
+| 顺序 | 工单 | 目标 | 状态 |
 | ---: | --- | --- | --- |
-| 1 | `Eclipseic1848/Mangrove_platform#33` | 三轴治理投影与兼容读取 | 已完成、迁移、验收并关闭 |
-| 2 | `Eclipseic1848/Mangrove_platform#34` | 精确 digest 的可恢复 ValidationRun | 已完成、生产迁移、真实灰度、验收并关闭 |
-| 3 | `Eclipseic1848/Mangrove_platform#35` | Trivy/Syft 供应链证据闭环 | 已完成、生产迁移、验收并关闭 |
-| 4 | 新仓库 #9 | Cosign 本地 OCI image signature PoC | 已完成；PR #19 合并，Issue 已关闭 |
-| 5 | 新仓库 #10 | 个人能力自动晋级 `verified` | 已完成；PR #20 合并，Issue 已关闭；真实晋级留待 #15/#16 |
-| 6 | 新仓库 #11 | 管理员审核与业务内容审计查看 | 已完成；Issue 已关闭 |
-| 7 | 新仓库 #12 | 独立平台快照、签名与 `admin_gray` 发布 | 已完成；Issue 已关闭；真实探针与真实发布纵切面留待 #15/#16 |
-| 8 | 新仓库 #13 | CapabilityMountResolver 运行时治理门 | 已完成；PR #24 合并，Issue 已关闭 |
-| 9 | 新仓库 #14 | 弃用、回滚、隔离、撤销与限期风险接受 | 已完成；PR #25 合并，Issue 已关闭 |
-| 10 | 新仓库 #15 | Python 表格 Tool 真实治理纵切面 | **下一工单**；依赖 #14 |
-| 10 | 新仓库 #15 | Python 表格 Tool 真实治理纵切面 | 开放；依赖 #14 |
-| 11 | 新仓库 #16 | Everything MCP 真实治理纵切面 | 开放；依赖 #14，可与 #15 分别验收 |
-| 12 | 新仓库 #17 | AC-06 兼容切换与 AC-07 综合验收门 | 开放；依赖 #15、#16，完成前不能称 AC-07 收口 |
-
-#14 依赖（旧 #35、新 #13）已具备前置事实；不要自行并行扩大范围。
+| 1-3 | 旧 #33/#34/#35 | 三轴投影、ValidationRun、供应链证据 | 完成并关闭（旧仓库历史） |
+| 4 | 新 #9 | Cosign 本地 OCI image signature PoC | 完成；PR #19 |
+| 5 | 新 #10 | 个人能力自动晋级 verified | 完成；PR #20；真实晋级已在 #15 发生 |
+| 6 | 新 #11 | 管理员审核与业务内容审计查看 | 完成 |
+| 7 | 新 #12 | 独立平台快照、签名与 admin_gray 发布 | 完成；**真实发布链在 #15 阶段 3 已首次执行** |
+| 8 | 新 #13 | CapabilityMountResolver 运行时治理门 | 完成；PR #24 |
+| 9 | 新 #14 | 弃用、回滚、隔离、撤销与限期风险接受 | 完成；PR #25 |
+| 10 | 新 #15 | Python 表格 Tool 真实治理纵切面 | **进行中**：阶段 0-5 完成，阶段 6 待授权 |
+| 11 | 新 #16 | Everything MCP 真实治理纵切面 | 开放；依赖 #14 |
+| 12 | 新 #17 | AC-06 兼容切换与 AC-07 综合验收门 | 开放；依赖 #15/#16 |
 
 ## 7. 整个工程 Roadmap
 
-以下分为“当前权威主线”和“历史规格中的方向性后续”。方向性后续不是已授权排期。
-
 ### 7.1 当前权威主线
 
-1. **完成 AC-07 #10～#17**：建立个人验证、管理员审核、平台快照、签名、运行门、生命周期、
-   两条真实纵切面和 AC-06 兼容切换。
+1. **完成 AC-07 #15/#16/#17**：#15 进行中；#16 复用 #15 机制；#17 收口。
 2. **补齐 Phase 4 未完成门**：30 项泛化、完整 PG-05、真实外部 Provider 安全端到端、P0
    GateSnapshot、默认入口切换、8B Linux/Compose/并发/故障与目标服务器验证。
-3. **完成生产资格审计**：全仓回归、真实数据/任务、权限与安全、备份恢复、可观测性、资源清理、
-   文档一致性和用户验收。
+3. **完成生产资格审计**：全仓回归、真实数据/任务、权限与安全、备份恢复、可观测性、
+   资源清理、文档一致性和用户验收。
 
 ### 7.2 已落地但不能称整体封板的 Phase 4 基础
 
-- Phase 4A 的文档解析、EvidenceRef、复核和交付基础已进入当前产品主链。
-- Phase 4B 的语义任务 Harness、能力包、有界修复 Loop、输出/下载和正式工作台已有大量实现。
-- Agentic Runtime vNext、统一任务域、Delivery Publisher、Provider 连接、受控外发、覆盖感知检索
-  和 Agentic Capability 已形成当前主架构。
-- 8B、完整 PG-05、默认切换和综合生产门仍未完成，所以不能宣布 Phase 4 封板。
+Phase 4A 文档解析/EvidenceRef/复核/交付基础已进入产品主链；Phase 4B 语义任务 Harness/
+能力包/有界修复 Loop/正式工作台已有大量实现；vNext Runtime/统一任务域/Delivery Publisher/
+Provider 连接/受控外发/覆盖感知检索/Agentic Capability 已形成主架构。8B、完整 PG-05、
+默认切换和综合生产门仍未完成，所以不能宣布 Phase 4 封板。
 
 ### 7.3 方向性后续（必须重新规格化和授权）
 
-| 阶段 | 方向 | 当前边界 |
-| --- | --- | --- |
-| Phase 4C | 图片、音频、视频解析接入同一 Harness | 只有部分原型/接口证据；未形成完整生产链 |
-| Phase 5A | 认证网站、只读 API、企业来源发现 | ADR 已采纳；安全隔离、确认和数据外发仍需专项实现 |
-| Phase 5B | Recipe、模板、增量、队列、配额、生命周期、质量运营和生产工程化 | 尚未进入当前实施主线；不得提前引入分布式复杂度 |
-
+Phase 4C（图片/音频/视频解析）、Phase 5A（认证网站/只读 API/企业来源发现）、
+Phase 5B（Recipe/模板/增量/队列/配额/生命周期/质量运营）——都未进入实施主线。
 企业 API、业务系统、本地路径、对象存储、远程 MCP、OAuth、通用 Registry 自动发现、
-多租户团队权限和大规模分布式执行都不能从现有本地灰度能力中推断为已完成。
+多租户团队权限和大规模分布式执行不能从现有本地灰度能力推断为已完成。
 
 ## 8. 版本计划
 
 ### 8.1 已验证版本事实
 
 - 当前仓库唯一现场可见的稳定封板标签是 `v0.0.4`，不得移动或回写。
-- 公开 `main` 承接原 `v0.0.8` 开发能力，但 `v0.0.8` **没有同名标签、没有封板，也不是稳定
-  生产版本**。
-- 当前 `main` 提交为 `5587043c...`；它是公开开发基线，不是 Release 声明。
+- 公开 `main` 承接原 `v0.0.8` 开发能力，但 `v0.0.8` 没有同名标签、没有封板。
 - `SECURITY.md` 将当前状态描述为 `v0.0.8` 开发阶段，安全修复优先进入 `main`。
 
 ### 8.2 尚未冻结的版本决策
 
-- 没有已确认的下一个版本号、发布日期、RC 日期或稳定发布日。
-- 没有授权创建 `v0.0.8`、`v0.0.9` 或其他标签/Release。
-- AC-07 完成不自动等于 `v0.0.8` 可以发布；Phase 4 未完成门仍需独立评估。
+没有已确认的下一个版本号、发布日期、RC 或稳定发布日；没有授权创建任何 tag/Release；
+AC-07 完成不自动等于版本可发布；Phase 4 未完成门仍需独立评估。
 
-### 8.3 建议的下一次版本决策门（建议，不是已确认计划）
+### 8.3 建议的下一次版本决策门
 
-在讨论新的 tag/Release 前，至少应重新确认：
-
-1. 计划纳入版本的工单范围与非目标；
-2. AC-07 是否要求 #17 综合门全部通过；
-3. 完整后端、前端构建、Playwright、Docker/Linux 和代表真实任务证据；
-4. 权限、供应链、签名、Dependabot/Secret、安全外发和残留资源审计；
-5. 数据库迁移备份、重复迁移、恢复演练和旧数据零改写；
-6. 8088 用户验收、升级/回滚说明、部署文档和已知限制；
-7. 用户分别授权版本号、tag、Release、Push 和任何包/镜像发布。
+重新确认：工单范围与非目标、#17 综合门是否要求全过、完整后端/前端/Playwright/Docker 证据、
+权限/供应链/签名/Dependabot/外发/残留资源审计、数据库迁移备份/恢复演练/旧数据零改写、
+8088 用户验收/升级回滚/部署文档/已知限制、以及用户分别授权版本号/tag/Release/Push。
 
 ## 9. 稳定业务与安全边界
 
@@ -338,48 +327,48 @@ Mangrove 是统一数据任务平台。用户用自然语言描述目标，平�
 - `/data-prep` 是主工作台；迁移完成前不得删除历史任务兼容入口或 Legacy Delivery 读取。
 - TaskRevision、来源快照、连接版本、外发确认、能力 digest 和 Owner 隔离必须冻结且失败关闭。
 - AC-06 两项历史 `admin_gray_only` 包只是迁移兼容例外，不扩大普通用户权限。
-- 普通用户、管理员、超级管理员是产品角色；“高级用户”不是权限角色。
-- 管理员可以查看跨 Owner 的任务管理元数据；读取个人业务正文必须填写原因并产生不可变审计。
+- 普通用户、管理员、超级管理员是产品角色；「高级用户」不是权限角色。
+- 管理员可查看跨 Owner 任务管理元数据；读取个人业务正文必须填写原因并产生不可变审计。
 - 无能力任务不能创建治理运行、扫描器或 Sidecar，也不能增加启动负担。
 - 外部模型、采集器、下载源、Registry、镜像和代理变化都可能改变数据外发与安全语义，必须确认。
 - 用户控制业务范围、数据含义、权限、生产迁移、能力晋级、平台发布、受众开放和不可逆操作。
+- #15 新增边界：验证任务豁免（`validation_target`）五条件同时成立才生效
+  （个人 + Owner 自己 + active + eligible + 冻结 selection 标记）；平台包永不豁免；
+  豁免不随 revision 继承；draft 能力不进入 `/capabilities` 新任务选择列表。
+- #15 阶段 5 修复边界：平台装载门签名验证必须绑定主布局主体内容（篡改即拒 + 自动隔离）；
+  平台 restore 复查链从平台验证运行表取证（六步全绿 + 签名齐备）。
 
 ## 10. 绝对不要再踩的坑
 
 ### 10.1 状态与范围
 
-- **不要把测试、Code Review 或一次真实任务当成用户验收。** 用户验收必须由用户明确确认；生产
-  资格和版本发布仍是另一道门。
-- **不要把 Candidate、验证通过、`eligible_for_delivery` 或中间文件称为正式交付。** 只认
-  `delivery_published` 且完整性/QA 通过的 `output_id`。
-- **不要把局部审计、PoC 或 AC 工单完成称为 Phase 4 完成。** 报告必须区分已验证事实、代码
-  推断和尚未验证的建议。
-- **不要自动进入下一 Skill 或阶段。** 需求、规格、拆票、实现、审查、迁移、验收和发布之间都
-  要展示产物与未决问题，等待用户确认。
+- **不要把测试、Code Review 或一次真实任务当成用户验收。** 用户验收必须由用户明确确认。
+- **不要把 Candidate、验证通过、`eligible_for_delivery` 或中间文件称为正式交付。**
+  只认 `delivery_published` 且完整性/QA 通过的 `output_id`。
+- **不要把局部审计、PoC 或 AC 工单完成称为 Phase 4 完成。** 报告必须区分已验证事实、
+  代码推断和尚未验证的建议。
+- **不要自动进入下一 Skill 或阶段。** 需求、规格、拆票、实现、审查、迁移、验收和发布之间
+  都要展示产物与未决问题，等待用户确认。
 - **不要顺手重构、扩大权限或合并工单。** 每一行改动都应能追溯到当前工单。
 
 ### 10.2 仓库、Issue 与文档
 
 - **不要用错仓库或 Issue 编号。** 新工单只认 `Eclipseic1848/Mangrove_ai`；AC-07 旧 #33～#35
-  只认 `Eclipseic1848/Mangrove_platform`。`origin` 是公开开发远端，`legacy-*` 只是历史远端。
+  只认 `Eclipseic1848/Mangrove_platform`。
 - **不要只看 `git diff <base>...HEAD` 审查 WIP。** HEAD 可能和基线相同，而关键文件仍是
   untracked；必须同时看 `git status --short --untracked-files=all` 并逐一审查新增文件。
-- **不要相信交接中的旧 SHA、分支、测试数、端点或 Issue 状态。** 这些都是时效信息，开工先现场
-  核验。
+- **不要相信交接中的旧 SHA、分支、测试数、端点或 Issue 状态。** 这些都是时效信息，开工先现场核验。
 - **不要让多个 Markdown 同时维护滚动状态。** `docs/status/current.md` 是唯一状态台账；
-  `handoff.md` 只做接手快照与下一门禁；ADR/规格/报告完成后保持历史证据身份。
-- **不要删除历史计划来“清理过期内容”。** 标记 historical/superseded 并指向当前权威文档，
-  除非用户明确授权删除且引用扫描证明安全。
+  `handoff.md` 只做接手快照与下一门禁。
+- **不要删除历史计划来「清理过期内容」。** 标记 historical/superseded 并指向当前权威文档。
 
 ### 10.3 Git 与发布
 
 - **禁止 `git add .`、`git add -A`、强推、`git reset --hard` 和 `git clean`。** 混合工作树只能用
   明确文件允许列表。
-- **不要直接在默认分支偷偷提交。** 需要发布时按授权创建 `codex/` 功能分支、提交、推送、PR、
-  合并；每个外部动作都要有授权。
+- **不要直接在默认分支偷偷提交。** 需要发布时按授权创建 `codex/` 分支、提交、推送、PR、合并。
 - **「同意全部」不覆盖 PR 合并步。** #13/#14 两次都被权限分类器拦截：用户对「提交/推送/PR/
-  关闭」清单回复「同意全部」后，合并仍需用户单独指名「合并」再执行；Issue 关闭由 PR 正文
-  `Closes #N` 自动完成，无需手动 close。
+  关闭」清单回复「同意全部」后，合并仍需用户单独指名「合并」再执行。
 - **不要提交本机路径、`.env`、Secret、数据库、日志、任务数据、签名私钥、浏览器状态、Agent
   设置或本地审计。** 私钥从 Git 历史删除也不等于已撤销，误泄漏必须轮换。
 - **不要因为下载慢就更换工具、版本、镜像、镜像源、URL、安装方式或实现路线。** 只能做语义
@@ -387,86 +376,128 @@ Mangrove 是统一数据任务平台。用户用自然语言描述目标，平�
 
 ### 10.4 AC-06 / AC-07 与签名
 
-- **Everything MCP 灰度样本是 MCP 协议测试服务器，不是 Voidtools Everything 文件搜索。** 如需
-  真实本地文件搜索，必须新建能力、冻结包与 digest、重新验证，不能静默替换或宣传错位。
+- **Everything MCP 灰度样本是 MCP 协议测试服务器，不是 Voidtools Everything 文件搜索。**
 - **不要用 `cosign sign-blob` 冒充标准 OCI image signature。** #9 已证明的路径是短期回环
   Registry + digest 签名 + OCI Referrers + 独立 Layout。
 - **签名工具锁不能只检查 `verified=true`。** 必须绑定版本、来源方法、身份/commit、可执行文件
   digest，以及 Zot 镜像 tag 与 digest。
-- **签名密钥不能只检查“文件存在”。** 私钥必须是加密 Sigstore 格式，位于项目、数据库和任务
+- **签名密钥不能只检查「文件存在」。** 私钥必须是加密 Sigstore 格式，位于项目、数据库和任务
   根之外；口令只进受控子进程环境，不进 argv、日志、Prompt、事件或证据。
-- **递归清理前必须验证 transaction ID 和解析后的绝对路径。** 只能删除专用 work root 下本事务
-  新建的精确目录；Windows 只读 OCI blob 需要显式变为可写后重试。
-- **取消回调自身抛错时也要先 terminate/kill/communicate 回收子进程。** 否则诊断异常会留下失控
-  ORAS/Cosign 进程和文件占用。
-- **测试运行中取消时必须确认子进程已经真正启动。** 曾出现回调先于 PID 文件写入，导致测试时序
-  波动；探针应等待可观察启动条件再触发异常或取消。
-- **不要要求旧缓存立即具备新 sidecar 元数据而没有兼容/回填策略。** 新完整性门不能让升级前
-  已物化的灰度包全部失效，也不能改写旧 digest、历史验证或冻结选择。
-- **不要仅凭源码猜 Docker Inspect 字段。** `--tmpfs` 等配置可能位于 `HostConfig.Tmpfs` 而不是
-  顶层 `Mounts`；提出安全 finding 前必须用真实 Docker 行为或官方资料核实。
-- **治理命令的幂等检查必须先于预期状态检查。** 同幂等键重试必须返回既有事件（already_applied），
-  不能在状态已变化后先被前置检查打成 rejected；#14 曾因此把幂等重试打成 409。
-- **多事件命令的非原子部分应用不能被幂等吞掉。** restore 写两条事件（资格+生命周期）：任一
-  幂等键命中都不能无条件返回，必须按投影补写缺失的另一条；#14 双向都踩过。
+  本机口令读取：`get_platform_signing_runtime` 用 `_platform_signing_password`
+  （私钥同目录 `COSIGN_PASSWORD.txt`，失败回退 `COSIGN_PASSWORD` 环境变量）。
+- **递归清理前必须验证 transaction ID 和解析后的绝对路径。** Windows 只读 OCI blob 需要显式
+  变为可写后重试（`chmod(S_IWUSR)` → 写 → 恢复原 mode）。
+- **治理命令的幂等检查必须先于预期状态检查。** 同幂等键重试必须返回既有事件（already_applied）。
+- **多事件命令的非原子部分应用不能被幂等吞掉。** restore 写两条事件：任一幂等键命中都不能
+  无条件返回，必须按投影补写缺失的另一条；自动隔离的崩溃窗口同理（重扫事件缺失时补写）。
+- **restore 幂等键不能复用掩盖新状态。** restore 成功后又发生新自动隔离时，旧幂等键命中会
+  不补写隔离解除 → 投影卡在 quarantined。演示/重放脚本必须用唯一幂等键（含时间戳/序号）。
 - **治理事件快照必须与写入时刻投影一致，不冒充他态。** 隔离中的弃用/撤销事件必须携带
-  quarantined 资格快照（validator 相应放宽），否则审计事件流会伪造状态。
+  quarantined 资格快照。
 - **两轴写序视状态选择。** revoked+quarantined 恢复必须先写生命周期（携带 quarantined 快照）
-  再解除隔离；反序会撞 validator（eligibility_changed 只允许 active/deprecated 生命周期）。
+  再解除隔离；反序会撞 validator。
 
-### 10.5 Runtime、网络与本机运维
+### 10.5 #15 纵切面专属（新踩的坑，绝对不要再踩）
+
+- **能力归档必须用固定名 `mangrove-capability.tar`（或 .tar.gz/.tgz）。** `_expand_capability_archive`
+  只认这三个固定名；带版本后缀不会被物化解压 → mount 目录只有 tar → `load_runtime_manifests` 空
+  → Sidecar 不启动 → 能力工具不可用。这是阶段 2 调试最深的根因。
+- **能力包 manifest 的标准文件名是 `mangrove-capability.json`，不是 `manifest.json`。**
+  mount_resolver 物化展开校验前者；快照生成器与平台六步执行器都必须兼容标准名
+  （`_resolve_manifest` 优先标准名、兼容测试旧名），且快照重打包必须保留源 manifest 文件名
+  （否则平台快照物化展开失败）。
+- **平台快照 manifest 的 `purpose` 必须保留为中性脱敏文案**（`_SANITIZED_PURPOSE`）——
+  运行时 `CapabilityRuntimeManifest` 要求 purpose 必填，删除字段会导致真实装载
+  `PI_RUNTIME_FAILED`；业务 purpose 不得进入平台内容。
+- **平台装载门签名验证必须绑定主布局主体内容。** `verify_local` 只验 signed/<run_id> 副本；
+  `OciPlatformSignatureVerifier.verify` 必须先校验主布局 subject blob 内容哈希
+  （sha256 == digest），否则篡改主布局不被检测、自动隔离不触发（靠物化兜底）。
+- **平台 restore 复查链从平台验证运行表取证。** `get_latest_succeeded_validation_run`
+  查个人表，平台能力会误报 `validation_incomplete`；平台目标改用
+  `list_platform_validation_runs`（六步全绿 + 签名齐备）。
+- **`materialize_platform` 路径拼接不要用 `Path + str`**（运算符优先级会先算 `/` 再 `+`，
+  TypeError）；用括号整体拼接 `Path / dir / (f"{a}-{b}" + c)`。
+- **发布 Adapter 装配必须传仓库实例（对象），不是绑定方法。** `PlatformPublisherContract`
+  期望带 `save_pack` 方法的对象；`get_platform_publication_dependencies` 传
+  `SqliteCapabilityCatalogRepository(...).save_pack` 会 AttributeError。
+- **instructor v2 strict 下模型字段不能用 tuple 接收 LLM 输出的 JSON 数组。**
+  `SemanticDecision.missing_requirements` 已从 tuple 改 list（含 validator 字符串规范化）；
+  以后新增 instructor 响应模型一律用 list。
+- **语义验证 prompt 必须强制 reason 与 passed 自一致**（「发现候选正确后不要沿用先前的不通过
+  结论」「reason 不得超过 400 字符」）；`VerificationCheck.summary` 上限 500，LLM 长 reason
+  必须防御性截断（`decision.reason[-500:]`）；`max_tokens` 给足（语义验证 4000）。
+- **上传必须写入 `settings.data_prep_upload_root`。** Pi 运行时按该路径解析上传；写临时目录会
+  「上传不存在或无权访问」。
+- **`source_refs` 的 sha256 必须是上传对象的真实 hash**，不能填空串（Pi 校验失败）。
+- **Pi 任务的语义判断输入不含工具调用轨迹**，不要靠 objective 里的「必须调用工具」证明工具
+  调用；工具调用的真实发生由冻结 selection + `_expected_target_tools`/
+  `_successful_tools_for_run` 机制门（agentic_runtime_events 的 `tool.completed`）证明。
+- **验证任务样例越简单越好。** 4 行数据曾让 Qwen 误判 row_count 与源行数不一致，3 行样例稳定通过。
+- **`SemanticWorkspaceManager` 是内存队列**：8088 的 worker 只执行 8088 进程内 enqueue 的任务；
+  外部驱动脚本必须自己构造 manager 并 start+enqueue；验证/平台 worker 是 DB 轮询
+  （8088 与外部进程可竞争，Lease 串行化）。
+- **平台验证 worker 的 `_run` 无 try/except**：执行器抛异常会让 worker task 崩溃且静默停止。
+  真实验证卡住时先查运行记录 evidence 是否推进、Lease 是否持有，再决定重试。
+- **Trivy DB 7 天时效是真实环境门**：过期后 `trivy image --download-db-only --cache-dir
+  data/platform-tools/supply-chain/cache/trivy` 更新（mirror.gcr.io 约 4 分钟）。
+- **`capability_pack_versions` 唯一键 (owner_key, pack_id, version)，同版本不可覆盖。**
+  重建平台版本（如快照修复）需删平台 OCI tag + 删目录行 + 换幂等键（`--replace` 纪律），
+  事件流保留旧记录作失败留痕；不要直接对旧行 UPDATE。
+- **语义验证有真实 LLM 随机性**：同输入可能输出自相矛盾结论（reason 全对却 passed:false）；
+  prompt 一致性 + 简单样例 + 重试是当前稳定口径；任何「卡在 candidate_ready」先看
+  `verification_json` 的 semantic_goal 结论再决定重试/重跑，不要盲目重跑。
+- **Windows 只读 OCI blob 写入前必须 chmod(S_IWUSR)**，写后恢复原 mode；还原 blob 用
+  signed/<run_id> 副本的正确内容（哈希与 digest 匹配），不要用可能被污染的备份文件。
+- **`accept_pack_risk` 的 finding_ref 校验必须区分取证表**：个人 scope 用
+  `get_validation_run`（个人表）；平台 scope 必须用平台验证运行表（digest 匹配 + SUCCEEDED，
+  与 restore 复查链同源）。`get_validation_run` 只查个人表，平台 digest 永不匹配——
+  误用会导致任何平台包 risk_accept 必被拒 `finding_ref_unknown`（阶段 6 首跑暴露）。
+  测试同理：平台场景的证据运行必须存平台验证运行表（`create_platform_validation_run`），
+  不能像修复前那样塞个人表掩盖问题。
+- **治理事件表 `capability_governance_events` 没有 reason/status 顶层列**，内容全在
+  `payload_json`；直接 SELECT reason 会 OperationalError。查询事件理由/快照先解析 payload。
+  （供应链证据表 `capability_supply_chain_evidence` 顶层有 status 列，两个表结构不同。）
+- **惰性到期是投影层判定，不是事件**：risk_accepted 到期（now >= expires_at）时投影回
+  QUARANTINED 但零新事件。验收演示「到期」改 payload 的 expires_at 即可触发，改前记录原值、
+  演示后恢复；不要靠写新事件模拟到期（会破坏零新事件断言与审计语义）。
+
+### 10.6 Runtime、网络与本机运维
 
 - **Capability Host 内网请求不能被业务外发代理接管。** `NO_PROXY` 只加入当前任务的确定性 Host
-  DNS，不能放宽为任意主机、网段、端口或外部目标。
-- **不要把辅助 Docker 容器失败直接当成 8088 服务失败。** 先检查后端日志、端口和
-  `/api/health`。
-- **FastAPI 启动阶段不要直接运行同步 embedding/rerank 网络调用。** 不可达本地模型曾让服务卡在
-  `Waiting for application startup`；阻塞工作应离开事件循环并有超时/降级边界。
-- **Windows PowerShell 可能拦截 `npm.ps1`。** 需要时使用 `npm.cmd`，但不要因此改变依赖或构建
-  语义。
-- **所有中文文本都显式使用 UTF-8。** 出现乱码先修编码，不能把乱码写进规格、日志或数据库。
-- **停止脚本只能清理经项目路径、标记或祖先进程验证的进程树。** 未知端口占用只能报警，不能
-  广泛杀进程。
+  DNS。
+- **不要把辅助 Docker 容器失败直接当成 8088 服务失败。** 先检查后端日志、端口和 `/api/health`。
+- **FastAPI 启动阶段不要直接运行同步 embedding/rerank 网络调用。**
+- **Windows PowerShell 可能拦截 `npm.ps1`。** 需要时使用 `npm.cmd`。
+- **所有中文文本都显式使用 UTF-8。** 出现乱码先修编码；PowerShell 管道打印中文加 `PYTHONUTF8=1`
+  或先 `chcp 65001`。
+- **停止脚本只能清理经项目路径、标记或祖先进程验证的进程树。** 未知端口占用只能报警。
 - **8088 后端受热更新监督进程托管。** `logs/dev_reload.log` 记录自动重启：修改 src/*.py 会
-  自动重启网关，杀掉的 `python -m src.api.main` 进程会被自动恢复——排查「幽灵进程/端口占用」
-  先看这个日志，不要反复杀进程。
-- **PowerShell 代码页影响 pytest 子进程。** `test_stop_helper_preserves_unrelated_port_listener`
-  在 GBK 代码页下因 stdout 乱码失败；全量测试先 `chcp 65001` 再跑。
-- **全量 pytest 偶发卡在 IO 等待（曾 33 分钟无输出）。** 用 `-o faulthandler_timeout=120` 重跑
-  可定位并保护；重跑通常正常完成。
+  自动重启网关，杀掉的进程会被自动恢复——排查「幽灵进程/端口占用」先看这个日志。
+- **权限分类器（auto 模式）偶发不可用。** 报错 `classifier temporarily unavailable` 是分类器
+  服务瞬时故障（fail-closed 默认拒绝），重试通常成功；若持续可用，用户可切换权限模式后继续。
+- **全量 pytest 偶发卡在 IO 等待（曾 33 分钟无输出）。** 用 `-o faulthandler_timeout=120` 重跑。
 
 ## 11. 权威资料索引
 
 ### 当前状态与规则
 
-- `AGENTS.md`
-- `docs/status/current.md`
-- `CONTEXT.md`
-- `docs/agents/issue-tracker.md`
-- `docs/agents/triage-labels.md`
-- `docs/agents/domain.md`
+- `AGENTS.md`、`docs/status/current.md`、`CONTEXT.md`、`docs/agents/`
+- `docs/agents/issue-tracker.md`、`docs/agents/triage-labels.md`、`docs/agents/domain.md`
 
 ### AC-07
 
 - 规格：`docs/plans/2026-08-06-agentic-capability-ac07-spec.md`
 - ADR：`docs/adr/0029-capability-validation-lifecycle-and-platform-publication.md`
-- #34 报告：`docs/plans/2026-08-07-agentic-capability-ac07-02-execution-report.md`
-- #35 报告：`docs/plans/2026-08-07-agentic-capability-ac07-03-execution-report.md`
+- #34/#35 报告：`docs/plans/2026-08-07-agentic-capability-ac07-{02,03}-execution-report.md`
 - #9 报告：`docs/plans/2026-08-13-agentic-capability-ac07-04-execution-report.md`
-- #10 需求复核：`docs/plans/2026-08-14-agentic-capability-ac07-05-requirements-review.md`
-- #10 设计：`docs/plans/2026-08-14-agentic-capability-ac07-05-design.md`
-- #11 需求复核：`docs/plans/2026-08-14-agentic-capability-ac07-06-requirements-review.md`
-- #11 设计：`docs/plans/2026-08-14-agentic-capability-ac07-06-design.md`
-- #11 任务拆分：`docs/plans/2026-08-14-agentic-capability-ac07-06-task-breakdown.md`
-- #12 需求复核：`docs/plans/2026-08-14-agentic-capability-ac07-07-requirements-review.md`
-- #12 设计：`docs/plans/2026-08-14-agentic-capability-ac07-07-design.md`
-- #12 任务拆分：`docs/plans/2026-08-14-agentic-capability-ac07-07-task-breakdown.md`
-- #13 需求复核：`docs/plans/2026-08-14-agentic-capability-ac07-08-requirements-review.md`
-- #13 设计：`docs/plans/2026-08-14-agentic-capability-ac07-08-design.md`
-- #13 任务拆分：`docs/plans/2026-08-14-agentic-capability-ac07-08-task-breakdown.md`
-- #14 需求复核：`docs/plans/2026-08-16-agentic-capability-ac07-09-requirements-review.md`
-- #14 设计：`docs/plans/2026-08-16-agentic-capability-ac07-09-design.md`
-- #14 验收方案：`docs/plans/2026-08-16-agentic-capability-ac07-09-acceptance-plan.md`
+- #10 需求/设计：`docs/plans/2026-08-14-agentic-capability-ac07-05-{requirements-review,design}.md`
+- #11 需求/设计/拆票：`docs/plans/2026-08-14-agentic-capability-ac07-06-*.md`
+- #12 需求/设计/拆票：`docs/plans/2026-08-14-agentic-capability-ac07-07-*.md`
+- #13 需求/设计/拆票：`docs/plans/2026-08-14-agentic-capability-ac07-08-*.md`
+- #14 需求/设计/验收：`docs/plans/2026-08-16-agentic-capability-ac07-09-*.md`
+- **#15 设计/拆票/验收方案：`docs/plans/2026-08-16-agentic-capability-ac07-10-{design,task-breakdown,acceptance-plan}.md`**
+- #15 驱动脚本：`scripts/ac07_10_{validation_drive,publish_drive,rebuild_platform,stage4_drive,stage4_mount_drive,stage5_drive,stage6_drive,verify_platform_signatures}.py`
+- #15 注册脚本：`scripts/prepare_ac07_10_packs.py`
 
 ### Phase 4 与长期方向
 
@@ -478,16 +509,19 @@ Mangrove 是统一数据任务平台。用户用自然语言描述目标，平�
 
 ## 12. 新会话的第一轮输出应该是什么
 
-读取上述资料和 Issue #15 后，先给用户一份只读阶段判断，不要立即实现。至少说明：
+读取上述资料与当前工作树后，先给用户一份只读阶段判断，不要立即实现。至少说明：
 
-1. 当前阶段：#15 开工前的需求/规格复核（#9～#14 已收口）。
-2. 已验证事实：#9～#14 已关闭、#15 开放、前置全部具备、当前 Git 实况。
-3. 基于代码的推断：#14 治理命令/风险接受/惰性到期与 #15 真实证据链的衔接点（自动隔离
-   触发接线、真实 risk_accept applied 链）。
-4. 尚未验证的建议：#15 的最小纵向切片、测试策略和是否需要数据库变化。
-5. 必须由用户确认：真实验证/晋级/发布的范围、治理命令对生产灰度包的执行、真实任务、
-   Commit/Push/PR/Issue 写入。
-6. 根据开发计划，#15 完成后的下一任务是 #16；但不得自动进入。
+1. 当前阶段：#15 阶段 7（收口）授权门；#15 阶段 0-6 已真实完成。
+2. 已验证事实：#15 双版本晋级 verified + admin_gray 发布 + 真实装载 + 治理动作链
+   （回滚/deprecated/revoked/篡改→自动隔离→restore + 真实 risk_accept applied 链 + 惰性到期
+   + 手动重扫 + 零残留核验）、生产库状态（两条平台能力 + 两条 verified 个人能力 +
+   32 条事件流）、平台签名密钥就绪、当前 Git 实况（工作树未提交：22 修改 + 19 新增）、
+   8088/LLM/Docker 可用。
+3. 基于代码的推断：阶段 7 的执行路径（Issue AC1-AC7 逐条对照 → 执行报告 →
+   文档同步 → 发布链 codex 分支→提交→推送→PR→合并）。
+4. 尚未验证的建议：阶段 7 的最小切片、是否需要数据库变化（预期零 DDL）。
+5. 必须由用户确认：阶段 7 各步骤（Issue 对照结论、执行报告、Commit/Push/PR/Issue 写入）。
+6. 根据开发计划，#15 完成后下一任务是 #16；但不得自动进入。
 
-如果用户只说“继续”，优先完成当前已确认阶段，不要把整个 #15 拆成没有价值的微步骤，也不要
-越过用户控制点。
+如果用户只说「继续」，优先完成当前已确认阶段（阶段 7 收口步骤展示），不要把整个
+#15 拆成没有价值的微步骤，也不要越过用户控制点。

@@ -512,8 +512,9 @@ class InMemoryCapabilityGovernanceRepository:
             "eligibility_changed",
             "risk_accepted",
             "recommendation_changed",
+            "rescan_completed",
         }:
-            raise ValueError("治理事件专用入口只接受生命周期/资格/风险接受/推荐指针事件")
+            raise ValueError("治理事件专用入口只接受生命周期/资格/风险接受/推荐指针/重扫事件")
         return self._insert_event(event)
 
     def get_governance_event_by_idempotency(

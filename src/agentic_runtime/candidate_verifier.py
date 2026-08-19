@@ -132,6 +132,11 @@ class LocalModelSemanticJudge:
                             "表示原文件不是 CSV/XLSX；格式是否可打开已经由前置检查"
                             "完成，你只判断内容语义。源表自身的小计或合计属于表格"
                             "数据，不应仅因其是汇总行而判为额外内容。"
+                            "reason 的最终结论必须与 passed 字段严格一致："
+                            "全部满足则 passed=true 并说明依据；有任何不满足则"
+                            "passed=false 并在 missing_requirements 中逐条列出。"
+                            "发现候选正确后不要沿用先前的不通过结论。"
+                            "reason 不得超过 400 字符，先给结论再给依据。"
                         ),
                     },
                     {
@@ -144,7 +149,9 @@ class LocalModelSemanticJudge:
                     },
                 ],
                 temperature=0,
-                max_tokens=2000,
+                # 2000 对长 reason（含候选内容复核）偶发截断导致 INCONCLUSIVE；
+                # 提高上限避免「语义验证未形成结论」（#15 纵切面真实暴露）。
+                max_tokens=4000,
                 max_retries=_SEMANTIC_JUDGE_MAX_RETRIES,
                 extra_body={
                     "chat_template_kwargs": {"enable_thinking": False}
@@ -788,7 +795,9 @@ class CandidateVerifier:
             VerificationCheck(
                 code="semantic_goal",
                 passed=semantic_ok,
-                summary=decision.reason,
+                # VerificationCheck.summary 上限 500；LLM 长 reason 截断后
+                # 保留下结论部分（结尾），避免「语义验证未形成结论」（#15 暴露）。
+                summary=decision.reason[-500:],
             )
         )
         status = (

@@ -88,7 +88,15 @@ class CapabilityMountResolver:
                 raise PermissionError("冻结能力包不存在、不可见或 digest 已失配")
             # 三轴/受众/签名门在物化前失败关闭；拒绝不降级、不换版本。
             if self._runtime_gate is not None:
-                self._runtime_gate.check_mount(actor, pack)
+                self._runtime_gate.check_mount(
+                    actor,
+                    pack,
+                    # #15 D9：验证任务标记匹配的 ref 放行 draft（门内其余条件仍强制）。
+                    validation_exempt=(
+                        selection.validation_target is not None
+                        and selection.validation_target == ref
+                    ),
+                )
             store = self._store_for(pack)
             digest_key = ref.digest.removeprefix("sha256:")
             destination = (self._mount_root / digest_key).resolve()

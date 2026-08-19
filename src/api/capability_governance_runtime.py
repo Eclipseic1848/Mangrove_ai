@@ -27,6 +27,7 @@ from src.config.settings import settings
 _manager: CapabilityValidationManager | None = None
 _platform_manager: object | None = None
 _platform_dependencies: tuple[object, object] | None = None
+_platform_probe_cache: tuple[object, object] | None = None
 _signing_toolchain: object | None = None
 _signing_runtime: object | None = None
 _runtime_gate: object | None = None
@@ -45,6 +46,24 @@ def get_locked_signing_toolchain():
             lock_path=settings.capability_supply_chain_lock_path,
         )
     return _signing_toolchain
+
+
+def _platform_signing_password() -> str:
+    """#15 平台签名口令：从私钥同目录口令文件读取（项目外，权限收紧）；
+    文件缺失或为空时回退环境变量（保持默认行为）。"""
+    key_path = settings.capability_platform_signing_private_key
+    if key_path:
+        try:
+            password = (
+                Path(key_path).resolve().parent / "COSIGN_PASSWORD.txt"
+            ).read_text(encoding="utf-8").strip()
+            if password:
+                return password
+        except OSError:
+            pass
+    import os
+
+    return os.environ.get("COSIGN_PASSWORD", "")
 
 
 def get_platform_signing_runtime():
@@ -66,6 +85,7 @@ def get_platform_signing_runtime():
             ),
             project_root=project_root,
             protected_key_roots=(project_root / "data",),
+            password_provider=_platform_signing_password,
         )
     return _signing_runtime
 
@@ -127,6 +147,8 @@ def get_runtime_gate():
             projection_for=governance.runtime_projection_for_pack,
             platform_publication_for=platform_publication_for,
             signature_verifier=verifier,
+            # #15 AC07-10：真实验签失败自动隔离（方法内投影复查 + 代次幂等键）。
+            auto_quarantine=governance.auto_quarantine_for_signature_failure,
         )
     return _runtime_gate
 
@@ -181,10 +203,11 @@ def get_capability_validation_manager() -> CapabilityValidationManager:
                 lock_path=settings.capability_supply_chain_lock_path,
             ),
         )
+        catalog = CapabilityCatalog(
+            SqliteCapabilityCatalogRepository(settings.webui_db_path)
+        )
         governance = CapabilityGovernance(
-            CapabilityCatalog(
-                SqliteCapabilityCatalogRepository(settings.webui_db_path)
-            ),
+            catalog,
             repository,
             task_resolver=task_resolver,
         )
@@ -253,23 +276,77 @@ def get_platform_publication_dependencies() -> tuple[object, object]:
                 oras_executable=str(toolchain.oras_executable),
             ),
         )
-        publisher = SqliteCapabilityCatalogRepository(
-            settings.webui_db_path
-        ).save_pack
+        # PlatformPublisherContract 期望带 save_pack 方法的对象（service 调用
+        # self._platform_publisher.save_pack(...)）；传绑定方法会导致
+        # AttributeError（#15 真实发布暴露的装配缺陷）。
+        publisher = SqliteCapabilityCatalogRepository(settings.webui_db_path)
         _platform_dependencies = (generator, publisher)
     return _platform_dependencies
+
+
+def _platform_probe_parts():
+    """平台物化与供应链采集的共享装配件（六步验证与手动重扫共用）。"""
+    from src.capability_governance import (
+        CapabilitySupplyChainEvidenceService,
+        LockedCliSupplyChainTools,
+        SqliteCapabilityGovernanceRepository,
+    )
+    from src.capability_catalog import OrasOciLayoutStore
+
+    repository = SqliteCapabilityGovernanceRepository(settings.webui_db_path)
+    supply_chain = CapabilitySupplyChainEvidenceService(
+        repository,
+        LockedCliSupplyChainTools(
+            tool_root=settings.capability_supply_chain_tool_root,
+            evidence_root=settings.capability_supply_chain_evidence_root,
+            cache_root=settings.capability_supply_chain_cache_root,
+            lock_path=settings.capability_supply_chain_lock_path,
+        ),
+    )
+    toolchain = get_locked_signing_toolchain()
+    platform_store = OrasOciLayoutStore(
+        settings.capability_platform_oci_layout_path,
+        oras_executable=str(toolchain.oras_executable),
+    )
+
+    def materialize_platform(target) -> Path:
+        # 按平台目标物化快照目录（缓存幂等）；写入 digest 标记供供应链
+        # 扫描复核主体身份（materialize 内部已按冻结 digest 校验内容）。
+        # 注意：不能把字符串与 Path 用 + 拼接（运算符优先级会先算 /）。
+        output = (
+            Path(settings.capability_mount_cache_path)
+            / "platform-probes"
+            / (f"{target.pack_id}-{target.version}-" + target.digest.replace(":", "-"))
+        )
+        if output.is_dir():
+            return output
+        materialized = platform_store.materialize(
+            artifact_name=target.pack_id,
+            version=target.version,
+            digest=target.digest,
+            destination=output,
+        )
+        # 供应链扫描的身份复核是两段式：digest 标记 + 外置完整性记录，
+        # 与 mount_resolver 的既有物化模式完全一致。
+        from src.capability_catalog.integrity import (
+            write_capability_integrity,
+        )
+
+        (materialized / ".mangrove-capability-digest").write_text(
+            target.digest,
+            encoding="utf-8",
+        )
+        write_capability_integrity(materialized, target.digest)
+        return materialized
+
+    return repository, supply_chain, materialize_platform
 
 
 def get_platform_validation_manager() -> object:
     """平台验证与签名 worker 的统一装配；六步执行器用目录级真实实现。"""
     global _platform_manager
     if _platform_manager is None:
-        from src.capability_governance import (
-            CapabilitySupplyChainEvidenceService,
-            LockedCliSupplyChainTools,
-            PlatformValidationManager,
-            SqliteCapabilityGovernanceRepository,
-        )
+        from src.capability_governance import PlatformValidationManager
         from src.capability_governance.oci_signing import (
             OciSigningTransaction,
         )
@@ -283,57 +360,8 @@ def get_platform_validation_manager() -> object:
             LockedPlatformValidationExecutor,
         )
 
-        toolchain = get_locked_signing_toolchain()
         signing_runtime = get_platform_signing_runtime()
-        repository = SqliteCapabilityGovernanceRepository(
-            settings.webui_db_path
-        )
-        supply_chain = CapabilitySupplyChainEvidenceService(
-            repository,
-            LockedCliSupplyChainTools(
-                tool_root=settings.capability_supply_chain_tool_root,
-                evidence_root=settings.capability_supply_chain_evidence_root,
-                cache_root=settings.capability_supply_chain_cache_root,
-                lock_path=settings.capability_supply_chain_lock_path,
-            ),
-        )
-        from src.capability_catalog import OrasOciLayoutStore
-
-        platform_store = OrasOciLayoutStore(
-            settings.capability_platform_oci_layout_path,
-            oras_executable=str(toolchain.oras_executable),
-        )
-
-        def materialize_platform(target) -> Path:
-            # 按平台目标物化快照目录（缓存幂等）；写入 digest 标记供供应链
-            # 扫描复核主体身份（materialize 内部已按冻结 digest 校验内容）。
-            output = (
-                Path(settings.capability_mount_cache_path)
-                / "platform-probes"
-                / f"{target.pack_id}-{target.version}-"
-                + target.digest.replace(":", "-")
-            )
-            if output.is_dir():
-                return output
-            materialized = platform_store.materialize(
-                artifact_name=target.pack_id,
-                version=target.version,
-                digest=target.digest,
-                destination=output,
-            )
-            # 供应链扫描的身份复核是两段式：digest 标记 + 外置完整性记录，
-            # 与 mount_resolver 的既有物化模式完全一致。
-            from src.capability_catalog.integrity import (
-                write_capability_integrity,
-            )
-
-            (materialized / ".mangrove-capability-digest").write_text(
-                target.digest,
-                encoding="utf-8",
-            )
-            write_capability_integrity(materialized, target.digest)
-            return materialized
-
+        repository, supply_chain, materialize_platform = _platform_probe_parts()
         executor = LockedPlatformValidationExecutor(
             materialize=materialize_platform,
             smoke=SyntheticSmokeDirectoryRunner(),
@@ -351,3 +379,14 @@ def get_platform_validation_manager() -> object:
             public_key_path=settings.capability_platform_signing_public_key,
         )
     return _platform_manager
+
+
+def get_rescan_dependencies() -> tuple[object, object]:
+    """#15 AC07-10 手动重扫的装配件：平台物化 + 供应链采集器。"""
+    global _platform_probe_cache
+    if _platform_probe_cache is None:
+        _, supply_chain, materialize_platform = _platform_probe_parts()
+        # service 按可调用对象消费（SupplyChainRescanContract）；
+        # 传采集服务的绑定 collect 方法而非服务实例。
+        _platform_probe_cache = (materialize_platform, supply_chain.collect)
+    return _platform_probe_cache

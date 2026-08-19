@@ -2,7 +2,7 @@
 
 > status: active
 >
-> last_verified: 2026-08-13
+> last_verified: 2026-08-17
 >
 > branch: `main`
 >
@@ -205,13 +205,116 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
   真实 risk_accept applied 链与自动隔离触发接线留待 #15/#16 纵切面。
   该结论不代表平台已发布、普通用户受众扩大或整个 AC-07/Phase 4 完成。
 
+2026-08-17，AC-07 #15 阶段 0-2 完成本地闭环（真实纵切面，进行中）：
+
+- 代码实现（S1-S5 + D9）：装载门自动隔离钩子（可选注入、四验签失败分支触发、默认 None
+  保持 #13 只读）；手动重扫命令（rescan_supply_chain 服务方法 + /admin/supply-chain-rescan
+  端点；证据追加不覆盖、BLOCKED 自动隔离、崩溃窗口补写、rescan_completed 事件）；
+  D9 验证任务 Seam（validation_target 标记：冻结 selection 持久化、check_mount 豁免
+  仅个人+Owner+active+eligible、平台包永不豁免、revision 不继承）；
+  注册/驱动脚本与 52 项新测试；双轴审查两轮无残留阻断；
+- 阶段 0：LLM（Qwen3.6-35B-A3B）与 Docker 可用；
+- 阶段 1：注册个人 draft gray-python-table@2.0.0（digest 59076f40…）与 3.0.0
+  （0ca80afd…），Owner=liyi（归档名修正后 --replace 重建）；
+- 阶段 2：两条真实验证链全部完成——真实 Pi 任务真实调用 capability_python_table_summary
+  工具、验证五步全 passed、供应链 passed（Trivy DB 2026-08-17 更新）、promoted_to_verified
+  事件、投影 verified/active/eligible；**生产库首次出现 verified 个人能力**；
+- 阶段 2 暴露并修复 6 个真实缺陷：instructor v2 strict 下 tuple 不可解析（missing_requirements
+  改 list）、语义验证 prompt 自一致 + reason 截断 500 + max_tokens 4000、验证 worker 装配
+  catalog NameError、能力归档固定名（_expand_capability_archive 只认固定名，带版本号不展开
+  导致 Sidecar 不启动）、Trivy DB 7 天过期更新；
+- 该结论不代表平台已发布、普通用户受众扩大或整个 AC-07/Phase 4 完成。
+- 下一门：阶段 3（平台发布 2.0.0/3.0.0，候选→快照→签名→六步→admin_gray）待用户授权。
+
+2026-08-17，AC-07 #15 阶段 3 完成本地闭环（真实平台发布，进行中）：
+
+- **平台签名密钥就绪**：`~/.mangrove-signing/` 生成加密 Sigstore 密钥对（Cosign 3.0.6
+  锁定工具），口令文件权限收紧，`get_platform_signing_runtime` 注入 password_provider
+  从项目外口令文件读取（不进 argv/日志/事件）；.env 配置密钥路径（gitignored）；
+- **阶段 3 双版本发布链全部真实走通**（2.0.0 与 3.0.0 各自独立链）：
+  - 提交平台候选（候选门 verified/active/eligible）→ 脱敏快照新 digest
+    （2.0.0=`5326dfae…`，3.0.0=`b462e577…`）→ platform_candidate 事件；
+  - 平台六步验证全绿（SyntheticSmoke/失败关闭/Trivy/Syft/装载结构探针/独立验证，
+    供应链证据 scope=platform 各 2 条）；Cosign 签名（回环 Zot Registry + OCI
+    Referrers）写回运行记录；**生产库首次 platform_published 事件 ×2**；
+  - admin_gray 发布 + 平台 OCI Layout 首个签名快照（signed/<run_id> 输出目录 +
+    signing.json）；幂等重放同幂等键 already_published/already_submitted（AC6）；
+  - 独立 Layout 密码学复验双版本 PASS（主体/签名 digest、公钥 `103de227…` 身份一致）；
+  - 装载门闭环：admin 对两个签名平台包 check_mount 通过（签名验证成功、未隔离）；
+  - 零残留：无 Zot/签名容器、无临时 Registry 监听、signing-runtime 已清理；
+    阶段 2 遗留空网络 mangrove-capval-* 已清理；
+- **阶段 3 暴露并修复 3 个真实缺陷**（都是 #12 发布机制真实首跑才暴露）：
+  1. 平台快照生成器硬编码读/写 `manifest.json`，真实归档是 `mangrove-capability.json`
+     → 兼容标准名（读优先标准名、写保留源名），快照 tar 保留标准名供物化展开；
+  2. 平台六步目录级执行器（SyntheticSmoke/FailClosed/MountProbe/独立验证）硬编码
+     `manifest.json` → 统一 `_resolve_manifest` 兼容标准名（worker 不再崩）；
+  3. `materialize_platform` 路径拼接 `Path + str`（运算符优先级错误 TypeError）
+     → 修正为括号拼接；`get_platform_publication_dependencies` 发布 Adapter 传绑定
+     方法而非对象（service `.save_pack` 调用 AttributeError）→ 改传仓库实例；
+- 新增测试 18 项（快照标准名 1 + 执行器 9 + 既有快照 8 回归）；平台发布/快照/执行器
+  聚焦回归 67 passed；
+- 该结论不代表普通用户受众扩大或整个 AC-07/Phase 4 完成。平台发布受众固定 admin_gray。
+- 下一门：阶段 4（管理员任务选择/真实装载、回滚指针、deprecated + 历史冻结恢复）待授权。
+
+2026-08-18，AC-07 #15 阶段 4-5 完成本地闭环（真实治理动作链 + 真实装载 + 篡改演示，进行中）：
+
+- **阶段 3 暴露并修复快照缺 purpose 缺陷（方案 A 重建发布链）**：
+  - 平台快照白名单删 `purpose` 导致真实装载 `PI_RUNTIME_FAILED`（运行时模型必填）；
+  - 修复：快照写中性脱敏 purpose（`_SANITIZED_PURPOSE`），重建发布链——删旧平台 OCI
+    tag + 目录行 → 新快照新 digest（2.0.0=`e5556f83…`，3.0.0=`9379fe29…`）→ 六步 →
+    签名 → 发布；旧事件流保留作失败留痕；独立 Layout 复验 PASS、装载门闭环通过；
+- **阶段 4 治理动作链 + 真实装载**：
+  - 管理员选择列表：2.0.0/3.0.0 平台能力可见（verified/active/eligible）；
+  - rollback 推荐指针切 2.0.0↔3.0.0（`recommendation_changed` 事件、幂等安全）；
+  - deprecate 2.0.0（`lifecycle_changed→deprecated`）：新任务不可选、冻结被拒、
+    历史冻结恢复装载通过（#13 A5）；
+  - **平台能力首次真实装载并调用**：真实 Pi 任务 completed + `capability_python_table_summary`
+    工具调用确认（机制门 `tool.completed`）；
+- **阶段 5 revoke/跨用户/篡改演示**：
+  - revoke 2.0.0（`lifecycle_changed→revoked`）：历史恢复装载被拒；
+  - 跨用户拒绝：liyi111（真实普通用户）对 admin_gray 3.0.0 装载被拒（受众门）；
+  - **篡改演示（blob 级备份安全原则）**：备份主体 manifest blob → 篡改 1 字节 → 装载
+    409 fail-closed → 自动隔离（`eligibility_changed` actor=system）→ restore 复查链
+    → 逐字节还原 → 独立 Layout 密码学复验通过 → 再次装载成功；演示后主 Layout 与
+    发布证据完全一致；
+- **阶段 4-5 暴露并修复 3 个真实缺陷**：
+  1. 装载门签名验证只验 signed/<run_id> 副本，篡改主布局 blob 不被检测、自动隔离
+     不触发 → `OciPlatformSignatureVerifier.verify` 先校验主布局 subject blob 内容
+     哈希（sha256 == digest），失配即拒 + 触发自动隔离；
+  2. 平台 restore 复查链误查个人验证表（validation_incomplete）→ 改查平台验证运行表
+     （六步全绿 + 签名齐备）；
+  3. 演示脚本复用固定幂等键会在「restore 后又自动隔离」时掩盖新状态 → 用唯一幂等键
+     （含时间戳/序号），符合 #14「幂等键不能吞掉恢复后的新隔离」纪律；
+- 新增测试 23 项（快照 purpose 回归 + 签名验证器 3 + restore 复查链 1 + 既有回归）；
+  装载门/自动隔离/平台发布/签名验证器聚焦回归 92 passed；
+- **阶段 6 真实 risk_accept + 重扫 + 零残留**（2026-08-19）：
+  - 人工隔离 3.0.0 → `accept_pack_risk`（finding_ref 实引平台验证运行 `pfval_2d816c74…`，
+    30 天）→ applied → 投影 eligible；
+  - **惰性到期演示**：验收专用改写该事件 expires_at 为过去（改前记录、改后恢复）→
+    投影重新 quarantined（零新事件，Q5A 惰性判定）；
+  - restore（复查链全绿）→ eligible；expires_at 恢复原值；
+  - **手动重扫（真实采集器：物化 + Trivy/Syft）**：PASSED 追加证据行 `supply_3402df2c…`
+    （4 行，不覆盖旧行）→ `rescan_completed`；
+  - **零残留核验**：Lease 表全 0、平台探针无残留、事件总数 32（risk_accepted=1、
+    rescan_completed=1）、3.0.0 投影 verified/active/eligible；
+  - 驱动脚本 `scripts/ac07_10_stage6_drive.py`（支持 `--verify-only` 重跑核验）；
+- **阶段 6 暴露并修复 1 个真实缺陷**：`accept_pack_risk` 的 finding_ref 校验误查个人验证
+  运行表（`get_validation_run` 只查个人表，平台 digest 永不匹配 → 任何平台包 risk_accept
+  必被拒 finding_ref_unknown）→ 平台 scope 改从平台验证运行表取证（digest 匹配 + SUCCEEDED，
+  与 restore 复查链同源）；回归测试 `test_platform_pack_requires_platform_run_ref` +
+  `TestRiskAcceptCommand`/`TestRestoreCommand` 取证表同步为平台表；治理/平台聚焦回归
+  141 passed；
+- 该结论不代表普通用户受众扩大或整个 AC-07/Phase 4 完成。平台发布受众固定 admin_gray。
+- 下一门：阶段 7（收口：Issue AC1-AC7 逐条对照 → 执行报告 → 文档同步 → 发布链）待授权。
+
 ## 7. 当前优先顺序
 
-1. 新仓库 #9～#14 已完成工程实现、双轴复审与 8088 验收；真实灰度包晋级与
-   真实平台发布纵切面留待 #15/#16。
-2. 下一工单为新仓库 [#15](https://github.com/Eclipseic1848/Mangrove_ai/issues/15)：
-   Python 表格 Tool 真实治理纵切面（依赖 #14）。
-3. #9～#14 完成不代表任何能力已经晋级、平台能力已经发布或普通用户受众已经扩大。
+1. 新仓库 #15 Python 表格 Tool 真实治理纵切面**进行中**：阶段 0-6（注册、验证五步、供应链、
+   晋级 verified、平台发布 admin_gray、真实装载、回滚/deprecated/revoked/篡改→自动隔离
+   →restore、真实 risk_accept applied 链、惰性到期、手动重扫、零残留核验）已真实完成；
+   阶段 7（收口：Issue 对照/执行报告/文档同步/发布链）待用户授权。
+2. #15 完成后：#16 Everything MCP 同一纵切面；#17 AC-06 兼容切换与综合验收门。
+3. #15 阶段 6 完成不代表任何能力已发布、平台能力已发布或普通用户受众已经扩大。
 
 ## 8. 权威证据
 
@@ -231,6 +334,9 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
 - #14 需求复核：`docs/plans/2026-08-16-agentic-capability-ac07-09-requirements-review.md`
 - #14 设计：`docs/plans/2026-08-16-agentic-capability-ac07-09-design.md`
 - #14 验收方案：`docs/plans/2026-08-16-agentic-capability-ac07-09-acceptance-plan.md`
+- #15 设计：`docs/plans/2026-08-16-agentic-capability-ac07-10-design.md`
+- #15 任务拆分：`docs/plans/2026-08-16-agentic-capability-ac07-10-task-breakdown.md`
+- #15 验收方案：`docs/plans/2026-08-16-agentic-capability-ac07-10-acceptance-plan.md`
 - #34 报告：`docs/plans/2026-08-07-agentic-capability-ac07-02-execution-report.md`
 - #35 报告：`docs/plans/2026-08-07-agentic-capability-ac07-03-execution-report.md`
 - vNext Publisher：`docs/plans/2026-08-04-vnext-delivery-publisher-execution-report.md`

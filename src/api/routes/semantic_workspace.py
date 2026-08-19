@@ -22,7 +22,13 @@ from fastapi import (
     status,
 )
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 from sse_starlette.sse import EventSourceResponse
 from starlette.background import BackgroundTask
 
@@ -162,11 +168,15 @@ def _check_freeze_gate(
     actor,
     pack_refs: tuple[CapabilityPackRef, ...],
     catalog: CapabilityCatalog,
+    *,
+    validation_target: CapabilityPackRef | None = None,
 ) -> None:
     """冻结前执行完整装载门 + 新任务可选谓词；拒绝以 409 失败关闭。
 
     装载门放行 DEPRECATED 是为历史恢复装载；冻结是「新任务」入口，
     必须再按三轴可选谓词拦截（AC3：deprecated 不进入新任务选择）。
+    validation_target（#15 D9）：验证任务标记匹配的 ref 走豁免路径——
+    仅跳过成熟度与可选谓词，门内其余条件（Owner/生命周期/资格）仍强制。
     """
     gate = _runtime_gate()
     governance = _runtime_gate_projection_governance()
@@ -184,14 +194,15 @@ def _check_freeze_gate(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="能力包 digest 与引用不一致",
             )
+        exempt = validation_target is not None and validation_target == ref
         try:
-            gate.check_mount(actor, pack)
+            gate.check_mount(actor, pack, validation_exempt=exempt)
         except CapabilityMountGateRejected as error:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=str(error),
             ) from error
-        if not _selectable_for_task(
+        if not exempt and not _selectable_for_task(
             governance.runtime_projection_for_pack(pack)
         ):
             raise HTTPException(
@@ -242,6 +253,9 @@ class WorkspaceTaskCreateIn(BaseModel):
     )
     model_connection_model: str | None = Field(default=None, min_length=1, max_length=200)
     capability_pack_refs: tuple[CapabilityPackRef, ...] = ()
+    # #15 D9 验证任务标记：本任务是为验证该个人 draft 能力而创建；
+    # 仅在 create_task 校验后随冻结 selection 落库。
+    validation_target: CapabilityPackRef | None = None
 
     @field_validator("objective_text", "provider")
     @classmethod
@@ -278,6 +292,18 @@ class WorkspaceTaskCreateIn(BaseModel):
         if len(identities) != len(value):
             raise ValueError("capability_pack_refs 不得重复")
         return value
+
+    @model_validator(mode="after")
+    def validate_validation_target(self) -> "WorkspaceTaskCreateIn":
+        # #15 D9：验证目标必须同时出现在能力选择中（否则豁免无载体）。
+        if (
+            self.validation_target is not None
+            and not any(
+                item == self.validation_target for item in self.capability_pack_refs
+            )
+        ):
+            raise ValueError("验证目标必须同时出现在能力选择中")
+        return self
 
 
 class WorkspaceAnswerIn(BaseModel):
@@ -816,12 +842,34 @@ async def create_task(
             )
         capability_catalog = _capability_catalog()
         actor = catalog_actor_from_user(user)
+        if payload.validation_target is not None:
+            # #15 D9 验证目标资格：本人所有的个人包（平台包/他人包不能
+            # 作为验证目标；gate 内仍强制其余三轴）。「必须同时被选择」
+            # 已由模型 validator 保证。
+            target_pack = capability_catalog.resolve_pack(
+                actor,
+                payload.validation_target.pack_id,
+                payload.validation_target.version,
+            )
+            from src.conversation_steering import ProcedureScope
+
+            if (
+                target_pack is None
+                or target_pack.digest != payload.validation_target.digest
+                or target_pack.scope is not ProcedureScope.PERSONAL
+                or target_pack.owner_id != user_id
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="验证目标必须是自己的个人能力",
+                )
         # 创建与冻结共用装载门（AC4 同一公开 Interface）；digest 精确
         # 匹配仍由目录 freeze_selection 复核。
         _check_freeze_gate(
             actor,
             payload.capability_pack_refs,
             capability_catalog,
+            validation_target=payload.validation_target,
         )
     connection_binding = None
     if (
@@ -1065,6 +1113,7 @@ async def create_task(
                 task_id=task_id,
                 revision=1,
                 pack_refs=payload.capability_pack_refs,
+                validation_target=payload.validation_target,
             )
     except Exception:
         if claimed_key:

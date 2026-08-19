@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import hashlib
+from pathlib import Path
 import threading
 from typing import Callable, Literal, Protocol
 
@@ -119,6 +120,24 @@ class PlatformPublisherContract(Protocol):
     def save_pack(self, pack: CapabilityPack) -> CapabilityPack: ...
 
 
+class PlatformMaterializeContract(Protocol):
+    """平台快照目录物化；与平台六步验证共享同一实现。"""
+
+    def __call__(
+        self, target: CapabilityGovernanceTarget
+    ) -> Path: ...
+
+
+class SupplyChainRescanContract(Protocol):
+    """手动重扫的供应链采集；装配层传采集服务的绑定 collect 方法。"""
+
+    def __call__(
+        self,
+        target: CapabilityGovernanceTarget,
+        subject_root: Path,
+    ) -> CapabilitySupplyChainEvidence: ...
+
+
 class CapabilityGovernance:
     def __init__(
         self,
@@ -130,12 +149,18 @@ class CapabilityGovernance:
             PlatformSnapshotGeneratorContract | None
         ) = None,
         platform_publisher: PlatformPublisherContract | None = None,
+        platform_materialize: PlatformMaterializeContract | None = None,
+        supply_chain_collector: SupplyChainRescanContract | None = None,
     ) -> None:
         self._catalog = catalog
         self._repository = repository
         self._task_resolver = task_resolver
         self._platform_snapshot_generator = platform_snapshot_generator
         self._platform_publisher = platform_publisher
+        # #15 AC07-10 手动重扫的装配件；默认 None 时重扫命令失败关闭
+        # （rescan_not_configured），不静默跳过。
+        self._platform_materialize = platform_materialize
+        self._supply_chain_collector = supply_chain_collector
 
     @staticmethod
     def _target(pack: CapabilityPack) -> CapabilityGovernanceTarget:
@@ -941,6 +966,44 @@ class CapabilityGovernance:
         )
         return GovernanceCommandOutcome(status=status, event=saved)
 
+    def auto_quarantine_for_signature_failure(
+        self,
+        pack: CapabilityPack,
+        reason: str,
+    ) -> None:
+        """装载门验签失败的自动隔离（#15 AC07-10）。
+
+        只写 eligibility_changed(QUARANTINED)；快照 = 写入时刻投影；已隔离跳过；
+        幂等键按代次派生（restore 解除后再次失败仍可写新事件）。
+        """
+        target = self._target(pack)
+        projection = self.runtime_projection_for_pack(pack)
+        if projection.eligibility is CapabilityEligibility.QUARANTINED:
+            # 已隔离：不重复写事件（幂等）。
+            return
+        generation = sum(
+            1
+            for event in self._repository.list_events(target)
+            if event.event_type == "eligibility_changed"
+            and event.eligibility is CapabilityEligibility.QUARANTINED
+        )
+        self._save_governance_event(
+            target,
+            CapabilityGovernanceEvent(
+                event_type="eligibility_changed",
+                idempotency_key=(
+                    f"auto-quarantine:{target.digest}:{generation + 1}"
+                ),
+                target=target,
+                maturity=projection.maturity,
+                lifecycle=projection.lifecycle,
+                eligibility=CapabilityEligibility.QUARANTINED,
+                actor_id="system",
+                actor_role="admin",
+                reason=f"自动隔离（装载门签名重验失败）：{reason}",
+            ),
+        )
+
     def deprecate_pack(
         self,
         actor: CatalogActor,
@@ -1096,11 +1159,27 @@ class CapabilityGovernance:
             # 任何 blocker（Secret/Critical/可修复 High/误配置/库过期）
             # 都是不可例外硬门（ADR-0029）；无修复 High 不产生 blocker。
             gaps.append("non_waivable_findings")
-        finding_run = self._repository.get_validation_run(finding_ref)
-        if finding_run is None or finding_run.target.digest != target.digest:
-            # finding_ref 必须实引本包验证运行证据（Q2A 只豁免路径不可达
-            # 的人工判定，不豁免引用存档的真实性；不得跨包引用）。
-            gaps.append("finding_ref_unknown")
+        if target.scope is ProcedureScope.PLATFORM:
+            # 平台能力：finding_ref 必须实引本包平台验证运行（六步全绿）。
+            # 个人验证运行表只有个人 digest，平台 digest 永不匹配
+            # （#15 阶段 6 同构缺陷：误查个人表，与 restore 复查链同源）。
+            finding_run = next(
+                (
+                    run
+                    for run in self._repository.list_platform_validation_runs()
+                    if run.target.digest == target.digest
+                    and run.status is ValidationRunStatus.SUCCEEDED
+                ),
+                None,
+            )
+            if finding_run is None or finding_ref != finding_run.run_id:
+                gaps.append("finding_ref_unknown")
+        else:
+            finding_run = self._repository.get_validation_run(finding_ref)
+            if finding_run is None or finding_run.target.digest != target.digest:
+                # finding_ref 必须实引本包验证运行证据（Q2A 只豁免路径不可达
+                # 的人工判定，不豁免引用存档的真实性；不得跨包引用）。
+                gaps.append("finding_ref_unknown")
         if gaps:
             return GovernanceCommandOutcome(
                 status="rejected", gaps=tuple(gaps)
@@ -1263,9 +1342,29 @@ class CapabilityGovernance:
         elif not self._trivy_database_current(evidence):
             # 恢复必须重查漏洞库时效（Q6A）；过期不能解除治理状态。
             gaps.append("trivy_database_stale")
-        run = self._repository.get_latest_succeeded_validation_run(target)
-        if run is None:
-            gaps.append("validation_incomplete")
+        if target.scope is ProcedureScope.PLATFORM:
+            # 平台能力的验证运行在平台验证运行表（六步 + 签名），不在个人表。
+            # #15 阶段 5 真实 restore 暴露：误查个人表导致 validation_incomplete。
+            platform_green = any(
+                run.target == target
+                and run.status is ValidationRunStatus.SUCCEEDED
+                and len(run.evidence) == len(PlatformValidationStep)
+                and {item.step for item in run.evidence}
+                == set(PlatformValidationStep)
+                and all(
+                    item.status is ValidationStepStatus.PASSED
+                    for item in run.evidence
+                )
+                and run.signing_signature_digest is not None
+                and run.signing_public_key_sha256 is not None
+                for run in self._repository.list_platform_validation_runs()
+            )
+            if not platform_green:
+                gaps.append("validation_incomplete")
+        else:
+            run = self._repository.get_latest_succeeded_validation_run(target)
+            if run is None:
+                gaps.append("validation_incomplete")
         return gaps
 
     def rollback_recommendation(
@@ -1329,6 +1428,126 @@ class CapabilityGovernance:
                 actor_role=actor.role,
                 reason=reason,
                 recommended_version=pack_ref.version,
+            ),
+        )
+
+    def rescan_supply_chain(
+        self,
+        actor: CatalogActor,
+        *,
+        pack_ref: CapabilityPackRef,
+        reason: str,
+        idempotency_key: str,
+    ) -> GovernanceCommandOutcome:
+        """手动重扫已发布平台包（#15 AC07-10）。
+
+        追加供应链证据不覆盖旧行；新证据含硬门且当前 eligible 时自动隔离。
+        幂等键双类型命中（隔离事件或重扫事件）先于一切检查（#14 教训）。
+        """
+        pack = self._governable_pack(actor, pack_ref)
+        target = self._target(pack)
+        # 幂等优先于一切检查：任一事件类型命中都返回既有结果，不重复采集。
+        hits = [
+            hit
+            for hit in (
+                self._governance_idempotent_hit(
+                    target, event_type, idempotency_key
+                )
+                for event_type in ("eligibility_changed", "rescan_completed")
+            )
+            if hit is not None
+        ]
+        if hits:
+            if all(
+                hit.event.event_type != "rescan_completed" for hit in hits
+            ):
+                # 崩溃窗口补写（#14 多事件非原子教训）：隔离事件已写而重扫
+                # 事件缺失（写隔离后崩溃）时，按投影补写重扫留痕，引用
+                # 最新证据行；不吞掉缺失的一半。
+                evidence = self._repository.get_latest_supply_chain_evidence(
+                    target
+                )
+                if evidence is not None:
+                    after = self.runtime_projection_for_pack(pack)
+                    self._save_governance_event(
+                        target,
+                        CapabilityGovernanceEvent(
+                            event_type="rescan_completed",
+                            idempotency_key=idempotency_key,
+                            target=target,
+                            maturity=after.maturity,
+                            lifecycle=after.lifecycle,
+                            eligibility=after.eligibility,
+                            actor_id=actor.owner_id,
+                            actor_role=actor.role,
+                            reason=reason,
+                            source_supply_chain_evidence_id=(
+                                evidence.evidence_id
+                            ),
+                        ),
+                    )
+            return hits[0]
+        if target.scope is not ProcedureScope.PLATFORM:
+            return GovernanceCommandOutcome(
+                status="rejected", gaps=("not_platform_pack",)
+            )
+        publication = self._repository.get_latest_platform_event(
+            target, "platform_published"
+        )
+        if publication is None:
+            return GovernanceCommandOutcome(
+                status="rejected", gaps=("not_platform_published",)
+            )
+        if (
+            self._platform_materialize is None
+            or self._supply_chain_collector is None
+        ):
+            # 未装配时失败关闭，不静默跳过。
+            return GovernanceCommandOutcome(
+                status="rejected", gaps=("rescan_not_configured",)
+            )
+        subject = self._platform_materialize(target)
+        evidence = self._supply_chain_collector(target, subject)
+        self._repository.save_supply_chain_evidence(evidence)
+        before = self.runtime_projection_for_pack(pack)
+        if (
+            evidence.status is SupplyChainEvidenceStatus.BLOCKED
+            and before.eligibility is CapabilityEligibility.ELIGIBLE
+        ):
+            # 隔离事件先写：中途失败时重放按幂等键命中隔离事件，
+            # 不会吞掉应生效的隔离（#14 多事件非原子教训）。
+            self._save_governance_event(
+                target,
+                CapabilityGovernanceEvent(
+                    event_type="eligibility_changed",
+                    idempotency_key=idempotency_key,
+                    target=target,
+                    maturity=before.maturity,
+                    lifecycle=before.lifecycle,
+                    eligibility=CapabilityEligibility.QUARANTINED,
+                    actor_id="system",
+                    actor_role="admin",
+                    reason=(
+                        "自动隔离（供应链重扫发现硬门）："
+                        + "、".join(evidence.blockers)
+                    ),
+                ),
+            )
+        # 重扫事件的快照必须与写入时刻投影一致（触发隔离时为 quarantined）。
+        after = self.runtime_projection_for_pack(pack)
+        return self._save_governance_event(
+            target,
+            CapabilityGovernanceEvent(
+                event_type="rescan_completed",
+                idempotency_key=idempotency_key,
+                target=target,
+                maturity=after.maturity,
+                lifecycle=after.lifecycle,
+                eligibility=after.eligibility,
+                actor_id=actor.owner_id,
+                actor_role=actor.role,
+                reason=reason,
+                source_supply_chain_evidence_id=evidence.evidence_id,
             ),
         )
 

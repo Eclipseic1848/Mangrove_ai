@@ -116,6 +116,9 @@ class CapabilitySelection(BaseModel):
     revision: int = Field(ge=1)
     pack_refs: tuple[CapabilityPackRef, ...] = ()
     procedure_refs: tuple[AutomationProcedureRef, ...] = ()
+    # #15 D9 验证任务标记：该任务是为验证此个人 draft 能力而创建；
+    # 装载门据此对匹配 ref 放行 draft（其余条件仍强制）。默认 None 零破坏。
+    validation_target: CapabilityPackRef | None = None
     created_at: datetime = Field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
