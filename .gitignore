@@ -105,6 +105,15 @@ frontend/test-results/
 # 可选第三方依赖由 scripts/setup_external_dependencies.ps1 固定版本重建。
 external/MediaCrawler/repo/
 external/firecrawl/
+# chrome-devtools-howso 是第三方完整工作副本（含源码/依赖锁文件），
+# 违反 external/README.md「只提交集成说明和补丁」声明，仅保留本机。
+external/chrome-devtools-howso/
+
+# 第三方品牌 Logo 图片（抖音/淘宝/京东/B站等）再分发有商标风险，不进入公开仓库。
+logos/
+
+# 商务条款摘录（Phase 4B 文档解析演示样本）属业务内容，仅保留本机。
+docs/plans/phase4b-batch0-results/document-workflow/商务条款摘录.*
 
 # Phase 4B 真实业务评测文件只允许保存在本地私有目录
 tests/fixtures/semantic_harness/private/
