@@ -36,7 +36,7 @@
 | [0026](0026-agentic-capability-acquisition-and-procedure-governance.md) | Pi 能力获取采用隔离能力包与个人/平台方案治理 | 已采纳；成熟度定义由 0029 修正 | 2026-08-02 |
 | [0027](0027-conversation-steering-and-context-compilation.md) | 运行中追问采用语义差异门与有界上下文编译 | 已采纳；AC-00～AC-03 工程验证完成 | 2026-08-02 |
 | [0028](0028-task-level-capability-host-sidecar.md) | 原生任务能力使用单一 Capability Host Sidecar | 已采纳；工程门与用户灰度验收通过，默认关闭 | 2026-08-05 |
-| [0029](0029-capability-validation-lifecycle-and-platform-publication.md) | 能力验证、生命周期与平台发布采用三轴治理 | 已采纳；#33 完成并关闭，#34 已迁移、待用户灰度 | 2026-08-06 |
+| [0029](0029-capability-validation-lifecycle-and-platform-publication.md) | 能力验证、生命周期与平台发布采用三轴治理 | 已采纳；新仓库 #9-#17 全部完成并关闭（两条真实纵切面 + 兼容切换，PR #30/#33/#34） | 2026-08-06 |
 
 ## 产品决策汇总（plan 第 3 节 + 本次确认）
 

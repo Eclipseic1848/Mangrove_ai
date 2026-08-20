@@ -51,7 +51,7 @@ Mangrove 是一个统一数据任务平台。用户描述目标，平台负责�
 | Delivery Publisher | **工程验证** | 只有独立验证、完整性和 QA 通过的 Candidate 才能形成正式 Delivery |
 | 覆盖感知文档检索 | **代表任务验证** | 按目标发现与精读，由独立 Verifier 判断覆盖与停止 |
 | 多模型连接 | **工程实现** | 支持个人/平台连接、Preset、自定义/LAN、Key 隔离和 revision 冻结 |
-| Agentic Capability | **管理员灰度** | Python Tool、stdio MCP、Capability Host、验证运行、供应链证据、个人能力自动晋级、管理员审核/审计查看与平台快照发布机制（admin_gray）；默认关闭 |
+| Agentic Capability | **两条真实纵切面已验证** | Python Tool 与 Everything MCP 均完成个人验证→晋级 verified→脱敏快照→签名→admin_gray 发布→真实装载→完整治理动作链（#15/#16 真实执行，AC-07 主线 #9-#17 全部关闭）；受众固定 admin_gray，未开放普通用户 |
 
 平台明确区分 Candidate、验证通过和正式 Delivery：只有 `delivery_published` 且通过完整性与
 QA 的 `output_id` 才能作为面向用户的正式结果。

@@ -2,9 +2,9 @@
 
 > 文档用途：写给完全没有历史对话的新会话
 >
-> 最后现场核验：2026-08-19
+> 最后现场核验：2026-08-20
 >
-> 当前分支：`main`；HEAD = `95872a01`（#15 收口，PR #30 合并）；**工作树干净**
+> 当前分支：`main`；HEAD = `07816572`（#17 收口，PR #34 合并）；**工作树干净**
 >
 > 公开远端：`origin` → `https://github.com/Eclipseic1848/Mangrove_ai.git`
 >
@@ -39,10 +39,10 @@ AC-07 主线 #9-#17 全部关闭，普通用户开放与 AC-08/AC-09/8B 等边�
 2. `docs/status/current.md`：当前能力与路线状态的唯一滚动台账。
 3. `CONTEXT.md`：领域词汇和长期语义。
 4. `docs/agents/`：Issue、标签和领域文档约定。
-5. 当前工单 #15、AC-07 规格、ADR-0029，以及 #15 的
-   `docs/plans/2026-08-16-agentic-capability-ac07-10-{requirements-review,design,task-breakdown,acceptance-plan}.md`。
-   （注：本次需求复核未单独成文，Q1-Q8 决策记录在设计文档；#15 阶段执行证据在
-   `scripts/ac07_10_*.py` 与生产库。）
+5. AC-07 规格（Issue #8，已关闭）、ADR-0029，以及三条纵切面执行报告：
+   `docs/plans/2026-08-19-agentic-capability-ac07-10-execution-report.md`（#15）、
+   `docs/plans/2026-08-19-agentic-capability-ac07-11-execution-report.md`（#16）、
+   `docs/plans/2026-08-20-agentic-capability-ac07-12-execution-report.md`（#17）。
 
 现场执行：
 
@@ -55,8 +55,8 @@ gh issue view 15 --repo Eclipseic1848/Mangrove_ai --comments
 
 预期现场状态是：
 
-- 本地 `main` 在 `95872a01`（= origin/main，#15 PR #30 合并）；工作树干净；
-- 新仓库 #9～#14 为 `CLOSED`；#15/#16/#17 为开放；
+- 本地 `main` 在 `07816572`（= origin/main，#17 PR #34 合并）；工作树干净；
+- 新仓库 #9～#17 全部为 `CLOSED`（AC-07 完整收口）；
 - 生产库 `data/webui.db`：
   - `gray-python-table@2.0.0`（personal digest `59076f40…`）/ `3.0.0`（`0ca80afd…`）
     为 personal verified；同版本另有 platform 行（2.0.0 平台 digest `e5556f83…`，
@@ -148,9 +148,9 @@ Mangrove 是统一数据任务平台。用户用自然语言描述目标，平�
 | 新 #12 | 独立平台快照、签名与 admin_gray 发布机制——完成并关闭；**真实发布链在 #15 阶段 3 已首次执行** |
 | 新 #13 | CapabilityMountResolver 运行时装载治理门——完成并关闭 |
 | 新 #14 | 弃用/回滚/隔离/撤销与限期风险接受——完成并关闭 |
-| 新 #15 | **进行中**：见 §3.4 |
+| 新 #15 | **完成并关闭**（真实纵切面；PR #30 合并） |
 
-### 3.4 #15（AC07-10）Python 表格 Tool 真实治理纵切面——进行中（阶段 0-6 完成）
+### 3.4 #15（AC07-10）Python 表格 Tool 真实治理纵切面——已完成（PR #30，Issue CLOSED）
 
 已完成：
 
@@ -212,7 +212,7 @@ Mangrove 是统一数据任务平台。用户用自然语言描述目标，平�
   回归测试 `test_platform_pack_requires_platform_run_ref` + `TestRiskAcceptCommand`/
   `TestRestoreCommand` 取证表全部同步为平台表（141 项通过）。
 
-未完成（停在授权门）：阶段 7（收口：Issue AC1-AC7 逐条对照 → 执行报告 → 文档同步 → 发布链）。
+阶段 7（收口）已完成：AC1-AC7 对照、执行报告、发布链（PR #30 合并）、Issue #15 CLOSED。
 
 ## 4. 当前卡在哪里
 
@@ -284,7 +284,8 @@ AC-07 主线 #9-#17 全部真实完成并关闭（执行报告：ac07-10/ac07-11
 
 ### 7.1 当前权威主线
 
-1. **完成 AC-07 #15/#16/#17**：#15 进行中；#16 复用 #15 机制；#17 收口。
+1. **AC-07 已完成**：#9-#17 全部真实完成并关闭（#15/#16 两条纵切面 + #17 兼容切换与
+   综合验收门，PR #30/#33/#34）。
 2. **补齐 Phase 4 未完成门**：30 项泛化、完整 PG-05、真实外部 Provider 安全端到端、P0
    GateSnapshot、默认入口切换、8B Linux/Compose/并发/故障与目标服务器验证。
 3. **完成生产资格审计**：全仓回归、真实数据/任务、权限与安全、备份恢复、可观测性、
