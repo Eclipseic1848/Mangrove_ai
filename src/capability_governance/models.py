@@ -51,24 +51,9 @@ class CapabilityGovernanceTarget(BaseModel):
         return self
 
 
-_AC06_ADMIN_GRAY_VALIDATION_TARGETS = frozenset(
-    {
-        ("gray-python-table", "1.0.0"),
-        ("gray-everything-mcp", "2026.7.4"),
-    }
-)
-
-
-def is_ac06_admin_gray_validation_target(
-    target: CapabilityGovernanceTarget,
-) -> bool:
-    """只识别 AC-06 已冻结的两项过渡灰度包，不扩大一般平台能力权限。"""
-
-    return (
-        target.scope is ProcedureScope.PLATFORM
-        and (target.pack_id, target.version)
-        in _AC06_ADMIN_GRAY_VALIDATION_TARGETS
-    )
+# #17（AC07-12）兼容切换：AC-06 过渡灰度包白名单已退役。真实发布链
+# （#15/#16：个人 draft → 验证 → 晋级 → 快照 → 签名 → admin_gray 发布）
+# 已满足门禁，管理员不再能直接验证白名单平台包。
 
 
 class PromotionGap(StrEnum):
