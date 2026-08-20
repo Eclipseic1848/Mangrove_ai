@@ -49,7 +49,6 @@ from .models import (
     ValidationRunStatus,
     ValidationStep,
     ValidationStepStatus,
-    is_ac06_admin_gray_validation_target,
 )
 from .repository import CapabilityGovernanceRepository
 from .task_replay import ValidationTaskResolver
@@ -178,17 +177,11 @@ class CapabilityGovernance:
         actor: CatalogActor,
         pack: CapabilityPack,
     ) -> bool:
-        if (
+        # #17（AC07-12）兼容切换：AC-06 过渡灰度包路径已退役，验证只接受
+        # 本人的个人能力（平台能力验证必须走 AC-07 发布链）。
+        return (
             pack.scope is ProcedureScope.PERSONAL
             and pack.owner_id == actor.owner_id
-        ):
-            return True
-        target = cls._target(pack)
-        return (
-            actor.is_admin
-            and is_ac06_admin_gray_validation_target(target)
-            and pack.created_by == "ac06-gray-preparation"
-            and "admin_gray_only" in pack.permission_requirements
         )
 
     def register_pack(

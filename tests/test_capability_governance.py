@@ -243,7 +243,12 @@ def test_validation_task_resolves_same_digest_personal_row() -> None:
     assert run.target.owner_id == "owner-a"
 
 
-def test_ac06_admin_gray_platform_pack_exposes_owner_validation_bridge() -> None:
+def test_ac06_admin_gray_platform_pack_validation_bridge_retired() -> None:
+    """#17（AC07-12）回归：AC-06 过渡灰度包验证路径已退役。
+
+    真实发布链（#15/#16）满足门禁后，管理员不能再直接验证白名单平台包；
+    平台能力验证必须走 AC-07 发布链（个人 draft → 验证 → 晋级 → 发布）。
+    """
     class Resolver:
         def __init__(self, task_ref: ValidationTaskRef) -> None:
             self.task_ref = task_ref
@@ -305,7 +310,8 @@ def test_ac06_admin_gray_platform_pack_exposes_owner_validation_bridge() -> None
 
     admin_views = {item.pack_id: item for item in governance.list_visible_projections(admin)}
     ordinary_views = {item.pack_id: item for item in governance.list_visible_projections(ordinary)}
-    assert admin_views[gray_pack.pack_id].can_validate is True
+    # 兼容切换后：管理员对 AC-06 白名单平台包不再有验证资格（退役锚点）。
+    assert admin_views[gray_pack.pack_id].can_validate is False
     assert admin_views[unrelated_platform.pack_id].can_validate is False
     assert ordinary_views[gray_pack.pack_id].can_validate is False
     assert governance.list_validation_task_options(
@@ -315,21 +321,24 @@ def test_ac06_admin_gray_platform_pack_exposes_owner_validation_bridge() -> None
             version=gray_pack.version,
             digest=gray_pack.digest,
         ),
-    ) == ("owner-task",)
+    ) == ()
 
-    run = governance.request_validation_for_task(
-        admin,
-        pack_ref=CapabilityPackRef(
-            pack_id=gray_pack.pack_id,
-            version=gray_pack.version,
-            digest=gray_pack.digest,
-        ),
-        task_id="workspace-gray",
-        revision=1,
-        idempotency_key="validate-ac06-gray",
-    )
-    assert run.owner_id == admin.owner_id
-    assert run.target.scope is ProcedureScope.PLATFORM
+    try:
+        governance.request_validation_for_task(
+            admin,
+            pack_ref=CapabilityPackRef(
+                pack_id=gray_pack.pack_id,
+                version=gray_pack.version,
+                digest=gray_pack.digest,
+            ),
+            task_id="workspace-gray",
+            revision=1,
+            idempotency_key="validate-ac06-gray",
+        )
+    except PermissionError:
+        pass
+    else:
+        raise AssertionError("AC-06 白名单平台包验证必须被拒（退役）")
 
 
 def test_legacy_projection_is_actor_scoped_without_rewriting_pack() -> None:

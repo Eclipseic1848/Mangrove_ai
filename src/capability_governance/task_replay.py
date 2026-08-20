@@ -22,7 +22,6 @@ from .models import (
     CapabilityTaskMetadata,
     ValidationTaskOption,
     ValidationTaskRef,
-    is_ac06_admin_gray_validation_target,
 )
 
 # 审计查看单对象读取上限；超出只返回截断前段，hash 按实际返回内容计算。
@@ -226,9 +225,9 @@ class SqliteValidationTaskResolver:
         task_id: str,
         revision: int,
     ) -> ValidationTaskRef:
-        if target.owner_id != actor.owner_id and not (
-            actor.is_admin and is_ac06_admin_gray_validation_target(target)
-        ):
+        if target.owner_id != actor.owner_id:
+            # #17（AC07-12）兼容切换：AC-06 过渡白名单退役后，验证证据
+            # 只能来自目标 Owner 本人的任务。
             raise PermissionError("不能使用其他用户的任务作为验证证据")
         with self._connect() as connection:
             task = connection.execute(
@@ -398,9 +397,8 @@ class SqliteValidationTaskResolver:
         actor: CatalogActor,
         target: CapabilityGovernanceTarget,
     ) -> tuple[ValidationTaskOption, ...]:
-        if target.owner_id != actor.owner_id and not (
-            actor.is_admin and is_ac06_admin_gray_validation_target(target)
-        ):
+        if target.owner_id != actor.owner_id:
+            # #17（AC07-12）兼容切换：AC-06 过渡白名单退役。
             return ()
         with self._connect() as connection:
             rows = connection.execute(
