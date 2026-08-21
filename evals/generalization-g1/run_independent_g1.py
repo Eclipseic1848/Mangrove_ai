@@ -38,21 +38,21 @@ from src.evaluation.formal_delivery import (
 
 
 EVAL_ROOT = Path(__file__).resolve().parent
-INDEPENDENT_ROOT = PROJECT_ROOT / "evals" / "generalization-g1-independent-v2"
+INDEPENDENT_ROOT = PROJECT_ROOT / "evals" / "generalization-g1-independent-v3"
 DIAGNOSTIC_MANIFEST = EVAL_ROOT / "fixtures.json"
 HELDOUT_MANIFEST = INDEPENDENT_ROOT / "heldout_manifest.json"
 FREEZE = INDEPENDENT_ROOT / "freeze.json"
 SELF_CHECK = INDEPENDENT_ROOT / "self_check.py"
 INDEPENDENT_ASSERTIONS = INDEPENDENT_ROOT / "assertions.py"
-RUNS_DIR = EVAL_ROOT / "runs" / "independent-v2"
+RUNS_DIR = EVAL_ROOT / "runs" / "independent-v3"
 FORMAL_DELIVERY_DB = RUNS_DIR / "formal-delivery.db"
 FORMAL_DELIVERY_ROOT = RUNS_DIR / "formal-deliveries"
 POST_COMMIT_FREEZE_METADATA = {
     "evals/generalization-g1/fixtures.json",
-    "evals/generalization-g1-independent-v2/README.md",
-    "evals/generalization-g1-independent-v2/freeze.json",
-    "evals/generalization-g1-independent-v2/heldout_manifest.json",
-    "evals/generalization-g1-independent-v2/self-check-report.json",
+    "evals/generalization-g1-independent-v3/README.md",
+    "evals/generalization-g1-independent-v3/freeze.json",
+    "evals/generalization-g1-independent-v3/heldout_manifest.json",
+    "evals/generalization-g1-independent-v3/self-check-report.json",
 }
 
 

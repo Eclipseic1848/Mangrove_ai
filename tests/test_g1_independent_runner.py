@@ -24,14 +24,21 @@ from src.agentic_runtime.models import (
 )
 
 
-def test_independent_v2_binary_sources_disable_git_text_conversion() -> None:
+@pytest.mark.parametrize(
+    "root_name",
+    ["generalization-g1-independent-v2", "generalization-g1-independent-v3"],
+)
+def test_independent_binary_sources_disable_git_text_conversion(
+    root_name: str,
+) -> None:
     project_root = Path(__file__).resolve().parents[1]
-    sources = project_root / "evals/generalization-g1-independent-v2/sources"
-    paths = [
-        sources / "v2_01_港区浮标巡检.pdf",
-        sources / "v2_07_蜂场采蜜记录.docx",
-        sources / "v2_13_风机叶片测量.xlsx",
-    ]
+    sources = project_root / "evals" / root_name / "sources"
+    paths = sorted(
+        path
+        for suffix in ("*.pdf", "*.docx", "*.xlsx")
+        for path in sources.glob(suffix)
+    )
+    assert paths
 
     completed = subprocess.run(
         ["git", "check-attr", "text", "--", *map(str, paths)],

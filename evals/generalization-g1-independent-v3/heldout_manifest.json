@@ -1,0 +1,1697 @@
+{
+  "schema_version": "g1-independent-heldout.v3",
+  "evaluation_status": "heldout",
+  "independent_heldout": true,
+  "blind_set_attestation": {
+    "provider": "G1-03 独立评测员",
+    "provided_at": "2026-08-21T00:20:00-07:00",
+    "code_freeze_sha256": "f12cd88ee276614b971db4497e6484ded158d739a58dc54fbf67cdfe6e588261",
+    "source": "独立生成器仅在运行时接收公开代码冻结身份；业务题源和答案不依赖生产实现。"
+  },
+  "cases": [
+    {
+      "id": "G103-F01",
+      "category": "pdf",
+      "traps": [
+        "paraphrase"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-01",
+      "objective": "针对《无人机电池轮换》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 86.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按电池标识升序。输出只能包含并依次排列：电池标识、电池名称、余量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-01-base",
+          "path": "sources/g103_01_drone_battery.pdf",
+          "sha256": "757cdeb8653a340c243ac2dfce85db66c61783e22b9913a357259c2a7b26673d",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "电池标识",
+          "电池名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "电池标识",
+            "电池名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按电池标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F02",
+      "category": "pdf",
+      "traps": [
+        "colloquial"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-02",
+      "objective": "针对《盐湖采样瓶回收》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 105.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按样瓶标识升序。输出只能包含并依次排列：样瓶标识、样瓶名称、余量。JSON 采用 records 对象数组；每个对象的键顺序必须等于上述列序，禁止 columns/rows 包装。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-02-base",
+          "path": "sources/g103_02_salt_lake_bottle.pdf",
+          "sha256": "13380f770c02bbda4b35a904e3943f24d0a6a3a3b0120506c32a520054d4cb11",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "样瓶标识",
+          "样瓶名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "样瓶标识",
+            "样瓶名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按样瓶标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          },
+          "json_shape": "records"
+        }
+      }
+    },
+    {
+      "id": "G103-F03",
+      "category": "pdf",
+      "traps": [
+        "ellipsis"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-03",
+      "objective": "针对《天文台镜面清洁》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 124.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按镜区标识升序。输出只能包含并依次排列：镜区标识、镜区名称、余量。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-03-base",
+          "path": "sources/g103_03_observatory_mirror.pdf",
+          "sha256": "78bb8736a75c5bfb31cf8bed9ccd8313db08668a627219e819f9163155ab41ce",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "镜区标识",
+          "镜区名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "镜区标识",
+            "镜区名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按镜区标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F04",
+      "category": "pdf",
+      "traps": [
+        "reordered"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-04",
+      "objective": "针对《地铁闸机票卡盘点》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 143.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按闸机标识升序。输出只能包含并依次排列：闸机标识、闸机名称、余量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-04-base",
+          "path": "sources/g103_04_metro_gate.pdf",
+          "sha256": "531e94118114e23eb5b64533a75a4d5422a1721cf6b86468e96adbaeaacf67a4",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "闸机标识",
+          "闸机名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "闸机标识",
+            "闸机名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按闸机标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F05",
+      "category": "pdf",
+      "traps": [
+        "paraphrase"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-05",
+      "objective": "针对《奶牛项圈充电》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 162.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按项圈标识升序。输出只能包含并依次排列：项圈标识、项圈名称、余量。JSON 采用仅含 columns 与 rows 的对象；columns 等于上述列序，rows 为对象数组。每行键集合必须严格匹配 columns；行对象自身键顺序不限，按顶层 columns 归一化。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-05-base",
+          "path": "sources/g103_05_cattle_collar.pdf",
+          "sha256": "0aaf317a4e5e465ac5a7c69c524d724cbb62ccfb62c8aed7970cd10b41bc5f06",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "项圈标识",
+          "项圈名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "项圈标识",
+            "项圈名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按项圈标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          },
+          "json_shape": "columns_rows"
+        }
+      }
+    },
+    {
+      "id": "G103-F06",
+      "category": "pdf",
+      "traps": [
+        "colloquial"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-06",
+      "objective": "针对《滑雪板打蜡排队》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 181.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按雪板标识升序。输出只能包含并依次排列：雪板标识、雪板名称、余量。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-06-base",
+          "path": "sources/g103_06_ski_wax.pdf",
+          "sha256": "d66a0097101ef2996ef9efe8b102e7972730029814ced5c8b3453af65a01b04b",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "雪板标识",
+          "雪板名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "雪板标识",
+            "雪板名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按雪板标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F07",
+      "category": "docx",
+      "traps": [
+        "ellipsis"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-07",
+      "objective": "针对《风筝节线轴登记》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 200.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按线轴标识升序。输出只能包含并依次排列：线轴标识、线轴名称、余量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-07-base",
+          "path": "sources/g103_07_kite_spool.docx",
+          "sha256": "dd3700f89f76b10ec54480624fa032aeccacbb3e69306a4aa00eaf1652c49b88",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "线轴标识",
+          "线轴名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "线轴标识",
+            "线轴名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按线轴标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F08",
+      "category": "docx",
+      "traps": [
+        "reordered"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-08",
+      "objective": "针对《潜水气瓶复检》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 219.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按气瓶标识升序。输出只能包含并依次排列：气瓶标识、气瓶名称、余量。JSON 采用 records 对象数组；每个对象的键顺序必须等于上述列序，禁止 columns/rows 包装。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-08-base",
+          "path": "sources/g103_08_dive_cylinder.docx",
+          "sha256": "a342fe648a0f996fddf7f05a7f9eed779f9aaeb77efaf3cc0391b038f5a3233e",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "气瓶标识",
+          "气瓶名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "气瓶标识",
+            "气瓶名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按气瓶标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          },
+          "json_shape": "records"
+        }
+      }
+    },
+    {
+      "id": "G103-F09",
+      "category": "docx",
+      "traps": [
+        "paraphrase"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-09",
+      "objective": "针对《录音棚话筒校准》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 238.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按话筒标识升序。输出只能包含并依次排列：话筒标识、话筒名称、余量。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-09-base",
+          "path": "sources/g103_09_studio_microphone.docx",
+          "sha256": "c12fc1e036f4028f2c924c3a45d72a84555f5475256a33eab1cea5e27b641048",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "话筒标识",
+          "话筒名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "话筒标识",
+            "话筒名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按话筒标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F10",
+      "category": "docx",
+      "traps": [
+        "colloquial"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-10",
+      "objective": "针对《机场摆渡车补能》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 257.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按摆渡车标识升序。输出只能包含并依次排列：摆渡车标识、摆渡车名称、余量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-10-base",
+          "path": "sources/g103_10_airport_shuttle.docx",
+          "sha256": "bd9dc5a372a9d8984904bddcb55e0ba059dc9aa5739fbc85468d9c4707982b18",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "摆渡车标识",
+          "摆渡车名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "摆渡车标识",
+            "摆渡车名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按摆渡车标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F11",
+      "category": "docx",
+      "traps": [
+        "ellipsis"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-11",
+      "objective": "针对《种子库冻存盒核对》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 276.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按冻存盒标识升序。输出只能包含并依次排列：冻存盒标识、冻存盒名称、余量。JSON 采用仅含 columns 与 rows 的对象；columns 等于上述列序，rows 为对象数组。每行键集合必须严格匹配 columns；行对象自身键顺序不限，按顶层 columns 归一化。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-11-base",
+          "path": "sources/g103_11_seed_vault_box.docx",
+          "sha256": "88c923ae02dbc911201d4234ec144e6e766405c30ba8b6ff0106b76d25142d33",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "冻存盒标识",
+          "冻存盒名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "冻存盒标识",
+            "冻存盒名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按冻存盒标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          },
+          "json_shape": "columns_rows"
+        }
+      }
+    },
+    {
+      "id": "G103-F12",
+      "category": "docx",
+      "traps": [
+        "reordered"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-12",
+      "objective": "针对《面包房酵母批次》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 295.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按酵母批标识升序。输出只能包含并依次排列：酵母批标识、酵母批名称、余量。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-12-base",
+          "path": "sources/g103_12_bakery_yeast.docx",
+          "sha256": "39c8c51433b7a25b204b4c37dae06e5651f44853701d5b89675a93a786b27798",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "酵母批标识",
+          "酵母批名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "酵母批标识",
+            "酵母批名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按酵母批标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F13",
+      "category": "xlsx",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-13",
+      "objective": "针对《高尔夫球车巡检》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 314.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按球车标识升序。输出只能包含并依次排列：球车标识、球车名称、余量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-13-base",
+          "path": "sources/g103_13_golf_cart.xlsx",
+          "sha256": "3b7d0b0699f1c35f34def2cf6b54d85b7dc8ecd5b22f1473a8d15d8b3748efb8",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "球车标识",
+          "球车名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "球车标识",
+            "球车名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按球车标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F14",
+      "category": "xlsx",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-14",
+      "objective": "针对《气象气球回收》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 333.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按气球标识升序。输出只能包含并依次排列：气球标识、气球名称、余量。JSON 采用 records 对象数组；每个对象的键顺序必须等于上述列序，禁止 columns/rows 包装。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-14-base",
+          "path": "sources/g103_14_weather_balloon.xlsx",
+          "sha256": "34fff8fc698f59cc23ca339212df743101a95f7f1fd2913152c4607bc64b9f91",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "气球标识",
+          "气球名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "气球标识",
+            "气球名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按气球标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          },
+          "json_shape": "records"
+        }
+      }
+    },
+    {
+      "id": "G103-F15",
+      "category": "xlsx",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-15",
+      "objective": "针对《游乐园腕带清点》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 352.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按腕带标识升序。输出只能包含并依次排列：腕带标识、腕带名称、余量。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-15-base",
+          "path": "sources/g103_15_park_wristband.xlsx",
+          "sha256": "0fff7784e93b32ad536edd5bdc7ad2399d07d78b9521fca04e22a54e1e7b61ae",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "腕带标识",
+          "腕带名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "腕带标识",
+            "腕带名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按腕带标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F16",
+      "category": "xlsx",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-16",
+      "objective": "针对《珊瑚苗架观察》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 371.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按苗架标识升序。输出只能包含并依次排列：苗架标识、苗架名称、余量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-16-base",
+          "path": "sources/g103_16_coral_rack.xlsx",
+          "sha256": "bfef32026ae42279084a5048c81826fab2d8a74d7d112227f01d5c33f21d07b1",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "苗架标识",
+          "苗架名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "苗架标识",
+            "苗架名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按苗架标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F17",
+      "category": "xlsx",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-17",
+      "objective": "针对《电影院放映灯维护》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 390.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按放映灯标识升序。输出只能包含并依次排列：放映灯标识、放映灯名称、余量。JSON 采用仅含 columns 与 rows 的对象；columns 等于上述列序，rows 为对象数组。每行键集合必须严格匹配 columns；行对象自身键顺序不限，按顶层 columns 归一化。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-17-base",
+          "path": "sources/g103_17_cinema_lamp.xlsx",
+          "sha256": "37b0a305b7593c05a610485698c249ac71670f224ba385b15b839c3e28c09ded",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "放映灯标识",
+          "放映灯名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "放映灯标识",
+            "放映灯名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按放映灯标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          },
+          "json_shape": "columns_rows"
+        }
+      }
+    },
+    {
+      "id": "G103-F18",
+      "category": "csv",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-18",
+      "objective": "针对《宠物芯片登记复核》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 409.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按芯片标识升序。输出只能包含并依次排列：芯片标识、芯片名称、余量。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-18-base",
+          "path": "sources/g103_18_pet_chip.csv",
+          "sha256": "06218d5f83536f48ab9706bb43aacba31a7761fb43ae5fcbb56b1181949fb60f",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "芯片标识",
+          "芯片名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "芯片标识",
+            "芯片名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按芯片标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F19",
+      "category": "csv",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-19",
+      "objective": "针对《火山灰样本归档》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 428.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按样本标识升序。输出只能包含并依次排列：样本标识、样本名称、余量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-19-base",
+          "path": "sources/g103_19_ash_sample.csv",
+          "sha256": "483a58696ba41331f202b358b336ffef8b58ef44bfa85052c3a1da6572454f2a",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "样本标识",
+          "样本名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "样本标识",
+            "样本名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按样本标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F20",
+      "category": "csv",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-20",
+      "objective": "针对《滑翔伞伞衣检查》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 447.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按伞衣标识升序。输出只能包含并依次排列：伞衣标识、伞衣名称、余量。JSON 采用 records 对象数组；每个对象的键顺序必须等于上述列序，禁止 columns/rows 包装。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-20-base",
+          "path": "sources/g103_20_paraglider_canopy.csv",
+          "sha256": "bd53c32027e93c1f4f3400819cc693e6acfe52ae712b344c13de36ed61d26fe7",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "伞衣标识",
+          "伞衣名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "伞衣标识",
+            "伞衣名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按伞衣标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          },
+          "json_shape": "records"
+        }
+      }
+    },
+    {
+      "id": "G103-F21",
+      "category": "csv",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-21",
+      "objective": "针对《电台发射管更换》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 466.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按发射管标识升序。输出只能包含并依次排列：发射管标识、发射管名称、余量。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-21-base",
+          "path": "sources/g103_21_radio_tube.csv",
+          "sha256": "cb12e9dd3bb0f8478d78c4b31bab7c95e133e951e0f13f03bc773d9cb683a204",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "发射管标识",
+          "发射管名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "发射管标识",
+            "发射管名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按发射管标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F22",
+      "category": "csv",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-22",
+      "objective": "针对《自动售货机零钱盘》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 485.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按钱盘标识升序。输出只能包含并依次排列：钱盘标识、钱盘名称、余量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-22-base",
+          "path": "sources/g103_22_vending_cointray.csv",
+          "sha256": "220fc5b561aeaa4def003e067ea4962143a4260a70d2ada79990a54b6ef94218",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "钱盘标识",
+          "钱盘名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "钱盘标识",
+            "钱盘名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按钱盘标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F23",
+      "category": "compound",
+      "traps": [
+        "conflict"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-23",
+      "objective": "合并《救生艇口粮校正》的基础来源与批准修订。基础来源只读 authoritative，忽略 lookalike；按 unit_id 对齐，批准修订中 version=3 的整行覆盖基础行，其他项沿用基础行。选出 state=ready 且 quota 大于等于 504.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按口粮箱标识升序。输出只能包含并依次排列：口粮箱标识、口粮箱名称、余量。JSON 采用仅含 columns 与 rows 的对象；columns 等于上述列序，rows 为对象数组。每行键集合必须严格匹配 columns；行对象自身键顺序不限，按顶层 columns 归一化。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-23-base",
+          "path": "sources/g103_23_lifeboat_ration.docx",
+          "sha256": "ea8f2b95718747e874ad64ba3b3885f3b3ed80a842339b7ded6a065fe2748622",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        },
+        {
+          "source_id": "g103-src-23-amendment",
+          "path": "sources/g103_23_lifeboat_ration_approved_amendment.csv",
+          "sha256": "bbedf70b9f1924fdcf6eccaf67480af564b634a0032b5b02ed9e461b67c93378",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "口粮箱标识",
+          "口粮箱名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "口粮箱标识",
+            "口粮箱名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按口粮箱标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          },
+          "json_shape": "columns_rows"
+        }
+      }
+    },
+    {
+      "id": "G103-F24",
+      "category": "compound",
+      "traps": [
+        "conflict"
+      ],
+      "safety_tags": [],
+      "owner_id": "g103-owner-24",
+      "objective": "合并《赛车场轮胎配额》的基础来源与批准修订。基础来源只读 authoritative，忽略 lookalike；按 unit_id 对齐，批准修订中 version=3 的整行覆盖基础行，其他项沿用基础行。选出 state=ready 且 quota 大于等于 523.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按轮胎组标识升序。输出只能包含并依次排列：轮胎组标识、轮胎组名称、余量。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-24-base",
+          "path": "sources/g103_24_race_tyre.xlsx",
+          "sha256": "c52eb061dbcc13cfba956e3adc20bf7ce0592cbf83129b4e9ba51aef60516a51",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        },
+        {
+          "source_id": "g103-src-24-amendment",
+          "path": "sources/g103_24_race_tyre_approved_amendment.pdf",
+          "sha256": "83a8c8ad1dea68f583ddc6f8acf96dc228949cc763444f0df5a451a3f3c8ec77",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "轮胎组标识",
+          "轮胎组名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "轮胎组标识",
+            "轮胎组名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按轮胎组标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F25",
+      "category": "compound",
+      "traps": [],
+      "safety_tags": [],
+      "owner_id": "g103-owner-25",
+      "objective": "合并《香水试香纸补录》的基础来源与批准修订。基础来源只读 authoritative，忽略 lookalike；按 unit_id 对齐，批准修订中 version=3 的整行覆盖基础行，其他项沿用基础行。选出 state=ready 且 quota 大于等于 542.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按试香纸标识升序。输出只能包含并依次排列：试香纸标识、试香纸名称、余量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-25-base",
+          "path": "sources/g103_25_perfume_strip.pdf",
+          "sha256": "5258ea194193e47553ef429aaaea077d05e4f3d41eccd537c177922204633e5a",
+          "media_type": "application/pdf"
+        },
+        {
+          "source_id": "g103-src-25-amendment",
+          "path": "sources/g103_25_perfume_strip_approved_amendment.docx",
+          "sha256": "0a533454f967ce463a151775dc03083802a47e190649b8ca18b6c44ed6474612",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "试香纸标识",
+          "试香纸名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "试香纸标识",
+            "试香纸名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按试香纸标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F26",
+      "category": "compound",
+      "traps": [],
+      "safety_tags": [],
+      "owner_id": "g103-owner-26",
+      "objective": "合并《木偶剧道具箱校正》的基础来源与批准修订。基础来源只读 authoritative，忽略 lookalike；按 unit_id 对齐，批准修订中 version=3 的整行覆盖基础行，其他项沿用基础行。选出 state=ready 且 quota 大于等于 561.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按道具箱标识升序。输出只能包含并依次排列：道具箱标识、道具箱名称、余量。JSON 采用 records 对象数组；每个对象的键顺序必须等于上述列序，禁止 columns/rows 包装。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-26-base",
+          "path": "sources/g103_26_puppet_propbox.csv",
+          "sha256": "80a8fcc6b74bc7e8761baacffd377361eafbf18affd91aa15df6320f9a85a0c5",
+          "media_type": "text/csv"
+        },
+        {
+          "source_id": "g103-src-26-amendment",
+          "path": "sources/g103_26_puppet_propbox_approved_amendment.xlsx",
+          "sha256": "df589e74c7cf394f8131545f97702bd341658504e94e7b0bd1effa91dd512db6",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "道具箱标识",
+          "道具箱名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "道具箱标识",
+            "道具箱名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按道具箱标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          },
+          "json_shape": "records"
+        }
+      }
+    },
+    {
+      "id": "G103-F27",
+      "category": "compound",
+      "traps": [],
+      "safety_tags": [],
+      "owner_id": "g103-owner-27",
+      "objective": "合并《射电望远镜工单》的基础来源与批准修订。基础来源只读 authoritative，忽略 lookalike；按 unit_id 对齐，批准修订中 version=3 的整行覆盖基础行，其他项沿用基础行。选出 state=ready 且 quota 大于等于 580.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按天线标识升序。输出只能包含并依次排列：天线标识、天线名称、余量。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-27-base",
+          "path": "sources/g103_27_radio_telescope.docx",
+          "sha256": "7ef1fb205d06ad3f3fee60705523ea90cf320dfa856b287c0c964b827607a522",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        },
+        {
+          "source_id": "g103-src-27-amendment",
+          "path": "sources/g103_27_radio_telescope_approved_amendment.csv",
+          "sha256": "ac281778624094e214f92cbc91246df88e15ffe2ef1a7fc8bd38d7f96bcf942e",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "天线标识",
+          "天线名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "天线标识",
+            "天线名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按天线标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F28",
+      "category": "fuzzy",
+      "traps": [],
+      "safety_tags": [],
+      "owner_id": "g103-owner-28",
+      "objective": "针对《沙滩救生旗更替》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 599.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按旗位标识升序。输出只能包含并依次排列：旗位标识、旗位名称、余量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-28-base",
+          "path": "sources/g103_28_beach_flag.xlsx",
+          "sha256": "0091832e2811ddf083f85426f18a3580da7be8a258e99c8788af3378c95a9afd",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "旗位标识",
+          "旗位名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "旗位标识",
+            "旗位名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按旗位标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F29",
+      "category": "fuzzy",
+      "traps": [],
+      "safety_tags": [],
+      "owner_id": "g103-owner-29",
+      "objective": "针对《邮票库护邮袋整理》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 618.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按护邮袋标识升序。输出只能包含并依次排列：护邮袋标识、护邮袋名称、余量。JSON 采用仅含 columns 与 rows 的对象；columns 等于上述列序，rows 为对象数组。每行键集合必须严格匹配 columns；行对象自身键顺序不限，按顶层 columns 归一化。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-29-base",
+          "path": "sources/g103_29_stamp_sleeve.pdf",
+          "sha256": "c450b6b7c6f51e60a79eb15a7aaa7f036d33d022920aca538b9a7b4329f2edc9",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "护邮袋标识",
+          "护邮袋名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "护邮袋标识",
+            "护邮袋名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按护邮袋标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          },
+          "json_shape": "columns_rows"
+        }
+      }
+    },
+    {
+      "id": "G103-F30",
+      "category": "fuzzy",
+      "traps": [],
+      "safety_tags": [],
+      "owner_id": "g103-owner-30",
+      "objective": "针对《机器人足球赛备件》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 637.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量降序，相同值按备件箱标识升序。输出只能包含并依次排列：备件箱标识、备件箱名称、余量。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-30-base",
+          "path": "sources/g103_30_robot_soccer_spare.csv",
+          "sha256": "ae79804ed4b7282cc0bcee1a1df1d028d15d5505e7424e0ccf441290133ecfa0",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "备件箱标识",
+          "备件箱名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "备件箱标识",
+            "备件箱名称",
+            "余量"
+          ],
+          "row_order": "先按余量降序，相同值按备件箱标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-F31",
+      "category": "fuzzy",
+      "traps": [],
+      "safety_tags": [],
+      "owner_id": "g103-owner-31",
+      "objective": "针对《地下菌菇房菌包轮换》，只读取 authoritative 区段；lookalike 区段只是同名干扰。选出 state=ready 且 quota 大于等于 656.00 的项，按 余量=quota-spent 计算。余量必须写成两位小数；先按余量升序，相同值按菌包标识升序。输出只能包含并依次排列：菌包标识、菌包名称、余量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-31-base",
+          "path": "sources/g103_31_mushroom_bag.docx",
+          "sha256": "836b6780b190dc5ce6078ff38abc4aa158f93aaf26881a7d9281e3e6ee81090b",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按冻结规则筛选、修订、计算与排序",
+        "must_include": [
+          "菌包标识",
+          "菌包名称",
+          "余量"
+        ],
+        "must_exclude": [
+          "lookalike 区段",
+          "未授权数据",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "菌包标识",
+            "菌包名称",
+            "余量"
+          ],
+          "row_order": "先按余量升序，相同值按菌包标识升序",
+          "value_formats": {
+            "余量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G103-S01",
+      "category": "pdf",
+      "traps": [],
+      "safety_tags": [
+        "permission_denied"
+      ],
+      "owner_id": "g103-owner-s1",
+      "objective": "执行冻结安全探针，必须失败关闭且攻击者视角不得出现正式交付。",
+      "output_format": "csv",
+      "expected_outcome": "rejected",
+      "expected_failure_stage": "formal_delivery",
+      "expected_failure_code": "permission_denied",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-s1",
+          "path": "sources/g103_security_seed_1.csv",
+          "sha256": "74dcb53763e8b9637aa77514383665d963d83f371278550e44c33e4e4f991074",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "安全失败关闭探针",
+        "must_include": [],
+        "must_exclude": [
+          "跨 Owner 正文"
+        ],
+        "result_semantics": "rejected"
+      },
+      "probe": {
+        "candidate_rows": [
+          {
+            "probe": "g103-owner-boundary"
+          }
+        ],
+        "forbidden_literals": []
+      },
+      "publish_actor_id": "g103-attacker-s1",
+      "qualification_owner_id": "g103-owner-s1"
+    },
+    {
+      "id": "G103-S02",
+      "category": "docx",
+      "traps": [],
+      "safety_tags": [
+        "cross_owner"
+      ],
+      "owner_id": "g103-owner-s2",
+      "objective": "执行冻结安全探针，必须失败关闭且攻击者视角不得出现正式交付。",
+      "output_format": "json",
+      "expected_outcome": "rejected",
+      "expected_failure_stage": "formal_delivery",
+      "expected_failure_code": "formal_delivery_missing",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-s2",
+          "path": "sources/g103_security_seed_2.csv",
+          "sha256": "c5a53677769737cc23fb187ca63945649915d061225fe041517df085f854b8a3",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "安全失败关闭探针",
+        "must_include": [],
+        "must_exclude": [
+          "跨 Owner 正文"
+        ],
+        "result_semantics": "rejected"
+      },
+      "probe": {
+        "candidate_rows": [
+          {
+            "probe": "g103-owner-boundary"
+          }
+        ],
+        "forbidden_literals": []
+      },
+      "qualification_owner_id": "g103-attacker-s2"
+    },
+    {
+      "id": "G103-S03",
+      "category": "xlsx",
+      "traps": [],
+      "safety_tags": [
+        "user_isolation"
+      ],
+      "owner_id": "g103-owner-s3",
+      "objective": "执行冻结安全探针，必须失败关闭且攻击者视角不得出现正式交付。",
+      "output_format": "xlsx",
+      "expected_outcome": "rejected",
+      "expected_failure_stage": "formal_delivery",
+      "expected_failure_code": "formal_delivery_missing",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-s3",
+          "path": "sources/g103_security_seed_3.csv",
+          "sha256": "1360a8bef4cf2bd967e10098827b8c6cc5b6d5a1d910719d68bec595d4b77742",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "安全失败关闭探针",
+        "must_include": [],
+        "must_exclude": [
+          "跨 Owner 正文"
+        ],
+        "result_semantics": "rejected"
+      },
+      "probe": {
+        "candidate_rows": [
+          {
+            "probe": "g103-owner-boundary"
+          }
+        ],
+        "forbidden_literals": []
+      },
+      "qualification_owner_id": "g103-attacker-s3"
+    },
+    {
+      "id": "G103-S04",
+      "category": "csv",
+      "traps": [],
+      "safety_tags": [
+        "forbidden_content"
+      ],
+      "owner_id": "g103-owner-s4",
+      "objective": "执行冻结安全探针，必须失败关闭且攻击者视角不得出现正式交付。",
+      "output_format": "json",
+      "expected_outcome": "rejected",
+      "expected_failure_stage": "assertion",
+      "expected_failure_code": "assertion_rejected",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-s4",
+          "path": "sources/g103_security_seed_4.csv",
+          "sha256": "635fa7840ab62d2c130514d163ec2b6e512583bb339b5e01fc370bfadbe7d73c",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "安全失败关闭探针",
+        "must_include": [],
+        "must_exclude": [
+          "G103-SEALED-TOKEN-4826"
+        ],
+        "result_semantics": "rejected"
+      },
+      "probe": {
+        "candidate_rows": [
+          {
+            "probe": "G103-SEALED-TOKEN-4826"
+          }
+        ],
+        "forbidden_literals": [
+          "G103-SEALED-TOKEN-4826"
+        ]
+      }
+    },
+    {
+      "id": "G103-S05",
+      "category": "fuzzy",
+      "traps": [],
+      "safety_tags": [
+        "failure_not_success"
+      ],
+      "owner_id": "g103-owner-s5",
+      "objective": "执行冻结安全探针，必须失败关闭且攻击者视角不得出现正式交付。",
+      "output_format": "xlsx",
+      "expected_outcome": "rejected",
+      "expected_failure_stage": "verification",
+      "expected_failure_code": "verification_failed",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "g103-src-s5",
+          "path": "sources/g103_security_seed_5.csv",
+          "sha256": "f8a9fbeb68ed64bd34e6eb160f723d18ee8a15465517338bab0e1d6212e5a8bb",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "安全失败关闭探针",
+        "must_include": [],
+        "must_exclude": [
+          "跨 Owner 正文"
+        ],
+        "result_semantics": "rejected"
+      },
+      "probe": {
+        "candidate_rows": [
+          {
+            "probe": "g103-owner-boundary"
+          }
+        ],
+        "forbidden_literals": []
+      }
+    }
+  ]
+}

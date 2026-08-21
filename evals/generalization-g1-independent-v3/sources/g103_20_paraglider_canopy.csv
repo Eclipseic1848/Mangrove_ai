@@ -1,0 +1,9 @@
+section,unit_id,label,zone,quota,spent,state,rank,version
+authoritative,U201,asset-20-1,E,434.06,6.00,ready,1,1
+authoritative,U202,asset-20-2,Q,447.06,10.00,hold,2,1
+authoritative,U203,asset-20-3,E,460.06,14.00,ready,3,1
+authoritative,U204,asset-20-4,Z,473.06,18.00,ready,4,1
+lookalike,U201,asset-20-1,E,545.06,6.00,ready,1,1
+lookalike,U202,asset-20-2,Q,558.06,10.00,hold,2,1
+lookalike,U203,asset-20-3,E,571.06,14.00,ready,3,1
+lookalike,U204,asset-20-4,Z,584.06,18.00,ready,4,1
