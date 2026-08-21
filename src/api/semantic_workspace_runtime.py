@@ -1113,6 +1113,13 @@ class SemanticWorkspaceManager:
         runtime = repository.get(user_id, task_id, revision)
         if runtime is None:
             raise ValueError("Pi Runtime 配置不存在")
+        task_revision = get_store().get_semantic_workspace_revision(
+            user_id,
+            task_id,
+            revision,
+        )
+        if task_revision is None:
+            raise ValueError("Pi Runtime 对应的冻结 TaskRevision 不存在")
         checkpoint = None
         if (
             runtime["status"]
@@ -1143,8 +1150,11 @@ class SemanticWorkspaceManager:
             "user_id": user_id,
             "task_id": task_id,
             "revision": revision,
-            "objective_text": task["objective_text"],
-            "requested_output_formats": tuple(task["output_formats"]),
+            "objective_text": task_revision["objective_text"],
+            "requested_output_formats": tuple(task_revision["output_formats"]),
+            "table_output_contracts": tuple(
+                task_revision["table_output_contracts"]
+            ),
             "sources": tuple(sources),
             "permission_profile": runtime["permission_profile"],
             # 外部 Provider 只能使用创建运行记录时已经冻结的用户确认，不能在执行时推断。

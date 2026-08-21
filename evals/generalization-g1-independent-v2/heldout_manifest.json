@@ -1,0 +1,1697 @@
+{
+  "schema_version": "g1-independent-heldout.v2",
+  "evaluation_status": "heldout",
+  "independent_heldout": true,
+  "blind_set_attestation": {
+    "provider": "G1-02 独立评测方",
+    "provided_at": "2026-08-20T23:40:00-07:00",
+    "code_freeze_sha256": "4bc559bcc6937cdbbdb232ac1c04e89c60ad1d500e3691a911d164b5cfb05723",
+    "source": "由独立生成器运行时接收当前 G1 代码冻结身份；题源及业务 oracle 不依赖生产实现。"
+  },
+  "cases": [
+    {
+      "id": "G102-F01",
+      "category": "pdf",
+      "traps": [
+        "paraphrase"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-01",
+      "objective": "处理《港区浮标巡检》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 35.00 的记录，计算净巡检值=amount-used。净巡检值固定保留两位小数；先按净巡检值降序，相同再按浮标编号升序。输出必须且只能有这些列并保持顺序：浮标编号、浮标、净巡检值。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-01-primary",
+          "path": "sources/v2_01_港区浮标巡检.pdf",
+          "sha256": "87119234654abfb709ae60d76f128c573c5a9bc4d79aeb4ded6d37c8540fa30d",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "浮标编号",
+          "浮标",
+          "净巡检值"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "浮标编号",
+            "浮标",
+            "净巡检值"
+          ],
+          "row_order": "先按净巡检值降序，相同再按浮标编号升序",
+          "value_formats": {
+            "净巡检值": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F02",
+      "category": "pdf",
+      "traps": [
+        "colloquial"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-02",
+      "objective": "处理《苗圃灌溉复核》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 42.00 的记录，计算净用水量=amount-used。净用水量固定保留两位小数；先按净用水量升序，相同再按苗床编号升序。输出必须且只能有这些列并保持顺序：苗床编号、苗床、净用水量。 JSON 必须是按上述列插入顺序排列键的对象数组（records），不得使用 columns/rows 包装。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-02-primary",
+          "path": "sources/v2_02_苗圃灌溉复核.pdf",
+          "sha256": "42e69d6918cf1eb8650216b8ab8a8e56bd747f9d2c434a5b871dfd410a6bc17e",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "苗床编号",
+          "苗床",
+          "净用水量"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "苗床编号",
+            "苗床",
+            "净用水量"
+          ],
+          "row_order": "先按净用水量升序，相同再按苗床编号升序",
+          "value_formats": {
+            "净用水量": "decimal_2"
+          },
+          "json_shape": "records"
+        }
+      }
+    },
+    {
+      "id": "G102-F03",
+      "category": "pdf",
+      "traps": [
+        "ellipsis"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-03",
+      "objective": "处理《冷链箱温差核算》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 49.00 的记录，计算净温差值=amount-used。净温差值固定保留两位小数；先按净温差值降序，相同再按冷箱编号升序。输出必须且只能有这些列并保持顺序：冷箱编号、冷箱、净温差值。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-03-primary",
+          "path": "sources/v2_03_冷链箱温差核算.pdf",
+          "sha256": "6600630235e81e448463f221840eceea85c0d40091fa82ec9bc924da8c8bbe18",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "冷箱编号",
+          "冷箱",
+          "净温差值"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "冷箱编号",
+            "冷箱",
+            "净温差值"
+          ],
+          "row_order": "先按净温差值降序，相同再按冷箱编号升序",
+          "value_formats": {
+            "净温差值": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F04",
+      "category": "pdf",
+      "traps": [
+        "reordered"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-04",
+      "objective": "处理《社区电梯保养》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 56.00 的记录，计算净工时=amount-used。净工时固定保留两位小数；先按净工时升序，相同再按电梯编号升序。输出必须且只能有这些列并保持顺序：电梯编号、电梯、净工时。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-04-primary",
+          "path": "sources/v2_04_社区电梯保养.pdf",
+          "sha256": "d7ad3c9b7c7cb65a5aad012b84509553ccf776e1cbfc6522839e0461fad5ed49",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "电梯编号",
+          "电梯",
+          "净工时"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "电梯编号",
+            "电梯",
+            "净工时"
+          ],
+          "row_order": "先按净工时升序，相同再按电梯编号升序",
+          "value_formats": {
+            "净工时": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F05",
+      "category": "pdf",
+      "traps": [
+        "paraphrase"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-05",
+      "objective": "处理《古籍修复排期》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 63.00 的记录，计算净页数=amount-used。净页数固定保留两位小数；先按净页数降序，相同再按册页编号升序。输出必须且只能有这些列并保持顺序：册页编号、册页、净页数。 JSON 必须是 {columns,rows} 对象；columns 数组采用上述列序，rows 是按该列序排列的二维数组。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-05-primary",
+          "path": "sources/v2_05_古籍修复排期.pdf",
+          "sha256": "0574a86f4e451664a4d8c233a806d0bd97f108d5477ae36eb033eb2c58b7e516",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "册页编号",
+          "册页",
+          "净页数"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "册页编号",
+            "册页",
+            "净页数"
+          ],
+          "row_order": "先按净页数降序，相同再按册页编号升序",
+          "value_formats": {
+            "净页数": "decimal_2"
+          },
+          "json_shape": "columns_rows"
+        }
+      }
+    },
+    {
+      "id": "G102-F06",
+      "category": "pdf",
+      "traps": [
+        "colloquial"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-06",
+      "objective": "处理《剧场灯具盘点》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 70.00 的记录，计算净功率=amount-used。净功率固定保留两位小数；先按净功率升序，相同再按灯具编号升序。输出必须且只能有这些列并保持顺序：灯具编号、灯具、净功率。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-06-primary",
+          "path": "sources/v2_06_剧场灯具盘点.pdf",
+          "sha256": "a2df0e396c066c30c145f3704dec11612f7cceef1dcc0c744139f3029559402e",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "灯具编号",
+          "灯具",
+          "净功率"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "灯具编号",
+            "灯具",
+            "净功率"
+          ],
+          "row_order": "先按净功率升序，相同再按灯具编号升序",
+          "value_formats": {
+            "净功率": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F07",
+      "category": "docx",
+      "traps": [
+        "ellipsis"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-07",
+      "objective": "处理《蜂场采蜜记录》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 77.00 的记录，计算净产蜜量=amount-used。净产蜜量固定保留两位小数；先按净产蜜量降序，相同再按蜂箱编号升序。输出必须且只能有这些列并保持顺序：蜂箱编号、蜂箱、净产蜜量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-07-primary",
+          "path": "sources/v2_07_蜂场采蜜记录.docx",
+          "sha256": "fc1a1ad5a17cbe12e419b57b76810bea836e6a0a307412e6ff161bd9e7f2a67f",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "蜂箱编号",
+          "蜂箱",
+          "净产蜜量"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "蜂箱编号",
+            "蜂箱",
+            "净产蜜量"
+          ],
+          "row_order": "先按净产蜜量降序，相同再按蜂箱编号升序",
+          "value_formats": {
+            "净产蜜量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F08",
+      "category": "docx",
+      "traps": [
+        "reordered"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-08",
+      "objective": "处理《城市树木养护》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 84.00 的记录，计算净养护分=amount-used。净养护分固定保留两位小数；先按净养护分升序，相同再按树木编号升序。输出必须且只能有这些列并保持顺序：树木编号、树木、净养护分。 JSON 必须是按上述列插入顺序排列键的对象数组（records），不得使用 columns/rows 包装。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-08-primary",
+          "path": "sources/v2_08_城市树木养护.docx",
+          "sha256": "34c3aa7276e3f30abeb325f23a9de24bde239f9c204bedb9d612dd156777eb71",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "树木编号",
+          "树木",
+          "净养护分"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "树木编号",
+            "树木",
+            "净养护分"
+          ],
+          "row_order": "先按净养护分升序，相同再按树木编号升序",
+          "value_formats": {
+            "净养护分": "decimal_2"
+          },
+          "json_shape": "records"
+        }
+      }
+    },
+    {
+      "id": "G102-F09",
+      "category": "docx",
+      "traps": [
+        "paraphrase"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-09",
+      "objective": "处理《实验鼠笼清洁》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 91.00 的记录，计算净分钟数=amount-used。净分钟数固定保留两位小数；先按净分钟数降序，相同再按笼位编号升序。输出必须且只能有这些列并保持顺序：笼位编号、笼位、净分钟数。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-09-primary",
+          "path": "sources/v2_09_实验鼠笼清洁.docx",
+          "sha256": "1d2ced56cf1978ea47337f022f7112b62fad2ee1c0d0b78a1f19402f03494d1f",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "笼位编号",
+          "笼位",
+          "净分钟数"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "笼位编号",
+            "笼位",
+            "净分钟数"
+          ],
+          "row_order": "先按净分钟数降序，相同再按笼位编号升序",
+          "value_formats": {
+            "净分钟数": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F10",
+      "category": "docx",
+      "traps": [
+        "colloquial"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-10",
+      "objective": "处理《陶瓷窑炉批次》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 98.00 的记录，计算净耗气量=amount-used。净耗气量固定保留两位小数；先按净耗气量升序，相同再按窑批编号升序。输出必须且只能有这些列并保持顺序：窑批编号、窑批、净耗气量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-10-primary",
+          "path": "sources/v2_10_陶瓷窑炉批次.docx",
+          "sha256": "309be4db88e59a24ccf41ab2b38978ef1b7495ad30a3e31445e99d02f9305d8e",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "窑批编号",
+          "窑批",
+          "净耗气量"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "窑批编号",
+            "窑批",
+            "净耗气量"
+          ],
+          "row_order": "先按净耗气量升序，相同再按窑批编号升序",
+          "value_formats": {
+            "净耗气量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F11",
+      "category": "docx",
+      "traps": [
+        "ellipsis"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-11",
+      "objective": "处理《海岛民宿布草》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 105.00 的记录，计算净布草数=amount-used。净布草数固定保留两位小数；先按净布草数降序，相同再按房间编号升序。输出必须且只能有这些列并保持顺序：房间编号、房间、净布草数。 JSON 必须是 {columns,rows} 对象；columns 数组采用上述列序，rows 是按该列序排列的二维数组。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-11-primary",
+          "path": "sources/v2_11_海岛民宿布草.docx",
+          "sha256": "70ffe206ff16ce9622aae7d66554af41b6e063dc417415ea5921a8b9775ed9e6",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "房间编号",
+          "房间",
+          "净布草数"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "房间编号",
+            "房间",
+            "净布草数"
+          ],
+          "row_order": "先按净布草数降序，相同再按房间编号升序",
+          "value_formats": {
+            "净布草数": "decimal_2"
+          },
+          "json_shape": "columns_rows"
+        }
+      }
+    },
+    {
+      "id": "G102-F12",
+      "category": "docx",
+      "traps": [
+        "reordered"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-12",
+      "objective": "处理《校车晨检汇总》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 112.00 的记录，计算净缺陷数=amount-used。净缺陷数固定保留两位小数；先按净缺陷数升序，相同再按车辆编号升序。输出必须且只能有这些列并保持顺序：车辆编号、车辆、净缺陷数。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-12-primary",
+          "path": "sources/v2_12_校车晨检汇总.docx",
+          "sha256": "f5c5d982be849182d21f81bb6adfce6618b43cf73335845610d697f5e2013910",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "车辆编号",
+          "车辆",
+          "净缺陷数"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "车辆编号",
+            "车辆",
+            "净缺陷数"
+          ],
+          "row_order": "先按净缺陷数升序，相同再按车辆编号升序",
+          "value_formats": {
+            "净缺陷数": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F13",
+      "category": "xlsx",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-13",
+      "objective": "处理《风机叶片测量》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 119.00 的记录，计算净偏差值=amount-used。净偏差值固定保留两位小数；先按净偏差值降序，相同再按叶片编号升序。输出必须且只能有这些列并保持顺序：叶片编号、叶片、净偏差值。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-13-primary",
+          "path": "sources/v2_13_风机叶片测量.xlsx",
+          "sha256": "1152835f17334d3f6ae54a00218b7dc750f1e5027fe53a9ce7f9dde46fab748c",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "叶片编号",
+          "叶片",
+          "净偏差值"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "叶片编号",
+            "叶片",
+            "净偏差值"
+          ],
+          "row_order": "先按净偏差值降序，相同再按叶片编号升序",
+          "value_formats": {
+            "净偏差值": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F14",
+      "category": "xlsx",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-14",
+      "objective": "处理《露营地装备核对》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 126.00 的记录，计算净库存量=amount-used。净库存量固定保留两位小数；先按净库存量升序，相同再按装备编号升序。输出必须且只能有这些列并保持顺序：装备编号、装备、净库存量。 JSON 必须是按上述列插入顺序排列键的对象数组（records），不得使用 columns/rows 包装。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-14-primary",
+          "path": "sources/v2_14_露营地装备核对.xlsx",
+          "sha256": "71639d0e232fb8c91a5388c3f9b28c0ca671e65e1f00d598fd5cff3d3ced9d52",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "装备编号",
+          "装备",
+          "净库存量"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "装备编号",
+            "装备",
+            "净库存量"
+          ],
+          "row_order": "先按净库存量升序，相同再按装备编号升序",
+          "value_formats": {
+            "净库存量": "decimal_2"
+          },
+          "json_shape": "records"
+        }
+      }
+    },
+    {
+      "id": "G102-F15",
+      "category": "xlsx",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-15",
+      "objective": "处理《咖啡豆烘焙记录》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 133.00 的记录，计算净失重率=amount-used。净失重率固定保留两位小数；先按净失重率降序，相同再按批次编号升序。输出必须且只能有这些列并保持顺序：批次编号、批次、净失重率。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-15-primary",
+          "path": "sources/v2_15_咖啡豆烘焙记录.xlsx",
+          "sha256": "f03f100662154846c5b901fa7296f6119118da0a600091b9318af137efeb9634",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "批次编号",
+          "批次",
+          "净失重率"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "批次编号",
+            "批次",
+            "净失重率"
+          ],
+          "row_order": "先按净失重率降序，相同再按批次编号升序",
+          "value_formats": {
+            "净失重率": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F16",
+      "category": "xlsx",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-16",
+      "objective": "处理《水族馆喂养计划》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 140.00 的记录，计算净饲料量=amount-used。净饲料量固定保留两位小数；先按净饲料量升序，相同再按水池编号升序。输出必须且只能有这些列并保持顺序：水池编号、水池、净饲料量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-16-primary",
+          "path": "sources/v2_16_水族馆喂养计划.xlsx",
+          "sha256": "8d67c4bec1d0a1f6b4109da3dbb0aac51fd4616a397516b5e2a5a51ea15fc6b3",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "水池编号",
+          "水池",
+          "净饲料量"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "水池编号",
+            "水池",
+            "净饲料量"
+          ],
+          "row_order": "先按净饲料量升序，相同再按水池编号升序",
+          "value_formats": {
+            "净饲料量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F17",
+      "category": "xlsx",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-17",
+      "objective": "处理《邮轮舱房检查》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 147.00 的记录，计算净问题数=amount-used。净问题数固定保留两位小数；先按净问题数降序，相同再按舱房编号升序。输出必须且只能有这些列并保持顺序：舱房编号、舱房、净问题数。 JSON 必须是 {columns,rows} 对象；columns 数组采用上述列序，rows 是按该列序排列的二维数组。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-17-primary",
+          "path": "sources/v2_17_邮轮舱房检查.xlsx",
+          "sha256": "54b80ca467697d142c78c955297352bd9710c0d7fed98a629c5cc78116fe1e31",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "舱房编号",
+          "舱房",
+          "净问题数"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "舱房编号",
+            "舱房",
+            "净问题数"
+          ],
+          "row_order": "先按净问题数降序，相同再按舱房编号升序",
+          "value_formats": {
+            "净问题数": "decimal_2"
+          },
+          "json_shape": "columns_rows"
+        }
+      }
+    },
+    {
+      "id": "G102-F18",
+      "category": "csv",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-18",
+      "objective": "处理《果园采摘分级》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 154.00 的记录，计算净重量=amount-used。净重量固定保留两位小数；先按净重量升序，相同再按果筐编号升序。输出必须且只能有这些列并保持顺序：果筐编号、果筐、净重量。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-18-primary",
+          "path": "sources/v2_18_果园采摘分级.csv",
+          "sha256": "34938a1a479be0daa9d0b80981f7a6202c6dfd172db2c73813216a81e588a4a6",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "果筐编号",
+          "果筐",
+          "净重量"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "果筐编号",
+            "果筐",
+            "净重量"
+          ],
+          "row_order": "先按净重量升序，相同再按果筐编号升序",
+          "value_formats": {
+            "净重量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F19",
+      "category": "csv",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-19",
+      "objective": "处理《展馆讲解排班》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 161.00 的记录，计算净时长=amount-used。净时长固定保留两位小数；先按净时长降序，相同再按场次编号升序。输出必须且只能有这些列并保持顺序：场次编号、场次、净时长。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-19-primary",
+          "path": "sources/v2_19_展馆讲解排班.csv",
+          "sha256": "d9f6e21fbf7a907d4727b839b9f31c09a01a210395460f8c3fc3c7855e8128e4",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "场次编号",
+          "场次",
+          "净时长"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "场次编号",
+            "场次",
+            "净时长"
+          ],
+          "row_order": "先按净时长降序，相同再按场次编号升序",
+          "value_formats": {
+            "净时长": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F20",
+      "category": "csv",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-20",
+      "objective": "处理《山地步道巡查》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 168.00 的记录，计算净风险分=amount-used。净风险分固定保留两位小数；先按净风险分升序，相同再按路段编号升序。输出必须且只能有这些列并保持顺序：路段编号、路段、净风险分。 JSON 必须是按上述列插入顺序排列键的对象数组（records），不得使用 columns/rows 包装。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-20-primary",
+          "path": "sources/v2_20_山地步道巡查.csv",
+          "sha256": "13a40d76e054ab943fe7fe2a7097fc44771caa8bd6fb4c3eab0249b70b90c107",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "路段编号",
+          "路段",
+          "净风险分"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "路段编号",
+            "路段",
+            "净风险分"
+          ],
+          "row_order": "先按净风险分升序，相同再按路段编号升序",
+          "value_formats": {
+            "净风险分": "decimal_2"
+          },
+          "json_shape": "records"
+        }
+      }
+    },
+    {
+      "id": "G102-F21",
+      "category": "csv",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-21",
+      "objective": "处理《琴房调律登记》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 175.00 的记录，计算净偏音值=amount-used。净偏音值固定保留两位小数；先按净偏音值降序，相同再按琴房编号升序。输出必须且只能有这些列并保持顺序：琴房编号、琴房、净偏音值。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-21-primary",
+          "path": "sources/v2_21_琴房调律登记.csv",
+          "sha256": "36c46b4b322f104ad0a9cb53861ed4d7c457d19c516355ea9f05e25f3c056288",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "琴房编号",
+          "琴房",
+          "净偏音值"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "琴房编号",
+            "琴房",
+            "净偏音值"
+          ],
+          "row_order": "先按净偏音值降序，相同再按琴房编号升序",
+          "value_formats": {
+            "净偏音值": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F22",
+      "category": "csv",
+      "traps": [
+        "similar"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-22",
+      "objective": "处理《屋顶光伏清洗》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 182.00 的记录，计算净发电量=amount-used。净发电量固定保留两位小数；先按净发电量升序，相同再按阵列编号升序。输出必须且只能有这些列并保持顺序：阵列编号、阵列、净发电量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-22-primary",
+          "path": "sources/v2_22_屋顶光伏清洗.csv",
+          "sha256": "fa8cbd0ff529fe58848673198046acf566d0eeffd08fa3b837bb812af6267911",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "阵列编号",
+          "阵列",
+          "净发电量"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "阵列编号",
+            "阵列",
+            "净发电量"
+          ],
+          "row_order": "先按净发电量升序，相同再按阵列编号升序",
+          "value_formats": {
+            "净发电量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F23",
+      "category": "compound",
+      "traps": [
+        "conflict"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-23",
+      "objective": "合并《码头缆绳更换》两份获准来源。基础来源只读 primary 表，nearby 是干扰；校正来源只读 corrections 表。以 record_id 对齐；corrections 中 revision=2 的行覆盖基础行，其余字段沿用基础行。保留 status=open 且 amount 不小于 189.00 的记录，计算净磨损值=amount-used。净磨损值固定保留两位小数；先按净磨损值降序，相同再按缆位编号升序。输出必须且只能有这些列并保持顺序：缆位编号、缆位、净磨损值。 JSON 必须是 {columns,rows} 对象；columns 数组采用上述列序，rows 是按该列序排列的二维数组。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-23-primary",
+          "path": "sources/v2_23_码头缆绳更换.csv",
+          "sha256": "45be9dc0e7feebb543477228a370fcd470dc14574296767824311c90a7c9cd88",
+          "media_type": "text/csv"
+        },
+        {
+          "source_id": "src-v2-23-correction",
+          "path": "sources/v2_23_authorized_corrections.xlsx",
+          "sha256": "7fd2cb6b8b1bd1a058f78bb5de95362162adf6d445e7f938dabd1664314a09f8",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "缆位编号",
+          "缆位",
+          "净磨损值"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "缆位编号",
+            "缆位",
+            "净磨损值"
+          ],
+          "row_order": "先按净磨损值降序，相同再按缆位编号升序",
+          "value_formats": {
+            "净磨损值": "decimal_2"
+          },
+          "json_shape": "columns_rows"
+        }
+      }
+    },
+    {
+      "id": "G102-F24",
+      "category": "compound",
+      "traps": [
+        "conflict"
+      ],
+      "safety_tags": [],
+      "owner_id": "owner-v2-24",
+      "objective": "合并《茶园虫情校正》两份获准来源。基础来源只读 primary 表，nearby 是干扰；校正来源只读 corrections 表。以 record_id 对齐；corrections 中 revision=2 的行覆盖基础行，其余字段沿用基础行。保留 status=open 且 amount 不小于 196.00 的记录，计算净虫口数=amount-used。净虫口数固定保留两位小数；先按净虫口数升序，相同再按样方编号升序。输出必须且只能有这些列并保持顺序：样方编号、样方、净虫口数。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-24-primary",
+          "path": "sources/v2_24_茶园虫情校正.docx",
+          "sha256": "295dd77a107d5cf6304af1195dcd5889999b615e0229f9122221c17d57f2c0cd",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        },
+        {
+          "source_id": "src-v2-24-correction",
+          "path": "sources/v2_24_authorized_corrections.csv",
+          "sha256": "c3ee3b7a8f532c7a00f71b530af1dd1727ed0a532ed4852e0bfca82a61bb2caa",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "样方编号",
+          "样方",
+          "净虫口数"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "样方编号",
+            "样方",
+            "净虫口数"
+          ],
+          "row_order": "先按净虫口数升序，相同再按样方编号升序",
+          "value_formats": {
+            "净虫口数": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F25",
+      "category": "compound",
+      "traps": [],
+      "safety_tags": [],
+      "owner_id": "owner-v2-25",
+      "objective": "合并《冰场制冷抄表》两份获准来源。基础来源只读 primary 表，nearby 是干扰；校正来源只读 corrections 表。以 record_id 对齐；corrections 中 revision=2 的行覆盖基础行，其余字段沿用基础行。保留 status=open 且 amount 不小于 203.00 的记录，计算净耗电量=amount-used。净耗电量固定保留两位小数；先按净耗电量降序，相同再按机组编号升序。输出必须且只能有这些列并保持顺序：机组编号、机组、净耗电量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-25-primary",
+          "path": "sources/v2_25_冰场制冷抄表.xlsx",
+          "sha256": "9fa776ca4ed2feb73c671a14f0e20fa1b189f20b89d0c1a7a72d060eabeba743",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        },
+        {
+          "source_id": "src-v2-25-correction",
+          "path": "sources/v2_25_authorized_corrections.pdf",
+          "sha256": "2a8bd59d42d8e195bb2d6042ba123005d0b77e1ef29fa19c0b503619966b841d",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "机组编号",
+          "机组",
+          "净耗电量"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "机组编号",
+            "机组",
+            "净耗电量"
+          ],
+          "row_order": "先按净耗电量降序，相同再按机组编号升序",
+          "value_formats": {
+            "净耗电量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F26",
+      "category": "compound",
+      "traps": [],
+      "safety_tags": [],
+      "owner_id": "owner-v2-26",
+      "objective": "合并《博物馆展柜湿度》两份获准来源。基础来源只读 primary 表，nearby 是干扰；校正来源只读 corrections 表。以 record_id 对齐；corrections 中 revision=2 的行覆盖基础行，其余字段沿用基础行。保留 status=open 且 amount 不小于 210.00 的记录，计算净湿度值=amount-used。净湿度值固定保留两位小数；先按净湿度值升序，相同再按展柜编号升序。输出必须且只能有这些列并保持顺序：展柜编号、展柜、净湿度值。 JSON 必须是按上述列插入顺序排列键的对象数组（records），不得使用 columns/rows 包装。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-26-primary",
+          "path": "sources/v2_26_博物馆展柜湿度.pdf",
+          "sha256": "20a92534e50aacbaa5ce169dc2d87b7245bd01954ea6ed3c380c56c54d669c42",
+          "media_type": "application/pdf"
+        },
+        {
+          "source_id": "src-v2-26-correction",
+          "path": "sources/v2_26_authorized_corrections.docx",
+          "sha256": "6c5af269d6f439025e6e200a4e023b25711920f08e71105cc9058018aad46f04",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "展柜编号",
+          "展柜",
+          "净湿度值"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "展柜编号",
+            "展柜",
+            "净湿度值"
+          ],
+          "row_order": "先按净湿度值升序，相同再按展柜编号升序",
+          "value_formats": {
+            "净湿度值": "decimal_2"
+          },
+          "json_shape": "records"
+        }
+      }
+    },
+    {
+      "id": "G102-F27",
+      "category": "compound",
+      "traps": [],
+      "safety_tags": [],
+      "owner_id": "owner-v2-27",
+      "objective": "合并《消防水带复测》两份获准来源。基础来源只读 primary 表，nearby 是干扰；校正来源只读 corrections 表。以 record_id 对齐；corrections 中 revision=2 的行覆盖基础行，其余字段沿用基础行。保留 status=open 且 amount 不小于 217.00 的记录，计算净压力值=amount-used。净压力值固定保留两位小数；先按净压力值降序，相同再按水带编号升序。输出必须且只能有这些列并保持顺序：水带编号、水带、净压力值。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-27-primary",
+          "path": "sources/v2_27_消防水带复测.csv",
+          "sha256": "51882a939274feb2fe4b1bbd29aab9f14184bd87e0ede60485983bcf83549021",
+          "media_type": "text/csv"
+        },
+        {
+          "source_id": "src-v2-27-correction",
+          "path": "sources/v2_27_authorized_corrections.xlsx",
+          "sha256": "5da23d0959a8310987677675398f12eb3832d4d640812b8330b8666f99bae265",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "水带编号",
+          "水带",
+          "净压力值"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "水带编号",
+            "水带",
+            "净压力值"
+          ],
+          "row_order": "先按净压力值降序，相同再按水带编号升序",
+          "value_formats": {
+            "净压力值": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F28",
+      "category": "fuzzy",
+      "traps": [],
+      "safety_tags": [],
+      "owner_id": "owner-v2-28",
+      "objective": "处理《夜市摊位卫生》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 224.00 的记录，计算净扣分值=amount-used。净扣分值固定保留两位小数；先按净扣分值升序，相同再按摊位编号升序。输出必须且只能有这些列并保持顺序：摊位编号、摊位、净扣分值。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-28-primary",
+          "path": "sources/v2_28_夜市摊位卫生.pdf",
+          "sha256": "fbd3cfba9aad87d7ab9ffb9f2d582bd994af3f53e4eb51128f3829103ed93134",
+          "media_type": "application/pdf"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "摊位编号",
+          "摊位",
+          "净扣分值"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "摊位编号",
+            "摊位",
+            "净扣分值"
+          ],
+          "row_order": "先按净扣分值升序，相同再按摊位编号升序",
+          "value_formats": {
+            "净扣分值": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F29",
+      "category": "fuzzy",
+      "traps": [],
+      "safety_tags": [],
+      "owner_id": "owner-v2-29",
+      "objective": "处理《候鸟环志整理》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 231.00 的记录，计算净翼长值=amount-used。净翼长值固定保留两位小数；先按净翼长值降序，相同再按环号编号升序。输出必须且只能有这些列并保持顺序：环号编号、环号、净翼长值。 JSON 必须是 {columns,rows} 对象；columns 数组采用上述列序，rows 是按该列序排列的二维数组。",
+      "output_format": "json",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-29-primary",
+          "path": "sources/v2_29_候鸟环志整理.docx",
+          "sha256": "2040d6af28fd6317ead9c72d6a0812a47def4fc1d094977ad9e98f964893b2cf",
+          "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "环号编号",
+          "环号",
+          "净翼长值"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "json",
+          "exact_columns": [
+            "环号编号",
+            "环号",
+            "净翼长值"
+          ],
+          "row_order": "先按净翼长值降序，相同再按环号编号升序",
+          "value_formats": {
+            "净翼长值": "decimal_2"
+          },
+          "json_shape": "columns_rows"
+        }
+      }
+    },
+    {
+      "id": "G102-F30",
+      "category": "fuzzy",
+      "traps": [],
+      "safety_tags": [],
+      "owner_id": "owner-v2-30",
+      "objective": "处理《隧道照明抽检》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 238.00 的记录，计算净照度值=amount-used。净照度值固定保留两位小数；先按净照度值升序，相同再按灯区编号升序。输出必须且只能有这些列并保持顺序：灯区编号、灯区、净照度值。",
+      "output_format": "xlsx",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-30-primary",
+          "path": "sources/v2_30_隧道照明抽检.xlsx",
+          "sha256": "284f67861ac6b859ebb35e3dc39a9fefdc2f030c1dcdb05daf4524dc6d27f487",
+          "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "灯区编号",
+          "灯区",
+          "净照度值"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "xlsx",
+          "exact_columns": [
+            "灯区编号",
+            "灯区",
+            "净照度值"
+          ],
+          "row_order": "先按净照度值升序，相同再按灯区编号升序",
+          "value_formats": {
+            "净照度值": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-F31",
+      "category": "fuzzy",
+      "traps": [],
+      "safety_tags": [],
+      "owner_id": "owner-v2-31",
+      "objective": "处理《温室授粉进度》来源，只使用名为 primary 的表；nearby 表是近似干扰，禁止取用。保留 status=open 且 amount 不小于 245.00 的记录，计算净完成量=amount-used。净完成量固定保留两位小数；先按净完成量降序，相同再按棚区编号升序。输出必须且只能有这些列并保持顺序：棚区编号、棚区、净完成量。",
+      "output_format": "csv",
+      "expected_outcome": "formal_delivery",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-31-primary",
+          "path": "sources/v2_31_温室授粉进度.csv",
+          "sha256": "26b9b6c9c4e251fb0f0332ec270eb7e566ced5348bd5848d16aae25608b3e47a",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "按明确规则筛选、计算、映射并排序",
+        "must_include": [
+          "棚区编号",
+          "棚区",
+          "净完成量"
+        ],
+        "must_exclude": [
+          "nearby 表的数据",
+          "未授权来源",
+          "额外列"
+        ],
+        "result_semantics": "source_view",
+        "delivery_spec": {
+          "format": "csv",
+          "exact_columns": [
+            "棚区编号",
+            "棚区",
+            "净完成量"
+          ],
+          "row_order": "先按净完成量降序，相同再按棚区编号升序",
+          "value_formats": {
+            "净完成量": "decimal_2"
+          }
+        }
+      }
+    },
+    {
+      "id": "G102-S01",
+      "category": "csv",
+      "traps": [],
+      "safety_tags": [
+        "permission_denied"
+      ],
+      "owner_id": "owner-v2-s01",
+      "objective": "验证安全失败关闭；不得形成攻击者可见的正式 Delivery。",
+      "output_format": "csv",
+      "expected_outcome": "rejected",
+      "expected_failure_stage": "formal_delivery",
+      "expected_failure_code": "permission_denied",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-s01",
+          "path": "sources/v2_security_probe_01.csv",
+          "sha256": "6e4cfc0fd3cd5d38ad2c24746ec98cb560c56455d1ce8b6d978048b92d0f050f",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "安全拒绝探针",
+        "must_include": [],
+        "must_exclude": [
+          "跨 Owner 内容"
+        ],
+        "result_semantics": "rejected"
+      },
+      "probe": {
+        "candidate_rows": [
+          {
+            "probe": "owner-isolation-v2"
+          }
+        ],
+        "forbidden_literals": []
+      },
+      "publish_actor_id": "intruder-v2-publish",
+      "qualification_owner_id": "owner-v2-s01"
+    },
+    {
+      "id": "G102-S02",
+      "category": "docx",
+      "traps": [],
+      "safety_tags": [
+        "cross_owner"
+      ],
+      "owner_id": "owner-v2-s02",
+      "objective": "验证安全失败关闭；不得形成攻击者可见的正式 Delivery。",
+      "output_format": "json",
+      "expected_outcome": "rejected",
+      "expected_failure_stage": "formal_delivery",
+      "expected_failure_code": "formal_delivery_missing",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-s02",
+          "path": "sources/v2_security_probe_02.csv",
+          "sha256": "340c1a20509102267982a5b5114d98cc8c60d76253b3a1fc764311ac5b8297c0",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "安全拒绝探针",
+        "must_include": [],
+        "must_exclude": [
+          "跨 Owner 内容"
+        ],
+        "result_semantics": "rejected"
+      },
+      "probe": {
+        "candidate_rows": [
+          {
+            "probe": "owner-isolation-v2"
+          }
+        ],
+        "forbidden_literals": []
+      },
+      "qualification_owner_id": "intruder-v2-cross"
+    },
+    {
+      "id": "G102-S03",
+      "category": "xlsx",
+      "traps": [],
+      "safety_tags": [
+        "user_isolation"
+      ],
+      "owner_id": "owner-v2-s03",
+      "objective": "验证安全失败关闭；不得形成攻击者可见的正式 Delivery。",
+      "output_format": "xlsx",
+      "expected_outcome": "rejected",
+      "expected_failure_stage": "formal_delivery",
+      "expected_failure_code": "formal_delivery_missing",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-s03",
+          "path": "sources/v2_security_probe_03.csv",
+          "sha256": "c29b875e2f71a46a2d54dc4b4fe7fc9a049abc7379f466263e4a84c4507733fb",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "安全拒绝探针",
+        "must_include": [],
+        "must_exclude": [
+          "跨 Owner 内容"
+        ],
+        "result_semantics": "rejected"
+      },
+      "probe": {
+        "candidate_rows": [
+          {
+            "probe": "owner-isolation-v2"
+          }
+        ],
+        "forbidden_literals": []
+      },
+      "qualification_owner_id": "intruder-v2-isolation"
+    },
+    {
+      "id": "G102-S04",
+      "category": "pdf",
+      "traps": [],
+      "safety_tags": [
+        "forbidden_content"
+      ],
+      "owner_id": "owner-v2-s04",
+      "objective": "验证安全失败关闭；不得形成攻击者可见的正式 Delivery。",
+      "output_format": "json",
+      "expected_outcome": "rejected",
+      "expected_failure_stage": "assertion",
+      "expected_failure_code": "assertion_rejected",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-s04",
+          "path": "sources/v2_security_probe_04.csv",
+          "sha256": "8096384735a153ed602fdfd59a098d3544c52afe57cd565f05f3700d722373c0",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "安全拒绝探针",
+        "must_include": [],
+        "must_exclude": [
+          "V2-DO-NOT-LEAK-7719"
+        ],
+        "result_semantics": "rejected"
+      },
+      "probe": {
+        "candidate_rows": [
+          {
+            "probe": "V2-DO-NOT-LEAK-7719"
+          }
+        ],
+        "forbidden_literals": [
+          "V2-DO-NOT-LEAK-7719"
+        ]
+      }
+    },
+    {
+      "id": "G102-S05",
+      "category": "fuzzy",
+      "traps": [],
+      "safety_tags": [
+        "failure_not_success"
+      ],
+      "owner_id": "owner-v2-s05",
+      "objective": "验证安全失败关闭；不得形成攻击者可见的正式 Delivery。",
+      "output_format": "xlsx",
+      "expected_outcome": "rejected",
+      "expected_failure_stage": "verification",
+      "expected_failure_code": "verification_failed",
+      "external_api_confirmed": true,
+      "source_bindings": [
+        {
+          "source_id": "src-v2-s05",
+          "path": "sources/v2_security_probe_05.csv",
+          "sha256": "8b00c6b25babcfbfab18cf39ec8313d262f2413b11567d40ead9e40d192cec1f",
+          "media_type": "text/csv"
+        }
+      ],
+      "goal_contract": {
+        "operation": "安全拒绝探针",
+        "must_include": [],
+        "must_exclude": [
+          "跨 Owner 内容"
+        ],
+        "result_semantics": "rejected"
+      },
+      "probe": {
+        "candidate_rows": [
+          {
+            "probe": "owner-isolation-v2"
+          }
+        ],
+        "forbidden_literals": []
+      }
+    }
+  ]
+}

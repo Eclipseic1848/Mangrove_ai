@@ -1,0 +1,5 @@
+table,record_id,item,segment,amount,used,status,date,revision
+corrections,R24-1,item-24-A,N,190.00,7.00,open,2026-01-05,1
+corrections,R24-2,item-24-B,S,204.50,10.00,open,2026-01-08,2
+corrections,R24-3,item-24-C,N,208.00,13.00,closed,2026-01-11,1
+corrections,R24-4,item-24-D,W,222.50,16.00,open,2026-01-14,2

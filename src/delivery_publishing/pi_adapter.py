@@ -11,7 +11,9 @@ from .models import (
     CandidateRef,
     DeliverySpec,
     PublishCommand,
+    TableOutputContract,
     canonical_hash,
+    with_table_output_contracts,
 )
 
 
@@ -59,6 +61,20 @@ class PiCandidateAdapter:
             != requested_formats
         ):
             raise ValueError("Runtime 输出格式与冻结 TaskRevision 不一致")
+        try:
+            runtime_table_output_contracts = tuple(
+                TableOutputContract.model_validate(item)
+                for item in request.get("table_output_contracts") or ()
+            )
+            table_output_contracts = tuple(
+                TableOutputContract.model_validate(item)
+                for item in task_revision.get("table_output_contracts") or ()
+            )
+        except Exception as exc:
+            # Publisher 只能继承 Runtime 已冻结的结构契约，不能在发布时猜测或修补。
+            raise ValueError("Runtime 表格输出契约无效") from exc
+        if runtime_table_output_contracts != table_output_contracts:
+            raise ValueError("Runtime 表格输出契约与冻结 TaskRevision 不一致")
 
         source_refs: list[str] = []
         source_hashes: dict[str, str] = {}
@@ -95,14 +111,19 @@ class PiCandidateAdapter:
         )
         if runtime["verified_candidate_set_hash"] != candidate_set_hash:
             raise ValueError("VerificationReport 未绑定当前 CandidateSet 哈希")
-        revision_payload = {
+        revision_payload = with_table_output_contracts({
             "owner_id": owner_id,
             "task_id": task_id,
             "revision": revision,
             "objective_text": task_revision["objective_text"],
             "output_formats": requested_formats,
             "source_snapshot_refs": sorted(source_refs),
-        }
+        }, table_output_contracts)
+        goal_contract_payload = with_table_output_contracts({
+            "objective_text": task_revision["objective_text"],
+            "requested_output_formats": requested_formats,
+            "source_snapshot_refs": sorted(source_refs),
+        }, table_output_contracts)
         verification_payload = verification.model_dump(mode="json")
         verification_hash = canonical_hash(verification_payload)
         return PublishCommand.build(
@@ -110,13 +131,7 @@ class PiCandidateAdapter:
             task_id=task_id,
             task_revision=revision,
             task_revision_hash=canonical_hash(revision_payload),
-            goal_contract_hash=canonical_hash(
-                {
-                    "objective_text": task_revision["objective_text"],
-                    "requested_output_formats": requested_formats,
-                    "source_snapshot_refs": sorted(source_refs),
-                }
-            ),
+            goal_contract_hash=canonical_hash(goal_contract_payload),
             run_id=runtime["run_id"],
             candidates=candidates,
             verification_report_id=f"verification_{verification_hash[:16]}",
@@ -126,6 +141,7 @@ class PiCandidateAdapter:
                 requested_formats=requested_formats,
                 output_name=task["title"] or "交付结果",
                 requested_file_count=len(requested_formats),
+                table_output_contracts=table_output_contracts,
             ),
             source_snapshot_refs=tuple(sorted(source_refs)),
         )

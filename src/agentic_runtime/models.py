@@ -14,6 +14,8 @@ from pydantic import (
     model_validator,
 )
 
+from src.delivery_publishing.models import TableOutputContract
+
 
 class RuntimeVersion(str, Enum):
     """工作台任务采用的执行 Runtime。"""
@@ -110,6 +112,10 @@ class PiRuntimeRequest(BaseModel):
     revision: int = Field(ge=1)
     objective_text: str = Field(min_length=1, max_length=20_000)
     requested_output_formats: tuple[str, ...] = Field(min_length=1)
+    table_output_contracts: tuple[TableOutputContract, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     sources: tuple[SourceInput, ...] = Field(min_length=1)
     permission_profile: PermissionProfile = PermissionProfile.STANDARD
     external_api_confirmed: bool = False
@@ -135,6 +141,15 @@ class PiRuntimeRequest(BaseModel):
         if len(normalized) != len(set(normalized)):
             raise ValueError("requested_output_formats 不得重复")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_table_output_contracts(self) -> "PiRuntimeRequest":
+        contract_formats = tuple(item.format for item in self.table_output_contracts)
+        if len(set(contract_formats)) != len(contract_formats):
+            raise ValueError("同一输出格式只能冻结一个表格契约")
+        if any(item not in self.requested_output_formats for item in contract_formats):
+            raise ValueError("表格输出契约必须绑定已请求的输出格式")
+        return self
 
     @model_validator(mode="after")
     def validate_model_route(self) -> "PiRuntimeRequest":

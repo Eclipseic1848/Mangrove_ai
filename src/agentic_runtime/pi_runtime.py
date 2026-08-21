@@ -1813,6 +1813,12 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
             ],
             "output_directory": "/workspace/output",
             "output_formats": list(request.requested_output_formats),
+            "delivery_spec": {
+                "table_outputs": [
+                    item.model_dump(mode="json")
+                    for item in request.table_output_contracts
+                ],
+            },
             "acceptance": [
                 "实际读取来源并保留可追溯依据",
                 "只生成用户要求的结果",

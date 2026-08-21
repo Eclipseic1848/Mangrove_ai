@@ -23,8 +23,42 @@ def canonical_hash(value: Any) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def with_table_output_contracts(
+    payload: dict[str, Any],
+    contracts: tuple["TableOutputContract", ...],
+) -> dict[str, Any]:
+    """只让真实存在的新契约进入血缘，保持旧任务哈希不变。"""
+
+    result = dict(payload)
+    if contracts:
+        result["table_output_contracts"] = [
+            item.model_dump(mode="json") for item in contracts
+        ]
+    return result
+
+
 class FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
+
+
+class TableOutputContract(FrozenModel):
+    """任务修订冻结、执行与发布共同消费的表格输出契约。"""
+
+    format: Literal["csv", "json", "xlsx"]
+    exact_columns: tuple[str, ...] = Field(min_length=1)
+    json_shape: Literal["records", "columns_rows"] | None = None
+
+    @model_validator(mode="after")
+    def validate_json_shape(self) -> "TableOutputContract":
+        if self.format == "json" and self.json_shape is None:
+            raise ValueError("JSON 表格输出必须冻结表示形态")
+        if self.format != "json" and self.json_shape is not None:
+            raise ValueError("只有 JSON 表格输出可以声明表示形态")
+        if any(not column.strip() for column in self.exact_columns):
+            raise ValueError("精确输出列必须是非空字符串")
+        if len(set(self.exact_columns)) != len(self.exact_columns):
+            raise ValueError("精确输出列不得重复")
+        return self
 
 
 class CandidateRef(FrozenModel):
@@ -39,6 +73,10 @@ class DeliverySpec(FrozenModel):
     requested_formats: tuple[str, ...]
     output_name: str = Field(min_length=1, max_length=200)
     requested_file_count: int | None = Field(default=None, ge=1)
+    table_output_contracts: tuple[TableOutputContract, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
 
     @model_validator(mode="after")
     def validate_formats(self) -> "DeliverySpec":
@@ -51,6 +89,11 @@ class DeliverySpec(FrozenModel):
             and self.requested_file_count != len(self.requested_formats)
         ):
             raise ValueError("请求文件数必须与正式输出格式数一致")
+        contract_formats = tuple(item.format for item in self.table_output_contracts)
+        if len(set(contract_formats)) != len(contract_formats):
+            raise ValueError("同一输出格式只能冻结一个表格契约")
+        if any(item not in self.requested_formats for item in contract_formats):
+            raise ValueError("表格输出契约必须绑定正式输出格式")
         return self
 
 

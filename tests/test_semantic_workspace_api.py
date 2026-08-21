@@ -25,6 +25,7 @@ from src.semantic_harness.delivery import service as delivery_service
 from src.api.auth import get_current_user, get_store
 from src.api.routes import semantic_plans, semantic_workspace
 from src.api.semantic_workspace_runtime import SemanticWorkspaceManager
+from src.api.store import WebUIStore
 from src.config.settings import settings
 from src.semantic_harness.compiler_models import (
     CompileRequest,
@@ -47,6 +48,45 @@ from src.semantic_harness.models import (
 )
 from src.services.upload_store import UploadStore
 from tests.test_semantic_plan_api import ApiFakeGenerator
+
+
+def test_workspace_revision_freezes_table_output_contract(tmp_path: Path) -> None:
+    store = WebUIStore(str(tmp_path / "workspace-contract.db"))
+    contract = [{
+        "format": "json",
+        "exact_columns": ["name", "amount"],
+        "json_shape": "records",
+    }]
+
+    task = store.create_semantic_workspace_task(
+        "user-a",
+        task_id="workspace-contract",
+        title="结构化交付",
+        objective_text="输出姓名和金额",
+        upload_ids=[],
+        output_formats=["json"],
+        provider="local",
+        model="local-model",
+        external_api_confirmed=False,
+        table_output_contracts=contract,
+    )
+    revision = store.get_semantic_workspace_revision(
+        "user-a",
+        "workspace-contract",
+        1,
+    )
+    revised = store.create_semantic_workspace_revision(
+        "user-a",
+        "workspace-contract",
+        objective_text="仍然输出姓名和金额",
+        output_formats=["json"],
+        change_summary="只调整筛选范围",
+    )
+
+    assert task["table_output_contracts"] == contract
+    assert revision is not None
+    assert revision["table_output_contracts"] == contract
+    assert revised["table_output_contracts"] == contract
 
 
 def _client(tmp_path, monkeypatch, *, generator=None):

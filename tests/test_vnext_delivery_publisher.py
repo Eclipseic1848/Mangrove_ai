@@ -12,6 +12,7 @@ from src.delivery_publishing.models import (
     DeliverySpec,
     PublicationGate,
     PublishCommand,
+    TableOutputContract,
 )
 from src.delivery_publishing.repository import DeliveryPublishingRepository
 from src.delivery_publishing.service import DeliveryPublisher
@@ -21,7 +22,12 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _command(candidate: Path, *, verification_status: str = "passed") -> PublishCommand:
+def _command(
+    candidate: Path,
+    *,
+    verification_status: str = "passed",
+    table_output_contracts: tuple[TableOutputContract, ...] = (),
+) -> PublishCommand:
     candidate_ref = CandidateRef(
         artifact_id="candidate_json",
         filename="result.json",
@@ -44,9 +50,33 @@ def _command(candidate: Path, *, verification_status: str = "passed") -> Publish
             requested_formats=("json",),
             output_name="报销结果",
             requested_file_count=1,
+            table_output_contracts=table_output_contracts,
         ),
         source_snapshot_refs=("upload-a:" + "4" * 64,),
     )
+
+
+def test_table_output_contract_changes_new_lineage_without_rewriting_legacy(
+    candidate: Path,
+) -> None:
+    legacy = _command(candidate)
+    structured = _command(
+        candidate,
+        table_output_contracts=(TableOutputContract(
+            format="json",
+            exact_columns=("name", "amount"),
+            json_shape="records",
+        ),),
+    )
+
+    assert "table_output_contracts" not in legacy.delivery_spec.model_dump(
+        mode="json"
+    )
+    assert structured.delivery_spec.model_dump(mode="json")[
+        "table_output_contracts"
+    ][0]["json_shape"] == "records"
+    assert structured.delivery_spec_hash != legacy.delivery_spec_hash
+    assert structured.publication_key != legacy.publication_key
 
 
 @pytest.fixture

@@ -274,11 +274,38 @@ def test_independent_request_uses_frozen_local_sources() -> None:
     assert request.user_id == case["owner_id"]
     assert request.objective_text == case["objective"]
     assert request.requested_output_formats == (case["output_format"],)
+    assert request.table_output_contracts[0].exact_columns == tuple(
+        case["goal_contract"]["delivery_spec"]["exact_columns"]
+    )
     assert len(request.sources) == len(case["source_bindings"])
     for source, binding in zip(request.sources, case["source_bindings"], strict=True):
         assert source.host_path.is_file()
         assert source.sha256 == binding["sha256"]
         assert runner._sha256(source.host_path) == binding["sha256"]
+
+
+def test_independent_json_request_rejects_undeclared_representation() -> None:
+    runner = _load_runner()
+    manifest = runner._load_json(runner.HELDOUT_MANIFEST)
+    case = next(
+        item
+        for item in manifest["cases"]
+        if item.get("expected_outcome") == "formal_delivery"
+        and item["output_format"] == "json"
+    )
+    case = json.loads(json.dumps(case, ensure_ascii=False))
+    case["goal_contract"]["delivery_spec"].pop("json_shape")
+
+    with pytest.raises(ValueError, match="JSON 表格输出必须冻结表示形态"):
+        runner.make_request(
+            case,
+            1,
+            {
+                "kind": "local",
+                "model": "test-model",
+                "base_url": "http://127.0.0.1:1/v1",
+            },
+        )
 
 
 def test_functional_batch_runs_formal_case_then_adapts_output(tmp_path: Path) -> None:

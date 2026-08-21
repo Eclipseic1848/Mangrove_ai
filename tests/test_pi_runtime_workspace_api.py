@@ -473,6 +473,58 @@ def _wait_for_status(
     raise AssertionError(f"Pi 任务未进入 {expected} 状态")
 
 
+def test_pi_request_uses_table_contract_frozen_by_task_revision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    fake_runtime = FakePiRuntime()
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=fake_runtime,
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "提取姓名和费用合计并输出 CSV",
+                "upload_ids": [document],
+                "output_formats": ["csv"],
+                "table_output_contracts": [{
+                    "format": "csv",
+                    "exact_columns": ["姓名", "费用合计"],
+                }],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        _wait_for_delivery(client, created.json()["task_id"])
+        mismatched_revision = client.post(
+            (
+                "/api/semantic-workspace/tasks/"
+                f"{created.json()['task_id']}/revisions"
+            ),
+            json={
+                "instruction": "保持输出格式但改用另一份结构契约",
+                "table_output_contracts": [{
+                    "format": "xlsx",
+                    "exact_columns": ["姓名", "费用合计"],
+                }],
+            },
+        )
+        assert mismatched_revision.status_code == 422
+
+    assert fake_runtime.requests[0].table_output_contracts[0].exact_columns == (
+        "姓名",
+        "费用合计",
+    )
+
+
 def test_scanned_pdf_is_not_eagerly_ocr_prepared_before_pi_execution(
     tmp_path,
     monkeypatch,

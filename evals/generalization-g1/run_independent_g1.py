@@ -25,6 +25,7 @@ from src.agentic_runtime.models import (
     PiRuntimeResult,
     RuntimeStatus,
     SourceInput,
+    TableOutputContract,
     VerificationCheck,
     VerificationReport,
     VerificationStatus,
@@ -37,21 +38,21 @@ from src.evaluation.formal_delivery import (
 
 
 EVAL_ROOT = Path(__file__).resolve().parent
-INDEPENDENT_ROOT = PROJECT_ROOT / "evals" / "generalization-g1-independent"
+INDEPENDENT_ROOT = PROJECT_ROOT / "evals" / "generalization-g1-independent-v2"
 DIAGNOSTIC_MANIFEST = EVAL_ROOT / "fixtures.json"
 HELDOUT_MANIFEST = INDEPENDENT_ROOT / "heldout_manifest.json"
 FREEZE = INDEPENDENT_ROOT / "freeze.json"
 SELF_CHECK = INDEPENDENT_ROOT / "self_check.py"
 INDEPENDENT_ASSERTIONS = INDEPENDENT_ROOT / "assertions.py"
-RUNS_DIR = EVAL_ROOT / "runs" / "independent"
+RUNS_DIR = EVAL_ROOT / "runs" / "independent-v2"
 FORMAL_DELIVERY_DB = RUNS_DIR / "formal-delivery.db"
 FORMAL_DELIVERY_ROOT = RUNS_DIR / "formal-deliveries"
 POST_COMMIT_FREEZE_METADATA = {
     "evals/generalization-g1/fixtures.json",
-    "evals/generalization-g1-independent/README.md",
-    "evals/generalization-g1-independent/freeze.json",
-    "evals/generalization-g1-independent/heldout_manifest.json",
-    "evals/generalization-g1-independent/self-check-report.json",
+    "evals/generalization-g1-independent-v2/README.md",
+    "evals/generalization-g1-independent-v2/freeze.json",
+    "evals/generalization-g1-independent-v2/heldout_manifest.json",
+    "evals/generalization-g1-independent-v2/self-check-report.json",
 }
 
 
@@ -188,12 +189,25 @@ def make_request(
                 media_type=str(binding["media_type"]),
             )
         )
+    table_output_contracts: tuple[TableOutputContract, ...] = ()
+    if case.get("expected_outcome") == "formal_delivery":
+        delivery_spec = case.get("goal_contract", {}).get("delivery_spec")
+        if not isinstance(delivery_spec, dict):
+            raise ValueError(f"{case['id']}: 正式交付缺少冻结 delivery_spec")
+        if delivery_spec.get("format") != case.get("output_format"):
+            raise ValueError(f"{case['id']}: delivery_spec 格式与输出格式不一致")
+        table_output_contracts = (TableOutputContract(
+            format=str(delivery_spec["format"]),
+            exact_columns=tuple(delivery_spec.get("exact_columns") or ()),
+            json_shape=delivery_spec.get("json_shape"),
+        ),)
     common = {
         "user_id": str(case["owner_id"]),
         "task_id": f"g1_independent_{case['id']}_{run_number}",
         "revision": 1,
         "objective_text": str(case["objective"]),
         "requested_output_formats": (str(case["output_format"]),),
+        "table_output_contracts": table_output_contracts,
         "sources": tuple(sources),
         "permission_profile": PermissionProfile.STANDARD,
         "external_api_confirmed": bool(case.get("external_api_confirmed", False)),

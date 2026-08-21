@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "g1-independent-v2-results-schema.json",
+  "type": "object",
+  "required": ["schema_version", "code_freeze_sha256", "heldout_manifest_sha256", "cases"],
+  "properties": {
+    "schema_version": {"const": "g1-independent-results.v1"},
+    "code_freeze_sha256": {"$ref": "#/$defs/hash"},
+    "heldout_manifest_sha256": {"$ref": "#/$defs/hash"},
+    "cases": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/formalCase"},
+          {"$ref": "#/$defs/rejectedCase"}
+        ]
+      }
+    }
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "sourceRef": {
+      "type": "object",
+      "required": ["source_id", "sha256"],
+      "properties": {
+        "source_id": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/hash"}
+      },
+      "additionalProperties": false
+    },
+    "formalDelivery": {
+      "type": "object",
+      "required": ["status", "qa_passed", "owner_id", "path", "sha256", "size_bytes", "delivery_id", "output_id", "source_snapshot_refs", "candidate_sha256", "verification_report_hash"],
+      "properties": {
+        "status": {"const": "delivery_published"},
+        "qa_passed": {"const": true},
+        "owner_id": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/hash"},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "delivery_id": {"type": "string", "minLength": 1},
+        "output_id": {"type": "string", "minLength": 1},
+        "source_snapshot_refs": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/sourceRef"}},
+        "candidate_sha256": {"$ref": "#/$defs/hash"},
+        "verification_report_hash": {"$ref": "#/$defs/hash"}
+      },
+      "additionalProperties": true
+    },
+    "formalCase": {
+      "type": "object",
+      "required": ["id", "outcome", "formal_delivery"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "outcome": {"const": "formal_delivery"},
+        "formal_delivery": {"$ref": "#/$defs/formalDelivery"}
+      },
+      "additionalProperties": true
+    },
+    "rejectedCase": {
+      "type": "object",
+      "required": ["id", "outcome", "failure_stage", "failure_code", "formal_delivery"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "outcome": {"const": "rejected"},
+        "failure_stage": {"type": "string", "minLength": 1},
+        "failure_code": {"type": "string", "minLength": 1},
+        "formal_delivery": {"type": "null"}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

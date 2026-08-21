@@ -375,6 +375,7 @@ CREATE TABLE IF NOT EXISTS semantic_workspace_tasks (
     upload_ids_json         TEXT NOT NULL DEFAULT '[]',
     source_refs_json        TEXT NOT NULL DEFAULT '[]',
     output_formats_json     TEXT NOT NULL DEFAULT '[]',
+    table_output_contracts_json TEXT NOT NULL DEFAULT '[]',
     provider                TEXT NOT NULL DEFAULT 'local',
     model                   TEXT,
     external_api_confirmed  INTEGER NOT NULL DEFAULT 0,
@@ -402,6 +403,7 @@ CREATE TABLE IF NOT EXISTS semantic_workspace_revisions (
     user_id                 TEXT NOT NULL,
     objective_text          TEXT NOT NULL,
     output_formats_json     TEXT NOT NULL DEFAULT '[]',
+    table_output_contracts_json TEXT NOT NULL DEFAULT '[]',
     plan_id                 TEXT,
     logical_revision        INTEGER,
     binding_revision        INTEGER,
@@ -553,6 +555,24 @@ class WebUIStore:
                 conn.execute(
                     "ALTER TABLE semantic_workspace_tasks "
                     "ADD COLUMN source_refs_json TEXT NOT NULL DEFAULT '[]'"
+                )
+            if "table_output_contracts_json" not in semantic_workspace_cols:
+                conn.execute(
+                    "ALTER TABLE semantic_workspace_tasks "
+                    "ADD COLUMN table_output_contracts_json "
+                    "TEXT NOT NULL DEFAULT '[]'"
+                )
+            semantic_revision_cols = {
+                r["name"]
+                for r in conn.execute(
+                    "PRAGMA table_info(semantic_workspace_revisions)"
+                ).fetchall()
+            }
+            if "table_output_contracts_json" not in semantic_revision_cols:
+                conn.execute(
+                    "ALTER TABLE semantic_workspace_revisions "
+                    "ADD COLUMN table_output_contracts_json "
+                    "TEXT NOT NULL DEFAULT '[]'"
                 )
             unit_cols = {
                 r["name"]
@@ -3014,6 +3034,9 @@ class WebUIStore:
             "output_formats": json.loads(
                 row["output_formats_json"] or "[]"
             ),
+            "table_output_contracts": json.loads(
+                row["table_output_contracts_json"] or "[]"
+            ),
             "provider": row["provider"],
             "model": row["model"],
             "external_api_confirmed": bool(
@@ -3057,6 +3080,7 @@ class WebUIStore:
         model: str | None,
         external_api_confirmed: bool,
         source_refs: List[Dict[str, str]] | None = None,
+        table_output_contracts: List[Dict[str, Any]] | None = None,
     ) -> Dict[str, Any]:
         now = _now()
         with self._lock, self._conn() as conn:
@@ -3065,10 +3089,12 @@ class WebUIStore:
                     "INSERT INTO semantic_workspace_tasks "
                     "(task_id, user_id, title, objective_text, "
                     "upload_ids_json, source_refs_json, output_formats_json, "
+                    "table_output_contracts_json, "
                     "provider, model, "
                     "external_api_confirmed, status, active_revision, "
                     "created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', 1, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                    "'queued', 1, ?, ?)",
                     (
                         task_id,
                         user_id,
@@ -3077,6 +3103,10 @@ class WebUIStore:
                         json.dumps(upload_ids, ensure_ascii=False),
                         json.dumps(source_refs or [], ensure_ascii=False),
                         json.dumps(output_formats, ensure_ascii=False),
+                        json.dumps(
+                            table_output_contracts or [],
+                            ensure_ascii=False,
+                        ),
                         provider,
                         model,
                         int(external_api_confirmed),
@@ -3087,13 +3117,18 @@ class WebUIStore:
                 conn.execute(
                     "INSERT INTO semantic_workspace_revisions "
                     "(task_id, revision, user_id, objective_text, "
-                    "output_formats_json, status, created_at, updated_at) "
-                    "VALUES (?, 1, ?, ?, ?, 'queued', ?, ?)",
+                    "output_formats_json, table_output_contracts_json, "
+                    "status, created_at, updated_at) "
+                    "VALUES (?, 1, ?, ?, ?, ?, 'queued', ?, ?)",
                     (
                         task_id,
                         user_id,
                         objective_text,
                         json.dumps(output_formats, ensure_ascii=False),
+                        json.dumps(
+                            table_output_contracts or [],
+                            ensure_ascii=False,
+                        ),
                         now,
                         now,
                     ),
@@ -3176,6 +3211,7 @@ class WebUIStore:
             "objective_text",
             "upload_ids",
             "output_formats",
+            "table_output_contracts",
             "provider",
             "model",
             "external_api_confirmed",
@@ -3205,12 +3241,14 @@ class WebUIStore:
         column_map = {
             "upload_ids": "upload_ids_json",
             "output_formats": "output_formats_json",
+            "table_output_contracts": "table_output_contracts_json",
             "failure": "failure_json",
             "question": "question_json",
         }
         json_fields = {
             "upload_ids",
             "output_formats",
+            "table_output_contracts",
             "failure",
             "question",
         }
@@ -3253,25 +3291,37 @@ class WebUIStore:
         objective_text: str,
         output_formats: List[str],
         change_summary: str,
+        table_output_contracts: List[Dict[str, Any]] | None = None,
     ) -> Dict[str, Any]:
         task = self.get_semantic_workspace_task(user_id, task_id)
         if task is None:
             raise KeyError("工作台任务不存在或无权访问")
+        if table_output_contracts is None:
+            table_output_contracts = [
+                item
+                for item in task.get("table_output_contracts", [])
+                if item.get("format") in output_formats
+            ]
         revision = int(task["active_revision"]) + 1
         now = _now()
         with self._lock, self._conn() as conn:
             conn.execute(
                 "INSERT INTO semantic_workspace_revisions "
                 "(task_id, revision, user_id, objective_text, "
-                "output_formats_json, status, change_summary, "
+                "output_formats_json, table_output_contracts_json, "
+                "status, change_summary, "
                 "created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
                 (
                     task_id,
                     revision,
                     user_id,
                     objective_text,
                     json.dumps(output_formats, ensure_ascii=False),
+                    json.dumps(
+                        table_output_contracts or [],
+                        ensure_ascii=False,
+                    ),
                     change_summary,
                     now,
                     now,
@@ -3281,7 +3331,8 @@ class WebUIStore:
             # 否则用户会看到无法恢复的“半个新版本”。
             cursor = conn.execute(
                 "UPDATE semantic_workspace_tasks SET objective_text=?, "
-                "output_formats_json=?, active_revision=?, status='queued', "
+                "output_formats_json=?, table_output_contracts_json=?, "
+                "active_revision=?, status='queued', "
                 "plan_id=?, logical_revision=NULL, binding_revision=NULL, "
                 "run_id=NULL, summary='', error=NULL, failure_json=NULL, "
                 "question_json=NULL, cancel_requested=0, deleted_at=NULL, "
@@ -3290,6 +3341,10 @@ class WebUIStore:
                 (
                     objective_text,
                     json.dumps(output_formats, ensure_ascii=False),
+                    json.dumps(
+                        table_output_contracts or [],
+                        ensure_ascii=False,
+                    ),
                     revision,
                     task["plan_id"],
                     now,
@@ -3318,6 +3373,9 @@ class WebUIStore:
             "objective_text": row["objective_text"],
             "output_formats": json.loads(
                 row["output_formats_json"] or "[]"
+            ),
+            "table_output_contracts": json.loads(
+                row["table_output_contracts_json"] or "[]"
             ),
             "plan_id": row["plan_id"],
             "logical_revision": row["logical_revision"],

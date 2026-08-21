@@ -23,6 +23,7 @@ from src.agentic_runtime.models import (
     PiRuntimeRequest,
     SemanticDecision,
     SourceInput,
+    TableOutputContract,
     VerificationStatus,
 )
 from src.model_connections import ConnectionBroker
@@ -114,6 +115,8 @@ def _write_manifest(
     *,
     quote: str,
     source_name: str = "contract.pdf",
+    filename: str = "service-fees.csv",
+    output_format: str = "csv",
 ) -> None:
     (output / "candidate-manifest.json").write_text(
         json.dumps(
@@ -121,8 +124,8 @@ def _write_manifest(
                 "version": 1,
                 "artifacts": [
                     {
-                        "filename": "service-fees.csv",
-                        "format": "csv",
+                        "filename": filename,
+                        "format": output_format,
                         "description": "Only the requested fee table",
                         "evidence": [
                             {
@@ -193,6 +196,72 @@ async def test_grounded_pdf_csv_candidate_passes_independent_verifier(
         "source_grounding",
         "semantic_goal",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output_format", "filename"),
+    (("csv", "service-fees.csv"),
+     ("json", "service-fees.json"),
+     ("xlsx", "service-fees.xlsx")),
+)
+async def test_table_output_contract_mismatch_fails_before_semantic_judge(
+    tmp_path: Path,
+    output_format: str,
+    filename: str,
+) -> None:
+    source = tmp_path / "upload-object-without-extension"
+    _write_pdf(source)
+    output = tmp_path / "output"
+    output.mkdir()
+    candidate_path = output / filename
+    if output_format == "csv":
+        candidate_path.write_text(
+            "fee,name\n100,Alice\n",
+            encoding="utf-8-sig",
+        )
+    elif output_format == "json":
+        candidate_path.write_text(
+            json.dumps([{"fee": 100, "name": "Alice"}], ensure_ascii=False),
+            encoding="utf-8",
+        )
+    else:
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["fee", "name"])
+        sheet.append([100, "Alice"])
+        workbook.save(candidate_path)
+    _write_manifest(
+        output,
+        quote="Service Fee Details - Alice - 100",
+        filename=filename,
+        output_format=output_format,
+    )
+    contract = TableOutputContract(
+        format=output_format,
+        exact_columns=("name", "fee"),
+        json_shape="records" if output_format == "json" else None,
+    )
+    request = _request(tmp_path, source).model_copy(
+        update={
+            "requested_output_formats": (output_format,),
+            "table_output_contracts": (contract,),
+        }
+    )
+
+    report = await CandidateVerifier(
+        semantic_judge=JudgeMustNotRun()
+    ).verify(
+        request=request,
+        candidates=inspect_candidates(output, (output_format,)),
+        manifest_path=output / "candidate-manifest.json",
+    )
+
+    assert report.status is VerificationStatus.FAILED
+    contract_check = next(
+        check for check in report.checks if check.code == "table_output_contract"
+    )
+    assert contract_check.passed is False
 
 
 @pytest.mark.asyncio

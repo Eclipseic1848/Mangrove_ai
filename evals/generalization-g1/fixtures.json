@@ -7,13 +7,13 @@
   "frozen_inputs": {
     "fixture_sha256": "0766fc026b94c7f7e9dbddea8bcab0bafccb3b3dbf981f0b4484d7c4de5fc003",
     "goal_contracts_sha256": "9c4a5b0e49856b2ca6a3ec792a61565b31334d41852a032da3b5cfaff909b3e0",
-    "candidate_verifier_sha256": "d75d9c531efcea0ee31d542fc215d948c99bfae822e0fc65caf8239dab3abca8",
+    "candidate_verifier_sha256": "f65f1fff8629f7c1000d28587f9b2ba62698866d909feba92117a71663ebc962",
     "assertions_sha256": "6a5f0a939681723065d5f363a748401efe98f10c6665ae4e02235bdb3f4557b7",
-    "runtime_sha256": "aeba9378805d5d9dd2486b5e50ed545a95ffc42a7151dd5dd45c6b2bd6aaa98d",
-    "delivery_qualification_sha256": "9f3f01779616d8637cac07414446631a4616342e4b16adbd2eb7ecf6002fa289",
-    "evaluation_driver_sha256": "aa06b963509b6b8e1bf4d4a585e9b51c9af1b3800a59f6445f0e953448aca80a",
-    "git_commit": "37cda72a91750b575cbca0dd971c3ed89230a7c2",
-    "code_freeze_sha256": "4b0315d3dddc4c53e99eb45718220a6d63d15165b010f2eae194e3878cc30fe1"
+    "runtime_sha256": "e5bf24e0500e4451476a8f499aaf5d28c3cd0b1f32414a5f894615b824d3ca9d",
+    "delivery_qualification_sha256": "41a73709b12e76c41e92e65180cfe5393a11c23c67f8591ae079c1d3ed718172",
+    "evaluation_driver_sha256": "2ad8237a6aed4cef072b8885e24461d6090824793fbe4626b54180b6bdb3565d",
+    "git_commit": "af5780e8ce634d5f683ed85abfa51e858424e4d8",
+    "code_freeze_sha256": "4bc559bcc6937cdbbdb232ac1c04e89c60ad1d500e3691a911d164b5cfb05723"
   },
   "cases": [
     {

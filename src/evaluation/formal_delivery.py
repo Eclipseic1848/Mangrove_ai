@@ -20,6 +20,7 @@ from src.delivery_publishing.models import (
     PublicationGate,
     PublishCommand,
     canonical_hash,
+    with_table_output_contracts,
 )
 from src.delivery_publishing.repository import DeliveryPublishingRepository
 from src.delivery_publishing.service import DeliveryPublisher
@@ -69,6 +70,7 @@ def publish_runtime_result_as_formal_delivery(
     source_refs = tuple(
         sorted(f"{source.upload_id}:{source.sha256}" for source in request.sources)
     )
+    table_output_contracts = request.table_output_contracts
     candidate_refs = tuple(
         CandidateRef(
             artifact_id=candidate.artifact_id,
@@ -79,7 +81,7 @@ def publish_runtime_result_as_formal_delivery(
         )
         for candidate in result.candidates
     )
-    revision_payload = {
+    revision_payload = with_table_output_contracts({
         "owner_id": request.user_id,
         "task_id": request.task_id,
         "revision": request.revision,
@@ -95,20 +97,21 @@ def publish_runtime_result_as_formal_delivery(
             "local_model": request.model,
             "local_base_url": request.base_url,
         },
-    }
+    }, table_output_contracts)
+    goal_contract_payload = with_table_output_contracts({
+        "objective_text": request.objective_text,
+        "requested_output_formats": request.requested_output_formats,
+        "source_snapshot_refs": source_refs,
+        "permission_profile": request.permission_profile.value,
+        "external_api_confirmed": request.external_api_confirmed,
+        "model_route": revision_payload["model_route"],
+    }, table_output_contracts)
     command = PublishCommand.build(
         owner_id=request.user_id,
         task_id=request.task_id,
         task_revision=request.revision,
         task_revision_hash=canonical_hash(revision_payload),
-        goal_contract_hash=canonical_hash({
-            "objective_text": request.objective_text,
-            "requested_output_formats": request.requested_output_formats,
-            "source_snapshot_refs": source_refs,
-            "permission_profile": request.permission_profile.value,
-            "external_api_confirmed": request.external_api_confirmed,
-            "model_route": revision_payload["model_route"],
-        }),
+        goal_contract_hash=canonical_hash(goal_contract_payload),
         run_id=result.run_id,
         candidates=candidate_refs,
         verification_report_id=(
@@ -123,6 +126,7 @@ def publish_runtime_result_as_formal_delivery(
             requested_formats=request.requested_output_formats,
             output_name=output_name,
             requested_file_count=len(request.requested_output_formats),
+            table_output_contracts=request.table_output_contracts,
         ),
         source_snapshot_refs=source_refs,
     )

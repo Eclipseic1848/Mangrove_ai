@@ -1,0 +1,9 @@
+table,record_id,item,segment,amount,used,status,date,revision
+primary,R18-1,item-18-A,N,148.20,6.00,open,2026-03-05,1
+primary,R18-2,item-18-B,S,157.20,9.00,open,2026-03-08,1
+primary,R18-3,item-18-C,N,166.20,12.00,closed,2026-03-11,1
+primary,R18-4,item-18-D,W,175.20,15.00,open,2026-03-14,1
+nearby,R18-1,item-18-A,N,228.20,6.00,open,2026-03-05,1
+nearby,R18-2,item-18-B,S,237.20,9.00,open,2026-03-08,1
+nearby,R18-3,item-18-C,N,246.20,12.00,closed,2026-03-11,1
+nearby,R18-4,item-18-D,W,255.20,15.00,open,2026-03-14,1

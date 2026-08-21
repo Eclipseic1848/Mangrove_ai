@@ -36,6 +36,7 @@ from src.agentic_runtime.models import (
     RuntimeTaskConfig,
     RuntimeVersion,
     SourceInput,
+    TableOutputContract,
     VerificationCheck,
     VerificationReport,
     VerificationStatus,
@@ -1846,6 +1847,51 @@ def test_pi_runtime_installs_official_extension_based_context_gate(
     assert "read_evidence" in system_prompt
     assert "propose_completion" in system_prompt
     assert "mangrove-ocr.jsonl" not in system_prompt
+
+
+def test_pi_runtime_writes_frozen_table_output_contract_to_goal(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.csv"
+    source.write_text("票号,箱数\nR-71,14\n", encoding="utf-8")
+    config_dir = tmp_path / "config"
+    work_dir = tmp_path / "work"
+    config_dir.mkdir()
+    work_dir.mkdir()
+    request = PiRuntimeRequest(
+        user_id="user-a",
+        task_id="task-a",
+        revision=1,
+        objective_text="提取复检票",
+        requested_output_formats=("csv",),
+        table_output_contracts=(TableOutputContract(
+            format="csv",
+            exact_columns=("ticket", "crates"),
+        ),),
+        sources=(SourceInput(
+            upload_id="upload-a",
+            original_name=source.name,
+            host_path=source,
+            sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+        ),),
+        model="local-model",
+        base_url="http://127.0.0.1:6012/v1",
+        api_key="local-runtime",
+    )
+
+    PiRuntime._write_runtime_files(
+        request,
+        source_names=(source.name,),
+        config_dir=config_dir,
+        work_dir=work_dir,
+    )
+
+    goal = json.loads((work_dir / "goal.json").read_text(encoding="utf-8"))
+    assert goal["delivery_spec"]["table_outputs"] == [{
+        "format": "csv",
+        "exact_columns": ["ticket", "crates"],
+        "json_shape": None,
+    }]
 
 
 def test_pi_runtime_installs_document_tools_without_leaking_grant_to_prompt(

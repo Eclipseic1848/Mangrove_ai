@@ -1,0 +1,37 @@
+{
+  "status": "PASS",
+  "qualification_gaps": [],
+  "case_count": 36,
+  "functional_count": 31,
+  "safety_count": 5,
+  "category_distribution": {
+    "compound": 5,
+    "csv": 6,
+    "docx": 7,
+    "fuzzy": 5,
+    "pdf": 7,
+    "xlsx": 6
+  },
+  "format_distribution": {
+    "csv": 12,
+    "json": 12,
+    "xlsx": 12
+  },
+  "json_shape_distribution": {
+    "columns_rows": 5,
+    "records": 5
+  },
+  "transformation_trap_count": 12,
+  "ambiguity_trap_count": 12,
+  "source_reopen_count": 41,
+  "functional_counterexamples": {
+    "wrong_value": 31,
+    "wrong_column_order": 31,
+    "wrong_json_shape": 10
+  },
+  "formal_delivery_counterexamples": 4,
+  "coordinated_tamper_rejected": true,
+  "manifest_sha256": "ef4a000df15c6954db5fcca23649865d866a784936ee3fe20e8280d3ef710f14",
+  "source_bundle_sha256": "44447d17b1268a6894818fdd0b624fdc89ef0bac076a600f0e2e65fe303767bb",
+  "evaluation_bundle_sha256": "bc1c4775ab96ee010c8dac6c575e8864760535b7c344605b379b8a4e1d89ce8d"
+}
