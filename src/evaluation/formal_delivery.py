@@ -60,6 +60,7 @@ def publish_runtime_result_as_formal_delivery(
         raise ValueError("外部模型未冻结外发确认，禁止正式发布")
     if result.status is not RuntimeStatus.CANDIDATE_READY:
         raise ValueError("Pi Runtime 尚未形成候选终态，禁止正式发布")
+    # 兼容字段为 false 仅表示 Verifier 无权自行发布；正式资格仍由 passed 与独立 Publisher 决定。
     if (
         verification is None
         or verification.status is not VerificationStatus.PASSED
