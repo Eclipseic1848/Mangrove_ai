@@ -5,7 +5,7 @@
   "blind_set_attestation": {
     "provider": "G1-03 独立评测员",
     "provided_at": "2026-08-21T00:20:00-07:00",
-    "code_freeze_sha256": "f12cd88ee276614b971db4497e6484ded158d739a58dc54fbf67cdfe6e588261",
+    "code_freeze_sha256": "bea1f17412e9728ea1d089d26660920cd04ff1f0c84b5fa7b6c9d772b1909241",
     "source": "独立生成器仅在运行时接收公开代码冻结身份；业务题源和答案不依赖生产实现。"
   },
   "cases": [
@@ -309,7 +309,7 @@
         {
           "source_id": "g103-src-07-base",
           "path": "sources/g103_07_kite_spool.docx",
-          "sha256": "dd3700f89f76b10ec54480624fa032aeccacbb3e69306a4aa00eaf1652c49b88",
+          "sha256": "37a1fea92d878c9925d9708634368a41a7045869ec653ff0844c79b648e6ca7b",
           "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         }
       ],
@@ -356,7 +356,7 @@
         {
           "source_id": "g103-src-08-base",
           "path": "sources/g103_08_dive_cylinder.docx",
-          "sha256": "a342fe648a0f996fddf7f05a7f9eed779f9aaeb77efaf3cc0391b038f5a3233e",
+          "sha256": "6a08810b5f5c5dbbb2fe5825ac3a66682f54a7abc9cbad80647496dada346f0a",
           "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         }
       ],
@@ -404,7 +404,7 @@
         {
           "source_id": "g103-src-09-base",
           "path": "sources/g103_09_studio_microphone.docx",
-          "sha256": "c12fc1e036f4028f2c924c3a45d72a84555f5475256a33eab1cea5e27b641048",
+          "sha256": "9f0f617111642a9e4d2e882cce178ed425fe8634bd9efabd5e055ade8b50fe6d",
           "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         }
       ],
@@ -451,7 +451,7 @@
         {
           "source_id": "g103-src-10-base",
           "path": "sources/g103_10_airport_shuttle.docx",
-          "sha256": "bd9dc5a372a9d8984904bddcb55e0ba059dc9aa5739fbc85468d9c4707982b18",
+          "sha256": "f7ca5b80387cd8709e23e2db7fd135e4f47351726170d55286a46b264da21950",
           "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         }
       ],
@@ -498,7 +498,7 @@
         {
           "source_id": "g103-src-11-base",
           "path": "sources/g103_11_seed_vault_box.docx",
-          "sha256": "88c923ae02dbc911201d4234ec144e6e766405c30ba8b6ff0106b76d25142d33",
+          "sha256": "80a16089c2de62dcbdee2ca8bbf53d62c77739d0358b90233a3239a95aa6bc3c",
           "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         }
       ],
@@ -546,7 +546,7 @@
         {
           "source_id": "g103-src-12-base",
           "path": "sources/g103_12_bakery_yeast.docx",
-          "sha256": "39c8c51433b7a25b204b4c37dae06e5651f44853701d5b89675a93a786b27798",
+          "sha256": "c063dfa2158c89f92044a328ba1108619234239e46dd1955dfd8bb142d5fec8a",
           "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         }
       ],
@@ -593,7 +593,7 @@
         {
           "source_id": "g103-src-13-base",
           "path": "sources/g103_13_golf_cart.xlsx",
-          "sha256": "3b7d0b0699f1c35f34def2cf6b54d85b7dc8ecd5b22f1473a8d15d8b3748efb8",
+          "sha256": "9a98c0dfc52c3e7e681e30230e0a2f226bc2523e95a8755598342a8ed815ec87",
           "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         }
       ],
@@ -640,7 +640,7 @@
         {
           "source_id": "g103-src-14-base",
           "path": "sources/g103_14_weather_balloon.xlsx",
-          "sha256": "34fff8fc698f59cc23ca339212df743101a95f7f1fd2913152c4607bc64b9f91",
+          "sha256": "1e4c42513c863df027a4db1b28585276a39a66f9ac7dd4e2912c34409a02b69f",
           "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         }
       ],
@@ -688,7 +688,7 @@
         {
           "source_id": "g103-src-15-base",
           "path": "sources/g103_15_park_wristband.xlsx",
-          "sha256": "0fff7784e93b32ad536edd5bdc7ad2399d07d78b9521fca04e22a54e1e7b61ae",
+          "sha256": "9a6019bf5698812dd2c39ff88358c7399e477b0abd163745df536a0e905c056b",
           "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         }
       ],
@@ -735,7 +735,7 @@
         {
           "source_id": "g103-src-16-base",
           "path": "sources/g103_16_coral_rack.xlsx",
-          "sha256": "bfef32026ae42279084a5048c81826fab2d8a74d7d112227f01d5c33f21d07b1",
+          "sha256": "fc0982ba9b9f87bcf0af29d5590abc5a1f69cabf98927fc9cea95a3d4d068f63",
           "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         }
       ],
@@ -782,7 +782,7 @@
         {
           "source_id": "g103-src-17-base",
           "path": "sources/g103_17_cinema_lamp.xlsx",
-          "sha256": "37b0a305b7593c05a610485698c249ac71670f224ba385b15b839c3e28c09ded",
+          "sha256": "1dcdb2df098459f9be3a8fe8d14ec256c9eab9620a55c07c91b567518239f033",
           "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         }
       ],
@@ -1066,7 +1066,7 @@
         {
           "source_id": "g103-src-23-base",
           "path": "sources/g103_23_lifeboat_ration.docx",
-          "sha256": "ea8f2b95718747e874ad64ba3b3885f3b3ed80a842339b7ded6a065fe2748622",
+          "sha256": "4e0044c759af4e0423f9b735ee0c9f4ca49ec64cc41a433f746e6853fd25c374",
           "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         },
         {
@@ -1120,7 +1120,7 @@
         {
           "source_id": "g103-src-24-base",
           "path": "sources/g103_24_race_tyre.xlsx",
-          "sha256": "c52eb061dbcc13cfba956e3adc20bf7ce0592cbf83129b4e9ba51aef60516a51",
+          "sha256": "089449a66bed46512f4f55eb2316f92b98b0aaf7d378ae288d29bdff1401c490",
           "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         },
         {
@@ -1177,7 +1177,7 @@
         {
           "source_id": "g103-src-25-amendment",
           "path": "sources/g103_25_perfume_strip_approved_amendment.docx",
-          "sha256": "0a533454f967ce463a151775dc03083802a47e190649b8ca18b6c44ed6474612",
+          "sha256": "e462873726c26a73beb04132304e65816fa44153191e01f643a0d8f550d86f1a",
           "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         }
       ],
@@ -1228,7 +1228,7 @@
         {
           "source_id": "g103-src-26-amendment",
           "path": "sources/g103_26_puppet_propbox_approved_amendment.xlsx",
-          "sha256": "df589e74c7cf394f8131545f97702bd341658504e94e7b0bd1effa91dd512db6",
+          "sha256": "cf972a896062833dd6dbd449002b7bcc2e243cf8e5ccb2cba3250d86283ff325",
           "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         }
       ],
@@ -1274,7 +1274,7 @@
         {
           "source_id": "g103-src-27-base",
           "path": "sources/g103_27_radio_telescope.docx",
-          "sha256": "7ef1fb205d06ad3f3fee60705523ea90cf320dfa856b287c0c964b827607a522",
+          "sha256": "dbdbfd259231872ad519ad3180e80ecc58a0e0cc15425ce98e026df5e068650b",
           "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         },
         {
@@ -1325,7 +1325,7 @@
         {
           "source_id": "g103-src-28-base",
           "path": "sources/g103_28_beach_flag.xlsx",
-          "sha256": "0091832e2811ddf083f85426f18a3580da7be8a258e99c8788af3378c95a9afd",
+          "sha256": "fd04d8f47db8abc73dca08e93a395af3215c42c461cb31fd0cb1067d275454eb",
           "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         }
       ],
@@ -1461,7 +1461,7 @@
         {
           "source_id": "g103-src-31-base",
           "path": "sources/g103_31_mushroom_bag.docx",
-          "sha256": "836b6780b190dc5ce6078ff38abc4aa158f93aaf26881a7d9281e3e6ee81090b",
+          "sha256": "3b773534d9b1e6f11e5616255d276f5e358b0e792966ef83fcd132cc1b33787b",
           "media_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         }
       ],

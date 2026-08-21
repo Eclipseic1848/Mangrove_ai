@@ -50,7 +50,7 @@
     "results_envelope": 6
   },
   "coordinated_tamper_rejected": true,
-  "manifest_sha256": "4c7dadbf702f822ef62b003da44e6a9efe7e9c18b2dc884235bf2a9fe86c6f1d",
-  "source_bundle_sha256": "407003c437801e77cc85d53837b28aab5d7638b8a81d71ba76fc765a3a988b65",
-  "evaluation_bundle_sha256": "bea176fe34781d504d9b8a01e479413c352906ba00ec9457db31ae1f92a6f0ec"
+  "manifest_sha256": "589756fed25f3104c745423677eac7558797b2dd26c03ab02c6ff89009202fe6",
+  "source_bundle_sha256": "e52aee3af93d5fdbea96f1434278d204dbf7409ae3f1b38a5b405381414453e0",
+  "evaluation_bundle_sha256": "54f29c9e4517e0aac81f0cb65c4aa35f1a60eabd2c7063d6904b8f08c747d93e"
 }

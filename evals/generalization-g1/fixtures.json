@@ -12,8 +12,8 @@
     "runtime_sha256": "e5bf24e0500e4451476a8f499aaf5d28c3cd0b1f32414a5f894615b824d3ca9d",
     "delivery_qualification_sha256": "41a73709b12e76c41e92e65180cfe5393a11c23c67f8591ae079c1d3ed718172",
     "evaluation_driver_sha256": "8ae85be8263c80c282c314a47f06fc36560ac442869b10f9445564b6e599d87f",
-    "git_commit": "e576a67d74c070e47cc0dae092366b2b64fad378",
-    "code_freeze_sha256": "f12cd88ee276614b971db4497e6484ded158d739a58dc54fbf67cdfe6e588261"
+    "git_commit": "8538481ac1ad2f06d137d1017f46be51b7b9ede3",
+    "code_freeze_sha256": "bea1f17412e9728ea1d089d26660920cd04ff1f0c84b5fa7b6c9d772b1909241"
   },
   "cases": [
     {
