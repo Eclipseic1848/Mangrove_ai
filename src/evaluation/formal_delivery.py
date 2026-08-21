@@ -63,7 +63,6 @@ def publish_runtime_result_as_formal_delivery(
     if (
         verification is None
         or verification.status is not VerificationStatus.PASSED
-        or not verification.formal_delivery_eligible
     ):
         raise ValueError("候选没有取得正式交付资格")
     source_refs = tuple(

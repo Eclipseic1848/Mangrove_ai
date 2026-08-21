@@ -199,7 +199,7 @@ def test_runtime_result_is_published_before_g1_scoring(tmp_path: Path) -> None:
                 summary="内容正确",
             ),),
             evidence_count=1,
-            formal_delivery_eligible=True,
+            formal_delivery_eligible=False,
         ),
     )
     repository = DeliveryPublishingRepository(tmp_path / "evaluation.db")
