@@ -2,7 +2,7 @@
 
 > status: active
 >
-> last_verified: 2026-08-17
+> last_verified: 2026-08-20
 >
 > branch: `main`
 >
@@ -47,7 +47,12 @@ TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍
 
 ## 4. 明确未完成的生产门
 
-- 30 项泛化集。
+- G1 30 项泛化集正式验收未完成：旧诊断运行 25/31，得到 19 个候选预检 PASS、6 FAIL；
+  #40 当前 WIP 已接通真实 Publisher/QA，加强六条已知弱断言，并以机器合约阻止诊断集
+  冒充独立盲保留集。历史弱规则被正式 allowlist 拒绝；安全夹具需精确拒绝阶段与 failure code。
+  独立评测方已提供 36 题新盲集（31 功能 + 5 安全）、41 个新源文件、两个 12 项配额和
+  权限/跨 Owner/隔离矩阵，离线资格与强断言自检 PASS；尚未执行模型全量运行，因此正式
+  交付正确率仍未测得。
 - Word/Excel 连续生产门与完整 PG-05。
 - 真实外部 Provider 的 Pi→Relay→Provider 安全端到端验证。
 - Rollout P0 GateSnapshot 和默认入口切换。
@@ -311,19 +316,35 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
 - 该结论不代表普通用户受众扩大或整个 AC-07/Phase 4 完成。平台发布受众固定 admin_gray。
 - 下一门：阶段 7（收口：Issue AC1-AC7 逐条对照 → 执行报告 → 文档同步 → 发布链）待授权。
 
+2026-08-20，Phase 4 G1 30 项泛化集诊断尝试收口，正式验收未完成：
+
+- 旧运行使用 fixture/objective/assertions/HEAD 四项弱冻结；双轴审查后驱动已改为冻结具体
+  GoalContract、CandidateVerifier、断言、Runtime、驱动与 Git commit，并拒绝跨快照重放；
+- 本地 Qwen 路线运行 25 项：CSV/XLSX/DOCX/复合/模糊共 19 个候选预检 PASS，PDF 与候选
+  证据共 6 项 FAIL；P2-P7 为 NOT_RUN。该驱动未进入正式 Delivery 发布与 QA；
+- P1 本地三次失败于低质量内容单元与必需字段证明缺口；外部 Qwen 3.7 Max、DeepSeek V4 Pro
+  各 3 次 P1 对照均超过 900 秒，未形成可验证候选。该对照不等于 G4 安全端到端验收；
+- 当前仅 5 项 `paraphrase`、7 项 `similar` + 1 项 `conflict`，不满足两个至少 11 项的构成门；
+  集合已用于缺陷修复，不再是盲保留集；部分断言也只有结构/长度/行数强度；
+- G1 发现并修复 XLSX locator、工具说明行 grounding、空结果完成提议三类契约缺陷；空结果
+  确认严格只接受 JSON 布尔 `true`；
+- #40 最终全仓后端回归 `1690 passed, 5 skipped`；前端生产构建、31/31 来源哈希 dry-run
+  与 diff 检查通过；Standards/Spec 双轴复审均 PASS；
+- 执行报告：`docs/plans/2026-08-20-g1-generalization-execution-report.md`。测试通过不等于
+  G1、Phase 4、用户验收或生产资格通过。
+- #40 本地机械链：新增隔离评测 Repository 下的正式 Delivery 资格读取；当前驱动要求
+  `DeliveryPublisher.publish`、持久化 `DeliveryManifest`/`output_id`、独立 QA、文件大小与
+  SHA-256 全部通过才记 PASS；外部 Provider 必须传递冻结的用户确认且缺失时失败关闭；
+  尚未运行新盲保留集。
+
 ## 7. 当前优先顺序
 
-1. 新仓库 #15 Python 表格 Tool 真实治理纵切面**已完成并关闭**（2026-08-19）：
-   阶段 0-6 真实走通 + 阶段 7 收口（AC1-AC7 对照全部 ✅、执行报告
-   `docs/plans/2026-08-19-agentic-capability-ac07-10-execution-report.md`、
-   PR #30 合并 `95872a01`、Issue #15 CLOSED）。
-2. **#16 Everything MCP 真实治理纵切面已完成**（2026-08-19）：AC1-AC7 对照 ✅；
-   **#17 AC-06 兼容切换与 AC-07 综合验收门已完成**（2026-08-20）：AC-06 白名单退役、
-   迁移演练（备份/前向/重放/零改写/恢复）、完整回归 419 passed、浏览器验收 16 项全过、
-   AC1-AC7 对照 ✅，执行报告
-   `docs/plans/2026-08-20-agentic-capability-ac07-12-execution-report.md`。
-3. **AC-07 主线 #9-#17 已全部完成并关闭**；未开放普通用户、未完成 AC-08/AC-09/8B
-   是明确边界；后续方向（Phase 4 剩余门）停在授权门。
+1. **#40 G1 修复执行中**：独立盲集已提供并通过离线资格自检；正式 Delivery 计分、强断言、
+   完整血缘和五类安全机械探针最终双轴复审 PASS。下一步是完成发布链授权、重冻结并全量运行。
+   Issue #37 尚未完成或关闭；未提交变更仍需用户逐项授权发布链。
+2. **G2/G3 未开工**：G3 默认切换受 G1 未通过阻断，不得直接推进切换。
+3. **G4/G5 未完成**：平台现有外部 Qwen/DeepSeek 连接已用于 G1 P1 对照，但 G4 安全矩阵
+   未执行；8B Linux/Compose 与目标服务器仍未就绪。
 
 ## 8. 权威证据
 

@@ -1,3 +1,4 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 tests/fixtures/semantic_harness/public/** -text -diff
+evals/generalization-g1-independent/sources/*.pdf binary

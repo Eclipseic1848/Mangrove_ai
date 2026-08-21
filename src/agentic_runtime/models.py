@@ -112,6 +112,7 @@ class PiRuntimeRequest(BaseModel):
     requested_output_formats: tuple[str, ...] = Field(min_length=1)
     sources: tuple[SourceInput, ...] = Field(min_length=1)
     permission_profile: PermissionProfile = PermissionProfile.STANDARD
+    external_api_confirmed: bool = False
     model_connection_id: str | None = Field(
         default=None,
         min_length=1,
@@ -141,6 +142,8 @@ class PiRuntimeRequest(BaseModel):
 
         local_values = (self.model, self.base_url, self.api_key)
         if self.model_connection_id is not None:
+            if not self.external_api_confirmed:
+                raise ValueError("外部连接模式必须冻结外发确认")
             if self.model_connection_version is None:
                 raise ValueError("外部连接模式必须冻结连接版本")
             if self.model_connection_model is None:

@@ -1147,6 +1147,10 @@ class SemanticWorkspaceManager:
             "requested_output_formats": tuple(task["output_formats"]),
             "sources": tuple(sources),
             "permission_profile": runtime["permission_profile"],
+            # 外部 Provider 只能使用创建运行记录时已经冻结的用户确认，不能在执行时推断。
+            "external_api_confirmed": bool(
+                runtime.get("external_api_confirmed", False)
+            ),
         }
         if runtime["model_connection_id"]:
             request_values["model_connection_id"] = runtime[

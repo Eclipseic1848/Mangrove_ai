@@ -1,0 +1,1478 @@
+{
+  "schema_version": "g1-independent-derivation-proof.v1",
+  "method": "静态自检重新打开实际源文件，重建逻辑表，再按声明式规则推导并与冻结期望逐值比较",
+  "cases": {
+    "IH-PDF-01": {
+      "source_paths": [
+        "sources/ih_pdf_01_cedar_recheck.pdf"
+      ],
+      "source_sha256": {
+        "sources/ih_pdf_01_cedar_recheck.pdf": "b6ed5d6937b49c25d36a543085908cfa4b0a4f0dd3d781ba52c98c79a1423602"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_pdf_01_cedar_recheck.pdf",
+          "tables": [
+            "Dock Tickets"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_pdf_01_cedar_recheck.pdf",
+        "table": "Dock Tickets",
+        "filters": [
+          {
+            "field": "dock",
+            "op": "eq",
+            "value": "CEDAR"
+          },
+          {
+            "field": "status",
+            "op": "eq",
+            "value": "RECHECK"
+          }
+        ],
+        "project": [
+          "ticket",
+          "crates"
+        ],
+        "sort": [
+          {
+            "field": "ticket"
+          }
+        ]
+      },
+      "expected_sha256": "40cafa163c75fa5b2723f15464e09b410e5708e7802e9aa1f02100c27dfa4b03",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-PDF-02": {
+      "source_paths": [
+        "sources/ih_pdf_02_signed_quotes.pdf"
+      ],
+      "source_sha256": {
+        "sources/ih_pdf_02_signed_quotes.pdf": "142ecb6d239db833d5e8322d5d09c8875a9c040fcd4d9dbc4f6bdce880ca434a"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_pdf_02_signed_quotes.pdf",
+          "tables": [
+            "Draft Quote",
+            "Signed Quote"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_pdf_02_signed_quotes.pdf",
+        "table": "Signed Quote",
+        "project": [
+          "vendor",
+          "unit_price",
+          "lead_days"
+        ],
+        "sort": [
+          {
+            "field": "unit_price",
+            "type": "number"
+          }
+        ]
+      },
+      "expected_sha256": "4c3ca98cf99051a53d8f7bfea71230e984cc00d2bcad1bdefca31865dcb230bc",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-PDF-03": {
+      "source_paths": [
+        "sources/ih_pdf_03_engineer_hours.pdf"
+      ],
+      "source_sha256": {
+        "sources/ih_pdf_03_engineer_hours.pdf": "2f264bc1fe409f0db43b68224814acb59ed678fff91fc09b4ff21309b61d2736"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_pdf_03_engineer_hours.pdf",
+          "tables": [
+            "Work Entries"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "group_sum",
+        "source": "sources/ih_pdf_03_engineer_hours.pdf",
+        "table": "Work Entries",
+        "filters": [
+          {
+            "field": "activity",
+            "op": "ne",
+            "value": "TRAINING"
+          }
+        ],
+        "group_by": [
+          "engineer"
+        ],
+        "sums": {
+          "total_hours": {
+            "field": "hours",
+            "places": 2
+          }
+        },
+        "project": [
+          "engineer",
+          "total_hours"
+        ],
+        "sort": [
+          {
+            "field": "engineer"
+          }
+        ]
+      },
+      "expected_sha256": "e4e8c48f96555e1b07556e0175d716bbbd813eaa6cd633397c97cba40849a835",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-PDF-04": {
+      "source_paths": [
+        "sources/ih_pdf_04_rate_revision.pdf"
+      ],
+      "source_sha256": {
+        "sources/ih_pdf_04_rate_revision.pdf": "22e61281771e5cf7d72f3483a6fee5cb5defcb969f7219dc406f1d2a58da2115"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_pdf_04_rate_revision.pdf",
+          "tables": [
+            "Base Rates 2026-07-01",
+            "Revision Effective 2026-08-15"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "overlay",
+        "base": {
+          "source": "sources/ih_pdf_04_rate_revision.pdf",
+          "table": "Base Rates 2026-07-01"
+        },
+        "override": {
+          "source": "sources/ih_pdf_04_rate_revision.pdf",
+          "table": "Revision Effective 2026-08-15"
+        },
+        "keys": [
+          "sku"
+        ],
+        "overlay_fields": [
+          "rate"
+        ],
+        "project": [
+          "sku",
+          "rate"
+        ],
+        "sort": [
+          {
+            "field": "sku"
+          }
+        ]
+      },
+      "expected_sha256": "7a2141ca843a2cd145625e0f8b3d1ebcfd65e93e6a59b5aee729824d8e7a9979",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-PDF-05": {
+      "source_paths": [
+        "sources/ih_pdf_05_parcel_weights.pdf"
+      ],
+      "source_sha256": {
+        "sources/ih_pdf_05_parcel_weights.pdf": "da24d6d7d7a4de91defc6d7275379dede26d86fa76e10e0ace7d641b99d7ca2d"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_pdf_05_parcel_weights.pdf",
+          "tables": [
+            "Measurements"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_pdf_05_parcel_weights.pdf",
+        "table": "Measurements",
+        "computed": {
+          "billable_kg": {
+            "op": "max_volume",
+            "actual": "actual_kg",
+            "length": "length_cm",
+            "width": "width_cm",
+            "height": "height_cm",
+            "divisor": "6000",
+            "places": 2
+          }
+        },
+        "project": [
+          "parcel",
+          "actual_kg",
+          "billable_kg"
+        ],
+        "sort": [
+          {
+            "field": "parcel"
+          }
+        ]
+      },
+      "expected_sha256": "16155a1accb4780df35187848185b1430778edb4f850d758cc4d4da49a3ccbdb",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-PDF-06": {
+      "source_paths": [
+        "sources/ih_pdf_06_audit_actions.pdf"
+      ],
+      "source_sha256": {
+        "sources/ih_pdf_06_audit_actions.pdf": "5931dc0edfa230e470ef1f9eb56d1e6ab4fa6b4768325e54e2c7f7300b527383"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_pdf_06_audit_actions.pdf",
+          "tables": [
+            "Corrective Actions"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_pdf_06_audit_actions.pdf",
+        "table": "Corrective Actions",
+        "filters": [
+          {
+            "field": "due_date",
+            "op": "before",
+            "value": "2026-09-01"
+          },
+          {
+            "field": "status",
+            "op": "ne",
+            "value": "CLOSED"
+          }
+        ],
+        "project": [
+          "action_id",
+          "owner",
+          "due_date"
+        ],
+        "sort": [
+          {
+            "field": "due_date"
+          }
+        ]
+      },
+      "expected_sha256": "f5360fa098869531e26b74dc58151805c11eb288535eb91ef38da825a62b0d00",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-DOCX-07": {
+      "source_paths": [
+        "sources/ih_docx_07_approved_milestones.docx"
+      ],
+      "source_sha256": {
+        "sources/ih_docx_07_approved_milestones.docx": "4a6fd01e7f36d2b0f2f32100d46c18b96943d076cd781022e3ec30a8594ec62a"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_docx_07_approved_milestones.docx",
+          "tables": [
+            "阶段计划（初稿）",
+            "阶段计划（已批准）"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_docx_07_approved_milestones.docx",
+        "table": "阶段计划（已批准）",
+        "project": [
+          "里程碑",
+          "日期",
+          "负责人"
+        ],
+        "sort": [
+          {
+            "field": "日期"
+          }
+        ]
+      },
+      "expected_sha256": "6bbf83f37db7278851d210d092eed24aa9fe3614ba0e577b819354dc543a82d8",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-DOCX-08": {
+      "source_paths": [
+        "sources/ih_docx_08_sampling.docx"
+      ],
+      "source_sha256": {
+        "sources/ih_docx_08_sampling.docx": "fd689c664ed5262e3eef978cae10af9116f8468b121264731d5890c031f70e21"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_docx_08_sampling.docx",
+          "tables": [
+            "正式抽样结果",
+            "计算示例（非结果）"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_docx_08_sampling.docx",
+        "table": "正式抽样结果",
+        "computed": {
+          "不良率_pct": {
+            "op": "divide_pct",
+            "a": "不良数",
+            "b": "抽样数",
+            "places": 2
+          }
+        },
+        "post_filters": [
+          {
+            "field": "不良率_pct",
+            "op": "gt",
+            "value": "2"
+          }
+        ],
+        "project": [
+          "批次",
+          "不良率_pct"
+        ],
+        "sort": [
+          {
+            "field": "不良率_pct",
+            "type": "number",
+            "direction": "desc"
+          }
+        ]
+      },
+      "expected_sha256": "52828165b2bade0cfcc1c3bdc5f411c9291a2e640de5e6e16ec6b1bff361ea63",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-DOCX-09": {
+      "source_paths": [
+        "sources/ih_docx_09_actions.docx"
+      ],
+      "source_sha256": {
+        "sources/ih_docx_09_actions.docx": "cbda16265bb044d7205fdde1d4f1484c7afe8a0dd46b3423ff052520ba6ff604"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_docx_09_actions.docx",
+          "tables": [
+            "行动项"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_docx_09_actions.docx",
+        "table": "行动项",
+        "project": [
+          "编号",
+          "事项",
+          "到期日"
+        ],
+        "sort": [
+          {
+            "field": "到期日"
+          }
+        ]
+      },
+      "expected_sha256": "8ffa8c2fd3949d8c1b976c232da73ad06d6e3a7d007f5e21a1242101242a1e8b",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-DOCX-10": {
+      "source_paths": [
+        "sources/ih_docx_10_renewal_terms.docx"
+      ],
+      "source_sha256": {
+        "sources/ih_docx_10_renewal_terms.docx": "4cff9dd4ffa0b9cd476bfe6be1608558c6ce5e5a1ba970ededf706376246c754"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_docx_10_renewal_terms.docx",
+          "tables": [
+            "原合同",
+            "补充协议（2026-08-01生效）"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "overlay",
+        "base": {
+          "source": "sources/ih_docx_10_renewal_terms.docx",
+          "table": "原合同"
+        },
+        "override": {
+          "source": "sources/ih_docx_10_renewal_terms.docx",
+          "table": "补充协议（2026-08-01生效）"
+        },
+        "keys": [
+          "服务"
+        ],
+        "overlay_fields": [
+          "通知天数",
+          "结算周期"
+        ],
+        "project": [
+          "服务",
+          "通知天数",
+          "结算周期"
+        ],
+        "sort": [
+          {
+            "field": "服务"
+          }
+        ]
+      },
+      "expected_sha256": "4db0807e68ecea26f804a5ab32bbce9114d329f2fc8b4d447c6e030ea612474d",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-DOCX-11": {
+      "source_paths": [
+        "sources/ih_docx_11_incidents.docx"
+      ],
+      "source_sha256": {
+        "sources/ih_docx_11_incidents.docx": "1a401e4f87a4e9519ff468de3cbe4878300bf598897b1ea9b2a31823f14952fe"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_docx_11_incidents.docx",
+          "tables": [
+            "事件明细"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "group_sum",
+        "source": "sources/ih_docx_11_incidents.docx",
+        "table": "事件明细",
+        "filters": [
+          {
+            "field": "类型",
+            "op": "eq",
+            "value": "生产故障"
+          }
+        ],
+        "group_by": [
+          "支持组"
+        ],
+        "sums": {
+          "故障总数": {
+            "field": "故障数",
+            "places": 0
+          }
+        },
+        "project": [
+          "支持组",
+          "故障总数"
+        ],
+        "sort": [
+          {
+            "field": "支持组"
+          }
+        ]
+      },
+      "expected_sha256": "baca205d7deef75eaf5ec9085a3fe6e52619ff2e2df70372c2130a0a864b2aef",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-DOCX-12": {
+      "source_paths": [
+        "sources/ih_docx_12_training.docx"
+      ],
+      "source_sha256": {
+        "sources/ih_docx_12_training.docx": "870ed2e38c67bd91846ef6a96ca4be11950ff8bc9ec484e650c0d7ce7c754369"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_docx_12_training.docx",
+          "tables": [
+            "培训名单"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_docx_12_training.docx",
+        "table": "培训名单",
+        "filters": [
+          {
+            "field": "出席",
+            "op": "eq",
+            "value": "缺席"
+          },
+          {
+            "field": "证书",
+            "op": "eq",
+            "value": "到期"
+          }
+        ],
+        "project": [
+          "员工号",
+          "姓名"
+        ],
+        "sort": [
+          {
+            "field": "员工号"
+          }
+        ]
+      },
+      "expected_sha256": "0a8f6c04ac4395f8766e4d4a3310087c34fdf6d21c7f0e462edaae6a59aae656",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-XLSX-13": {
+      "source_paths": [
+        "sources/ih_xlsx_13_q2_actual.xlsx"
+      ],
+      "source_sha256": {
+        "sources/ih_xlsx_13_q2_actual.xlsx": "ca33a08bd8ce3392aeb535f803428307e3aa147a7310d790c8ae1aece8b0c6ca"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_xlsx_13_q2_actual.xlsx",
+          "tables": [
+            "Q2预测",
+            "Q2实际"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_xlsx_13_q2_actual.xlsx",
+        "table": "Q2实际",
+        "project": [
+          "产品",
+          "销量"
+        ],
+        "sort": [
+          {
+            "field": "产品"
+          }
+        ]
+      },
+      "expected_sha256": "518437be6f7b9731a64e9abb787b89c3e135def833b4351be1fae9cad483219e",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-XLSX-14": {
+      "source_paths": [
+        "sources/ih_xlsx_14_verified_customers.xlsx"
+      ],
+      "source_sha256": {
+        "sources/ih_xlsx_14_verified_customers.xlsx": "2b58d7d745ea2921645f379f119726e71d867cbb86224b57762b0c61bb08d74f"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_xlsx_14_verified_customers.xlsx",
+          "tables": [
+            "客户主表_备份",
+            "客户主表_已核验"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_xlsx_14_verified_customers.xlsx",
+        "table": "客户主表_已核验",
+        "filters": [
+          {
+            "field": "状态",
+            "op": "eq",
+            "value": "启用"
+          }
+        ],
+        "project": [
+          "客户号",
+          "城市"
+        ],
+        "sort": [
+          {
+            "field": "客户号"
+          }
+        ]
+      },
+      "expected_sha256": "57a90a7405ee09de8a4c997981b297f0debcc57025e37fa109ff6b48dd8e5866",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-XLSX-15": {
+      "source_paths": [
+        "sources/ih_xlsx_15_negative_margin.xlsx"
+      ],
+      "source_sha256": {
+        "sources/ih_xlsx_15_negative_margin.xlsx": "603962912549abc55604bfeb887ce2ac47403afa2d59308fb7c19228136bf732"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_xlsx_15_negative_margin.xlsx",
+          "tables": [
+            "本期数据"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_xlsx_15_negative_margin.xlsx",
+        "table": "本期数据",
+        "computed": {
+          "毛利额": {
+            "op": "subtract",
+            "a": "收入",
+            "b": "成本",
+            "places": 2
+          },
+          "毛利率_pct": {
+            "op": "divide_pct",
+            "a": "毛利额",
+            "b": "收入",
+            "places": 2
+          }
+        },
+        "post_filters": [
+          {
+            "field": "毛利额",
+            "op": "lt",
+            "value": "0"
+          }
+        ],
+        "project": [
+          "SKU",
+          "毛利额",
+          "毛利率_pct"
+        ],
+        "sort": [
+          {
+            "field": "SKU"
+          }
+        ]
+      },
+      "expected_sha256": "f0f83752990f40edb522f06844c4b938fe8bf15aa18a4ed0391b166c503680ea",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-XLSX-16": {
+      "source_paths": [
+        "sources/ih_xlsx_16_inventory_adjustment.xlsx"
+      ],
+      "source_sha256": {
+        "sources/ih_xlsx_16_inventory_adjustment.xlsx": "d2d5748fc4fdec3e76ccc66c4e81ac2f2f4eb683af05abc0151f4a2f0548f425"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_xlsx_16_inventory_adjustment.xlsx",
+          "tables": [
+            "盘点基线",
+            "盘点调整"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "overlay",
+        "base": {
+          "source": "sources/ih_xlsx_16_inventory_adjustment.xlsx",
+          "table": "盘点基线"
+        },
+        "override": {
+          "source": "sources/ih_xlsx_16_inventory_adjustment.xlsx",
+          "table": "盘点调整"
+        },
+        "keys": [
+          "物料"
+        ],
+        "overlay_fields": [
+          "数量"
+        ],
+        "project": [
+          "物料",
+          "数量"
+        ],
+        "sort": [
+          {
+            "field": "物料"
+          }
+        ]
+      },
+      "expected_sha256": "fa96bfd7f5f09623c13ed494d6f7fe7b3de83bfc89c602f631f5c371e3791052",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-XLSX-17": {
+      "source_paths": [
+        "sources/ih_xlsx_17_july_deliveries.xlsx"
+      ],
+      "source_sha256": {
+        "sources/ih_xlsx_17_july_deliveries.xlsx": "18536bd7938d92e92acadbc1ef95183c06a9d4b45424be344e93a0d57582579a"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_xlsx_17_july_deliveries.xlsx",
+          "tables": [
+            "发运明细"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_xlsx_17_july_deliveries.xlsx",
+        "table": "发运明细",
+        "filters": [
+          {
+            "field": "日期",
+            "op": "between",
+            "start": "2026-07-01",
+            "end": "2026-07-31"
+          },
+          {
+            "field": "状态",
+            "op": "eq",
+            "value": "已签收"
+          }
+        ],
+        "project": [
+          "金额",
+          "客户",
+          "单号"
+        ],
+        "sort": [
+          {
+            "field": "单号"
+          }
+        ]
+      },
+      "expected_sha256": "5513eed983871fdbaa6b4cbed5cd7dd779cfd13f26e778762426b8bc0927ec0e",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-XLSX-18": {
+      "source_paths": [
+        "sources/ih_xlsx_18_building_usage.xlsx"
+      ],
+      "source_sha256": {
+        "sources/ih_xlsx_18_building_usage.xlsx": "77eac03f2b9a7af17c55d42ff41ea66090b8aca3cd635b77932086bdd4018bc6"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_xlsx_18_building_usage.xlsx",
+          "tables": [
+            "能耗明细_示例",
+            "能耗明细"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "group_sum",
+        "source": "sources/ih_xlsx_18_building_usage.xlsx",
+        "table": "能耗明细",
+        "group_by": [
+          "楼宇"
+        ],
+        "sums": {
+          "总用量": {
+            "field": "用量",
+            "places": 0
+          }
+        },
+        "project": [
+          "楼宇",
+          "总用量"
+        ],
+        "sort": [
+          {
+            "field": "楼宇"
+          }
+        ]
+      },
+      "expected_sha256": "55a08eb50bf86f678962eaf775c33570ceb2533e0c4b50e820add601a5f719c1",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-CSV-19": {
+      "source_paths": [
+        "sources/ih_csv_19_confirmed_energy.csv"
+      ],
+      "source_sha256": {
+        "sources/ih_csv_19_confirmed_energy.csv": "289e6c4a0afe79a77093d60dd7b5abbc9cec23ed80a3b1611dd8710e3e0c560e"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_csv_19_confirmed_energy.csv",
+          "tables": [
+            "energy"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "group_sum",
+        "source": "sources/ih_csv_19_confirmed_energy.csv",
+        "table": "energy",
+        "filters": [
+          {
+            "field": "状态",
+            "op": "eq",
+            "value": "确认"
+          }
+        ],
+        "group_by": [
+          "片区"
+        ],
+        "sums": {
+          "总kwh": {
+            "field": "kwh",
+            "places": 0
+          }
+        },
+        "project": [
+          "片区",
+          "总kwh"
+        ],
+        "sort": [
+          {
+            "field": "片区"
+          }
+        ]
+      },
+      "expected_sha256": "7b5cbad228df9e9c86556f40197cdd56f9e6b6c231e6796e7870e9ec131ee3e4",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-CSV-20": {
+      "source_paths": [
+        "sources/ih_csv_20_review_claims.csv"
+      ],
+      "source_sha256": {
+        "sources/ih_csv_20_review_claims.csv": "269030018a5066bd7f15fd544cd1f6524b3b54140de43478303bcfc8c26864a2"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_csv_20_review_claims.csv",
+          "tables": [
+            "claims"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_csv_20_review_claims.csv",
+        "table": "claims",
+        "filters": [
+          {
+            "field": "需要复核",
+            "op": "eq",
+            "value": "是"
+          },
+          {
+            "field": "金额",
+            "op": "gt",
+            "value": "1000"
+          }
+        ],
+        "project": [
+          "申请号",
+          "金额"
+        ],
+        "sort": [
+          {
+            "field": "申请号"
+          }
+        ]
+      },
+      "expected_sha256": "f3e8104215a977b1c99cac6cd8c47b347749279e57df37cddab106b728ea7919",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-CSV-21": {
+      "source_paths": [
+        "sources/ih_csv_21_asset_events.csv"
+      ],
+      "source_sha256": {
+        "sources/ih_csv_21_asset_events.csv": "61b703ef13fc57bd37db11e4ab580abb214eec8c05e38ed6776c757e0ba04ec9"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_csv_21_asset_events.csv",
+          "tables": [
+            "events"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "dedupe_latest",
+        "inputs": [
+          {
+            "source": "sources/ih_csv_21_asset_events.csv",
+            "table": "events"
+          }
+        ],
+        "keys": [
+          "资产"
+        ],
+        "timestamp": "更新时间",
+        "project": [
+          "资产",
+          "状态",
+          "更新时间"
+        ],
+        "sort": [
+          {
+            "field": "资产"
+          }
+        ]
+      },
+      "expected_sha256": "bbbbef41fff5a26147174daa65aea4090108307e5c8ec4d01e1c5276ce1ea11d",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-CSV-22": {
+      "source_paths": [
+        "sources/ih_csv_22_account_status.csv"
+      ],
+      "source_sha256": {
+        "sources/ih_csv_22_account_status.csv": "6c24e4697b7929592448c7d3a14f44732f14fa1d6fd6e73c5edf193da1429036"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_csv_22_account_status.csv",
+          "tables": [
+            "accounts"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_csv_22_account_status.csv",
+        "table": "accounts",
+        "filters": [
+          {
+            "field": "运营状态",
+            "op": "eq",
+            "value": "暂停"
+          },
+          {
+            "field": "计费状态",
+            "op": "eq",
+            "value": "开启"
+          }
+        ],
+        "project": [
+          "账户",
+          "运营状态",
+          "计费状态"
+        ],
+        "sort": [
+          {
+            "field": "账户"
+          }
+        ]
+      },
+      "expected_sha256": "0a006a695f4feeaa57f0cac890c6ee2ec00bd14b83398d9342af3aa767ea7a94",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-CSV-23": {
+      "source_paths": [
+        "sources/ih_csv_23_gold_customers.csv"
+      ],
+      "source_sha256": {
+        "sources/ih_csv_23_gold_customers.csv": "ef399eccf57b859d46730b2f91598ca29a7a02b3b6c9a98dc7dbca8a6b568d10"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_csv_23_gold_customers.csv",
+          "tables": [
+            "customers"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_csv_23_gold_customers.csv",
+        "table": "customers",
+        "filters": [
+          {
+            "field": "区域",
+            "op": "eq",
+            "value": "北区"
+          },
+          {
+            "field": "等级",
+            "op": "eq",
+            "value": "金级"
+          }
+        ],
+        "project": [
+          "邮箱",
+          "姓名",
+          "客户号"
+        ],
+        "sort": [
+          {
+            "field": "客户号"
+          }
+        ]
+      },
+      "expected_sha256": "d5c3ae7a572a5f56a25e538addf139b059362265beb2b02550e1172eea791830",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-CSV-24": {
+      "source_paths": [
+        "sources/ih_csv_24_line_totals.csv"
+      ],
+      "source_sha256": {
+        "sources/ih_csv_24_line_totals.csv": "e9874f8810887132ac06afd2fa076921e0e034a309228fa07e9a01ca2983878c"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_csv_24_line_totals.csv",
+          "tables": [
+            "lines"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_csv_24_line_totals.csv",
+        "table": "lines",
+        "computed": {
+          "行金额": {
+            "op": "multiply",
+            "a": "数量",
+            "b": "单价",
+            "places": 2
+          }
+        },
+        "post_filters": [
+          {
+            "field": "行金额",
+            "op": "ge",
+            "value": "500"
+          }
+        ],
+        "project": [
+          "行号",
+          "行金额"
+        ],
+        "sort": [
+          {
+            "field": "行金额",
+            "type": "number",
+            "direction": "desc"
+          }
+        ]
+      },
+      "expected_sha256": "33704eafc4fba560ddfd00b2893bb5c7160dcaf95788e5c50d40340f4944760f",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-CMP-25": {
+      "source_paths": [
+        "sources/ih_cmp_25_tickets.csv",
+        "sources/ih_cmp_25_codebook.docx"
+      ],
+      "source_sha256": {
+        "sources/ih_cmp_25_tickets.csv": "762f7434f0ac74d4a7136b936ae7c196db75cc0445aed0790f71d995aa4713b5",
+        "sources/ih_cmp_25_codebook.docx": "8c2352e62ac6d32f5cbceb3a6e4376ca2d4a23ad10ac1f1fcdfab95d1f0b474a"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_cmp_25_tickets.csv",
+          "tables": [
+            "tickets"
+          ]
+        },
+        {
+          "path": "sources/ih_cmp_25_codebook.docx",
+          "tables": [
+            "等级定义"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "join",
+        "left": {
+          "source": "sources/ih_cmp_25_tickets.csv",
+          "table": "tickets"
+        },
+        "right": {
+          "source": "sources/ih_cmp_25_codebook.docx",
+          "table": "等级定义"
+        },
+        "left_key": "等级码",
+        "right_key": "等级码",
+        "right_map": {
+          "截止口径": "截止口径",
+          "处置口径": "处置口径"
+        },
+        "filters": [
+          {
+            "field": "截止口径",
+            "op": "eq",
+            "value": "今天"
+          }
+        ],
+        "project": [
+          "工单号",
+          "问题",
+          "处置口径"
+        ],
+        "sort": [
+          {
+            "field": "工单号"
+          }
+        ]
+      },
+      "expected_sha256": "ead2d009a36ebaca528928cda9d863794a176e7bf884170dacff91aee1f1cd08",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-CMP-26": {
+      "source_paths": [
+        "sources/ih_cmp_26_inventory.xlsx",
+        "sources/ih_cmp_26_exception.pdf"
+      ],
+      "source_sha256": {
+        "sources/ih_cmp_26_inventory.xlsx": "171b91bb11aa50dba02defe051d330d2e5a3fa920dc370183ae7b139d78525e5",
+        "sources/ih_cmp_26_exception.pdf": "4b25bda304026156af47ed7d6913d23348a984527f690d9a0c56b2b3c843ee61"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_cmp_26_inventory.xlsx",
+          "tables": [
+            "库存"
+          ]
+        },
+        {
+          "path": "sources/ih_cmp_26_exception.pdf",
+          "tables": [
+            "Hold Overrides"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "overlay",
+        "base": {
+          "source": "sources/ih_cmp_26_inventory.xlsx",
+          "table": "库存"
+        },
+        "override": {
+          "source": "sources/ih_cmp_26_exception.pdf",
+          "table": "Hold Overrides"
+        },
+        "keys": [
+          "item"
+        ],
+        "overlay_fields": [
+          "hold_qty"
+        ],
+        "computed": {
+          "releasable_qty": {
+            "op": "subtract",
+            "a": "available_qty",
+            "b": "hold_qty",
+            "places": 0
+          }
+        },
+        "project": [
+          "item",
+          "releasable_qty"
+        ],
+        "sort": [
+          {
+            "field": "item"
+          }
+        ]
+      },
+      "expected_sha256": "a73614a28fb5a69ff0882ba0a439f7344c01113623ac61445bc4daae7ed6eb61",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-CMP-27": {
+      "source_paths": [
+        "sources/ih_cmp_27_claims.csv",
+        "sources/ih_cmp_27_policy.docx"
+      ],
+      "source_sha256": {
+        "sources/ih_cmp_27_claims.csv": "edaea8f270a5a1f9263f4320444a3e0e6ea237301e2e0196b002ee3c9aafb023",
+        "sources/ih_cmp_27_policy.docx": "a9f6e52831a5098490336d99befd86e98e68519ade6a6ec7db17b188b90196aa"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_cmp_27_claims.csv",
+          "tables": [
+            "claims"
+          ]
+        },
+        {
+          "path": "sources/ih_cmp_27_policy.docx",
+          "tables": [
+            "类别政策"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "join",
+        "left": {
+          "source": "sources/ih_cmp_27_claims.csv",
+          "table": "claims"
+        },
+        "right": {
+          "source": "sources/ih_cmp_27_policy.docx",
+          "table": "类别政策"
+        },
+        "left_key": "类别",
+        "right_key": "类别",
+        "right_map": {
+          "是否允许": "是否允许",
+          "单笔上限": "单笔上限"
+        },
+        "filters": [
+          {
+            "field": "是否允许",
+            "op": "eq",
+            "value": "是"
+          }
+        ],
+        "computed": {
+          "可报金额": {
+            "op": "min",
+            "a": "申报额",
+            "b": "单笔上限",
+            "places": 2
+          }
+        },
+        "project": [
+          "申请号",
+          "类别",
+          "可报金额"
+        ],
+        "sort": [
+          {
+            "field": "申请号"
+          }
+        ]
+      },
+      "expected_sha256": "14f7a1ea63ceaf3ae920d45b6f96308a0088d21383b4a2f3753834f0e1b90a51",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-CMP-28": {
+      "source_paths": [
+        "sources/ih_cmp_28_snapshot_a.csv",
+        "sources/ih_cmp_28_snapshot_b.csv"
+      ],
+      "source_sha256": {
+        "sources/ih_cmp_28_snapshot_a.csv": "9e6e1fbaae2b309574727bba0fbedf85e20bad5fd8c5920e09ddba63339f8827",
+        "sources/ih_cmp_28_snapshot_b.csv": "021bf35ca714ca8829c9274e0833e79a104b6770eb4635360aa093a1c2fda909"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_cmp_28_snapshot_a.csv",
+          "tables": [
+            "snapshot_a"
+          ]
+        },
+        {
+          "path": "sources/ih_cmp_28_snapshot_b.csv",
+          "tables": [
+            "snapshot_b"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "dedupe_latest",
+        "inputs": [
+          {
+            "source": "sources/ih_cmp_28_snapshot_a.csv",
+            "table": "snapshot_a"
+          },
+          {
+            "source": "sources/ih_cmp_28_snapshot_b.csv",
+            "table": "snapshot_b"
+          }
+        ],
+        "keys": [
+          "订单号"
+        ],
+        "timestamp": "更新时间",
+        "project": [
+          "订单号",
+          "状态",
+          "更新时间"
+        ],
+        "sort": [
+          {
+            "field": "订单号"
+          }
+        ]
+      },
+      "expected_sha256": "4415f541b5276b839276eb8a2aa597f666e0f922fa85c7cd5efb92cfe2c6cc9f",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-CMP-29": {
+      "source_paths": [
+        "sources/ih_cmp_29_purchase_order.pdf",
+        "sources/ih_cmp_29_receipts.xlsx"
+      ],
+      "source_sha256": {
+        "sources/ih_cmp_29_purchase_order.pdf": "5e394fcbbcb2027bce65cdfa77a24ac85fd77a1d6638ed41e4c9d5f12b4ecd0c",
+        "sources/ih_cmp_29_receipts.xlsx": "7c058e61e5cc73c73cb52b285d4cfa723ba2a6642d9b848ca3584c92981c071e"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_cmp_29_purchase_order.pdf",
+          "tables": [
+            "Purchase Orders"
+          ]
+        },
+        {
+          "path": "sources/ih_cmp_29_receipts.xlsx",
+          "tables": [
+            "收货"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "join",
+        "left": {
+          "source": "sources/ih_cmp_29_purchase_order.pdf",
+          "table": "Purchase Orders"
+        },
+        "right": {
+          "source": "sources/ih_cmp_29_receipts.xlsx",
+          "table": "收货"
+        },
+        "left_key": "po",
+        "right_key": "po",
+        "right_map": {
+          "received_qty": "received_qty"
+        },
+        "computed": {
+          "variance": {
+            "op": "subtract",
+            "a": "received_qty",
+            "b": "ordered_qty",
+            "places": 0
+          },
+          "result": {
+            "op": "compare_zero",
+            "field": "variance",
+            "positive": "OVER",
+            "negative": "SHORT",
+            "zero": "MATCH"
+          }
+        },
+        "post_filters": [
+          {
+            "field": "variance",
+            "op": "ne",
+            "value": "0"
+          }
+        ],
+        "project": [
+          "po",
+          "ordered_qty",
+          "received_qty",
+          "variance",
+          "result"
+        ],
+        "sort": [
+          {
+            "field": "po"
+          }
+        ]
+      },
+      "expected_sha256": "7477b22cf80e3b45cc32714caad591ba95b300dbe8ab463ad4e1fc34776fe45d",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-FUZ-30": {
+      "source_paths": [
+        "sources/ih_fuz_30_collection_list.csv"
+      ],
+      "source_sha256": {
+        "sources/ih_fuz_30_collection_list.csv": "77b4fa930dc7002d5bfe8019db3fd0ae219c53f8abbf4fd132c90f1e6813b55c"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_fuz_30_collection_list.csv",
+          "tables": [
+            "invoices"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_fuz_30_collection_list.csv",
+        "table": "invoices",
+        "filters": [
+          {
+            "field": "付款状态",
+            "op": "eq",
+            "value": "未付"
+          },
+          {
+            "field": "到期日",
+            "op": "before",
+            "value": "2026-08-20"
+          }
+        ],
+        "computed": {
+          "逾期天数": {
+            "op": "days_overdue",
+            "as_of": "2026-08-20",
+            "due": "到期日"
+          }
+        },
+        "project": [
+          "发票号",
+          "客户",
+          "金额",
+          "逾期天数"
+        ],
+        "sort": [
+          {
+            "field": "逾期天数",
+            "type": "number",
+            "direction": "desc"
+          }
+        ]
+      },
+      "expected_sha256": "ea7fa727c5f8a4fcafc62aa48045d80fb1b62237ac9a795d52aafd0b4da8dfd5",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    },
+    "IH-FUZ-31": {
+      "source_paths": [
+        "sources/ih_fuz_31_replenishment.xlsx"
+      ],
+      "source_sha256": {
+        "sources/ih_fuz_31_replenishment.xlsx": "88458a2c001225de5434ebafa4c77a227834533833387d8460683a4be276a7ca"
+      },
+      "source_locators": [
+        {
+          "path": "sources/ih_fuz_31_replenishment.xlsx",
+          "tables": [
+            "库存现状",
+            "参考示例"
+          ]
+        }
+      ],
+      "derivation": {
+        "kind": "extract",
+        "source": "sources/ih_fuz_31_replenishment.xlsx",
+        "table": "库存现状",
+        "computed": {
+          "建议补货数": {
+            "op": "max_zero_subtract",
+            "target": "目标数",
+            "current": "当前数",
+            "inbound": "在途数",
+            "places": 0
+          }
+        },
+        "post_filters": [
+          {
+            "field": "建议补货数",
+            "op": "gt",
+            "value": "0"
+          }
+        ],
+        "project": [
+          "仓库",
+          "建议补货数"
+        ],
+        "sort": [
+          {
+            "field": "建议补货数",
+            "type": "number",
+            "direction": "desc"
+          }
+        ]
+      },
+      "expected_sha256": "e49431505351e5554dc823b5f0ef8de8f8b2fb9bc07d1a42d2a42a2cd06269f6",
+      "strength": "精确列、精确行、精确顺序、精确业务值；禁止额外行列"
+    }
+  }
+}

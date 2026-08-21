@@ -475,7 +475,14 @@ def _source_text(
                 data_only=True,
             )
             try:
-                match = re.search(r"sheet\s*:?\s*(.+)", locator, re.I)
+                # locator 形如「sheet:大师场景规划 row:2」：sheet 名必须
+                # 非贪婪捕获，并把「 row:N」行号后缀剥离，否则 openpyxl 会
+                # 把「 row:2」也当 sheet 名（真实纵切面暴露的解析缺陷）。
+                match = re.search(
+                    r"sheet\s*:?\s*(.+?)(?:\s+row\s*:\s*\d+)?\s*$",
+                    locator,
+                    re.I,
+                )
                 sheets = (
                     [workbook[match.group(1).strip()]]
                     if match
@@ -534,8 +541,17 @@ def _quote_is_grounded(quote: str, actual: str) -> bool:
         for line in quote.splitlines()
         if _normalized(line)
     ]
-    return len(lines) > 1 and all(
-        line in normalized_actual for line in lines
+    # 工具展示表格时会在首行生成「Table N: <描述> (R rows × C cols)」
+    # 说明行（不是来源事实）；多行匹配时跳过该行，其余行仍逐字命中。
+    content_lines = [
+        line
+        for line in lines
+        if not re.match(r"^table\s*\d+\s*:", line, re.I)
+    ]
+    return len(content_lines) > 1 and all(
+        line in normalized_actual
+        or ("|" in line and line.replace("|", "") in normalized_actual)
+        for line in content_lines
     )
 
 

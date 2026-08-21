@@ -333,6 +333,7 @@ async def test_external_verifier_uses_separate_grant_and_records_usage(
         model_connection_id=str(connection["connection_id"]),
         model_connection_version=binding.connection_version,
         model_connection_model=binding.model,
+        external_api_confirmed=True,
     )
     report = await CandidateVerifier(
         semantic_judge=BrokerSemanticJudge(
@@ -465,6 +466,7 @@ async def test_external_verifier_retries_one_empty_semantic_response(
         model_connection_id=str(connection["connection_id"]),
         model_connection_version=binding.connection_version,
         model_connection_model=binding.model,
+        external_api_confirmed=True,
     )
 
     report = await CandidateVerifier(
@@ -746,8 +748,10 @@ async def test_csv_evidence_uses_original_serialized_row(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("locator", ("sheet:费用", "sheet:费用 row:2"))
 async def test_xlsx_evidence_supports_extensionless_upload_object(
     tmp_path: Path,
+    locator: str,
 ) -> None:
     source = tmp_path / "upload-object-without-extension"
     workbook = Workbook()
@@ -775,7 +779,7 @@ async def test_xlsx_evidence_supports_extensionless_upload_object(
                         "evidence": [
                             {
                                 "source": "book.xlsx",
-                                "locator": "sheet:费用",
+                                "locator": locator,
                                 "quote": "Alice\t100",
                             }
                         ],
@@ -804,8 +808,22 @@ async def test_xlsx_evidence_supports_extensionless_upload_object(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("locator", "quote"),
+    (
+        ("table:0 row:1", "Alice | 100"),
+        (
+            "table:0",
+            "Table 1: 费用明细 (2 rows × 2 cols)\n"
+            "姓名 | 金额\n"
+            "Alice | 100",
+        ),
+    ),
+)
 async def test_docx_table_evidence_accepts_markdown_cell_separators(
     tmp_path: Path,
+    locator: str,
+    quote: str,
 ) -> None:
     source = tmp_path / "upload-object-without-extension"
     document = Document()
@@ -834,8 +852,8 @@ async def test_docx_table_evidence_accepts_markdown_cell_separators(
                         "evidence": [
                             {
                                 "source": "source.docx",
-                                "locator": "table:0 row:1",
-                                "quote": "Alice | 100",
+                                "locator": locator,
+                                "quote": quote,
                             }
                         ],
                     }

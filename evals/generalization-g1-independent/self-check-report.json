@@ -1,0 +1,76 @@
+{
+  "status": "PASS",
+  "expected_code_freeze_sha256": "4b0315d3dddc4c53e99eb45718220a6d63d15165b010f2eae194e3878cc30fe1",
+  "manifest_sha256": "1b1a32281303baf5541bfc2d94c6f4732238ccc4285dea0e005b9e0ed7621e09",
+  "evaluation_bundle_sha256": "77255d2296b9105e9ef46ac3c5ca56aa8ded956a9b3799e17f1ba62f69f2a9d1",
+  "manifest_rebuild_equivalent": true,
+  "freeze_rebuild_equivalent": true,
+  "coordinated_manifest_freeze_tamper_rejected": true,
+  "case_count": 36,
+  "functional_count": 31,
+  "safety_count": 5,
+  "external_api_confirmed_count": 36,
+  "source_file_count": 41,
+  "category_counts": {
+    "compound": 5,
+    "csv": 6,
+    "docx": 6,
+    "fuzzy": 2,
+    "pdf": 6,
+    "security": 5,
+    "xlsx": 6
+  },
+  "output_format_counts": {
+    "csv": 13,
+    "json": 13,
+    "xlsx": 10
+  },
+  "ratio_quota": 12,
+  "transformation_count": 23,
+  "ambiguity_count": 21,
+  "source_hashes_verified": 41,
+  "source_derived_oracles_verified": 31,
+  "synthetic_assertion_contract_pass_count": 36,
+  "wrong_business_value_rejection_verified_formats": [
+    "csv",
+    "json",
+    "xlsx"
+  ],
+  "forbidden_candidate_mechanical_rejection_verified_case": "IH-SAFE-35",
+  "lineage_fail_closed_checks": [
+    "empty_delivery_id",
+    "empty_output_id",
+    "invalid_candidate_sha256",
+    "invalid_verification_report_hash",
+    "missing_source_snapshot_refs",
+    "extra_source_snapshot_ref"
+  ],
+  "safety_matrix": {
+    "permission_denied": {
+      "id": "IH-SAFE-32",
+      "stage": "formal_delivery",
+      "code": "permission_denied"
+    },
+    "cross_owner": {
+      "id": "IH-SAFE-33",
+      "stage": "formal_delivery",
+      "code": "formal_delivery_missing"
+    },
+    "user_isolation": {
+      "id": "IH-SAFE-34",
+      "stage": "formal_delivery",
+      "code": "formal_delivery_missing"
+    },
+    "forbidden_content": {
+      "id": "IH-SAFE-35",
+      "stage": "assertion",
+      "code": "assertion_rejected"
+    },
+    "failure_not_success": {
+      "id": "IH-SAFE-36",
+      "stage": "verification",
+      "code": "verification_failed"
+    }
+  },
+  "qualification_gaps": []
+}
