@@ -31,7 +31,7 @@
   },
   "formal_delivery_counterexamples": 4,
   "coordinated_tamper_rejected": true,
-  "manifest_sha256": "ef4a000df15c6954db5fcca23649865d866a784936ee3fe20e8280d3ef710f14",
-  "source_bundle_sha256": "44447d17b1268a6894818fdd0b624fdc89ef0bac076a600f0e2e65fe303767bb",
-  "evaluation_bundle_sha256": "bc1c4775ab96ee010c8dac6c575e8864760535b7c344605b379b8a4e1d89ce8d"
+  "manifest_sha256": "2b87fede348085ec352773fe96288389aaf6082e3f0327a69c2f2cbda10829a6",
+  "source_bundle_sha256": "4720ab7daf1c5bf266d1747833f742768f396e1f73a39e70e99c51d73a3adf48",
+  "evaluation_bundle_sha256": "2b99360b82fca7d33433a3340b0bb07e5e62a416fdf93f23e936fd7201870ebb"
 }

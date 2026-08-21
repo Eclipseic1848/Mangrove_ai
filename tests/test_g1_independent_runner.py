@@ -24,6 +24,27 @@ from src.agentic_runtime.models import (
 )
 
 
+def test_independent_v2_binary_sources_disable_git_text_conversion() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    sources = project_root / "evals/generalization-g1-independent-v2/sources"
+    paths = [
+        sources / "v2_01_港区浮标巡检.pdf",
+        sources / "v2_07_蜂场采蜜记录.docx",
+        sources / "v2_13_风机叶片测量.xlsx",
+    ]
+
+    completed = subprocess.run(
+        ["git", "check-attr", "text", "--", *map(str, paths)],
+        cwd=project_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    )
+
+    assert completed.stdout.count("text: unset") == len(paths)
+
+
 def test_independent_g1_dry_run_verifies_frozen_blind_set() -> None:
     project_root = Path(__file__).resolve().parents[1]
     runner = project_root / "evals/generalization-g1/run_independent_g1.py"

@@ -2,3 +2,6 @@
 *.cmd text eol=crlf
 tests/fixtures/semantic_harness/public/** -text -diff
 evals/generalization-g1-independent/sources/*.pdf binary
+evals/generalization-g1-independent-v2/sources/*.pdf binary
+evals/generalization-g1-independent-v2/sources/*.docx binary
+evals/generalization-g1-independent-v2/sources/*.xlsx binary
