@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import threading
 import time
 
@@ -40,6 +41,16 @@ from src.model_connections import ConnectionBroker
 from src.model_connections.storage import ModelConnectionRepository
 from src.model_connections.vault import FernetCredentialVault
 from src.services.upload_store import UploadStore
+from src.runtime_routing import (
+    GateCheck,
+    GateSnapshot,
+    RolloutActor,
+    RolloutApproval,
+    RolloutMode,
+    RuntimeRouting,
+    SqliteRuntimeRoutingRepository,
+    migrate_runtime_routing,
+)
 
 
 class FakePiRuntime:
@@ -437,6 +448,183 @@ def _uploads(tmp_path: Path) -> tuple[str, str]:
         media_type="text/csv",
     )
     return document.upload_id, table.upload_id
+
+
+def _g3_snapshot(*, passed: bool) -> GateSnapshot:
+    return GateSnapshot.build(
+        gate_version="phase4-g3-api-v1",
+        code_commit="a" * 40,
+        environment_digest="b" * 64,
+        checks=(
+            GateCheck(
+                gate_id="delivery-integrity",
+                passed=passed,
+                evidence_hash="c" * 64,
+            ),
+        ),
+    )
+
+
+def test_runtime_rollout_only_changes_new_tasks_and_p0_restores_legacy(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "pi_runtime_enabled", True)
+    client = _client(tmp_path, monkeypatch, role="admin")
+    document, _ = _uploads(tmp_path)
+    # 先让现有 Store 建完历史表，再在同一测试库执行显式 G3 迁移。
+    auth_mod.get_store()
+    database = Path(settings.webui_db_path)
+    migrate_runtime_routing(database, tmp_path / "workspace-before-g3.db")
+    routing = RuntimeRouting(SqliteRuntimeRoutingRepository(database))
+    passed = _g3_snapshot(passed=True)
+    actor = RolloutActor(actor_id="admin-a", role="admin")
+    routing.record_gate(passed, actor)
+    gray_approval = RolloutApproval(
+        approval_id="approval-api-gray",
+        target_mode=RolloutMode.EXPLICIT_OPT_IN,
+        gate_snapshot_id=passed.snapshot_id,
+        approved_by="maintainer-a",
+    )
+    routing.record_approval(
+        gray_approval,
+        RolloutActor(actor_id="maintainer-a", role="user"),
+    )
+    routing.change_mode(
+        RolloutMode.EXPLICIT_OPT_IN,
+        gray_approval,
+        actor,
+    )
+    default_approval = RolloutApproval(
+        approval_id="approval-api-default",
+        target_mode=RolloutMode.VNEXT_DEFAULT,
+        gate_snapshot_id=passed.snapshot_id,
+        approved_by="maintainer-a",
+    )
+    routing.record_approval(
+        default_approval,
+        RolloutActor(actor_id="maintainer-a", role="user"),
+    )
+    routing.change_mode(
+        RolloutMode.VNEXT_DEFAULT,
+        default_approval,
+        actor,
+    )
+
+    request = {
+        "objective_text": "提取附件内容并输出 JSON",
+        "upload_ids": [document],
+        "output_formats": ["json"],
+        "provider": "local",
+    }
+    with client:
+        vnext = client.post("/api/semantic-workspace/tasks", json=request)
+        assert vnext.status_code == 202, vnext.text
+        assert vnext.json()["runtime_version"] == "pi"
+
+        cancelled = client.post(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}/cancel"
+        )
+        assert cancelled.status_code in {200, 409}, cancelled.text
+        original_register = AgenticRuntimeRepository.register_in_transaction
+
+        def fail_after_runtime_config(self, connection, config):
+            original_register(self, connection, config)
+            raise RuntimeError("模拟 RuntimeConfig 事务失败")
+
+        monkeypatch.setattr(
+            AgenticRuntimeRepository,
+            "register_in_transaction",
+            fail_after_runtime_config,
+        )
+        failed_revision = client.post(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}/revisions",
+            json={"instruction": "模拟路由绑定后的存储失败"},
+        )
+        assert failed_revision.status_code == 409, failed_revision.text
+        monkeypatch.setattr(
+            AgenticRuntimeRepository,
+            "register_in_transaction",
+            original_register,
+        )
+        with sqlite3.connect(database) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM runtime_assignments "
+                "WHERE owner_id=? AND task_id=? AND revision=2",
+                ("user-a", vnext.json()["task_id"]),
+            ).fetchone()[0] == 0
+            assert connection.execute(
+                "SELECT active_revision FROM semantic_workspace_tasks "
+                "WHERE user_id=? AND task_id=?",
+                ("user-a", vnext.json()["task_id"]),
+            ).fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT COUNT(*) FROM agentic_runtime_runs "
+                "WHERE user_id=? AND task_id=? AND revision=2",
+                ("user-a", vnext.json()["task_id"]),
+            ).fetchone()[0] == 0
+
+        routing.record_gate(_g3_snapshot(passed=False), actor)
+        blocked = client.post(
+            "/api/semantic-workspace/tasks",
+            json={**request, "runtime_version": "pi"},
+            headers={"Idempotency-Key": "g3-p0-retry"},
+        )
+        assert blocked.status_code == 409, blocked.text
+        legacy = client.post(
+            "/api/semantic-workspace/tasks",
+            json=request,
+            headers={"Idempotency-Key": "g3-p0-retry"},
+        )
+        assert legacy.status_code == 202, legacy.text
+        assert legacy.json()["runtime_version"] == "legacy"
+
+        unchanged = client.get(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}"
+        )
+        assert unchanged.status_code == 200
+        assert unchanged.json()["runtime_version"] == "pi"
+        for task_id in (vnext.json()["task_id"], legacy.json()["task_id"]):
+            cancelled = client.post(
+                f"/api/semantic-workspace/tasks/{task_id}/cancel"
+            )
+            assert cancelled.status_code in {200, 409}, cancelled.text
+        rejected_revision = client.post(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}/revisions",
+            json={
+                "instruction": "回退后错误请求表格契约",
+                "output_formats": ["csv"],
+                "table_output_contracts": [{
+                    "format": "csv",
+                    "exact_columns": ["姓名"],
+                }],
+            },
+        )
+        assert rejected_revision.status_code == 422, rejected_revision.text
+        with sqlite3.connect(database) as connection:
+            assignment_count = connection.execute(
+                "SELECT COUNT(*) FROM runtime_assignments "
+                "WHERE owner_id=? AND task_id=? AND revision=2",
+                ("user-a", vnext.json()["task_id"]),
+            ).fetchone()[0]
+        assert assignment_count == 0
+        revised = client.post(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}/revisions",
+            json={"instruction": "保持原目标，创建回退后的新版本"},
+        )
+        assert revised.status_code == 202, revised.text
+        active = client.get(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}"
+        )
+        historical = client.get(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}",
+            params={"revision": 1},
+        )
+        assert active.json()["runtime_version"] == "legacy"
+        assert historical.json()["runtime_version"] == "pi"
+        client.post(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}/cancel"
+        )
 
 
 def _wait_for_delivery(client: TestClient, task_id: str) -> dict:

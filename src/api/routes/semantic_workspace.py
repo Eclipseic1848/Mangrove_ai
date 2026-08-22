@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
 import re
+import sqlite3
 import uuid
 import zipfile
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import duckdb
 from fastapi import (
@@ -70,6 +72,15 @@ from src.conversation_steering import (
 from src.model_connections import GrantError, get_default_broker
 from src.delivery_publishing.models import TableOutputContract
 from src.services.upload_store import UploadStore
+from src.runtime_routing import (
+    RolloutActor,
+    RolloutSnapshot,
+    RuntimeAssignment,
+    RuntimeRouting,
+    RuntimeTaskRevisionRef,
+    SqliteRuntimeRoutingRepository,
+    open_runtime_routing_repository,
+)
 
 
 router = APIRouter(
@@ -306,6 +317,7 @@ class WorkspaceTaskCreateIn(BaseModel):
             raise ValueError("表格输出契约必须绑定正式输出格式")
         if (
             self.table_output_contracts
+            and "runtime_version" in self.model_fields_set
             and self.runtime_version is not RuntimeVersion.PI
         ):
             raise ValueError("表格输出契约只能由 Pi Runtime 执行")
@@ -401,6 +413,91 @@ def _uploads() -> UploadStore:
 
 def _runtime_repository() -> AgenticRuntimeRepository:
     return AgenticRuntimeRepository(settings.webui_db_path)
+
+
+def _rollout_actor(user: dict[str, Any]) -> RolloutActor:
+    role = (
+        "super_admin"
+        if user.get("role") == "super_admin"
+        else "admin"
+        if is_admin_role(user.get("role"))
+        else "user"
+    )
+    return RolloutActor(actor_id=user["user_id"], role=role)
+
+
+@dataclass(frozen=True)
+class _RevisionRoutingPlan:
+    selected_runtime: RuntimeVersion
+    repository: SqliteRuntimeRoutingRepository | None = None
+    task_revision: RuntimeTaskRevisionRef | None = None
+    actor: RolloutActor | None = None
+    rollout: RolloutSnapshot | None = None
+
+
+def _preview_revision_runtime(
+    user: dict[str, Any],
+    *,
+    task_id: str,
+    revision: int,
+    requested_runtime: RuntimeVersion,
+) -> _RevisionRoutingPlan:
+    repository = open_runtime_routing_repository(settings.webui_db_path)
+    if repository is None:
+        return _RevisionRoutingPlan(selected_runtime=requested_runtime)
+    routing = RuntimeRouting(repository)
+    task_revision = RuntimeTaskRevisionRef(
+        owner_id=user["user_id"],
+        task_id=task_id,
+        revision=revision,
+        requested_runtime=requested_runtime,
+    )
+    actor = _rollout_actor(user)
+    selected_runtime, rollout = routing.preview(task_revision, actor)
+    return _RevisionRoutingPlan(
+        selected_runtime=selected_runtime,
+        repository=repository,
+        task_revision=task_revision,
+        actor=actor,
+        rollout=rollout,
+    )
+
+
+def _prepare_runtime_binding(
+    plan: _RevisionRoutingPlan,
+    runtime_config: RuntimeTaskConfig,
+) -> tuple[
+    RuntimeVersion,
+    Callable[[sqlite3.Connection], None] | None,
+]:
+    assignment = None
+    if plan.repository is not None:
+        assert plan.task_revision is not None
+        assert plan.actor is not None
+        assert plan.rollout is not None
+        assignment = RuntimeAssignment(
+            task_revision=plan.task_revision,
+            runtime_version=plan.selected_runtime,
+            rollout_mode=plan.rollout.mode,
+            gate_snapshot_id=plan.rollout.active_gate_snapshot_id,
+            assigned_by=plan.actor.actor_id,
+            assigned_at=datetime.now(timezone.utc),
+        )
+    runtime_repository = _runtime_repository()
+
+    def bind_runtime(connection: sqlite3.Connection) -> None:
+        try:
+            if assignment is not None:
+                assert plan.repository is not None
+                plan.repository.create_assignment_in_transaction(
+                    connection,
+                    assignment,
+                )
+            runtime_repository.register_in_transaction(connection, runtime_config)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    return plan.selected_runtime, bind_runtime
 
 
 def _steering_repository() -> SqliteSteeringRepository:
@@ -863,6 +960,58 @@ async def create_task(
     user=Depends(get_current_user),
 ):
     user_id = user["user_id"]
+    idempotency_payload = payload.model_dump(mode="json")
+    task_id = f"workspace_{uuid.uuid4().hex[:16]}"
+    requested_runtime = (
+        payload.runtime_version
+        if "runtime_version" in payload.model_fields_set
+        else None
+    )
+    routing_repository = open_runtime_routing_repository(settings.webui_db_path)
+    routing_ref = None
+    rollout_actor = None
+    routing_preview = None
+    if routing_repository is not None:
+        routing_ref = RuntimeTaskRevisionRef(
+            owner_id=user_id,
+            task_id=task_id,
+            revision=1,
+            requested_runtime=requested_runtime,
+        )
+        rollout_actor = _rollout_actor(user)
+        selected_runtime, routing_preview = RuntimeRouting(
+            routing_repository
+        ).preview(routing_ref, rollout_actor)
+        if routing_preview.p0_blocked and requested_runtime is RuntimeVersion.PI:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="vNext 因 P0 回归已暂停；请创建 Legacy 任务或等待重新授权",
+            )
+        if (
+            requested_runtime is RuntimeVersion.PI
+            and selected_runtime is not RuntimeVersion.PI
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="当前 Rollout 模式未向该用户开放 vNext",
+            )
+        payload.runtime_version = selected_runtime
+        if (
+            payload.table_output_contracts
+            and selected_runtime is not RuntimeVersion.PI
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="表格输出契约只能由 Pi Runtime 执行",
+            )
+    elif (
+        payload.table_output_contracts
+        and payload.runtime_version is not RuntimeVersion.PI
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="表格输出契约只能由 Pi Runtime 执行",
+        )
     capability_catalog = None
     if payload.capability_pack_refs:
         _require_capability_gray(user)
@@ -1035,7 +1184,6 @@ async def create_task(
                 f"但界面选择了 {selected_label}；请统一后再执行。"
             ),
         )
-    task_id = f"workspace_{uuid.uuid4().hex[:16]}"
     repository = _runtime_repository()
     claimed_key = None
     if idempotency_key is not None:
@@ -1048,7 +1196,7 @@ async def create_task(
         fingerprint = hashlib.sha256(
             json.dumps(
                 {
-                    "payload": payload.model_dump(mode="json"),
+                    "payload": idempotency_payload,
                     "sources": source_refs,
                 },
                 ensure_ascii=False,
@@ -1101,6 +1249,40 @@ async def create_task(
                     else None
                 ),
             }
+    transaction_hook = None
+    if routing_repository is not None:
+        assert routing_ref is not None
+        assert rollout_actor is not None
+        assert routing_preview is not None
+    runtime_config = RuntimeTaskConfig(
+        user_id=user_id,
+        task_id=task_id,
+        revision=1,
+        runtime_version=payload.runtime_version,
+        permission_profile=payload.permission_profile,
+        model_connection_id=payload.model_connection_id,
+        model_connection_version=(
+            connection_binding.connection_version
+            if connection_binding
+            else None
+        ),
+        model_connection_model=(
+            payload.model_connection_model or connection_binding.model
+            if connection_binding
+            else None
+        ),
+        external_api_confirmed=bool(connection_binding),
+    )
+    payload.runtime_version, transaction_hook = _prepare_runtime_binding(
+        _RevisionRoutingPlan(
+            selected_runtime=payload.runtime_version,
+            repository=routing_repository,
+            task_revision=routing_ref,
+            actor=rollout_actor,
+            rollout=routing_preview,
+        ),
+        runtime_config,
+    )
     first_line = payload.objective_text.splitlines()[0].strip()
     title = first_line[:40] + ("…" if len(first_line) > 40 else "")
     store = get_store()
@@ -1120,27 +1302,7 @@ async def create_task(
                 item.model_dump(mode="json")
                 for item in payload.table_output_contracts
             ],
-        )
-        repository.register(
-            RuntimeTaskConfig(
-                user_id=user_id,
-                task_id=task_id,
-                revision=1,
-                runtime_version=payload.runtime_version,
-                permission_profile=payload.permission_profile,
-                model_connection_id=payload.model_connection_id,
-                model_connection_version=(
-                    connection_binding.connection_version
-                    if connection_binding
-                    else None
-                ),
-                model_connection_model=(
-                    payload.model_connection_model or connection_binding.model
-                    if connection_binding
-                    else None
-                ),
-                external_api_confirmed=bool(connection_binding),
-            )
+            transaction_hook=transaction_hook,
         )
         if capability_catalog is not None:
             capability_catalog.freeze_selection(
@@ -1150,6 +1312,17 @@ async def create_task(
                 pack_refs=payload.capability_pack_refs,
                 validation_target=payload.validation_target,
             )
+    except RuntimeError as exc:
+        if claimed_key:
+            repository.release_idempotency(
+                user_id,
+                claimed_key,
+                task_id=task_id,
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     except Exception:
         if claimed_key:
             repository.release_idempotency(
@@ -1515,7 +1688,7 @@ def reject_steering_revision(
 
 
 def _apply_confirmed_steering_revision(
-    user_id: str,
+    user: dict[str, Any],
     task_id: str,
     decision_id: str,
     *,
@@ -1523,6 +1696,7 @@ def _apply_confirmed_steering_revision(
 ) -> dict[str, Any]:
     """把已确认的结构化差异应用为新版本；旧版本和旧 Run 保持可追溯。"""
 
+    user_id = user["user_id"]
     repository = _steering_repository()
     decision = repository.get_decision(user_id, decision_id)
     if decision is None or decision.task_id != task_id:
@@ -1542,8 +1716,31 @@ def _apply_confirmed_steering_revision(
         task_id,
         decision.base_revision,
     )
+    routing_plan = _preview_revision_runtime(
+        user,
+        task_id=task_id,
+        revision=decision.base_revision + 1,
+        requested_runtime=(
+            previous_runtime["runtime_version"]
+            if previous_runtime
+            else RuntimeVersion.LEGACY
+        ),
+    )
+    selected_runtime = routing_plan.selected_runtime
+    if (
+        selected_runtime is not RuntimeVersion.PI
+        and task.get("table_output_contracts")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="表格输出契约只能由 Pi Runtime 执行",
+        )
     connection_binding = None
-    if previous_runtime and previous_runtime["model_connection_id"]:
+    if (
+        selected_runtime is RuntimeVersion.PI
+        and previous_runtime
+        and previous_runtime["model_connection_id"]
+    ):
         if not external_api_confirmed:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -1575,53 +1772,59 @@ def _apply_confirmed_steering_revision(
         "已确认的上下文变更（仅应用下列差异，其余语义继承）：\n"
         f"{delta.normalized_text}"
     )
-    revision = get_store().create_semantic_workspace_revision(
-        user_id,
-        task_id,
-        objective_text=objective,
-        output_formats=formats,
-        change_summary=delta.normalized_text,
+    # 路由分配是新 Revision 的线性化点；所有可预见校验必须先完成。
+    runtime_config = RuntimeTaskConfig(
+        user_id=user_id,
+        task_id=task_id,
+        revision=decision.base_revision + 1,
+        runtime_version=selected_runtime,
+        permission_profile=(
+            previous_runtime["permission_profile"]
+            if previous_runtime
+            else PermissionProfile.STANDARD
+        ),
+        model_connection_id=(
+            previous_runtime["model_connection_id"]
+            if selected_runtime is RuntimeVersion.PI and previous_runtime
+            else None
+        ),
+        model_connection_version=(
+            connection_binding.connection_version if connection_binding else None
+        ),
+        model_connection_model=(
+            previous_runtime["model_connection_model"]
+            if selected_runtime is RuntimeVersion.PI and previous_runtime
+            else None
+        ),
+        external_api_confirmed=bool(connection_binding),
     )
-    _runtime_repository().register(
-        RuntimeTaskConfig(
-            user_id=user_id,
-            task_id=task_id,
-            revision=revision["revision"],
-            runtime_version=(
-                previous_runtime["runtime_version"]
-                if previous_runtime
-                else RuntimeVersion.LEGACY
-            ),
-            permission_profile=(
-                previous_runtime["permission_profile"]
-                if previous_runtime
-                else PermissionProfile.STANDARD
-            ),
-            model_connection_id=(
-                previous_runtime["model_connection_id"]
-                if previous_runtime
-                else None
-            ),
-            model_connection_version=(
-                connection_binding.connection_version
-                if connection_binding
-                else None
-            ),
-            model_connection_model=(
-                previous_runtime["model_connection_model"]
-                if previous_runtime
-                else None
-            ),
-            external_api_confirmed=bool(connection_binding),
+    selected_runtime, transaction_hook = _prepare_runtime_binding(
+        routing_plan,
+        runtime_config,
+    )
+    try:
+        revision = get_store().create_semantic_workspace_revision(
+            user_id,
+            task_id,
+            objective_text=objective,
+            output_formats=formats,
+            change_summary=delta.normalized_text,
+            expected_revision=decision.base_revision + 1,
+            transaction_hook=transaction_hook,
         )
-    )
-    _inherit_capability_selection(
-        user_id,
-        source_task_id=task_id,
-        source_revision=proposal.base_revision,
-        target_task_id=task_id,
-        target_revision=int(revision["revision"]),
-    )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    if selected_runtime is RuntimeVersion.PI:
+        _inherit_capability_selection(
+            user_id,
+            source_task_id=task_id,
+            source_revision=proposal.base_revision,
+            target_task_id=task_id,
+            target_revision=int(revision["revision"]),
+        )
     applied = repository.update_decision(
         decision.model_copy(
             update={
@@ -1705,8 +1908,37 @@ async def decide_steering_revision(
                     status_code=422,
                     detail=f"语义草案包含不支持的输出格式：{sorted(invalid)}",
                 )
+        new_task_id = f"workspace_{uuid.uuid4().hex[:16]}"
+        routing_plan = _preview_revision_runtime(
+            user,
+            task_id=new_task_id,
+            revision=1,
+            requested_runtime=(
+                previous_runtime["runtime_version"]
+                if previous_runtime
+                else RuntimeVersion.LEGACY
+            ),
+        )
+        selected_runtime = routing_plan.selected_runtime
+        inherited_contracts = [
+            item
+            for item in task.get("table_output_contracts", [])
+            if item.get("format") in formats
+        ]
+        if (
+            selected_runtime is not RuntimeVersion.PI
+            and inherited_contracts
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="表格输出契约只能由 Pi Runtime 执行",
+            )
         connection_binding = None
-        if previous_runtime and previous_runtime["model_connection_id"]:
+        if (
+            selected_runtime is RuntimeVersion.PI
+            and previous_runtime
+            and previous_runtime["model_connection_id"]
+        ):
             if not payload.external_api_confirmed:
                 raise HTTPException(
                     status_code=422,
@@ -1722,67 +1954,69 @@ async def decide_steering_revision(
                     status_code=404,
                     detail="模型连接不存在或无权访问",
                 ) from exc
-        new_task_id = f"workspace_{uuid.uuid4().hex[:16]}"
-        new_task = get_store().create_semantic_workspace_task(
-            user_id,
+        # 新任务的格式、权限与外发确认通过后才冻结 Runtime 分配。
+        runtime_config = RuntimeTaskConfig(
+            user_id=user_id,
             task_id=new_task_id,
-            title=f"{task['title']}（独立任务）",
-            objective_text=(
-                f"{task['objective_text']}\n\n"
-                "已确认的独立任务差异：\n"
-                f"{delta.normalized_text}"
+            revision=1,
+            runtime_version=selected_runtime,
+            permission_profile=(
+                previous_runtime["permission_profile"]
+                if previous_runtime
+                else PermissionProfile.STANDARD
             ),
-            upload_ids=task["upload_ids"],
-            output_formats=formats,
-            provider=task["provider"],
-            model=task["model"],
+            model_connection_id=(
+                previous_runtime["model_connection_id"]
+                if selected_runtime is RuntimeVersion.PI and previous_runtime
+                else None
+            ),
+            model_connection_version=(
+                connection_binding.connection_version
+                if connection_binding
+                else None
+            ),
+            model_connection_model=(
+                previous_runtime["model_connection_model"]
+                if selected_runtime is RuntimeVersion.PI and previous_runtime
+                else None
+            ),
             external_api_confirmed=bool(connection_binding),
-            table_output_contracts=[
-                item
-                for item in task.get("table_output_contracts", [])
-                if item.get("format") in formats
-            ],
         )
-        _runtime_repository().register(
-            RuntimeTaskConfig(
-                user_id=user_id,
+        selected_runtime, transaction_hook = _prepare_runtime_binding(
+            routing_plan,
+            runtime_config,
+        )
+        try:
+            new_task = get_store().create_semantic_workspace_task(
+                user_id,
                 task_id=new_task_id,
-                revision=1,
-                runtime_version=(
-                    previous_runtime["runtime_version"]
-                    if previous_runtime
-                    else RuntimeVersion.LEGACY
+                title=f"{task['title']}（独立任务）",
+                objective_text=(
+                    f"{task['objective_text']}\n\n"
+                    "已确认的独立任务差异：\n"
+                    f"{delta.normalized_text}"
                 ),
-                permission_profile=(
-                    previous_runtime["permission_profile"]
-                    if previous_runtime
-                    else PermissionProfile.STANDARD
-                ),
-                model_connection_id=(
-                    previous_runtime["model_connection_id"]
-                    if previous_runtime
-                    else None
-                ),
-                model_connection_version=(
-                    connection_binding.connection_version
-                    if connection_binding
-                    else None
-                ),
-                model_connection_model=(
-                    previous_runtime["model_connection_model"]
-                    if previous_runtime
-                    else None
-                ),
+                upload_ids=task["upload_ids"],
+                output_formats=formats,
+                provider=task["provider"],
+                model=task["model"],
                 external_api_confirmed=bool(connection_binding),
+                table_output_contracts=inherited_contracts,
+                transaction_hook=transaction_hook,
             )
-        )
-        _inherit_capability_selection(
-            user_id,
-            source_task_id=task_id,
-            source_revision=proposal.base_revision,
-            target_task_id=new_task_id,
-            target_revision=1,
-        )
+        except RuntimeError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+        if selected_runtime is RuntimeVersion.PI:
+            _inherit_capability_selection(
+                user_id,
+                source_task_id=task_id,
+                source_revision=proposal.base_revision,
+                target_task_id=new_task_id,
+                target_revision=1,
+            )
         applied = repository.update_decision(
             decision.model_copy(
                 update={
@@ -1822,7 +2056,7 @@ async def decide_steering_revision(
     if task["status"] not in _TERMINAL:
         await get_semantic_workspace_manager().cancel(user_id, task_id)
     response = _apply_confirmed_steering_revision(
-        user_id,
+        user,
         task_id,
         decision.decision_id,
         external_api_confirmed=payload.external_api_confirmed,
@@ -1903,19 +2137,53 @@ async def create_revision(
         task_id,
         int(task["active_revision"]),
     )
+    expected_revision = int(task["active_revision"]) + 1
+    formats = (
+        list(payload.output_formats)
+        if payload.output_formats is not None
+        else task["output_formats"]
+    )
     if (
-        payload.table_output_contracts
-        and (
-            previous_runtime is None
-            or previous_runtime["runtime_version"] is not RuntimeVersion.PI
+        payload.table_output_contracts is not None
+        and not {
+            item.format for item in payload.table_output_contracts
+        }.issubset(formats)
+    ):
+        # 继承旧格式时也必须现场核对，不能把错配契约写入不可变 Revision。
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="表格输出契约必须绑定正式输出格式",
         )
+    routing_plan = _preview_revision_runtime(
+        user,
+        task_id=task_id,
+        revision=expected_revision,
+        requested_runtime=(
+            previous_runtime["runtime_version"]
+            if previous_runtime
+            else RuntimeVersion.LEGACY
+        ),
+    )
+    selected_runtime = routing_plan.selected_runtime
+    effective_contracts = (
+        payload.table_output_contracts
+        if payload.table_output_contracts is not None
+        else task.get("table_output_contracts", [])
+    )
+    if (
+        effective_contracts
+        and selected_runtime is not RuntimeVersion.PI
     ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="表格输出契约只能由 Pi Runtime 执行",
         )
     connection_binding = None
-    if previous_runtime and previous_runtime["model_connection_id"]:
+    if (
+        selected_runtime is RuntimeVersion.PI
+        and previous_runtime
+        and previous_runtime["model_connection_id"]
+    ):
         if not payload.external_api_confirmed:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -1939,80 +2207,75 @@ async def create_revision(
     }:
         await get_semantic_workspace_manager().cancel(user_id, task_id)
         task = _task_or_404(user_id, task_id)
-    formats = (
-        list(payload.output_formats)
-        if payload.output_formats is not None
-        else task["output_formats"]
-    )
-    if (
-        payload.table_output_contracts is not None
-        and not {
-            item.format for item in payload.table_output_contracts
-        }.issubset(formats)
-    ):
-        # 继承旧格式时也必须现场核对，不能把错配契约写入不可变 Revision。
+    if int(task["active_revision"]) + 1 != expected_revision:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="表格输出契约必须绑定正式输出格式",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="活动版本已变化，请重新提交 Revision",
         )
     objective = (
         f"{task['objective_text']}\n用户修改要求：{payload.instruction}"
     )
-    revision = get_store().create_semantic_workspace_revision(
-        user_id,
-        task_id,
-        objective_text=objective,
-        output_formats=formats,
-        change_summary=payload.instruction,
-        table_output_contracts=(
-            [
-                item.model_dump(mode="json")
-                for item in payload.table_output_contracts
-            ]
-            if payload.table_output_contracts is not None
+    # 取消旧 Run 和全部输入校验完成后，再用 Rollout CAS 冻结本版本。
+    runtime_config = RuntimeTaskConfig(
+        user_id=user_id,
+        task_id=task_id,
+        revision=expected_revision,
+        runtime_version=selected_runtime,
+        permission_profile=(
+            previous_runtime["permission_profile"]
+            if previous_runtime
+            else PermissionProfile.STANDARD
+        ),
+        model_connection_id=(
+            previous_runtime["model_connection_id"]
+            if selected_runtime is RuntimeVersion.PI and previous_runtime
             else None
         ),
+        model_connection_version=(
+            connection_binding.connection_version if connection_binding else None
+        ),
+        model_connection_model=(
+            previous_runtime["model_connection_model"]
+            if selected_runtime is RuntimeVersion.PI and previous_runtime
+            else None
+        ),
+        external_api_confirmed=bool(connection_binding),
     )
-    _runtime_repository().register(
-        RuntimeTaskConfig(
-            user_id=user_id,
-            task_id=task_id,
-            revision=revision["revision"],
-            runtime_version=(
-                previous_runtime["runtime_version"]
-                if previous_runtime
-                else RuntimeVersion.LEGACY
-            ),
-            permission_profile=(
-                previous_runtime["permission_profile"]
-                if previous_runtime
-                else PermissionProfile.STANDARD
-            ),
-            model_connection_id=(
-                previous_runtime["model_connection_id"]
-                if previous_runtime
+    selected_runtime, transaction_hook = _prepare_runtime_binding(
+        routing_plan,
+        runtime_config,
+    )
+    try:
+        revision = get_store().create_semantic_workspace_revision(
+            user_id,
+            task_id,
+            objective_text=objective,
+            output_formats=formats,
+            change_summary=payload.instruction,
+            table_output_contracts=(
+                [
+                    item.model_dump(mode="json")
+                    for item in payload.table_output_contracts
+                ]
+                if payload.table_output_contracts is not None
                 else None
             ),
-            model_connection_version=(
-                connection_binding.connection_version
-                if connection_binding
-                else None
-            ),
-            model_connection_model=(
-                previous_runtime["model_connection_model"]
-                if previous_runtime
-                else None
-            ),
-            external_api_confirmed=bool(connection_binding),
+            expected_revision=expected_revision,
+            transaction_hook=transaction_hook,
         )
-    )
-    _inherit_capability_selection(
-        user_id,
-        source_task_id=task_id,
-        source_revision=int(task["active_revision"]),
-        target_task_id=task_id,
-        target_revision=int(revision["revision"]),
-    )
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    if selected_runtime is RuntimeVersion.PI:
+        _inherit_capability_selection(
+            user_id,
+            source_task_id=task_id,
+            source_revision=int(task["active_revision"]),
+            target_task_id=task_id,
+            target_revision=int(revision["revision"]),
+        )
     get_store().append_semantic_workspace_event(
         user_id,
         task_id,

@@ -2,7 +2,7 @@
 
 > 文档用途：写给完全没有历史对话的新会话
 >
-> 最后现场核验：2026-08-22（G2 Office 3/3 + AC-05 生产迁移用户验收后）
+> 最后现场核验：2026-08-22（G3 本地工程门与测试库迁移演练后）
 >
 > 当前分支：`codex/g1-independent-evaluation`；正式评测绑定的代码基线 = `83fe3f70`；
 > 当前 G2 Office 代码提交：`31729495`；AC-05 生产迁移代码提交：`235459a3`；
@@ -20,8 +20,9 @@ Mangrove 正在把「能运行的个人能力」推进为「证据完整、可�
 AC-07 主线 #9-#17 已全部真实完成并关闭（两条纵切面 + 兼容切换，PR #30/#33/#34）。
 **当前任务：Phase 4 剩余门**——G1 v3 本地正式运行已取得合格资格；G2 Office 已完成真实
 Word/Excel 各连续 3/3，AC-05 带备份生产迁移、恢复副本、真实 Docker 探针与用户验收已通过；
-G3 GateSnapshot + 默认入口切换尚未开始，切换动作仍需独立实现与
-用户授权。G4 已有平台配置的 DeepSeek/Qwen 连接，但真实
+G3 GateSnapshot、累计硬门、P0 自动回退和分阶段 Rollout 已完成本地工程实现、测试库迁移
+演练、双轴终审与本地提交，但生产库未迁移、生产默认未切换、8088 未验收。G4 已有平台
+配置的 DeepSeek/Qwen 连接，但真实
 外部 Provider 安全矩阵未执行；G5（8B/Linux 服务器）仍未就绪。
 **G1 确定结论：DeepSeek V4 Flash 在 36 题 v3 独立集上功能 30/31、安全 5/5，资格 PASS。**
 31 个功能候选均形成正式 Delivery 并通过 QA；独立 oracle 拒绝 G103-F27「业务值或行序错误」。
@@ -68,8 +69,8 @@ E:/python3.13/python.exe -X utf8 evals/generalization-g1/run_g1.py --dry-run
 - 平台签名密钥在 `~/.mangrove-signing/`（项目外，加密 Sigstore），`.env` 已配置（gitignored）；
 - G1 v3 正式结果在 `evals/generalization-g1/runs/independent-v3/`（gitignored，不提交）；
   功能 30/31、安全 5/5、资格 PASS。旧 `runs/g1-*.json` 只保留为诊断历史。
-- G2 Office 代码提交为 `31729495`；真实 Word/Excel 各 3/3 PASS。工作树仍保留 10 个 G1
-  post-commit 冻结元数据文件，不得混入 G2 或状态文档提交。
+- G2 Office 代码提交为 `31729495`；真实 Word/Excel 各 3/3 PASS。G3 已按明确文件白名单
+  完成本地提交；工作树仍只保留 10 个 G1 post-commit 冻结元数据文件，未混入 G3 提交。
 - AC-05 生产迁移代码提交为 `235459a3`；恢复点为
   `data/backups/webui-before-ac05-20260822-072340.db`，生产任务记录为 0，8088 健康。
 
@@ -101,7 +102,7 @@ admin_gray 发布 → 运行时三轴治理门 → 弃用/回滚/隔离/撤销/�
 
 - **G1**：30 项泛化集（evaluation-spec §5）——正式交付正确率 ≥90%、安全/失败 100%；
 - **G2**：PG-05 收口——Word/Excel 连续 3/3 + AC-05 依赖获取状态机生产迁移与验收；
-- **G3**：Rollout P0 GateSnapshot + P0 自动阻断 + 默认入口切换（切换需用户单独授权）；
+- **G3**：本地工程门已通过；生产迁移、生产 Rollout 切换和 8088 验收仍是独立授权门；
 - **G4/G5 挂起**：平台已有可用 DeepSeek/Qwen 连接，但 G4 安全矩阵尚未获准执行；8B/Linux
   目标服务器未就绪（2026-08-20 确认，不得表述为已完成）。
 
@@ -209,8 +210,6 @@ Runtime、驱动与 Git commit，并拒绝跨快照 `--verify-only`。旧报告�
 ### 4.2 当前本地提交与工作树
 
 ```text
- M docs/status/current.md
- M handoff.md
  M evals/generalization-g1-independent/freeze.json
  M evals/generalization-g1-independent/heldout_manifest.json
  M evals/generalization-g1-independent/self-check-report.json
@@ -224,9 +223,10 @@ Runtime、驱动与 Git commit，并拒绝跨快照 `--verify-only`。旧报告�
 ```
 
 G1 生产代码与 v3 盲集已本地提交：`55ca58aa`、`e576a67d`、`8538481a`、`83fe3f70`。
-上述未提交 JSON 是运行前后冻结/自检元数据；提交会再次改变 Git 身份，因此正式 runner 明确
-只允许这些路径在 post-commit 重绑定后保持 dirty。`runs/` 为 gitignored 正式证据目录。
-尚未推送、建 PR 或更新 Issue；这些远端动作仍需用户分别授权。
+上述未提交 JSON 是 G1 运行前后冻结/自检元数据；提交会再次改变 Git 身份，因此正式 runner
+明确只允许这些路径在 post-commit 重绑定后保持 dirty。G3 已使用明确路径白名单完成本地
+提交，10 个 G1 JSON 未被暂存。`runs/` 为 gitignored 正式证据目录。尚未推送、建 PR 或更新
+Issue；生产迁移与远端动作仍需用户分别授权。
 
 ### 4.3 其他开放事实
 
@@ -261,8 +261,15 @@ G1 生产代码与 v3 盲集已本地提交：`55ca58aa`、`e576a67d`、`8538481
 
 ### G3 GateSnapshot + 默认入口切换
 
-- Rollout GateSnapshot、P0 自动阻断、默认切换（D3 状态机、ADR-0019）；
-- **切换动作本身需用户单独授权**（Issue #39 已注明）。
+- 已实现不可变 GateSnapshot、累计硬门有效资格、独立 Approval、对比审计和
+  `admin_gray → explicit_opt_in → vnext_default` 状态机；P0 自动进入 `legacy_rollback`；
+- 新 Task/Revision 的 semantic 记录、活动指针、Runtime assignment 与 RuntimeTaskConfig
+  同一 SQLite 事务提交；422、重复、并发、锁超时和故障注入均失败关闭；
+- 测试库显式迁移/回放、真实 Publisher P0 零改写保护、Steering/Safe Point 回归已通过；
+  Standards/Spec 终审均无仍可复现问题；排除 G1 冻结身份漂移与测试域名 DNS 两项既有
+  基线后，全仓后端 `1762 passed, 5 skipped, 2 deselected`；
+- **尚未执行**：生产 `data/webui.db` 迁移、生产 Rollout 切换、8088 用户验收、推送、
+  Issue #39 更新。G3 已完成本地提交；生产动作必须再次单独授权。
 
 ### 生产资格审计（G1-G3 后收口）
 
@@ -284,7 +291,7 @@ G1 生产代码与 v3 盲集已本地提交：`55ca58aa`、`e576a67d`、`8538481
 | 新 #37 | G1：30 项泛化集 | OPEN（本地正式资格 PASS；尚未更新远端工单） |
 | 新 #40 | G1 修复：盲保留集与正式 Delivery 验收链 | OPEN（本地提交与正式资格 PASS；尚未推送/更新工单） |
 | 新 #38 | G2：PG-05 收口 | OPEN（本地实现、生产迁移和用户验收 PASS；待远端更新授权） |
-| 新 #39 | G3：GateSnapshot + 默认入口切换 | OPEN（未开始） |
+| 新 #39 | G3：GateSnapshot + 默认入口切换 | OPEN（本地工程门与本地提交 PASS；未生产迁移/推送） |
 
 AC-07 历史（全部 CLOSED）：新 #9-#17 + 父 #8；旧仓库 #33-#35（历史）。
 
@@ -292,8 +299,8 @@ AC-07 历史（全部 CLOSED）：新 #9-#17 + 父 #8；旧仓库 #33-#35（历�
 
 1. **AC-07 已完成**：#9-#17 全部真实完成并关闭（PR #30/#33/#34 + #35 文档同步）。
 2. **Phase 4 剩余门（当前）**：#40 G1 本地工程门资格 PASS；G2 Office 3/3、AC-05 生产
-   迁移和用户验收 PASS；G3 GateSnapshot + 默认入口切换仍未实现且切换需用户单独授权；
-   G4/G5 挂起。
+   迁移和用户验收 PASS；G3 本地工程门 PASS，但生产迁移、默认切换、8088 验收与提交发布
+   均未执行；G4/G5 挂起。
 3. **生产资格审计**：G1-G3 后收口（回归/权限/备份/可观测性/文档一致性/用户验收）。
 4. **明确未完成/后置**：普通用户平台能力开放、远程 MCP/Secret、Registry 自动发现、
    AC-08/AC-09、Phase 4C（图片/音频/视频）、Phase 5A/B、多租户、大规模分布式执行。

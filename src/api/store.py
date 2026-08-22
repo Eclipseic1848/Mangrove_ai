@@ -18,7 +18,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS users (
@@ -3081,10 +3081,12 @@ class WebUIStore:
         external_api_confirmed: bool,
         source_refs: List[Dict[str, str]] | None = None,
         table_output_contracts: List[Dict[str, Any]] | None = None,
+        transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     ) -> Dict[str, Any]:
         now = _now()
         with self._lock, self._conn() as conn:
             try:
+                conn.execute("BEGIN IMMEDIATE")
                 conn.execute(
                     "INSERT INTO semantic_workspace_tasks "
                     "(task_id, user_id, title, objective_text, "
@@ -3133,8 +3135,14 @@ class WebUIStore:
                         now,
                     ),
                 )
+                if transaction_hook is not None:
+                    transaction_hook(conn)
             except sqlite3.IntegrityError as exc:
                 raise ValueError("工作台任务已存在，禁止覆盖") from exc
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower():
+                    raise RuntimeError("工作台数据库繁忙，请稍后重试") from exc
+                raise
         saved = self.get_semantic_workspace_task(user_id, task_id)
         assert saved is not None
         return saved
@@ -3292,69 +3300,83 @@ class WebUIStore:
         output_formats: List[str],
         change_summary: str,
         table_output_contracts: List[Dict[str, Any]] | None = None,
+        expected_revision: int | None = None,
+        transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     ) -> Dict[str, Any]:
-        task = self.get_semantic_workspace_task(user_id, task_id)
-        if task is None:
-            raise KeyError("工作台任务不存在或无权访问")
-        if table_output_contracts is None:
-            table_output_contracts = [
-                item
-                for item in task.get("table_output_contracts", [])
-                if item.get("format") in output_formats
-            ]
-        revision = int(task["active_revision"]) + 1
         now = _now()
         with self._lock, self._conn() as conn:
-            conn.execute(
-                "INSERT INTO semantic_workspace_revisions "
-                "(task_id, revision, user_id, objective_text, "
-                "output_formats_json, table_output_contracts_json, "
-                "status, change_summary, "
-                "created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
-                (
-                    task_id,
-                    revision,
-                    user_id,
-                    objective_text,
-                    json.dumps(output_formats, ensure_ascii=False),
-                    json.dumps(
-                        table_output_contracts or [],
-                        ensure_ascii=False,
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                if "locked" in str(exc).lower():
+                    raise RuntimeError("工作台数据库繁忙，请稍后重试") from exc
+                raise
+            row = conn.execute(
+                "SELECT * FROM semantic_workspace_tasks "
+                "WHERE user_id=? AND task_id=?",
+                (user_id, task_id),
+            ).fetchone()
+            task = self._semantic_workspace_task_row(row)
+            if task is None:
+                raise KeyError("工作台任务不存在或无权访问")
+            revision = int(task["active_revision"]) + 1
+            if expected_revision is not None and revision != expected_revision:
+                raise RuntimeError("活动版本已变化，禁止创建路由错配的 Revision")
+            frozen_contracts = table_output_contracts
+            if frozen_contracts is None:
+                frozen_contracts = [
+                    item
+                    for item in task.get("table_output_contracts", [])
+                    if item.get("format") in output_formats
+                ]
+            try:
+                conn.execute(
+                    "INSERT INTO semantic_workspace_revisions "
+                    "(task_id, revision, user_id, objective_text, "
+                    "output_formats_json, table_output_contracts_json, "
+                    "status, change_summary, "
+                    "created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
+                    (
+                        task_id,
+                        revision,
+                        user_id,
+                        objective_text,
+                        json.dumps(output_formats, ensure_ascii=False),
+                        json.dumps(frozen_contracts or [], ensure_ascii=False),
+                        change_summary,
+                        now,
+                        now,
                     ),
-                    change_summary,
-                    now,
-                    now,
-                ),
-            )
-            # revision 行和任务活动指针必须同事务提交；任何一步失败都回滚，
-            # 否则用户会看到无法恢复的“半个新版本”。
-            cursor = conn.execute(
-                "UPDATE semantic_workspace_tasks SET objective_text=?, "
-                "output_formats_json=?, table_output_contracts_json=?, "
-                "active_revision=?, status='queued', "
-                "plan_id=?, logical_revision=NULL, binding_revision=NULL, "
-                "run_id=NULL, summary='', error=NULL, failure_json=NULL, "
-                "question_json=NULL, cancel_requested=0, deleted_at=NULL, "
-                "purge_after=NULL, updated_at=? "
-                "WHERE user_id=? AND task_id=? AND active_revision=?",
-                (
-                    objective_text,
-                    json.dumps(output_formats, ensure_ascii=False),
-                    json.dumps(
-                        table_output_contracts or [],
-                        ensure_ascii=False,
+                )
+                # revision、活动指针和 Runtime assignment 必须同事务提交。
+                cursor = conn.execute(
+                    "UPDATE semantic_workspace_tasks SET objective_text=?, "
+                    "output_formats_json=?, table_output_contracts_json=?, "
+                    "active_revision=?, status='queued', "
+                    "plan_id=?, logical_revision=NULL, binding_revision=NULL, "
+                    "run_id=NULL, summary='', error=NULL, failure_json=NULL, "
+                    "question_json=NULL, cancel_requested=0, deleted_at=NULL, "
+                    "purge_after=NULL, updated_at=? "
+                    "WHERE user_id=? AND task_id=? AND active_revision=?",
+                    (
+                        objective_text,
+                        json.dumps(output_formats, ensure_ascii=False),
+                        json.dumps(frozen_contracts or [], ensure_ascii=False),
+                        revision,
+                        task["plan_id"],
+                        now,
+                        user_id,
+                        task_id,
+                        revision - 1,
                     ),
-                    revision,
-                    task["plan_id"],
-                    now,
-                    user_id,
-                    task_id,
-                    revision - 1,
-                ),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError("活动版本已变化，禁止创建半应用 Revision")
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError("活动版本已变化，禁止创建半应用 Revision")
+                if transaction_hook is not None:
+                    transaction_hook(conn)
+            except sqlite3.IntegrityError as exc:
+                raise RuntimeError("活动版本已并发变化，Revision 未创建") from exc
         saved = self.get_semantic_workspace_revision(
             user_id, task_id, revision
         )

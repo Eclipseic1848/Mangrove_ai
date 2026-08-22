@@ -278,6 +278,7 @@ class TestD9SelectionMarker:
 class TestD9CreateTaskApi:
     def _prepare(self, tmp_path, monkeypatch, *, owner_id: str = "user-a"):
         """装配真实 sqlite 目录 + 个人 draft 包，返回 (client, pack_ref)。"""
+        import src.api.auth as auth_mod
         from src.capability_catalog import SqliteCapabilityCatalogRepository
 
         monkeypatch.setattr(
@@ -290,6 +291,7 @@ class TestD9CreateTaskApi:
             settings, "semantic_execution_root", str(tmp_path / "executions")
         )
         monkeypatch.setattr(settings, "pi_capability_host_enabled", True)
+        monkeypatch.setattr(auth_mod, "_store", None)
         repository = SqliteCapabilityCatalogRepository(settings.webui_db_path)
         actor = CatalogActor(owner_id=owner_id, role="admin")
         pack = CapabilityPack(

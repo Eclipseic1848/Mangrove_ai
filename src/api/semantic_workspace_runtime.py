@@ -47,6 +47,7 @@ from src.delivery_publishing.models import PublicationGate
 from src.delivery_publishing.pi_adapter import PiCandidateAdapter
 from src.delivery_publishing.repository import DeliveryPublishingRepository
 from src.delivery_publishing.service import DeliveryPublisher
+from src.runtime_routing import runtime_routing_is_p0_blocked
 from src.semantic_harness.compiler_models import ClarificationResolution
 from src.semantic_harness.harness_models import HarnessResume
 from src.semantic_harness.inspectors import UploadSourceInspector
@@ -742,12 +743,12 @@ class SemanticWorkspaceManager:
 
         def publication_gate(_command) -> PublicationGate:
             current = store.get_semantic_workspace_task(user_id, task_id)
-            # Rollout P0 状态尚未实施；保留显式门位，不能由 Agent 自行传值。
+            # 迁移激活后只读中央 Rollout；Agent 与发布命令都不能覆盖 P0 结论。
             return PublicationGate(
                 cancel_requested=bool(
                     current and current.get("cancel_requested")
                 ),
-                p0_blocked=False,
+                p0_blocked=runtime_routing_is_p0_blocked(settings.webui_db_path),
             )
 
         publisher = DeliveryPublisher(
@@ -877,7 +878,8 @@ class SemanticWorkspaceManager:
         )
 
         _apply_confirmed_steering_revision(
-            user_id,
+            get_store().get_user(user_id)
+            or {"user_id": user_id, "role": "user"},
             task_id,
             decision.decision_id,
             external_api_confirmed=decision.external_api_confirmed,

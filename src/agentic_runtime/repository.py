@@ -279,68 +279,77 @@ class AgenticRuntimeRepository:
             )
 
     def register(self, config: RuntimeTaskConfig) -> dict[str, Any]:
-        now = _now()
         with _LOCK, self._conn() as conn:
-            conn.execute(
-                """
-                INSERT INTO agentic_runtime_runs (
-                    user_id, task_id, revision, runtime_version,
-                    permission_profile, model_connection_id,
-                    model_connection_version, model_connection_model,
-                    external_api_confirmed, status,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id, task_id, revision) DO NOTHING
-                """,
-                (
-                    config.user_id,
-                    config.task_id,
-                    config.revision,
-                    config.runtime_version.value,
-                    config.permission_profile.value,
-                    config.model_connection_id,
-                    config.model_connection_version,
-                    config.model_connection_model,
-                    int(config.external_api_confirmed),
-                    RuntimeStatus.QUEUED.value,
-                    now,
-                    now,
-                ),
-            )
-            row = conn.execute(
-                """
-                SELECT runtime_version, permission_profile,
-                       model_connection_id, model_connection_version,
-                       model_connection_model,
-                       external_api_confirmed
-                FROM agentic_runtime_runs
-                WHERE user_id=? AND task_id=? AND revision=?
-                """,
-                (config.user_id, config.task_id, config.revision),
-            ).fetchone()
-            assert row is not None
-            frozen = (
-                row["runtime_version"],
-                row["permission_profile"],
-                row["model_connection_id"],
-                row["model_connection_version"],
-                row["model_connection_model"],
-                bool(row["external_api_confirmed"]),
-            )
-            requested = (
+            self.register_in_transaction(conn, config)
+        saved = self.get(config.user_id, config.task_id, config.revision)
+        assert saved is not None
+        return saved
+
+    def register_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        config: RuntimeTaskConfig,
+    ) -> None:
+        """在调用方事务内冻结运行配置；本方法不得自行提交。"""
+
+        now = _now()
+        connection.execute(
+            """
+            INSERT INTO agentic_runtime_runs (
+                user_id, task_id, revision, runtime_version,
+                permission_profile, model_connection_id,
+                model_connection_version, model_connection_model,
+                external_api_confirmed, status,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, task_id, revision) DO NOTHING
+            """,
+            (
+                config.user_id,
+                config.task_id,
+                config.revision,
                 config.runtime_version.value,
                 config.permission_profile.value,
                 config.model_connection_id,
                 config.model_connection_version,
                 config.model_connection_model,
-                config.external_api_confirmed,
-            )
-            if frozen != requested:
-                # RuntimeAssignment 属于不可变 TaskRevision，变化必须创建新修订。
-                raise ValueError("同一 Runtime revision 的冻结配置不可修改")
-        saved = self.get(config.user_id, config.task_id, config.revision)
-        assert saved is not None
-        return saved
+                int(config.external_api_confirmed),
+                RuntimeStatus.QUEUED.value,
+                now,
+                now,
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT runtime_version, permission_profile,
+                   model_connection_id, model_connection_version,
+                   model_connection_model,
+                   external_api_confirmed
+            FROM agentic_runtime_runs
+            WHERE user_id=? AND task_id=? AND revision=?
+            """,
+            (config.user_id, config.task_id, config.revision),
+        ).fetchone()
+        assert row is not None
+        frozen = (
+            row["runtime_version"],
+            row["permission_profile"],
+            row["model_connection_id"],
+            row["model_connection_version"],
+            row["model_connection_model"],
+            bool(row["external_api_confirmed"]),
+        )
+        requested = (
+            config.runtime_version.value,
+            config.permission_profile.value,
+            config.model_connection_id,
+            config.model_connection_version,
+            config.model_connection_model,
+            config.external_api_confirmed,
+        )
+        if frozen != requested:
+            # RuntimeAssignment 属于不可变 TaskRevision，变化必须创建新修订。
+            raise ValueError("同一 Runtime revision 的冻结配置不可修改")
 
     def get(
         self,

@@ -55,7 +55,8 @@ TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍
 - G2 PG-05 已完成：Word/Excel 连续 3/3；AC-05 带备份生产迁移、恢复副本状态机、真实
   Docker 探针及用户验收均通过。该结论不代表 Phase 4、平台发布或普通用户开放完成。
 - 真实外部 Provider 的 Pi→Relay→Provider 安全端到端验证。
-- Rollout P0 GateSnapshot 和默认入口切换。
+- G3 Rollout P0 GateSnapshot、累计硬门、P0 自动回退与分阶段默认切换已完成本地工程实现、
+  测试库迁移/回放及双轴复审；生产库迁移、生产默认切换、8088 用户验收和远端发布均未执行。
 - 远程 MCP/Secret、Registry 自动发现、平台能力普通用户开放。
 - 8B Linux/Compose/并发/故障与目标服务器验证。
 
@@ -374,12 +375,29 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
   冻结挂载、取消、重试和崩溃恢复通过且残留为 0；8088 重启健康；用户明确确认 G2 验收
   通过。Issue #38 仍为 OPEN，等待单独授权的远端更新；Phase 4 仍未完成。
 
+2026-08-22，G3 GateSnapshot 与 P0 回退完成本地工程门：
+
+- 新增不可变 GateSnapshot、累计 Gate 有效资格、对比审计、独立 Approval 与 Rollout 状态机；
+  删除历史硬门、P0 失败或快照漂移均失败关闭，合格快照不会自动解除回退；
+- 新任务与所有 Revision 路径先预览、完成权限/契约/外发校验，再在同一 SQLite 事务冻结
+  semantic task/revision、活动指针、Runtime assignment 与 RuntimeTaskConfig；重复、并发、
+  锁超时和中途异常不会留下半状态；
+- Delivery Publisher 在 G3 激活后读取中央 P0 状态，P0 下拒绝新正式发布，并已验证既有
+  Delivery 数据库行和文件字节零改写；
+- 显式迁移要求一致性备份、Schema/DDL digest、首次备份 SHA-256 与逻辑指纹，迁移前保持
+  Legacy 路径，迁移后畸形对象失败关闭；相关 API/Publisher/Steering/Workspace 回归
+  `88 passed`，Agentic Runtime 与原子故障聚焦回归 `79 passed`，Standards/Spec 终审均
+  无仍可复现问题；排除已确认的 G1 冻结身份漂移与测试域名 DNS 两项基线后，全仓后端
+  `1762 passed, 5 skipped, 2 deselected`；
+- 以上只在临时测试库执行。G3 工程代码已完成本地提交；生产 `data/webui.db` 未迁移，生产
+  Rollout 未切换，8088 未做 G3 用户验收，代码未推送，Issue #39 未更新；Phase 4 仍未完成。
+
 ## 7. 当前优先顺序
 
 1. **#40 G1 本地工程门已达标**：v3 正式结果功能 96.8%、安全 100%，资格 PASS；下一步是
    在用户单独授权后更新/关闭 Issue、推送分支并建 PR。当前本地结果不得冒充远端工单已完成。
-2. **G2 已通过、G3 未开工**：G2 Office 3/3、AC-05 生产迁移/恢复/真实探针和用户验收均已
-   通过；G3 默认入口切换仍需独立规格、实现与用户授权。
+2. **G2 已通过、G3 本地工程门与本地提交已通过**：G3 代码、测试库迁移/回放、P0 回退、
+   原子路由与双轴复审已完成；下一门是单独决定生产迁移和 Rollout 切换。
 3. **G4/G5 未完成**：平台现有外部 Qwen/DeepSeek 连接已用于 G1 P1 对照，但 G4 安全矩阵
    未执行；8B Linux/Compose 与目标服务器仍未就绪。
 

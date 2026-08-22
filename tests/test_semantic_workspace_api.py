@@ -9,6 +9,7 @@ from datetime import datetime, timedelta
 import io
 import json
 from pathlib import Path
+import threading
 import time
 import zipfile
 
@@ -87,6 +88,58 @@ def test_workspace_revision_freezes_table_output_contract(tmp_path: Path) -> Non
     assert revision is not None
     assert revision["table_output_contracts"] == contract
     assert revised["table_output_contracts"] == contract
+
+
+def test_concurrent_revision_uses_transactional_expected_revision(
+    tmp_path: Path,
+) -> None:
+    store = WebUIStore(str(tmp_path / "workspace-revision-race.db"))
+    store.create_semantic_workspace_task(
+        "user-a",
+        task_id="workspace-race",
+        title="并发版本",
+        objective_text="初始目标",
+        upload_ids=[],
+        output_formats=["json"],
+        provider="local",
+        model="local-model",
+        external_api_confirmed=False,
+    )
+    barrier = threading.Barrier(2)
+    outcomes: list[str] = []
+
+    def create_revision(instruction: str) -> None:
+        barrier.wait()
+        try:
+            store.create_semantic_workspace_revision(
+                "user-a",
+                "workspace-race",
+                objective_text=instruction,
+                output_formats=["json"],
+                change_summary=instruction,
+                expected_revision=2,
+            )
+        except RuntimeError:
+            outcomes.append("conflict")
+        else:
+            outcomes.append("created")
+
+    threads = [
+        threading.Thread(target=create_revision, args=(f"修改-{index}",))
+        for index in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert sorted(outcomes) == ["conflict", "created"]
+    task = store.get_semantic_workspace_task("user-a", "workspace-race")
+    assert task is not None
+    assert task["active_revision"] == 2
+    assert store.get_semantic_workspace_revision(
+        "user-a", "workspace-race", 3
+    ) is None
 
 
 def _client(tmp_path, monkeypatch, *, generator=None):
