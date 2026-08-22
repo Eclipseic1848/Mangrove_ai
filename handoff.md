@@ -2,28 +2,27 @@
 
 > 文档用途：写给完全没有历史对话的新会话
 >
-> 最后现场核验：2026-08-20（会话中途交接）
+> 最后现场核验：2026-08-21（G1 v3 正式运行后）
 >
-> 当前分支：`main`；HEAD = `37cda72a`（#35 文档同步合并）；**工作树有未提交变更**（见 §4.2）
+> 当前分支：`codex/g1-independent-evaluation`；正式评测绑定的代码基线 = `83fe3f70`；
+> 当前 HEAD 以现场 `git rev-parse HEAD` 为准（状态文档收口提交可位于其后，见 §4.2）
 >
 > 公开远端：`origin` → `https://github.com/Eclipseic1848/Mangrove_ai.git`
 >
-> 当前阶段：**Phase 4 剩余门 #40 G1 修复执行中**；旧 G1 诊断为 NOT_QUALIFIED，当前
-> 已实现真实 Publisher/QA 计分、强断言和清单资格失败关闭；36 题独立盲保留集与五类安全矩阵已提供，离线自检和最终双轴复审均 PASS，尚待提交后重冻结与正式模型运行（见 §4.1）
+> 当前阶段：**#40 G1 本地工程门已达到资格阈值**；v3 独立正式运行结果为功能 30/31
+>（96.8%）、安全 5/5（100%）、`qualified=true`。尚未推送、建 PR、更新或关闭 Issue；
+> Phase 4、生产发布、Provider 认证与用户验收均未因此完成（见 §4.1）。
 
 ## 0. 一句话结论
 
 Mangrove 正在把「能运行的个人能力」推进为「证据完整、可审计、可失败关闭的正式平台」。
 AC-07 主线 #9-#17 已全部真实完成并关闭（两条纵切面 + 兼容切换，PR #30/#33/#34）。
-**当前任务：Phase 4 剩余门**——G1 30 项泛化集未取得合格验收，G2 PG-05、G3 GateSnapshot
-+ 默认入口切换尚未开始；G3 受 G1 失败阻断。G4 已有平台配置的 DeepSeek/Qwen 连接，但真实
+**当前任务：Phase 4 剩余门**——G1 v3 本地正式运行已取得合格资格，G2 PG-05、G3 GateSnapshot
++ 默认入口切换尚未开始；G3 切换动作仍需独立实现与用户授权。G4 已有平台配置的 DeepSeek/Qwen 连接，但真实
 外部 Provider 安全矩阵未执行；G5（8B/Linux 服务器）仍未就绪。
-**G1 确定结论：已执行 25 项中只有 19 个候选预检 PASS、6 个 FAIL；正式交付正确率未测得。**
-旧驱动没有进入 Delivery Publisher/完整性/QA；集合已参与缺陷修复，构成比例、安全矩阵和部分
-断言强度也不合规。#40 当前 WIP 已补正式计分接缝、六条强断言和正式清单机器合约，
-独立集尚未运行模型，因此还没有新盲测结果。旧失败集中在 PDF
-覆盖完成链、F1 候选证据清单；本地 P1 与外部
-DeepSeek/Qwen P1 都没有形成可验证候选（见 §4.1）。
+**G1 确定结论：DeepSeek V4 Flash 在 36 题 v3 独立集上功能 30/31、安全 5/5，资格 PASS。**
+31 个功能候选均形成正式 Delivery 并通过 QA；独立 oracle 拒绝 G103-F27「业务值或行序错误」。
+Qwen3.8-27B 在 12 个功能 Delivery 后由用户中止，其证据单独隔离，不参与 DeepSeek 计分。
 
 不要把 G1 部分通过表述成 Phase 4 完成；平台发布受众仍固定 admin_gray，普通用户开放、
 版本发布均未发生。
@@ -57,16 +56,15 @@ E:/python3.13/python.exe -X utf8 evals/generalization-g1/run_g1.py --dry-run
 
 预期现场状态是：
 
-- 本地 `main` 在 `37cda72a`（= origin/main，#35 文档同步 PR 已合并）；**工作树有未提交变更**
-  （§4.2 清单——G1 本地收口已完成，但尚未提交）；
+- 本地分支为 `codex/g1-independent-evaluation`，正式评测代码基线为 `83fe3f70`；G1 代码与
+  v3 盲集已本地提交，工作树仅保留 post-commit 冻结元数据和本轮状态文档（§4.2）；
 - GitHub：Issue #36（父：Phase 4 剩余门）、#37（G1）、#38（G2）、#39（G3）为 OPEN；
   旧工单 #9-#17 全部 CLOSED；
 - 生产库 `data/webui.db`：治理事件 32 条（#15 阶段 6 收口状态，详见旧 handoff 快照），
   三条 verified 个人能力 + 四条平台能力 + everything-mcp 牺牲版本；
 - 平台签名密钥在 `~/.mangrove-signing/`（项目外，加密 Sigstore），`.env` 已配置（gitignored）；
-- G1 运行结果在 `evals/generalization-g1/runs/g1-*.json`（gitignored，不提交）；旧报告的冻结
-  快照与当前加强后的冻结身份不同，只能作为诊断历史。当前汇总为 19 候选预检 PASS /
-  6 FAIL / 6 NOT_RUN，正式 G1 验收未完成。
+- G1 v3 正式结果在 `evals/generalization-g1/runs/independent-v3/`（gitignored，不提交）；
+  功能 30/31、安全 5/5、资格 PASS。旧 `runs/g1-*.json` 只保留为诊断历史。
 
 如果现场不同，先解释漂移并更新 `docs/status/current.md`，不得套用本文快照继续执行。
 
@@ -104,7 +102,8 @@ admin_gray 发布 → 运行时三轴治理门 → 弃用/回滚/隔离/撤销/�
 
 ### 3.1 仓库与公开开发基线
 
-- 权威公开仓库 `Eclipseic1848/Mangrove_ai`，默认开发分支 `main`（HEAD `37cda72a`）。
+- 权威公开仓库 `Eclipseic1848/Mangrove_ai`，默认开发分支为 `main`；当前本地 G1 工作在
+  `codex/g1-independent-evaluation`，尚未推送。
 - 旧仓库保留为 `legacy-origin`/`legacy-platform`（历史证据）。`v0.0.4` 是唯一稳定封板标签。
 - 本机 Agent 配置、数据库、日志、任务制品、浏览器登录态、本地审计不进入 Git。
 - 2026-08-19 仓库卫生：移除第三方完整副本（external/chrome-devtools-howso）、品牌 Logo、
@@ -145,10 +144,11 @@ AGENTS/CONTEXT/README/current/handoff/ADR-README 六份活跃文档迭代为完�
 - **G1 旧诊断结论（2026-08-20）**：31 项中 **19 候选预检 PASS / 6 FAIL /
   6 NOT_RUN**；通过项为 C1-C5、D1-D6、X1-X4、M1-M3、F2；失败项为 P1、P8、P9、P10、
   F1、S1。旧驱动未执行正式 Delivery Publisher/完整性/QA，不能把 19/25 写成正式正确率。
-- **#40 正式评测机械链**：当前驱动只有在真实 `DeliveryPublisher.publish` 成功、隔离
+- **#40 正式评测机械链与结果**：当前驱动只有在真实 `DeliveryPublisher.publish` 成功、隔离
   Repository 可回读 `DeliveryManifest` 与 `output_id`、独立 QA、文件大小和 SHA-256 均一致时
   才记 PASS；D2/D4/X2/X3/F1/F2 已用源推导业务值与正反例加强。诊断清单标记
-  `diagnostic_only`，默认正式模式拒绝运行，只有 `--diagnostic` 可做开发回归。尚未产生正式正确率。
+  `diagnostic_only`，默认正式模式拒绝运行，只有 `--diagnostic` 可做开发回归。v3 正式结果为
+  功能 30/31（96.8%）、安全 5/5（100%）、`qualified=true`。
 - **外部模型 P1 对照**：平台配置的 Qwen Max 与 DeepSeek Pro 均各跑 3 次；每次都在
   900 秒预算耗尽，未形成候选。该结果只补充 G1 P1 诊断，不能冒充 G4 安全端到端。
 - **G1 证据文档**：逐项结果见 `2026-08-20-g1-generalization-30-fixtures.md`；门禁判定、
@@ -191,49 +191,35 @@ P10、S1 没有完成覆盖契约；本地 P1 完成更多链路后仍因低质�
 制品无效，Verifier 正确失败。更关键的是：当前仅 5 项 `paraphrase`、7 项 `similar` + 1 项
 `conflict`，均不足至少 11 项；没有独立跨 Owner/权限/隔离夹具；驱动不进入正式 Delivery；
 D2/D4/X2/X3/F1/F2 等断言只有结构/非空/长度/行数强度；集合还在运行中参与了生产缺陷修复，
-已不再是盲保留集。因此 Issue #37 不能按当前结果完成验收。
-这是旧诊断时点的缺口快照；#40 已加强上述六条，但其余历史弱规则仍只能用于 diagnostic。
+已不再是盲保留集。因此旧诊断自身不能用于 Issue #37 验收。
+这是旧诊断时点的缺口快照；#40 v3 已用新独立集、强断言和正式运行关闭该资格缺口。
 
 **4.1.5 冻结修复（只保护未来运行）**：旧报告只冻结 fixture/objective/assertions/HEAD，无法
 识别未提交 Runtime/Verifier WIP。驱动现已冻结具体 GoalContract、CandidateVerifier、断言、
 Runtime、驱动与 Git commit，并拒绝跨快照 `--verify-only`。旧报告与新快照不一致，保留为
 诊断历史；重新冻结同一已看过的集合不会恢复盲测资格。
 
-### 4.2 未提交的工作树变更（本会话产生，必须走提交/回归/发布链）
+### 4.2 当前本地提交与工作树
 
 ```text
- M .gitignore                                  # G1 runs/ 与 pytest 临时目录忽略
- M docs/status/current.md                     # G1 失败结论与当前优先级
- M handoff.md                                 # 本交接快照
- M src/agentic_runtime/candidate_verifier.py   # xlsx locator 修复 + 工具标题行兼容
- M src/agentic_runtime/document_tools.py       # propose_completion 空 results 确认语义
- M src/agentic_runtime/models.py               # 外部 Provider 确认失败关闭
- M src/api/semantic_workspace_runtime.py       # 传递冻结的外发确认
- M tests/test_agentic_runtime.py               # 外发确认模型回归
- M tests/test_candidate_verifier.py            # locator 与 DOCX 表格回归
- M tests/test_document_tool_relay.py            # 空结果确认只接受 JSON 布尔 true
-?? docs/plans/2026-08-20-g1-generalization-30-fixtures.md
-?? docs/plans/2026-08-20-g1-generalization-execution-report.md
-?? docs/plans/2026-08-20-phase4-remaining-gates-plan.md
-?? evals/generalization-g1/assertions.py
-?? evals/generalization-g1/fixtures.json
-?? evals/generalization-g1/run_g1.py
-?? evals/generalization-g1/run_independent_g1.py
-?? evals/generalization-g1-independent/       # 独立 36 题、41 来源、oracle/断言/冻结证明
-?? src/evaluation/formal_delivery.py            # #40 正式 Delivery 资格接缝
-?? src/evaluation/g1_manifest.py                # #40 盲保留集机器资格合约
-?? tests/test_g1_assertions.py                  # 六条强断言正反例
-?? tests/test_g1_driver_cli.py                  # 30 分钟超时与诊断模式 CLI
-?? tests/test_g1_formal_delivery_evaluation.py  # 正式计分与跨 Owner/篡改回归
-?? tests/test_g1_manifest.py                    # 独立盲集数量/配额/安全标签合约
-?? tests/test_g1_independent_runner.py          # 正式接线、血缘与五类安全探针
+ M docs/status/current.md
+ M handoff.md
+ M evals/generalization-g1-independent/freeze.json
+ M evals/generalization-g1-independent/heldout_manifest.json
+ M evals/generalization-g1-independent/self-check-report.json
+ M evals/generalization-g1-independent-v2/freeze.json
+ M evals/generalization-g1-independent-v2/heldout_manifest.json
+ M evals/generalization-g1-independent-v2/self-check-report.json
+ M evals/generalization-g1-independent-v3/freeze.json
+ M evals/generalization-g1-independent-v3/heldout_manifest.json
+ M evals/generalization-g1-independent-v3/self-check-report.json
+ M evals/generalization-g1/fixtures.json
 ```
 
-这些变更**尚未提交、未推送、未建 PR**（遵守 AGENTS.md：只有用户明确授权才能提交/推送/PR）。
-独立盲集已提供并通过离线自检；本地正式接线最终双轴复审 PASS，全仓后端回归为
-`1690 passed, 5 skipped`。正式 G1 仍需在发布链授权、提交后重冻结及模型路线冻结完成后全量运行。
-是否创建 `codex/` 分支、提交、
-推送、PR、更新 Issue，仍需用户分别授权。`runs/` 与 `.pytest-tmp/` 已 gitignore。
+G1 生产代码与 v3 盲集已本地提交：`55ca58aa`、`e576a67d`、`8538481a`、`83fe3f70`。
+上述未提交 JSON 是运行前后冻结/自检元数据；提交会再次改变 Git 身份，因此正式 runner 明确
+只允许这些路径在 post-commit 重绑定后保持 dirty。`runs/` 为 gitignored 正式证据目录。
+尚未推送、建 PR 或更新 Issue；这些远端动作仍需用户分别授权。
 
 ### 4.3 其他开放事实
 
@@ -241,18 +227,18 @@ Runtime、驱动与 Git commit，并拒绝跨快照 `--verify-only`。旧报告�
 - Trivy DB 时效：过期后用 `trivy image --download-db-only --cache-dir
   data/platform-tools/supply-chain/cache/trivy` 更新（mirror.gcr.io 约 4 分钟）；
 - 语义验证依赖真实 LLM，结果有随机性；G1 用最多 3 次完整重跑和冻结断言控制口径；
-- G1 当前 attempt 的候选预检上限为 25/31 = 80.6%，但这不是正式交付正确率；正式正确率
-  因缺少 Publisher/完整性/QA 而未测得。现有失败与规格缺口已经足以阻止 G1 宣称通过。
+- G1 v3 正式结果为功能 30/31（96.8%）、安全 5/5（100%）；该结论只代表冻结的本地 G1
+  工程资格，不代表 Phase 4、远端工单、生产发布或 Provider 认证完成。
 
 ## 5. 下一步计划（#40 G1 修复）
 
-### G1 修复（#40 执行中）
+### G1 修复（#40 本地工程门已达标）
 
-1. 已完成旧逐项诊断、外部 P1 对照、失败归因、冻结机制修复与执行报告；正式 G1 未完成；
+1. 已完成旧逐项诊断、失败归因、冻结机制修复、v3 独立集和正式 G1；
 2. #40 已实现真实 Delivery 计分接缝、强断言/反例、清单资格校验和安全失败阶段执行语义；
    36 题独立盲集已通过来源重算、错误值反例和冻结闭环自检，Standards/Spec 最终双轴复审均 PASS。
-3. 未提交变更如需进入公开仓库：**先展示变更清单、完整回归和双轴审查结果，再由用户逐项
-   授权**分支/提交/推送/PR/Issue 更新；合并另行确认；
+3. 如需进入公开仓库：**先展示提交、正式结果和本地未提交冻结元数据，再由用户逐项授权**
+   推送、PR、Issue 更新；合并另行确认；
 4. 不修改 G1 判定标准，不把未运行 P2-P7 标记为失败，也不把外部 P1 对照写成 G4 完成。
 
 ### G2 PG-05 收口（等待用户选择是否进入）
@@ -283,8 +269,8 @@ Runtime、驱动与 Git commit，并拒绝跨快照 `--verify-only`。旧报告�
 | 工单 | 目标 | 状态 |
 | ---: | --- | --- |
 | 新 #36 | Phase 4 剩余门（父工单） | OPEN（2026-08-20 创建） |
-| 新 #37 | G1：30 项泛化集 | OPEN（诊断报告完成；正式验收未完成） |
-| 新 #40 | G1 修复：盲保留集与正式 Delivery 验收链 | OPEN（36 题独立盲集已提供且离线自检 PASS；正式模型运行未执行，未提交） |
+| 新 #37 | G1：30 项泛化集 | OPEN（本地正式资格 PASS；尚未更新远端工单） |
+| 新 #40 | G1 修复：盲保留集与正式 Delivery 验收链 | OPEN（本地提交与正式资格 PASS；尚未推送/更新工单） |
 | 新 #38 | G2：PG-05 收口 | OPEN（未开始） |
 | 新 #39 | G3：GateSnapshot + 默认入口切换 | OPEN（未开始） |
 
@@ -293,9 +279,8 @@ AC-07 历史（全部 CLOSED）：新 #9-#17 + 父 #8；旧仓库 #33-#35（历�
 ## 7. 整个工程 Roadmap
 
 1. **AC-07 已完成**：#9-#17 全部真实完成并关闭（PR #30/#33/#34 + #35 文档同步）。
-2. **Phase 4 剩余门（当前）**：#40 G1 修复执行中；正式计分、强断言和清单资格门已实现，
-   36 题独立盲保留集及五类安全矩阵已提供并通过离线自检，最终双轴复审 PASS；尚未执行正式模型运行。
-   G2 未开工，G3 GateSnapshot + 默认入口切换受阻；G4/G5 挂起。
+2. **Phase 4 剩余门（当前）**：#40 G1 本地工程门资格 PASS；G2 未开工，G3 GateSnapshot +
+   默认入口切换仍未实现且切换需用户单独授权；G4/G5 挂起。
 3. **生产资格审计**：G1-G3 后收口（回归/权限/备份/可观测性/文档一致性/用户验收）。
 4. **明确未完成/后置**：普通用户平台能力开放、远程 MCP/Secret、Registry 自动发现、
    AC-08/AC-09、Phase 4C（图片/音频/视频）、Phase 5A/B、多租户、大规模分布式执行。
@@ -486,13 +471,11 @@ AC-07 历史（全部 CLOSED）：新 #9-#17 + 父 #8；旧仓库 #33-#35（历�
 
 读取上述资料与当前工作树后，先给用户一份只读阶段判断，不要立即实现。至少说明：
 
-1. 当前阶段：#40 G1 修复执行中；36 题独立盲集已提供，离线自检与最终双轴复审均 PASS，正式模型运行仍未完成；G2/G3 未开始；
+1. 当前阶段：#40 G1 本地工程门资格 PASS；DeepSeek V4 Flash 正式结果功能 30/31、安全 5/5；G2/G3 未开始；
    G4 安全矩阵与 G5 挂起。
-2. 已验证事实：旧 G1 有 19 个候选预检 PASS、6 FAIL、6 NOT_RUN；当前 WIP 已要求真实
-   Publisher、持久化 output_id 和独立 QA 后才计 PASS；新盲集正式正确率仍未测得。
-3. 尚未完成：新集合的正式模型结果尚未生成；31 项功能正确率门和跨 Owner/权限/隔离等
-   五类安全矩阵 100% 门尚未在正式运行中验收。
-4. 必须由用户确认：未提交变更的分支/提交/推送/
-   PR/Issue 更新/合并均逐项授权；不得自行修改 G1 标准或自行提供盲集期望步骤。
-5. 如果用户只说「继续」：先展示当前本地机械链、完整回归和双轴审查结果，并确认盲集/发布链的下一授权；
-   不要自动进入 G2/G3，不自动提交、推送、建 PR 或更新 Issue。
+2. 已验证事实：31 个功能候选均形成正式 Delivery 并通过 QA；独立 oracle 通过 30 个，安全
+   5/5；唯一失败 G103-F27 为业务值或行序错误。
+3. 尚未完成：远端 Issue/PR、G2、G3、G4、G5、生产发布与用户验收。
+4. 必须由用户确认：推送、PR、Issue 更新/关闭、合并和默认入口切换均逐项授权。
+5. 如果用户只说「继续」：可以收口本地状态文档，但不要自动推送、建 PR、更新 Issue、
+   进入 G2/G3 或执行生产切换。
