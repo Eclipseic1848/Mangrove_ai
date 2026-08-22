@@ -2,7 +2,7 @@
 
 > 文档用途：写给完全没有历史对话的新会话
 >
-> 最后现场核验：2026-08-22（G3 本地工程门与测试库迁移演练后）
+> 最后现场核验：2026-08-22（G3 生产库带备份迁移后）
 >
 > 当前分支：`codex/g1-independent-evaluation`；正式评测绑定的代码基线 = `83fe3f70`；
 > 当前 G2 Office 代码提交：`31729495`；AC-05 生产迁移代码提交：`235459a3`；
@@ -20,8 +20,11 @@ Mangrove 正在把「能运行的个人能力」推进为「证据完整、可�
 AC-07 主线 #9-#17 已全部真实完成并关闭（两条纵切面 + 兼容切换，PR #30/#33/#34）。
 **当前任务：Phase 4 剩余门**——G1 v3 本地正式运行已取得合格资格；G2 Office 已完成真实
 Word/Excel 各连续 3/3，AC-05 带备份生产迁移、恢复副本、真实 Docker 探针与用户验收已通过；
-G3 GateSnapshot、累计硬门、P0 自动回退和分阶段 Rollout 已完成本地工程实现、测试库迁移
-演练、双轴终审与本地提交，但生产库未迁移、生产默认未切换、8088 未验收。G4 已有平台
+G3 GateSnapshot、累计硬门、P0 自动回退和分阶段 Rollout 已完成工程实现、双轴终审、本地
+提交、带备份生产迁移及生产 Gate/Approval 初始化；旧 8088 进程触发 P0 回退后已完成重启和
+六项门重跑，新快照合格并已按独立授权恢复 `admin_gray`，技术烟测通过；生产默认未切换、
+用户已确认本轮恢复验收通过，但完整默认切换验收未完成。
+G4 已有平台
 配置的 DeepSeek/Qwen 连接，但真实
 外部 Provider 安全矩阵未执行；G5（8B/Linux 服务器）仍未就绪。
 **G1 确定结论：DeepSeek V4 Flash 在 36 题 v3 独立集上功能 30/31、安全 5/5，资格 PASS。**
@@ -61,7 +64,7 @@ E:/python3.13/python.exe -X utf8 evals/generalization-g1/run_g1.py --dry-run
 预期现场状态是：
 
 - 本地分支为 `codex/g1-independent-evaluation`，正式评测代码基线为 `83fe3f70`；G1 代码与
-  v3 盲集已本地提交，工作树仅保留 post-commit 冻结元数据和本轮状态文档（§4.2）；
+  v3 盲集已本地提交，工作树仅保留 10 个 G1 post-commit 冻结元数据（§4.2）；
 - GitHub：Issue #36（父：Phase 4 剩余门）、#37（G1）、#38（G2）、#39（G3）为 OPEN；
   旧工单 #9-#17 全部 CLOSED；
 - 生产库 `data/webui.db`：治理事件 32 条（#15 阶段 6 收口状态，详见旧 handoff 快照），
@@ -73,6 +76,14 @@ E:/python3.13/python.exe -X utf8 evals/generalization-g1/run_g1.py --dry-run
   完成本地提交；工作树仍只保留 10 个 G1 post-commit 冻结元数据文件，未混入 G3 提交。
 - AC-05 生产迁移代码提交为 `235459a3`；恢复点为
   `data/backups/webui-before-ac05-20260822-072340.db`，生产任务记录为 0，8088 健康。
+- G3 生产迁移恢复点为 `data/backups/webui-before-g3-20260822-133901.db`；迁移后保持
+  `admin_gray`，未切换默认入口，8088 `/api/health` 返回 200。
+- 首次生产 GateSnapshot 为 `abfc951ee4a99f282484f46c8ffe0c48f36e4c924fd2d765cacc3dd7de992b38`；
+  独立 `explicit_opt_in` Approval 已记录但未执行模式切换。运行态核验随后追加修正快照
+  `39c168fb4009478fcd731dbe1f5f10d05d8685b5721cbe7bc5302eddc1ab9fa8`，当前 P0 已阻断。
+- 8088 已重启为加载 G3 的 PID `5136`；新活动快照
+  `a936510e53eebc2abb04ce984e1fb72821730d0dc1ce9d37760d2c85beec3571` 累计有效合格，
+  `admin_gray` 恢复 Approval 已独立记录并执行，技术烟测通过；未扩大普通用户权限。
 
 如果现场不同，先解释漂移并更新 `docs/status/current.md`，不得套用本文快照继续执行。
 
@@ -225,8 +236,9 @@ Runtime、驱动与 Git commit，并拒绝跨快照 `--verify-only`。旧报告�
 G1 生产代码与 v3 盲集已本地提交：`55ca58aa`、`e576a67d`、`8538481a`、`83fe3f70`。
 上述未提交 JSON 是 G1 运行前后冻结/自检元数据；提交会再次改变 Git 身份，因此正式 runner
 明确只允许这些路径在 post-commit 重绑定后保持 dirty。G3 已使用明确路径白名单完成本地
-提交，10 个 G1 JSON 未被暂存。`runs/` 为 gitignored 正式证据目录。尚未推送、建 PR 或更新
-Issue；生产迁移与远端动作仍需用户分别授权。
+提交，10 个 G1 JSON 未被暂存；本轮三份状态文档也已按独立白名单完成本地提交。`runs/` 为
+gitignored 正式证据目录。尚未推送、建 PR 或更新 Issue；扩大 Rollout 与远端动作仍需用户
+分别授权。
 
 ### 4.3 其他开放事实
 
@@ -268,8 +280,24 @@ Issue；生产迁移与远端动作仍需用户分别授权。
 - 测试库显式迁移/回放、真实 Publisher P0 零改写保护、Steering/Safe Point 回归已通过；
   Standards/Spec 终审均无仍可复现问题；排除 G1 冻结身份漂移与测试域名 DNS 两项既有
   基线后，全仓后端 `1762 passed, 5 skipped, 2 deselected`；
-- **尚未执行**：生产 `data/webui.db` 迁移、生产 Rollout 切换、8088 用户验收、推送、
-  Issue #39 更新。G3 已完成本地提交；生产动作必须再次单独授权。
+- 生产 `data/webui.db` 已完成带备份显式迁移；恢复点为
+  `data/backups/webui-before-g3-20260822-133901.db`，SHA-256 为
+  `b552af5ac08bec3ba4421462cd51f73cf4b783520646ad285489ed9dd413bd7f`；生产库和恢复点
+  `integrity_check=ok`，旧业务逻辑指纹一致，16 个 G3 对象、Schema digest、备份绑定及幂等
+  回放均通过；初始状态保持 `admin_gray`、`p0_blocked=0`；
+- 首次生产 GateSnapshot `abfc951ee4a99f282484f46c8ffe0c48f36e4c924fd2d765cacc3dd7de992b38`
+  及独立 Approval `approval-explicit-opt-in-abfc951ee4a99f28` 已追加保存；随后发现 8088 进程
+  早于 G3 提交启动，系统追加修正快照
+  `39c168fb4009478fcd731dbe1f5f10d05d8685b5721cbe7bc5302eddc1ab9fa8`，当前为
+  `legacy_rollback`、`p0_blocked=true`。历史 Approval 不绑定当前快照，不可复用；
+- 8088 已重启并加载 G3，新活动快照
+  `a936510e53eebc2abb04ce984e1fb72821730d0dc1ce9d37760d2c85beec3571` 的六项硬门累计
+  有效合格；恢复 Approval `approval-admin-gray-recovery-a936510e53eebc2a` 已绑定当前快照；
+- 用户单独授权后已原子恢复到 `admin_gray`、`p0_blocked=false`；旧业务逻辑指纹、既有
+  Delivery 和 Runtime assignment 均未改变。管理员 Pi、普通用户 Legacy、默认 Legacy、跨
+  Owner 拒绝及 8088 三入口技术烟测通过；用户于 2026-08-22 明确确认本轮恢复验收通过；
+- **尚未执行**：`explicit_opt_in`、vNext 默认切换、完整默认切换用户验收、推送、Issue #39
+  更新。Runtime assignment 为 0；后续动作必须再次单独授权。
 
 ### 生产资格审计（G1-G3 后收口）
 
@@ -291,7 +319,7 @@ Issue；生产迁移与远端动作仍需用户分别授权。
 | 新 #37 | G1：30 项泛化集 | OPEN（本地正式资格 PASS；尚未更新远端工单） |
 | 新 #40 | G1 修复：盲保留集与正式 Delivery 验收链 | OPEN（本地提交与正式资格 PASS；尚未推送/更新工单） |
 | 新 #38 | G2：PG-05 收口 | OPEN（本地实现、生产迁移和用户验收 PASS；待远端更新授权） |
-| 新 #39 | G3：GateSnapshot + 默认入口切换 | OPEN（本地工程门与本地提交 PASS；未生产迁移/推送） |
+| 新 #39 | G3：GateSnapshot + 默认入口切换 | OPEN（admin_gray 恢复与用户验收 PASS；未扩大/推送） |
 
 AC-07 历史（全部 CLOSED）：新 #9-#17 + 父 #8；旧仓库 #33-#35（历史）。
 

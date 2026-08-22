@@ -15,7 +15,7 @@
 |---|---|---|---|
 | **G1** 30 项泛化集 | ≥30 个未参与调优任务（文档/PDF/Excel/CSV/复合来源/模糊目标/多输出格式）；≥1/3 同义/口语/省略/顺序变化；≥1/3 相似表/章节/冲突来源；运行前冻结夹具哈希/GoalContract/Verifier；正式交付正确率 ≥90%，安全/权限/用户隔离/禁止项/失败不冒充成功 100%（`2026-07-29-agentic-runtime-vnext-evaluation-spec.md` §5） | 本地正式运行完成 | **QUALIFIED**：功能 30/31（96.8%）、安全 5/5（100%）；尚未更新远端工单 |
 | **G2** PG-05 收口 | ① Word/Excel 连续 3/3 真实任务（`scripts/verify_pi_runtime_pg05_office.py`/`_pdf.py` 已存在）；② AC-05 独立依赖获取状态机生产迁移 + 用户验收（audit P0-4：「生产数据库迁移未执行」） | 执行完成 | **PASS**：Office 3/3；AC-05 带备份生产迁移、恢复、真实 Docker 探针及用户验收通过 |
-| **G3** P0 GateSnapshot + 默认入口切换 | Rollout GateSnapshot、P0 自动阻断、默认切换（失败即回 Legacy，不迁移/覆盖/删除旧任务与既有 Delivery）；切换动作需用户单独确认（`2026-07-30-phase4-d3-delivery-default-state-machine.md`、ADR-0019） | 执行（实现+验收本机可做；**切换本身需用户单独授权**） | 未开始 |
+| **G3** P0 GateSnapshot + 默认入口切换 | Rollout GateSnapshot、P0 自动阻断、默认切换（失败即回 Legacy，不迁移/覆盖/删除旧任务与既有 Delivery）；切换动作需用户单独确认（`2026-07-30-phase4-d3-delivery-default-state-machine.md`、ADR-0019） | 执行（实现+验收本机可做；**切换本身需用户单独授权**） | **ADMIN_GRAY ACCEPTED**：生产 Gate、恢复、烟测与用户验收通过；未扩大 |
 | **G4** 真实外部 Provider 端到端 | 真实 DeepSeek/Qwen/OpenAI/Anthropic/Gemini/Kimi/智谱 Key 做 Pi→Grant→Relay→Provider→Usage Smoke + DNS rebinding/证书生命周期/备份擦除生产安全门（audit §7） | 平台已有可用 Qwen/DeepSeek 连接；用户授权本地模型不足时用于 G1 正式集，但 G4 安全矩阵未授权开工 | 未开始 |
 | **G5** 8B Linux/Compose/并发/故障与目标服务器 | 干净镜像、Linux/Compose 部署、服务器并发、目标服务器验收（audit §5 用户明确后置项） | **挂起**：用户目标服务器未就绪（2026-08-20 确认） | 挂起（不执行） |
 
@@ -42,7 +42,15 @@ G4/G5 与生产资格审计不得自动进入。
   AC-05 提交 `235459a3` 完成显式带备份迁移、精确 Schema、并发写锁、备份 SHA 绑定和
   幂等重放；生产源库/恢复点完整、63 张既有表零改写、恢复副本状态机和真实 Docker 探针
   均通过；用户于 2026-08-22 明确确认 G2 验收通过。
-- G3：未开始。
+- G3：提交 `21dbf11b` 完成 GateSnapshot、累计门、P0 回退、原子 RuntimeAssignment 与分阶段
+  Rollout；生产带备份迁移完成。首次生产快照与独立 Approval 已记录，但运行态核验确认 8088
+  进程早于 G3 提交启动；修正快照
+  `39c168fb4009478fcd731dbe1f5f10d05d8685b5721cbe7bc5302eddc1ab9fa8` 已把运行态门标记
+  为失败。8088 随后已重启加载 G3，新活动快照
+  `a936510e53eebc2abb04ce984e1fb72821730d0dc1ce9d37760d2c85beec3571` 累计有效合格，
+  当前快照的 `admin_gray` 恢复 Approval 已记录并按用户单独授权执行；当前为 `admin_gray`、
+  `p0_blocked=false`。管理员 Pi、普通用户/默认 Legacy、跨 Owner 拒绝和 8088 三入口烟测通过；
+  用户于 2026-08-22 明确确认本轮恢复验收通过，未进入 `explicit_opt_in` 或 vNext 默认。
 
 ## 3. 边界声明
 

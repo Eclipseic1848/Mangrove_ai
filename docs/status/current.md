@@ -55,8 +55,10 @@ TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍
 - G2 PG-05 已完成：Word/Excel 连续 3/3；AC-05 带备份生产迁移、恢复副本状态机、真实
   Docker 探针及用户验收均通过。该结论不代表 Phase 4、平台发布或普通用户开放完成。
 - 真实外部 Provider 的 Pi→Relay→Provider 安全端到端验证。
-- G3 Rollout P0 GateSnapshot、累计硬门、P0 自动回退与分阶段默认切换已完成本地工程实现、
-  测试库迁移/回放及双轴复审；生产库迁移、生产默认切换、8088 用户验收和远端发布均未执行。
+- G3 Rollout P0 GateSnapshot、累计硬门、P0 自动回退与分阶段默认切换已完成工程实现、生产
+  迁移和生产 Gate/Approval 初始化；运行态核验曾因旧 8088 进程触发 P0 回退，后端现已重启
+  加载 G3、取得新合格快照并恢复到 `admin_gray`。生产默认切换、完整 G3 用户验收和远端发布
+  未执行。
 - 远程 MCP/Secret、Registry 自动发现、平台能力普通用户开放。
 - 8B Linux/Compose/并发/故障与目标服务器验证。
 
@@ -389,15 +391,56 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
   `88 passed`，Agentic Runtime 与原子故障聚焦回归 `79 passed`，Standards/Spec 终审均
   无仍可复现问题；排除已确认的 G1 冻结身份漂移与测试域名 DNS 两项基线后，全仓后端
   `1762 passed, 5 skipped, 2 deselected`；
-- 以上只在临时测试库执行。G3 工程代码已完成本地提交；生产 `data/webui.db` 未迁移，生产
-  Rollout 未切换，8088 未做 G3 用户验收，代码未推送，Issue #39 未更新；Phase 4 仍未完成。
+- G3 工程代码已完成本地提交，生产 `data/webui.db` 已执行带备份显式迁移；恢复点为
+  `data/backups/webui-before-g3-20260822-133901.db`，SHA-256 为
+  `b552af5ac08bec3ba4421462cd51f73cf4b783520646ad285489ed9dd413bd7f`。生产库和恢复点
+  `integrity_check=ok`，旧业务逻辑指纹一致，16 个 G3 对象、Schema digest、备份绑定与幂等
+  回放通过；初始状态保持 `admin_gray`、`p0_blocked=0`，8088 `/api/health` 返回 200；
+- 首次生产 GateSnapshot `abfc951ee4a99f282484f46c8ffe0c48f36e4c924fd2d765cacc3dd7de992b38`
+  绑定 G3 提交 `21dbf11b3b6d72702fdaf95c4cd321299e19b8fe` 与环境摘要
+  `06e11542ebaf1d4b49477cd32ad92f7c802223358c34dd8c2dd6189b2ccf43c3`；该快照最初记录的六项
+  硬门如下，现只保留为不可变历史：
+
+  | GateCheck | evidence_hash |
+  |---|---|
+  | `g1-formal-delivery-quality` | `cda84b4547404595f332a9f36c649751acbccf5f1b78e34a3e1adc7f3df61708` |
+  | `g1-safety-permission-isolation` | `a99ef24b5b08c244dff2c5582b6fa5cb9918ae74c81a4a6e5c9624d1e01bd5da` |
+  | `g2-office-pg05` | `d7735bafb5b69a0d1c1fbb489ce44eee36451aa5238ac14c9f11e9e48456da9f` |
+  | `g2-ac05-production-readiness` | `42a9b1d7b45453b87c2ef16b8ea85e8b068526cabaddfca090dcb35416c3da50` |
+  | `g3-runtime-routing-regression` | `7c7d812e678b5e6791a520af35fdd774951f949df12b2faf7639ff8e22437a00` |
+  | `g3-production-migration` | `c18fd9afbff662525626a69fb4d6082852be5bd355b748c882a950f783471e7d` |
+
+- 随后核验确认 8088 进程启动时间 `2026-08-22T10:52:02-07:00` 早于 G3 提交时间
+  `2026-08-22T13:33:57-07:00`，不能证明运行进程已加载该提交。系统追加修正快照
+  `39c168fb4009478fcd731dbe1f5f10d05d8685b5721cbe7bc5302eddc1ab9fa8`，把
+  `g3-runtime-routing-regression` 标记为失败（证据
+  `e8e530d373f4afd519ef41774ccb224f82acbb18bdae0fdd4fc9809d5133a778`），并自动进入
+  `legacy_rollback`、`p0_blocked=true`；
+- 独立 Approval `approval-explicit-opt-in-abfc951ee4a99f28` 已由超级管理员
+  `u_9505fd620899` 本人身份记录，但它绑定历史快照 `abfc951e...`，不能用于当前活动快照；
+- 后端已由标准 supervisor 重启为 PID `5136`，启动时间晚于 G3 提交，`src/` 与
+  `21dbf11b` 一致、项目 supervisor 收敛为 1 个且 `/api/health` 返回 200。新活动快照
+  `a936510e53eebc2abb04ce984e1fb72821730d0dc1ce9d37760d2c85beec3571` 的六项硬门均
+  通过且累计有效合格；更新后的运行态证据为
+  `1eb872e625ca495f07ac476cce8487aa23116b5d9dbf0b18aa20bbaf60b36316`，环境摘要为
+  `a955b26cf8a23afcd14066c11e7254c53acd942a411d6fa9f5a5e03c16d0e882`；
+- 恢复 Approval `approval-admin-gray-recovery-a936510e53eebc2a` 已由超级管理员
+  `u_9505fd620899` 本人身份记录并绑定当前快照。按失败恢复规则，合格快照不会自动解除回退；
+  用户单独授权后已从 `legacy_rollback` 原子恢复为 `admin_gray`、`p0_blocked=false`，审计事件
+  绑定当前快照；旧业务逻辑指纹一致，24 条正式 Delivery、7 条 Legacy Delivery 和
+  Runtime assignment 0 条均未改变；
+- `admin_gray` 技术烟测通过：管理员显式 Pi 选择为 Pi，普通用户请求 Pi 和默认请求均为
+  Legacy，跨 Owner 失败关闭；8088 `/`、`/api/health`、`/openapi.json` 均返回 200，烟测未
+  创建任务或业务数据。用户于 2026-08-22 明确确认本轮 `admin_gray` 恢复验收通过；该结论
+  不等于 `explicit_opt_in` 或 vNext 默认切换验收；
+- 代码未推送，Issue #39 未更新；Phase 4 仍未完成。
 
 ## 7. 当前优先顺序
 
 1. **#40 G1 本地工程门已达标**：v3 正式结果功能 96.8%、安全 100%，资格 PASS；下一步是
    在用户单独授权后更新/关闭 Issue、推送分支并建 PR。当前本地结果不得冒充远端工单已完成。
-2. **G2 已通过、G3 本地工程门与本地提交已通过**：G3 代码、测试库迁移/回放、P0 回退、
-   原子路由与双轴复审已完成；下一门是单独决定生产迁移和 Rollout 切换。
+2. **G2 已通过、G3 `admin_gray` 恢复验收已通过**：8088 已加载 G3，新活动快照六项门累计
+   有效合格，恢复动作、技术烟测和用户确认均完成。`explicit_opt_in` 仍是更后的独立授权门。
 3. **G4/G5 未完成**：平台现有外部 Qwen/DeepSeek 连接已用于 G1 P1 对照，但 G4 安全矩阵
    未执行；8B Linux/Compose 与目标服务器仍未就绪。
 
