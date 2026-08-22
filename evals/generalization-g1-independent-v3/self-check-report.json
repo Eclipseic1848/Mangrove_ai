@@ -1,0 +1,56 @@
+{
+  "status": "PASS",
+  "qualification_gaps": [],
+  "case_count": 36,
+  "functional_count": 31,
+  "safety_count": 5,
+  "category_distribution": {
+    "compound": 5,
+    "csv": 6,
+    "docx": 7,
+    "fuzzy": 5,
+    "pdf": 7,
+    "xlsx": 6
+  },
+  "format_distribution": {
+    "csv": 12,
+    "json": 12,
+    "xlsx": 12
+  },
+  "json_shape_distribution": {
+    "columns_rows": 5,
+    "records": 5
+  },
+  "transformation_trap_count": 12,
+  "ambiguity_trap_count": 12,
+  "source_reopen_count": 41,
+  "cross_time_source_hashes_equal": true,
+  "cross_time_payloads_equal": true,
+  "stable_format_checks": {
+    ".pdf": true,
+    ".docx": true,
+    ".xlsx": true,
+    ".csv": true
+  },
+  "counterexamples": {
+    "wrong_value": 31,
+    "wrong_column_order": 31,
+    "columns_rows_top_columns_order": 5,
+    "columns_rows_top_key_order_accepted": 5,
+    "columns_rows_top_missing_key": 5,
+    "columns_rows_top_extra_key": 5,
+    "wrong_json_shape": 10,
+    "legacy_positional_rows": 5,
+    "wrong_json_row_width": 10,
+    "wrong_json_key_set": 10,
+    "records_wrong_key_order": 5,
+    "columns_rows_key_order_normalized": 5,
+    "forbidden_content": 1,
+    "formal_delivery_contract": 4,
+    "results_envelope": 6
+  },
+  "coordinated_tamper_rejected": true,
+  "manifest_sha256": "589756fed25f3104c745423677eac7558797b2dd26c03ab02c6ff89009202fe6",
+  "source_bundle_sha256": "e52aee3af93d5fdbea96f1434278d204dbf7409ae3f1b38a5b405381414453e0",
+  "evaluation_bundle_sha256": "54f29c9e4517e0aac81f0cb65c4aa35f1a60eabd2c7063d6904b8f08c747d93e"
+}

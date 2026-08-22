@@ -1,0 +1,54 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+5 0 obj
+<< /Length 918 >>
+stream
+BT
+/F1 8 Tf
+35 805 Td
+(SECTION=authoritative) Tj
+0 -11 Td
+(unit_id=U021|label=asset-02-1|zone=E|quota=92.02|spent=6.00|state=ready|rank=1|version=1) Tj
+0 -11 Td
+(unit_id=U022|label=asset-02-2|zone=Q|quota=105.02|spent=10.00|state=hold|rank=2|version=1) Tj
+0 -11 Td
+(unit_id=U023|label=asset-02-3|zone=E|quota=118.02|spent=14.00|state=ready|rank=3|version=1) Tj
+0 -11 Td
+(unit_id=U024|label=asset-02-4|zone=Z|quota=131.02|spent=18.00|state=ready|rank=4|version=1) Tj
+0 -11 Td
+(SECTION=lookalike) Tj
+0 -11 Td
+(unit_id=U021|label=asset-02-1|zone=E|quota=203.02|spent=6.00|state=ready|rank=1|version=1) Tj
+0 -11 Td
+(unit_id=U022|label=asset-02-2|zone=Q|quota=216.02|spent=10.00|state=hold|rank=2|version=1) Tj
+0 -11 Td
+(unit_id=U023|label=asset-02-3|zone=E|quota=229.02|spent=14.00|state=ready|rank=3|version=1) Tj
+0 -11 Td
+(unit_id=U024|label=asset-02-4|zone=Z|quota=242.02|spent=18.00|state=ready|rank=4|version=1) Tj
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000309 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1278
+%%EOF

@@ -2,9 +2,9 @@
 
 > status: active
 >
-> last_verified: 2026-08-17
+> last_verified: 2026-08-21
 >
-> branch: `main`
+> branch: `codex/g1-independent-evaluation`
 >
 > baseline: 以现场 `git rev-parse HEAD` 和 `git rev-parse origin/main` 核验为准
 
@@ -47,7 +47,11 @@ TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍
 
 ## 4. 明确未完成的生产门
 
-- 30 项泛化集。
+- G1 独立泛化门已取得一次合格正式运行：v3 独立盲集共 36 题（31 功能 + 5 安全），
+  DeepSeek V4 Flash 正式结果为功能 30/31（96.8%）、安全 5/5（100%），runner 判定
+  `qualified=true`。31 个功能候选均经真实 Publisher、持久化 Delivery/output_id、独立 QA、
+  文件完整性与来源血缘门；独立 oracle 额外拒绝 G103-F27（业务值或行序错误）。该结果只关闭
+  G1 工程资格缺口，不代表 Phase 4、生产发布、Provider 认证或用户验收完成。
 - Word/Excel 连续生产门与完整 PG-05。
 - 真实外部 Provider 的 Pi→Relay→Provider 安全端到端验证。
 - Rollout P0 GateSnapshot 和默认入口切换。
@@ -311,19 +315,52 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
 - 该结论不代表普通用户受众扩大或整个 AC-07/Phase 4 完成。平台发布受众固定 admin_gray。
 - 下一门：阶段 7（收口：Issue AC1-AC7 逐条对照 → 执行报告 → 文档同步 → 发布链）待授权。
 
+2026-08-20，Phase 4 G1 30 项泛化集诊断尝试收口，正式验收未完成：
+
+- 旧运行使用 fixture/objective/assertions/HEAD 四项弱冻结；双轴审查后驱动已改为冻结具体
+  GoalContract、CandidateVerifier、断言、Runtime、驱动与 Git commit，并拒绝跨快照重放；
+- 本地 Qwen 路线运行 25 项：CSV/XLSX/DOCX/复合/模糊共 19 个候选预检 PASS，PDF 与候选
+  证据共 6 项 FAIL；P2-P7 为 NOT_RUN。该驱动未进入正式 Delivery 发布与 QA；
+- P1 本地三次失败于低质量内容单元与必需字段证明缺口；外部 Qwen 3.7 Max、DeepSeek V4 Pro
+  各 3 次 P1 对照均超过 900 秒，未形成可验证候选。该对照不等于 G4 安全端到端验收；
+- 当前仅 5 项 `paraphrase`、7 项 `similar` + 1 项 `conflict`，不满足两个至少 11 项的构成门；
+  集合已用于缺陷修复，不再是盲保留集；部分断言也只有结构/长度/行数强度；
+- G1 发现并修复 XLSX locator、工具说明行 grounding、空结果完成提议三类契约缺陷；空结果
+  确认严格只接受 JSON 布尔 `true`；
+- #40 最终全仓后端回归 `1690 passed, 5 skipped`；前端生产构建、31/31 来源哈希 dry-run
+  与 diff 检查通过；Standards/Spec 双轴复审均 PASS；
+- 执行报告：`docs/plans/2026-08-20-g1-generalization-execution-report.md`。测试通过不等于
+  G1、Phase 4、用户验收或生产资格通过。
+- #40 本地机械链：新增隔离评测 Repository 下的正式 Delivery 资格读取；当前驱动要求
+  `DeliveryPublisher.publish`、持久化 `DeliveryManifest`/`output_id`、独立 QA、文件大小与
+  SHA-256 全部通过才记 PASS；外部 Provider 必须传递冻结的用户确认且缺失时失败关闭；
+  尚未运行新盲保留集。
+
+2026-08-21，#40 G1 v3 独立正式运行达到资格阈值：
+
+- 本地提交 `8538481a`（v3 独立集）与 `83fe3f70`（二进制夹具字节规范）完成；正式运行绑定
+  HEAD `83fe3f70122ad965c210196823536b12c3942932`、code-freeze
+  `5e3737f69dbe8e57429e3cfeab72e79a69e1f49c7d37bc64482d7dbc0a4f70cf`；未推送、未建 PR；
+- Qwen3.8-27B（LAN 6013）运行至 12 个功能 Delivery 后由用户要求中止：前 12 个均通过
+  Verifier，但多次自修正，且 G103-F10 语义裁判连续发生 `max_tokens` 截断；证据已隔离，
+  不与正式结果混算，也不能据此宣称该模型 G1 失败；
+- 平台连接 `deepseek-v4-flash` 从第 1 题重新独立运行，预算为单次 2400 秒、每题最多 3 次
+  重试；正式汇总为功能 30/31（96.8%）、安全 5/5（100%）、`qualified=true`；
+- 唯一独立断言失败为 G103-F27「业务值或行序错误」；该候选已 `delivery_published` 且 QA
+  通过，说明生产 Verifier 与独立业务 oracle 的双层门均真实生效；
+- 正式结果 SHA-256 为
+  `72cdd9ef6c142ddac541ab51b63865a9b8c0adb10ffc9ae93ee75e6ba9eab639`，独立断言报告
+  SHA-256 为 `2e3af8eb833c71b31c20c2f0c511f7b167690f8fcccb3879ba136410c6b0d1a2`；
+- DeepSeek 运行中出现过 Provider 临时连接失败、空/无效裁判和截断 JSON，均由失败关闭与
+  重试恢复；这是稳定性证据，不影响本次冻结口径下的最终资格判定，也不等于 G4 完成。
+
 ## 7. 当前优先顺序
 
-1. 新仓库 #15 Python 表格 Tool 真实治理纵切面**已完成并关闭**（2026-08-19）：
-   阶段 0-6 真实走通 + 阶段 7 收口（AC1-AC7 对照全部 ✅、执行报告
-   `docs/plans/2026-08-19-agentic-capability-ac07-10-execution-report.md`、
-   PR #30 合并 `95872a01`、Issue #15 CLOSED）。
-2. **#16 Everything MCP 真实治理纵切面已完成**（2026-08-19）：AC1-AC7 对照 ✅；
-   **#17 AC-06 兼容切换与 AC-07 综合验收门已完成**（2026-08-20）：AC-06 白名单退役、
-   迁移演练（备份/前向/重放/零改写/恢复）、完整回归 419 passed、浏览器验收 16 项全过、
-   AC1-AC7 对照 ✅，执行报告
-   `docs/plans/2026-08-20-agentic-capability-ac07-12-execution-report.md`。
-3. **AC-07 主线 #9-#17 已全部完成并关闭**；未开放普通用户、未完成 AC-08/AC-09/8B
-   是明确边界；后续方向（Phase 4 剩余门）停在授权门。
+1. **#40 G1 本地工程门已达标**：v3 正式结果功能 96.8%、安全 100%，资格 PASS；下一步是
+   在用户单独授权后更新/关闭 Issue、推送分支并建 PR。当前本地结果不得冒充远端工单已完成。
+2. **G2/G3 未开工**：可以进入 G2 规划；G3 默认入口切换仍需独立规格、实现与用户授权。
+3. **G4/G5 未完成**：平台现有外部 Qwen/DeepSeek 连接已用于 G1 P1 对照，但 G4 安全矩阵
+   未执行；8B Linux/Compose 与目标服务器仍未就绪。
 
 ## 8. 权威证据
 

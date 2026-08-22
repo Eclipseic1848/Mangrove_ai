@@ -476,6 +476,15 @@ class TestS6Supervision:
         )
 
         class _Store:
+            def get_semantic_workspace_revision(
+                self, user_id, task_id, revision
+            ):
+                return {
+                    "objective_text": "汇总目标",
+                    "output_formats": ("json",),
+                    "table_output_contracts": [],
+                }
+
             def append_semantic_workspace_event(
                 self, user_id, task_id, **kwargs
             ): ...

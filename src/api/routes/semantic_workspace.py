@@ -68,6 +68,7 @@ from src.conversation_steering import (
     build_context_rewriter,
 )
 from src.model_connections import GrantError, get_default_broker
+from src.delivery_publishing.models import TableOutputContract
 from src.services.upload_store import UploadStore
 
 
@@ -241,6 +242,7 @@ class WorkspaceTaskCreateIn(BaseModel):
     objective_text: str = Field(min_length=1, max_length=20_000)
     upload_ids: tuple[str, ...] = Field(min_length=1)
     output_formats: tuple[str, ...] = ("xlsx",)
+    table_output_contracts: tuple[TableOutputContract, ...] = ()
     provider: str = Field(default="local", min_length=1)
     model: str | None = Field(default=None, min_length=1)
     external_api_confirmed: bool = False
@@ -295,6 +297,18 @@ class WorkspaceTaskCreateIn(BaseModel):
 
     @model_validator(mode="after")
     def validate_validation_target(self) -> "WorkspaceTaskCreateIn":
+        contract_formats = [
+            item.format for item in self.table_output_contracts
+        ]
+        if len(contract_formats) != len(set(contract_formats)):
+            raise ValueError("同一输出格式只能冻结一个表格契约")
+        if not set(contract_formats).issubset(self.output_formats):
+            raise ValueError("表格输出契约必须绑定正式输出格式")
+        if (
+            self.table_output_contracts
+            and self.runtime_version is not RuntimeVersion.PI
+        ):
+            raise ValueError("表格输出契约只能由 Pi Runtime 执行")
         # #15 D9：验证目标必须同时出现在能力选择中（否则豁免无载体）。
         if (
             self.validation_target is not None
@@ -338,6 +352,7 @@ class WorkspaceRevisionIn(BaseModel):
 
     instruction: str = Field(min_length=1, max_length=20_000)
     output_formats: tuple[str, ...] | None = None
+    table_output_contracts: tuple[TableOutputContract, ...] | None = None
     external_api_confirmed: bool = False
 
     @field_validator("instruction")
@@ -359,6 +374,22 @@ class WorkspaceRevisionIn(BaseModel):
         if invalid:
             raise ValueError(f"不支持的正式输出格式：{sorted(invalid)}")
         return normalized
+
+    @model_validator(mode="after")
+    def validate_table_output_contracts(self) -> "WorkspaceRevisionIn":
+        if self.table_output_contracts is None:
+            return self
+        contract_formats = [
+            item.format for item in self.table_output_contracts
+        ]
+        if len(contract_formats) != len(set(contract_formats)):
+            raise ValueError("同一输出格式只能冻结一个表格契约")
+        if (
+            self.output_formats is not None
+            and not set(contract_formats).issubset(self.output_formats)
+        ):
+            raise ValueError("表格输出契约必须绑定正式输出格式")
+        return self
 
 
 def _uploads() -> UploadStore:
@@ -1085,6 +1116,10 @@ async def create_task(
             model=payload.model,
             external_api_confirmed=payload.external_api_confirmed,
             source_refs=source_refs,
+            table_output_contracts=[
+                item.model_dump(mode="json")
+                for item in payload.table_output_contracts
+            ],
         )
         repository.register(
             RuntimeTaskConfig(
@@ -1702,6 +1737,11 @@ async def decide_steering_revision(
             provider=task["provider"],
             model=task["model"],
             external_api_confirmed=bool(connection_binding),
+            table_output_contracts=[
+                item
+                for item in task.get("table_output_contracts", [])
+                if item.get("format") in formats
+            ],
         )
         _runtime_repository().register(
             RuntimeTaskConfig(
@@ -1863,6 +1903,17 @@ async def create_revision(
         task_id,
         int(task["active_revision"]),
     )
+    if (
+        payload.table_output_contracts
+        and (
+            previous_runtime is None
+            or previous_runtime["runtime_version"] is not RuntimeVersion.PI
+        )
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="表格输出契约只能由 Pi Runtime 执行",
+        )
     connection_binding = None
     if previous_runtime and previous_runtime["model_connection_id"]:
         if not payload.external_api_confirmed:
@@ -1893,6 +1944,17 @@ async def create_revision(
         if payload.output_formats is not None
         else task["output_formats"]
     )
+    if (
+        payload.table_output_contracts is not None
+        and not {
+            item.format for item in payload.table_output_contracts
+        }.issubset(formats)
+    ):
+        # 继承旧格式时也必须现场核对，不能把错配契约写入不可变 Revision。
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="表格输出契约必须绑定正式输出格式",
+        )
     objective = (
         f"{task['objective_text']}\n用户修改要求：{payload.instruction}"
     )
@@ -1902,6 +1964,14 @@ async def create_revision(
         objective_text=objective,
         output_formats=formats,
         change_summary=payload.instruction,
+        table_output_contracts=(
+            [
+                item.model_dump(mode="json")
+                for item in payload.table_output_contracts
+            ]
+            if payload.table_output_contracts is not None
+            else None
+        ),
     )
     _runtime_repository().register(
         RuntimeTaskConfig(

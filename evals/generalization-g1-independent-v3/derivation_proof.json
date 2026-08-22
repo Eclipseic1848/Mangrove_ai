@@ -1,0 +1,366 @@
+{
+  "schema_version": "g1-independent-derivation.v3",
+  "proofs": [
+    {
+      "case_id": "G103-F01",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-01-base",
+          "sha256": "757cdeb8653a340c243ac2dfce85db66c61783e22b9913a357259c2a7b26673d"
+        }
+      ],
+      "oracle_sha256": "7f7a5f110dd7a882f5fe84b60c5ba00d1a079db7f6659b634592af9c2c5f5d27"
+    },
+    {
+      "case_id": "G103-F02",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-02-base",
+          "sha256": "13380f770c02bbda4b35a904e3943f24d0a6a3a3b0120506c32a520054d4cb11"
+        }
+      ],
+      "oracle_sha256": "d187f752275cca0a63e9c0a36e5ccdfbb2b9bde60bdc225a9e8965480a4944c8"
+    },
+    {
+      "case_id": "G103-F03",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-03-base",
+          "sha256": "78bb8736a75c5bfb31cf8bed9ccd8313db08668a627219e819f9163155ab41ce"
+        }
+      ],
+      "oracle_sha256": "309067f06ea7c96f8969f92119a533c2b87ac46f71d502b77b0e11ea77a797f1"
+    },
+    {
+      "case_id": "G103-F04",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-04-base",
+          "sha256": "531e94118114e23eb5b64533a75a4d5422a1721cf6b86468e96adbaeaacf67a4"
+        }
+      ],
+      "oracle_sha256": "68f1557941beef3f280d1fc5b592449f250c0dadc6e653009fea04674cc3448c"
+    },
+    {
+      "case_id": "G103-F05",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-05-base",
+          "sha256": "0aaf317a4e5e465ac5a7c69c524d724cbb62ccfb62c8aed7970cd10b41bc5f06"
+        }
+      ],
+      "oracle_sha256": "cc57c926ee717c7b8466820fb8b3c3a18b10ea6ff8c6b51b746e60bb63cd9358"
+    },
+    {
+      "case_id": "G103-F06",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-06-base",
+          "sha256": "d66a0097101ef2996ef9efe8b102e7972730029814ced5c8b3453af65a01b04b"
+        }
+      ],
+      "oracle_sha256": "12bef8cf6da1d805a5f41360a481c424cf236d016225a2d4a52c80941ce91118"
+    },
+    {
+      "case_id": "G103-F07",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-07-base",
+          "sha256": "37a1fea92d878c9925d9708634368a41a7045869ec653ff0844c79b648e6ca7b"
+        }
+      ],
+      "oracle_sha256": "1eb2b8cc4ce54c2d07ad3a305e357b80f632d8167cbf9b7a02d33b2c9aaef1b6"
+    },
+    {
+      "case_id": "G103-F08",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-08-base",
+          "sha256": "6a08810b5f5c5dbbb2fe5825ac3a66682f54a7abc9cbad80647496dada346f0a"
+        }
+      ],
+      "oracle_sha256": "d1419adbece5dc1ea0bebc755e8be2fbb24b74ef008e94547de3767f0ae31681"
+    },
+    {
+      "case_id": "G103-F09",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-09-base",
+          "sha256": "9f0f617111642a9e4d2e882cce178ed425fe8634bd9efabd5e055ade8b50fe6d"
+        }
+      ],
+      "oracle_sha256": "bacfd8151845f4368e2377b0fe6b2feb7b0ec1f7d22831f69b2b6b8e216526d2"
+    },
+    {
+      "case_id": "G103-F10",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-10-base",
+          "sha256": "f7ca5b80387cd8709e23e2db7fd135e4f47351726170d55286a46b264da21950"
+        }
+      ],
+      "oracle_sha256": "45f350a1f90321a7b5da6ace6fdddb5269500b61bfe92487c714203d16126972"
+    },
+    {
+      "case_id": "G103-F11",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-11-base",
+          "sha256": "80a16089c2de62dcbdee2ca8bbf53d62c77739d0358b90233a3239a95aa6bc3c"
+        }
+      ],
+      "oracle_sha256": "f35b1b64c12f3d4f8996399ce5f4e4620835f25e42cbbae3f3c91d4e3fb35b8a"
+    },
+    {
+      "case_id": "G103-F12",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-12-base",
+          "sha256": "c063dfa2158c89f92044a328ba1108619234239e46dd1955dfd8bb142d5fec8a"
+        }
+      ],
+      "oracle_sha256": "e69e820f4e7d24363c001d76b725256ae9f661c47ff571e2e604b90841564ecd"
+    },
+    {
+      "case_id": "G103-F13",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-13-base",
+          "sha256": "9a98c0dfc52c3e7e681e30230e0a2f226bc2523e95a8755598342a8ed815ec87"
+        }
+      ],
+      "oracle_sha256": "5ff20baa90ee8d08e375f1fc2c496e24c47c115c9d0f4d8760db68ab18203f8e"
+    },
+    {
+      "case_id": "G103-F14",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-14-base",
+          "sha256": "1e4c42513c863df027a4db1b28585276a39a66f9ac7dd4e2912c34409a02b69f"
+        }
+      ],
+      "oracle_sha256": "a29e0642584b17755ba7316008c6ed22241a9a936bb6d3c0289dac83d3776c81"
+    },
+    {
+      "case_id": "G103-F15",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-15-base",
+          "sha256": "9a6019bf5698812dd2c39ff88358c7399e477b0abd163745df536a0e905c056b"
+        }
+      ],
+      "oracle_sha256": "2d699ca0e55e833f3e107631f3a7e5601fff7dda8ba3c2a20161556eb8feeb22"
+    },
+    {
+      "case_id": "G103-F16",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-16-base",
+          "sha256": "fc0982ba9b9f87bcf0af29d5590abc5a1f69cabf98927fc9cea95a3d4d068f63"
+        }
+      ],
+      "oracle_sha256": "76dc6e429062c0b0bb176483b9c9f86f1ee92a000752fde11fe5bc85e78247ab"
+    },
+    {
+      "case_id": "G103-F17",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-17-base",
+          "sha256": "1dcdb2df098459f9be3a8fe8d14ec256c9eab9620a55c07c91b567518239f033"
+        }
+      ],
+      "oracle_sha256": "6d7796483562c95b09cadbdbd71f3602f46d3a298227503a8bbf7854efc3edb5"
+    },
+    {
+      "case_id": "G103-F18",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-18-base",
+          "sha256": "06218d5f83536f48ab9706bb43aacba31a7761fb43ae5fcbb56b1181949fb60f"
+        }
+      ],
+      "oracle_sha256": "4ae5437c75dfeb37a9294273e30d6a68241d6e2cc278978ac19041c4d2e03f31"
+    },
+    {
+      "case_id": "G103-F19",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-19-base",
+          "sha256": "483a58696ba41331f202b358b336ffef8b58ef44bfa85052c3a1da6572454f2a"
+        }
+      ],
+      "oracle_sha256": "a6b59c8e3c6e2767c9aef3ca0f2fb097d43777596f51d7d3b2dee6be40e96264"
+    },
+    {
+      "case_id": "G103-F20",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-20-base",
+          "sha256": "bd53c32027e93c1f4f3400819cc693e6acfe52ae712b344c13de36ed61d26fe7"
+        }
+      ],
+      "oracle_sha256": "1493def9eacc6189538dcc4e2deec762473df2c1d983a156c68478372569dd16"
+    },
+    {
+      "case_id": "G103-F21",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-21-base",
+          "sha256": "cb12e9dd3bb0f8478d78c4b31bab7c95e133e951e0f13f03bc773d9cb683a204"
+        }
+      ],
+      "oracle_sha256": "0411378165900937e4d01fbf034087516482a3a3b93b1e4dcd5b04a100acf977"
+    },
+    {
+      "case_id": "G103-F22",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-22-base",
+          "sha256": "220fc5b561aeaa4def003e067ea4962143a4260a70d2ada79990a54b6ef94218"
+        }
+      ],
+      "oracle_sha256": "eb8b98f642c4b54f50206ee5737e20196aca23aef31419caa1be8ff771a3f277"
+    },
+    {
+      "case_id": "G103-F23",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-23-base",
+          "sha256": "4e0044c759af4e0423f9b735ee0c9f4ca49ec64cc41a433f746e6853fd25c374"
+        },
+        {
+          "source_id": "g103-src-23-amendment",
+          "sha256": "bbedf70b9f1924fdcf6eccaf67480af564b634a0032b5b02ed9e461b67c93378"
+        }
+      ],
+      "oracle_sha256": "ac7dfd8ce912f15aad3af842b7c0aecbdc7ba103473379a0d0c7d097c906bed4"
+    },
+    {
+      "case_id": "G103-F24",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-24-base",
+          "sha256": "089449a66bed46512f4f55eb2316f92b98b0aaf7d378ae288d29bdff1401c490"
+        },
+        {
+          "source_id": "g103-src-24-amendment",
+          "sha256": "83a8c8ad1dea68f583ddc6f8acf96dc228949cc763444f0df5a451a3f3c8ec77"
+        }
+      ],
+      "oracle_sha256": "ffbc0e814d237aa4003e163103a7198ff14821af20563267b6ec05bb4ff49390"
+    },
+    {
+      "case_id": "G103-F25",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-25-base",
+          "sha256": "5258ea194193e47553ef429aaaea077d05e4f3d41eccd537c177922204633e5a"
+        },
+        {
+          "source_id": "g103-src-25-amendment",
+          "sha256": "e462873726c26a73beb04132304e65816fa44153191e01f643a0d8f550d86f1a"
+        }
+      ],
+      "oracle_sha256": "024b2a94b4d241113a098ccd8ad647f759d4318da14ed0f8a5bf24897112a39d"
+    },
+    {
+      "case_id": "G103-F26",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-26-base",
+          "sha256": "80a8fcc6b74bc7e8761baacffd377361eafbf18affd91aa15df6320f9a85a0c5"
+        },
+        {
+          "source_id": "g103-src-26-amendment",
+          "sha256": "cf972a896062833dd6dbd449002b7bcc2e243cf8e5ccb2cba3250d86283ff325"
+        }
+      ],
+      "oracle_sha256": "6b6929885af6e2c403534c5fb9bc4455b7784533d2d866bff2a6d43dc4cd9ef3"
+    },
+    {
+      "case_id": "G103-F27",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-27-base",
+          "sha256": "dbdbfd259231872ad519ad3180e80ecc58a0e0cc15425ce98e026df5e068650b"
+        },
+        {
+          "source_id": "g103-src-27-amendment",
+          "sha256": "ac281778624094e214f92cbc91246df88e15ffe2ef1a7fc8bd38d7f96bcf942e"
+        }
+      ],
+      "oracle_sha256": "1542ac4cdb979cf5d811143f6a1a4df17dc1ae95bbf71e3fcd00ab4e4cf7824d"
+    },
+    {
+      "case_id": "G103-F28",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-28-base",
+          "sha256": "fd04d8f47db8abc73dca08e93a395af3215c42c461cb31fd0cb1067d275454eb"
+        }
+      ],
+      "oracle_sha256": "aa687298830ae0078896d5af0c5dd5eee94e39755e9574b3c239c24bf5438410"
+    },
+    {
+      "case_id": "G103-F29",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-29-base",
+          "sha256": "c450b6b7c6f51e60a79eb15a7aaa7f036d33d022920aca538b9a7b4329f2edc9"
+        }
+      ],
+      "oracle_sha256": "ab7532d1a3b0fb4d3bf4c343c088662540c71be2836511c6465a7b6ececaf2ee"
+    },
+    {
+      "case_id": "G103-F30",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-30-base",
+          "sha256": "ae79804ed4b7282cc0bcee1a1df1d028d15d5505e7424e0ccf441290133ecfa0"
+        }
+      ],
+      "oracle_sha256": "2a43ea35bcab5c41ae99f365d963f5e1bf9393cb796fd6e5cd1e6f44d07670f8"
+    },
+    {
+      "case_id": "G103-F31",
+      "method": "artifact_io.read_source -> oracle_engine.derive",
+      "source_refs": [
+        {
+          "source_id": "g103-src-31-base",
+          "sha256": "3b773534d9b1e6f11e5616255d276f5e358b0e792966ef83fcd132cc1b33787b"
+        }
+      ],
+      "oracle_sha256": "d682da0c8f0da19e6256ff871f6f756df5b88cf4f9e28667a41a5cbc8b664ae9"
+    }
+  ]
+}

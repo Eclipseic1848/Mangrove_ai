@@ -14,6 +14,8 @@ from pydantic import (
     model_validator,
 )
 
+from src.delivery_publishing.models import TableOutputContract
+
 
 class RuntimeVersion(str, Enum):
     """工作台任务采用的执行 Runtime。"""
@@ -110,8 +112,13 @@ class PiRuntimeRequest(BaseModel):
     revision: int = Field(ge=1)
     objective_text: str = Field(min_length=1, max_length=20_000)
     requested_output_formats: tuple[str, ...] = Field(min_length=1)
+    table_output_contracts: tuple[TableOutputContract, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+    )
     sources: tuple[SourceInput, ...] = Field(min_length=1)
     permission_profile: PermissionProfile = PermissionProfile.STANDARD
+    external_api_confirmed: bool = False
     model_connection_id: str | None = Field(
         default=None,
         min_length=1,
@@ -136,11 +143,22 @@ class PiRuntimeRequest(BaseModel):
         return normalized
 
     @model_validator(mode="after")
+    def validate_table_output_contracts(self) -> "PiRuntimeRequest":
+        contract_formats = tuple(item.format for item in self.table_output_contracts)
+        if len(set(contract_formats)) != len(contract_formats):
+            raise ValueError("同一输出格式只能冻结一个表格契约")
+        if any(item not in self.requested_output_formats for item in contract_formats):
+            raise ValueError("表格输出契约必须绑定已请求的输出格式")
+        return self
+
+    @model_validator(mode="after")
     def validate_model_route(self) -> "PiRuntimeRequest":
         """外部模式只携带连接引用；本地模式保留无秘密的直接配置。"""
 
         local_values = (self.model, self.base_url, self.api_key)
         if self.model_connection_id is not None:
+            if not self.external_api_confirmed:
+                raise ValueError("外部连接模式必须冻结外发确认")
             if self.model_connection_version is None:
                 raise ValueError("外部连接模式必须冻结连接版本")
             if self.model_connection_model is None:

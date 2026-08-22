@@ -98,6 +98,7 @@ data/templates/_vectors.json
 node_modules/
 frontend/node_modules/
 evals/agentic-runtime-vnext/runs/
+evals/generalization-g1/runs/
 frontend/dist/
 frontend/test-results/
 *.tsbuildinfo

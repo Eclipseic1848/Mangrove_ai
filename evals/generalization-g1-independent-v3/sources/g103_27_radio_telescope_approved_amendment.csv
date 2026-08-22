@@ -1,0 +1,5 @@
+section,unit_id,label,zone,quota,spent,state,rank,version
+approved_amendment,U271,asset-27-1,E,573.31,7.00,ready,1,3
+approved_amendment,U272,asset-27-2,Q,580.06,11.00,hold,2,1
+approved_amendment,U273,asset-27-3,E,593.06,15.00,ready,3,1
+approved_amendment,U274,asset-27-4,Z,612.31,19.00,ready,4,3

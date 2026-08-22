@@ -23,6 +23,7 @@ from src.agentic_runtime.models import (
     PiRuntimeRequest,
     SemanticDecision,
     SourceInput,
+    TableOutputContract,
     VerificationStatus,
 )
 from src.model_connections import ConnectionBroker
@@ -114,6 +115,8 @@ def _write_manifest(
     *,
     quote: str,
     source_name: str = "contract.pdf",
+    filename: str = "service-fees.csv",
+    output_format: str = "csv",
 ) -> None:
     (output / "candidate-manifest.json").write_text(
         json.dumps(
@@ -121,8 +124,8 @@ def _write_manifest(
                 "version": 1,
                 "artifacts": [
                     {
-                        "filename": "service-fees.csv",
-                        "format": "csv",
+                        "filename": filename,
+                        "format": output_format,
                         "description": "Only the requested fee table",
                         "evidence": [
                             {
@@ -193,6 +196,72 @@ async def test_grounded_pdf_csv_candidate_passes_independent_verifier(
         "source_grounding",
         "semantic_goal",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("output_format", "filename"),
+    (("csv", "service-fees.csv"),
+     ("json", "service-fees.json"),
+     ("xlsx", "service-fees.xlsx")),
+)
+async def test_table_output_contract_mismatch_fails_before_semantic_judge(
+    tmp_path: Path,
+    output_format: str,
+    filename: str,
+) -> None:
+    source = tmp_path / "upload-object-without-extension"
+    _write_pdf(source)
+    output = tmp_path / "output"
+    output.mkdir()
+    candidate_path = output / filename
+    if output_format == "csv":
+        candidate_path.write_text(
+            "fee,name\n100,Alice\n",
+            encoding="utf-8-sig",
+        )
+    elif output_format == "json":
+        candidate_path.write_text(
+            json.dumps([{"fee": 100, "name": "Alice"}], ensure_ascii=False),
+            encoding="utf-8",
+        )
+    else:
+        workbook = Workbook()
+        sheet = workbook.active
+        sheet.append(["fee", "name"])
+        sheet.append([100, "Alice"])
+        workbook.save(candidate_path)
+    _write_manifest(
+        output,
+        quote="Service Fee Details - Alice - 100",
+        filename=filename,
+        output_format=output_format,
+    )
+    contract = TableOutputContract(
+        format=output_format,
+        exact_columns=("name", "fee"),
+        json_shape="records" if output_format == "json" else None,
+    )
+    request = _request(tmp_path, source).model_copy(
+        update={
+            "requested_output_formats": (output_format,),
+            "table_output_contracts": (contract,),
+        }
+    )
+
+    report = await CandidateVerifier(
+        semantic_judge=JudgeMustNotRun()
+    ).verify(
+        request=request,
+        candidates=inspect_candidates(output, (output_format,)),
+        manifest_path=output / "candidate-manifest.json",
+    )
+
+    assert report.status is VerificationStatus.FAILED
+    contract_check = next(
+        check for check in report.checks if check.code == "table_output_contract"
+    )
+    assert contract_check.passed is False
 
 
 @pytest.mark.asyncio
@@ -333,6 +402,7 @@ async def test_external_verifier_uses_separate_grant_and_records_usage(
         model_connection_id=str(connection["connection_id"]),
         model_connection_version=binding.connection_version,
         model_connection_model=binding.model,
+        external_api_confirmed=True,
     )
     report = await CandidateVerifier(
         semantic_judge=BrokerSemanticJudge(
@@ -465,6 +535,7 @@ async def test_external_verifier_retries_one_empty_semantic_response(
         model_connection_id=str(connection["connection_id"]),
         model_connection_version=binding.connection_version,
         model_connection_model=binding.model,
+        external_api_confirmed=True,
     )
 
     report = await CandidateVerifier(
@@ -746,8 +817,10 @@ async def test_csv_evidence_uses_original_serialized_row(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("locator", ("sheet:费用", "sheet:费用 row:2"))
 async def test_xlsx_evidence_supports_extensionless_upload_object(
     tmp_path: Path,
+    locator: str,
 ) -> None:
     source = tmp_path / "upload-object-without-extension"
     workbook = Workbook()
@@ -775,7 +848,7 @@ async def test_xlsx_evidence_supports_extensionless_upload_object(
                         "evidence": [
                             {
                                 "source": "book.xlsx",
-                                "locator": "sheet:费用",
+                                "locator": locator,
                                 "quote": "Alice\t100",
                             }
                         ],
@@ -804,8 +877,22 @@ async def test_xlsx_evidence_supports_extensionless_upload_object(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("locator", "quote"),
+    (
+        ("table:0 row:1", "Alice | 100"),
+        (
+            "table:0",
+            "Table 1: 费用明细 (2 rows × 2 cols)\n"
+            "姓名 | 金额\n"
+            "Alice | 100",
+        ),
+    ),
+)
 async def test_docx_table_evidence_accepts_markdown_cell_separators(
     tmp_path: Path,
+    locator: str,
+    quote: str,
 ) -> None:
     source = tmp_path / "upload-object-without-extension"
     document = Document()
@@ -834,8 +921,8 @@ async def test_docx_table_evidence_accepts_markdown_cell_separators(
                         "evidence": [
                             {
                                 "source": "source.docx",
-                                "locator": "table:0 row:1",
-                                "quote": "Alice | 100",
+                                "locator": locator,
+                                "quote": quote,
                             }
                         ],
                     }

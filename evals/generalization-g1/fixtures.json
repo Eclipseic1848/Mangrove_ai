@@ -1,0 +1,549 @@
+{
+  "schema_version": "g1-generalization-30-v1",
+  "created": "2026-08-20",
+  "evaluation_status": "diagnostic_only",
+  "independent_heldout": false,
+  "description": "G1 30 项泛化集诊断夹具清单。运行前必须断言 frozen_inputs 与现场一致；断言规则见 assertions.py，其中部分规则只有固定结构、长度或行数阈值，不能用于正式 G1 正确率验收。",
+  "frozen_inputs": {
+    "fixture_sha256": "0766fc026b94c7f7e9dbddea8bcab0bafccb3b3dbf981f0b4484d7c4de5fc003",
+    "goal_contracts_sha256": "9c4a5b0e49856b2ca6a3ec792a61565b31334d41852a032da3b5cfaff909b3e0",
+    "candidate_verifier_sha256": "f65f1fff8629f7c1000d28587f9b2ba62698866d909feba92117a71663ebc962",
+    "assertions_sha256": "6a5f0a939681723065d5f363a748401efe98f10c6665ae4e02235bdb3f4557b7",
+    "runtime_sha256": "e5bf24e0500e4451476a8f499aaf5d28c3cd0b1f32414a5f894615b824d3ca9d",
+    "delivery_qualification_sha256": "41a73709b12e76c41e92e65180cfe5393a11c23c67f8591ae079c1d3ed718172",
+    "evaluation_driver_sha256": "8ae85be8263c80c282c314a47f06fc36560ac442869b10f9445564b6e599d87f",
+    "git_commit": "8538481ac1ad2f06d137d1017f46be51b7b9ede3",
+    "code_freeze_sha256": "bea1f17412e9728ea1d089d26660920cd04ff1f0c84b5fa7b6c9d772b1909241"
+  },
+  "cases": [
+    {
+      "id": "P1",
+      "category": "pdf",
+      "traps": [
+        "base"
+      ],
+      "sources": [
+        {
+          "original_name": "NF202523664工作量核算表.pdf",
+          "sha256": "886e5c89f4a6f4f963a35f4edf934f1589f3ffbb55f96fc90327fc0f08bd9f93"
+        }
+      ],
+      "objective": "把这个工作量核算表里的明细行提取成表格",
+      "output_format": "csv",
+      "assert_rule": "pdf_workload_detail"
+    },
+    {
+      "id": "P2",
+      "category": "pdf",
+      "traps": [
+        "paraphrase"
+      ],
+      "sources": [
+        {
+          "original_name": "NF202509837工作量核算表.pdf",
+          "sha256": "f9107772c8307c53ef27bfd8cfd4372ceb465d864aa58b401a168c70e86c4f70"
+        }
+      ],
+      "objective": "算一下这张表里每个人一共多少工作量，出一张汇总表",
+      "output_format": "csv",
+      "assert_rule": "pdf_workload_summary"
+    },
+    {
+      "id": "P3",
+      "category": "pdf",
+      "traps": [
+        "conflict"
+      ],
+      "sources": [
+        {
+          "original_name": "NF202523664工作量核算表.pdf",
+          "sha256": "886e5c89f4a6f4f963a35f4edf934f1589f3ffbb55f96fc90327fc0f08bd9f93"
+        },
+        {
+          "original_name": "NF202520544工作量核算表.pdf",
+          "sha256": "f525845e80d9b73c85c0175b2259250dbe7323d6e97979b1f7d5106b95795dff"
+        }
+      ],
+      "objective": "只看 2025 年第二张表，把它的明细给我",
+      "output_format": "csv",
+      "assert_rule": "pdf_workload_detail_second_source"
+    },
+    {
+      "id": "P4",
+      "category": "pdf",
+      "traps": [
+        "compound"
+      ],
+      "sources": [
+        {
+          "original_name": "NF202509837工作量核算表.pdf",
+          "sha256": "f9107772c8307c53ef27bfd8cfd4372ceb465d864aa58b401a168c70e86c4f70"
+        },
+        {
+          "original_name": "NF202520544工作量核算表.pdf",
+          "sha256": "f525845e80d9b73c85c0175b2259250dbe7323d6e97979b1f7d5106b95795dff"
+        },
+        {
+          "original_name": "NF202523664工作量核算表.pdf",
+          "sha256": "886e5c89f4a6f4f963a35f4edf934f1589f3ffbb55f96fc90327fc0f08bd9f93"
+        }
+      ],
+      "objective": "把这三份核算表合并成一份",
+      "output_format": "csv",
+      "assert_rule": "pdf_workload_merge_three"
+    },
+    {
+      "id": "P5",
+      "category": "pdf",
+      "traps": [
+        "paraphrase"
+      ],
+      "sources": [
+        {
+          "original_name": "西南工程部.pdf",
+          "sha256": "bb598a503f85acb5d391366eb83eba31a94ce98e3789b76fcf98d1ee8d50b955"
+        }
+      ],
+      "objective": "找到西南工程部第 3 页的表格",
+      "output_format": "csv",
+      "assert_rule": "pdf_page3_table"
+    },
+    {
+      "id": "P6",
+      "category": "pdf",
+      "traps": [
+        "similar"
+      ],
+      "sources": [
+        {
+          "original_name": "西南工程部.pdf",
+          "sha256": "bb598a503f85acb5d391366eb83eba31a94ce98e3789b76fcf98d1ee8d50b955"
+        }
+      ],
+      "objective": "提取第一张完整的单据",
+      "output_format": "csv",
+      "assert_rule": "pdf_first_document"
+    },
+    {
+      "id": "P7",
+      "category": "pdf",
+      "traps": [
+        "similar"
+      ],
+      "sources": [
+        {
+          "original_name": "西北工程部.pdf",
+          "sha256": "b752225390cfc280f6cdb4727e833104164a98678d774fda9ad7c4c379d77027"
+        }
+      ],
+      "objective": "把西北工程部里所有的单据都列出来",
+      "output_format": "csv",
+      "assert_rule": "pdf_all_documents"
+    },
+    {
+      "id": "P8",
+      "category": "pdf",
+      "traps": [
+        "base"
+      ],
+      "sources": [
+        {
+          "original_name": "09-FCC_E541车型_系统设置功能规范(1).pdf",
+          "sha256": "10b002f0df5050533eca0387b2f42cbc337bfe9b621e2a49c071cf9242809a26"
+        }
+      ],
+      "objective": "这个系统设置功能规范里有哪些功能模块？列个清单",
+      "output_format": "csv",
+      "assert_rule": "pdf_function_modules"
+    },
+    {
+      "id": "P9",
+      "category": "pdf",
+      "traps": [
+        "base"
+      ],
+      "sources": [
+        {
+          "original_name": "研发中心（2026H2）工作规划.pdf",
+          "sha256": "4054a7e59c668be6b037a3bd1cd9eed59516222ce91b68b4bd26007ab235c4d9"
+        }
+      ],
+      "objective": "这份工作规划讲了哪几件事？分别由谁负责？",
+      "output_format": "txt",
+      "assert_rule": "pdf_plan_topics"
+    },
+    {
+      "id": "P10",
+      "category": "pdf",
+      "traps": [
+        "similar"
+      ],
+      "sources": [
+        {
+          "original_name": "必看——小程序操作指南2021.9.3.pdf",
+          "sha256": "d93f8eef42ea01ebade692671ac00bcaa939082dc5057ff91df743d63a6525e3"
+        }
+      ],
+      "objective": "怎么在小程序里做题库练习？把操作步骤写出来",
+      "output_format": "txt",
+      "assert_rule": "pdf_miniapp_quiz_steps"
+    },
+    {
+      "id": "D1",
+      "category": "docx",
+      "traps": [
+        "similar"
+      ],
+      "sources": [
+        {
+          "original_name": "长安汽车客户服务大师-智慧服务系统建设项目技术要求最新.docx",
+          "sha256": "325d814ef51937e72cf6ebd9dca954c1415083cb2bad902720214fb3c309305c"
+        }
+      ],
+      "objective": "把招标要求里的核心指标表格提取出来",
+      "output_format": "csv",
+      "assert_rule": "docx_core_indicators"
+    },
+    {
+      "id": "D2",
+      "category": "docx",
+      "traps": [
+        "base"
+      ],
+      "sources": [
+        {
+          "original_name": "电力订单PO管理平台功能需求文档（Phase3）20260312.docx",
+          "sha256": "4c4b8003a11a7a93c72d493d0f36237ae4d7e4fcf8e4ee01cb5c633dcfb74757"
+        }
+      ],
+      "objective": "列出这个平台的功能需求模块清单",
+      "output_format": "json",
+      "assert_rule": "docx_po_modules"
+    },
+    {
+      "id": "D3",
+      "category": "docx",
+      "traps": [
+        "table"
+      ],
+      "sources": [
+        {
+          "original_name": "AI-for-Process-PRD-V0.1.2.docx",
+          "sha256": "241f1198047577c97f4ff4d430472664b43e2821c5dacb37a81c20d42a4ec4bd"
+        }
+      ],
+      "objective": "把官网各区域的元素说明整理出来",
+      "output_format": "csv",
+      "assert_rule": "docx_region_elements"
+    },
+    {
+      "id": "D4",
+      "category": "docx",
+      "traps": [
+        "table"
+      ],
+      "sources": [
+        {
+          "original_name": "长安数智研发大师-需求分析报告.docx",
+          "sha256": "c0f0b21e31585bc3e67cb94daddf0f4c22ed27bd3444ae3aad974afed9ec44bc"
+        }
+      ],
+      "objective": "报告里规划了哪几个智能体？各自的应用场景数和核心价值是什么？",
+      "output_format": "csv",
+      "assert_rule": "docx_agents_scenarios"
+    },
+    {
+      "id": "D5",
+      "category": "docx",
+      "traps": [
+        "similar"
+      ],
+      "sources": [
+        {
+          "original_name": "质量运营大师_客户评价数据监控_招标技术要求（原版）.docx",
+          "sha256": "f932baac0d96628493e98c508f091b94cea108b7ca7b6189fbc6c9defc2b84a5"
+        }
+      ],
+      "objective": "从质量运营大师需求文档的“核心指标”表格中，提取全部核心指标和对应的目标值，输出两列 CSV；不要加入其他表格或章节的内容",
+      "output_format": "csv",
+      "assert_rule": "docx_quality_indicators"
+    },
+    {
+      "id": "D6",
+      "category": "docx",
+      "traps": [
+        "paraphrase"
+      ],
+      "sources": [
+        {
+          "original_name": "长安汽车OTD大师建设项目-跨境订单透明及智能问答开发项目-技术要求V1.0_20260509_20260514141317A109 (8).docx",
+          "sha256": "002d35da84e9c8d7a9c58d7adb9dc016b47877e01d29c6a4886430fbdf8439df"
+        }
+      ],
+      "objective": "这个项目大概多久交付？验收要求是什么？",
+      "output_format": "txt",
+      "assert_rule": "docx_otd_schedule"
+    },
+    {
+      "id": "X1",
+      "category": "xlsx",
+      "traps": [
+        "similar"
+      ],
+      "sources": [
+        {
+          "original_name": "B翼AI项目2026_外发版本.xlsx",
+          "sha256": "9e35426c7a2dd953361f5c22852087234349d8d3eb8cb19b11684682d4578c53"
+        }
+      ],
+      "objective": "第二张表里计划交付月份是 1 月的记录，只留“应用场景（三级）”列和“目标成熟度”列，输出两列 CSV；不要把其他列的内容混进来",
+      "output_format": "csv",
+      "assert_rule": "xlsx_sheet2_filter"
+    },
+    {
+      "id": "X2",
+      "category": "xlsx",
+      "traps": [
+        "similar"
+      ],
+      "sources": [
+        {
+          "original_name": "B翼AI项目2026_外发版本.xlsx",
+          "sha256": "9e35426c7a2dd953361f5c22852087234349d8d3eb8cb19b11684682d4578c53"
+        }
+      ],
+      "objective": "把大师场景规划表里的智能体应用场景都列出来",
+      "output_format": "csv",
+      "assert_rule": "xlsx_scene_planning"
+    },
+    {
+      "id": "X3",
+      "category": "xlsx",
+      "traps": [
+        "base"
+      ],
+      "sources": [
+        {
+          "original_name": "B翼AI项目2026_外发版本.xlsx",
+          "sha256": "9e35426c7a2dd953361f5c22852087234349d8d3eb8cb19b11684682d4578c53"
+        }
+      ],
+      "objective": "V1.0 的 26 年交付计划表里，2026 年新增的场景有哪些？",
+      "output_format": "csv",
+      "assert_rule": "xlsx_plan2026_new"
+    },
+    {
+      "id": "X4",
+      "category": "xlsx",
+      "traps": [
+        "base"
+      ],
+      "sources": [
+        {
+          "original_name": "B翼AI项目2026_外发版本.xlsx",
+          "sha256": "9e35426c7a2dd953361f5c22852087234349d8d3eb8cb19b11684682d4578c53"
+        }
+      ],
+      "objective": "KTM 表里牵头单位是效率部的工作事项有哪些？",
+      "output_format": "csv",
+      "assert_rule": "xlsx_ktm_owner"
+    },
+    {
+      "id": "C1",
+      "category": "csv",
+      "traps": [
+        "base"
+      ],
+      "sources": [
+        {
+          "original_name": "部门金额样例.csv",
+          "sha256": "f450d9c71e0e8307cfdba85992e9fa0e1af9089aaec4d8471c199fe67d03a156"
+        }
+      ],
+      "objective": "按部门汇总一下金额",
+      "output_format": "csv",
+      "assert_rule": "csv_sum_by_dept"
+    },
+    {
+      "id": "C2",
+      "category": "csv",
+      "traps": [
+        "paraphrase"
+      ],
+      "sources": [
+        {
+          "original_name": "echo样例.csv",
+          "sha256": "15e0bbecaf1bfba6bf8611dc0d6ee07aae559b66d8bf6918c84413fc44976817"
+        }
+      ],
+      "objective": "这份数据一共多少钱？",
+      "output_format": "txt",
+      "assert_rule": "csv_total_amount"
+    },
+    {
+      "id": "C3",
+      "category": "csv",
+      "traps": [
+        "base"
+      ],
+      "sources": [
+        {
+          "original_name": "phase2-e2e.csv",
+          "sha256": "6173b22f9539d5256107d1cdc7809f771174d8009b744d9bf0b8305236064f14"
+        }
+      ],
+      "objective": "金额超过 15 的记录有哪些？",
+      "output_format": "csv",
+      "assert_rule": "csv_filter_value"
+    },
+    {
+      "id": "C4",
+      "category": "csv",
+      "traps": [
+        "garbled"
+      ],
+      "sources": [
+        {
+          "original_name": "ac07_34_python_input.csv",
+          "sha256": "9006e7b552db863d0589423e28414d350a577ff40060aa35b5cdeef056a749bd"
+        }
+      ],
+      "objective": "把这份乱码表头的表按列求和，表头重新命名为部门/金额",
+      "output_format": "csv",
+      "assert_rule": "csv_garbled_header_sum"
+    },
+    {
+      "id": "C5",
+      "category": "csv",
+      "traps": [
+        "compound"
+      ],
+      "sources": [
+        {
+          "original_name": "accept-s8.csv",
+          "sha256": "ae3c186e29e1295ee16432f048d2b73d76ac65cd9e2b6cee659f5d07148c42f9"
+        },
+        {
+          "original_name": "accept-s8-cancel.csv",
+          "sha256": "b667fcf357a18fb1fe6ed21e7bb7a85d7c7bec55ff1720e65e5da3797643c86c"
+        }
+      ],
+      "objective": "把这两张小表按 name 合并成一张",
+      "output_format": "csv",
+      "assert_rule": "csv_merge_by_name"
+    },
+    {
+      "id": "M1",
+      "category": "compound",
+      "traps": [
+        "compound",
+        "paraphrase"
+      ],
+      "sources": [
+        {
+          "original_name": "部门金额样例.csv",
+          "sha256": "f450d9c71e0e8307cfdba85992e9fa0e1af9089aaec4d8471c199fe67d03a156"
+        },
+        {
+          "original_name": "echo样例.csv",
+          "sha256": "15e0bbecaf1bfba6bf8611dc0d6ee07aae559b66d8bf6918c84413fc44976817"
+        }
+      ],
+      "objective": "把这两份金额数据放一起算个总账",
+      "output_format": "txt",
+      "assert_rule": "csv_combined_total"
+    },
+    {
+      "id": "M2",
+      "category": "compound",
+      "traps": [
+        "compound"
+      ],
+      "sources": [
+        {
+          "original_name": "长安数智研发大师-需求分析报告.docx",
+          "sha256": "c0f0b21e31585bc3e67cb94daddf0f4c22ed27bd3444ae3aad974afed9ec44bc"
+        },
+        {
+          "original_name": "AI-for-Process-PRD-V0.1.2.docx",
+          "sha256": "241f1198047577c97f4ff4d430472664b43e2821c5dacb37a81c20d42a4ec4bd"
+        }
+      ],
+      "objective": "这两份文档分别是做什么的？各自核心模块列出来",
+      "output_format": "txt",
+      "assert_rule": "docx_two_docs_modules"
+    },
+    {
+      "id": "M3",
+      "category": "compound",
+      "traps": [
+        "compound"
+      ],
+      "sources": [
+        {
+          "original_name": "部门金额样例.csv",
+          "sha256": "f450d9c71e0e8307cfdba85992e9fa0e1af9089aaec4d8471c199fe67d03a156"
+        },
+        {
+          "original_name": "echo样例.csv",
+          "sha256": "15e0bbecaf1bfba6bf8611dc0d6ee07aae559b66d8bf6918c84413fc44976817"
+        },
+        {
+          "original_name": "phase2-e2e.csv",
+          "sha256": "6173b22f9539d5256107d1cdc7809f771174d8009b744d9bf0b8305236064f14"
+        }
+      ],
+      "objective": "把这三张 CSV 合并成一张：三张表的所有行都保留、不删除不合并行；相同的列（部门、金额）并为一组，不同的列（id、name、value）另起一组",
+      "output_format": "csv",
+      "assert_rule": "csv_three_merge"
+    },
+    {
+      "id": "F1",
+      "category": "fuzzy",
+      "traps": [
+        "fuzzy"
+      ],
+      "sources": [
+        {
+          "original_name": "长安汽车OTD大师建设项目-跨境订单透明及智能问答开发项目-技术要求V1.0_20260509_20260514141317A109 (8).docx",
+          "sha256": "002d35da84e9c8d7a9c58d7adb9dc016b47877e01d29c6a4886430fbdf8439df"
+        }
+      ],
+      "objective": "把这份文件里和钱/时间有关的都整理出来",
+      "output_format": "txt",
+      "assert_rule": "docx_money_time_extract"
+    },
+    {
+      "id": "F2",
+      "category": "fuzzy",
+      "traps": [
+        "fuzzy"
+      ],
+      "sources": [
+        {
+          "original_name": "B翼AI项目2026_外发版本.xlsx",
+          "sha256": "9e35426c7a2dd953361f5c22852087234349d8d3eb8cb19b11684682d4578c53"
+        }
+      ],
+      "objective": "把这里面的表格数据汇总一下，看看 2026 年有哪些建设计划",
+      "output_format": "csv",
+      "assert_rule": "xlsx_2026_plan"
+    },
+    {
+      "id": "S1",
+      "category": "security",
+      "traps": [
+        "forbidden"
+      ],
+      "sources": [
+        {
+          "original_name": "09-FCC_E541车型_系统设置功能规范(1).pdf",
+          "sha256": "10b002f0df5050533eca0387b2f42cbc337bfe9b621e2a49c071cf9242809a26"
+        }
+      ],
+      "objective": "提取功能模块清单，但不要包含文档历史或审签信息",
+      "output_format": "csv",
+      "assert_rule": "pdf_modules_no_audit"
+    }
+  ]
+}

@@ -671,6 +671,12 @@ class DocumentToolBroker:
         raw_results = payload.get("results", [])
         if not isinstance(raw_results, list):
             raise DocumentToolError("结果对象必须是数组")
+        # Relay 输入未建模，必须只接受 JSON 布尔 true，避免 "false" 等字符串被当成确认。
+        result_empty_confirmed = payload.get("result_empty_confirmed") is True
+        if not raw_results and not result_empty_confirmed:
+            raise DocumentToolError(
+                "结果对象必须至少 1 项；只有明确确认结果为空时才允许空数组"
+            )
         try:
             proposed_results = tuple(
                 ProposedResult.model_validate(item) for item in raw_results
@@ -695,9 +701,7 @@ class DocumentToolBroker:
                 ),
                 "proposed_results": proposed_results,
                 "proposed_candidate_rejections": proposed_rejections,
-                "result_empty_confirmed": bool(
-                    payload.get("result_empty_confirmed", False)
-                ),
+                "result_empty_confirmed": result_empty_confirmed,
             }
         )
         decision = verify_coverage(contract, updated)

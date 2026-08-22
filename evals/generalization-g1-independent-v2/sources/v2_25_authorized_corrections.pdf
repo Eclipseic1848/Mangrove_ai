@@ -1,0 +1,44 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+5 0 obj
+<< /Length 522 >>
+stream
+BT
+/F1 8 Tf
+40 800 Td
+(TABLE=corrections) Tj
+0 -12 Td
+(record_id=R25-1|item=item-25-A|segment=N|amount=197.10|used=3.00|status=open|date=2026-02-05|revision=1) Tj
+0 -12 Td
+(record_id=R25-2|item=item-25-B|segment=S|amount=211.60|used=6.00|status=open|date=2026-02-08|revision=2) Tj
+0 -12 Td
+(record_id=R25-3|item=item-25-C|segment=N|amount=215.10|used=9.00|status=closed|date=2026-02-11|revision=1) Tj
+0 -12 Td
+(record_id=R25-4|item=item-25-D|segment=W|amount=229.60|used=12.00|status=open|date=2026-02-14|revision=2) Tj
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000309 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+882
+%%EOF

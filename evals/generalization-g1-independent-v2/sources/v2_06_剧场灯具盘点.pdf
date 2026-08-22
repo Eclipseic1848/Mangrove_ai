@@ -1,0 +1,54 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>
+endobj
+4 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+5 0 obj
+<< /Length 1018 >>
+stream
+BT
+/F1 8 Tf
+40 800 Td
+(TABLE=primary) Tj
+0 -12 Td
+(record_id=R06-1|item=item-06-A|segment=N|amount=64.20|used=4.00|status=open|date=2026-07-05|revision=1) Tj
+0 -12 Td
+(record_id=R06-2|item=item-06-B|segment=S|amount=73.20|used=7.00|status=open|date=2026-07-08|revision=1) Tj
+0 -12 Td
+(record_id=R06-3|item=item-06-C|segment=N|amount=82.20|used=10.00|status=closed|date=2026-07-11|revision=1) Tj
+0 -12 Td
+(record_id=R06-4|item=item-06-D|segment=W|amount=91.20|used=13.00|status=open|date=2026-07-14|revision=1) Tj
+0 -12 Td
+(TABLE=nearby) Tj
+0 -12 Td
+(record_id=R06-1|item=item-06-A|segment=N|amount=144.20|used=4.00|status=open|date=2026-07-05|revision=1) Tj
+0 -12 Td
+(record_id=R06-2|item=item-06-B|segment=S|amount=153.20|used=7.00|status=open|date=2026-07-08|revision=1) Tj
+0 -12 Td
+(record_id=R06-3|item=item-06-C|segment=N|amount=162.20|used=10.00|status=closed|date=2026-07-11|revision=1) Tj
+0 -12 Td
+(record_id=R06-4|item=item-06-D|segment=W|amount=171.20|used=13.00|status=open|date=2026-07-14|revision=1) Tj
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000241 00000 n 
+0000000309 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1379
+%%EOF

@@ -371,6 +371,18 @@ async def test_all_results_must_resolve_every_discovered_candidate(
         payload={"source_id": "upload-a", "query": "目标"},
     )
 
+    for invalid_confirmation in ("false", "true", 1):
+        with pytest.raises(DocumentToolError, match="只有明确确认结果为空"):
+            await broker.call(
+                grant_token=grant.token,
+                operation="propose_completion",
+                payload={
+                    "summary": "没有结果",
+                    "results": [],
+                    "result_empty_confirmed": invalid_confirmation,
+                },
+            )
+
     unresolved = await broker.call(
         grant_token=grant.token,
         operation="propose_completion",

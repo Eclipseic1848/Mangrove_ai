@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+import csv
 import hashlib
 import json
 import logging
@@ -14,6 +15,7 @@ import unicodedata
 import httpx
 import instructor
 from openai import AsyncOpenAI
+from openpyxl import load_workbook
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.model_connections import ConnectionBroker
@@ -23,6 +25,7 @@ from .models import (
     PiRuntimeRequest,
     SemanticDecision,
     SourceInput,
+    TableOutputContract,
     VerificationCheck,
     VerificationReport,
     VerificationStatus,
@@ -475,7 +478,14 @@ def _source_text(
                 data_only=True,
             )
             try:
-                match = re.search(r"sheet\s*:?\s*(.+)", locator, re.I)
+                # locator 形如「sheet:大师场景规划 row:2」：sheet 名必须
+                # 非贪婪捕获，并把「 row:N」行号后缀剥离，否则 openpyxl 会
+                # 把「 row:2」也当 sheet 名（真实纵切面暴露的解析缺陷）。
+                match = re.search(
+                    r"sheet\s*:?\s*(.+?)(?:\s+row\s*:\s*\d+)?\s*$",
+                    locator,
+                    re.I,
+                )
                 sheets = (
                     [workbook[match.group(1).strip()]]
                     if match
@@ -534,8 +544,17 @@ def _quote_is_grounded(quote: str, actual: str) -> bool:
         for line in quote.splitlines()
         if _normalized(line)
     ]
-    return len(lines) > 1 and all(
-        line in normalized_actual for line in lines
+    # 工具展示表格时会在首行生成「Table N: <描述> (R rows × C cols)」
+    # 说明行（不是来源事实）；多行匹配时跳过该行，其余行仍逐字命中。
+    content_lines = [
+        line
+        for line in lines
+        if not re.match(r"^table\s*\d+\s*:", line, re.I)
+    ]
+    return len(content_lines) > 1 and all(
+        line in normalized_actual
+        or ("|" in line and line.replace("|", "") in normalized_actual)
+        for line in content_lines
     )
 
 
@@ -552,6 +571,91 @@ def _expects_one_artifact(objective: str) -> bool:
     )
     lowered = objective.lower()
     return any(re.search(pattern, lowered, re.I) for pattern in patterns)
+
+
+def _read_table_columns(
+    path: Path,
+    contract: TableOutputContract,
+) -> tuple[str, ...]:
+    if contract.format == "csv":
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            header = next(csv.reader(handle), None)
+        if not header or any(not column for column in header):
+            raise ValueError("CSV 缺少完整表头")
+        return tuple(header)
+    if contract.format == "xlsx":
+        workbook = load_workbook(path, read_only=True, data_only=True)
+        try:
+            nonempty_sheets = []
+            for sheet in workbook.worksheets:
+                rows = sheet.iter_rows(values_only=True)
+                first_row = next(rows, None)
+                has_values = first_row is not None and any(
+                    value is not None for value in first_row
+                )
+                has_values = has_values or any(
+                    any(value is not None for value in row) for row in rows
+                )
+                if has_values:
+                    nonempty_sheets.append(first_row)
+            if len(nonempty_sheets) != 1:
+                raise ValueError("XLSX 必须且只能包含一个非空工作表")
+            header = nonempty_sheets[0]
+            if any(value is None or str(value) == "" for value in header):
+                raise ValueError("XLSX 缺少完整表头")
+            return tuple(str(value) for value in header)
+        finally:
+            workbook.close()
+
+    value = json.loads(path.read_text(encoding="utf-8-sig"))
+    if contract.json_shape == "records":
+        if not isinstance(value, list) or not value:
+            raise ValueError("records JSON 必须是非空对象数组")
+        for row in value:
+            if not isinstance(row, dict):
+                raise ValueError("records JSON 的每一行必须是对象")
+            if tuple(row) != contract.exact_columns:
+                raise ValueError("records JSON 存在缺失、额外或乱序列")
+        return contract.exact_columns
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"columns", "rows"}
+        or not isinstance(value.get("columns"), list)
+        or not isinstance(value.get("rows"), list)
+    ):
+        raise ValueError("columns_rows JSON 必须只包含 columns 与 rows")
+    columns = tuple(value["columns"])
+    if any(not isinstance(column, str) or not column for column in columns):
+        raise ValueError("columns_rows JSON 的列名必须是非空字符串")
+    for row in value["rows"]:
+        if not isinstance(row, dict) or set(row) != set(columns):
+            raise ValueError("columns_rows JSON 的每一行必须严格匹配 columns")
+    return columns
+
+
+def _verify_table_output_contracts(
+    request: PiRuntimeRequest,
+    candidates: tuple[CandidateArtifact, ...],
+) -> tuple[bool, str]:
+    for contract in request.table_output_contracts:
+        matching = tuple(
+            candidate
+            for candidate in candidates
+            if candidate.format == contract.format
+        )
+        if len(matching) != 1:
+            return False, f"{contract.format} 表格候选数量必须为 1"
+        candidate = matching[0]
+        try:
+            actual_columns = _read_table_columns(candidate.host_path, contract)
+        except Exception as exc:
+            return False, f"{contract.format} 表格结构无效：{str(exc)[:300]}"
+        if actual_columns != contract.exact_columns:
+            return (
+                False,
+                f"{contract.format} 列名或列顺序不符合冻结契约",
+            )
+    return True, f"已验证 {len(request.table_output_contracts)} 个冻结表格输出契约"
 
 
 class CandidateVerifier:
@@ -625,6 +729,22 @@ class CandidateVerifier:
         )
         if not artifact_set_ok or not count_ok:
             return self._report_failed(checks, evidence_count=0)
+
+        if request.table_output_contracts:
+            contract_ok, contract_summary = _verify_table_output_contracts(
+                request,
+                candidates,
+            )
+            checks.append(
+                VerificationCheck(
+                    code="table_output_contract",
+                    passed=contract_ok,
+                    summary=contract_summary,
+                )
+            )
+            # 精确输出结构是冻结事实，不能交给语义模型猜测或放宽。
+            if not contract_ok:
+                return self._report_failed(checks, evidence_count=0)
 
         source_map: dict[str, SourceInput] = {}
         for source in request.sources:
@@ -714,6 +834,8 @@ class CandidateVerifier:
         if previous_report.status is not VerificationStatus.INCONCLUSIVE:
             raise ValueError("只有语义验证未形成结论的候选可以重新验证")
         required_checks = {"artifact_set", "artifact_count", "source_grounding"}
+        if request.table_output_contracts:
+            required_checks.add("table_output_contract")
         passed_checks = {
             check.code for check in previous_report.checks if check.passed
         }
@@ -745,6 +867,11 @@ class CandidateVerifier:
         )
         if len(evidence) != previous_report.evidence_count:
             raise ValueError("候选证据数量已变化，不能复用原来源验证结论")
+        if request.table_output_contracts:
+            contract_ok, _ = _verify_table_output_contracts(request, candidates)
+            if not contract_ok:
+                # 重试只能复用来源结论，冻结结构仍需针对当前文件重新执行。
+                raise ValueError("候选不再符合冻结表格输出契约")
         checks = [
             check
             for check in previous_report.checks

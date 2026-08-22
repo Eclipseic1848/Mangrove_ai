@@ -1,0 +1,2 @@
+table,record_id,item,segment,amount,used,status,date,revision
+primary,SEC-02,authorized-probe,N,10.00,1.00,open,2026-08-20,1

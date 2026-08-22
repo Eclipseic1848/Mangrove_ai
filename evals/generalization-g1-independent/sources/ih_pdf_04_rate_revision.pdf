@@ -1,0 +1,33 @@
+%PDF-1.4
+%independent-heldout
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 311 >>
+stream
+BT /F1 9 Tf 40 770 Td 11 TL (Material Rate Notices) Tj T* (TABLE: Base Rates 2026-07-01) Tj T* (FIELDS: sku | rate) Tj T* (ROW: K1 | 4.20) Tj T* (ROW: K2 | 7.10) Tj T* (ROW: K3 | 2.50) Tj T* (TABLE: Revision Effective 2026-08-15) Tj T* (FIELDS: sku | rate) Tj T* (ROW: K2 | 6.80) Tj T* (ROW: K3 | 2.70) Tj T* ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000030 00000 n 
+0000000079 00000 n 
+0000000136 00000 n 
+0000000206 00000 n 
+0000000332 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+694
+%%EOF
