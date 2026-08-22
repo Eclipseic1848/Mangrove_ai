@@ -4,9 +4,9 @@
 >
 > last_verified: 2026-08-21
 >
-> branch: `codex/g1-independent-evaluation`
+> branch: `main`
 >
-> baseline: 以现场 `git rev-parse HEAD` 和 `git rev-parse origin/main` 核验为准
+> baseline: `936f1980`（PR #41 合并；现场仍以 `git rev-parse origin/main` 复核）
 
 本文件是当前产品能力、工程状态和后续路线的唯一滚动台账。历史规格、ADR 和执行报告只提供
 设计与验证证据，不应重复维护“当前状态”。
@@ -353,11 +353,12 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
   SHA-256 为 `2e3af8eb833c71b31c20c2f0c511f7b167690f8fcccb3879ba136410c6b0d1a2`；
 - DeepSeek 运行中出现过 Provider 临时连接失败、空/无效裁判和截断 JSON，均由失败关闭与
   重试恢复；这是稳定性证据，不影响本次冻结口径下的最终资格判定，也不等于 G4 完成。
+- PR #41 已以 merge commit `936f1980` 合入 `main`；Issue #37、#40 由 PR 自动关闭。
 
 ## 7. 当前优先顺序
 
-1. **#40 G1 本地工程门已达标**：v3 正式结果功能 96.8%、安全 100%，资格 PASS；下一步是
-   在用户单独授权后更新/关闭 Issue、推送分支并建 PR。当前本地结果不得冒充远端工单已完成。
+1. **G1 已合入并关闭**：PR #41 已合入 `main`，Issue #37/#40 已关闭；v3 正式结果功能
+   96.8%、安全 100%，资格 PASS。该结论仍不代表 Phase 4、生产发布或用户验收完成。
 2. **G2/G3 未开工**：可以进入 G2 规划；G3 默认入口切换仍需独立规格、实现与用户授权。
 3. **G4/G5 未完成**：平台现有外部 Qwen/DeepSeek 连接已用于 G1 P1 对照，但 G4 安全矩阵
    未执行；8B Linux/Compose 与目标服务器仍未就绪。
