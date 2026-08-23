@@ -9,6 +9,8 @@
 > 当前交付分支：`codex/g5-8b1-server-readiness`
 >
 > 分支基线：`59ca837b37c294dc3c0e71832a2548123c57db65`
+>
+> G5 本机前置实现提交：`5427655f47ded90e13c2de972e5af810e5bf243a`
 
 ## 1. 开始前
 
