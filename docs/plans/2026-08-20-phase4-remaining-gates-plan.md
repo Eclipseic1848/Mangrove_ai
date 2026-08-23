@@ -16,14 +16,14 @@
 | **G1** 30 项泛化集 | ≥30 个未参与调优任务（文档/PDF/Excel/CSV/复合来源/模糊目标/多输出格式）；≥1/3 同义/口语/省略/顺序变化；≥1/3 相似表/章节/冲突来源；运行前冻结夹具哈希/GoalContract/Verifier；正式交付正确率 ≥90%，安全/权限/用户隔离/禁止项/失败不冒充成功 100%（`2026-07-29-agentic-runtime-vnext-evaluation-spec.md` §5） | 完成 | **QUALIFIED**：功能 30/31（96.8%）、安全 5/5（100%）；PR #41 合并，#37/#40 关闭 |
 | **G2** PG-05 收口 | ① Word/Excel 连续 3/3 真实任务（`scripts/verify_pi_runtime_pg05_office.py`/`_pdf.py` 已存在）；② AC-05 独立依赖获取状态机生产迁移 + 用户验收（audit P0-4：「生产数据库迁移未执行」） | 执行完成 | **PASS**：Office 3/3；AC-05 带备份生产迁移、恢复、真实 Docker 探针及用户验收通过 |
 | **G3** P0 GateSnapshot + 默认入口切换 | Rollout GateSnapshot、P0 自动阻断、默认切换（失败即回 Legacy，不迁移/覆盖/删除旧任务与既有 Delivery）；切换动作需用户单独确认（`2026-07-30-phase4-d3-delivery-default-state-machine.md`、ADR-0019） | 执行（实现+验收本机可做；**切换本身需用户单独授权**） | **ADMIN_GRAY ACCEPTED**：恢复验收通过；产品目标改为 G4 合格后全用户默认，尚未切换 |
-| **G4** 真实外部 Provider 端到端 | 对所有准备投入生产的外部 Provider 做 Pi→Grant→Relay→Provider→Usage Smoke + DNS rebinding/证书生命周期/备份擦除生产安全门（audit §7） | 范围为平台共享 DeepSeek/百炼连接和纯合成数据；其他 Provider 不在本轮资格范围 | 工程门与传输矩阵通过；DeepSeek Pi 链 PASS；百炼未形成合格 Pi 链且重试额度已用尽；生产轮换和最终资格未完成 |
+| **G4** 真实外部 Provider 端到端 | 对所有准备投入生产的外部 Provider 做 Pi→Grant→Relay→Provider→Usage Smoke + DNS rebinding/证书生命周期/备份擦除生产安全门（audit §7） | 范围为平台共享 DeepSeek/百炼连接和纯合成数据；其他 Provider 不在本轮资格范围 | DeepSeek/百炼 Pi 链与同提交传输矩阵 PASS；生产 Vault 轮换和最终三证据汇总未完成 |
 | **G5** 8B Linux/Compose/并发/故障与目标服务器 | 干净镜像、Linux/Compose 部署、服务器并发、目标服务器验收（audit §5） | **挂起**：目标服务器未提供或未就绪 | 挂起（不执行） |
 
 ## 1. 执行顺序
 
 G1 v3 独立正式运行已达到资格阈值，PR #41 已合并并关闭 #37/#40。G2 的 Office、AC-05
 生产迁移与验收均已通过，PR #44 已合并并关闭 #38/#43。G3 默认切换仍由 G4 完整资格阻断；
-G4/G5 与生产资格审计不得自动进入。
+G4 已完成两条 Provider Pi 链与传输安全复验；剩余 Vault 轮换、G5 与生产资格审计不得自动进入。
 
 ## 2. 进度
 
@@ -79,11 +79,13 @@ G4/G5 与生产资格审计不得自动进入。
   任一轮未知仍失败关闭，相关后端 169 项通过，修复提交为 `a9e0d61d`。绑定该提交的传输矩阵
   6/6 通过；DeepSeek 资格链形成 1 个候选并通过验证，6 次调用 Usage 均为 `recorded`，合计
   19,843 tokens。百炼曾在 Relay 到 Provider 的 HTTP 连接阶段返回 502，未收到模型内容或
-  token，不能判定为模型能力失败。PR #45 新增未知 Runtime 异常的脱敏报告和 attempt 收口；
-  绑定 `09a67b43` 的最终复验第一次因 C 盘临时目录 Docker bind mount I/O 失败而保持未知，
-  人工重试因 Relay 路径缺失在本机返回 405。两次均无 Provider Usage，Grant 已撤销且 Docker
-  残留为 0；重试额度已用尽，不得以新清单或数据库绕过。生产 Vault Key 不在本轮变更范围，
-  最终三证据 G4 资格保持不完整；百炼链路、最终汇总和默认入口切换尚未完成。
+  token，不能判定为模型能力失败。PR #45 新增未知 Runtime 异常的脱敏报告和 attempt 收口。
+  PR #47（`a0560852`）进一步按 ADR-0031 增加固定持久台账、生产数据库单调锚点、全局运行锁、
+  旧证据去重和进程退出后的 `outcome_unknown` 恢复规则；终审和相关回归通过。新的百炼后继
+  批次保留两次已耗尽失败历史，只执行 Attempt 1：Qwen 形成 1 个候选并通过独立验证，11 次
+  Usage 全部为 `recorded`，合计 36,744 tokens。台账 revision 3 与生产锚点完全一致，两个
+  Grant 已撤销，无重试、恢复事件或 Docker 残留。绑定 `a0560852` 的传输矩阵 6/6 通过。
+  生产 Vault Key 未轮换，无法生成轮换报告，最终三证据 G4 资格和默认入口切换仍被阻断。
 
 ## 3. 边界声明
 

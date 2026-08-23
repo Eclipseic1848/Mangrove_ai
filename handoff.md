@@ -2,9 +2,9 @@
 
 > 文档用途：写给完全没有历史对话的新会话
 >
-> 最后现场核验：2026-08-23（G2/G3/G4 发布候选回归后）
+> 最后现场核验：2026-08-23（G4 持久台账、百炼正式链与传输安全复验后）
 >
-> 公开分支：`main`；已核验合并提交：`09a67b43`（PR #45）；正式评测绑定的 G1 代码基线
+> 公开分支：`main`；已核验合并提交：`a0560852`（PR #47）；正式评测绑定的 G1 代码基线
 > = `83fe3f70`，当前身份仍以现场 `git rev-parse HEAD` / `origin/main` 为准
 >
 > 公开远端：`origin` → `https://github.com/Eclipseic1848/Mangrove_ai.git`
@@ -23,14 +23,13 @@ G3 GateSnapshot、累计硬门、P0 自动回退和分阶段 Rollout 已完成�
 提交、带备份生产迁移及生产 Gate/Approval 初始化；旧 8088 进程触发 P0 回退后已完成重启和
 六项门重跑，新快照合格并已按独立授权恢复 `admin_gray`，技术烟测通过；生产默认未切换，
 完整默认切换验收未完成。G2 与 #43 已通过 PR #44 合入并关闭。
-G4 的地址解析、盲重试和显式确认修复已提交为 `9ba95985`；多轮 Usage 汇总修复已提交为
-`a9e0d61d`，169 项相关后端回归通过，绑定该提交的传输安全矩阵 6/6 通过。DeepSeek V4 Flash
-真实合成链形成 1 个候选并通过独立验证，6 次调用 Usage 均为 `recorded`，合计 19,843 tokens。
-百炼 Qwen 曾在 Relay 到 Provider 的 HTTP 连接阶段返回 502，无模型内容或 token，不能归因为
-模型能力失败。PR #45 已补齐未知 Runtime 异常的报告与 attempt 收口。绑定 `09a67b43` 的最终
-复验没有到达 Provider：一次为 C 盘 Docker bind mount I/O，一次人工重试在本机 Relay 返回
-405；重试额度已用尽。生产 Vault Key 未轮换，最终三证据汇总仍不具备完整资格；G5
-（8B/Linux 服务器）仍未就绪。
+G4 的地址解析、盲重试、显式确认、多轮 Usage 汇总和未知 Runtime 收口已完成。PR #47
+（`a0560852`）新增固定持久台账、生产库单调锚点、全局运行锁、旧证据去重和进程退出后的
+`outcome_unknown` 恢复规则。新的百炼后继批次保留两次已耗尽失败历史后只执行 1 次正式请求：
+Qwen `qwen3.7-max-2026-06-08` 形成 1 个候选并通过独立验证，11 次调用 Usage 全部为
+`recorded`，合计 36,744 tokens；两个 Grant 均撤销，无重试、恢复事件或 Docker 残留。
+绑定同一提交的传输安全矩阵 6/6 通过。生产 Vault Key 未轮换，因此最终三证据汇总仍不能
+形成完整 G4 资格，G3 默认切换继续阻断；G5（8B/Linux 服务器）仍未就绪。
 **G1 确定结论：DeepSeek V4 Flash 在 36 题 v3 独立集上功能 30/31、安全 5/5，资格 PASS。**
 31 个功能候选均形成正式 Delivery 并通过 QA；独立 oracle 拒绝 G103-F27「业务值或行序错误」。
 Qwen3.8-27B 在 12 个功能 Delivery 后中止，其证据单独隔离，不参与 DeepSeek 计分。
@@ -67,8 +66,8 @@ E:/python3.13/python.exe -X utf8 evals/generalization-g1/run_g1.py --dry-run
 
 预期现场状态是：
 
-- 本地分支为 `codex/g1-independent-evaluation`，正式评测代码基线为 `83fe3f70`；G1 代码与
-  v3 盲集已本地提交，工作树仅保留 10 个 G1 post-commit 冻结元数据（§4.2）；
+- `origin/main` 至少包含 PR #47 合并提交 `a0560852`；G1 正式评测代码基线为 `83fe3f70`；
+  工作树仅保留 10 个 G1 post-commit 冻结元数据（§4.2），现场分支和 SHA 仍需重新核验；
 - GitHub：Issue #36（父：Phase 4 剩余门）与 #39（G3 默认切换）为 OPEN；#37/#38/#40/#43
   已关闭，旧工单 #9-#17 全部 CLOSED；
 - 生产库 `data/webui.db`：治理事件 32 条（#15 阶段 6 收口状态，详见旧 handoff 快照），
@@ -82,6 +81,10 @@ E:/python3.13/python.exe -X utf8 evals/generalization-g1/run_g1.py --dry-run
   `data/backups/webui-before-ac05-20260822-072340.db`，生产任务记录为 0，8088 健康。
 - G3 生产迁移恢复点为 `data/backups/webui-before-g3-20260822-133901.db`；迁移后保持
   `admin_gray`，未切换默认入口，8088 `/api/health` 返回 200。
+- G4 运行前恢复点为 `data/backups/webui-before-g4-a0560852-20260823T081535.db`；
+  SHA-256 为 `37001fc963f8d52a0469bf66c45614711e9d51e64d887984c94b5ec9a414d131`，
+  `quick_check=ok`。脱敏清单、百炼报告和传输报告位于 `data/g4-evidence/a0560852/`，
+  固定台账位于 `~/.mangrove/g4/qualification-ledger.sqlite3`；这些本地证据不进入 Git。
 - 首次生产 GateSnapshot 为 `abfc951ee4a99f282484f46c8ffe0c48f36e4c924fd2d765cacc3dd7de992b38`；
   独立 `explicit_opt_in` Approval 已记录但未执行模式切换。运行态核验随后追加修正快照
   `39c168fb4009478fcd731dbe1f5f10d05d8685b5721cbe7bc5302eddc1ab9fa8`，当前 P0 已阻断。
@@ -118,16 +121,16 @@ admin_gray 发布 → 运行时三轴治理门 → 弃用/回滚/隔离/撤销/�
 - **G1**：30 项泛化集（evaluation-spec §5）——正式交付正确率 ≥90%、安全/失败 100%；
 - **G2**：PG-05 收口——Word/Excel 连续 3/3 + AC-05 依赖获取状态机生产迁移与验收；
 - **G3**：工程门、生产迁移与 `admin_gray` 恢复验收已通过；生产默认切换尚未执行；
-- **G4 工程门已实现、生产资格未完成；G5 挂起**：绑定 `a9e0d61d` 的传输矩阵 6/6 通过；
-  DeepSeek 真实合成 Pi 链 PASS。百炼没有形成合格 Pi 链，不能归因为模型能力失败；生产
-  Vault Key 未轮换；8B/Linux 目标服务器未就绪。
+- **G4 两条 Provider Pi 链与传输安全已通过、最终资格未完成；G5 挂起**：DeepSeek 与百炼
+  真实合成 Pi 链均 PASS；绑定 `a0560852` 的传输矩阵 6/6 通过。生产 Vault Key 未轮换，
+  因此三证据最终汇总仍被阻断；8B/Linux 目标服务器未就绪。
 
 ## 3. 已经完成了什么
 
 ### 3.1 仓库与公开开发基线
 
-- 权威公开仓库 `Eclipseic1848/Mangrove_ai`，默认开发分支为 `main`；Phase 4 当前发布基线
-  为 PR #45 合并提交 `09a67b43`。
+- 权威公开仓库 `Eclipseic1848/Mangrove_ai`，默认开发分支为 `main`；Phase 4 当前实现基线
+  为 PR #47 合并提交 `a0560852`。
 - 旧仓库保留为 `legacy-origin`/`legacy-platform`（历史证据）。`v0.0.4` 是唯一稳定封板标签。
 - 本机 Agent 配置、数据库、日志、任务制品、浏览器登录态、本地审计不进入 Git。
 - 2026-08-19 仓库卫生：移除第三方完整副本（external/chrome-devtools-howso）、品牌 Logo、
@@ -311,14 +314,14 @@ PR #41 已合入 `main`，Issue #37/#40 已关闭。维护者原工作树仍保�
 
 ### G4/G5
 
-- G4：执行范围限定为平台共享 DeepSeek/百炼连接，外发仅限冻结的纯合成数据；`a9e0d61d`
-  已通过传输矩阵与 DeepSeek 真实 Pi 链。百炼曾在 Relay 到 Provider 的 HTTP 连接阶段返回
-  502，Usage 为 `unknown`，不能判定为模型能力失败；
-- PR #45（`09a67b43`）补齐未知 Runtime 异常的脱敏报告和 attempt 收口，145 项相关回归通过。
-  最终百炼复验第一次因 C 盘临时 worktree 的 Docker bind mount I/O 失败而保持未知；人工重试
-  因 Relay 路径缺失在本机返回 405。两次均无 Provider Usage，Grant 已撤销且 Docker 残留为 0；
-  重试额度已用尽，不得换清单或数据库绕过。生产 Vault Key 未轮换，G4 三证据资格未形成，
-  默认切换继续阻断；
+- G4：执行范围限定为平台共享 DeepSeek/百炼连接，外发仅限冻结的纯合成数据。DeepSeek
+  真实 Pi 链已通过；PR #47（`a0560852`）按 ADR-0031 增加固定持久台账与生产锚点，相关终审和
+  回归均通过；
+- 新百炼后继批次 `g4batch_838c3bf9544240d3b03f35dfed65cdb7` 保留旧两次失败的任务身份和
+  结果，只执行 Attempt 1 且通过：1 个候选、11 次 Usage、36,744 tokens。台账 revision 3 与
+  生产锚点哈希一致，两个 Grant 已撤销，重试/恢复事件和 Docker 残留均为 0；
+- 绑定 `a0560852` 的传输安全矩阵 6/6 通过。生产 Vault Key 未轮换，无法生成同一身份的轮换
+  报告，最终 G4 三证据汇总仍被阻断，默认切换不得执行；
 - G5：目标服务器未就绪，Linux/Compose/并发/故障验收未执行。
 
 ## 6. 工单 Roadmap
@@ -331,7 +334,7 @@ PR #41 已合入 `main`，Issue #37/#40 已关闭。维护者原工作树仍保�
 | 新 #37 | G1：30 项泛化集 | CLOSED（PR #41 合并） |
 | 新 #40 | G1 修复：盲保留集与正式 Delivery 验收链 | CLOSED（PR #41 合并） |
 | 新 #38 | G2：PG-05 收口 | CLOSED（PR #44 合并） |
-| 新 #39 | G3：GateSnapshot + 默认入口切换 | OPEN（admin_gray 验收 PASS；G4 未合格，未默认切换） |
+| 新 #39 | G3：GateSnapshot + 默认入口切换 | OPEN（admin_gray 验收 PASS；G4 缺 Vault 轮换证据，未默认切换） |
 | 新 #43 | G3 修复：explicit_opt_in 获准用户权限契约 | CLOSED（ADR-0030，PR #44 合并） |
 
 AC-07 历史（全部 CLOSED）：新 #9-#17 + 父 #8；旧仓库 #33-#35（历史）。
@@ -341,7 +344,7 @@ AC-07 历史（全部 CLOSED）：新 #9-#17 + 父 #8；旧仓库 #33-#35（历�
 1. **AC-07 已完成**：#9-#17 全部真实完成并关闭（PR #30/#33/#34 + #35 文档同步）。
 2. **Phase 4 剩余门（当前）**：G1 已通过 PR #41 合入并关闭；G2 Office 3/3、AC-05 生产
    迁移和验收 PASS；G3 工程门、生产迁移与 `admin_gray` 恢复验收 PASS，默认切换未执行；
-   G4 传输矩阵与 DeepSeek Pi 链通过，百炼链结果未知；G5 挂起。
+   G4 传输矩阵与 DeepSeek/百炼 Pi 链通过，最终资格仍缺 Vault 轮换证据；G5 挂起。
 3. **生产资格审计**：G1-G3 后收口（回归/权限/备份/可观测性/文档一致性/用户验收）。
 4. **明确未完成/后置**：普通用户平台能力开放、远程 MCP/Secret、Registry 自动发现、
    AC-08/AC-09、Phase 4C（图片/音频/视频）、Phase 5A/B、多租户、大规模分布式执行。
@@ -533,9 +536,9 @@ AC-07 历史（全部 CLOSED）：新 #9-#17 + 父 #8；旧仓库 #33-#35（历�
 读取上述资料与当前工作树后，先给用户一份只读阶段判断，不要立即实现。至少说明：
 
 1. 当前阶段：G1 已通过 PR #41 合入并关闭；G2 与 #43 已通过 PR #44 合入并关闭；PR #45
-   已收口 G4 未知异常台账。G3 已恢复 `admin_gray` 但未默认切换；G4 传输矩阵与 DeepSeek
-   Pi 链通过，百炼链和 Vault 证据未通过；G5 挂起。
+   已收口 G4 未知异常台账，并通过 PR #47 合入持久台账。G3 已恢复 `admin_gray` 但未默认
+   切换；G4 传输矩阵与 DeepSeek/百炼 Pi 链通过，Vault 轮换证据未形成；G5 挂起。
 2. 已验证事实：31 个功能候选均形成正式 Delivery 并通过 QA；独立 oracle 通过 30 个，安全
    5/5；唯一失败 G103-F27 为业务值或行序错误。
-3. 尚未完成：G3 默认切换、G4 百炼链及最终资格、G5、生产发布。
+3. 尚未完成：G3 默认切换、G4 Vault 轮换及最终资格、G5、生产发布。
 4. 下一步先核验 GitHub Issue/PR 与生产状态，再继续未完成门；不得用测试结果替代真实资格。
