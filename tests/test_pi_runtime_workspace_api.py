@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 import threading
 import time
 
@@ -40,6 +41,16 @@ from src.model_connections import ConnectionBroker
 from src.model_connections.storage import ModelConnectionRepository
 from src.model_connections.vault import FernetCredentialVault
 from src.services.upload_store import UploadStore
+from src.runtime_routing import (
+    GateCheck,
+    GateSnapshot,
+    RolloutActor,
+    RolloutApproval,
+    RolloutMode,
+    RuntimeRouting,
+    SqliteRuntimeRoutingRepository,
+    migrate_runtime_routing,
+)
 
 
 class FakePiRuntime:
@@ -371,6 +382,28 @@ class EmptyOutputPiRuntime:
         return None
 
 
+class AmbiguousProviderPiRuntime(EmptyOutputPiRuntime):
+    """模拟请求可能已到 Provider，但客户端没有拿到确定结果。"""
+
+    failure_message = (
+        "模型请求结果不确定，已停止自动重试；"
+        "请由用户决定是否创建新版本重新执行"
+    )
+
+    async def start(self, request, *, on_event):
+        try:
+            await super().start(request, on_event=on_event)
+        except ValueError as exc:
+            raise ValueError(self.failure_message) from exc
+
+    async def resume(self, request, *, checkpoint, on_event):
+        await self.start(request, on_event=on_event)
+
+
+class ProviderTimeoutPiRuntime(AmbiguousProviderPiRuntime):
+    failure_message = "Pi 执行超过 1800 秒预算"
+
+
 def _client(
     tmp_path: Path,
     monkeypatch,
@@ -437,6 +470,175 @@ def _uploads(tmp_path: Path) -> tuple[str, str]:
         media_type="text/csv",
     )
     return document.upload_id, table.upload_id
+
+
+def _g3_snapshot(*, passed: bool) -> GateSnapshot:
+    return GateSnapshot.build(
+        gate_version="phase4-g3-api-v1",
+        code_commit="a" * 40,
+        environment_digest="b" * 64,
+        checks=(
+            GateCheck(
+                gate_id="delivery-integrity",
+                passed=passed,
+                evidence_hash="c" * 64,
+            ),
+        ),
+    )
+
+
+def test_runtime_rollout_only_changes_new_tasks_and_p0_restores_legacy(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "pi_runtime_enabled", True)
+    client = _client(tmp_path, monkeypatch, role="admin")
+    document, _ = _uploads(tmp_path)
+    # 先让现有 Store 建完历史表，再在同一测试库执行显式 G3 迁移。
+    auth_mod.get_store()
+    database = Path(settings.webui_db_path)
+    migrate_runtime_routing(database, tmp_path / "workspace-before-g3.db")
+    routing = RuntimeRouting(SqliteRuntimeRoutingRepository(database))
+    passed = _g3_snapshot(passed=True)
+    actor = RolloutActor(actor_id="admin-a", role="admin")
+    routing.record_gate(passed, actor)
+    default_approval = RolloutApproval(
+        approval_id="approval-api-default",
+        target_mode=RolloutMode.VNEXT_DEFAULT,
+        gate_snapshot_id=passed.snapshot_id,
+        approved_by="maintainer-a",
+    )
+    routing.record_approval(
+        default_approval,
+        RolloutActor(actor_id="maintainer-a", role="user"),
+    )
+    routing.change_mode(
+        RolloutMode.VNEXT_DEFAULT,
+        default_approval,
+        actor,
+    )
+
+    request = {
+        "objective_text": "提取附件内容并输出 JSON",
+        "upload_ids": [document],
+        "output_formats": ["json"],
+        "provider": "local",
+    }
+    with client:
+        vnext = client.post("/api/semantic-workspace/tasks", json=request)
+        assert vnext.status_code == 202, vnext.text
+        assert vnext.json()["runtime_version"] == "pi"
+
+        cancelled = client.post(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}/cancel"
+        )
+        assert cancelled.status_code in {200, 409}, cancelled.text
+        original_register = AgenticRuntimeRepository.register_in_transaction
+
+        def fail_after_runtime_config(self, connection, config):
+            original_register(self, connection, config)
+            raise RuntimeError("模拟 RuntimeConfig 事务失败")
+
+        monkeypatch.setattr(
+            AgenticRuntimeRepository,
+            "register_in_transaction",
+            fail_after_runtime_config,
+        )
+        failed_revision = client.post(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}/revisions",
+            json={
+                "instruction": "模拟路由绑定后的存储失败",
+                "expected_active_revision": 1,
+            },
+        )
+        assert failed_revision.status_code == 409, failed_revision.text
+        monkeypatch.setattr(
+            AgenticRuntimeRepository,
+            "register_in_transaction",
+            original_register,
+        )
+        with sqlite3.connect(database) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM runtime_assignments "
+                "WHERE owner_id=? AND task_id=? AND revision=2",
+                ("user-a", vnext.json()["task_id"]),
+            ).fetchone()[0] == 0
+            assert connection.execute(
+                "SELECT active_revision FROM semantic_workspace_tasks "
+                "WHERE user_id=? AND task_id=?",
+                ("user-a", vnext.json()["task_id"]),
+            ).fetchone()[0] == 1
+            assert connection.execute(
+                "SELECT COUNT(*) FROM agentic_runtime_runs "
+                "WHERE user_id=? AND task_id=? AND revision=2",
+                ("user-a", vnext.json()["task_id"]),
+            ).fetchone()[0] == 0
+
+        routing.record_gate(_g3_snapshot(passed=False), actor)
+        blocked = client.post(
+            "/api/semantic-workspace/tasks",
+            json={**request, "runtime_version": "pi"},
+            headers={"Idempotency-Key": "g3-p0-retry"},
+        )
+        assert blocked.status_code == 409, blocked.text
+        legacy = client.post(
+            "/api/semantic-workspace/tasks",
+            json=request,
+            headers={"Idempotency-Key": "g3-p0-retry"},
+        )
+        assert legacy.status_code == 202, legacy.text
+        assert legacy.json()["runtime_version"] == "legacy"
+
+        unchanged = client.get(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}"
+        )
+        assert unchanged.status_code == 200
+        assert unchanged.json()["runtime_version"] == "pi"
+        for task_id in (vnext.json()["task_id"], legacy.json()["task_id"]):
+            cancelled = client.post(
+                f"/api/semantic-workspace/tasks/{task_id}/cancel"
+            )
+            assert cancelled.status_code in {200, 409}, cancelled.text
+        rejected_revision = client.post(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}/revisions",
+            json={
+                "instruction": "回退后错误请求表格契约",
+                "expected_active_revision": 1,
+                "output_formats": ["csv"],
+                "table_output_contracts": [{
+                    "format": "csv",
+                    "exact_columns": ["姓名"],
+                }],
+            },
+        )
+        assert rejected_revision.status_code == 422, rejected_revision.text
+        with sqlite3.connect(database) as connection:
+            assignment_count = connection.execute(
+                "SELECT COUNT(*) FROM runtime_assignments "
+                "WHERE owner_id=? AND task_id=? AND revision=2",
+                ("user-a", vnext.json()["task_id"]),
+            ).fetchone()[0]
+        assert assignment_count == 0
+        revised = client.post(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}/revisions",
+            json={
+                "instruction": "保持原目标，创建回退后的新版本",
+                "expected_active_revision": 1,
+            },
+        )
+        assert revised.status_code == 202, revised.text
+        active = client.get(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}"
+        )
+        historical = client.get(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}",
+            params={"revision": 1},
+        )
+        assert active.json()["runtime_version"] == "legacy"
+        assert historical.json()["runtime_version"] == "pi"
+        client.post(
+            f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}/cancel"
+        )
 
 
 def _wait_for_delivery(client: TestClient, task_id: str) -> dict:
@@ -511,6 +713,7 @@ def test_pi_request_uses_table_contract_frozen_by_task_revision(
             ),
             json={
                 "instruction": "保持输出格式但改用另一份结构契约",
+                "expected_active_revision": 1,
                 "table_output_contracts": [{
                     "format": "xlsx",
                     "exact_columns": ["姓名", "费用合计"],
@@ -574,7 +777,10 @@ def test_scanned_pdf_is_not_eagerly_ocr_prepared_before_pi_execution(
                 "/api/semantic-workspace/tasks/"
                 f"{created.json()['task_id']}/revisions"
             ),
-            json={"instruction": "保持字段不变，重新生成结果"},
+            json={
+                "instruction": "保持字段不变，重新生成结果",
+                "expected_active_revision": 1,
+            },
         )
         assert revised.status_code == 202, revised.text
         _wait_for_delivery(client, created.json()["task_id"])
@@ -720,6 +926,127 @@ def test_empty_pi_workspace_is_not_reported_as_intermediate_result(
     ]
 
 
+def test_ambiguous_provider_outcome_requires_user_retry_decision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=AmbiguousProviderPiRuntime(),
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并输出 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task = _wait_for_status(
+            client,
+            created.json()["task_id"],
+            "failed",
+        )
+        missing_revision = client.post(
+            f"/api/semantic-workspace/tasks/{task['task_id']}/revisions",
+            json={
+                "instruction": "保持原要求，重新执行",
+                "external_api_confirmed": True,
+            },
+        )
+        retry_payload = {
+            "instruction": "保持原要求，重新执行",
+            "external_api_confirmed": True,
+            "expected_active_revision": task["active_revision"],
+        }
+        retried = client.post(
+            f"/api/semantic-workspace/tasks/{task['task_id']}/revisions",
+            json=retry_payload,
+        )
+        assert retried.status_code == 202, retried.text
+        stale_retry = client.post(
+            f"/api/semantic-workspace/tasks/{task['task_id']}/revisions",
+            json=retry_payload,
+        )
+
+    assert task["failure"]["error_code"] == "MODEL_OUTCOME_UNKNOWN"
+    assert missing_revision.status_code == 422
+    assert task["failure"]["attempt_count"] == 1
+    assert task["failure"]["next_actions"] == [
+        "由你决定是否创建新版本重新执行",
+        "取消并保留当前失败记录",
+    ]
+    assert stale_retry.status_code == 409
+    assert "查看最新结果" in stale_retry.json()["detail"]
+
+
+def test_external_provider_timeout_requires_user_retry_decision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="user",
+        pi_runtime=ProviderTimeoutPiRuntime(),
+    )
+    document, _ = _uploads(tmp_path)
+    broker = ConnectionBroker(
+        repository=ModelConnectionRepository(settings.webui_db_path),
+        vault=FernetCredentialVault.generate(),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "OK"}}],
+                    "usage": {"total_tokens": 1},
+                },
+            )
+        ),
+        resolver=lambda _host: ["8.8.8.8"],
+    )
+    connection = asyncio.run(
+        broker.configure_personal(
+            owner_user_id="user-a",
+            preset_id="deepseek",
+            api_key="personal-provider-secret-1234",
+        )
+    )
+    broker.set_usage_preference(
+        "user-a",
+        str(connection["connection_id"]),
+        str(connection["default_model"]),
+    )
+    monkeypatch.setattr(broker_mod, "_default_broker", broker)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并输出 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "external_api_confirmed": True,
+            },
+        )
+        assert created.status_code == 202, created.text
+        task = _wait_for_status(client, created.json()["task_id"], "failed")
+
+    assert task["failure"]["error_code"] == "MODEL_OUTCOME_UNKNOWN"
+    assert task["failure"]["attempt_count"] == 1
+
+
 def test_pi_local_gray_entry_requires_admin(tmp_path, monkeypatch) -> None:
     client = _client(tmp_path, monkeypatch, role="user")
     document, _ = _uploads(tmp_path)
@@ -808,7 +1135,10 @@ def test_user_can_explicitly_use_own_verified_connection_for_standard_vnext_task
                 "/api/semantic-workspace/tasks/"
                 f"{created.json()['task_id']}/revisions"
             ),
-            json={"instruction": "把结果中的金额按降序排列"},
+            json={
+                "instruction": "把结果中的金额按降序排列",
+                "expected_active_revision": 1,
+            },
         )
         assert unconfirmed_revision.status_code == 422
         assert "再次确认" in unconfirmed_revision.json()["detail"]
@@ -820,6 +1150,7 @@ def test_user_can_explicitly_use_own_verified_connection_for_standard_vnext_task
             json={
                 "instruction": "把结果中的金额按降序排列",
                 "external_api_confirmed": True,
+                "expected_active_revision": 1,
             },
         )
         assert confirmed_revision.status_code == 202, confirmed_revision.text
@@ -1489,7 +1820,10 @@ def test_admin_can_freeze_visible_capability_when_creating_pi_task(
         )
         revised = client.post(
             f"/api/semantic-workspace/tasks/{task_id}/revisions",
-            json={"instruction": "字段名称改成中文"},
+            json={
+                "instruction": "字段名称改成中文",
+                "expected_active_revision": 1,
+            },
         )
         assert revised.status_code == 202, revised.text
         _wait_for_delivery(client, task_id)

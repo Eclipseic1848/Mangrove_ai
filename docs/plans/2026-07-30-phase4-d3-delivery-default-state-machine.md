@@ -385,11 +385,13 @@ publication_key = SHA-256(
 |---|---|---|
 | `legacy_default` | Legacy | 无 |
 | `admin_gray` | Legacy | 管理员逐任务选择 |
-| `explicit_opt_in` | Legacy | 获准用户逐任务选择 |
 | `vnext_default` | vNext | 普通用户默认；仍可显式选 Legacy |
 | `legacy_rollback` | Legacy | 暂停新 vNext Run 和发布 |
 
 当前事实投影为 `admin_gray`。
+
+`explicit_opt_in` 已由 ADR-0030 取消为可进入阶段；历史数据库若存在该值，新 revision 全部
+路由 Legacy，且只能恢复到 `admin_gray`。
 
 影子运行不是 Rollout 状态，而是 `RunPurpose=shadow`：
 
@@ -401,7 +403,6 @@ publication_key = SHA-256(
 
 ```text
 admin_gray
-  --用户确认扩大灰度--> explicit_opt_in
   --D10 生产硬门 qualified + 用户单独确认--> vnext_default
 ```
 
@@ -613,6 +614,9 @@ E:\python3.13\python.exe -X utf8 `
 8. 质量 P0 阻断发布但允许在途任务收口为 Candidate；安全 P0 取消在途 vNext；
 9. 回滚只影响新 revision 路由，不迁移、删除或覆盖旧任务和既有 Delivery；
 10. Legacy 和 vNext 通过 Candidate Adapter 复用同一 Publisher，不建设两套正式交付语义。
+
+2026-08-23：第 7 项的中间 `explicit_opt_in` 阶段由 ADR-0030 取代；当前为硬门合格并独立
+授权后从 `admin_gray` 直接进入 `vnext_default`，其余安全边界不变。
 
 ### 封存与同步动作
 

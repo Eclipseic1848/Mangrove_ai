@@ -31,6 +31,7 @@ import { WorkspaceTaskSidebar } from "@/components/workspace/WorkspaceTaskSideba
 import {
   answerWorkspaceTask,
   cancelWorkspaceTask,
+  createWorkspaceRevision,
   createWorkspaceTask,
   decideWorkspaceRevision,
   getWorkspaceGuidance,
@@ -959,11 +960,41 @@ export function SemanticWorkspacePage() {
                               );
                             }
                           }}
-                          onRetry={() =>
-                            document
-                              .getElementById("workspace-revision-composer")
-                              ?.scrollIntoView({ behavior: "smooth" })
-                          }
+                          onRetry={async (unchanged = false) => {
+                            if (!unchanged) {
+                              document
+                                .getElementById("workspace-revision-composer")
+                                ?.scrollIntoView({ behavior: "smooth" });
+                              return;
+                            }
+                            try {
+                              await createWorkspaceRevision(
+                                task.task_id,
+                                "保持原要求，重新执行",
+                                task.active_revision,
+                                undefined,
+                                true,
+                              );
+                              await Promise.all([
+                                queryClient.invalidateQueries({
+                                  queryKey: [
+                                    "semantic-workspace-task",
+                                    task.task_id,
+                                  ],
+                                }),
+                                queryClient.invalidateQueries({
+                                  queryKey: ["semantic-workspace-tasks"],
+                                }),
+                              ]);
+                              toast.success("已创建新版本并重新执行");
+                            } catch (error) {
+                              toast.error(
+                                error instanceof Error
+                                  ? error.message
+                                  : "重新执行失败",
+                              );
+                            }
+                          }}
                           onRevisionChange={(revision) =>
                             setSelectedRevision(
                               revision === task.current_revision

@@ -63,7 +63,8 @@ class TestValidateDbHost:
 
     def test_host_allowlist_match(self):
         t = validate_db_host("allowed.example.com", 5432,
-                             allowlist={"allowed.example.com"})
+                             allowlist={"allowed.example.com"},
+                             resolver=_MOCK_RESOLVER)
         assert t.host == "allowed.example.com"
 
     def test_port_override(self):

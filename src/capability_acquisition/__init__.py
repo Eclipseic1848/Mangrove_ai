@@ -13,7 +13,10 @@ from .models import (
 )
 from .repository import AcquisitionRepository, InMemoryAcquisitionRepository
 from .service import CapabilityAcquisition, SourcePolicy
-from .sqlite_repository import SqliteAcquisitionRepository
+from .sqlite_repository import (
+    SqliteAcquisitionRepository,
+    migrate_capability_acquisition,
+)
 from .docker_environment import DockerBuildkitAcquisitionEnvironment
 
 __all__ = [
@@ -30,5 +33,6 @@ __all__ = [
     "ResolvedCandidate",
     "SourcePolicy",
     "SqliteAcquisitionRepository",
+    "migrate_capability_acquisition",
     "DockerBuildkitAcquisitionEnvironment",
 ]

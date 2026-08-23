@@ -264,8 +264,8 @@ _Avoid_: 上传开始、用户点击取消
 _Avoid_: 当前平台默认值、可变用户偏好
 
 **灰度模式（RolloutMode）**：
-平台为新 revision 选择 RuntimeAssignment 的路由策略，包括 Legacy、管理员灰度、用户显式
-试用、vNext 默认和 Legacy 回滚。
+平台为新 revision 选择 RuntimeAssignment 的路由策略，包括 Legacy、管理员灰度、vNext 默认
+和 Legacy 回滚；不完整的用户显式试用状态只作为历史失败关闭值，不再是可进入的产品阶段。
 _Avoid_: 单次 Run 状态、用户正式交付状态
 
 **门禁快照（GateSnapshot）**：

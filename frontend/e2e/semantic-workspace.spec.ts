@@ -1440,6 +1440,67 @@ test.describe("统一数据工作台", () => {
     await expect(notice).toContainText("STP_COMPILE_FAILED");
   });
 
+  test("模型结果不确定时由用户确认后创建新版本", async ({ page }) => {
+    await mockWorkspace(page);
+    const failedTask = {
+      ...workspaceTask("task-model-unknown", "failed", "模型结果待确认"),
+      model_connection_id: "connection-a",
+      external_api_confirmed: true,
+      error: "模型请求结果不确定",
+      failure: {
+        error_code: "MODEL_OUTCOME_UNKNOWN",
+        stage: "execute",
+        cause_summary: "模型请求结果不确定，平台没有自动重试",
+        attempt_count: 1,
+        elapsed_ms: 21000,
+        source_read: false,
+        intermediate_created: false,
+        delivery_published: false,
+        next_actions: [
+          "由你决定是否创建新版本重新执行",
+          "取消并保留当前失败记录",
+        ],
+        diagnostic_ref: "pi-run-unknown",
+      },
+    };
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [failedTask] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-model-unknown",
+      (route) => route.fulfill({
+        json: workspaceDetail(failedTask),
+      }),
+    );
+    let revisionPayload: Record<string, unknown> | null = null;
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-model-unknown/revisions",
+      async (route) => {
+        revisionPayload = await route.request().postDataJSON();
+        await route.fulfill({
+          status: 202,
+          json: { revision: 2 },
+        });
+      },
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /模型结果待确认/ }).click();
+    const notice = page.getByTestId("task-failure-explanation");
+    await expect(notice).toContainText("模型请求结果不确定");
+    await notice.getByRole("button", { name: "重新执行" }).click();
+    await expect(page.getByRole("alertdialog")).toContainText(
+      "可能产生重复调用和费用",
+    );
+    await page.getByRole("button", { name: "确认重新执行" }).click();
+
+    await expect.poll(() => revisionPayload).not.toBeNull();
+    expect(revisionPayload).toEqual({
+      instruction: "保持原要求，重新执行",
+      external_api_confirmed: true,
+      expected_active_revision: 1,
+    });
+  });
+
   test("后序完成事件会收口前序遗留开始态", async ({ page }) => {
     await mockWorkspace(page);
     const running = workspaceTask("task-stage-gap", "running", "阶段状态检查");

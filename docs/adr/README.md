@@ -26,7 +26,7 @@
 | [0016](0016-docker-desktop-unified-development-and-clean-image-gate.md) | Docker Desktop 统一开发环境与干净镜像验收门 | 已采纳但整体后置 | 2026-07-28 |
 | [0017](0017-agentic-runtime-vnext.md) | 数据工作台引入来源驱动的 Agentic Runtime | 已采纳，PG-05 恢复与安全纵切面已实现 | 2026-07-29 |
 | [0018](0018-unified-task-domain-contract.md) | 统一任务域采用正交五轴模型与独立发布权 | 已采纳 | 2026-07-30 |
-| [0019](0019-vnext-delivery-and-default-cutover-state-machine.md) | vNext 分离执行、正式发布与默认路由状态机 | 已采纳 | 2026-07-30 |
+| [0019](0019-vnext-delivery-and-default-cutover-state-machine.md) | vNext 分离执行、正式发布与默认路由状态机 | 已采纳；三段 Rollout 顺序由 0030 部分取代 | 2026-07-30 |
 | [0020](0020-provider-connection-broker-and-credential-isolation.md) | 模型连接采用凭证隔离代理与原生协议透传 | 已采纳；完整安全加固后置 | 2026-07-30 |
 | [0021](0021-named-personal-model-connections-and-compatibility-slot.md) | 个人模型连接采用命名多实例与旧接口兼容槽 | 已实现并验收 | 2026-07-30 |
 | [0022](0022-connection-model-validation-and-default-selection.md) | 模型连接采用逐模型验证与显式默认模型 | 已实现，等待用户验收 | 2026-07-30 |
@@ -37,6 +37,7 @@
 | [0027](0027-conversation-steering-and-context-compilation.md) | 运行中追问采用语义差异门与有界上下文编译 | 已采纳；AC-00～AC-03 工程验证完成 | 2026-08-02 |
 | [0028](0028-task-level-capability-host-sidecar.md) | 原生任务能力使用单一 Capability Host Sidecar | 已采纳；工程门与用户灰度验收通过，默认关闭 | 2026-08-05 |
 | [0029](0029-capability-validation-lifecycle-and-platform-publication.md) | 能力验证、生命周期与平台发布采用三轴治理 | 已采纳；新仓库 #9-#17 全部完成并关闭（两条真实纵切面 + 兼容切换，PR #30/#33/#34） | 2026-08-06 |
+| [0030](0030-direct-vnext-default-cutover.md) | 合格后直接切换全用户 vNext 默认 | 已采纳 | 2026-08-23 |
 
 ## 产品决策汇总（plan 第 3 节 + 本次确认）
 
@@ -62,3 +63,4 @@
 | 运行中追问 | 保留用户原话，LLM 生成 ContextDelta，确定性差异门决定只读回答或 Revision 草案 | 0027 |
 | 原生能力隔离 | 一个任务共用一个无来源/模型配置挂载的 Capability Host Sidecar，Pi 仅持短期 Relay | 0028 |
 | 能力验证与平台发布 | 成熟度、生命周期、运行资格三轴分离；平台快照独立签名并默认管理员灰度 | 0029 |
+| vNext 默认切换 | 不建立普通用户显式试用资格；硬门合格并独立授权后从管理员灰度直接切换全用户默认 | 0030 |

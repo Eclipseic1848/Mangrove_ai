@@ -45,6 +45,7 @@ def _client(
     role: str = "admin",
 ) -> TestClient:
     from src.agentic_runtime.pi_runtime import PiRuntime
+    import src.api.auth as auth_mod
     from src.api.auth import get_current_user
 
     monkeypatch.setattr(
@@ -59,6 +60,7 @@ def _client(
         str(tmp_path / "executions"),
     )
     monkeypatch.setattr(settings, "pi_capability_host_enabled", True)
+    monkeypatch.setattr(auth_mod, "_store", None)
     # 每个测试重置门单例，避免沿用前一个测试的 DB 路径装配。
     import src.api.capability_governance_runtime as gate_runtime
 

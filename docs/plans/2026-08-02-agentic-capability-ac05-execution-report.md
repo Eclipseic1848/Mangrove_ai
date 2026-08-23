@@ -1,8 +1,8 @@
 # AC-05 独立能力获取状态机与共享缓存执行报告
 
 > 日期：2026-08-02
-> 状态：`ac05_engineering_verified_pending_user_acceptance`
-> 分支：`v0.0.8`
+> 状态：`ac05_production_migrated_user_accepted`
+> 当前生产迁移代码提交：`235459a3`
 > 边界：本报告只证明 AC-05；后续 AC-06 已通过用户灰度验收，AC-07 #33 已完成并迁移。
 > AC-05 获取链本身仍未发布平台能力或正式 Delivery
 
@@ -44,6 +44,9 @@
 - `python -m compileall -q src/capability_acquisition src/capability_catalog
   src/agentic_runtime/egress_policy.py`：通过；
 - `git diff --check`：通过。
+- 2026-08-22 迁移加固后，`tests/test_capability_acquisition.py` 为 38 passed；相邻
+  `test_capability_catalog.py + test_agentic_runtime.py` 为 65 passed；Standards/Spec 最终
+  双轴复审无 P0/P1/P2。
 
 ### 2.2 真实 Docker、Smokescreen、BuildKit 与 ORAS 探针
 
@@ -62,6 +65,23 @@
 - BuildKit 本地 cache 生成；探针结束后目标容器、网络和 active 工作目录残留均为 0。
 
 探针使用临时目录，结束后删除临时 OCI Layout 和 cache；没有写生产能力仓库或业务数据库。
+
+### 2.3 生产迁移、恢复与重放门（2026-08-22）
+
+- `migrate_capability_acquisition(db_path, backup_path)` 是唯一显式迁移入口；Repository 在缺失或
+  畸形 Schema 时失败关闭，不再隐式执行 DDL；
+- SQLite `BEGIN IMMEDIATE` 写锁覆盖恢复点一致性检查、原子备份发布和纯新增 DDL，业务写入
+  不能进入备份与 DDL 之间；迁移元数据在同一事务内绑定首次备份 SHA-256；
+- 生产恢复点为 `data/backups/webui-before-ac05-20260822-072340.db`，SHA-256 为
+  `669a13e24cbf6877e5c16bf41e532304a51b14e45742ef1162f7aa0957310b9e`；源库与恢复点
+  `integrity_check=ok`；
+- 迁移前、迁移后及恢复点中 AC-05 之外的 63 张既有表逻辑指纹均为
+  `901d133bbeaf0c34720f74e46ffc9fa211b408b1f0ed6950e2b4d07925df3242`，验证零改写；
+- 同路径重放后恢复点 SHA-256 不变；生产新增两张表和一个索引，任务记录保持 0；
+- 从恢复点建立的临时副本通过完整性、再次迁移、幂等创建、请求身份冲突、跨 Owner 取消拒绝、
+  取消持久化及取消后 READY CAS 拒绝，随后副本与临时恢复点均删除；
+- 真实 Docker 探针再次通过并独立确认目标容器、网络、工作目录残留均为 0；8088 重启后
+  `/api/health` 返回 200；用户于 2026-08-22 明确确认验收通过。
 
 ## 3. 审查纠偏
 
@@ -86,7 +106,7 @@
 ### 已验证事实
 
 - AC-05 状态机、来源策略、隔离获取、缓存、取消、重试、恢复和资源清理已完成工程验证；
-- AC-05 执行当时未迁移生产库；后续 AC-06 目录迁移与 AC-07 #33 治理迁移均带备份完成；
+- AC-05 已于 2026-08-22 完成带备份生产迁移、幂等重放、零改写、恢复副本验收和用户验收；
 - AC-06 四类真实 Adapter 与用户灰度验收已完成，AC-07 #33 三轴治理投影已完成；AC-07
   验证晋级/管理员发布、AC-08 SOP 学习及后续 UI 仍未开始；
 - 本次 READY 只是冻结能力制品，不是 `verified` 平台能力，也不是正式 Delivery。

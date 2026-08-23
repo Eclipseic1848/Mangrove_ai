@@ -3,6 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+import threading
+import time
 
 import pytest
 from pydantic import ValidationError
@@ -18,6 +24,7 @@ from src.capability_acquisition import (
     ResolvedCandidate,
     SourcePolicy,
     SqliteAcquisitionRepository,
+    migrate_capability_acquisition,
 )
 from src.conversation_steering import AcquisitionBudget, AcquisitionStatus
 
@@ -59,6 +66,348 @@ def _request(
         ),
         budget=budget or _budget(),
     )
+
+
+def _migrate_test_database(tmp_path, filename: str):
+    database = tmp_path / filename
+    with sqlite3.connect(database):
+        pass
+    migrate_capability_acquisition(
+        database,
+        tmp_path / f"{database.stem}-before-ac05.db",
+    )
+    return database
+
+
+def test_explicit_migration_backs_up_before_adding_acquisition_schema(
+    tmp_path,
+) -> None:
+    database = tmp_path / "production.db"
+    backup = tmp_path / "production-before-ac05.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE existing_governance "
+            "(event_id TEXT PRIMARY KEY, payload_json TEXT NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO existing_governance VALUES (?, ?)",
+            ("event-1", '{"status":"kept"}'),
+        )
+
+    migrated_backup = migrate_capability_acquisition(database, backup)
+
+    assert migrated_backup == backup.resolve()
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert connection.execute(
+            "SELECT payload_json FROM existing_governance"
+        ).fetchone()[0] == '{"status":"kept"}'
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='capability_acquisition_runs'"
+        ).fetchone() is None
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert connection.execute(
+            "SELECT payload_json FROM existing_governance"
+        ).fetchone()[0] == '{"status":"kept"}'
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='capability_acquisition_runs'"
+        ).fetchone() == (1,)
+
+
+def test_sqlite_repository_refuses_database_without_explicit_migration(
+    tmp_path,
+) -> None:
+    database = tmp_path / "not-migrated.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE existing_data (value TEXT NOT NULL)")
+
+    with pytest.raises(RuntimeError, match="尚未执行带备份迁移"):
+        SqliteAcquisitionRepository(database)
+
+
+def test_sqlite_repository_rejects_malformed_acquisition_schema(
+    tmp_path,
+) -> None:
+    database = tmp_path / "malformed.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE capability_acquisition_runs "
+            "(acquisition_id TEXT PRIMARY KEY)"
+        )
+        connection.execute(
+            "CREATE INDEX idx_capability_acquisition_owner_status "
+            "ON capability_acquisition_runs(acquisition_id)"
+        )
+
+    with pytest.raises(RuntimeError, match="尚未执行带备份迁移"):
+        SqliteAcquisitionRepository(database)
+
+
+def test_sqlite_repository_rejects_schema_with_changed_identity_collation(
+    tmp_path,
+) -> None:
+    database = tmp_path / "changed-collation.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE capability_acquisition_runs ("
+            "acquisition_id TEXT COLLATE NOCASE PRIMARY KEY, "
+            "owner_id TEXT NOT NULL, status TEXT NOT NULL, "
+            "payload_json TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        connection.execute(
+            "CREATE INDEX idx_capability_acquisition_owner_status "
+            "ON capability_acquisition_runs(owner_id, status)"
+        )
+
+    with pytest.raises(RuntimeError, match="尚未执行带备份迁移"):
+        SqliteAcquisitionRepository(database)
+
+
+def test_explicit_migration_replay_preserves_first_recovery_point(
+    tmp_path,
+) -> None:
+    database = tmp_path / "production.db"
+    backup = tmp_path / "production-before-ac05.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE existing_data (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO existing_data VALUES ('kept')")
+
+    first = migrate_capability_acquisition(database, backup)
+    backup_before_replay = backup.read_bytes()
+    second = migrate_capability_acquisition(database, backup)
+
+    assert first == second == backup.resolve()
+    assert backup.read_bytes() == backup_before_replay
+
+
+def test_migration_replay_allows_normal_business_writes_after_migration(
+    tmp_path,
+) -> None:
+    database = tmp_path / "production.db"
+    backup = tmp_path / "production-before-ac05.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE existing_data (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO existing_data VALUES ('before')")
+    migrate_capability_acquisition(database, backup)
+    backup_before_replay = backup.read_bytes()
+    with sqlite3.connect(database) as connection:
+        connection.execute("INSERT INTO existing_data VALUES ('after')")
+
+    replayed = migrate_capability_acquisition(database, backup)
+
+    assert replayed == backup.resolve()
+    assert backup.read_bytes() == backup_before_replay
+
+
+def test_migration_rejects_a_new_recovery_path_after_schema_exists(
+    tmp_path,
+) -> None:
+    database = tmp_path / "production.db"
+    first_backup = tmp_path / "production-before-ac05.db"
+    different_backup = tmp_path / "different-recovery-point.db"
+    with sqlite3.connect(database):
+        pass
+    migrate_capability_acquisition(database, first_backup)
+
+    with pytest.raises(RuntimeError, match="首次恢复点不匹配"):
+        migrate_capability_acquisition(database, different_backup)
+
+    assert not different_backup.exists()
+
+
+def test_migration_rejects_corrupt_source_without_creating_backup(
+    tmp_path,
+) -> None:
+    database = tmp_path / "corrupt.db"
+    backup = tmp_path / "corrupt-before-ac05.db"
+    database.write_bytes(b"not-a-sqlite-database")
+
+    with pytest.raises(RuntimeError, match="源数据库完整性检查失败"):
+        migrate_capability_acquisition(database, backup)
+
+    assert not backup.exists()
+
+
+def test_migration_rejects_missing_source_without_creating_database(
+    tmp_path,
+) -> None:
+    database = tmp_path / "missing.db"
+    backup = tmp_path / "missing-before-ac05.db"
+
+    with pytest.raises(FileNotFoundError, match="源数据库不存在"):
+        migrate_capability_acquisition(database, backup)
+
+    assert not database.exists()
+    assert not backup.exists()
+
+
+def test_migration_rejects_backup_that_overwrites_source(tmp_path) -> None:
+    database = tmp_path / "production.db"
+    with sqlite3.connect(database):
+        pass
+
+    with pytest.raises(ValueError, match="备份不能覆盖源数据库"):
+        migrate_capability_acquisition(database, database)
+
+
+def test_migration_rejects_unrelated_existing_backup_before_schema_exists(
+    tmp_path,
+) -> None:
+    database = tmp_path / "production.db"
+    backup = tmp_path / "occupied.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE source_data (value TEXT NOT NULL)")
+    with sqlite3.connect(backup) as connection:
+        connection.execute("CREATE TABLE unrelated_data (value TEXT NOT NULL)")
+    backup_before = backup.read_bytes()
+
+    with pytest.raises(RuntimeError, match="恢复点与源数据库不一致"):
+        migrate_capability_acquisition(database, backup)
+
+    assert backup.read_bytes() == backup_before
+
+
+def test_migration_replay_rejects_unrelated_healthy_database_as_backup(
+    tmp_path,
+) -> None:
+    database = tmp_path / "production.db"
+    real_backup = tmp_path / "real-recovery-point.db"
+    unrelated_backup = tmp_path / "unrelated.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE existing_data (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO existing_data VALUES ('production')")
+    migrate_capability_acquisition(database, real_backup)
+    with sqlite3.connect(unrelated_backup) as connection:
+        connection.execute("CREATE TABLE existing_data (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO existing_data VALUES ('unrelated')")
+
+    with pytest.raises(RuntimeError, match="恢复点与源数据库不一致"):
+        migrate_capability_acquisition(database, unrelated_backup)
+
+
+def test_migration_resumes_after_backup_completed_before_ddl(
+    tmp_path,
+) -> None:
+    database = tmp_path / "production.db"
+    backup = tmp_path / "production-before-ac05.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE existing_data (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO existing_data VALUES ('kept')")
+        connection.commit()
+        with sqlite3.connect(backup) as destination:
+            connection.backup(destination)
+
+    migrated_backup = migrate_capability_acquisition(database, backup)
+
+    assert migrated_backup == backup.resolve()
+    repository = SqliteAcquisitionRepository(database)
+    assert repository.get("missing") is None
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='capability_acquisition_runs'"
+        ).fetchone() is None
+
+
+def test_concurrent_explicit_migrations_share_one_recovery_point(
+    tmp_path,
+) -> None:
+    database = tmp_path / "production.db"
+    backup = tmp_path / "production-before-ac05.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE existing_data (payload BLOB NOT NULL)")
+        connection.execute(
+            "INSERT INTO existing_data VALUES (zeroblob(33554432))"
+        )
+    gate = tmp_path / "start-migration"
+    command = (
+        "from pathlib import Path; import sys,time; "
+        "from src.capability_acquisition import migrate_capability_acquisition; "
+        "gate=Path(sys.argv[3]); Path(sys.argv[4]).touch(); "
+        "exec('while not gate.exists():\\n time.sleep(0.01)'); "
+        "print(migrate_capability_acquisition(sys.argv[1], sys.argv[2]))"
+    )
+    ready_paths = [tmp_path / "ready-1", tmp_path / "ready-2"]
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-X",
+                "utf8",
+                "-c",
+                command,
+                str(database),
+                str(backup),
+                str(gate),
+                str(ready),
+            ],
+            cwd=Path(__file__).resolve().parents[1],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        for ready in ready_paths
+    ]
+    deadline = time.monotonic() + 30
+    while not all(path.exists() for path in ready_paths):
+        if time.monotonic() >= deadline:
+            raise TimeoutError("并发迁移子进程未按时就绪")
+        time.sleep(0.01)
+    gate.touch()
+    completed = [process.communicate(timeout=30) for process in processes]
+
+    assert [process.returncode for process in processes] == [0, 0], completed
+    assert all(str(backup.resolve()) in stdout for stdout, _stderr in completed)
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='capability_acquisition_runs'"
+        ).fetchone() is None
+
+
+def test_business_write_cannot_enter_between_backup_and_ddl(tmp_path) -> None:
+    database = tmp_path / "production.db"
+    backup = tmp_path / "production-before-ac05.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE existing_data (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO existing_data VALUES ('before')")
+        connection.execute("CREATE TABLE padding (payload BLOB NOT NULL)")
+        connection.execute("INSERT INTO padding VALUES (zeroblob(33554432))")
+    observed_schema: list[bool] = []
+
+    def write_when_backup_starts() -> None:
+        deadline = time.monotonic() + 30
+        while not list(tmp_path.glob(f".{backup.name}.*.tmp")):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("迁移临时备份未按时出现")
+            time.sleep(0.005)
+        with sqlite3.connect(database, timeout=30) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            observed_schema.append(
+                connection.execute(
+                    "SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' AND name='capability_acquisition_migrations'"
+                ).fetchone()
+                == (1,)
+            )
+            connection.execute("INSERT INTO existing_data VALUES ('during')")
+
+    writer = threading.Thread(target=write_when_backup_starts)
+    writer.start()
+    migrate_capability_acquisition(database, backup)
+    writer.join(timeout=30)
+
+    assert not writer.is_alive()
+    assert observed_schema == [True]
+    with sqlite3.connect(backup) as connection:
+        assert connection.execute(
+            "SELECT value FROM existing_data ORDER BY value"
+        ).fetchall() == [("before",)]
 
 
 class FakeEnvironment:
@@ -429,7 +778,7 @@ async def test_cross_instance_cancel_is_persisted_and_classified_cancelled() -> 
 
 @pytest.mark.asyncio
 async def test_terminal_result_survives_repository_reopen(tmp_path) -> None:
-    db_path = tmp_path / "acquisition.db"
+    db_path = _migrate_test_database(tmp_path, "acquisition.db")
     request = _request(acquisition_id="acq-restart")
     first_environment = FakeEnvironment()
     first = CapabilityAcquisition(
@@ -468,7 +817,7 @@ async def test_nonterminal_record_recovers_before_restart() -> None:
 
 
 def test_sqlite_ready_finalize_cannot_overwrite_cross_instance_cancel(tmp_path) -> None:
-    db_path = tmp_path / "acquisition-cas.db"
+    db_path = _migrate_test_database(tmp_path, "acquisition-cas.db")
     request = _request(acquisition_id="acq-cas")
     first = SqliteAcquisitionRepository(db_path)
     second = SqliteAcquisitionRepository(db_path)
@@ -484,7 +833,7 @@ def test_sqlite_ready_finalize_cannot_overwrite_cross_instance_cancel(tmp_path) 
 
 
 def test_sqlite_stale_cancel_cannot_overwrite_cross_instance_ready(tmp_path) -> None:
-    db_path = tmp_path / "acquisition-cas-ready.db"
+    db_path = _migrate_test_database(tmp_path, "acquisition-cas-ready.db")
     request = _request(acquisition_id="acq-cas-ready")
     first = SqliteAcquisitionRepository(db_path)
     second = SqliteAcquisitionRepository(db_path)
@@ -499,7 +848,7 @@ def test_sqlite_stale_cancel_cannot_overwrite_cross_instance_ready(tmp_path) -> 
 
 
 def test_sqlite_finalize_ready_cannot_overwrite_failed_terminal(tmp_path) -> None:
-    db_path = tmp_path / "acquisition-terminal.db"
+    db_path = _migrate_test_database(tmp_path, "acquisition-terminal.db")
     request = _request(acquisition_id="acq-terminal")
     repository = SqliteAcquisitionRepository(db_path)
     record = repository.create(request)

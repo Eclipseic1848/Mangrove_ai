@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import gzip
 import json
 import sqlite3
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
@@ -30,6 +31,20 @@ def _connection_version(
         owner_user_id,
         str(connection["connection_id"]),
     ).connection_version
+
+
+def _assert_pinned_provider_request(
+    seen: dict[str, object],
+    expected_url: str,
+) -> None:
+    expected = urlsplit(expected_url)
+    actual = urlsplit(str(seen["url"]))
+    assert actual.scheme == expected.scheme
+    assert actual.hostname == "8.8.8.8"
+    assert actual.path == expected.path
+    assert actual.query == expected.query
+    assert seen["host"] == expected.hostname
+    assert seen["sni_hostname"] == expected.hostname
 
 
 def _client(
@@ -130,6 +145,8 @@ def test_user_configures_and_lists_personal_preset_connection(tmp_path):
 
     def provider(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
+        seen["host"] = request.headers.get("host")
+        seen["sni_hostname"] = request.extensions.get("sni_hostname")
         seen["authorization"] = request.headers.get("authorization")
         seen["payload"] = request.read().decode("utf-8")
         return httpx.Response(
@@ -171,7 +188,9 @@ def test_user_configures_and_lists_personal_preset_connection(tmp_path):
     assert saved.json()["key_hint"] == "1234"
     assert listed.status_code == 200
     assert listed.json()["items"] == [saved.json()]
-    assert seen["url"] == "https://api.deepseek.com/chat/completions"
+    assert seen["url"] == "https://8.8.8.8/chat/completions"
+    assert seen["host"] == "api.deepseek.com"
+    assert seen["sni_hostname"] == "api.deepseek.com"
     assert seen["authorization"] == "Bearer sk-personal-secret-1234"
     assert "sk-personal-secret-1234" not in saved.text
     assert "sk-personal-secret-1234" not in listed.text
@@ -566,7 +585,9 @@ def test_user_retries_failed_model_changes_default_and_controls_model_state(tmp_
 
 def test_admin_publishes_provider_preset_with_required_key(tmp_path):
     def provider(request: httpx.Request) -> httpx.Response:
-        assert str(request.url) == "https://api.deepseek.com/chat/completions"
+        assert str(request.url) == "https://8.8.8.8/chat/completions"
+        assert request.headers["host"] == "api.deepseek.com"
+        assert request.extensions["sni_hostname"] == "api.deepseek.com"
         assert request.headers["authorization"] == "Bearer platform-secret-2468"
         return httpx.Response(
             200,
@@ -1427,6 +1448,8 @@ def test_openai_preset_is_verified_through_responses_api(tmp_path):
 
     def provider(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
+        seen["host"] = request.headers.get("host")
+        seen["sni_hostname"] = request.extensions.get("sni_hostname")
         seen["authorization"] = request.headers.get("authorization")
         seen["json"] = request.read().decode("utf-8")
         return httpx.Response(
@@ -1453,7 +1476,10 @@ def test_openai_preset_is_verified_through_responses_api(tmp_path):
     )
 
     assert response.status_code == 200
-    assert seen["url"] == "https://api.openai.com/v1/responses"
+    _assert_pinned_provider_request(
+        seen,
+        "https://api.openai.com/v1/responses",
+    )
     assert seen["authorization"] == "Bearer openai-secret-0001"
     request_json = str(seen["json"])
     assert '"input":"Reply with OK."' in request_json
@@ -1466,6 +1492,8 @@ def test_qwen_preset_uses_shared_china_responses_route_and_frozen_model(tmp_path
 
     def provider(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
+        seen["host"] = request.headers.get("host")
+        seen["sni_hostname"] = request.extensions.get("sni_hostname")
         seen["json"] = request.read().decode("utf-8")
         return httpx.Response(
             200,
@@ -1486,8 +1514,9 @@ def test_qwen_preset_uses_shared_china_responses_route_and_frozen_model(tmp_path
     )
 
     assert response.status_code == 200
-    assert seen["url"] == (
-        "https://dashscope.aliyuncs.com/compatible-mode/v1/responses"
+    _assert_pinned_provider_request(
+        seen,
+        "https://dashscope.aliyuncs.com/compatible-mode/v1/responses",
     )
     assert '"model":"qwen3.7-plus-2026-05-26"' in str(seen["json"])
     assert response.json()["model"] == "qwen3.7-plus-2026-05-26"
@@ -1499,6 +1528,8 @@ def test_anthropic_preset_is_verified_through_native_messages_api(tmp_path):
 
     def provider(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
+        seen["host"] = request.headers.get("host")
+        seen["sni_hostname"] = request.extensions.get("sni_hostname")
         seen["x_api_key"] = request.headers.get("x-api-key")
         seen["version"] = request.headers.get("anthropic-version")
         seen["json"] = request.read().decode("utf-8")
@@ -1526,7 +1557,10 @@ def test_anthropic_preset_is_verified_through_native_messages_api(tmp_path):
     )
 
     assert response.status_code == 200
-    assert seen["url"] == "https://api.anthropic.com/v1/messages"
+    _assert_pinned_provider_request(
+        seen,
+        "https://api.anthropic.com/v1/messages",
+    )
     assert seen["x_api_key"] == "anthropic-secret-0003"
     assert seen["version"] == "2023-06-01"
     assert '"model":"claude-sonnet-5"' in str(seen["json"])
@@ -1538,6 +1572,8 @@ def test_gemini_preset_is_verified_through_native_generate_content(tmp_path):
 
     def provider(request: httpx.Request) -> httpx.Response:
         seen["url"] = str(request.url)
+        seen["host"] = request.headers.get("host")
+        seen["sni_hostname"] = request.extensions.get("sni_hostname")
         seen["api_key"] = request.headers.get("x-goog-api-key")
         seen["json"] = request.read().decode("utf-8")
         return httpx.Response(
@@ -1573,9 +1609,10 @@ def test_gemini_preset_is_verified_through_native_generate_content(tmp_path):
     )
 
     assert response.status_code == 200
-    assert seen["url"] == (
+    _assert_pinned_provider_request(
+        seen,
         "https://generativelanguage.googleapis.com/v1beta/"
-        "models/gemini-3.6-flash:generateContent"
+        "models/gemini-3.6-flash:generateContent",
     )
     assert seen["api_key"] == "gemini-secret-0004"
     assert '"contents":' in str(seen["json"])
@@ -1621,6 +1658,8 @@ def test_broker_relay_uses_scoped_grant_and_records_native_stream_usage(
                 },
             )
         seen["url"] = str(request.url)
+        seen["host"] = request.headers.get("host")
+        seen["sni_hostname"] = request.extensions.get("sni_hostname")
         seen["authorization"] = request.headers.get("authorization")
         seen["body"] = body
         return httpx.Response(
@@ -1678,7 +1717,9 @@ def test_broker_relay_uses_scoped_grant_and_records_native_stream_usage(
 
     grant, relayed, body, usage = asyncio.run(scenario())
 
-    assert seen["url"] == "https://api.deepseek.com/chat/completions"
+    assert seen["url"] == "https://8.8.8.8/chat/completions"
+    assert seen["host"] == "api.deepseek.com"
+    assert seen["sni_hostname"] == "api.deepseek.com"
     assert seen["authorization"] == f"Bearer {provider_secret}"
     assert grant.token not in str(seen["authorization"])
     assert provider_secret not in grant.model_dump_json()
@@ -1822,6 +1863,8 @@ def test_broker_relay_preserves_each_native_protocol_and_usage(
         if call_count == 1:
             return httpx.Response(200, json=verification_response)
         seen["url"] = str(request.url)
+        seen["host"] = request.headers.get("host")
+        seen["sni_hostname"] = request.extensions.get("sni_hostname")
         seen["auth"] = request.headers.get(auth_header)
         return httpx.Response(200, json=relay_response)
 
@@ -1865,7 +1908,14 @@ def test_broker_relay_preserves_each_native_protocol_and_usage(
 
     usage = asyncio.run(scenario())
 
-    assert seen["url"] == expected_url
+    expected_parts = urlsplit(expected_url)
+    pinned_parts = urlsplit(str(seen["url"]))
+    assert pinned_parts.scheme == expected_parts.scheme
+    assert pinned_parts.hostname == "8.8.8.8"
+    assert pinned_parts.path == expected_parts.path
+    assert pinned_parts.query == expected_parts.query
+    assert seen["host"] == expected_parts.hostname
+    assert seen["sni_hostname"] == expected_parts.hostname
     assert (
         seen["auth"] == provider_secret
         if auth_header != "authorization"

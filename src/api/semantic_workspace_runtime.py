@@ -47,6 +47,7 @@ from src.delivery_publishing.models import PublicationGate
 from src.delivery_publishing.pi_adapter import PiCandidateAdapter
 from src.delivery_publishing.repository import DeliveryPublishingRepository
 from src.delivery_publishing.service import DeliveryPublisher
+from src.runtime_routing import runtime_routing_is_p0_blocked
 from src.semantic_harness.compiler_models import ClarificationResolution
 from src.semantic_harness.harness_models import HarnessResume
 from src.semantic_harness.inspectors import UploadSourceInspector
@@ -742,12 +743,12 @@ class SemanticWorkspaceManager:
 
         def publication_gate(_command) -> PublicationGate:
             current = store.get_semantic_workspace_task(user_id, task_id)
-            # Rollout P0 状态尚未实施；保留显式门位，不能由 Agent 自行传值。
+            # 迁移激活后只读中央 Rollout；Agent 与发布命令都不能覆盖 P0 结论。
             return PublicationGate(
                 cancel_requested=bool(
                     current and current.get("cancel_requested")
                 ),
-                p0_blocked=False,
+                p0_blocked=runtime_routing_is_p0_blocked(settings.webui_db_path),
             )
 
         publisher = DeliveryPublisher(
@@ -877,7 +878,8 @@ class SemanticWorkspaceManager:
         )
 
         _apply_confirmed_steering_revision(
-            user_id,
+            get_store().get_user(user_id)
+            or {"user_id": user_id, "role": "user"},
             task_id,
             decision.decision_id,
             external_api_confirmed=decision.external_api_confirmed,
@@ -2087,8 +2089,26 @@ class SemanticWorkspaceManager:
                 marker in message.lower()
                 for marker in ("docker", "runtime 镜像", "image inspect")
             )
+            external_provider = bool(runtime.get("model_connection_id"))
+            outcome_unknown = (
+                "模型请求结果不确定" in message
+                or (
+                    external_provider
+                    and any(
+                        marker in message
+                        for marker in (
+                            "Pi 执行超过",
+                            "Pi RPC 在任务稳定结束前退出",
+                        )
+                    )
+                )
+            )
             failure = {
-                "error_code": "PI_RUNTIME_FAILED",
+                "error_code": (
+                    "MODEL_OUTCOME_UNKNOWN"
+                    if outcome_unknown
+                    else "PI_RUNTIME_FAILED"
+                ),
                 "stage": "execute",
                 "cause_summary": message[:500],
                 "attempt_count": 1,
@@ -2098,6 +2118,11 @@ class SemanticWorkspaceManager:
                 "delivery_published": False,
                 "next_actions": (
                     [
+                        "由你决定是否创建新版本重新执行",
+                        "取消并保留当前失败记录",
+                    ]
+                    if outcome_unknown
+                    else [
                         "检查 Docker Desktop 和 Pi Runtime 镜像",
                         "服务恢复后重试任务",
                         "停止任务",

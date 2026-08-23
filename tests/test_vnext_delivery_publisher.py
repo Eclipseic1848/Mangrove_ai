@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -16,6 +17,15 @@ from src.delivery_publishing.models import (
 )
 from src.delivery_publishing.repository import DeliveryPublishingRepository
 from src.delivery_publishing.service import DeliveryPublisher
+from src.runtime_routing import (
+    GateCheck,
+    GateSnapshot,
+    RolloutActor,
+    RuntimeRouting,
+    SqliteRuntimeRoutingRepository,
+    migrate_runtime_routing,
+    runtime_routing_is_p0_blocked,
+)
 
 
 def _sha256(path: Path) -> str:
@@ -181,6 +191,90 @@ def test_cancel_before_commit_publishes_no_formal_output(
     intent = repository.get_intent(_command(candidate).publication_key)
     assert intent is not None
     assert intent["status"] == "aborted"
+
+
+def test_central_p0_rollback_blocks_new_vnext_publication(
+    tmp_path: Path,
+    repository: DeliveryPublishingRepository,
+    candidate: Path,
+) -> None:
+    database = tmp_path / "webui.db"
+    existing_publisher = _publisher(tmp_path, repository, candidate)
+    existing_delivery = existing_publisher.publish(
+        _command(candidate),
+        actor_id="owner-a",
+    )
+    with sqlite3.connect(database) as connection:
+        delivery_before = tuple(connection.execute(
+            "SELECT * FROM formal_delivery_runs WHERE delivery_id=?",
+            (existing_delivery.delivery_id,),
+        ).fetchone())
+        outputs_before = [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT * FROM formal_delivery_outputs WHERE delivery_id=? "
+                "ORDER BY output_id",
+                (existing_delivery.delivery_id,),
+            ).fetchall()
+        ]
+        output_dir = Path(connection.execute(
+            "SELECT output_dir FROM formal_delivery_runs WHERE delivery_id=?",
+            (existing_delivery.delivery_id,),
+        ).fetchone()[0])
+    files_before = {
+        path.name: path.read_bytes() for path in output_dir.iterdir() if path.is_file()
+    }
+    migrate_runtime_routing(database, tmp_path / "webui-before-g3.db")
+    routing = RuntimeRouting(SqliteRuntimeRoutingRepository(database))
+    routing.record_gate(
+        GateSnapshot.build(
+            gate_version="phase4-g3-v1",
+            code_commit="a" * 40,
+            environment_digest="b" * 64,
+            checks=(
+                GateCheck(
+                    gate_id="delivery-integrity",
+                    passed=False,
+                    evidence_hash="c" * 64,
+                ),
+            ),
+        ),
+        RolloutActor(actor_id="admin-a", role="admin"),
+    )
+    def gate_reader(_command):
+        return PublicationGate(
+            p0_blocked=runtime_routing_is_p0_blocked(database)
+        )
+    blocked_candidate = tmp_path / "blocked" / "result.json"
+    blocked_candidate.parent.mkdir()
+    blocked_candidate.write_text('{"blocked":true}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="P0"):
+        DeliveryPublisher(
+            repository=repository,
+            output_root=tmp_path / "deliveries",
+            candidate_resolver=lambda _command: {
+                "candidate_json": blocked_candidate
+            },
+            gate_reader=gate_reader,
+        ).publish(_command(blocked_candidate), actor_id="owner-a")
+
+    with sqlite3.connect(database) as connection:
+        assert tuple(connection.execute(
+            "SELECT * FROM formal_delivery_runs WHERE delivery_id=?",
+            (existing_delivery.delivery_id,),
+        ).fetchone()) == delivery_before
+        assert [
+            tuple(row)
+            for row in connection.execute(
+                "SELECT * FROM formal_delivery_outputs WHERE delivery_id=? "
+                "ORDER BY output_id",
+                (existing_delivery.delivery_id,),
+            ).fetchall()
+        ] == outputs_before
+    assert {
+        path.name: path.read_bytes() for path in output_dir.iterdir() if path.is_file()
+    } == files_before
 
 
 def test_same_publication_is_idempotent_and_owner_scoped(

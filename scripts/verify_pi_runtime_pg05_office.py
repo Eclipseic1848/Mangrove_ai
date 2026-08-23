@@ -6,10 +6,12 @@ import argparse
 import asyncio
 from collections import Counter
 import csv
+from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
 import re
+import secrets
 import sys
 import tempfile
 import unicodedata
@@ -28,25 +30,102 @@ from src.agentic_runtime.models import (
     SourceInput,
     VerificationStatus,
 )
-from src.agentic_runtime.pi_runtime import PiRuntime
+from src.agentic_runtime.pi_runtime import PiRuntime, PiRuntimeError
 from src.config.settings import settings
 
 
-def _resolve_upload(upload_id: str) -> tuple[Path, dict]:
-    matches = list(
-        (PROJECT_ROOT / settings.data_prep_upload_root).glob(
-            f"*/objects/{upload_id}.meta"
+MAX_TIMEOUT_SECONDS = 7200
+
+
+@dataclass(frozen=True)
+class OfficeValidationBatch:
+    case: str
+    batch_id: str
+    owner_id: str
+    upload_id: str
+    repeat: int
+    timeout_seconds: int
+
+    def task_id(self, run_number: int) -> str:
+        # 批次身份必须进入任务身份，重复或并发执行不能复用另一批的运行资源。
+        return f"pg05_{self.case}_{self.batch_id}_{run_number}"
+
+    def allocate_execution_root(
+        self,
+        base_root: Path,
+        run_number: int,
+    ) -> Path:
+        batch_root = (
+            base_root / f"pi-runtime-pg05-{self.case}" / self.batch_id
         )
-    )
-    if len(matches) != 1:
-        raise ValueError(
-            f"upload_id 应唯一命中一个本地上传对象，实际 {len(matches)} 个"
+        batch_root.mkdir(parents=True, exist_ok=True)
+        return Path(
+            tempfile.mkdtemp(prefix=f"run-{run_number}-", dir=batch_root)
         )
-    meta_path = matches[0]
+
+
+def _positive_timeout(value: str) -> int:
+    try:
+        timeout_seconds = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            "timeout-seconds 必须是正整数"
+        ) from exc
+    if timeout_seconds <= 0:
+        raise argparse.ArgumentTypeError("timeout-seconds 必须是正整数")
+    # 验收任务允许长时间运行，但仍需硬上限，防止配置错误形成无界资源占用。
+    if timeout_seconds > MAX_TIMEOUT_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f"timeout-seconds 不能超过 {MAX_TIMEOUT_SECONDS}"
+        )
+    return timeout_seconds
+
+
+def _safe_identifier(field_name: str):
+    def parse(value: str) -> str:
+        if not value or not value.strip():
+            raise argparse.ArgumentTypeError(f"{field_name} 不能为空")
+        if value != value.strip():
+            raise argparse.ArgumentTypeError(
+                f"{field_name} 不能包含首尾空白"
+            )
+        if "/" in value or "\\" in value or value in {".", ".."}:
+            raise argparse.ArgumentTypeError(
+                f"{field_name} 不能包含路径分隔符"
+            )
+        return value
+
+    return parse
+
+
+def _resolve_upload(owner_id: str, upload_id: str) -> tuple[Path, dict]:
+    upload_root = Path(settings.data_prep_upload_root)
+    if not upload_root.is_absolute():
+        upload_root = PROJECT_ROOT / upload_root
+    upload_root = upload_root.resolve()
+    owner_objects = (upload_root / owner_id / "objects").resolve()
+    # CLI 必须绑定明确 Owner；即使目录被替换为链接也不能逃出上传根目录。
+    if not owner_objects.is_relative_to(upload_root):
+        raise PermissionError("指定 Owner 的上传目录无效")
+    meta_path = owner_objects / f"{upload_id}.meta"
+    if not meta_path.is_file():
+        raise ValueError("指定 Owner 下未找到上传对象")
     metadata = json.loads(meta_path.read_text(encoding="utf-8"))
-    source = meta_path.with_suffix("")
+    for field_name in ("upload_id", "user_id", "original_name", "sha256"):
+        value = metadata.get(field_name)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(
+                f"上传对象元数据字段 {field_name} 不能为空"
+            )
+    if str(metadata.get("user_id") or "") != owner_id:
+        raise PermissionError("上传对象元数据与指定 Owner 不一致")
+    if str(metadata.get("upload_id") or "") != upload_id:
+        raise ValueError("上传对象元数据与指定 upload_id 不一致")
+    source = meta_path.with_suffix("").resolve()
+    if source.parent != owner_objects:
+        raise PermissionError("上传对象路径超出指定 Owner 目录")
     if not source.is_file():
-        raise FileNotFoundError(source)
+        raise ValueError("上传对象源文件不存在")
     actual = hashlib.sha256(source.read_bytes()).hexdigest()
     if actual != metadata["sha256"]:
         raise ValueError("真实上传对象与元数据哈希不一致")
@@ -195,20 +274,19 @@ def _case_contract(case: str) -> tuple[str, str]:
 
 async def _run_once(
     *,
-    case: str,
+    batch: OfficeValidationBatch,
     source: Path,
     metadata: dict,
     run_number: int,
 ) -> None:
-    objective, output_format = _case_contract(case)
-    root = PROJECT_ROOT / ".pytest-tmp" / f"pi-runtime-pg05-{case}"
-    root.mkdir(parents=True, exist_ok=True)
-    execution_root = Path(
-        tempfile.mkdtemp(prefix=f"run-{run_number}-", dir=root)
+    objective, output_format = _case_contract(batch.case)
+    execution_root = batch.allocate_execution_root(
+        PROJECT_ROOT / ".pytest-tmp",
+        run_number,
     )
     request = PiRuntimeRequest(
-        user_id=str(metadata["user_id"]),
-        task_id=f"pg05_{case}_{run_number}",
+        user_id=batch.owner_id,
+        task_id=batch.task_id(run_number),
         revision=1,
         objective_text=objective,
         requested_output_formats=(output_format,),
@@ -232,14 +310,14 @@ async def _run_once(
 
     async def event_sink(event: RuntimeEvent) -> None:
         print(
-            f"[{case}:{run_number}] "
+            f"[batch:{batch.batch_id}][{batch.case}:{run_number}] "
             f"{event.event_type}: {event.summary}",
             flush=True,
         )
 
     result = await PiRuntime(
         execution_root=execution_root,
-        timeout_seconds=600,
+        timeout_seconds=batch.timeout_seconds,
     ).start(request, on_event=event_sink)
     if len(result.candidates) != 1:
         raise AssertionError(
@@ -251,7 +329,7 @@ async def _run_once(
         raise AssertionError(
             f"候选格式不是 {output_format.upper()}：{candidate.format}"
         )
-    if case == "word":
+    if batch.case == "word":
         _assert_word_summary(candidate.host_path, source)
     else:
         _assert_excel_filter(candidate.host_path, source)
@@ -268,26 +346,100 @@ async def _run_once(
             )
         )
     print(
-        f"[{case}:{run_number}] PASS: {candidate.host_path}",
+        f"[batch:{batch.batch_id}][{batch.case}:{run_number}] "
+        f"PASS: {candidate.host_path}",
         flush=True,
     )
 
 
-async def _main(case: str, upload_id: str, repeat: int) -> None:
-    source, metadata = _resolve_upload(upload_id)
-    for run_number in range(1, repeat + 1):
+async def _main(batch: OfficeValidationBatch) -> None:
+    print(
+        f"[batch:{batch.batch_id}] START case={batch.case} "
+        f"owner={batch.owner_id} repeat={batch.repeat} "
+        f"timeout_seconds={batch.timeout_seconds}",
+        flush=True,
+    )
+    source, metadata = _resolve_upload(batch.owner_id, batch.upload_id)
+    for run_number in range(1, batch.repeat + 1):
         await _run_once(
-            case=case,
+            batch=batch,
             source=source,
             metadata=metadata,
             run_number=run_number,
         )
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
+def _failure_category(exc: Exception) -> str:
+    if isinstance(exc, PermissionError):
+        return "permission_denied"
+    if isinstance(exc, (ValueError, FileNotFoundError, KeyError)):
+        return "input_invalid"
+    if isinstance(exc, AssertionError):
+        return "verification_failed"
+    if isinstance(exc, PiRuntimeError):
+        cause: BaseException | None = exc
+        while cause is not None:
+            if isinstance(cause, TimeoutError):
+                return "runtime_timeout"
+            cause = cause.__cause__
+        return "runtime_failed"
+    return "unexpected_error"
+
+
+def _redact_host_paths(message: str) -> str:
+    # 验证日志可以保留端点与错误语义，但不得暴露 Owner 文件的宿主绝对路径。
+    return re.sub(
+        r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|\\\\)[^\r\n；;]+",
+        "<host-path>",
+        message,
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument("--case", required=True, choices=("word", "excel"))
-    parser.add_argument("--upload-id", required=True)
+    parser.add_argument(
+        "--owner-id",
+        required=True,
+        type=_safe_identifier("owner-id"),
+    )
+    parser.add_argument(
+        "--upload-id",
+        required=True,
+        type=_safe_identifier("upload-id"),
+    )
     parser.add_argument("--repeat", type=int, default=1, choices=range(1, 4))
+    parser.add_argument(
+        "--timeout-seconds",
+        type=_positive_timeout,
+        default=1800,
+        help="每次 Pi 执行允许的最长秒数",
+    )
     args = parser.parse_args()
-    asyncio.run(_main(args.case, args.upload_id, args.repeat))
+    batch = OfficeValidationBatch(
+        case=args.case,
+        batch_id=secrets.token_hex(8),
+        owner_id=args.owner_id,
+        upload_id=args.upload_id,
+        repeat=args.repeat,
+        timeout_seconds=args.timeout_seconds,
+    )
+    try:
+        asyncio.run(_main(batch))
+    except Exception as exc:
+        print(
+            f"[batch:{batch.batch_id}] FAILED "
+            f"category={_failure_category(exc)} "
+            f"error={type(exc).__name__}: "
+            f"{_redact_host_paths(str(exc))}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

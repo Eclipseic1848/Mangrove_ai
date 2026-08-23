@@ -2,11 +2,11 @@
 
 > status: active
 >
-> last_verified: 2026-08-21
+> last_verified: 2026-08-23
 >
 > branch: `main`
 >
-> baseline: `936f1980`（PR #41 合并；现场仍以 `git rev-parse origin/main` 复核）
+> baseline: 以现场 `git rev-parse HEAD` 和 `git rev-parse origin/main` 核验为准
 
 本文件是当前产品能力、工程状态和后续路线的唯一滚动台账。历史规格、ADR 和执行报告只提供
 设计与验证证据，不应重复维护“当前状态”。
@@ -35,7 +35,7 @@ PDF、Word、Excel、CSV 文件主链；数据库具备连接与测试基础。�
 | 项目 | 当前状态 | 尚缺 |
 |---|---|---|
 | AC-04 能力目录 | 工程验证通过 | 用户代表验收/完整生产门按后续票推进 |
-| AC-05 隔离能力获取 | 工程验证通过 | 生产迁移与用户验收；不得与业务来源同时联网 |
+| AC-05 隔离能力获取 | 带备份生产迁移与用户验收通过 | 不得与业务来源同时联网；平台发布和普通用户开放仍是独立门 |
 | AC-06 本地 Adapter + Sidecar | 用户灰度验收通过，默认关闭 | 远程 MCP、Registry 发现和普通用户开放 |
 | AC-07 旧 #33 三轴治理投影 | 完成并关闭 | 历史工单保留在旧仓库 |
 | AC-07 旧 #34 可恢复 ValidationRun | 工程实现、双轴审查、生产迁移、两项真实能力灰度、取消后重新发起和 8088 用户验收完成；Capability Host 代理修复经 PR #7 合并，旧工单已关闭 | 无 |
@@ -52,9 +52,21 @@ TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍
   `qualified=true`。31 个功能候选均经真实 Publisher、持久化 Delivery/output_id、独立 QA、
   文件完整性与来源血缘门；独立 oracle 额外拒绝 G103-F27（业务值或行序错误）。该结果只关闭
   G1 工程资格缺口，不代表 Phase 4、生产发布、Provider 认证或用户验收完成。
-- Word/Excel 连续生产门与完整 PG-05。
-- 真实外部 Provider 的 Pi→Relay→Provider 安全端到端验证。
-- Rollout P0 GateSnapshot 和默认入口切换。
+- G2 PG-05 已完成：Word/Excel 连续 3/3；AC-05 带备份生产迁移、恢复副本状态机、真实
+  Docker 探针及用户验收均通过。该结论不代表 Phase 4、平台发布或普通用户开放完成。
+- G4 外部 Provider 工程准备已完成但尚未形成生产资格：地址解析、关闭 SDK 盲重试和用户确认
+  新 Revision 的修复已提交为 `9ba95985`；多轮 Usage 汇总及任一轮未知时失败关闭的修复已提交
+  为 `a9e0d61d`，相关后端 169 项通过。绑定 `a9e0d61d` 的传输安全矩阵 6/6 通过。DeepSeek
+  V4 Flash 真实合成链形成 1 个候选并通过独立验证，6 次调用全部记录 Usage，合计 19,843
+  tokens，Pi 链通过。百炼 `qwen3.7-max-2026-06-08` 的唯一一次运行在 Relay 到 Provider 的
+  HTTP 连接阶段返回 502，无模型内容、无 token，Usage 为 `unknown`；DNS、证书和当前解析到的
+  IPv4 TLS 握手均正常，官方文档也确认该模型支持 Responses API，因此现有证据不能归因为模型
+  能力失败。未自动重试。生产 Vault 轮换按用户决定不执行，百炼链与三证据汇总未通过，最终
+  G4 资格仍不完整。生产 Vault Key 不在本轮变更范围。
+- G3 Rollout P0 GateSnapshot、累计硬门、P0 自动回退与分阶段默认切换已完成工程实现、生产
+  迁移和生产 Gate/Approval 初始化；运行态核验曾因旧 8088 进程触发 P0 回退，后端现已重启
+  加载 G3、取得新合格快照并恢复到 `admin_gray`。生产默认切换、完整 G3 用户验收和远端发布
+  未执行。
 - 远程 MCP/Secret、Registry 自动发现、平台能力普通用户开放。
 - 8B Linux/Compose/并发/故障与目标服务器验证。
 
@@ -355,13 +367,99 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
   重试恢复；这是稳定性证据，不影响本次冻结口径下的最终资格判定，也不等于 G4 完成。
 - PR #41 已以 merge commit `936f1980` 合入 `main`；Issue #37、#40 由 PR 自动关闭。
 
+2026-08-22，G2 Office、AC-05 生产迁移与用户验收通过：
+
+- 提交 `31729495` 加固 Office 验证 CLI：Owner 与上传对象绑定、空值和不安全标识失败关闭、
+  批次/任务/工作区隔离、1800 秒默认与 7200 秒硬上限、异常分类及宿主路径脱敏；新增 18 项
+  定向测试，Standards/Spec 双轴审查未发现实现问题或范围扩张；
+- 平台配置的本地 Qwen3.8-27B 对真实 Word 与 Excel 各连续运行三次，六次均形成单一约定格式
+  候选，并通过源数据内容断言和独立 Verifier：Word 3/3、Excel 3/3；
+- 全仓后端回归为 `1716 passed, 5 skipped, 2 failed`。两个失败分别是保留域名 DNS 无法解析
+  和 G1 冻结快照拒绝当前 HEAD/元数据漂移，复跑稳定且不在 G2 两文件差异内；
+- AC-05 提交 `235459a3` 新增唯一显式带备份迁移入口；Repository 缺失/畸形 Schema 失败关闭，
+  SQLite 写锁覆盖备份与 DDL，迁移元数据绑定首次备份 SHA-256；38 项 AC-05 测试、65 项相邻
+  回归和双轴复审通过；
+- 生产恢复点 `data/backups/webui-before-ac05-20260822-072340.db` 完整且 SHA-256 为
+  `669a13e24cbf6877e5c16bf41e532304a51b14e45742ef1162f7aa0957310b9e`；迁移前后与恢复点
+  的 63 张既有表逻辑指纹一致，同路径重放不改写恢复点；
+- 恢复副本上的幂等、请求身份、Owner 权限、取消和终态 CAS 全部通过；真实 Docker 获取、
+  冻结挂载、取消、重试和崩溃恢复通过且残留为 0；8088 重启健康；用户明确确认 G2 验收
+  通过。Issue #38 仍为 OPEN，等待单独授权的远端更新；Phase 4 仍未完成。
+
+2026-08-22，G3 GateSnapshot 与 P0 回退完成本地工程门：
+
+- 新增不可变 GateSnapshot、累计 Gate 有效资格、对比审计、独立 Approval 与 Rollout 状态机；
+  删除历史硬门、P0 失败或快照漂移均失败关闭，合格快照不会自动解除回退；
+- 新任务与所有 Revision 路径先预览、完成权限/契约/外发校验，再在同一 SQLite 事务冻结
+  semantic task/revision、活动指针、Runtime assignment 与 RuntimeTaskConfig；重复、并发、
+  锁超时和中途异常不会留下半状态；
+- Delivery Publisher 在 G3 激活后读取中央 P0 状态，P0 下拒绝新正式发布，并已验证既有
+  Delivery 数据库行和文件字节零改写；
+- 显式迁移要求一致性备份、Schema/DDL digest、首次备份 SHA-256 与逻辑指纹，迁移前保持
+  Legacy 路径，迁移后畸形对象失败关闭；相关 API/Publisher/Steering/Workspace 回归
+  `88 passed`，Agentic Runtime 与原子故障聚焦回归 `79 passed`，Standards/Spec 终审均
+  无仍可复现问题；排除已确认的 G1 冻结身份漂移与测试域名 DNS 两项基线后，全仓后端
+  `1762 passed, 5 skipped, 2 deselected`；
+- G3 工程代码已完成本地提交，生产 `data/webui.db` 已执行带备份显式迁移；恢复点为
+  `data/backups/webui-before-g3-20260822-133901.db`，SHA-256 为
+  `b552af5ac08bec3ba4421462cd51f73cf4b783520646ad285489ed9dd413bd7f`。生产库和恢复点
+  `integrity_check=ok`，旧业务逻辑指纹一致，16 个 G3 对象、Schema digest、备份绑定与幂等
+  回放通过；初始状态保持 `admin_gray`、`p0_blocked=0`，8088 `/api/health` 返回 200；
+- 首次生产 GateSnapshot `abfc951ee4a99f282484f46c8ffe0c48f36e4c924fd2d765cacc3dd7de992b38`
+  绑定 G3 提交 `21dbf11b3b6d72702fdaf95c4cd321299e19b8fe` 与环境摘要
+  `06e11542ebaf1d4b49477cd32ad92f7c802223358c34dd8c2dd6189b2ccf43c3`；该快照最初记录的六项
+  硬门如下，现只保留为不可变历史：
+
+  | GateCheck | evidence_hash |
+  |---|---|
+  | `g1-formal-delivery-quality` | `cda84b4547404595f332a9f36c649751acbccf5f1b78e34a3e1adc7f3df61708` |
+  | `g1-safety-permission-isolation` | `a99ef24b5b08c244dff2c5582b6fa5cb9918ae74c81a4a6e5c9624d1e01bd5da` |
+  | `g2-office-pg05` | `d7735bafb5b69a0d1c1fbb489ce44eee36451aa5238ac14c9f11e9e48456da9f` |
+  | `g2-ac05-production-readiness` | `42a9b1d7b45453b87c2ef16b8ea85e8b068526cabaddfca090dcb35416c3da50` |
+  | `g3-runtime-routing-regression` | `7c7d812e678b5e6791a520af35fdd774951f949df12b2faf7639ff8e22437a00` |
+  | `g3-production-migration` | `c18fd9afbff662525626a69fb4d6082852be5bd355b748c882a950f783471e7d` |
+
+- 随后核验确认 8088 进程启动时间 `2026-08-22T10:52:02-07:00` 早于 G3 提交时间
+  `2026-08-22T13:33:57-07:00`，不能证明运行进程已加载该提交。系统追加修正快照
+  `39c168fb4009478fcd731dbe1f5f10d05d8685b5721cbe7bc5302eddc1ab9fa8`，把
+  `g3-runtime-routing-regression` 标记为失败（证据
+  `e8e530d373f4afd519ef41774ccb224f82acbb18bdae0fdd4fc9809d5133a778`），并自动进入
+  `legacy_rollback`、`p0_blocked=true`；
+- 独立 Approval `approval-explicit-opt-in-abfc951ee4a99f28` 已由超级管理员
+  `u_9505fd620899` 本人身份记录，但它绑定历史快照 `abfc951e...`，不能用于当前活动快照；
+- 后端已由标准 supervisor 重启为 PID `5136`，启动时间晚于 G3 提交，`src/` 与
+  `21dbf11b` 一致、项目 supervisor 收敛为 1 个且 `/api/health` 返回 200。新活动快照
+  `a936510e53eebc2abb04ce984e1fb72821730d0dc1ce9d37760d2c85beec3571` 的六项硬门均
+  通过且累计有效合格；更新后的运行态证据为
+  `1eb872e625ca495f07ac476cce8487aa23116b5d9dbf0b18aa20bbaf60b36316`，环境摘要为
+  `a955b26cf8a23afcd14066c11e7254c53acd942a411d6fa9f5a5e03c16d0e882`；
+- 恢复 Approval `approval-admin-gray-recovery-a936510e53eebc2a` 已由超级管理员
+  `u_9505fd620899` 本人身份记录并绑定当前快照。按失败恢复规则，合格快照不会自动解除回退；
+  用户单独授权后已从 `legacy_rollback` 原子恢复为 `admin_gray`、`p0_blocked=false`，审计事件
+  绑定当前快照；旧业务逻辑指纹一致，24 条正式 Delivery、7 条 Legacy Delivery 和
+  Runtime assignment 0 条均未改变；
+- `admin_gray` 技术烟测通过：管理员显式 Pi 选择为 Pi，普通用户请求 Pi 和默认请求均为
+  Legacy，跨 Owner 失败关闭；8088 `/`、`/api/health`、`/openapi.json` 均返回 200，烟测未
+  创建任务或业务数据。用户于 2026-08-22 明确确认本轮 `admin_gray` 恢复验收通过；该结论
+  不等于 vNext 默认切换验收；
+- 代码未推送，Issue #39 未更新；Phase 4 仍未完成。
+- `explicit_opt_in` 切换前曾核验出缺少“获准用户”资格门，并创建修复工单 #43。ADR-0030
+  已按“可用后所有用户默认使用”的产品决定取消该中间阶段：`admin_gray` 在累计硬门合格且
+  获得独立授权后可直接进入 `vnext_default`；历史 `explicit_opt_in` 新任务失败关闭到 Legacy，
+  且只能恢复 `admin_gray`。路由与 API 接缝测试已通过，生产仍保持 `admin_gray`，G4 合格前
+  不得扩大受众。
+- G4 执行范围限定为平台共享 DeepSeek 与百炼连接，外发仅限冻结的纯合成数据。生产库脱敏
+  核验确认两条连接均为 `platform_shared`、已绑定 Secret 且状态 `verified`；该状态只证明连接
+  已配置，不等于 G4 合格。
+
 ## 7. 当前优先顺序
 
 1. **G1 已合入并关闭**：PR #41 已合入 `main`，Issue #37/#40 已关闭；v3 正式结果功能
-   96.8%、安全 100%，资格 PASS。该结论仍不代表 Phase 4、生产发布或用户验收完成。
-2. **G2/G3 未开工**：可以进入 G2 规划；G3 默认入口切换仍需独立规格、实现与用户授权。
-3. **G4/G5 未完成**：平台现有外部 Qwen/DeepSeek 连接已用于 G1 P1 对照，但 G4 安全矩阵
-   未执行；8B Linux/Compose 与目标服务器仍未就绪。
+   96.8%、安全 100%，资格 PASS。
+2. **G2 已通过、G3 `admin_gray` 恢复验收已通过**：ADR-0030 与直接全用户默认状态机已完成
+   本地实现，正式切换仍由 G4 完整合格门阻断，生产不得提前扩大。
+3. **G4 部分通过、G5 未完成**：传输矩阵与 DeepSeek Pi 链通过；百炼链结果未知且未重试，
+   8B Linux/Compose 与目标服务器仍未就绪。
 
 ## 8. 权威证据
 
