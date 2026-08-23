@@ -4,7 +4,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -298,6 +298,32 @@ class ModelConnectionRepository:
         finally:
             # Windows 会锁住仍打开的 SQLite 文件，所有短事务都在退出时主动释放句柄。
             conn.close()
+
+    def reencrypt_all_secrets(
+        self,
+        transform: Callable[[str], str],
+    ) -> int:
+        """在单一写事务中重加密全部在线 Provider Secret。"""
+
+        with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                rows = conn.execute(
+                    "SELECT secret_id, ciphertext "
+                    "FROM model_connection_secrets "
+                    "WHERE ciphertext IS NOT NULL"
+                ).fetchall()
+                for row in rows:
+                    conn.execute(
+                        "UPDATE model_connection_secrets "
+                        "SET ciphertext=? WHERE secret_id=?",
+                        (transform(str(row["ciphertext"])), row["secret_id"]),
+                    )
+                conn.commit()
+                return len(rows)
+            except BaseException:
+                conn.rollback()
+                raise
 
     def upsert_personal(
         self,

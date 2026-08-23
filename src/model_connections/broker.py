@@ -18,8 +18,9 @@ from src.connectors.http_security import HostResolver, HttpSecurityGuard, SsrfEr
 
 from .catalog import PRESETS_BY_ID, ProviderPreset, public_presets
 from .contracts import AccessGrant, ConnectionBinding, RelayResponse
+from .pinned_transport import PinnedAsyncHTTPTransport
 from .storage import ModelConnectionRepository
-from .vault import FernetCredentialVault
+from .vault import FernetCredentialVault, VaultDecryptionError
 
 
 _OFFICIAL_PRESET_HTTPS_HOSTS = tuple(sorted({
@@ -69,6 +70,7 @@ class ConnectionBroker:
         resolver: HostResolver | None = None,
         clock: Callable[[], datetime] | None = None,
         grant_ttl_seconds: int = 900,
+        provider_timeout_seconds: float = 120.0,
     ) -> None:
         self._repository = repository
         self._vault = vault
@@ -76,6 +78,7 @@ class ConnectionBroker:
         self._resolver = resolver
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._grant_ttl_seconds = grant_ttl_seconds
+        self._provider_timeout_seconds = provider_timeout_seconds
 
     def presets(self) -> list[dict[str, object]]:
         return public_presets()
@@ -548,7 +551,7 @@ class ConnectionBroker:
         endpoint = _provider_endpoint(grant, operation)
         allow_private = grant["locality"] == "managed_private"
         try:
-            HttpSecurityGuard(
+            target = HttpSecurityGuard(
                 allow_private=allow_private,
                 proxy_fake_ip_host_allowlist=_OFFICIAL_PRESET_HTTPS_HOSTS,
                 resolver=self._resolver,
@@ -560,21 +563,26 @@ class ConnectionBroker:
         outbound_headers = _safe_provider_headers(headers)
         outbound_headers.setdefault("Content-Type", "application/json")
         ciphertext = grant.get("ciphertext")
-        provider_secret = (
-            self._vault.decrypt(str(ciphertext)) if ciphertext else ""
-        )
+        try:
+            provider_secret = (
+                self._vault.decrypt(str(ciphertext)) if ciphertext else ""
+            )
+        except VaultDecryptionError as exc:
+            raise ConnectionError("Provider 凭证密文无法解密") from exc
         _inject_provider_auth(
             outbound_headers,
             api_format=str(grant["api_format"]),
             provider_secret=provider_secret,
         )
         client_kwargs: dict[str, object] = {
-            "timeout": 120.0,
+            "timeout": self._provider_timeout_seconds,
             "follow_redirects": False,
             "trust_env": False,
         }
-        if self._transport is not None:
-            client_kwargs["transport"] = self._transport
+        client_kwargs["transport"] = PinnedAsyncHTTPTransport(
+            target=target,
+            transport=self._transport,
+        )
         client = httpx.AsyncClient(**client_kwargs)
         request = client.build_request(
             "POST",
@@ -1026,8 +1034,10 @@ class ConnectionBroker:
             "follow_redirects": False,
             "trust_env": False,
         }
-        if self._transport is not None:
-            client_kwargs["transport"] = self._transport
+        client_kwargs["transport"] = PinnedAsyncHTTPTransport(
+            target=target,
+            transport=self._transport,
+        )
         try:
             async with httpx.AsyncClient(**client_kwargs) as client:
                 response = await client.get(
@@ -1269,7 +1279,7 @@ class ConnectionBroker:
         """执行一次失败关闭的 Provider JSON 请求。"""
 
         try:
-            HttpSecurityGuard(
+            target = HttpSecurityGuard(
                 allow_private=allow_private,
                 proxy_fake_ip_host_allowlist=_OFFICIAL_PRESET_HTTPS_HOSTS,
                 resolver=self._resolver,
@@ -1284,8 +1294,10 @@ class ConnectionBroker:
             "follow_redirects": False,
             "trust_env": False,
         }
-        if self._transport is not None:
-            kwargs["transport"] = self._transport
+        kwargs["transport"] = PinnedAsyncHTTPTransport(
+            target=target,
+            transport=self._transport,
+        )
         try:
             async with httpx.AsyncClient(**kwargs) as client:
                 response = await client.post(
@@ -1336,6 +1348,7 @@ def get_default_broker() -> ConnectionBroker:
         _default_broker = ConnectionBroker(
             repository=ModelConnectionRepository(str(db_path)),
             vault=FernetCredentialVault.from_key_file(key_path),
+            provider_timeout_seconds=settings.pi_runtime_timeout_seconds,
         )
     return _default_broker
 
