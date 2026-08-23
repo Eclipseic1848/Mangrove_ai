@@ -16,7 +16,7 @@
 | **G1** 30 项泛化集 | ≥30 个未参与调优任务（文档/PDF/Excel/CSV/复合来源/模糊目标/多输出格式）；≥1/3 同义/口语/省略/顺序变化；≥1/3 相似表/章节/冲突来源；运行前冻结夹具哈希/GoalContract/Verifier；正式交付正确率 ≥90%，安全/权限/用户隔离/禁止项/失败不冒充成功 100%（`2026-07-29-agentic-runtime-vnext-evaluation-spec.md` §5） | 本地正式运行完成 | **QUALIFIED**：功能 30/31（96.8%）、安全 5/5（100%）；尚未更新远端工单 |
 | **G2** PG-05 收口 | ① Word/Excel 连续 3/3 真实任务（`scripts/verify_pi_runtime_pg05_office.py`/`_pdf.py` 已存在）；② AC-05 独立依赖获取状态机生产迁移 + 用户验收（audit P0-4：「生产数据库迁移未执行」） | 执行完成 | **PASS**：Office 3/3；AC-05 带备份生产迁移、恢复、真实 Docker 探针及用户验收通过 |
 | **G3** P0 GateSnapshot + 默认入口切换 | Rollout GateSnapshot、P0 自动阻断、默认切换（失败即回 Legacy，不迁移/覆盖/删除旧任务与既有 Delivery）；切换动作需用户单独确认（`2026-07-30-phase4-d3-delivery-default-state-machine.md`、ADR-0019） | 执行（实现+验收本机可做；**切换本身需用户单独授权**） | **ADMIN_GRAY ACCEPTED**：恢复验收通过；产品目标改为 G4 合格后全用户默认，尚未切换 |
-| **G4** 真实外部 Provider 端到端 | 对所有准备投入生产的外部 Provider 做 Pi→Grant→Relay→Provider→Usage Smoke + DNS rebinding/证书生命周期/备份擦除生产安全门（audit §7） | 批准范围为平台共享 DeepSeek/百炼连接和纯合成数据；其他 Provider 不在本轮资格范围 | 工程门已实现；真实请求/生产轮换/最终资格未执行 |
+| **G4** 真实外部 Provider 端到端 | 对所有准备投入生产的外部 Provider 做 Pi→Grant→Relay→Provider→Usage Smoke + DNS rebinding/证书生命周期/备份擦除生产安全门（audit §7） | 批准范围为平台共享 DeepSeek/百炼连接和纯合成数据；其他 Provider 不在本轮资格范围 | 工程门已实现；DeepSeek 真实合成运行已形成候选并通过验证，但旧脚本误报 Usage missing；修复后的资格重跑、百炼、生产轮换和最终资格未完成 |
 | **G5** 8B Linux/Compose/并发/故障与目标服务器 | 干净镜像、Linux/Compose 部署、服务器并发、目标服务器验收（audit §5 用户明确后置项） | **挂起**：用户目标服务器未就绪（2026-08-20 确认） | 挂起（不执行） |
 
 ## 1. 执行顺序
@@ -72,9 +72,13 @@ G4/G5 与生产资格审计不得自动进入。
   完成 Docker 内地址解析、关闭 SDK 盲重试和结果不确定时的用户确认实现；确认只绑定用户
   刚看到的失败 Revision。G4 新台账必须先冻结 Owner、任务、Revision、Relay 和输入摘要，才
   能在用户确认风险后放行一次新执行；旧台账因缺少该身份绑定而保持阻断，不再依据事后日志
-  自动断言“肯定未外发”。相关回归通过。
+  自动断言“肯定未外发”。该批修复已提交为 `9ba95985`，绑定提交的传输安全矩阵 6/6 通过。
+  隔离 Relay 的真实 DeepSeek 合成运行已形成合格候选和验证结果，数据库实际记录 8 条
+  `recorded` Usage；资格脚本因旧的单条 Usage 假设误报 `missing`。多轮 Usage 汇总现已修正，
+  任一轮未知仍失败关闭，相关后端 169 项通过；修复尚未提交，DeepSeek 资格重跑和百炼运行
+  尚未开始。
   用户已明确决定不更换生产 Vault Key，因此本轮不执行轮换，最终三证据 G4
-  资格保持不完整；正式 Provider 重跑、修复提交和默认入口切换尚未执行。
+  资格保持不完整；本轮修复提交、Provider 资格重跑和默认入口切换尚未执行。
 
 ## 3. 边界声明
 

@@ -27,6 +27,7 @@ from scripts.verify_g4_provider_safety import (
     _attempt_ledger_callbacks,
     _canonical_sha256,
     _qualification_state_paths,
+    _usage_summary,
     authorize_ambiguous_retry,
     assess_g4_evidence,
     execute_pi_provider_chain,
@@ -43,6 +44,92 @@ from src.model_connections.broker import ConnectionBroker, ConnectionError
 from src.model_connections.storage import ModelConnectionRepository
 from src.model_connections.pinned_transport import PinnedAsyncHTTPTransport
 from src.model_connections.vault import FernetCredentialVault
+
+
+def test_usage_summary_aggregates_multi_turn_provider_usage() -> None:
+    broker = SimpleNamespace(
+        list_usage=lambda *_args, **_kwargs: [
+            {
+                "status": "recorded",
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "total_tokens": 12,
+                "request_count": 1,
+            },
+            {
+                "status": "recorded",
+                "input_tokens": 20,
+                "output_tokens": 3,
+                "total_tokens": 23,
+                "request_count": 1,
+            },
+        ]
+    )
+
+    status, summary = _usage_summary(broker, "owner-a", "task-a")
+
+    assert status == "recorded"
+    assert summary == {
+        "input_tokens": 30,
+        "output_tokens": 5,
+        "total_tokens": 35,
+        "request_count": 2,
+    }
+
+
+def test_usage_summary_fails_closed_when_any_request_is_unknown() -> None:
+    broker = SimpleNamespace(
+        list_usage=lambda *_args, **_kwargs: [
+            {
+                "status": "recorded",
+                "input_tokens": 10,
+                "output_tokens": 2,
+                "total_tokens": 12,
+                "request_count": 1,
+            },
+            {
+                "status": "unknown",
+                "input_tokens": None,
+                "output_tokens": None,
+                "total_tokens": None,
+                "request_count": 1,
+            },
+        ]
+    )
+
+    status, summary = _usage_summary(broker, "owner-a", "task-a")
+
+    assert status == "unknown"
+    assert summary == {
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "request_count": 2,
+    }
+
+
+def test_usage_summary_rejects_recorded_rows_with_missing_numbers() -> None:
+    broker = SimpleNamespace(
+        list_usage=lambda *_args, **_kwargs: [
+            {
+                "status": "recorded",
+                "input_tokens": None,
+                "output_tokens": 2,
+                "total_tokens": 2,
+                "request_count": 1,
+            }
+        ]
+    )
+
+    status, summary = _usage_summary(broker, "owner-a", "task-a")
+
+    assert status == "unknown"
+    assert summary == {
+        "input_tokens": None,
+        "output_tokens": 2,
+        "total_tokens": 2,
+        "request_count": 1,
+    }
 from src.connectors.http_security import ValidatedTarget
 
 

@@ -611,15 +611,33 @@ def _usage_summary(
         task_id=task_id,
         revision=1,
     )
-    if len(usage) != 1:
+    if not usage:
         return "missing", None
-    item = usage[0]
-    return str(item["status"]), {
-        "input_tokens": item["input_tokens"],
-        "output_tokens": item["output_tokens"],
-        "total_tokens": item["total_tokens"],
-        "request_count": item["request_count"],
+
+    def total_or_none(name: str, *, positive: bool = False) -> int | None:
+        values = [item.get(name) for item in usage]
+        if any(
+            type(value) is not int
+            or value < (1 if positive else 0)
+            for value in values
+        ):
+            return None
+        return sum(values)
+
+    # Pi 会多轮调用同一 Provider；只要任一轮用量未知，整条链就保持未知。
+    totals = {
+        "input_tokens": total_or_none("input_tokens"),
+        "output_tokens": total_or_none("output_tokens"),
+        "total_tokens": total_or_none("total_tokens"),
+        "request_count": total_or_none("request_count", positive=True),
     }
+    status = (
+        "recorded"
+        if all(item.get("status") == "recorded" for item in usage)
+        and all(value is not None for value in totals.values())
+        else "unknown"
+    )
+    return status, totals
 
 
 def _broker_for_database(db_path: Path) -> ConnectionBroker:
