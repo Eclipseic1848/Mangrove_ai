@@ -4,8 +4,8 @@
 >
 > 最后现场核验：2026-08-23（G2/G3/G4 发布候选回归后）
 >
-> 公开分支：`main`；当前发布候选分支：`codex/g1-independent-evaluation`；
-> 正式评测绑定的代码基线 = `83fe3f70`，当前 HEAD 以现场 `git rev-parse HEAD` 为准
+> 公开分支：`main`；已核验合并提交：`09a67b43`（PR #45）；正式评测绑定的 G1 代码基线
+> = `83fe3f70`，当前身份仍以现场 `git rev-parse HEAD` / `origin/main` 为准
 >
 > 公开远端：`origin` → `https://github.com/Eclipseic1848/Mangrove_ai.git`
 >
@@ -21,17 +21,19 @@ AC-07 主线 #9-#17 已全部真实完成并关闭（两条纵切面 + 兼容切
 Word/Excel 各连续 3/3，AC-05 带备份生产迁移、恢复副本、真实 Docker 探针与用户验收已通过；
 G3 GateSnapshot、累计硬门、P0 自动回退和分阶段 Rollout 已完成工程实现、双轴终审、本地
 提交、带备份生产迁移及生产 Gate/Approval 初始化；旧 8088 进程触发 P0 回退后已完成重启和
-六项门重跑，新快照合格并已按独立授权恢复 `admin_gray`，技术烟测通过；生产默认未切换、
-用户已确认本轮恢复验收通过，但完整默认切换验收未完成。
-G4 的地址解析、盲重试和用户确认修复已提交为 `9ba95985`；多轮 Usage 汇总修复已提交为
+六项门重跑，新快照合格并已按独立授权恢复 `admin_gray`，技术烟测通过；生产默认未切换，
+完整默认切换验收未完成。G2 与 #43 已通过 PR #44 合入并关闭。
+G4 的地址解析、盲重试和显式确认修复已提交为 `9ba95985`；多轮 Usage 汇总修复已提交为
 `a9e0d61d`，169 项相关后端回归通过，绑定该提交的传输安全矩阵 6/6 通过。DeepSeek V4 Flash
 真实合成链形成 1 个候选并通过独立验证，6 次调用 Usage 均为 `recorded`，合计 19,843 tokens。
-百炼 Qwen 的唯一一次运行在 Relay 到 Provider 的 HTTP 连接阶段返回 502，无模型内容或 token，
-Usage 为 `unknown`，未自动重试；现有证据不能归因为模型能力失败。生产 Vault 两阶段轮换按用户
-决定不执行，最终三证据汇总仍不具备完整资格；G5（8B/Linux 服务器）仍未就绪。
+百炼 Qwen 曾在 Relay 到 Provider 的 HTTP 连接阶段返回 502，无模型内容或 token，不能归因为
+模型能力失败。PR #45 已补齐未知 Runtime 异常的报告与 attempt 收口。绑定 `09a67b43` 的最终
+复验没有到达 Provider：一次为 C 盘 Docker bind mount I/O，一次人工重试在本机 Relay 返回
+405；重试额度已用尽。生产 Vault Key 未轮换，最终三证据汇总仍不具备完整资格；G5
+（8B/Linux 服务器）仍未就绪。
 **G1 确定结论：DeepSeek V4 Flash 在 36 题 v3 独立集上功能 30/31、安全 5/5，资格 PASS。**
 31 个功能候选均形成正式 Delivery 并通过 QA；独立 oracle 拒绝 G103-F27「业务值或行序错误」。
-Qwen3.8-27B 在 12 个功能 Delivery 后由用户中止，其证据单独隔离，不参与 DeepSeek 计分。
+Qwen3.8-27B 在 12 个功能 Delivery 后中止，其证据单独隔离，不参与 DeepSeek 计分。
 
 不要把 G1 部分通过表述成 Phase 4 完成；平台发布受众仍固定 admin_gray，普通用户开放、
 版本发布均未发生。
@@ -67,8 +69,8 @@ E:/python3.13/python.exe -X utf8 evals/generalization-g1/run_g1.py --dry-run
 
 - 本地分支为 `codex/g1-independent-evaluation`，正式评测代码基线为 `83fe3f70`；G1 代码与
   v3 盲集已本地提交，工作树仅保留 10 个 G1 post-commit 冻结元数据（§4.2）；
-- GitHub：Issue #36（父：Phase 4 剩余门）、#37（G1）、#38（G2）、#39（G3）为 OPEN；
-  旧工单 #9-#17 全部 CLOSED；
+- GitHub：Issue #36（父：Phase 4 剩余门）与 #39（G3 默认切换）为 OPEN；#37/#38/#40/#43
+  已关闭，旧工单 #9-#17 全部 CLOSED；
 - 生产库 `data/webui.db`：治理事件 32 条（#15 阶段 6 收口状态，详见旧 handoff 快照），
   三条 verified 个人能力 + 四条平台能力 + everything-mcp 牺牲版本；
 - 平台签名密钥在 `~/.mangrove-signing/`（项目外，加密 Sigstore），`.env` 已配置（gitignored）；
@@ -111,25 +113,25 @@ admin_gray 发布 → 运行时三轴治理门 → 弃用/回滚/隔离/撤销/�
 三轴投影：成熟度 `draft|verified`、生命周期 `active|deprecated|revoked`、运行资格
 `eligible|quarantined`。
 
-**当前主线 Phase 4 剩余门**（用户 2026-08-20 选定，性价比排序第一）解决「生产资格」：
+**当前主线 Phase 4 剩余门**解决「生产资格」：
 
 - **G1**：30 项泛化集（evaluation-spec §5）——正式交付正确率 ≥90%、安全/失败 100%；
 - **G2**：PG-05 收口——Word/Excel 连续 3/3 + AC-05 依赖获取状态机生产迁移与验收；
-- **G3**：本地工程门已通过；生产迁移、生产 Rollout 切换和 8088 验收仍是独立授权门；
+- **G3**：工程门、生产迁移与 `admin_gray` 恢复验收已通过；生产默认切换尚未执行；
 - **G4 工程门已实现、生产资格未完成；G5 挂起**：绑定 `a9e0d61d` 的传输矩阵 6/6 通过；
-  DeepSeek 真实合成 Pi 链 PASS。百炼首次链路在 HTTP 连接阶段结果未知且未重试，不能归因为
-  模型能力失败；用户明确不执行生产 Vault 轮换；8B/Linux 目标服务器未就绪。
+  DeepSeek 真实合成 Pi 链 PASS。百炼没有形成合格 Pi 链，不能归因为模型能力失败；生产
+  Vault Key 未轮换；8B/Linux 目标服务器未就绪。
 
 ## 3. 已经完成了什么
 
 ### 3.1 仓库与公开开发基线
 
-- 权威公开仓库 `Eclipseic1848/Mangrove_ai`，默认开发分支为 `main`；G1 已通过 PR #41
-  合入，merge commit 为 `936f1980`。
+- 权威公开仓库 `Eclipseic1848/Mangrove_ai`，默认开发分支为 `main`；Phase 4 当前发布基线
+  为 PR #45 合并提交 `09a67b43`。
 - 旧仓库保留为 `legacy-origin`/`legacy-platform`（历史证据）。`v0.0.4` 是唯一稳定封板标签。
 - 本机 Agent 配置、数据库、日志、任务制品、浏览器登录态、本地审计不进入 Git。
 - 2026-08-19 仓库卫生：移除第三方完整副本（external/chrome-devtools-howso）、品牌 Logo、
-  商务条款摘录（PR #32）；用户明确本机也不要这些文件。
+  商务条款摘录（PR #32）；这些文件不得恢复。
 
 ### 3.2 产品与交付主链
 
@@ -259,8 +261,7 @@ PR #41 已合入 `main`，Issue #37/#40 已关闭。维护者原工作树仍保�
 1. 已完成旧逐项诊断、失败归因、冻结机制修复、v3 独立集和正式 G1；
 2. #40 已实现真实 Delivery 计分接缝、强断言/反例、清单资格校验和安全失败阶段执行语义；
    36 题独立盲集已通过来源重算、错误值反例和冻结闭环自检，Standards/Spec 最终双轴复审均 PASS。
-3. 如需进入公开仓库：**先展示提交、正式结果和本地未提交冻结元数据，再由用户逐项授权**
-   推送、PR、Issue 更新；合并另行确认；
+3. PR #41 已合入 `main`，Issue #37/#40 已关闭；本地 post-commit 冻结元数据仍不得提交或清理；
 4. 不修改 G1 判定标准，不把未运行 P2-P7 标记为失败，也不把外部 P1 对照写成 G4 完成。
 
 ### G2 PG-05 收口（已通过）
@@ -271,8 +272,7 @@ PR #41 已合入 `main`，Issue #37/#40 已关闭。维护者原工作树仍保�
   本轮没有扩展到 PDF 重跑；
 - AC-05 已完成显式带备份生产迁移、同路径幂等重放、63 张既有表零改写、恢复副本状态机、
   真实隔离获取 → 冻结依赖 → 离线构建 → 清理/恢复；容器、网络与临时目录残留均为 0；
-- 用户于 2026-08-22 明确确认验收通过；G2 已完成。Issue #38 仍为 OPEN，推送、更新或关闭
-  远端工单需单独授权；该结论不代表 Phase 4 完成。
+- G2 验收通过，PR #44 已合入 `main`，Issue #38 已关闭；该结论不代表 Phase 4 完成。
 
 ### G3 GateSnapshot + 默认入口切换
 
@@ -297,13 +297,13 @@ PR #41 已合入 `main`，Issue #37/#40 已关闭。维护者原工作树仍保�
 - 8088 已重启并加载 G3，新活动快照
   `a936510e53eebc2abb04ce984e1fb72821730d0dc1ce9d37760d2c85beec3571` 的六项硬门累计
   有效合格；恢复 Approval `approval-admin-gray-recovery-a936510e53eebc2a` 已绑定当前快照；
-- 用户单独授权后已原子恢复到 `admin_gray`、`p0_blocked=false`；旧业务逻辑指纹、既有
-  Delivery 和 Runtime assignment 均未改变。管理员 Pi、普通用户 Legacy、默认 Legacy、跨
-  Owner 拒绝及 8088 三入口技术烟测通过；用户于 2026-08-22 明确确认本轮恢复验收通过；
-- **尚未执行**：vNext 默认切换、完整默认切换用户验收、推送、Issue #39 更新。Runtime
+- 经独立授权已原子恢复到 `admin_gray`、`p0_blocked=false`；旧业务逻辑指纹、既有 Delivery
+  和 Runtime assignment 均未改变。管理员 Pi、普通用户 Legacy、默认 Legacy、跨 Owner 拒绝
+  及 8088 三入口技术烟测通过，恢复验收通过；
+- **尚未执行**：vNext 默认切换与完整默认切换验收。Runtime
   assignment 为 0；生产继续保持 `admin_gray`，G4 完整合格前不得扩大。
 - #43 的 OptInGrant 原方案已由 ADR-0030 取代；直接全用户默认状态机已完成本地实现和路由/API
-  接缝测试，提交为 `8a030157`，待推送和远端工单收口。
+  接缝测试，PR #44 已合并，Issue #43 已关闭。Issue #39 因默认切换未执行继续保持 OPEN。
 
 ### 生产资格审计（G1-G3 后收口）
 
@@ -311,19 +311,15 @@ PR #41 已合入 `main`，Issue #37/#40 已关闭。维护者原工作树仍保�
 
 ### G4/G5
 
-- G4：执行范围限定为平台共享 DeepSeek/百炼连接，外发仅限冻结的纯合成数据；
-  本轮资格范围不包含其他 Provider，新增 Provider 必须独立通过同一矩阵。`a9e0d61d` 已通过
-  传输矩阵与 DeepSeek 真实 Pi 链；百炼首次链路在 HTTP 连接阶段返回 502，Usage 为 `unknown`，
-  未自动重试。失败记录必须保留；只有明确接受可能重复调用和费用风险后，才可人工触发一次
-  新执行。生产 Vault Key 不在本轮变更范围，因此不能生成 Pi、传输安全、Vault 三证据齐全的最终 G4 合格结论；
+- G4：执行范围限定为平台共享 DeepSeek/百炼连接，外发仅限冻结的纯合成数据；`a9e0d61d`
+  已通过传输矩阵与 DeepSeek 真实 Pi 链。百炼曾在 Relay 到 Provider 的 HTTP 连接阶段返回
+  502，Usage 为 `unknown`，不能判定为模型能力失败；
+- PR #45（`09a67b43`）补齐未知 Runtime 异常的脱敏报告和 attempt 收口，145 项相关回归通过。
+  最终百炼复验第一次因 C 盘临时 worktree 的 Docker bind mount I/O 失败而保持未知；人工重试
+  因 Relay 路径缺失在本机返回 405。两次均无 Provider Usage，Grant 已撤销且 Docker 残留为 0；
+  重试额度已用尽，不得换清单或数据库绕过。生产 Vault Key 未轮换，G4 三证据资格未形成，
   默认切换继续阻断；
-- G4 首次 Pi 尝试的 Egress 只连接不可达的旧内部 8088 地址，Provider Usage=0 且 Grant 已撤销；
-  当前修复改为 Docker 网络内解析、关闭 Pi SDK 自动重试，结果不确定时由用户确认并创建新
-  Revision，确认只对用户刚看到的失败版本有效。旧 `in_progress` 台账不会再靠事后日志自动
-  判定为“肯定未外发”，且因缺少原始 Owner/任务/Revision 绑定而不允许恢复；修复后的新台账
-  会先冻结完整身份，只有用户明确确认重复调用和费用风险后才保留旧记录并最多放行一次新
-  执行。当前百炼失败记录保持不变，不依据事后连通检查自动重放；
-- G5：用户目标服务器就绪并授权部署验证。
+- G5：目标服务器未就绪，Linux/Compose/并发/故障验收未执行。
 
 ## 6. 工单 Roadmap
 
@@ -334,9 +330,9 @@ PR #41 已合入 `main`，Issue #37/#40 已关闭。维护者原工作树仍保�
 | 新 #36 | Phase 4 剩余门（父工单） | OPEN（2026-08-20 创建） |
 | 新 #37 | G1：30 项泛化集 | CLOSED（PR #41 合并） |
 | 新 #40 | G1 修复：盲保留集与正式 Delivery 验收链 | CLOSED（PR #41 合并） |
-| 新 #38 | G2：PG-05 收口 | OPEN（本地实现、生产迁移和用户验收 PASS；待远端更新授权） |
-| 新 #39 | G3：GateSnapshot + 默认入口切换 | OPEN（admin_gray 验收 PASS；目标改为 G4 后全用户默认，未扩大/推送） |
-| 新 #43 | G3 修复：explicit_opt_in 获准用户权限契约 | OPEN（ADR-0030 直接默认方案已本地实现，待推送收口） |
+| 新 #38 | G2：PG-05 收口 | CLOSED（PR #44 合并） |
+| 新 #39 | G3：GateSnapshot + 默认入口切换 | OPEN（admin_gray 验收 PASS；G4 未合格，未默认切换） |
+| 新 #43 | G3 修复：explicit_opt_in 获准用户权限契约 | CLOSED（ADR-0030，PR #44 合并） |
 
 AC-07 历史（全部 CLOSED）：新 #9-#17 + 父 #8；旧仓库 #33-#35（历史）。
 
@@ -399,13 +395,13 @@ AC-07 历史（全部 CLOSED）：新 #9-#17 + 父 #8；旧仓库 #33-#35（历�
 - **不要让多个 Markdown 同时维护滚动状态。** `docs/status/current.md` 是唯一状态台账；
   `handoff.md` 只做接手快照与下一门禁。
 - **不要删除历史计划来「清理过期内容」。** 标记 historical/superseded 并指向当前权威文档。
-- **不要删除或恢复 logos/、商务条款、第三方副本**（用户明确本机也不要）。
+- **不要删除或恢复 logos/、商务条款、第三方副本。**
 
 ### 10.3 Git 与发布
 
 - **禁止 `git add .`、`git add -A`、强推、`git reset --hard` 和 `git clean`。**
 - **不要直接在默认分支偷偷提交。** 需要发布时按授权创建 `codex/` 分支、提交、推送、PR、合并。
-- **「同意全部」不覆盖 PR 合并步。** 合并仍需用户单独指名「合并」再执行。
+- **远端提交、PR、合并、Issue 和发布动作必须以当前任务的明确授权为准，执行前现场复核。**
 - **不要提交本机路径、`.env`、Secret、数据库、日志、任务数据、签名私钥、浏览器状态、
   Agent 设置或本地审计。**
 - **不要因为下载慢就更换工具、版本、镜像、镜像源、URL、安装方式或实现路线。** 只能做
@@ -536,9 +532,9 @@ AC-07 历史（全部 CLOSED）：新 #9-#17 + 父 #8；旧仓库 #33-#35（历�
 
 读取上述资料与当前工作树后，先给用户一份只读阶段判断，不要立即实现。至少说明：
 
-1. 当前阶段：G1 已通过 PR #41 合入并关闭；DeepSeek V4 Flash 正式结果功能 30/31、安全 5/5；
-   G2 Office 3/3、AC-05 生产迁移与用户验收 PASS；G3 已恢复 `admin_gray` 但未默认切换；
-   G4 传输矩阵与 DeepSeek Pi 链通过、百炼链结果未知；G5 挂起。
+1. 当前阶段：G1 已通过 PR #41 合入并关闭；G2 与 #43 已通过 PR #44 合入并关闭；PR #45
+   已收口 G4 未知异常台账。G3 已恢复 `admin_gray` 但未默认切换；G4 传输矩阵与 DeepSeek
+   Pi 链通过，百炼链和 Vault 证据未通过；G5 挂起。
 2. 已验证事实：31 个功能候选均形成正式 Delivery 并通过 QA；独立 oracle 通过 30 个，安全
    5/5；唯一失败 G103-F27 为业务值或行序错误。
 3. 尚未完成：G3 默认切换、G4 百炼链及最终资格、G5、生产发布。
