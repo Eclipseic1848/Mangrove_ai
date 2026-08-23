@@ -2,9 +2,9 @@
 
 > status: active
 >
-> last_verified: 2026-08-22
+> last_verified: 2026-08-23
 >
-> branch: `codex/g1-independent-evaluation`
+> branch: `main`
 >
 > baseline: 以现场 `git rev-parse HEAD` 和 `git rev-parse origin/main` 核验为准
 
@@ -365,6 +365,7 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
   SHA-256 为 `2e3af8eb833c71b31c20c2f0c511f7b167690f8fcccb3879ba136410c6b0d1a2`；
 - DeepSeek 运行中出现过 Provider 临时连接失败、空/无效裁判和截断 JSON，均由失败关闭与
   重试恢复；这是稳定性证据，不影响本次冻结口径下的最终资格判定，也不等于 G4 完成。
+- PR #41 已以 merge commit `936f1980` 合入 `main`；Issue #37、#40 由 PR 自动关闭。
 
 2026-08-22，G2 Office、AC-05 生产迁移与用户验收通过：
 
@@ -453,8 +454,8 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
 
 ## 7. 当前优先顺序
 
-1. **#40 G1 工程门已达标并远端收口**：v3 正式结果功能 96.8%、安全 100%，资格 PASS；
-   PR #41 已合并，Issue #37/#40 已关闭。
+1. **G1 已合入并关闭**：PR #41 已合入 `main`，Issue #37/#40 已关闭；v3 正式结果功能
+   96.8%、安全 100%，资格 PASS。
 2. **G2 已通过、G3 `admin_gray` 恢复验收已通过**：ADR-0030 与直接全用户默认状态机已完成
    本地实现，正式切换仍由 G4 完整合格门阻断，生产不得提前扩大。
 3. **G4 部分通过、G5 未完成**：传输矩阵与 DeepSeek Pi 链通过；百炼链结果未知且未重试，
