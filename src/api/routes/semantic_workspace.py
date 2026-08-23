@@ -366,6 +366,7 @@ class WorkspaceRevisionIn(BaseModel):
     output_formats: tuple[str, ...] | None = None
     table_output_contracts: tuple[TableOutputContract, ...] | None = None
     external_api_confirmed: bool = False
+    expected_active_revision: int = Field(ge=1)
 
     @field_validator("instruction")
     @classmethod
@@ -2132,6 +2133,12 @@ async def create_revision(
 ):
     user_id = user["user_id"]
     task = _task_or_404(user_id, task_id)
+    if int(task["active_revision"]) != payload.expected_active_revision:
+        # 风险确认只对用户刚看到的失败版本有效，不能被旧页面重复使用。
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="活动版本已变化，请查看最新结果后再决定是否重新执行",
+        )
     previous_runtime = _runtime_repository().get(
         user_id,
         task_id,

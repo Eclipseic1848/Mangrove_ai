@@ -89,11 +89,15 @@ export function retryCandidateVerification(
 export function createWorkspaceRevision(
   taskId: string,
   instruction: string,
+  expectedActiveRevision: number,
   outputFormats?: string[],
+  externalApiConfirmed = false,
 ): Promise<WorkspaceRevision> {
   return api.post(`${BASE}/tasks/${taskId}/revisions`, {
     instruction,
     output_formats: outputFormats,
+    external_api_confirmed: externalApiConfirmed,
+    expected_active_revision: expectedActiveRevision,
   });
 }
 

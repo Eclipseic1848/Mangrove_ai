@@ -58,7 +58,13 @@ TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍
   `Pi→Grant→Relay→Provider→Usage` 驱动、连接级 DNS IP 固定、原 Host/TLS SNI、禁止重定向、
   错域名/过期证书拒绝、结果未知语义、同报告并发互斥、逐 Provider 外发前持久化 attempt
   台账，以及可恢复的两阶段 Vault 轮换、旧 key 备份流式扫描和三证据汇总门；74 项定向回归
-  通过。DeepSeek/百炼真实 Pi 请求、生产 Vault 轮换和最终 G4 汇总均未执行。
+  通过。首次 DeepSeek Pi 合成尝试因 Windows 宿主把 Docker 内部入口解析为不可达旧地址而
+  中止，Egress 日志证明所有连接均在内部 8088 前失败，Provider Usage 为 0、Grant 已撤销，
+  百炼未开始。现已改为在 Docker 网络内解析入口、关闭 Pi SDK 自动重试，并在结果不确定时
+  由前端提示用户决定；用户确认后创建新 Revision，确认绑定用户刚看到的失败版本，旧页面
+  不能重复提交，旧失败记录保留。相关
+  后端 166 项、前端 23 项及生产构建通过。修复尚未提交，
+  DeepSeek/百炼正式重跑、生产 Vault 轮换和最终 G4 汇总均未执行。
 - G3 Rollout P0 GateSnapshot、累计硬门、P0 自动回退与分阶段默认切换已完成工程实现、生产
   迁移和生产 Gate/Approval 初始化；运行态核验曾因旧 8088 进程触发 P0 回退，后端现已重启
   加载 G3、取得新合格快照并恢复到 `admin_gray`。生产默认切换、完整 G3 用户验收和远端发布

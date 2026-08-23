@@ -1054,6 +1054,7 @@ def test_workspace_revision_keeps_previous_delivery_available(
             f"/api/semantic-workspace/tasks/{task_id}/revisions",
             json={
                 "instruction": "保持筛选条件，同时增加 JSON 输出",
+                "expected_active_revision": 1,
                 "output_formats": ["xlsx", "json"],
             },
         )

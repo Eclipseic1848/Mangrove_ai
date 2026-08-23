@@ -1584,6 +1584,138 @@ async def test_pi_rpc_transport_accepts_large_jsonl_events(
     assert int(captured["limit"]) >= 8 * 1024 * 1024
 
 
+def test_pi_runtime_resolves_local_relay_in_docker_network(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run(command: tuple[str, ...], **kwargs: object) -> object:
+        captured["command"] = command
+        captured.update(kwargs)
+        return SimpleNamespace(
+            returncode=0,
+            stdout='["192.168.65.254"]\n',
+            stderr="",
+        )
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    runtime = PiRuntime(
+        image="mangrove/pi-coding-agent:0.80.10",
+        execution_root=tmp_path,
+        relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+        document_relay_base_url=(
+            "http://localhost:8088/internal/document-tools"
+        ),
+    )
+
+    assert runtime._resolved_relay_base_url() == (
+        "http://192.168.65.254:8088/internal/model-relay"
+    )
+    assert runtime._resolved_document_relay_base_url() == (
+        "http://192.168.65.254:8088/internal/document-tools"
+    )
+    command = captured["command"]
+    assert isinstance(command, tuple)
+    assert command[:4] == ("docker", "run", "--rm", "--network")
+    assert "host.docker.internal:host-gateway" in command
+    assert captured["timeout"] == 30
+
+
+@pytest.mark.asyncio
+async def test_pi_runtime_stops_after_ambiguous_provider_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MemoryStdin:
+        def __init__(self) -> None:
+            self.writes: list[bytes] = []
+
+        def write(self, value: bytes) -> None:
+            self.writes.append(value)
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    stdout = asyncio.StreamReader()
+    for event in (
+        {
+            "type": "message_end",
+            "message": {
+                "role": "assistant",
+                "stopReason": "error",
+                "errorMessage": "Connection error.",
+            },
+        },
+        {"type": "agent_settled"},
+    ):
+        stdout.feed_data((json.dumps(event) + "\n").encode("utf-8"))
+    stdout.feed_eof()
+    stderr = asyncio.StreamReader()
+    stderr.feed_eof()
+    fake_process = SimpleNamespace(
+        stdin=MemoryStdin(),
+        stdout=stdout,
+        stderr=stderr,
+        returncode=0,
+        wait=lambda: asyncio.sleep(0),
+    )
+    runtime = PiRuntime(execution_root=tmp_path)
+
+    async def fake_spawn(_command: tuple[str, ...]) -> object:
+        return fake_process
+
+    settled_checks = 0
+
+    async def settled_check() -> str | None:
+        nonlocal settled_checks
+        settled_checks += 1
+        return "候选不存在"
+
+    monkeypatch.setattr(runtime, "_spawn_rpc_process", fake_spawn)
+    (tmp_path / "trace").mkdir()
+    source = tmp_path / "source.csv"
+    source.write_text("name,value\nsynthetic,1\n", encoding="utf-8")
+
+    with pytest.raises(PiRuntimeError, match="结果不确定"):
+        await runtime._run_rpc(
+            PiRuntimeRequest(
+                user_id="owner-a",
+                task_id="task-a",
+                revision=1,
+                objective_text="处理合成数据",
+                sources=(
+                    SourceInput(
+                        upload_id="upload-a",
+                        original_name=source.name,
+                        host_path=source,
+                        sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                    ),
+                ),
+                requested_output_formats=("csv",),
+                permission_profile=PermissionProfile.STANDARD,
+                model="model-a",
+                base_url="http://127.0.0.1:6012/v1",
+                api_key="local-runtime",
+            ),
+            command=("docker", "run"),
+            container_name="pi-test",
+            output_dir=tmp_path,
+            trace_dir=tmp_path / "trace",
+            on_event=lambda _event: asyncio.sleep(0),
+            settled_check=settled_check,
+        )
+
+    assert settled_checks == 0
+    assert len(fake_process.stdin.writes) == 1
+
+
 def test_pi_output_contract_requests_repair_until_manifest_is_complete(
     tmp_path: Path,
 ) -> None:
@@ -1819,6 +1951,10 @@ def test_pi_runtime_installs_official_extension_based_context_gate(
         work_dir=work_dir,
     )
 
+    settings_payload = json.loads(
+        (config_dir / "settings.json").read_text(encoding="utf-8")
+    )
+    assert settings_payload["retry"] == {"enabled": False}
     extension = (
         config_dir / "extensions" / "mangrove-context-gate.ts"
     )

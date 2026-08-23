@@ -501,7 +501,7 @@ export function TaskTimeline({
   onAnswer: (answer: string) => Promise<void>;
   onCancel: () => Promise<void>;
   onRecycle: () => Promise<void>;
-  onRetry: () => void;
+  onRetry: (unchanged?: boolean) => void | Promise<void>;
   onRevisionChange: (revision: number) => void;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -509,6 +509,7 @@ export function TaskTimeline({
     !["completed", "candidate_ready"].includes(task.status),
   );
   const [eventsOpen, setEventsOpen] = useState(false);
+  const [retryingUnknown, setRetryingUnknown] = useState(false);
   const events = useMemo(() => {
     const map = new Map<string, WorkspaceEvent>();
     [...(task.events || []), ...(task.harness_events || []), ...liveEvents].forEach(
@@ -906,14 +907,57 @@ export function TaskTimeline({
                   影响：没有发布新的正式交付，已有历史版本不受影响。
                 </p>
               )}
-              <button
-                type="button"
-                onClick={onRetry}
-                className="mt-3 inline-flex items-center gap-1.5 rounded-lg border bg-background px-3 py-2 text-xs font-medium hover:bg-muted"
-              >
-                <RotateCcw className="h-3.5 w-3.5" />
-                修改要求后重试
-              </button>
+              {task.failure?.error_code === "MODEL_OUTCOME_UNKNOWN" ? (
+                <AlertDialog.Root>
+                  <AlertDialog.Trigger asChild>
+                    <button
+                      type="button"
+                      className="mt-3 inline-flex items-center gap-1.5 rounded-lg border bg-background px-3 py-2 text-xs font-medium hover:bg-muted"
+                    >
+                      <RotateCcw className="h-3.5 w-3.5" />
+                      重新执行
+                    </button>
+                  </AlertDialog.Trigger>
+                  <AlertDialog.Portal>
+                    <AlertDialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
+                    <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(90vw,440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl">
+                      <AlertDialog.Title className="font-semibold">
+                        是否重新执行？
+                      </AlertDialog.Title>
+                      <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">
+                        平台无法确认模型是否已经收到上一次请求。重新执行会创建新版本，
+                        并可能产生重复调用和费用。
+                      </AlertDialog.Description>
+                      <div className="mt-5 flex justify-end gap-2">
+                        <AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm hover:bg-muted">
+                          取消
+                        </AlertDialog.Cancel>
+                        <AlertDialog.Action
+                          disabled={retryingUnknown}
+                          onClick={() => {
+                            setRetryingUnknown(true);
+                            void Promise.resolve(onRetry(true)).finally(() => {
+                              setRetryingUnknown(false);
+                            });
+                          }}
+                          className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
+                        >
+                          {retryingUnknown ? "正在创建新版本" : "确认重新执行"}
+                        </AlertDialog.Action>
+                      </div>
+                    </AlertDialog.Content>
+                  </AlertDialog.Portal>
+                </AlertDialog.Root>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void onRetry(false)}
+                  className="mt-3 inline-flex items-center gap-1.5 rounded-lg border bg-background px-3 py-2 text-xs font-medium hover:bg-muted"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  修改要求后重试
+                </button>
+              )}
             </div>
           </div>
         </div>

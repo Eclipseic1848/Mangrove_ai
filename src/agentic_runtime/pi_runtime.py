@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 import re
 import shutil
-import socket
+import subprocess
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 import uuid
@@ -138,17 +138,53 @@ def _container_base_url(value: str) -> str:
     )
 
 
-def _resolve_host_ipv4(host: str) -> tuple[str, ...]:
+def _resolve_host_ipv4_in_docker(
+    host: str,
+    *,
+    image: str,
+) -> tuple[str, ...]:
+    """在 Docker 网络中解析宿主入口，避免使用 Windows 宿主的陈旧 DNS。"""
+
+    command = (
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "bridge",
+        "--add-host",
+        f"{host}:host-gateway",
+        image,
+        "node",
+        "-e",
+        (
+            "const dns=require('node:dns').promises;"
+            "dns.lookup(process.argv[1],{family:4,all:true})"
+            ".then(rows=>console.log(JSON.stringify(rows.map(row=>row.address))))"
+            ".catch(()=>process.exit(2));"
+        ),
+        host,
+    )
     try:
-        rows = socket.getaddrinfo(
-            host,
-            None,
-            family=socket.AF_INET,
-            type=socket.SOCK_STREAM,
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            check=False,
         )
-    except OSError:
+    except (OSError, subprocess.SubprocessError):
         return ()
-    return tuple(dict.fromkeys(row[4][0] for row in rows))
+    if completed.returncode != 0:
+        return ()
+    try:
+        rows = json.loads(completed.stdout)
+    except (json.JSONDecodeError, TypeError):
+        return ()
+    if not isinstance(rows, list):
+        return ()
+    return tuple(dict.fromkeys(str(row) for row in rows))
 
 
 def _output_contract_issue(
@@ -417,9 +453,8 @@ class PiRuntime:
             or settings.pi_runtime_document_relay_base_url
             or f"http://127.0.0.1:{settings.api_port}/internal/document-tools"
         ).rstrip("/")
-        self._relay_host_resolver = (
-            relay_host_resolver or _resolve_host_ipv4
-        )
+        self._relay_host_resolver = relay_host_resolver
+        self._docker_relay_host_candidates: tuple[str, ...] | None = None
         self._capability_mount_resolver = capability_mount_resolver
         self._capability_host = capability_host
         self._containers: dict[tuple[str, str, int], str] = {}
@@ -583,9 +618,15 @@ class PiRuntime:
         parsed = urlsplit(value)
         if parsed.hostname not in {"127.0.0.1", "localhost"}:
             return value
-        candidates = self._relay_host_resolver(
-            "host.docker.internal"
-        )
+        if self._relay_host_resolver is not None:
+            candidates = self._relay_host_resolver("host.docker.internal")
+        else:
+            if self._docker_relay_host_candidates is None:
+                self._docker_relay_host_candidates = _resolve_host_ipv4_in_docker(
+                    "host.docker.internal",
+                    image=self.image,
+                )
+            candidates = self._docker_relay_host_candidates
         selected = None
         for value in candidates:
             try:
@@ -1671,6 +1712,15 @@ class PiRuntime:
             json.dumps(models, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        # Provider 是否收到请求无法由 Pi SDK 判断，关闭其内部重试，交给平台和用户决策。
+        (config_dir / "settings.json").write_text(
+            json.dumps(
+                {"retry": {"enabled": False}},
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         shutil.copyfile(
             Path(__file__).with_name("candidate_manifest_tool.py"),
             work_dir / "candidate_manifest_tool.py",
@@ -1896,6 +1946,16 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
                             + "\n"
                         )
                         trace.flush()
+                        message = event.get("message")
+                        if (
+                            isinstance(message, dict)
+                            and message.get("role") == "assistant"
+                            and message.get("stopReason") == "error"
+                        ):
+                            raise PiRuntimeError(
+                                "模型请求结果不确定，已停止自动重试；"
+                                "请由用户决定是否创建新版本重新执行"
+                            )
                         if event.get("type") == "agent_settled":
                             issue = await settled_check()
                             if (

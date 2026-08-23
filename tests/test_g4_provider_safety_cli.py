@@ -24,6 +24,10 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from scripts.verify_g4_provider_safety import (
+    _attempt_ledger_callbacks,
+    _canonical_sha256,
+    _qualification_state_paths,
+    authorize_ambiguous_retry,
     assess_g4_evidence,
     execute_pi_provider_chain,
     execute_transport_safety,
@@ -755,6 +759,207 @@ def test_provider_smoke_persists_attempt_before_egress_and_refuses_replay(
         )
 
     assert outbound_calls == 2
+
+
+def test_ambiguous_retry_preserves_history_and_allows_only_one_retry(
+    tmp_path,
+) -> None:
+    database = tmp_path / "webui.db"
+    manifest_path = tmp_path / "manifest.json"
+    execution_root = tmp_path / "execution"
+    repository = ModelConnectionRepository(str(database))
+    broker = ConnectionBroker(
+        repository=repository,
+        vault=FernetCredentialVault.generate(),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "OK"}}],
+                    "usage": {"total_tokens": 1},
+                },
+            )
+        ),
+        resolver=lambda _host: ["8.8.8.8"],
+    )
+    asyncio.run(
+        broker.configure_platform_preset(
+            actor_user_id="super-admin",
+            display_name="平台 DeepSeek",
+            preset_id="deepseek",
+            api_key="deepseek-secret-for-test",
+            model="deepseek-v4-flash",
+        )
+    )
+    manifest = freeze_manifest(db_path=database, presets=["deepseek"])
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    provider = dict(manifest["providers"][0])
+    old_context = {
+        "git_commit": "old",
+        "git_dirty": False,
+        "relay_base_url": "http://127.0.0.1:8088/internal/model-relay",
+        "timeout_seconds": 1800,
+        "owner_user_id": "ordinary-user",
+        "expected_commit": "old",
+    }
+    old_attempt_context = {
+        "owner_user_id": "ordinary-user",
+        "task_id": "old-task",
+        "revision": 1,
+        "relay_base_url": "http://127.0.0.1:8088/internal/model-relay",
+        "execution_root": str(execution_root.resolve()),
+        "source_sha256": "old-source-sha256",
+    }
+    new_context = {
+        "git_commit": "new-commit",
+        "git_dirty": False,
+        "relay_base_url": "http://127.0.0.1:8088/internal/model-relay",
+        "timeout_seconds": 1800,
+        "owner_user_id": "ordinary-user",
+        "expected_commit": "new-commit",
+    }
+    _, ledger_path = _qualification_state_paths(
+        db_path=database,
+        manifest_path=manifest_path,
+        action="pi-provider",
+    )
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(
+        json.dumps({
+            "schema_version": "g4-provider-attempt-ledger-v1",
+            "action": "pi-provider",
+            "manifest_sha256": manifest["manifest_sha256"],
+            "run_context_sha256": _canonical_sha256(old_context),
+            "run_context": old_context,
+            "providers": {
+                (
+                    f"{provider['connection_id']}:"
+                    f"{provider['connection_version']}"
+                ): {
+                    "state": "in_progress",
+                    "connection_id": provider["connection_id"],
+                    "connection_version": provider["connection_version"],
+                    "started_at": "2026-08-23T01:47:38+00:00",
+                    "attempt_context": old_attempt_context,
+                },
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(QualificationError, match="重复 Provider 请求和费用风险"):
+        authorize_ambiguous_retry(
+            db_path=database,
+            manifest_path=manifest_path,
+            owner_user_id="ordinary-user",
+            connection_id=str(provider["connection_id"]),
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            expected_commit="new-commit",
+            confirm_duplicate_request_and_cost=False,
+            git_identity={"git_commit": "new-commit", "git_dirty": False},
+        )
+
+    with pytest.raises(QualificationError, match="缺少原始身份，拒绝重绑"):
+        authorize_ambiguous_retry(
+            db_path=database,
+            manifest_path=manifest_path,
+            owner_user_id="another-user",
+            connection_id=str(provider["connection_id"]),
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            expected_commit="new-commit",
+            confirm_duplicate_request_and_cost=True,
+            git_identity={"git_commit": "new-commit", "git_dirty": False},
+        )
+
+    report = authorize_ambiguous_retry(
+        db_path=database,
+        manifest_path=manifest_path,
+        owner_user_id="ordinary-user",
+        connection_id=str(provider["connection_id"]),
+        relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+        timeout_seconds=1800,
+        expected_commit="new-commit",
+        confirm_duplicate_request_and_cost=True,
+        git_identity={"git_commit": "new-commit", "git_dirty": False},
+    )
+
+    assert report["user_confirmed_duplicate_request_and_cost"] is True
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    entry = next(iter(ledger["providers"].values()))
+    assert entry["state"] == "retry_authorized"
+    assert entry["authorization"]["previous_state"] == "in_progress"
+    assert ledger["run_context_sha256"] == _canonical_sha256(new_context)
+
+    _, before_provider, _ = _attempt_ledger_callbacks(
+        ledger_path=ledger_path,
+        action="pi-provider",
+        manifest=manifest,
+        run_context=new_context,
+    )
+    attempt_context = {
+        "owner_user_id": "ordinary-user",
+        "task_id": "new-task",
+        "revision": 1,
+        "relay_base_url": "http://127.0.0.1:8088/internal/model-relay",
+        "execution_root": str(execution_root.resolve()),
+        "source_sha256": "source-sha256",
+    }
+    before_provider(provider, attempt_context)
+    retried = json.loads(ledger_path.read_text(encoding="utf-8"))
+    retried_entry = next(iter(retried["providers"].values()))
+    assert retried_entry["state"] == "in_progress"
+    assert retried_entry["attempt_context"] == attempt_context
+    assert retried_entry["previous_attempts"][0]["state"] == "retry_authorized"
+
+    retried_entry["state"] = "outcome_unknown"
+    retried["providers"] = {
+        next(iter(retried["providers"])): retried_entry,
+    }
+    ledger_path.write_text(json.dumps(retried), encoding="utf-8")
+    with pytest.raises(QualificationError, match="恢复重试次数"):
+        authorize_ambiguous_retry(
+            db_path=database,
+            manifest_path=manifest_path,
+            owner_user_id="ordinary-user",
+            connection_id=str(provider["connection_id"]),
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            expected_commit="new-commit",
+            confirm_duplicate_request_and_cost=True,
+            git_identity={"git_commit": "new-commit", "git_dirty": False},
+        )
+
+
+def test_ambiguous_retry_rejects_connection_outside_frozen_manifest(
+    tmp_path,
+) -> None:
+    database = tmp_path / "webui.db"
+    manifest_path = tmp_path / "manifest.json"
+    _create_inventory_database(database)
+    manifest_path.write_text(
+        json.dumps(
+            freeze_manifest(db_path=database, presets=["deepseek"]),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(QualificationError, match="连接不属于冻结清单"):
+        authorize_ambiguous_retry(
+            db_path=database,
+            manifest_path=manifest_path,
+            owner_user_id="ordinary-user",
+            connection_id="connection-a",
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            expected_commit="new-commit",
+            confirm_duplicate_request_and_cost=True,
+            git_identity={"git_commit": "new-commit", "git_dirty": False},
+        )
 
 
 def test_pi_provider_chain_uses_standard_ordinary_owner_and_never_claims_g4(

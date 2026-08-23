@@ -2089,8 +2089,26 @@ class SemanticWorkspaceManager:
                 marker in message.lower()
                 for marker in ("docker", "runtime 镜像", "image inspect")
             )
+            external_provider = bool(runtime.get("model_connection_id"))
+            outcome_unknown = (
+                "模型请求结果不确定" in message
+                or (
+                    external_provider
+                    and any(
+                        marker in message
+                        for marker in (
+                            "Pi 执行超过",
+                            "Pi RPC 在任务稳定结束前退出",
+                        )
+                    )
+                )
+            )
             failure = {
-                "error_code": "PI_RUNTIME_FAILED",
+                "error_code": (
+                    "MODEL_OUTCOME_UNKNOWN"
+                    if outcome_unknown
+                    else "PI_RUNTIME_FAILED"
+                ),
                 "stage": "execute",
                 "cause_summary": message[:500],
                 "attempt_count": 1,
@@ -2100,6 +2118,11 @@ class SemanticWorkspaceManager:
                 "delivery_published": False,
                 "next_actions": (
                     [
+                        "由你决定是否创建新版本重新执行",
+                        "取消并保留当前失败记录",
+                    ]
+                    if outcome_unknown
+                    else [
                         "检查 Docker Desktop 和 Pi Runtime 镜像",
                         "服务恢复后重试任务",
                         "停止任务",

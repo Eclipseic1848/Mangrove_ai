@@ -234,7 +234,7 @@ def _attempt_ledger_callbacks(
     run_context: dict[str, object],
 ) -> tuple[
     dict[str, dict[str, object]],
-    Callable[[dict[str, object]], None],
+    Callable[[dict[str, object], dict[str, object] | None], None],
     Callable[[dict[str, object], dict[str, object]], None],
 ]:
     provider_keys = {
@@ -253,6 +253,10 @@ def _attempt_ledger_callbacks(
             or ledger.get("manifest_sha256") != manifest["manifest_sha256"]
             or ledger.get("run_context_sha256")
             != _canonical_sha256(run_context)
+            or (
+                ledger.get("run_context") is not None
+                and ledger.get("run_context") != run_context
+            )
             or not isinstance(ledger.get("providers"), dict)
             or not set(ledger["providers"]).issubset(provider_keys)
         ):
@@ -263,6 +267,7 @@ def _attempt_ledger_callbacks(
             "action": action,
             "manifest_sha256": manifest["manifest_sha256"],
             "run_context_sha256": _canonical_sha256(run_context),
+            "run_context": dict(run_context),
             "providers": {},
         }
 
@@ -274,8 +279,26 @@ def _attempt_ledger_callbacks(
             "passed",
             "outcome_unknown",
             "failed_after_egress",
+            "retry_authorized",
         }:
             raise QualificationError("G4 Provider 外发台账状态无效，拒绝外发")
+        if entry["state"] == "retry_authorized":
+            authorization = entry.get("authorization")
+            prior_attempt_context = entry.get("attempt_context")
+            if (
+                not isinstance(authorization, dict)
+                or not isinstance(prior_attempt_context, dict)
+                or authorization.get(
+                    "user_confirmed_duplicate_request_and_cost"
+                ) is not True
+                or authorization.get("retry_number") != 1
+                or authorization.get("owner_user_id")
+                != prior_attempt_context.get("owner_user_id")
+                or authorization.get("previous_attempt_context_sha256")
+                != _canonical_sha256(prior_attempt_context)
+            ):
+                raise QualificationError("G4 Provider 重试授权证据无效，拒绝外发")
+            continue
         if entry["state"] != "passed":
             # in_progress 可能已到达 Provider；没有幂等回执时必须按未知处理。
             raise QualificationError("存在未决或失败的 Provider 外发记录，拒绝重复外发")
@@ -290,16 +313,49 @@ def _attempt_ledger_callbacks(
         ledger["updated_at"] = datetime.now(timezone.utc).isoformat()
         _write_json_atomic(ledger_path, ledger)
 
-    def before_provider(provider: dict[str, object]) -> None:
+    def before_provider(
+        provider: dict[str, object],
+        attempt_context: dict[str, object] | None = None,
+    ) -> None:
         key = _provider_attempt_key(provider)
-        if key in entries:
+        previous_attempts: list[dict[str, object]] = []
+        if key in entries and entries[key].get("state") != "retry_authorized":
             raise QualificationError("Provider 已有外发记录，拒绝重复外发")
+        if key in entries:
+            authorization = entries[key].get("authorization")
+            previous_attempts = list(entries[key].get("previous_attempts") or [])
+            if previous_attempts:
+                raise QualificationError("该 Provider 的一次恢复重试次数已用完")
+            if (
+                not isinstance(authorization, dict)
+                or not isinstance(attempt_context, dict)
+                or attempt_context.get("owner_user_id")
+                != authorization.get("owner_user_id")
+                or attempt_context.get("owner_user_id")
+                != run_context.get("owner_user_id")
+                or attempt_context.get("relay_base_url")
+                != run_context.get("relay_base_url")
+                or not str(attempt_context.get("task_id") or "").strip()
+                or attempt_context.get("revision") != 1
+                or not str(attempt_context.get("execution_root") or "").strip()
+                or not str(attempt_context.get("source_sha256") or "").strip()
+            ):
+                raise QualificationError("Provider 恢复重试身份无效，拒绝外发")
+            previous_attempts.append({
+                name: value
+                for name, value in entries[key].items()
+                if name != "previous_attempts"
+            })
         entries[key] = {
             "state": "in_progress",
             "connection_id": provider["connection_id"],
             "connection_version": provider["connection_version"],
             "started_at": datetime.now(timezone.utc).isoformat(),
         }
+        if attempt_context is not None:
+            entries[key]["attempt_context"] = dict(attempt_context)
+        if previous_attempts:
+            entries[key]["previous_attempts"] = previous_attempts
         persist()
 
     def after_provider(
@@ -320,6 +376,131 @@ def _attempt_ledger_callbacks(
         persist()
 
     return prior_checks, before_provider, after_provider
+
+
+def authorize_ambiguous_retry(
+    *,
+    db_path: Path,
+    manifest_path: Path,
+    connection_id: str,
+    owner_user_id: str,
+    relay_base_url: str,
+    timeout_seconds: int,
+    expected_commit: str,
+    confirm_duplicate_request_and_cost: bool,
+    git_identity: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """由用户明确承担重复请求风险后，只放行一次新的正式尝试。"""
+
+    if not confirm_duplicate_request_and_cost:
+        raise QualificationError("未确认重复 Provider 请求和费用风险")
+    if timeout_seconds <= 0:
+        raise QualificationError("超时必须大于 0 秒")
+    if not connection_id.strip() or not owner_user_id.strip():
+        raise QualificationError("重试授权身份不能为空")
+    manifest = _load_manifest(manifest_path)
+    providers = [
+        dict(provider)
+        for provider in manifest["providers"]
+        if provider.get("connection_id") == connection_id
+    ]
+    if len(providers) != 1:
+        raise QualificationError("重试授权连接不属于冻结清单")
+    provider = providers[0]
+    current_git = dict(git_identity or _git_identity())
+    if (
+        current_git.get("git_commit") != expected_commit
+        or current_git.get("git_dirty") is not False
+    ):
+        raise QualificationError("重试授权必须绑定预期的干净 Git 提交")
+    new_run_context = {
+        **current_git,
+        "relay_base_url": _validate_relay_base_url(relay_base_url),
+        "timeout_seconds": timeout_seconds,
+        "owner_user_id": owner_user_id,
+        "expected_commit": expected_commit,
+    }
+    lock_path, ledger_path = _qualification_state_paths(
+        db_path=db_path,
+        manifest_path=manifest_path,
+        action="pi-provider",
+    )
+    with _exclusive_file_lock(lock_path, "已有相同 G4 Pi 链路正在执行"):
+        try:
+            ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise QualificationError("G4 Provider 外发台账不可读取") from exc
+        provider_entries = ledger.get("providers")
+        previous_run_context = ledger.get("run_context")
+        key = _provider_attempt_key(provider)
+        entry = (
+            provider_entries.get(key)
+            if isinstance(provider_entries, dict)
+            else None
+        )
+        manifest_keys = {
+            _provider_attempt_key(dict(item))
+            for item in manifest["providers"]
+        }
+        if (
+            ledger.get("schema_version") != "g4-provider-attempt-ledger-v1"
+            or ledger.get("action") != "pi-provider"
+            or ledger.get("manifest_sha256") != manifest["manifest_sha256"]
+            or not isinstance(previous_run_context, dict)
+            or ledger.get("run_context_sha256")
+            != _canonical_sha256(previous_run_context)
+            or not isinstance(provider_entries, dict)
+            or not set(provider_entries).issubset(manifest_keys)
+            or not isinstance(entry, dict)
+            or entry.get("state") not in {"in_progress", "outcome_unknown"}
+        ):
+            raise QualificationError("没有可由用户决定重试的未决 Pi 外发记录")
+        previous_attempt_context = entry.get("attempt_context")
+        if (
+            not isinstance(previous_attempt_context, dict)
+            or previous_run_context.get("owner_user_id") != owner_user_id
+            or previous_attempt_context.get("owner_user_id") != owner_user_id
+            or previous_attempt_context.get("relay_base_url")
+            != previous_run_context.get("relay_base_url")
+            or not str(previous_attempt_context.get("task_id") or "").strip()
+            or previous_attempt_context.get("revision") != 1
+            or not str(
+                previous_attempt_context.get("execution_root") or ""
+            ).strip()
+            or not str(previous_attempt_context.get("source_sha256") or "").strip()
+        ):
+            raise QualificationError("未决 Pi 外发记录缺少原始身份，拒绝重绑")
+        if entry.get("previous_attempts") or entry.get("authorization"):
+            raise QualificationError("该 Provider 的一次恢复重试次数已用完")
+        authorization = {
+            "user_confirmed_duplicate_request_and_cost": True,
+            "retry_number": 1,
+            "owner_user_id": owner_user_id,
+            "previous_state": entry["state"],
+            "previous_run_context_sha256": ledger.get("run_context_sha256"),
+            "previous_attempt_context_sha256": _canonical_sha256(
+                previous_attempt_context
+            ),
+            "replacement_run_context_sha256": _canonical_sha256(
+                new_run_context
+            ),
+            "authorized_at": datetime.now(timezone.utc).isoformat(),
+        }
+        report = {
+            "schema_version": "g4-provider-ambiguous-retry-authorization-v1",
+            "manifest_sha256": manifest["manifest_sha256"],
+            "connection_id": connection_id,
+            **authorization,
+        }
+        entry["state"] = "retry_authorized"
+        entry["authorization"] = authorization
+        ledger["run_context_sha256"] = _canonical_sha256(new_run_context)
+        ledger["run_context"] = new_run_context
+        ledger["updated_at"] = datetime.now(timezone.utc).isoformat()
+        _write_json_atomic(ledger_path, ledger)
+    return report
+
+
 
 
 def _load_manifest(path: Path) -> dict[str, object]:
@@ -923,7 +1104,9 @@ async def _execute_pi_provider_chain_unlocked(
     broker: ConnectionBroker | None = None,
     runtime_factory=None,
     prior_checks: dict[str, dict[str, object]] | None = None,
-    before_provider: Callable[[dict[str, object]], None] | None = None,
+    before_provider: Callable[
+        [dict[str, object], dict[str, object]], None
+    ] | None = None,
     after_provider: Callable[
         [dict[str, object], dict[str, object]], None
     ] | None = None,
@@ -1032,7 +1215,17 @@ async def _execute_pi_provider_chain_unlocked(
                     relay_base_url=relay_base_url,
                 )
                 if before_provider is not None:
-                    before_provider(provider)
+                    before_provider(
+                        provider,
+                        {
+                            "owner_user_id": owner_user_id,
+                            "task_id": task_id,
+                            "revision": 1,
+                            "relay_base_url": relay_base_url,
+                            "execution_root": str(execution_root.resolve()),
+                            "source_sha256": source_sha256,
+                        },
+                    )
                 attempt_started = True
                 result = await asyncio.wait_for(
                     runtime.start(request, on_event=on_event),
@@ -1413,6 +1606,24 @@ def _parser() -> argparse.ArgumentParser:
     run_pi.add_argument("--expected-commit", required=True)
     run_pi.add_argument("--confirm-synthetic-egress", action="store_true")
     run_pi.add_argument("--timeout-seconds", type=int, default=1800)
+    authorize_retry = subparsers.add_parser(
+        "authorize-ambiguous-retry",
+        help="由用户确认重复请求与费用风险后授权一次新尝试",
+    )
+    authorize_retry.add_argument("--db-path", required=True, type=Path)
+    authorize_retry.add_argument("--manifest", required=True, type=Path)
+    authorize_retry.add_argument("--owner-user-id", required=True)
+    authorize_retry.add_argument("--connection-id", required=True)
+    authorize_retry.add_argument(
+        "--relay-base-url",
+        default="http://127.0.0.1:8088/internal/model-relay",
+    )
+    authorize_retry.add_argument("--timeout-seconds", type=int, default=1800)
+    authorize_retry.add_argument("--expected-commit", required=True)
+    authorize_retry.add_argument(
+        "--confirm-duplicate-request-and-cost",
+        action="store_true",
+    )
     safety = subparsers.add_parser(
         "transport-safety",
         help="执行并冻结传输安全矩阵",
@@ -1515,6 +1726,25 @@ def main() -> int:
                 flush=True,
             )
             return 0 if report["pi_provider_chain_passed"] else 2
+        if args.command == "authorize-ambiguous-retry":
+            report = authorize_ambiguous_retry(
+                db_path=args.db_path,
+                manifest_path=args.manifest,
+                owner_user_id=args.owner_user_id,
+                connection_id=args.connection_id,
+                relay_base_url=args.relay_base_url,
+                timeout_seconds=args.timeout_seconds,
+                expected_commit=args.expected_commit,
+                confirm_duplicate_request_and_cost=(
+                    args.confirm_duplicate_request_and_cost
+                ),
+            )
+            print(
+                "G4_PROVIDER_AMBIGUOUS_RETRY_AUTHORIZED "
+                f"connection_id={report['connection_id']}",
+                flush=True,
+            )
+            return 0
         if args.command == "transport-safety":
             report = execute_transport_safety(
                 output_path=args.output,
