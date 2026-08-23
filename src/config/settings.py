@@ -287,6 +287,10 @@ class Settings(BaseSettings):
         default="data/semantic-executions",
         description="Phase 4B 确定性执行结果和血缘的服务端存储根目录",
     )
+    data_prep_artifact_root: str = Field(
+        default="downloads",
+        description="数据准备任务产物和正式下载的存储根目录",
+    )
     capability_oci_layout_path: str = Field(
         default="data/capabilities/oci",
         description="冻结能力包的本机 OCI Image Layout",

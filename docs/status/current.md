@@ -70,7 +70,12 @@ TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍
   加载 G3、取得新合格快照并恢复到 `admin_gray`。工程代码已通过 PR #44 合入；生产默认切换
   与完整默认切换验收未执行。
 - 远程 MCP/Secret、Registry 自动发现、平台能力普通用户开放。
-- 8B Linux/Compose/并发/故障与目标服务器验证。
+- G5 本机前置包已通过真实运行：干净 Linux 镜像、Compose 接单就绪、非 root/只读根、
+  真实浏览器闭环、20 用户 Owner 隔离、40 次并发重复抽取拒绝、进程重启、模型超时单次请求、
+  SQLite 在线备份恢复和本次 Docker 资源零残留均通过。该结论只证明目标服务器验收前的本机
+  前置条件，不等于完整 8B-1 或 G5 合格。
+- G5 目标服务器 8B-2 尚未执行：目标 Linux/GPU/驱动/CUDA、生产并发与容量、长期运行、
+  RAID/灾难恢复和另一台可信 LAN PC 人工验收仍缺真实环境。
 
 上述任一项都不能因局部测试通过被表述为整个 Phase 4 完成。
 
@@ -459,8 +464,10 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
    96.8%、安全 100%，资格 PASS。
 2. **G2 已关闭、G3 `admin_gray` 恢复验收已通过**：PR #44 已合并并关闭 #38/#43；正式
    默认切换仍由 G4 完整合格门阻断，Issue #39 保持 OPEN，生产不得提前扩大。
-3. **G4 部分通过、G5 未完成**：传输矩阵与 DeepSeek/百炼 Pi 链均通过；Vault 轮换证据缺失，
-   因此 G4 最终汇总和 G3 默认切换仍被阻断；8B Linux/Compose 与目标服务器仍未就绪。
+3. **G4 部分通过、G5 本机前置通过**：传输矩阵与 DeepSeek/百炼 Pi 链均通过；Vault 轮换
+   证据缺失，因此 G4 最终汇总和 G3 默认切换仍被阻断。G5 已通过干净 Linux 镜像、Compose、
+   真实模型/浏览器、并发、故障、备份恢复与零残留本机前置包；完整旧路径可移植性门和目标
+   服务器 8B-2 未执行，#36 仍保持 OPEN。
 
 ## 8. 权威证据
 
@@ -487,5 +494,6 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
 - #35 报告：`docs/plans/2026-08-07-agentic-capability-ac07-03-execution-report.md`
 - vNext Publisher：`docs/plans/2026-08-04-vnext-delivery-publisher-execution-report.md`
 - Runtime 可靠性：`docs/plans/2026-08-06-v008-runtime-reliability-and-candidate-retry-closeout.md`
+- G5 本机前置报告：`docs/plans/2026-08-23-g5-local-prerequisite-execution-report.md`
 
 状态改变时先更新本文件，再更新精简 `handoff.md`；不要把滚动状态复制回 README、CONTEXT 或 ADR。

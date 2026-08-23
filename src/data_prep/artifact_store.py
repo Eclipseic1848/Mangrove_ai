@@ -35,8 +35,8 @@ from .models import (
 
 logger = logging.getLogger(__name__)
 
-# 任务产物根目录（与旧 output.py 的 downloads/ 同根，但子结构按 plan 6.4）
-_DEFAULT_ROOT = "downloads"
+# 保留旧测试和嵌入调用的覆盖接缝；生产默认仍统一读取 settings。
+_DEFAULT_ROOT: str | None = None
 
 # 凭证相关键名：写入 Manifest/request_snapshot 前必删
 _SENSITIVE_KEYS = {
@@ -73,10 +73,12 @@ class ArtifactStore:
     """任务产物存储。每个 task_id 一个独立目录，互不踩踏。"""
 
     def __init__(self, root: Optional[str] = None) -> None:
-        # 优先用 settings.file_resource_base_url 同级的 downloads 根；默认 downloads/
+        # 默认仍为 downloads/；容器可通过统一设置把它放到持久卷。
         # 统一保存为绝对路径，避免 Windows 下 resolve_path() 返回绝对路径后，
         # 再相对于字符串形式的相对根目录计算路径而触发 ValueError。
-        self.root = Path(root or _DEFAULT_ROOT).resolve()
+        self.root = Path(
+            root or _DEFAULT_ROOT or settings.data_prep_artifact_root
+        ).resolve()
 
     # ------------------------------------------------------------------
     # 目录管理

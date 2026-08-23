@@ -1,0 +1,65 @@
+name: mangrove-phase4b-8b1
+
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: docker/phase4b/Dockerfile
+    image: mangrove-phase4b-8b1:${MANGROVE_ACCEPTANCE_IMAGE_TAG:-local}
+    entrypoint:
+      - /app/docker/phase4b/entrypoint.sh
+    command:
+      - python
+      - -m
+      - src.api.main
+    user: "10001:10001"
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:${MANGROVE_ACCEPTANCE_PORT:-18089}:8088"
+    environment:
+      API_HOST: 0.0.0.0
+      API_PORT: "8088"
+      WEBUI_DB_PATH: /app/data/webui.db
+      SCHEDULER_DB_PATH: /app/data/scheduler.db
+      CAPABILITY_SUPPLY_CHAIN_TOOL_ROOT: /opt/mangrove-tools
+      CAPABILITY_SUPPLY_CHAIN_LOCK_PATH: /app/config/supply-chain-tools.linux-amd64.lock.json
+      WEBUI_ALLOW_REGISTER: "false"
+      JWT_SECRET: phase4b-8b1-isolated-acceptance-only
+      DATA_PREP_UPLOAD_ROOT: /app/data/uploads
+      SEMANTIC_EXECUTION_ROOT: /app/data/semantic-executions
+      DATA_PREP_ARTIFACT_ROOT: /app/data/downloads
+      LLM_BASE_URL: "${MANGROVE_ACCEPTANCE_MODEL_BASE_URL:?MANGROVE_ACCEPTANCE_MODEL_BASE_URL is required}"
+      LLM_MODEL_NAME: "${MANGROVE_ACCEPTANCE_MODEL_NAME:?MANGROVE_ACCEPTANCE_MODEL_NAME is required}"
+      LLM_API_KEY: local
+      LLM_DEFAULT_PROVIDER: local
+      LLM_TIMEOUT: ${MANGROVE_ACCEPTANCE_MODEL_TIMEOUT_SECONDS:-1800}
+      DOCUMENT_EXTRACTION_MODEL: "local::${MANGROVE_ACCEPTANCE_MODEL_NAME:?MANGROVE_ACCEPTANCE_MODEL_NAME is required}"
+      LOG_FILE: /app/data/logs/app.log
+    volumes:
+      - acceptance-data:/app/data
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+      - /run:rw,noexec,nosuid,size=16m
+      - /app/logs:rw,noexec,nosuid,size=64m
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8088/api/readiness', timeout=5).read()
+      interval: 5s
+      timeout: 6s
+      retries: 12
+      start_period: 30s
+    restart: "no"
+    stop_grace_period: 30s
+
+volumes:
+  acceptance-data:

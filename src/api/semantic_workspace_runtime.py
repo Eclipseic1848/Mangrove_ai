@@ -244,6 +244,13 @@ class SemanticWorkspaceManager:
             )
             self.enqueue(task["user_id"], task["task_id"])
 
+    def workers_ready(self) -> bool:
+        """两个工作器都已启动且未退出时，进程才可以继续接单。"""
+
+        return len(self._workers) == 2 and all(
+            not worker.done() for worker in self._workers
+        )
+
     async def stop(self) -> None:
         for task in self._active.values():
             task.cancel()

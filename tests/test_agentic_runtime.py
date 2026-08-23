@@ -217,7 +217,8 @@ def test_stop_helper_preserves_current_absolute_startup_chain(tmp_path: Path) ->
         text=True,
         encoding="utf-8",
         errors="replace",
-        timeout=10,
+        # PowerShell 启动和两次 Windows 系统枚举在完整套件负载下可超过 10 秒。
+        timeout=30,
         check=False,
     )
 
