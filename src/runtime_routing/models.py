@@ -23,6 +23,7 @@ class FrozenModel(BaseModel):
 class RolloutMode(StrEnum):
     LEGACY_DEFAULT = "legacy_default"
     ADMIN_GRAY = "admin_gray"
+    # 仅兼容旧数据库；当前状态机不允许进入该模式。
     EXPLICIT_OPT_IN = "explicit_opt_in"
     VNEXT_DEFAULT = "vnext_default"
     LEGACY_ROLLBACK = "legacy_rollback"

@@ -62,6 +62,19 @@ def _approval(
     return approval
 
 
+def _legacy_explicit_opt_in_routing(tmp_path, name: str) -> RuntimeRouting:
+    database = tmp_path / f"{name}.db"
+    sqlite3.connect(database).close()
+    migrate_runtime_routing(database, tmp_path / f"{name}-backup.db")
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE runtime_rollout_state SET mode=? WHERE state_id=1",
+            (RolloutMode.EXPLICIT_OPT_IN.value,),
+        )
+        connection.commit()
+    return RuntimeRouting(SqliteRuntimeRoutingRepository(database))
+
+
 def test_failed_p0_snapshot_automatically_rolls_back_new_routing() -> None:
     routing = RuntimeRouting(InMemoryRuntimeRoutingRepository())
 
@@ -250,16 +263,6 @@ def test_resolve_freezes_each_revision_and_does_not_rewrite_old_assignment() -> 
     )
     routing.record_gate(_snapshot(passed=True), _actor())
     routing.change_mode(
-        RolloutMode.EXPLICIT_OPT_IN,
-        _approval(
-            routing,
-            approval_id="approval-gray",
-            target_mode=RolloutMode.EXPLICIT_OPT_IN,
-            gate_snapshot_id=_snapshot(passed=True).snapshot_id,
-        ),
-        _actor(),
-    )
-    routing.change_mode(
         RolloutMode.VNEXT_DEFAULT,
         _approval(
             routing,
@@ -279,6 +282,101 @@ def test_resolve_freezes_each_revision_and_does_not_rewrite_old_assignment() -> 
     assert second.runtime_version is RuntimeVersion.PI
 
 
+def test_admin_gray_can_cut_over_directly_to_vnext_default() -> None:
+    routing = RuntimeRouting(InMemoryRuntimeRoutingRepository())
+    passed = _snapshot(passed=True)
+    routing.record_gate(passed, _actor())
+    approval = _approval(
+        routing,
+        approval_id="approval-all-users-default",
+        target_mode=RolloutMode.VNEXT_DEFAULT,
+        gate_snapshot_id=passed.snapshot_id,
+    )
+
+    rollout = routing.change_mode(
+        RolloutMode.VNEXT_DEFAULT,
+        approval,
+        _actor(),
+    )
+
+    assert rollout.mode is RolloutMode.VNEXT_DEFAULT
+
+
+def test_admin_gray_rejects_deprecated_explicit_opt_in_transition() -> None:
+    routing = RuntimeRouting(InMemoryRuntimeRoutingRepository())
+    passed = _snapshot(passed=True)
+    routing.record_gate(passed, _actor())
+    approval = _approval(
+        routing,
+        approval_id="approval-deprecated-opt-in",
+        target_mode=RolloutMode.EXPLICIT_OPT_IN,
+        gate_snapshot_id=passed.snapshot_id,
+    )
+
+    with pytest.raises(ValueError, match="模式转换不允许"):
+        routing.change_mode(
+            RolloutMode.EXPLICIT_OPT_IN,
+            approval,
+            _actor(),
+        )
+
+
+def test_legacy_explicit_opt_in_state_routes_new_user_revision_to_legacy(
+    tmp_path,
+) -> None:
+    routing = _legacy_explicit_opt_in_routing(tmp_path, "legacy-explicit-opt-in")
+
+    runtime, rollout = routing.preview(
+        RuntimeTaskRevisionRef(
+            owner_id="user-a",
+            task_id="task-a",
+            revision=1,
+            requested_runtime=RuntimeVersion.PI,
+        ),
+        RolloutActor(actor_id="user-a", role="user"),
+    )
+
+    assert rollout.mode is RolloutMode.EXPLICIT_OPT_IN
+    assert runtime is RuntimeVersion.LEGACY
+
+
+def test_legacy_explicit_opt_in_state_can_only_recover_to_admin_gray(
+    tmp_path,
+) -> None:
+    routing = _legacy_explicit_opt_in_routing(
+        tmp_path,
+        "legacy-explicit-opt-in-recovery",
+    )
+    passed = _snapshot(passed=True)
+    routing.record_gate(passed, _actor())
+    default_approval = _approval(
+        routing,
+        approval_id="approval-reject-legacy-opt-in-default",
+        target_mode=RolloutMode.VNEXT_DEFAULT,
+        gate_snapshot_id=passed.snapshot_id,
+    )
+    with pytest.raises(ValueError, match="模式转换不允许"):
+        routing.change_mode(
+            RolloutMode.VNEXT_DEFAULT,
+            default_approval,
+            _actor(),
+        )
+    approval = _approval(
+        routing,
+        approval_id="approval-recover-admin-gray",
+        target_mode=RolloutMode.ADMIN_GRAY,
+        gate_snapshot_id=passed.snapshot_id,
+    )
+
+    rollout = routing.change_mode(
+        RolloutMode.ADMIN_GRAY,
+        approval,
+        _actor(),
+    )
+
+    assert rollout.mode is RolloutMode.ADMIN_GRAY
+
+
 def test_legacy_task_new_revision_stays_legacy_after_default_cutover() -> None:
     routing = RuntimeRouting(InMemoryRuntimeRoutingRepository())
     actor = RolloutActor(actor_id="user-a", role="user")
@@ -287,16 +385,6 @@ def test_legacy_task_new_revision_stays_legacy_after_default_cutover() -> None:
         actor,
     )
     routing.record_gate(_snapshot(passed=True), _actor())
-    routing.change_mode(
-        RolloutMode.EXPLICIT_OPT_IN,
-        _approval(
-            routing,
-            approval_id="approval-gray",
-            target_mode=RolloutMode.EXPLICIT_OPT_IN,
-            gate_snapshot_id=_snapshot(passed=True).snapshot_id,
-        ),
-        _actor(),
-    )
     routing.change_mode(
         RolloutMode.VNEXT_DEFAULT,
         _approval(
@@ -602,12 +690,12 @@ def test_duplicate_mode_change_is_idempotent_but_conflict_is_rejected() -> None:
     routing.record_gate(passed, _actor())
     approval = RolloutApproval(
         approval_id="approval-one",
-        target_mode=RolloutMode.EXPLICIT_OPT_IN,
+        target_mode=RolloutMode.VNEXT_DEFAULT,
         gate_snapshot_id=passed.snapshot_id,
         approved_by="maintainer-a",
     )
     with pytest.raises(PermissionError, match="独立记录"):
-        routing.change_mode(RolloutMode.EXPLICIT_OPT_IN, approval, _actor())
+        routing.change_mode(RolloutMode.VNEXT_DEFAULT, approval, _actor())
     with pytest.raises(PermissionError, match="本人"):
         routing.record_approval(approval, _actor())
     routing.record_approval(
@@ -615,13 +703,13 @@ def test_duplicate_mode_change_is_idempotent_but_conflict_is_rejected() -> None:
         RolloutActor(actor_id="maintainer-a", role="user"),
     )
 
-    first = routing.change_mode(RolloutMode.EXPLICIT_OPT_IN, approval, _actor())
-    second = routing.change_mode(RolloutMode.EXPLICIT_OPT_IN, approval, _actor())
+    first = routing.change_mode(RolloutMode.VNEXT_DEFAULT, approval, _actor())
+    second = routing.change_mode(RolloutMode.VNEXT_DEFAULT, approval, _actor())
 
     assert first == second
     with pytest.raises(ValueError, match="授权身份不一致"):
         routing.change_mode(
-            RolloutMode.EXPLICIT_OPT_IN,
+            RolloutMode.VNEXT_DEFAULT,
             approval.model_copy(update={"approved_by": "maintainer-b"}),
             _actor(),
         )
@@ -652,7 +740,7 @@ def test_mode_change_detects_concurrent_gate_snapshot_change() -> None:
     routing.record_gate(passed, _actor())
     approval = RolloutApproval(
         approval_id="approval-race",
-        target_mode=RolloutMode.EXPLICIT_OPT_IN,
+        target_mode=RolloutMode.VNEXT_DEFAULT,
         gate_snapshot_id=passed.snapshot_id,
         approved_by="maintainer-a",
     )
@@ -662,7 +750,7 @@ def test_mode_change_detects_concurrent_gate_snapshot_change() -> None:
     )
 
     with pytest.raises(RuntimeError, match="GateSnapshot 已并发变化"):
-        routing.change_mode(RolloutMode.EXPLICIT_OPT_IN, approval, _actor())
+        routing.change_mode(RolloutMode.VNEXT_DEFAULT, approval, _actor())
 
 
 @pytest.mark.parametrize(

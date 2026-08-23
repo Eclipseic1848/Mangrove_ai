@@ -166,11 +166,8 @@ class RuntimeRouting:
                 return RuntimeVersion.PI
             return RuntimeVersion.LEGACY
         if rollout.mode is RolloutMode.EXPLICIT_OPT_IN:
-            return (
-                RuntimeVersion.PI
-                if requested is RuntimeVersion.PI
-                else RuntimeVersion.LEGACY
-            )
+            # 该历史模式没有可靠的获准用户契约；升级后必须失败关闭，不能扩大普通用户权限。
+            return RuntimeVersion.LEGACY
         if requested is RuntimeVersion.LEGACY:
             return RuntimeVersion.LEGACY
         if self._repository.has_legacy_assignment(
@@ -195,8 +192,8 @@ class RuntimeRouting:
                 return current
             raise ValueError("目标模式已生效，但授权身份不一致")
         allowed = {
-            RolloutMode.ADMIN_GRAY: {RolloutMode.EXPLICIT_OPT_IN},
-            RolloutMode.EXPLICIT_OPT_IN: {RolloutMode.VNEXT_DEFAULT},
+            RolloutMode.ADMIN_GRAY: {RolloutMode.VNEXT_DEFAULT},
+            RolloutMode.EXPLICIT_OPT_IN: {RolloutMode.ADMIN_GRAY},
             RolloutMode.LEGACY_ROLLBACK: {RolloutMode.ADMIN_GRAY},
         }
         if target_mode not in allowed.get(current.mode, set()):

@@ -1,6 +1,6 @@
 # ADR-0019：vNext 分离执行、正式发布与默认路由状态机
 
-- 状态：`accepted`，用户于 2026-07-30 明确确认 Phase 4 D3
+- 状态：`accepted`；第 5 项的三段 Rollout 顺序由 ADR-0030 部分取代
 - 实施状态（2026-08-04）：Pi Candidate Adapter、通用 Publisher、独立 QA、确定性幂等和
   发布恢复对账已完成工程验证，等待用户验收；Legacy 既有 Delivery 不受影响。Rollout
   GateSnapshot、P0 自动阻断和默认切换仍未实现，默认切换继续要求用户单独确认

@@ -502,21 +502,6 @@ def test_runtime_rollout_only_changes_new_tasks_and_p0_restores_legacy(
     passed = _g3_snapshot(passed=True)
     actor = RolloutActor(actor_id="admin-a", role="admin")
     routing.record_gate(passed, actor)
-    gray_approval = RolloutApproval(
-        approval_id="approval-api-gray",
-        target_mode=RolloutMode.EXPLICIT_OPT_IN,
-        gate_snapshot_id=passed.snapshot_id,
-        approved_by="maintainer-a",
-    )
-    routing.record_approval(
-        gray_approval,
-        RolloutActor(actor_id="maintainer-a", role="user"),
-    )
-    routing.change_mode(
-        RolloutMode.EXPLICIT_OPT_IN,
-        gray_approval,
-        actor,
-    )
     default_approval = RolloutApproval(
         approval_id="approval-api-default",
         target_mode=RolloutMode.VNEXT_DEFAULT,
