@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import ipaddress
 import json
@@ -26,21 +27,29 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 from scripts.verify_g4_provider_safety import (
     _attempt_ledger_callbacks,
     _canonical_sha256,
+    _load_qualification_ledger_anchor,
+    _parser,
+    _sync_qualification_ledger_anchor,
     _qualification_state_paths,
+    _require_authoritative_qualification_ledger,
     _usage_summary,
     authorize_ambiguous_retry,
+    authorize_qualification_batch_retry,
     assess_g4_evidence,
+    create_qualification_batch,
     execute_pi_provider_chain,
     execute_transport_safety,
     execute_qualification,
     finalize_vault_rotation,
     freeze_manifest,
     prepare_vault_rotation,
+    recover_qualification_ledger_anchor,
     QualificationError,
 )
 from src.agentic_runtime.models import RuntimeStatus
 from src.api.routes import model_relay
 from src.model_connections.broker import ConnectionBroker, ConnectionError
+from src.model_connections.qualification_ledger import QualificationBatchLedger
 from src.model_connections.storage import ModelConnectionRepository
 from src.model_connections.pinned_transport import PinnedAsyncHTTPTransport
 from src.model_connections.vault import FernetCredentialVault
@@ -137,6 +146,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = PROJECT_ROOT / "scripts" / "verify_g4_provider_safety.py"
 
 
+@pytest.fixture
+def authoritative_ledger_path(tmp_path, monkeypatch) -> Path:
+    path = tmp_path / "authoritative" / "qualification-ledger.sqlite3"
+    monkeypatch.setattr(
+        "scripts.verify_g4_provider_safety."
+        "AUTHORITATIVE_QUALIFICATION_LEDGER_PATH",
+        path,
+    )
+    return path
+
+
 def _create_inventory_database(path: Path) -> None:
     with sqlite3.connect(path) as connection:
         connection.executescript(
@@ -160,7 +180,35 @@ def _create_inventory_database(path: Path) -> None:
                 status TEXT NOT NULL,
                 enabled INTEGER NOT NULL
             );
+            CREATE TABLE users (
+                user_id TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                role TEXT NOT NULL,
+                disabled INTEGER NOT NULL,
+                pending INTEGER NOT NULL
+            );
+            CREATE TABLE app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            );
             """
+        )
+        connection.executemany(
+            """
+            INSERT INTO users (
+                user_id, username, password_hash, created_at,
+                role, disabled, pending
+            ) VALUES (?, ?, 'hash', '2026-08-23T00:00:00Z', ?, ?, ?)
+            """,
+            [
+                ("super-admin", "super-admin", "super_admin", 0, 0),
+                ("admin-user", "admin-user", "admin", 0, 0),
+                ("ordinary-user", "ordinary-user", "user", 0, 0),
+                ("disabled-root", "disabled-root", "super_admin", 1, 0),
+                ("pending-root", "pending-root", "super_admin", 0, 1),
+            ],
         )
         connection.executemany(
             """
@@ -210,6 +258,61 @@ def _create_inventory_database(path: Path) -> None:
                 ("connection-qwen", "qwen3.7-max-2026-06-08"),
             ],
         )
+
+
+def _create_test_qualification_batch(
+    *,
+    database: Path,
+    ledger_path: Path,
+    manifest: dict[str, object],
+    owner_user_id: str,
+    expected_commit: str = "commit-a",
+) -> dict[str, object]:
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+    ledger = QualificationBatchLedger(ledger_path)
+    batch = ledger.create_batch(
+        manifest_sha256=str(manifest["manifest_sha256"]),
+        providers=[dict(provider) for provider in manifest["providers"]],
+        expected_commit=expected_commit,
+        owner_user_id=owner_user_id,
+        relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+        timeout_seconds=1800,
+        authorized_by="super-admin",
+        authorization_reason="测试正式 Pi 批次",
+        idempotency_key=f"test-{ledger_path.parent.name}-{owner_user_id}",
+        batch_kind="initial",
+        parent_batch_id=None,
+        previous_evidence=[],
+    )
+    _sync_qualification_ledger_anchor(
+        db_path=database,
+        ledger=ledger,
+        bootstrap_batch_id=str(batch["batch_id"]),
+        initialized_by="super-admin",
+    )
+    return batch
+
+
+def _anchor_empty_test_qualification_ledger(
+    *,
+    database: Path,
+    ledger_path: Path,
+) -> None:
+    ledger = QualificationBatchLedger(ledger_path)
+    _sync_qualification_ledger_anchor(
+        db_path=database,
+        ledger=ledger,
+        bootstrap_batch_id="test-empty-bootstrap",
+        initialized_by="super-admin",
+    )
 
 
 def test_freeze_writes_deterministic_secret_free_provider_manifest(tmp_path):
@@ -848,6 +951,885 @@ def test_provider_smoke_persists_attempt_before_egress_and_refuses_replay(
     assert outbound_calls == 2
 
 
+def test_pi_batch_ledger_refuses_replay_across_database_copies(
+    tmp_path,
+    monkeypatch,
+    authoritative_ledger_path,
+) -> None:
+    database_a = tmp_path / "worktree-a" / "webui.db"
+    database_b = tmp_path / "worktree-b" / "webui.db"
+    database_a.parent.mkdir()
+    database_b.parent.mkdir()
+    _create_inventory_database(database_a)
+    ledger_path = authoritative_ledger_path
+    _anchor_empty_test_qualification_ledger(
+        database=database_a,
+        ledger_path=ledger_path,
+    )
+    shutil.copy2(database_a, database_b)
+    manifest_path = tmp_path / "evidence" / "manifest.json"
+    manifest_path.parent.mkdir()
+    manifest = freeze_manifest(db_path=database_a, presets=["deepseek"])
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    git_identity = {"git_commit": "commit-a", "git_dirty": False}
+    monkeypatch.setattr(
+        "scripts.verify_g4_provider_safety._git_identity",
+        lambda: dict(git_identity),
+    )
+    batch = create_qualification_batch(
+        db_path=database_a,
+        manifest_path=manifest_path,
+        ledger_path=ledger_path,
+        owner_user_id="g4-synthetic-owner",
+        relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+        timeout_seconds=1800,
+        expected_commit="commit-a",
+        authorized_by="super-admin",
+        authorization_reason="执行首轮合成资格验证",
+        idempotency_key="g4-initial-deepseek",
+        confirm_initial_batch=True,
+        confirm_new_batch_after_exhausted_history=False,
+        previous_report_paths=(),
+        git_identity=git_identity,
+    )
+    before_attempt_snapshot = tmp_path / "before-attempt.sqlite3"
+    shutil.copy2(ledger_path, before_attempt_snapshot)
+    provider = dict(manifest["providers"][0])
+    broker = SimpleNamespace(
+        freeze_connection=lambda _owner, _connection: SimpleNamespace(
+            connection_id=provider["connection_id"],
+            connection_version=provider["connection_version"],
+            model=provider["model"],
+        ),
+        list_usage=lambda *_args, **_kwargs: [],
+    )
+    runtime_calls = 0
+
+    class FailingRuntime:
+        async def start(self, _request, *, on_event):
+            nonlocal runtime_calls
+            del on_event
+            runtime_calls += 1
+            raise RuntimeError("synthetic runtime failure")
+
+    first_report = asyncio.run(
+        execute_pi_provider_chain(
+            db_path=database_a,
+            manifest_path=manifest_path,
+            output_path=tmp_path / "evidence" / "first.json",
+            execution_root=tmp_path / "execution-a",
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            owner_user_id="g4-synthetic-owner",
+            expected_commit="commit-a",
+            broker=broker,
+            runtime_factory=lambda **_kwargs: FailingRuntime(),
+            qualification_ledger_path=ledger_path,
+            qualification_batch_id=str(batch["batch_id"]),
+        )
+    )
+    assert first_report["qualification_batch_id"] == batch["batch_id"]
+    after_attempt_snapshot = tmp_path / "after-attempt.sqlite3"
+    shutil.copy2(ledger_path, after_attempt_snapshot)
+
+    with pytest.raises(QualificationError, match="数据库身份不一致"):
+        asyncio.run(
+            execute_pi_provider_chain(
+                db_path=database_b,
+                manifest_path=manifest_path,
+                output_path=tmp_path / "evidence" / "second.json",
+                execution_root=tmp_path / "execution-b",
+                relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+                timeout_seconds=1800,
+                owner_user_id="g4-synthetic-owner",
+                expected_commit="commit-a",
+                broker=broker,
+                runtime_factory=lambda **_kwargs: FailingRuntime(),
+                qualification_ledger_path=ledger_path,
+                qualification_batch_id=str(batch["batch_id"]),
+            )
+        )
+
+    with pytest.raises(QualificationError, match="数据库身份不一致"):
+        recover_qualification_ledger_anchor(
+            db_path=database_b,
+            manifest_path=manifest_path,
+            ledger_path=ledger_path,
+            recovered_by="super-admin",
+            recovery_reason="旧数据库副本不得恢复权威台账",
+        )
+
+    assert runtime_calls == 1
+    shutil.copy2(before_attempt_snapshot, ledger_path)
+    with pytest.raises(QualificationError, match="旧快照回滚"):
+        asyncio.run(
+            execute_pi_provider_chain(
+                db_path=database_a,
+                manifest_path=manifest_path,
+                output_path=tmp_path / "evidence" / "rollback.json",
+                execution_root=tmp_path / "execution-rollback",
+                relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+                timeout_seconds=1800,
+                owner_user_id="g4-synthetic-owner",
+                expected_commit="commit-a",
+                broker=broker,
+                runtime_factory=lambda **_kwargs: FailingRuntime(),
+                qualification_ledger_path=ledger_path,
+                qualification_batch_id=str(batch["batch_id"]),
+            )
+        )
+    assert runtime_calls == 1
+    shutil.copy2(after_attempt_snapshot, ledger_path)
+    assert ledger_path.is_file()
+    with pytest.raises(QualificationError, match="已有资格历史"):
+        create_qualification_batch(
+            db_path=database_a,
+            manifest_path=manifest_path,
+            ledger_path=ledger_path,
+            owner_user_id="g4-synthetic-owner",
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            expected_commit="commit-a",
+            authorized_by="super-admin",
+            authorization_reason="不得重置初始批次",
+            idempotency_key="g4-second-initial-deepseek",
+            confirm_initial_batch=True,
+            confirm_new_batch_after_exhausted_history=False,
+            previous_report_paths=(),
+            git_identity=git_identity,
+        )
+    ledger_path.unlink()
+    with pytest.raises(QualificationError, match="权威.*台账缺失.*拒绝重建"):
+        create_qualification_batch(
+            db_path=database_a,
+            manifest_path=manifest_path,
+            ledger_path=ledger_path,
+            owner_user_id="g4-synthetic-owner",
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            expected_commit="commit-a",
+            authorized_by="super-admin",
+            authorization_reason="删除台账后必须失败关闭",
+            idempotency_key="g4-after-ledger-deletion",
+            confirm_initial_batch=True,
+            confirm_new_batch_after_exhausted_history=False,
+            previous_report_paths=(),
+            git_identity=git_identity,
+        )
+    replacement_ledger = QualificationBatchLedger(ledger_path)
+    assert replacement_ledger.identity()["ledger_id"] != batch["ledger_id"]
+    with pytest.raises(QualificationError, match="身份与外部锚点不一致"):
+        create_qualification_batch(
+            db_path=database_a,
+            manifest_path=manifest_path,
+            ledger_path=ledger_path,
+            owner_user_id="g4-synthetic-owner",
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            expected_commit="commit-a",
+            authorized_by="super-admin",
+            authorization_reason="替换台账后必须失败关闭",
+            idempotency_key="g4-after-ledger-replacement",
+            confirm_initial_batch=True,
+            confirm_new_batch_after_exhausted_history=False,
+            previous_report_paths=(),
+            git_identity=git_identity,
+        )
+
+
+def test_successor_batch_retains_exhausted_legacy_attempt_history(
+    tmp_path,
+    authoritative_ledger_path,
+) -> None:
+    database = tmp_path / "webui.db"
+    manifest_path = tmp_path / "manifest.json"
+    ledger_path = authoritative_ledger_path
+    _create_inventory_database(database)
+    manifest = freeze_manifest(db_path=database, presets=["qwen"])
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    provider = dict(manifest["providers"][0])
+    reports = []
+    for name, outcome, error_code in (
+        ("first.json", "outcome_unknown", "pi_internal_error"),
+        ("retry.json", "failed", "pi_chain_failed"),
+    ):
+        report_path = tmp_path / name
+        report_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "g4-pi-provider-report-v1",
+                    "manifest_sha256": manifest["manifest_sha256"],
+                    "generated_at": "2026-08-23T09:49:52+00:00",
+                    "git_commit": "legacy-commit",
+                    "git_dirty": False,
+                    "synthetic_egress_only": True,
+                    "pi_provider_chain_passed": False,
+                    "providers": [
+                        {
+                            **provider,
+                            "owner_user_id": "g4-synthetic-owner",
+                            "task_id": f"g4-legacy-{name}",
+                            "permission_profile": "standard",
+                            "outcome": outcome,
+                            "usage_status": "missing",
+                            "pi_provider_chain_passed": False,
+                            "error_code": error_code,
+                        }
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        reports.append(report_path)
+
+    with pytest.raises(QualificationError, match="必须登记两份已耗尽的历史报告"):
+        create_qualification_batch(
+            db_path=database,
+            manifest_path=manifest_path,
+            ledger_path=ledger_path,
+            owner_user_id="g4-synthetic-owner",
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            expected_commit="new-commit",
+            authorized_by="super-admin",
+            authorization_reason="历史不完整时拒绝新批次",
+            idempotency_key="g4-qwen-incomplete-history",
+            confirm_initial_batch=False,
+            confirm_new_batch_after_exhausted_history=True,
+            previous_report_paths=(reports[0],),
+            git_identity={"git_commit": "new-commit", "git_dirty": False},
+        )
+    reformatted_report = tmp_path / "reformatted-first.json"
+    reformatted_report.write_text(
+        json.dumps(
+            json.loads(reports[0].read_text(encoding="utf-8")),
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(QualificationError, match="历史 Pi 报告.*不一致"):
+        create_qualification_batch(
+            db_path=database,
+            manifest_path=manifest_path,
+            ledger_path=ledger_path,
+            owner_user_id="g4-synthetic-owner",
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            expected_commit="new-commit",
+            authorized_by="super-admin",
+            authorization_reason="拒绝重复历史报告",
+            idempotency_key="g4-qwen-duplicate-history",
+            confirm_initial_batch=False,
+            confirm_new_batch_after_exhausted_history=True,
+            previous_report_paths=(reports[0], reformatted_report),
+            git_identity={"git_commit": "new-commit", "git_dirty": False},
+        )
+
+    batch = create_qualification_batch(
+        db_path=database,
+        manifest_path=manifest_path,
+        ledger_path=ledger_path,
+        owner_user_id="g4-synthetic-owner",
+        relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+        timeout_seconds=1800,
+        expected_commit="new-commit",
+        authorized_by="super-admin",
+        authorization_reason="保留旧失败历史后启动独立资格批次",
+        idempotency_key="g4-qwen-successor-1",
+        confirm_initial_batch=False,
+        confirm_new_batch_after_exhausted_history=True,
+        previous_report_paths=tuple(reports),
+        git_identity={"git_commit": "new-commit", "git_dirty": False},
+    )
+
+    assert batch["batch_kind"] == "successor"
+    assert batch["state"] == "authorized"
+    assert [item["outcome"] for item in batch["previous_evidence"]] == [
+        "outcome_unknown",
+        "failed",
+    ]
+    assert all(
+        len(str(item["sha256"])) == 64 for item in batch["previous_evidence"]
+    )
+    assert [item["task_ids"] for item in batch["previous_evidence"]] == [
+        ["g4-legacy-first.json"],
+        ["g4-legacy-retry.json"],
+    ]
+    assert all("path" not in item for item in batch["previous_evidence"])
+
+
+@pytest.mark.parametrize(
+    "actor_user_id",
+    ["ordinary-user", "admin-user", "disabled-root", "pending-root", "missing"],
+)
+def test_qualification_batch_requires_active_superadmin(
+    tmp_path,
+    actor_user_id,
+    authoritative_ledger_path,
+) -> None:
+    database = tmp_path / "webui.db"
+    manifest_path = tmp_path / "manifest.json"
+    _create_inventory_database(database)
+    manifest_path.write_text(
+        json.dumps(
+            freeze_manifest(db_path=database, presets=["deepseek"]),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(QualificationError, match="启用且已审批的超级管理员"):
+        create_qualification_batch(
+            db_path=database,
+            manifest_path=manifest_path,
+            ledger_path=authoritative_ledger_path,
+            owner_user_id="g4-synthetic-owner",
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            expected_commit="commit-a",
+            authorized_by=actor_user_id,
+            authorization_reason="执行首轮合成资格验证",
+            idempotency_key=f"g4-permission-{actor_user_id}",
+            confirm_initial_batch=True,
+            confirm_new_batch_after_exhausted_history=False,
+            previous_report_paths=(),
+            git_identity={"git_commit": "commit-a", "git_dirty": False},
+        )
+
+    assert not authoritative_ledger_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("owner_user_id", None, "身份和授权原因不能为空"),
+        ("authorized_by", None, "身份和授权原因不能为空"),
+        ("authorization_reason", " ", "身份和授权原因不能为空"),
+        ("idempotency_key", "", "身份和授权原因不能为空"),
+        ("relay_base_url", None, "Relay 地址不能为空"),
+        ("timeout_seconds", None, "超时必须在"),
+        ("timeout_seconds", 0, "超时必须在"),
+        ("timeout_seconds", 7201, "超时必须在"),
+    ],
+)
+def test_qualification_batch_rejects_null_and_invalid_boundaries(
+    tmp_path,
+    field,
+    value,
+    message,
+    authoritative_ledger_path,
+) -> None:
+    database = tmp_path / "webui.db"
+    manifest_path = tmp_path / "manifest.json"
+    ledger_path = authoritative_ledger_path
+    _create_inventory_database(database)
+    manifest_path.write_text(
+        json.dumps(
+            freeze_manifest(db_path=database, presets=["deepseek"]),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    arguments = {
+        "db_path": database,
+        "manifest_path": manifest_path,
+        "ledger_path": ledger_path,
+        "owner_user_id": "g4-synthetic-owner",
+        "relay_base_url": "http://127.0.0.1:8088/internal/model-relay",
+        "timeout_seconds": 1800,
+        "expected_commit": "commit-a",
+        "authorized_by": "super-admin",
+        "authorization_reason": "执行首轮合成资格验证",
+        "idempotency_key": "g4-invalid-boundary",
+        "confirm_initial_batch": True,
+        "confirm_new_batch_after_exhausted_history": False,
+        "previous_report_paths": (),
+        "git_identity": {"git_commit": "commit-a", "git_dirty": False},
+    }
+    arguments[field] = value
+
+    with pytest.raises(QualificationError, match=message):
+        create_qualification_batch(**arguments)
+
+    assert not ledger_path.exists()
+
+
+@pytest.mark.parametrize(
+    "relay_base_url",
+    [
+        "http://token:secret@127.0.0.1:8088/internal/model-relay",
+        "http://127.0.0.1:8088/internal/model-relay?api_key=hidden",
+        "http://127.0.0.1:8088/internal/model-relay#fragment",
+        "http://127.0.0.1:8088",
+        "http://127.0.0.1:8088/internal/model-relay/extra",
+    ],
+)
+def test_qualification_batch_requires_secret_free_exact_relay_url(
+    tmp_path,
+    relay_base_url,
+    authoritative_ledger_path,
+) -> None:
+    database = tmp_path / "webui.db"
+    manifest_path = tmp_path / "manifest.json"
+    ledger_path = authoritative_ledger_path
+    _create_inventory_database(database)
+    manifest_path.write_text(
+        json.dumps(
+            freeze_manifest(db_path=database, presets=["deepseek"]),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(QualificationError, match="Relay.*地址"):
+        create_qualification_batch(
+            db_path=database,
+            manifest_path=manifest_path,
+            ledger_path=ledger_path,
+            owner_user_id="g4-synthetic-owner",
+            relay_base_url=relay_base_url,
+            timeout_seconds=1800,
+            expected_commit="commit-a",
+            authorized_by="super-admin",
+            authorization_reason="执行首轮合成资格验证",
+            idempotency_key="g4-invalid-relay",
+            confirm_initial_batch=True,
+            confirm_new_batch_after_exhausted_history=False,
+            previous_report_paths=(),
+            git_identity={"git_commit": "commit-a", "git_dirty": False},
+        )
+
+    assert not ledger_path.exists()
+
+
+def test_qualification_batch_is_idempotent_under_concurrent_requests(
+    tmp_path,
+    authoritative_ledger_path,
+) -> None:
+    database = tmp_path / "webui.db"
+    manifest_path = tmp_path / "manifest.json"
+    ledger_path = authoritative_ledger_path
+    _create_inventory_database(database)
+    _anchor_empty_test_qualification_ledger(
+        database=database,
+        ledger_path=ledger_path,
+    )
+    manifest_path.write_text(
+        json.dumps(
+            freeze_manifest(db_path=database, presets=["deepseek"]),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    def create() -> dict[str, object]:
+        return create_qualification_batch(
+            db_path=database,
+            manifest_path=manifest_path,
+            ledger_path=ledger_path,
+            owner_user_id="g4-synthetic-owner",
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            expected_commit="commit-a",
+            authorized_by="super-admin",
+            authorization_reason="执行首轮合成资格验证",
+            idempotency_key="g4-concurrent-same-request",
+            confirm_initial_batch=True,
+            confirm_new_batch_after_exhausted_history=False,
+            previous_report_paths=(),
+            git_identity={"git_commit": "commit-a", "git_dirty": False},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _index: create(), range(2)))
+
+    assert results[0]["batch_id"] == results[1]["batch_id"]
+    with sqlite3.connect(ledger_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM qualification_batches"
+        ).fetchone()[0] == 1
+    with pytest.raises(QualificationError, match="幂等键已绑定其他请求"):
+        create_qualification_batch(
+            db_path=database,
+            manifest_path=manifest_path,
+            ledger_path=ledger_path,
+            owner_user_id="g4-synthetic-owner",
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1801,
+            expected_commit="commit-a",
+            authorized_by="super-admin",
+            authorization_reason="执行首轮合成资格验证",
+            idempotency_key="g4-concurrent-same-request",
+            confirm_initial_batch=True,
+            confirm_new_batch_after_exhausted_history=False,
+            previous_report_paths=(),
+            git_identity={"git_commit": "commit-a", "git_dirty": False},
+        )
+
+
+def test_qualification_batch_blocks_concurrent_distinct_requests(
+    tmp_path,
+    authoritative_ledger_path,
+) -> None:
+    database = tmp_path / "webui.db"
+    manifest_path = tmp_path / "manifest.json"
+    ledger_path = authoritative_ledger_path
+    _create_inventory_database(database)
+    _anchor_empty_test_qualification_ledger(
+        database=database,
+        ledger_path=ledger_path,
+    )
+    manifest_path.write_text(
+        json.dumps(
+            freeze_manifest(db_path=database, presets=["deepseek"]),
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    def create(index: int) -> dict[str, object] | str:
+        try:
+            return create_qualification_batch(
+                db_path=database,
+                manifest_path=manifest_path,
+                ledger_path=ledger_path,
+                owner_user_id="g4-synthetic-owner",
+                relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+                timeout_seconds=1800,
+                expected_commit="commit-a",
+                authorized_by="super-admin",
+                authorization_reason="执行首轮合成资格验证",
+                idempotency_key=f"g4-concurrent-request-{index}",
+                confirm_initial_batch=True,
+                confirm_new_batch_after_exhausted_history=False,
+                previous_report_paths=(),
+                git_identity={"git_commit": "commit-a", "git_dirty": False},
+            )
+        except QualificationError as exc:
+            return str(exc)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(create, range(2)))
+
+    assert sum(isinstance(result, dict) for result in results) == 1
+    assert any(
+        "已有活动资格批次" in str(result)
+        or "已有资格历史" in str(result)
+        for result in results
+    )
+    with sqlite3.connect(ledger_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM qualification_batches"
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("initial_outcome", ["outcome_unknown", "failed"])
+def test_qualification_batch_retry_requires_user_decision_and_is_single_use(
+    tmp_path,
+    monkeypatch,
+    initial_outcome,
+    authoritative_ledger_path,
+) -> None:
+    database = tmp_path / "webui.db"
+    manifest_path = tmp_path / "manifest.json"
+    ledger_path = authoritative_ledger_path
+    _create_inventory_database(database)
+    _anchor_empty_test_qualification_ledger(
+        database=database,
+        ledger_path=ledger_path,
+    )
+    manifest = freeze_manifest(db_path=database, presets=["deepseek"])
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    git_identity = {"git_commit": "commit-a", "git_dirty": False}
+    monkeypatch.setattr(
+        "scripts.verify_g4_provider_safety._git_identity",
+        lambda: dict(git_identity),
+    )
+    batch = create_qualification_batch(
+        db_path=database,
+        manifest_path=manifest_path,
+        ledger_path=ledger_path,
+        owner_user_id="g4-synthetic-owner",
+        relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+        timeout_seconds=1800,
+        expected_commit="commit-a",
+        authorized_by="super-admin",
+        authorization_reason="执行首轮合成资格验证",
+        idempotency_key="g4-retry-decision",
+        confirm_initial_batch=True,
+        confirm_new_batch_after_exhausted_history=False,
+        previous_report_paths=(),
+        git_identity=git_identity,
+    )
+    provider = dict(manifest["providers"][0])
+    ledger = QualificationBatchLedger(ledger_path)
+    ledger.begin_attempt(
+        batch_id=str(batch["batch_id"]),
+        provider=provider,
+        attempt_context={"task_id_sha256": "a" * 64},
+    )
+    _sync_qualification_ledger_anchor(db_path=database, ledger=ledger)
+    with pytest.raises(QualificationError, match="仍在进行，不能授权重试"):
+        authorize_qualification_batch_retry(
+            db_path=database,
+            manifest_path=manifest_path,
+            ledger_path=ledger_path,
+            batch_id=str(batch["batch_id"]),
+            connection_id=str(provider["connection_id"]),
+            authorized_by="super-admin",
+            authorization_reason="拒绝并发外发",
+            confirm_duplicate_request_and_cost=True,
+            git_identity=git_identity,
+        )
+    ledger.finish_attempt(
+        batch_id=str(batch["batch_id"]),
+        provider=provider,
+        check={"outcome": initial_outcome, "error_code": "synthetic_failure"},
+    )
+    _sync_qualification_ledger_anchor(db_path=database, ledger=ledger)
+
+    with pytest.raises(QualificationError, match="重复 Provider 请求和费用风险"):
+        authorize_qualification_batch_retry(
+            db_path=database,
+            manifest_path=manifest_path,
+            ledger_path=ledger_path,
+            batch_id=str(batch["batch_id"]),
+            connection_id=str(provider["connection_id"]),
+            authorized_by="super-admin",
+            authorization_reason="用户决定承担一次重复请求风险",
+            confirm_duplicate_request_and_cost=False,
+            git_identity=git_identity,
+        )
+
+    authorization = authorize_qualification_batch_retry(
+        db_path=database,
+        manifest_path=manifest_path,
+        ledger_path=ledger_path,
+        batch_id=str(batch["batch_id"]),
+        connection_id=str(provider["connection_id"]),
+        authorized_by="super-admin",
+        authorization_reason="用户决定承担一次重复请求风险",
+        confirm_duplicate_request_and_cost=True,
+        git_identity=git_identity,
+    )
+
+    assert authorization["retry_number"] == 1
+    assert authorization["previous_state"] == (
+        "outcome_unknown"
+        if initial_outcome == "outcome_unknown"
+        else "failed_after_egress"
+    )
+    assert authorization["user_confirmed_duplicate_request_and_cost"] is True
+    with pytest.raises(QualificationError, match="恢复重试次数"):
+        authorize_qualification_batch_retry(
+            db_path=database,
+            manifest_path=manifest_path,
+            ledger_path=ledger_path,
+            batch_id=str(batch["batch_id"]),
+            connection_id=str(provider["connection_id"]),
+            authorized_by="super-admin",
+            authorization_reason="重复授权",
+            confirm_duplicate_request_and_cost=True,
+            git_identity=git_identity,
+        )
+
+    with sqlite3.connect(ledger_path) as connection:
+        provider_state, attempt_count = connection.execute(
+            """
+            SELECT state, attempt_count
+            FROM qualification_batch_providers
+            WHERE batch_id = ?
+            """,
+            (batch["batch_id"],),
+        ).fetchone()
+        authorization_count = connection.execute(
+            "SELECT COUNT(*) FROM qualification_retry_authorizations"
+        ).fetchone()[0]
+    assert (provider_state, attempt_count) == ("retry_authorized", 1)
+    assert authorization_count == 1
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["batch_id", "connection_id", "authorized_by", "authorization_reason"],
+)
+def test_qualification_batch_retry_rejects_null_identity(
+    tmp_path,
+    authoritative_ledger_path,
+    field,
+) -> None:
+    arguments = {
+        "db_path": tmp_path / "webui.db",
+        "manifest_path": tmp_path / "manifest.json",
+        "ledger_path": authoritative_ledger_path,
+        "batch_id": "g4batch-test",
+        "connection_id": "connection-test",
+        "authorized_by": "super-admin",
+        "authorization_reason": "测试空值失败关闭",
+        "confirm_duplicate_request_and_cost": True,
+    }
+    arguments[field] = None
+    with pytest.raises(QualificationError, match="身份和原因不能为空"):
+        authorize_qualification_batch_retry(**arguments)
+
+
+def test_qualification_anchor_recovery_preserves_egress_count(
+    tmp_path,
+    monkeypatch,
+    authoritative_ledger_path,
+) -> None:
+    database = tmp_path / "webui.db"
+    manifest_path = tmp_path / "manifest.json"
+    _create_inventory_database(database)
+    manifest = freeze_manifest(db_path=database, presets=["deepseek"])
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    _anchor_empty_test_qualification_ledger(
+        database=database,
+        ledger_path=authoritative_ledger_path,
+    )
+    git_identity = {"git_commit": "commit-a", "git_dirty": False}
+    monkeypatch.setattr(
+        "scripts.verify_g4_provider_safety._git_identity",
+        lambda: dict(git_identity),
+    )
+    batch = create_qualification_batch(
+        db_path=database,
+        manifest_path=manifest_path,
+        ledger_path=authoritative_ledger_path,
+        owner_user_id="g4-synthetic-owner",
+        relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+        timeout_seconds=1800,
+        expected_commit="commit-a",
+        authorized_by="super-admin",
+        authorization_reason="测试锚点恢复",
+        idempotency_key="g4-anchor-recovery",
+        confirm_initial_batch=True,
+        confirm_new_batch_after_exhausted_history=False,
+        previous_report_paths=(),
+        git_identity=git_identity,
+    )
+    provider = dict(manifest["providers"][0])
+    ledger = QualificationBatchLedger(authoritative_ledger_path)
+    ledger.begin_attempt(
+        batch_id=str(batch["batch_id"]),
+        provider=provider,
+        attempt_context={"task_id_sha256": "a" * 64},
+    )
+    _sync_qualification_ledger_anchor(db_path=database, ledger=ledger)
+
+    recovered = recover_qualification_ledger_anchor(
+        db_path=database,
+        manifest_path=manifest_path,
+        ledger_path=authoritative_ledger_path,
+        recovered_by="super-admin",
+        recovery_reason="运行进程退出后收口结果未知 Attempt",
+    )
+    assert recovered["pre_egress_attempt_cancelled"] is False
+    assert recovered["stale_attempt_closed_outcome_unknown"] is True
+    with sqlite3.connect(authoritative_ledger_path) as connection:
+        state, attempt_count = connection.execute(
+            """
+            SELECT state, attempt_count
+            FROM qualification_batch_providers
+            WHERE batch_id = ?
+            """,
+            (batch["batch_id"],),
+        ).fetchone()
+        attempts = connection.execute(
+            "SELECT COUNT(*) FROM qualification_provider_attempts"
+        ).fetchone()[0]
+        recoveries = connection.execute(
+            "SELECT COUNT(*) FROM qualification_ledger_recoveries"
+        ).fetchone()[0]
+    assert (state, attempt_count, attempts, recoveries) == (
+        "outcome_unknown",
+        1,
+        1,
+        1,
+    )
+
+
+def test_formal_pi_cli_requires_durable_batch_identity(tmp_path) -> None:
+    common = [
+        "--db-path",
+        str(tmp_path / "webui.db"),
+        "--manifest",
+        str(tmp_path / "manifest.json"),
+    ]
+    start_args = _parser().parse_args(
+        [
+            "start-batch",
+            *common,
+            "--owner-user-id",
+            "g4-synthetic-owner",
+            "--relay-base-url",
+            "http://127.0.0.1:8088/internal/model-relay",
+            "--timeout-seconds",
+            "1800",
+            "--expected-commit",
+            "commit-a",
+            "--authorized-by",
+            "super-admin",
+            "--authorization-reason",
+            "执行首轮合成资格验证",
+            "--idempotency-key",
+            "g4-first",
+            "--confirm-initial-batch",
+        ]
+    )
+    assert start_args.command == "start-batch"
+    with pytest.raises(QualificationError, match="工作目录外的权威台账"):
+        _require_authoritative_qualification_ledger(
+            tmp_path / "replaceable-ledger.sqlite3"
+        )
+
+    with pytest.raises(SystemExit):
+        _parser().parse_args(
+            [
+                "run-pi",
+                *common,
+                "--output",
+                str(tmp_path / "pi.json"),
+                "--execution-root",
+                str(tmp_path / "execution"),
+                "--owner-user-id",
+                "g4-synthetic-owner",
+                "--expected-commit",
+                "commit-a",
+                "--confirm-synthetic-egress",
+            ]
+        )
+    with pytest.raises(QualificationError, match="必须绑定持久资格批次"):
+        asyncio.run(
+            execute_pi_provider_chain(
+                db_path=tmp_path / "webui.db",
+                manifest_path=tmp_path / "manifest.json",
+                output_path=tmp_path / "pi.json",
+                execution_root=tmp_path / "execution",
+                relay_base_url=(
+                    "http://127.0.0.1:8088/internal/model-relay"
+                ),
+                timeout_seconds=1800,
+                owner_user_id="g4-synthetic-owner",
+                expected_commit="commit-a",
+            )
+        )
+
+
 def test_ambiguous_retry_preserves_history_and_allows_only_one_retry(
     tmp_path,
 ) -> None:
@@ -1051,6 +2033,8 @@ def test_ambiguous_retry_rejects_connection_outside_frozen_manifest(
 
 def test_pi_provider_chain_uses_standard_ordinary_owner_and_never_claims_g4(
     tmp_path,
+    monkeypatch,
+    authoritative_ledger_path,
 ):
     database = tmp_path / "webui.db"
     manifest_path = tmp_path / "manifest.json"
@@ -1083,12 +2067,21 @@ def test_pi_provider_chain_uses_standard_ordinary_owner_and_never_claims_g4(
             model="deepseek-v4-flash",
         )
     )
+    manifest = freeze_manifest(db_path=database, presets=["deepseek"])
     manifest_path.write_text(
-        json.dumps(
-            freeze_manifest(db_path=database, presets=["deepseek"]),
-            ensure_ascii=False,
-        ),
+        json.dumps(manifest, ensure_ascii=False),
         encoding="utf-8",
+    )
+    ledger_path = authoritative_ledger_path
+    batch = _create_test_qualification_batch(
+        database=database,
+        ledger_path=ledger_path,
+        manifest=manifest,
+        owner_user_id="g4-ordinary-synthetic-user",
+    )
+    monkeypatch.setattr(
+        "scripts.verify_g4_provider_safety._git_identity",
+        lambda: {"git_commit": "commit-a", "git_dirty": False},
     )
     seen_requests = []
 
@@ -1134,8 +2127,11 @@ def test_pi_provider_chain_uses_standard_ordinary_owner_and_never_claims_g4(
             relay_base_url="http://127.0.0.1:8088/internal/model-relay",
             timeout_seconds=1800,
             owner_user_id="g4-ordinary-synthetic-user",
+            expected_commit="commit-a",
             broker=broker,
             runtime_factory=lambda **_kwargs: FakeRuntime(),
+            qualification_ledger_path=ledger_path,
+            qualification_batch_id=str(batch["batch_id"]),
         )
     )
 
@@ -1152,8 +2148,120 @@ def test_pi_provider_chain_uses_standard_ordinary_owner_and_never_claims_g4(
     assert "deepseek-secret-for-test" not in report_path.read_text(encoding="utf-8")
 
 
+def test_pi_provider_chain_recovers_anchor_failure_before_runtime_call(
+    tmp_path,
+    monkeypatch,
+    authoritative_ledger_path,
+) -> None:
+    database = tmp_path / "webui.db"
+    manifest_path = tmp_path / "manifest.json"
+    report_path = tmp_path / "pi-report.json"
+    _create_inventory_database(database)
+    manifest = freeze_manifest(db_path=database, presets=["deepseek"])
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    batch = _create_test_qualification_batch(
+        database=database,
+        ledger_path=authoritative_ledger_path,
+        manifest=manifest,
+        owner_user_id="g4-ordinary-synthetic-user",
+    )
+    monkeypatch.setattr(
+        "scripts.verify_g4_provider_safety._git_identity",
+        lambda: {"git_commit": "commit-a", "git_dirty": False},
+    )
+    provider = dict(manifest["providers"][0])
+    broker = SimpleNamespace(
+        freeze_connection=lambda _owner, _connection: SimpleNamespace(
+            connection_id=provider["connection_id"],
+            connection_version=provider["connection_version"],
+            model=provider["model"],
+        ),
+        list_usage=lambda *_args, **_kwargs: [],
+    )
+    runtime_calls = 0
+
+    class UnexpectedRuntime:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def start(self, _request, *, on_event):
+            nonlocal runtime_calls
+            del on_event
+            runtime_calls += 1
+            raise AssertionError("锚点未同步时不应调用 Runtime")
+
+    real_sync = _sync_qualification_ledger_anchor
+    sync_calls = 0
+
+    def fail_twice_then_sync(**kwargs):
+        nonlocal sync_calls
+        sync_calls += 1
+        if sync_calls <= 2:
+            raise QualificationError("synthetic anchor lock")
+        return real_sync(**kwargs)
+
+    monkeypatch.setattr(
+        "scripts.verify_g4_provider_safety._sync_qualification_ledger_anchor",
+        fail_twice_then_sync,
+    )
+    report = asyncio.run(
+        execute_pi_provider_chain(
+            db_path=database,
+            manifest_path=manifest_path,
+            output_path=report_path,
+            execution_root=tmp_path / "execution",
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            owner_user_id="g4-ordinary-synthetic-user",
+            expected_commit="commit-a",
+            broker=broker,
+            runtime_factory=UnexpectedRuntime,
+            qualification_ledger_path=authoritative_ledger_path,
+            qualification_batch_id=str(batch["batch_id"]),
+        )
+    )
+
+    assert runtime_calls == 0
+    assert sync_calls == 2
+    assert report["pi_provider_chain_passed"] is False
+    ledger = QualificationBatchLedger(authoritative_ledger_path)
+    with sqlite3.connect(authoritative_ledger_path) as connection:
+        state, attempt_count = connection.execute(
+            """
+            SELECT state, attempt_count
+            FROM qualification_batch_providers
+            WHERE batch_id = ?
+            """,
+            (batch["batch_id"],),
+        ).fetchone()
+        recoveries = connection.execute(
+            "SELECT COUNT(*) FROM qualification_ledger_recoveries"
+        ).fetchone()[0]
+    assert (state, attempt_count, recoveries) == ("authorized", 0, 1)
+    monkeypatch.setattr(
+        "scripts.verify_g4_provider_safety._sync_qualification_ledger_anchor",
+        real_sync,
+    )
+    recovered = recover_qualification_ledger_anchor(
+        db_path=database,
+        manifest_path=manifest_path,
+        ledger_path=authoritative_ledger_path,
+        recovered_by="super-admin",
+        recovery_reason="恢复两次连续本地锚点同步失败",
+    )
+    assert recovered["pre_egress_attempt_cancelled"] is True
+    anchor = _load_qualification_ledger_anchor(db_path=database)
+    assert anchor is not None
+    assert anchor["ledger_revision"] == ledger.state_receipt()["ledger_revision"]
+
+
 def test_pi_provider_chain_closes_attempt_when_runtime_raises_unexpected_error(
     tmp_path,
+    monkeypatch,
+    authoritative_ledger_path,
 ):
     database = tmp_path / "webui.db"
     manifest_path = tmp_path / "manifest.json"
@@ -1191,6 +2299,17 @@ def test_pi_provider_chain_closes_attempt_when_runtime_raises_unexpected_error(
         json.dumps(manifest, ensure_ascii=False),
         encoding="utf-8",
     )
+    ledger_path = authoritative_ledger_path
+    batch = _create_test_qualification_batch(
+        database=database,
+        ledger_path=ledger_path,
+        manifest=manifest,
+        owner_user_id="g4-ordinary-synthetic-user",
+    )
+    monkeypatch.setattr(
+        "scripts.verify_g4_provider_safety._git_identity",
+        lambda: {"git_commit": "commit-a", "git_dirty": False},
+    )
 
     class FailingRuntime:
         async def start(self, _request, *, on_event):
@@ -1206,8 +2325,11 @@ def test_pi_provider_chain_closes_attempt_when_runtime_raises_unexpected_error(
             relay_base_url="http://127.0.0.1:8088/internal/model-relay",
             timeout_seconds=1800,
             owner_user_id="g4-ordinary-synthetic-user",
+            expected_commit="commit-a",
             broker=broker,
             runtime_factory=lambda **_kwargs: FailingRuntime(),
+            qualification_ledger_path=ledger_path,
+            qualification_batch_id=str(batch["batch_id"]),
         )
     )
 
@@ -1218,19 +2340,21 @@ def test_pi_provider_chain_closes_attempt_when_runtime_raises_unexpected_error(
     assert provider["error_type"] == "RuntimeError"
     assert "本机异常上下文" not in report_path.read_text(encoding="utf-8")
 
-    _, ledger_path = _qualification_state_paths(
-        db_path=database,
-        manifest_path=manifest_path,
-        action="pi-provider",
-    )
-    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
-    entry = next(iter(ledger["providers"].values()))
-    assert entry["state"] == "outcome_unknown"
-    assert entry["check"]["error_code"] == "pi_internal_error"
+    with sqlite3.connect(ledger_path) as connection:
+        state, check_json = connection.execute(
+            """
+            SELECT state, check_json
+            FROM qualification_batch_providers
+            WHERE batch_id = ?
+            """,
+            (batch["batch_id"],),
+        ).fetchone()
+    assert state == "outcome_unknown"
+    assert json.loads(check_json)["error_code"] == "pi_internal_error"
 
 
 def test_pi_provider_chain_rejects_external_relay_before_grant_issue(tmp_path):
-    with pytest.raises(QualificationError, match="Relay 必须是本机地址"):
+    with pytest.raises(QualificationError, match="Relay.*本机地址"):
         asyncio.run(
             execute_pi_provider_chain(
                 db_path=tmp_path / "webui.db",
@@ -1267,9 +2391,12 @@ def test_transport_safety_report_binds_exact_tests_and_commit(tmp_path):
 
 def test_g4_assessment_requires_pi_transport_and_scoped_rotation_evidence(
     tmp_path,
+    authoritative_ledger_path,
 ):
     commit = "b" * 40
     manifest_sha = "c" * 64
+    database = tmp_path / "webui.db"
+    _create_inventory_database(database)
 
     def write(name: str, payload: dict) -> Path:
         path = tmp_path / name
@@ -1376,9 +2503,45 @@ def test_g4_assessment_requires_pi_transport_and_scoped_rotation_evidence(
     manifest.write_text(json.dumps(unsigned), encoding="utf-8")
     pi_payload = json.loads(pi_report.read_text(encoding="utf-8"))
     pi_payload["manifest_sha256"] = manifest_sha
+    provider = dict(unsigned["providers"][0])
+    ledger_path = authoritative_ledger_path
+    ledger = QualificationBatchLedger(ledger_path)
+    batch = ledger.create_batch(
+        manifest_sha256=manifest_sha,
+        providers=[provider],
+        expected_commit=commit,
+        owner_user_id="g4-ordinary-user",
+        relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+        timeout_seconds=1800,
+        authorized_by="super-admin",
+        authorization_reason="测试最终资格反查",
+        idempotency_key="g4-assessment",
+        batch_kind="initial",
+        parent_batch_id=None,
+        previous_evidence=[],
+    )
+    ledger.begin_attempt(
+        batch_id=str(batch["batch_id"]),
+        provider=provider,
+        attempt_context={"task_id_sha256": "a" * 64},
+    )
+    ledger.finish_attempt(
+        batch_id=str(batch["batch_id"]),
+        provider=provider,
+        check={"outcome": "passed"},
+    )
+    _sync_qualification_ledger_anchor(
+        db_path=database,
+        ledger=ledger,
+        bootstrap_batch_id=str(batch["batch_id"]),
+        initialized_by="super-admin",
+    )
+    pi_payload["qualification_ledger_id"] = batch["ledger_id"]
+    pi_payload["qualification_batch_id"] = batch["batch_id"]
     pi_report.write_text(json.dumps(pi_payload), encoding="utf-8")
 
     result = assess_g4_evidence(
+        db_path=database,
         manifest_path=manifest,
         pi_report_path=pi_report,
         transport_report_path=safety_report,
@@ -1386,6 +2549,8 @@ def test_g4_assessment_requires_pi_transport_and_scoped_rotation_evidence(
         output_path=output,
         expected_commit=commit,
         expected_manifest_sha256=manifest_sha,
+        qualification_ledger_path=ledger_path,
+        qualification_batch_id=str(batch["batch_id"]),
     )
 
     assert result["g4_qualified"] is True
@@ -1396,6 +2561,7 @@ def test_g4_assessment_requires_pi_transport_and_scoped_rotation_evidence(
     pi_report.write_text(json.dumps(pi_payload), encoding="utf-8")
     with pytest.raises(QualificationError, match="G4 证据不完整"):
         assess_g4_evidence(
+            db_path=database,
             manifest_path=manifest,
             pi_report_path=pi_report,
             transport_report_path=safety_report,
@@ -1403,6 +2569,8 @@ def test_g4_assessment_requires_pi_transport_and_scoped_rotation_evidence(
             output_path=tmp_path / "g4-final-empty-providers.json",
             expected_commit=commit,
             expected_manifest_sha256=manifest_sha,
+            qualification_ledger_path=ledger_path,
+            qualification_batch_id=str(batch["batch_id"]),
         )
     pi_payload["providers"] = [
         {
@@ -1428,6 +2596,7 @@ def test_g4_assessment_requires_pi_transport_and_scoped_rotation_evidence(
     rotation_report.write_text(json.dumps(rotation_payload), encoding="utf-8")
     with pytest.raises(QualificationError, match="G4 证据不完整"):
         assess_g4_evidence(
+            db_path=database,
             manifest_path=manifest,
             pi_report_path=pi_report,
             transport_report_path=safety_report,
@@ -1435,6 +2604,8 @@ def test_g4_assessment_requires_pi_transport_and_scoped_rotation_evidence(
             output_path=tmp_path / "g4-final-fail.json",
             expected_commit=commit,
             expected_manifest_sha256=manifest_sha,
+            qualification_ledger_path=ledger_path,
+            qualification_batch_id=str(batch["batch_id"]),
         )
 
 

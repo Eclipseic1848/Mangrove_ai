@@ -38,6 +38,7 @@
 | [0028](0028-task-level-capability-host-sidecar.md) | 原生任务能力使用单一 Capability Host Sidecar | 已采纳；工程门与用户灰度验收通过，默认关闭 | 2026-08-05 |
 | [0029](0029-capability-validation-lifecycle-and-platform-publication.md) | 能力验证、生命周期与平台发布采用三轴治理 | 已采纳；新仓库 #9-#17 全部完成并关闭（两条真实纵切面 + 兼容切换，PR #30/#33/#34） | 2026-08-06 |
 | [0030](0030-direct-vnext-default-cutover.md) | 合格后直接切换全用户 vNext 默认 | 已采纳 | 2026-08-23 |
+| [0031](0031-durable-provider-qualification-batches.md) | Provider 资格外发采用独立持久批次台账 | 已采纳 | 2026-08-23 |
 
 ## 产品决策汇总（plan 第 3 节 + 本次确认）
 
@@ -64,3 +65,4 @@
 | 原生能力隔离 | 一个任务共用一个无来源/模型配置挂载的 Capability Host Sidecar，Pi 仅持短期 Relay | 0028 |
 | 能力验证与平台发布 | 成熟度、生命周期、运行资格三轴分离；平台快照独立签名并默认管理员灰度 | 0029 |
 | vNext 默认切换 | 不建立普通用户显式试用资格；硬门合格并独立授权后从管理员灰度直接切换全用户默认 | 0030 |
+| Provider 资格外发 | 独立持久批次台账先记 Attempt；每批只有一次初始执行和一次经用户确认的恢复重试 | 0031 |
