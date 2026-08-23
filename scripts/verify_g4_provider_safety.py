@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -33,14 +33,40 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.model_connections.broker import ConnectionBroker, ConnectionError
 from src.model_connections.storage import ModelConnectionRepository
+from src.model_connections.qualification_ledger import (
+    QualificationBatchLedger,
+    QualificationLedgerError,
+)
 from src.model_connections.vault import FernetCredentialVault
 
 
 SCHEMA_VERSION = "g4-provider-manifest-v1"
+AUTHORITATIVE_QUALIFICATION_LEDGER_PATH = (
+    Path.home() / ".mangrove" / "g4" / "qualification-ledger.sqlite3"
+)
+QUALIFICATION_LEDGER_ANCHOR_KEY = "g4_qualification_ledger_anchor_v3"
 
 
 class QualificationError(RuntimeError):
     """G4 验收前置条件不满足。"""
+
+
+def _require_authoritative_qualification_ledger(path: Path) -> Path:
+    expected = AUTHORITATIVE_QUALIFICATION_LEDGER_PATH.resolve()
+    if path.resolve() != expected:
+        raise QualificationError(
+            "正式 Provider 资格必须使用工作目录外的权威台账"
+        )
+    return expected
+
+
+def _qualification_ledger_lock_path(ledger_path: Path) -> Path:
+    return ledger_path.with_name(f"{ledger_path.name}.lock")
+
+
+def _database_path_sha256(db_path: Path) -> str:
+    normalized = os.path.normcase(str(db_path.resolve()))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _connection_version(secret_id: str, model: str) -> str:
@@ -201,6 +227,517 @@ def freeze_manifest(
         **unsigned,
         "manifest_sha256": _canonical_sha256(unsigned),
     }
+
+
+def _require_active_superadmin(*, db_path: Path, actor_user_id: str) -> None:
+    """失败关闭地确认资格批次授权人拥有当前超级管理员权限。"""
+
+    if not db_path.is_file():
+        raise QualificationError("模型连接数据库不存在")
+    try:
+        uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
+            row = connection.execute(
+                """
+                SELECT role, disabled, pending
+                FROM users
+                WHERE user_id = ?
+                """,
+                (actor_user_id,),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise QualificationError(
+            "无法确认资格批次授权人的超级管理员权限"
+        ) from exc
+    # 外发资格批次会消耗真实 Provider 配额，授权身份缺失或状态异常时必须拒绝。
+    if row is None or row[0] != "super_admin" or bool(row[1]) or bool(row[2]):
+        raise QualificationError(
+            "资格批次授权人必须是启用且已审批的超级管理员"
+        )
+
+
+def _parse_qualification_ledger_anchor(raw_value: object) -> dict[str, object]:
+    try:
+        anchor = json.loads(str(raw_value))
+    except (TypeError, ValueError) as exc:
+        raise QualificationError("Provider 资格台账锚点无效") from exc
+    if (
+        not isinstance(anchor, dict)
+        or set(anchor)
+        != {
+            "schema_version",
+            "ledger_id",
+            "bootstrap_batch_id",
+            "initialized_at",
+            "initialized_by",
+            "ledger_revision",
+            "ledger_state_sha256",
+            "database_path_sha256",
+        }
+        or anchor.get("schema_version") != "g4-qualification-ledger-anchor-v3"
+        or any(
+            not isinstance(anchor.get(name), str)
+            or not str(anchor.get(name)).strip()
+            for name in (
+                "ledger_id",
+                "bootstrap_batch_id",
+                "initialized_at",
+                "initialized_by",
+            )
+        )
+        or not isinstance(anchor.get("ledger_revision"), int)
+        or isinstance(anchor.get("ledger_revision"), bool)
+        or int(anchor.get("ledger_revision")) < 0
+        or not isinstance(anchor.get("ledger_state_sha256"), str)
+        or len(str(anchor.get("ledger_state_sha256"))) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in str(anchor.get("ledger_state_sha256"))
+        )
+        or not isinstance(anchor.get("database_path_sha256"), str)
+        or len(str(anchor.get("database_path_sha256"))) != 64
+        or any(
+            character not in "0123456789abcdef"
+            for character in str(anchor.get("database_path_sha256"))
+        )
+    ):
+        raise QualificationError("Provider 资格台账锚点无效")
+    return dict(anchor)
+
+
+def _load_qualification_ledger_anchor(
+    *,
+    db_path: Path,
+) -> dict[str, object] | None:
+    if not db_path.is_file():
+        raise QualificationError("模型连接数据库不存在")
+    try:
+        uri = f"{db_path.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
+            row = connection.execute(
+                "SELECT value FROM app_settings WHERE key = ?",
+                (QUALIFICATION_LEDGER_ANCHOR_KEY,),
+            ).fetchone()
+    except sqlite3.Error as exc:
+        raise QualificationError("无法读取 Provider 资格台账锚点") from exc
+    if row is None:
+        return None
+    return _parse_qualification_ledger_anchor(row[0])
+
+
+def _sync_qualification_ledger_anchor(
+    *,
+    db_path: Path,
+    ledger: QualificationBatchLedger,
+    bootstrap_batch_id: str | None = None,
+    initialized_by: str | None = None,
+    allowed_revision_advance: int = 1,
+) -> dict[str, object]:
+    if allowed_revision_advance not in {1, 2}:
+        raise QualificationError("Provider 资格台账锚点推进范围无效")
+    receipt = ledger.state_receipt()
+    try:
+        with closing(sqlite3.connect(db_path)) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT value FROM app_settings WHERE key = ?",
+                (QUALIFICATION_LEDGER_ANCHOR_KEY,),
+            ).fetchone()
+            if existing is None:
+                if not all(
+                    isinstance(value, str) and bool(value.strip())
+                    for value in (bootstrap_batch_id, initialized_by)
+                ):
+                    raise QualificationError(
+                        "首次 Provider 资格台账锚点缺少批次或授权人"
+                    )
+                anchor: dict[str, object] = {
+                    "schema_version": "g4-qualification-ledger-anchor-v3",
+                    "ledger_id": receipt["ledger_id"],
+                    "bootstrap_batch_id": bootstrap_batch_id,
+                    "initialized_at": datetime.now(timezone.utc).isoformat(),
+                    "initialized_by": initialized_by,
+                    "ledger_revision": receipt["ledger_revision"],
+                    "ledger_state_sha256": receipt["ledger_state_sha256"],
+                    "database_path_sha256": _database_path_sha256(db_path),
+                }
+                connection.execute(
+                    "INSERT INTO app_settings (key, value) VALUES (?, ?)",
+                    (
+                        QUALIFICATION_LEDGER_ANCHOR_KEY,
+                        json.dumps(anchor, ensure_ascii=False, sort_keys=True),
+                    ),
+                )
+            else:
+                current = _parse_qualification_ledger_anchor(existing[0])
+                if current["ledger_id"] != receipt["ledger_id"]:
+                    raise QualificationError(
+                        "Provider 资格台账锚点已绑定其他 Ledger"
+                    )
+                if current["database_path_sha256"] != _database_path_sha256(
+                    db_path
+                ):
+                    raise QualificationError(
+                        "Provider 资格台账锚点绑定的数据库身份不一致"
+                    )
+                current_revision = int(current["ledger_revision"])
+                ledger_revision = int(receipt["ledger_revision"])
+                if ledger_revision < current_revision:
+                    raise QualificationError(
+                        "Provider 资格台账旧快照回滚，拒绝继续"
+                    )
+                if ledger_revision == current_revision:
+                    if (
+                        current["ledger_state_sha256"]
+                        != receipt["ledger_state_sha256"]
+                    ):
+                        raise QualificationError(
+                            "Provider 资格台账状态与外部锚点不一致"
+                        )
+                    anchor = current
+                else:
+                    if (
+                        ledger_revision
+                        != current_revision + allowed_revision_advance
+                    ):
+                        raise QualificationError(
+                            "Provider 资格台账版本跳跃，拒绝继续"
+                        )
+                    anchor = {
+                        **current,
+                        "ledger_revision": ledger_revision,
+                        "ledger_state_sha256": receipt[
+                            "ledger_state_sha256"
+                        ],
+                    }
+                    updated = connection.execute(
+                        """
+                        UPDATE app_settings
+                        SET value = ?
+                        WHERE key = ? AND value = ?
+                        """,
+                        (
+                            json.dumps(
+                                anchor,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            ),
+                            QUALIFICATION_LEDGER_ANCHOR_KEY,
+                            existing[0],
+                        ),
+                    )
+                    if updated.rowcount != 1:
+                        raise QualificationError(
+                            "Provider 资格台账锚点并发更新失败"
+                        )
+    except sqlite3.Error as exc:
+        raise QualificationError("无法持久化 Provider 资格台账锚点") from exc
+    return anchor
+
+
+def _anchored_qualification_ledger(
+    *,
+    db_path: Path,
+    ledger_path: Path,
+) -> QualificationBatchLedger:
+    anchor = _load_qualification_ledger_anchor(db_path=db_path)
+    if anchor is None:
+        raise QualificationError("Provider 资格台账锚点不存在，拒绝继续")
+    if not ledger_path.is_file():
+        raise QualificationError("权威 Provider 资格台账缺失，拒绝重建")
+    try:
+        ledger = QualificationBatchLedger(ledger_path)
+        receipt = ledger.state_receipt()
+    except (QualificationLedgerError, sqlite3.Error, OSError) as exc:
+        raise QualificationError("权威 Provider 资格台账不可读取") from exc
+    if receipt["ledger_id"] != anchor["ledger_id"]:
+        raise QualificationError("Provider 资格台账身份与外部锚点不一致")
+    if anchor["database_path_sha256"] != _database_path_sha256(db_path):
+        raise QualificationError("Provider 资格台账锚点绑定的数据库身份不一致")
+    if int(receipt["ledger_revision"]) < int(anchor["ledger_revision"]):
+        raise QualificationError("Provider 资格台账旧快照回滚，拒绝继续")
+    if (
+        receipt["ledger_revision"] != anchor["ledger_revision"]
+        or receipt["ledger_state_sha256"] != anchor["ledger_state_sha256"]
+    ):
+        raise QualificationError("Provider 资格台账状态与外部锚点不一致")
+    return ledger
+
+
+def _recover_qualification_ledger_anchor_unlocked(
+    *,
+    db_path: Path,
+    ledger_path: Path,
+    recovered_by: str,
+    recovery_reason: str,
+    allow_pre_egress_cancel: bool,
+) -> dict[str, object]:
+    anchor = _load_qualification_ledger_anchor(db_path=db_path)
+    if anchor is None:
+        raise QualificationError("Provider 资格台账锚点不存在，拒绝恢复")
+    if not ledger_path.is_file():
+        raise QualificationError("权威 Provider 资格台账缺失，拒绝恢复")
+    try:
+        ledger = QualificationBatchLedger(ledger_path)
+        receipt = ledger.state_receipt()
+        if receipt["ledger_id"] != anchor["ledger_id"]:
+            raise QualificationError(
+                "Provider 资格台账身份与外部锚点不一致"
+            )
+        if anchor["database_path_sha256"] != _database_path_sha256(db_path):
+            raise QualificationError(
+                "Provider 资格台账锚点绑定的数据库身份不一致"
+            )
+        recovery = ledger.recover_anchor_gap(
+            anchor_revision=int(anchor["ledger_revision"]),
+            recovered_by=recovered_by,
+            recovery_reason=recovery_reason,
+            allow_pre_egress_cancel=allow_pre_egress_cancel,
+        )
+        synchronized = _sync_qualification_ledger_anchor(
+            db_path=db_path,
+            ledger=ledger,
+            allowed_revision_advance=int(
+                recovery["anchor_revision_advance"]
+            ),
+        )
+    except (QualificationLedgerError, sqlite3.Error, OSError) as exc:
+        raise QualificationError(str(exc)) from exc
+    return {
+        "schema_version": "g4-qualification-ledger-recovery-v1",
+        "ledger_id": synchronized["ledger_id"],
+        "ledger_revision": synchronized["ledger_revision"],
+        "pre_egress_attempt_cancelled": recovery[
+            "pre_egress_attempt_cancelled"
+        ],
+        "stale_attempt_closed_outcome_unknown": recovery[
+            "stale_attempt_closed_outcome_unknown"
+        ],
+        "recovered_by": recovered_by,
+        "recovery_reason": recovery_reason,
+    }
+
+
+def recover_qualification_ledger_anchor(
+    *,
+    db_path: Path,
+    manifest_path: Path,
+    ledger_path: Path,
+    recovered_by: str,
+    recovery_reason: str,
+) -> dict[str, object]:
+    """在没有活动 Pi 进程时安全前滚一次未完成的锚点同步。"""
+
+    ledger_path = _require_authoritative_qualification_ledger(ledger_path)
+    if not all(
+        isinstance(value, str) and bool(value.strip())
+        for value in (recovered_by, recovery_reason)
+    ):
+        raise QualificationError("资格台账恢复身份和原因不能为空")
+    _require_active_superadmin(
+        db_path=db_path,
+        actor_user_id=recovered_by,
+    )
+    verify_frozen_inventory(db_path=db_path, manifest_path=manifest_path)
+    lock_path = _qualification_ledger_lock_path(ledger_path)
+    with _exclusive_file_lock(
+        lock_path,
+        "已有 G4 Pi 链路正在执行，不能恢复资格台账",
+    ):
+        return _recover_qualification_ledger_anchor_unlocked(
+            db_path=db_path,
+            ledger_path=ledger_path,
+            recovered_by=recovered_by,
+            recovery_reason=recovery_reason,
+            allow_pre_egress_cancel=False,
+        )
+
+
+def create_qualification_batch(
+    *,
+    db_path: Path,
+    manifest_path: Path,
+    ledger_path: Path,
+    owner_user_id: str,
+    relay_base_url: str,
+    timeout_seconds: int,
+    expected_commit: str,
+    authorized_by: str,
+    authorization_reason: str,
+    idempotency_key: str,
+    confirm_initial_batch: bool,
+    confirm_new_batch_after_exhausted_history: bool,
+    previous_report_paths: tuple[Path, ...],
+    git_identity: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """创建独立于工作树和连接数据库的正式资格批次。"""
+
+    ledger_path = _require_authoritative_qualification_ledger(ledger_path)
+    if confirm_initial_batch == confirm_new_batch_after_exhausted_history:
+        raise QualificationError("必须且只能确认一种资格批次类型")
+    if confirm_initial_batch and previous_report_paths:
+        raise QualificationError("首个资格批次不得携带历史报告")
+    if (
+        confirm_new_batch_after_exhausted_history
+        and len(previous_report_paths) != 2
+    ):
+        raise QualificationError("新资格批次必须登记两份已耗尽的历史报告")
+    if not all(
+        isinstance(value, str) and bool(value.strip())
+        for value in (
+            owner_user_id,
+            expected_commit,
+            authorized_by,
+            authorization_reason,
+            idempotency_key,
+        )
+    ):
+        raise QualificationError("资格批次身份和授权原因不能为空")
+    if not isinstance(relay_base_url, str) or not relay_base_url.strip():
+        raise QualificationError("资格批次 Relay 地址不能为空")
+    if (
+        not isinstance(timeout_seconds, int)
+        or isinstance(timeout_seconds, bool)
+        or timeout_seconds <= 0
+        or timeout_seconds > 7200
+    ):
+        raise QualificationError("资格批次超时必须在 1 到 7200 秒之间")
+    _require_active_superadmin(db_path=db_path, actor_user_id=authorized_by)
+    relay_base_url = _validate_pi_relay_base_url(relay_base_url)
+    identity = dict(git_identity or _git_identity())
+    if identity != {"git_commit": expected_commit, "git_dirty": False}:
+        raise QualificationError("资格批次必须绑定预期的干净 Git 提交")
+    verify_frozen_inventory(db_path=db_path, manifest_path=manifest_path)
+    manifest = _load_manifest(manifest_path)
+    previous_evidence: list[dict[str, object]] = []
+    seen_report_sha256: set[str] = set()
+    seen_attempt_identity_sha256: set[str] = set()
+    seen_task_ids: set[str] = set()
+    manifest_provider_set = {
+        (
+            str(provider["connection_id"]),
+            str(provider["connection_version"]),
+            str(provider["preset_id"]),
+            str(provider["model"]),
+            str(provider["api_format"]),
+        )
+        for provider in manifest["providers"]
+        if isinstance(provider, dict)
+    }
+    for report_path in previous_report_paths:
+        report = _load_evidence(report_path, "g4-pi-provider-report-v1")
+        report_sha256 = _file_sha256(report_path)
+        report_providers = report.get("providers")
+        report_provider_set = {
+            (
+                str(provider.get("connection_id")),
+                str(provider.get("connection_version")),
+                str(provider.get("preset_id")),
+                str(provider.get("model")),
+                str(provider.get("api_format")),
+            )
+            for provider in report_providers
+            if isinstance(provider, dict)
+        } if isinstance(report_providers, list) else set()
+        provider_outcomes = [
+            str(provider.get("outcome"))
+            for provider in (report_providers or [])
+            if isinstance(provider, dict)
+        ]
+        report_task_ids = {
+            str(provider.get("task_id"))
+            for provider in (report_providers or [])
+            if isinstance(provider, dict)
+            and str(provider.get("task_id") or "").strip()
+        }
+        attempt_identity_sha256 = _canonical_sha256(report)
+        if (
+            report_sha256 in seen_report_sha256
+            or attempt_identity_sha256 in seen_attempt_identity_sha256
+            or bool(report_task_ids & seen_task_ids)
+            or report.get("manifest_sha256") != manifest["manifest_sha256"]
+            or report.get("synthetic_egress_only") is not True
+            or report.get("pi_provider_chain_passed") is not False
+            or report_provider_set != manifest_provider_set
+            or len(report_providers or []) != len(manifest_provider_set)
+            or len(report_task_ids) != len(manifest_provider_set)
+            or not provider_outcomes
+            or any(
+                outcome not in {"failed", "outcome_unknown"}
+                for outcome in provider_outcomes
+            )
+            or any(
+                provider.get("permission_profile") != "standard"
+                or provider.get("pi_provider_chain_passed") is not False
+                or not str(provider.get("owner_user_id") or "").strip()
+                for provider in (report_providers or [])
+                if isinstance(provider, dict)
+            )
+        ):
+            raise QualificationError("历史 Pi 报告与当前资格批次不一致")
+        seen_report_sha256.add(report_sha256)
+        seen_attempt_identity_sha256.add(attempt_identity_sha256)
+        seen_task_ids.update(report_task_ids)
+        aggregate_outcome = (
+            "outcome_unknown"
+            if "outcome_unknown" in provider_outcomes
+            else "failed"
+        )
+        previous_evidence.append(
+            {
+                "sha256": report_sha256,
+                "attempt_identity_sha256": attempt_identity_sha256,
+                "schema_version": report["schema_version"],
+                "manifest_sha256": report["manifest_sha256"],
+                "git_commit": report.get("git_commit"),
+                "generated_at": report.get("generated_at"),
+                "outcome": aggregate_outcome,
+                "provider_outcomes": provider_outcomes,
+                "task_ids": sorted(report_task_ids),
+            }
+        )
+    try:
+        anchor = _load_qualification_ledger_anchor(db_path=db_path)
+        if anchor is None:
+            if not confirm_new_batch_after_exhausted_history:
+                raise QualificationError(
+                    "权威台账首次建立必须绑定两份已耗尽的旧报告"
+                )
+            if ledger_path.exists():
+                raise QualificationError(
+                    "发现没有外部锚点的资格台账，拒绝自动接管"
+                )
+            ledger = QualificationBatchLedger(ledger_path)
+        else:
+            ledger = _anchored_qualification_ledger(
+                db_path=db_path,
+                ledger_path=ledger_path,
+            )
+        batch = ledger.create_batch(
+            manifest_sha256=str(manifest["manifest_sha256"]),
+            providers=[dict(provider) for provider in manifest["providers"]],
+            expected_commit=expected_commit,
+            owner_user_id=owner_user_id,
+            relay_base_url=relay_base_url,
+            timeout_seconds=timeout_seconds,
+            authorized_by=authorized_by,
+            authorization_reason=authorization_reason,
+            idempotency_key=idempotency_key,
+            batch_kind=(
+                "initial" if confirm_initial_batch else "successor"
+            ),
+            parent_batch_id=None,
+            previous_evidence=previous_evidence,
+        )
+        _sync_qualification_ledger_anchor(
+            db_path=db_path,
+            ledger=ledger,
+            bootstrap_batch_id=(str(batch["batch_id"]) if anchor is None else None),
+            initialized_by=(authorized_by if anchor is None else None),
+        )
+        return batch
+    except (QualificationLedgerError, sqlite3.Error, OSError) as exc:
+        raise QualificationError(str(exc)) from exc
 
 
 def _write_json_atomic(path: Path, value: object) -> None:
@@ -376,6 +913,68 @@ def _attempt_ledger_callbacks(
         persist()
 
     return prior_checks, before_provider, after_provider
+
+
+def authorize_qualification_batch_retry(
+    *,
+    db_path: Path,
+    manifest_path: Path,
+    ledger_path: Path,
+    batch_id: str,
+    connection_id: str,
+    authorized_by: str,
+    authorization_reason: str,
+    confirm_duplicate_request_and_cost: bool,
+    git_identity: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """把用户决定的一次恢复重试写入正式资格批次台账。"""
+
+    ledger_path = _require_authoritative_qualification_ledger(ledger_path)
+    if not confirm_duplicate_request_and_cost:
+        raise QualificationError("未确认重复 Provider 请求和费用风险")
+    if not all(
+        isinstance(value, str) and bool(value.strip())
+        for value in (
+            batch_id,
+            connection_id,
+            authorized_by,
+            authorization_reason,
+        )
+    ):
+        raise QualificationError("重试授权身份和原因不能为空")
+    _require_active_superadmin(db_path=db_path, actor_user_id=authorized_by)
+    verify_frozen_inventory(db_path=db_path, manifest_path=manifest_path)
+    manifest = _load_manifest(manifest_path)
+    providers = [
+        dict(provider)
+        for provider in manifest["providers"]
+        if provider.get("connection_id") == connection_id
+    ]
+    if len(providers) != 1:
+        raise QualificationError("重试授权连接不属于冻结清单")
+    try:
+        ledger = _anchored_qualification_ledger(
+            db_path=db_path,
+            ledger_path=ledger_path,
+        )
+        authorization = ledger.authorize_retry(
+            batch_id=batch_id,
+            provider=providers[0],
+            manifest_sha256=str(manifest["manifest_sha256"]),
+            git_identity=dict(git_identity or _git_identity()),
+            authorized_by=authorized_by,
+            authorization_reason=authorization_reason,
+            user_confirmed_duplicate_request_and_cost=(
+                confirm_duplicate_request_and_cost
+            ),
+        )
+        _sync_qualification_ledger_anchor(
+            db_path=db_path,
+            ledger=ledger,
+        )
+        return authorization
+    except (QualificationLedgerError, sqlite3.Error, OSError) as exc:
+        raise QualificationError(str(exc)) from exc
 
 
 def authorize_ambiguous_retry(
@@ -1128,6 +1727,7 @@ async def _execute_pi_provider_chain_unlocked(
     after_provider: Callable[
         [dict[str, object], dict[str, object]], None
     ] | None = None,
+    qualification_batch: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """执行真实 Pi→Grant→Relay→Provider→Usage 合成链路。"""
 
@@ -1147,7 +1747,7 @@ async def _execute_pi_provider_chain_unlocked(
         raise QualificationError("G4 合成 Owner 不能为空")
     if timeout_seconds <= 0:
         raise QualificationError("超时必须大于 0 秒")
-    relay_base_url = _validate_relay_base_url(relay_base_url)
+    relay_base_url = _validate_pi_relay_base_url(relay_base_url)
     identity = _git_identity()
     if expected_commit is not None and (
         identity["git_commit"] != expected_commit or identity["git_dirty"]
@@ -1332,6 +1932,9 @@ async def _execute_pi_provider_chain_unlocked(
         "qualification_blockers": blockers,
         "providers": checks,
     }
+    if qualification_batch is not None:
+        report["qualification_ledger_id"] = qualification_batch["ledger_id"]
+        report["qualification_batch_id"] = qualification_batch["batch_id"]
     _write_json_atomic(output_path, report)
     return report
 
@@ -1348,29 +1951,102 @@ async def execute_pi_provider_chain(
     expected_commit: str | None = None,
     broker: ConnectionBroker | None = None,
     runtime_factory=None,
+    qualification_ledger_path: Path | None = None,
+    qualification_batch_id: str | None = None,
 ) -> dict[str, object]:
     """串行化同一正式 Pi 证据目标，避免重复外发。"""
 
-    relay_base_url = _validate_relay_base_url(relay_base_url)
-    lock_path, ledger_path = _qualification_state_paths(
-        db_path=db_path,
-        manifest_path=manifest_path,
-        action="pi-provider",
+    relay_base_url = _validate_pi_relay_base_url(relay_base_url)
+    if (qualification_ledger_path is None) != (qualification_batch_id is None):
+        raise QualificationError("资格台账路径和批次 ID 必须同时提供")
+    if qualification_ledger_path is None:
+        raise QualificationError("正式 Pi 外发必须绑定持久资格批次")
+    qualification_ledger_path = _require_authoritative_qualification_ledger(
+        qualification_ledger_path
+    )
+    lock_path = _qualification_ledger_lock_path(
+        qualification_ledger_path
     )
     with _exclusive_file_lock(lock_path, "已有相同 G4 Pi 链路正在执行"):
         manifest = _load_manifest(manifest_path)
-        prior_checks, before_provider, after_provider = _attempt_ledger_callbacks(
-            ledger_path=ledger_path,
-            action="pi-provider",
-            manifest=manifest,
-            run_context={
-                **_git_identity(),
-                "relay_base_url": relay_base_url,
-                "timeout_seconds": timeout_seconds,
-                "owner_user_id": owner_user_id,
-                "expected_commit": expected_commit,
-            },
-        )
+        run_context = {
+            **_git_identity(),
+            "relay_base_url": relay_base_url,
+            "timeout_seconds": timeout_seconds,
+            "owner_user_id": owner_user_id,
+            "expected_commit": expected_commit,
+        }
+        try:
+            durable_ledger = _anchored_qualification_ledger(
+                db_path=db_path,
+                ledger_path=qualification_ledger_path,
+            )
+            qualification_batch, prior_checks = durable_ledger.prepare_run(
+                batch_id=str(qualification_batch_id),
+                manifest_sha256=str(manifest["manifest_sha256"]),
+                providers=[
+                    dict(provider) for provider in manifest["providers"]
+                ],
+                run_context=run_context,
+            )
+
+            def before_provider(
+                provider: dict[str, object],
+                attempt_context: dict[str, object],
+            ) -> None:
+                sanitized_context = {
+                    name: value
+                    for name, value in attempt_context.items()
+                    if name != "execution_root"
+                }
+                sanitized_context["execution_root_sha256"] = hashlib.sha256(
+                    str(attempt_context["execution_root"]).encode("utf-8")
+                ).hexdigest()
+                durable_ledger.begin_attempt(
+                    batch_id=str(qualification_batch_id),
+                    provider=provider,
+                    attempt_context=sanitized_context,
+                )
+                # 外发前先把单调版本写入连接数据库；任一侧失败都不能继续请求 Provider。
+                try:
+                    _sync_qualification_ledger_anchor(
+                        db_path=db_path,
+                        ledger=durable_ledger,
+                    )
+                except QualificationError as sync_error:
+                    try:
+                        _recover_qualification_ledger_anchor_unlocked(
+                            db_path=db_path,
+                            ledger_path=qualification_ledger_path,
+                            recovered_by="system",
+                            recovery_reason=(
+                                "外发前锚点同步失败，撤回未发送的 Attempt"
+                            ),
+                            allow_pre_egress_cancel=True,
+                        )
+                    except QualificationError as recovery_error:
+                        raise QualificationError(
+                            "外发前锚点同步失败且自动收口未完成；未发送 Provider 请求"
+                        ) from recovery_error
+                    raise QualificationError(
+                        "外发前锚点同步失败，未发送 Provider 请求且 Attempt 已撤回"
+                    ) from sync_error
+
+            def after_provider(
+                provider: dict[str, object],
+                check: dict[str, object],
+            ) -> None:
+                durable_ledger.finish_attempt(
+                    batch_id=str(qualification_batch_id),
+                    provider=provider,
+                    check=check,
+                )
+                _sync_qualification_ledger_anchor(
+                    db_path=db_path,
+                    ledger=durable_ledger,
+                )
+        except (QualificationLedgerError, sqlite3.Error, OSError) as exc:
+            raise QualificationError(str(exc)) from exc
         report = await _execute_pi_provider_chain_unlocked(
             db_path=db_path,
             manifest_path=manifest_path,
@@ -1385,6 +2061,7 @@ async def execute_pi_provider_chain(
             prior_checks=prior_checks,
             before_provider=before_provider,
             after_provider=after_provider,
+            qualification_batch=qualification_batch,
         )
         return report
 
@@ -1461,6 +2138,7 @@ def _load_evidence(path: Path, schema_version: str) -> dict[str, object]:
 
 def assess_g4_evidence(
     *,
+    db_path: Path,
     manifest_path: Path,
     pi_report_path: Path,
     transport_report_path: Path,
@@ -1468,9 +2146,14 @@ def assess_g4_evidence(
     output_path: Path,
     expected_commit: str,
     expected_manifest_sha256: str,
+    qualification_ledger_path: Path,
+    qualification_batch_id: str,
 ) -> dict[str, object]:
     """只在三组独立证据身份一致时形成 G4 最终资格。"""
 
+    qualification_ledger_path = _require_authoritative_qualification_ledger(
+        qualification_ledger_path
+    )
     if output_path.exists():
         raise QualificationError("G4 最终报告已存在，拒绝覆盖")
     manifest = _load_manifest(manifest_path)
@@ -1500,6 +2183,35 @@ def assess_g4_evidence(
         "g4-vault-rotation-report-v2",
     )
     blockers: list[str] = []
+    batch_ledger_valid = False
+    if qualification_ledger_path.is_file():
+        try:
+            _anchored_qualification_ledger(
+                db_path=db_path,
+                ledger_path=qualification_ledger_path,
+            ).validate_passed_batch(
+                batch_id=qualification_batch_id,
+                manifest_sha256=expected_manifest_sha256,
+                providers=[dict(item) for item in manifest["providers"]],
+                expected_commit=expected_commit,
+                expected_ledger_id=str(
+                    pi_report.get("qualification_ledger_id") or ""
+                ),
+            )
+            batch_ledger_valid = (
+                pi_report.get("qualification_batch_id")
+                == qualification_batch_id
+            )
+        except (
+            QualificationLedgerError,
+            sqlite3.Error,
+            OSError,
+            ValueError,
+            AttributeError,
+        ):
+            batch_ledger_valid = False
+    if not batch_ledger_valid:
+        blockers.append("qualification_batch_invalid")
     pi_providers = pi_report.get("providers")
     pi_provider_set = {
         (
@@ -1572,11 +2284,14 @@ def assess_g4_evidence(
         "manifest_sha256": expected_manifest_sha256,
         "g4_qualified": True,
         "qualification_blockers": [],
+        "qualification_batch_id": qualification_batch_id,
+        "qualification_ledger_id": pi_report["qualification_ledger_id"],
         "evidence_sha256": {
             "manifest": _file_sha256(manifest_path),
             "pi_provider": _file_sha256(pi_report_path),
             "transport_safety": _file_sha256(transport_report_path),
             "vault_rotation": _file_sha256(rotation_report_path),
+            "qualification_ledger": _file_sha256(qualification_ledger_path),
         },
     }
     _write_json_atomic(output_path, report)
@@ -1584,15 +2299,27 @@ def assess_g4_evidence(
 
 
 def _validate_relay_base_url(value: str) -> str:
+    if not isinstance(value, str):
+        raise QualificationError("模型 Relay 必须是无凭证的本机地址")
     parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or parsed.hostname not in {
-        "127.0.0.1",
-        "localhost",
-        "::1",
-    }:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.username is not None
+        or parsed.password is not None
+        or bool(parsed.query)
+        or bool(parsed.fragment)
+    ):
         # Grant Token 只能发送给本机内部 Relay，不能被参数改成外部接收方。
-        raise QualificationError("模型 Relay 必须是本机地址")
+        raise QualificationError("模型 Relay 必须是无凭证的本机地址")
     return value.rstrip("/")
+
+
+def _validate_pi_relay_base_url(value: str) -> str:
+    normalized = _validate_relay_base_url(value)
+    if urlsplit(normalized).path != "/internal/model-relay":
+        raise QualificationError("正式 Pi Relay 必须是精确的本机内部地址")
+    return normalized
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -1604,6 +2331,34 @@ def _parser() -> argparse.ArgumentParser:
     freeze.add_argument("--db-path", required=True, type=Path)
     freeze.add_argument("--preset", action="append", required=True)
     freeze.add_argument("--output", required=True, type=Path)
+    start_batch = subparsers.add_parser(
+        "start-batch",
+        help="创建独立持久的 Provider 资格批次",
+    )
+    start_batch.add_argument("--db-path", required=True, type=Path)
+    start_batch.add_argument("--manifest", required=True, type=Path)
+    start_batch.add_argument("--owner-user-id", required=True)
+    start_batch.add_argument(
+        "--relay-base-url",
+        default="http://127.0.0.1:8088/internal/model-relay",
+    )
+    start_batch.add_argument("--timeout-seconds", type=int, default=1800)
+    start_batch.add_argument("--expected-commit", required=True)
+    start_batch.add_argument("--authorized-by", required=True)
+    start_batch.add_argument("--authorization-reason", required=True)
+    start_batch.add_argument("--idempotency-key", required=True)
+    batch_kind = start_batch.add_mutually_exclusive_group(required=True)
+    batch_kind.add_argument("--confirm-initial-batch", action="store_true")
+    batch_kind.add_argument(
+        "--confirm-new-batch-after-exhausted-history",
+        action="store_true",
+    )
+    start_batch.add_argument(
+        "--previous-pi-report",
+        action="append",
+        type=Path,
+        default=[],
+    )
     run = subparsers.add_parser(
         "run",
         help="执行冻结清单的 Broker/Relay 烟测（不形成 G4 资格）",
@@ -1628,6 +2383,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     run_pi.add_argument("--owner-user-id", required=True)
     run_pi.add_argument("--expected-commit", required=True)
+    run_pi.add_argument("--qualification-batch-id", required=True)
     run_pi.add_argument("--confirm-synthetic-egress", action="store_true")
     run_pi.add_argument("--timeout-seconds", type=int, default=1800)
     authorize_retry = subparsers.add_parser(
@@ -1636,18 +2392,22 @@ def _parser() -> argparse.ArgumentParser:
     )
     authorize_retry.add_argument("--db-path", required=True, type=Path)
     authorize_retry.add_argument("--manifest", required=True, type=Path)
-    authorize_retry.add_argument("--owner-user-id", required=True)
+    authorize_retry.add_argument("--batch-id", required=True)
     authorize_retry.add_argument("--connection-id", required=True)
-    authorize_retry.add_argument(
-        "--relay-base-url",
-        default="http://127.0.0.1:8088/internal/model-relay",
-    )
-    authorize_retry.add_argument("--timeout-seconds", type=int, default=1800)
-    authorize_retry.add_argument("--expected-commit", required=True)
+    authorize_retry.add_argument("--authorized-by", required=True)
+    authorize_retry.add_argument("--authorization-reason", required=True)
     authorize_retry.add_argument(
         "--confirm-duplicate-request-and-cost",
         action="store_true",
     )
+    recover_anchor = subparsers.add_parser(
+        "recover-anchor",
+        help="在无活动 Pi 进程时收口一次本地锚点同步失败",
+    )
+    recover_anchor.add_argument("--db-path", required=True, type=Path)
+    recover_anchor.add_argument("--manifest", required=True, type=Path)
+    recover_anchor.add_argument("--recovered-by", required=True)
+    recover_anchor.add_argument("--recovery-reason", required=True)
     safety = subparsers.add_parser(
         "transport-safety",
         help="执行并冻结传输安全矩阵",
@@ -1658,12 +2418,14 @@ def _parser() -> argparse.ArgumentParser:
         "assess",
         help="汇总 Pi、传输安全与密钥轮换证据",
     )
+    assess.add_argument("--db-path", required=True, type=Path)
     assess.add_argument("--pi-report", required=True, type=Path)
     assess.add_argument("--manifest", required=True, type=Path)
     assess.add_argument("--transport-report", required=True, type=Path)
     assess.add_argument("--rotation-report", required=True, type=Path)
     assess.add_argument("--expected-commit", required=True)
     assess.add_argument("--expected-manifest-sha256", required=True)
+    assess.add_argument("--qualification-batch-id", required=True)
     assess.add_argument("--output", required=True, type=Path)
     rotate = subparsers.add_parser(
         "rotate-vault",
@@ -1705,6 +2467,31 @@ def main() -> int:
                 flush=True,
             )
             return 0
+        if args.command == "start-batch":
+            batch = create_qualification_batch(
+                db_path=args.db_path,
+                manifest_path=args.manifest,
+                ledger_path=AUTHORITATIVE_QUALIFICATION_LEDGER_PATH,
+                owner_user_id=args.owner_user_id,
+                relay_base_url=args.relay_base_url,
+                timeout_seconds=args.timeout_seconds,
+                expected_commit=args.expected_commit,
+                authorized_by=args.authorized_by,
+                authorization_reason=args.authorization_reason,
+                idempotency_key=args.idempotency_key,
+                confirm_initial_batch=args.confirm_initial_batch,
+                confirm_new_batch_after_exhausted_history=(
+                    args.confirm_new_batch_after_exhausted_history
+                ),
+                previous_report_paths=tuple(args.previous_pi_report),
+            )
+            print(
+                "G4_PROVIDER_QUALIFICATION_BATCH_CREATED "
+                f"batch_id={batch['batch_id']} "
+                f"ledger_id={batch['ledger_id']}",
+                flush=True,
+            )
+            return 0
         if args.command == "run":
             if not args.confirm_synthetic_egress:
                 raise QualificationError("未确认仅外发合成测试数据")
@@ -1741,6 +2528,10 @@ def main() -> int:
                     timeout_seconds=args.timeout_seconds,
                     owner_user_id=args.owner_user_id,
                     expected_commit=args.expected_commit,
+                    qualification_ledger_path=(
+                        AUTHORITATIVE_QUALIFICATION_LEDGER_PATH
+                    ),
+                    qualification_batch_id=args.qualification_batch_id,
                 )
             )
             print(
@@ -1751,14 +2542,14 @@ def main() -> int:
             )
             return 0 if report["pi_provider_chain_passed"] else 2
         if args.command == "authorize-ambiguous-retry":
-            report = authorize_ambiguous_retry(
+            report = authorize_qualification_batch_retry(
                 db_path=args.db_path,
                 manifest_path=args.manifest,
-                owner_user_id=args.owner_user_id,
+                ledger_path=AUTHORITATIVE_QUALIFICATION_LEDGER_PATH,
+                batch_id=args.batch_id,
                 connection_id=args.connection_id,
-                relay_base_url=args.relay_base_url,
-                timeout_seconds=args.timeout_seconds,
-                expected_commit=args.expected_commit,
+                authorized_by=args.authorized_by,
+                authorization_reason=args.authorization_reason,
                 confirm_duplicate_request_and_cost=(
                     args.confirm_duplicate_request_and_cost
                 ),
@@ -1766,6 +2557,21 @@ def main() -> int:
             print(
                 "G4_PROVIDER_AMBIGUOUS_RETRY_AUTHORIZED "
                 f"connection_id={report['connection_id']}",
+                flush=True,
+            )
+            return 0
+        if args.command == "recover-anchor":
+            report = recover_qualification_ledger_anchor(
+                db_path=args.db_path,
+                manifest_path=args.manifest,
+                ledger_path=AUTHORITATIVE_QUALIFICATION_LEDGER_PATH,
+                recovered_by=args.recovered_by,
+                recovery_reason=args.recovery_reason,
+            )
+            print(
+                "G4_PROVIDER_QUALIFICATION_ANCHOR_RECOVERED "
+                f"ledger_id={report['ledger_id']} "
+                f"ledger_revision={report['ledger_revision']}",
                 flush=True,
             )
             return 0
@@ -1782,6 +2588,7 @@ def main() -> int:
             return 0 if report["transport_safety_passed"] else 2
         if args.command == "assess":
             report = assess_g4_evidence(
+                db_path=args.db_path,
                 manifest_path=args.manifest,
                 pi_report_path=args.pi_report,
                 transport_report_path=args.transport_report,
@@ -1789,6 +2596,10 @@ def main() -> int:
                 output_path=args.output,
                 expected_commit=args.expected_commit,
                 expected_manifest_sha256=args.expected_manifest_sha256,
+                qualification_ledger_path=(
+                    AUTHORITATIVE_QUALIFICATION_LEDGER_PATH
+                ),
+                qualification_batch_id=args.qualification_batch_id,
             )
             print(
                 "G4_FINAL_ASSESSMENT_PASS "
