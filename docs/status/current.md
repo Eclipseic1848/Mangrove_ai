@@ -55,18 +55,16 @@ TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍
 - G2 PG-05 已完成：Word/Excel 连续 3/3；AC-05 带备份生产迁移、恢复副本状态机、真实
   Docker 探针及验收均通过。PR #44 已合并，Issue #38 已关闭。该结论不代表 Phase 4、平台
   发布或普通用户开放完成。
-- G4 外部 Provider 工程准备已完成但尚未形成生产资格：地址解析、关闭 SDK 盲重试和显式确认
-  新 Revision 的修复已提交为 `9ba95985`；多轮 Usage 汇总及任一轮未知时失败关闭的修复已提交
-  为 `a9e0d61d`，相关后端 169 项通过。绑定 `a9e0d61d` 的传输安全矩阵 6/6 通过。DeepSeek
-  V4 Flash 真实合成链形成 1 个候选并通过独立验证，6 次调用全部记录 Usage，合计 19,843
-  tokens，Pi 链通过。百炼 `qwen3.7-max-2026-06-08` 较早的一次运行在 Relay 到 Provider 的
-  HTTP 连接阶段返回 502，无模型内容、无 token，Usage 为 `unknown`；DNS、证书和当前解析到的
-  IPv4 TLS 握手均正常，官方文档也确认该模型支持 Responses API，因此现有证据不能归因为模型
-  能力失败。PR #45 进一步保证未知 Runtime 异常会持久化脱敏类型并收口 attempt，而不是遗留
-  `in_progress`。绑定 `09a67b43` 的传输矩阵 6/6；最终百炼复验第一次因 C 盘临时目录的 Docker
-  bind mount I/O 失败而保持 `outcome_unknown`，人工重试因 Relay 路径缺失在本机返回 405，
-  两次均未产生 Provider Usage，且重试额度已用尽。生产 Vault Key 不在本轮变更范围，百炼链
-  与三证据汇总均未通过，最终 G4 资格仍不完整。
+- G4 两条真实 Provider Pi 链和传输安全已通过，但最终生产资格仍缺 Vault 轮换证据：地址解析、
+  关闭 SDK 盲重试、显式确认、多轮 Usage 汇总和未知 Runtime 收口已完成。DeepSeek V4 Flash
+  真实合成链形成 1 个候选并通过独立验证，6 次调用全部记录 Usage，合计 19,843 tokens。
+  PR #47（`a0560852`）按 ADR-0031 增加固定持久台账、生产数据库单调锚点、全局运行锁、旧证据
+  去重及进程退出后的 `outcome_unknown` 恢复规则。新的百炼后继批次保留旧两次失败历史后只
+  执行 Attempt 1：Qwen `qwen3.7-max-2026-06-08` 形成 1 个候选并通过独立验证，11 次调用
+  Usage 全部为 `recorded`，合计 36,744 tokens；批次、Provider 与 Attempt 均为 `passed`，
+  两个 Grant 已撤销，无重试、恢复事件或 Docker 残留。台账 revision 3 与生产锚点身份、版本和
+  状态哈希一致。绑定 `a0560852` 的传输安全矩阵 6/6 通过。生产 Vault Key 未轮换，无法生成
+  同一身份的轮换报告，最终三证据汇总仍被阻断，G4 不得表述为完整合格。
 - G3 Rollout P0 GateSnapshot、累计硬门、P0 自动回退与分阶段默认切换已完成工程实现、生产
   迁移和生产 Gate/Approval 初始化；运行态核验曾因旧 8088 进程触发 P0 回退，后端现已重启
   加载 G3、取得新合格快照并恢复到 `admin_gray`。工程代码已通过 PR #44 合入；生产默认切换
@@ -461,8 +459,8 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
    96.8%、安全 100%，资格 PASS。
 2. **G2 已关闭、G3 `admin_gray` 恢复验收已通过**：PR #44 已合并并关闭 #38/#43；正式
    默认切换仍由 G4 完整合格门阻断，Issue #39 保持 OPEN，生产不得提前扩大。
-3. **G4 部分通过、G5 未完成**：传输矩阵与 DeepSeek Pi 链通过；百炼最终仍未形成合格链，
-   Vault 证据缺失；8B Linux/Compose 与目标服务器仍未就绪。
+3. **G4 部分通过、G5 未完成**：传输矩阵与 DeepSeek/百炼 Pi 链均通过；Vault 轮换证据缺失，
+   因此 G4 最终汇总和 G3 默认切换仍被阻断；8B Linux/Compose 与目标服务器仍未就绪。
 
 ## 8. 权威证据
 
