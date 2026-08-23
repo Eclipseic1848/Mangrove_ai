@@ -88,7 +88,8 @@ E:/python3.13/python.exe -X utf8 evals/generalization-g1/run_g1.py --dry-run
 - 首次生产 GateSnapshot 为 `abfc951ee4a99f282484f46c8ffe0c48f36e4c924fd2d765cacc3dd7de992b38`；
   独立 `explicit_opt_in` Approval 已记录但未执行模式切换。运行态核验随后追加修正快照
   `39c168fb4009478fcd731dbe1f5f10d05d8685b5721cbe7bc5302eddc1ab9fa8`，当前 P0 已阻断。
-- 8088 已重启为加载 G3 的 PID `5136`；新活动快照
+- 8088 已由标准 supervisor 重启并加载 G3；接手时应现场核对端口进程与 `/api/health`，
+  不得复用历史 PID。新活动快照
   `a936510e53eebc2abb04ce984e1fb72821730d0dc1ce9d37760d2c85beec3571` 累计有效合格，
   `admin_gray` 恢复 Approval 已独立记录并执行，技术烟测通过；未扩大普通用户权限。
 

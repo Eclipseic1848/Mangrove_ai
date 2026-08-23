@@ -429,7 +429,7 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
   `legacy_rollback`、`p0_blocked=true`；
 - 独立 Approval `approval-explicit-opt-in-abfc951ee4a99f28` 已由超级管理员
   `u_9505fd620899` 本人身份记录，但它绑定历史快照 `abfc951e...`，不能用于当前活动快照；
-- 后端已由标准 supervisor 重启为 PID `5136`，启动时间晚于 G3 提交，`src/` 与
+- 后端在 G3 验收时已由标准 supervisor 重启，启动时间晚于 G3 提交，`src/` 与
   `21dbf11b` 一致、项目 supervisor 收敛为 1 个且 `/api/health` 返回 200。新活动快照
   `a936510e53eebc2abb04ce984e1fb72821730d0dc1ce9d37760d2c85beec3571` 的六项硬门均
   通过且累计有效合格；更新后的运行态证据为
