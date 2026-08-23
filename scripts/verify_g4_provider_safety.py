@@ -1282,6 +1282,12 @@ async def _execute_pi_provider_chain_unlocked(
                 check["error_code"] = "pi_timeout"
             except (QualificationError, ConnectionError, PiRuntimeError, OSError):
                 check["error_code"] = "pi_chain_failed"
+            except Exception as exc:
+                # 运行器的未知异常也可能发生在请求发出之后；必须保留未知结果并收口台账，
+                # 但不能把可能含路径、Token 或 Provider 正文的异常消息写入正式证据。
+                check["outcome"] = "outcome_unknown"
+                check["error_code"] = "pi_internal_error"
+                check["error_type"] = type(exc).__name__
             if check["usage_status"] == "missing":
                 usage_status, usage_summary = _usage_summary(
                     active_broker,
