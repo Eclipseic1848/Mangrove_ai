@@ -25,6 +25,7 @@ from src.services.document_extraction import (
     InstructorSemanticMatchProvider,
     SemanticMatchBatch,
     SemanticMatchDecision,
+    _build_instructor_client,
     _document_structured_extra_body,
 )
 from src.llm.provider import ResolvedModelConnection
@@ -65,6 +66,38 @@ def test_document_structured_output_forces_thinking_off():
             {"chat_template_kwargs": {"enable_thinking": True}},
         )
     ) == {"chat_template_kwargs": {"enable_thinking": False}}
+
+
+def test_document_model_client_disables_blind_network_retries(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    captured: dict[str, object] = {}
+    raw_client = object()
+
+    def build_client(**kwargs):
+        captured.update(kwargs)
+        return raw_client
+
+    monkeypatch.setattr("openai.OpenAI", build_client)
+    monkeypatch.setattr("instructor.from_openai", lambda client, mode: client)
+    monkeypatch.setattr(
+        "src.services.document_extraction.get_provider",
+        lambda: SimpleNamespace(
+            resolve_model=lambda provider, model: _connection(provider, model)
+        ),
+    )
+
+    client, model, _ = _build_instructor_client(
+        provider="local",
+        model="fixture-model",
+        base_url=None,
+        api_key=None,
+    )
+
+    assert client is raw_client
+    assert model == "fixture-model"
+    assert captured["max_retries"] == 0
+    captured["http_client"].close()
 
 
 def _semantic_provider_with(decisions):

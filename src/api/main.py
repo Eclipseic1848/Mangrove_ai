@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import sys
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -108,6 +109,25 @@ app.include_router(capability_governance.admin_router)
 @app.get("/api/health")
 def health():
     return {"ok": True, "service": "mangrove-webui"}
+
+
+@app.get("/api/readiness")
+def readiness():
+    from src.api.auth import get_store
+    from src.api.readiness import collect_workspace_readiness
+    from src.api.semantic_workspace_runtime import get_semantic_workspace_manager
+
+    report = collect_workspace_readiness(
+        store=get_store(),
+        manager=get_semantic_workspace_manager(),
+        upload_root=Path(settings.data_prep_upload_root),
+        execution_root=Path(settings.semantic_execution_root),
+        artifact_root=Path(settings.data_prep_artifact_root),
+    )
+    return JSONResponse(
+        status_code=200 if report.ready else 503,
+        content=asdict(report),
+    )
 
 
 # ---------- 前端静态托管（构建后才有 dist；开发期用 Vite，不影响）----------

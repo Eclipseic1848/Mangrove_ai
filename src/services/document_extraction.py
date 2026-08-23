@@ -142,6 +142,8 @@ def _build_instructor_client(
     raw_client = OpenAI(
         base_url=resolved_url,
         api_key=resolved_key,
+        # 网络超时后的结果可能未知，禁止 SDK 盲重放；是否重试交由用户决定。
+        max_retries=0,
         http_client=httpx.Client(
             trust_env=connection.trust_env if base_url is None else False,
             timeout=connection.timeout,

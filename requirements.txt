@@ -103,7 +103,7 @@ mypy_extensions==1.1.0
 narwhals==2.15.0
 nest-asyncio==1.6.0
 networkx==3.6.1
-numpy==2.4.0
+numpy==2.4.1
 openpyxl==3.1.5
 nvidia-cublas-cu11==11.11.3.6
 nvidia-cuda-cupti-cu11==11.8.87
@@ -164,11 +164,11 @@ opentelemetry-sdk==1.39.1
 opentelemetry-semantic-conventions==0.60b1
 opentelemetry-semantic-conventions-ai==0.4.13
 opentelemetry-util-http==0.60b1
-orjson==3.11.5
+orjson==3.11.8
 ormsgpack==1.12.1
 packaging==25.0
 pandas==2.3.3
-pillow==12.1.0
+pillow==12.2.0
 plotly==6.6.0
 prettytable==3.17.0
 propcache==0.4.1
@@ -176,7 +176,7 @@ protobuf==6.33.4
 pyarrow==22.0.0
 duckdb==1.5.5
 pandera==0.32.1
-polars==1.43.0
+polars==1.43.2
 # 数据准备测试与 Phase 2-4 解析依赖（按需启用对应连接器/解析器）
 cn2an==0.5.24
 dateparser==1.4.1
@@ -274,10 +274,9 @@ zipp==3.23.0
 zstandard==0.25.0
 
 # ===== 采集引擎（Mangrove 采集层）=====
-# crawl4ai 需要 lxml~=5.3，scrapling 需要 lxml>=6.1，二者互斥；
-# 经验证锁定 lxml==5.4.0 时两者运行期均正常（pip 仅给出告警），优先保障默认引擎 crawl4ai。
-crawl4ai==0.9.0
-lxml==5.4.0
+# crawl4ai 0.9.1 支持 lxml>=5.3,<7，可与 scrapling 的 lxml>=6.1.1 同时满足。
+crawl4ai==0.9.1
+lxml==6.1.1
 scrapling==0.4.9
 curl_cffi==0.15.0
 browserforge==1.2.4
