@@ -1152,6 +1152,83 @@ def test_pi_provider_chain_uses_standard_ordinary_owner_and_never_claims_g4(
     assert "deepseek-secret-for-test" not in report_path.read_text(encoding="utf-8")
 
 
+def test_pi_provider_chain_closes_attempt_when_runtime_raises_unexpected_error(
+    tmp_path,
+):
+    database = tmp_path / "webui.db"
+    manifest_path = tmp_path / "manifest.json"
+    report_path = tmp_path / "pi-report.json"
+    execution_root = tmp_path / "execution"
+    broker = ConnectionBroker(
+        repository=ModelConnectionRepository(str(database)),
+        vault=FernetCredentialVault.generate(),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "OK"}}],
+                    "usage": {
+                        "prompt_tokens": 1,
+                        "completion_tokens": 1,
+                        "total_tokens": 2,
+                    },
+                },
+            )
+        ),
+        resolver=lambda _host: ["8.8.8.8"],
+    )
+    asyncio.run(
+        broker.configure_platform_preset(
+            actor_user_id="super-admin",
+            display_name="平台 DeepSeek",
+            preset_id="deepseek",
+            api_key="deepseek-secret-for-test",
+            model="deepseek-v4-flash",
+        )
+    )
+    manifest = freeze_manifest(db_path=database, presets=["deepseek"])
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    class FailingRuntime:
+        async def start(self, _request, *, on_event):
+            del on_event
+            raise RuntimeError("包含不应写入报告的本机异常上下文")
+
+    report = asyncio.run(
+        execute_pi_provider_chain(
+            db_path=database,
+            manifest_path=manifest_path,
+            output_path=report_path,
+            execution_root=execution_root,
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            owner_user_id="g4-ordinary-synthetic-user",
+            broker=broker,
+            runtime_factory=lambda **_kwargs: FailingRuntime(),
+        )
+    )
+
+    assert report_path.is_file()
+    provider = report["providers"][0]
+    assert provider["outcome"] == "outcome_unknown"
+    assert provider["error_code"] == "pi_internal_error"
+    assert provider["error_type"] == "RuntimeError"
+    assert "本机异常上下文" not in report_path.read_text(encoding="utf-8")
+
+    _, ledger_path = _qualification_state_paths(
+        db_path=database,
+        manifest_path=manifest_path,
+        action="pi-provider",
+    )
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    entry = next(iter(ledger["providers"].values()))
+    assert entry["state"] == "outcome_unknown"
+    assert entry["check"]["error_code"] == "pi_internal_error"
+
+
 def test_pi_provider_chain_rejects_external_relay_before_grant_issue(tmp_path):
     with pytest.raises(QualificationError, match="Relay 必须是本机地址"):
         asyncio.run(
