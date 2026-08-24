@@ -264,7 +264,7 @@ export function TaskComposer({
     formats: string[];
     provider: string;
     model: string | null;
-    runtimeVersion: "legacy" | "pi";
+    runtimeVersion?: "legacy" | "pi";
     permissionProfile: "standard";
     modelConnectionId: string | null;
     modelConnectionModel: string | null;
@@ -291,14 +291,31 @@ export function TaskComposer({
   const [items, setItems] = useState<UploadDraft[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
-  const [runtimeVersion, setRuntimeVersion] =
-    useState<"legacy" | "pi">("legacy");
+  const [runtimeSelection, setRuntimeSelection] =
+    useState<"platform_default" | "legacy" | "pi">("platform_default");
+  const usesPiConfiguration =
+    allowPiRuntime && runtimeSelection !== "legacy";
   const [selectedConnectionId, setSelectedConnectionId] = useState("");
   const [selectedConnectionModelId, setSelectedConnectionModelId] = useState("");
   const [externalApiConfirmed, setExternalApiConfirmed] = useState(false);
   const [selectedCapabilityIds, setSelectedCapabilityIds] = useState<string[]>([]);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [fileNotice, setFileNotice] = useState("");
+  useEffect(() => {
+    if (!allowPiRuntime && runtimeSelection === "pi") {
+      setRuntimeSelection("platform_default");
+    }
+  }, [allowPiRuntime, runtimeSelection]);
+  useEffect(() => {
+    if (runtimeSelection !== "legacy") return;
+    setSelectedConnectionId("");
+    setSelectedConnectionModelId("");
+    setSelectedCapabilityIds([]);
+    setExternalApiConfirmed(false);
+    if (defaultModel) {
+      setSelectedModel(`${defaultModel.provider}::${defaultModel.model}`);
+    }
+  }, [defaultModel, runtimeSelection]);
   const readyUploads = useMemo(
     () =>
       items.flatMap((item) =>
@@ -315,7 +332,7 @@ export function TaskComposer({
     }
   }, [defaultModel, selectedModel]);
   useEffect(() => {
-    if (runtimeVersion !== "pi") return;
+    if (!usesPiConfiguration) return;
     if (!selectedConnectionId) {
       setSelectedConnectionId(
         defaultConnectionId
@@ -329,14 +346,16 @@ export function TaskComposer({
     allowLocalPiRuntime,
     defaultConnectionId,
     modelConnections,
-    runtimeVersion,
+    usesPiConfiguration,
     selectedConnectionId,
   ]);
-  const selectedConnection = modelConnections.find(
-    (connection) => connection.connection_id === selectedConnectionId,
-  );
+  const selectedConnection = usesPiConfiguration
+    ? modelConnections.find(
+        (connection) => connection.connection_id === selectedConnectionId,
+      )
+    : undefined;
   useEffect(() => {
-    if (runtimeVersion !== "pi") return;
+    if (!usesPiConfiguration) return;
     if (selectedConnection) {
       const available = (selectedConnection.models || []).filter(
         (item) => item.status === "available" && item.enabled,
@@ -362,7 +381,7 @@ export function TaskComposer({
     }
   }, [
     modelOptions,
-    runtimeVersion,
+    usesPiConfiguration,
     selectedConnection,
     selectedConnectionId,
     defaultConnectionId,
@@ -370,7 +389,7 @@ export function TaskComposer({
   ]);
   useEffect(() => {
     setExternalApiConfirmed(false);
-  }, [runtimeVersion, selectedConnectionId]);
+  }, [usesPiConfiguration, selectedConnectionId]);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, {
@@ -499,11 +518,13 @@ export function TaskComposer({
     formats.includes(format)
   ).length + selectedCapabilityIds.length;
   const externalConfirmationRequired =
-    runtimeVersion === "pi" && Boolean(selectedConnection);
-  const piSelectionInvalid = runtimeVersion === "pi"
-    && (
-      (!selectedConnection && selectedConnectionId !== "__local__")
-      || (externalConfirmationRequired && !externalApiConfirmed)
+    usesPiConfiguration && Boolean(selectedConnection);
+  const piSelectionInvalid =
+    (runtimeSelection === "pi"
+      && !selectedConnection
+      && selectedConnectionId !== "__local__")
+    || (
+      externalConfirmationRequired && !externalApiConfirmed
     );
 
   const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -529,7 +550,7 @@ export function TaskComposer({
       || !ready.length
       || !formats.length
       || busy
-      || (kind === "mixed" && runtimeVersion === "legacy")
+      || (kind === "mixed" && runtimeSelection === "legacy")
       || piSelectionInvalid
     ) return;
     setSubmitting(true);
@@ -542,13 +563,21 @@ export function TaskComposer({
         formats,
         provider,
         model: modelParts.join("::") || null,
-        runtimeVersion,
+        runtimeVersion: runtimeSelection === "platform_default"
+          ? undefined
+          : runtimeSelection,
         permissionProfile: "standard",
-        modelConnectionId: selectedConnection?.connection_id ?? null,
-        modelConnectionModel: selectedConnection ? selectedConnectionModelId : null,
+        modelConnectionId: usesPiConfiguration
+          ? selectedConnection?.connection_id ?? null
+          : null,
+        modelConnectionModel: usesPiConfiguration && selectedConnection
+          ? selectedConnectionModelId
+          : null,
         externalApiConfirmed:
-          Boolean(selectedConnection) && externalApiConfirmed,
-        capabilityPackRefs: runtimeVersion === "pi"
+          usesPiConfiguration
+          && Boolean(selectedConnection)
+          && externalApiConfirmed,
+        capabilityPackRefs: usesPiConfiguration
           ? grayCapabilities
               .filter((item) => selectedCapabilityIds.includes(
                 `${item.pack_id}@${item.version}@${item.digest}`,
@@ -643,13 +672,13 @@ export function TaskComposer({
         }
         className="w-full resize-none bg-transparent px-1 text-[15px] leading-7 outline-none placeholder:text-muted-foreground/70"
       />
-      {kind === "mixed" && runtimeVersion === "legacy" && (
+      {kind === "mixed" && runtimeSelection === "legacy" && (
         <div className="mt-2 flex items-start gap-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           当前执行器需将表格和文档分成两个任务，请移除其中一类文件。
         </div>
       )}
-      {kind === "mixed" && runtimeVersion === "pi" && (
+      {kind === "mixed" && runtimeSelection === "pi" && (
         <div className="mt-2 flex items-start gap-2 rounded-lg bg-primary/10 px-3 py-2 text-xs text-primary">
           <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           Mangrove 增强模式可以在同一任务中观察并组合表格与文档来源。
@@ -723,7 +752,7 @@ export function TaskComposer({
             || !formats.length
             || busy
             || hasFailed
-            || (kind === "mixed" && runtimeVersion === "legacy")
+            || (kind === "mixed" && runtimeSelection === "legacy")
             || piSelectionInvalid
           }
           className="ml-auto inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-45"
@@ -738,7 +767,7 @@ export function TaskComposer({
       </div>
       {advancedOpen && (
         <div className="mt-3 rounded-xl border bg-muted/20 p-3">
-          {allowPiRuntime && !compact && (
+          {!compact && (
             <div className="mb-3 border-b pb-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div>
@@ -747,36 +776,41 @@ export function TaskComposer({
                     vNext 增强模式允许在任务级容器中动态使用工具。
                   </p>
                 </div>
-                <div className="flex rounded-lg border bg-background p-1">
-                  <button
-                    type="button"
-                    aria-pressed={runtimeVersion === "legacy"}
-                    onClick={() => setRuntimeVersion("legacy")}
-                    className={cn(
-                      "rounded-md px-2.5 py-1 text-[11px]",
-                      runtimeVersion === "legacy"
-                        ? "bg-muted font-medium text-foreground"
-                        : "text-muted-foreground",
-                    )}
-                  >
-                    稳定模式
-                  </button>
-                  <button
-                    type="button"
-                    aria-pressed={runtimeVersion === "pi"}
-                    onClick={() => setRuntimeVersion("pi")}
-                    className={cn(
-                      "rounded-md px-2.5 py-1 text-[11px]",
-                      runtimeVersion === "pi"
-                        ? "bg-primary/10 font-medium text-primary"
-                        : "text-muted-foreground",
-                    )}
-                  >
-                    Mangrove 增强灰度
-                  </button>
-                </div>
+                <fieldset className="flex flex-wrap rounded-lg border bg-background p-1">
+                  <legend className="sr-only">执行引擎</legend>
+                  {([
+                    ["platform_default", "平台默认（推荐）"],
+                    ["pi", "增强模式（Pi）"],
+                    ["legacy", "兼容模式（Legacy）"],
+                  ] as const).map(([value, label]) => (
+                    <label
+                      key={value}
+                      className={cn(
+                        "inline-flex cursor-pointer items-center gap-1.5 rounded-md px-2.5 py-1 text-[11px] transition-colors focus-within:ring-2 focus-within:ring-primary focus-within:ring-offset-1",
+                        value === "pi" && !allowPiRuntime
+                          && "cursor-not-allowed opacity-45",
+                        runtimeSelection === value
+                          ? value === "pi"
+                            ? "bg-primary/10 font-medium text-primary"
+                            : "bg-muted font-medium text-foreground"
+                          : "text-muted-foreground hover:bg-muted/60",
+                      )}
+                    >
+                      <input
+                        type="radio"
+                        name="runtime-selection"
+                        value={value}
+                        checked={runtimeSelection === value}
+                        disabled={value === "pi" && !allowPiRuntime}
+                        onChange={() => setRuntimeSelection(value)}
+                        className="h-3 w-3 accent-primary"
+                      />
+                      {label}
+                    </label>
+                  ))}
+                </fieldset>
               </div>
-              {runtimeVersion === "pi" && (
+              {runtimeSelection !== "legacy" && (
                 <>
                   <p className="mt-2 rounded-lg bg-amber-500/10 px-2.5 py-2 text-[11px] leading-5 text-amber-700 dark:text-amber-300">
                     输入文件只读；工作区可写；容器内可使用 Shell、Python、Node、Git、npm 和 pip。
@@ -955,7 +989,7 @@ export function TaskComposer({
                 {modelOptions
                   .filter(
                     (option) =>
-                      runtimeVersion !== "pi"
+                      runtimeSelection === "legacy"
                       || (
                         selectedConnectionId === "__local__"
                         && option.provider === "local"

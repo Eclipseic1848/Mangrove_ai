@@ -61,6 +61,13 @@ def _client(
     )
     monkeypatch.setattr(settings, "pi_capability_host_enabled", True)
     monkeypatch.setattr(auth_mod, "_store", None)
+    auth_mod.get_store()
+    from tests.runtime_routing_test_support import enable_admin_gray_routing
+
+    enable_admin_gray_routing(
+        Path(settings.webui_db_path),
+        tmp_path / "workspace-before-runtime-routing.db",
+    )
     # 每个测试重置门单例，避免沿用前一个测试的 DB 路径装配。
     import src.api.capability_governance_runtime as gate_runtime
 

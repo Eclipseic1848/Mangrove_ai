@@ -257,7 +257,9 @@ class WorkspaceTaskCreateIn(BaseModel):
     provider: str = Field(default="local", min_length=1)
     model: str | None = Field(default=None, min_length=1)
     external_api_confirmed: bool = False
-    runtime_version: RuntimeVersion = RuntimeVersion.LEGACY
+    runtime_version: RuntimeVersion = Field(
+        default_factory=lambda: RuntimeVersion.LEGACY,
+    )
     permission_profile: PermissionProfile = PermissionProfile.STANDARD
     model_connection_id: str | None = Field(
         default=None,
@@ -961,7 +963,10 @@ async def create_task(
     user=Depends(get_current_user),
 ):
     user_id = user["user_id"]
-    idempotency_payload = payload.model_dump(mode="json")
+    idempotency_payload = payload.model_dump(
+        mode="json",
+        exclude_unset=True,
+    )
     task_id = f"workspace_{uuid.uuid4().hex[:16]}"
     requested_runtime = (
         payload.runtime_version
@@ -1005,7 +1010,16 @@ async def create_task(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="表格输出契约只能由 Pi Runtime 执行",
             )
-    elif (
+    elif requested_runtime is RuntimeVersion.PI:
+        # 显式请求 Pi 时不能绕过 Rollout/P0 门；路由状态不可读必须失败关闭。
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Runtime 路由状态暂不可用，无法安全创建 Pi 任务",
+        )
+    else:
+        payload.runtime_version = RuntimeVersion.LEGACY
+
+    if (
         payload.table_output_contracts
         and payload.runtime_version is not RuntimeVersion.PI
     ):
@@ -1013,6 +1027,18 @@ async def create_task(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="表格输出契约只能由 Pi Runtime 执行",
         )
+    if (
+        requested_runtime is None
+        and payload.runtime_version is RuntimeVersion.LEGACY
+    ):
+        # 平台默认可能因 P0/路由状态落到 Legacy；不得遗留 Pi 连接、能力或外发确认。
+        payload.model_connection_id = None
+        payload.model_connection_model = None
+        payload.capability_pack_refs = ()
+        payload.validation_target = None
+        payload.external_api_confirmed = False
+        payload.provider = "local"
+        payload.model = None
     capability_catalog = None
     if payload.capability_pack_refs:
         _require_capability_gray(user)

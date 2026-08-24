@@ -571,6 +571,13 @@ export function TaskTimeline({
             >
               {workspaceStatusLabel(task.status)}
             </span>
+            {task.runtime_version && (
+              <span className="rounded-full border bg-muted/40 px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                {task.runtime_version === "pi"
+                  ? "实际执行：增强模式（Pi）"
+                  : "实际执行：兼容模式（Legacy）"}
+              </span>
+            )}
             <label className="flex items-center gap-1 text-xs text-muted-foreground">
               <span className="sr-only">结果版本</span>
               <select

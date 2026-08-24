@@ -469,7 +469,7 @@ export function SemanticWorkspacePage() {
     formats: string[];
     provider: string;
     model: string | null;
-    runtimeVersion: "legacy" | "pi";
+    runtimeVersion?: "legacy" | "pi";
     permissionProfile: "standard";
     modelConnectionId: string | null;
     modelConnectionModel: string | null;
@@ -487,7 +487,9 @@ export function SemanticWorkspacePage() {
         output_formats: payload.formats,
         provider: payload.provider,
         model: payload.model,
-        runtime_version: payload.runtimeVersion,
+        ...(payload.runtimeVersion
+          ? { runtime_version: payload.runtimeVersion }
+          : {}),
         permission_profile: payload.permissionProfile,
         model_connection_id: payload.modelConnectionId,
         model_connection_model: payload.modelConnectionModel,

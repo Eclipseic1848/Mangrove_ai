@@ -143,6 +143,7 @@ function workspaceTask(
     output_formats: ["xlsx"],
     provider: "local",
     model: "Qwen3.6-35B-A3B",
+    runtime_version: "legacy",
     external_api_confirmed: false,
     status,
     active_revision: 1,
@@ -389,7 +390,10 @@ test.describe("统一数据工作台", () => {
       provider: "local",
       model: "Qwen3.6-35B-A3B",
     });
+    expect(submitted).not.toHaveProperty("runtime_version");
     expect(submittedKey).toMatch(/^[A-Za-z0-9_-]{21}$/);
+    await expect(page.getByText("实际执行：兼容模式（Legacy）"))
+      .toBeVisible();
   });
 
   test("管理员可显式选择 Mangrove 增强模式且仍使用本地模型", async ({ page }) => {
@@ -449,7 +453,9 @@ test.describe("统一数据工作台", () => {
       "只筛选张三并输出 CSV",
     );
     await page.getByRole("button", { name: "更多", exact: true }).click();
-    await page.getByRole("button", { name: "Mangrove 增强灰度" }).click();
+    await expect(page.getByRole("radio", { name: "平台默认（推荐）" }))
+      .toBeChecked();
+    await page.getByRole("radio", { name: "增强模式（Pi）" }).check();
     await expect(page.getByText("输入文件只读", { exact: false }))
       .toBeVisible();
     await expect(page.getByLabel("执行模型")).toHaveValue(
@@ -469,9 +475,54 @@ test.describe("统一数据工作台", () => {
         digest: `sha256:${"a".repeat(64)}`,
       }],
     });
+    await expect(page.getByText("实际执行：增强模式（Pi）"))
+      .toBeVisible();
   });
 
-  test("普通用户通过自己的连接运行 Mangrove 前必须确认当前任务外发", async ({ page }) => {
+  test("无可用连接的普通用户仍可显式选择 Legacy", async ({ page }) => {
+    await mockWorkspace(page, "light", "user");
+    const completed = workspaceTask(
+      "task-user-legacy",
+      "completed",
+      "Legacy 兼容任务",
+    );
+    let submitted: Record<string, unknown> | null = null;
+    await page.route("**/api/semantic-workspace/tasks", async (route) => {
+      if (route.request().method() !== "POST") {
+        await route.fallback();
+        return;
+      }
+      submitted = route.request().postDataJSON();
+      await route.fulfill({ status: 202, json: completed });
+    });
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-user-legacy",
+      (route) => route.fulfill({ json: workspaceDetail(completed) }),
+    );
+
+    await page.goto("/data-prep");
+    await page.locator('input[type="file"]').setInputFiles({
+      name: "workload.csv",
+      mimeType: "text/csv",
+      buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8"),
+    });
+    await page.getByPlaceholder(/描述你想得到的结果/).fill(
+      "只筛选张三并输出 XLSX",
+    );
+    await page.getByRole("button", { name: "更多", exact: true }).click();
+    await expect(page.getByRole("radio", { name: "平台默认（推荐）" }))
+      .toBeChecked();
+    await expect(page.getByRole("radio", { name: "增强模式（Pi）" }))
+      .toBeDisabled();
+    await page.getByRole("radio", { name: "兼容模式（Legacy）" }).check();
+    await page.getByRole("button", { name: "开始执行" }).click();
+
+    expect(submitted).toMatchObject({ runtime_version: "legacy" });
+    await expect(page.getByText("实际执行：兼容模式（Legacy）"))
+      .toBeVisible();
+  });
+
+  test("普通用户走平台默认时仍须确认自己的连接外发", async ({ page }) => {
     await mockWorkspace(page, "light", "user");
     await page.route("**/api/model-connections", (route) => route.fulfill({
       json: {
@@ -535,7 +586,8 @@ test.describe("统一数据工作台", () => {
       "只筛选张三并输出 CSV",
     );
     await page.getByRole("button", { name: "更多", exact: true }).click();
-    await page.getByRole("button", { name: "Mangrove 增强灰度" }).click();
+    await expect(page.getByRole("radio", { name: "平台默认（推荐）" }))
+      .toBeChecked();
 
     await expect(page.getByLabel("模型连接")).toHaveValue(
       "conn-user-deepseek",
@@ -555,19 +607,31 @@ test.describe("统一数据工作台", () => {
       .analyze();
     expect(accessibility.violations).toEqual([]);
 
+    await page.getByRole("radio", { name: "兼容模式（Legacy）" }).check();
+    await expect(page.getByTestId("external-model-disclosure"))
+      .not.toBeVisible();
+    await page.getByRole("radio", { name: "平台默认（推荐）" }).check();
+    await expect(page.getByRole("checkbox", {
+      name: /确认将上述内容发送到 DeepSeek/,
+    })).not.toBeChecked();
+    await expect(page.getByLabel("本任务模型")).toHaveValue(
+      "deepseek-reasoner",
+    );
+    await page.getByLabel("本任务模型").selectOption("deepseek-chat");
+
     await page.getByRole("checkbox", {
       name: /确认将上述内容发送到 DeepSeek/,
     }).check();
     await page.getByRole("button", { name: "开始执行" }).click();
 
     expect(submitted).toMatchObject({
-      runtime_version: "pi",
       provider: "deepseek",
       model: "deepseek-chat",
       model_connection_id: "conn-user-deepseek",
       model_connection_model: "deepseek-chat",
       external_api_confirmed: true,
     });
+    expect(submitted).not.toHaveProperty("runtime_version");
   });
 
   test("Mangrove 候选明确区别于正式交付并可下载", async ({ page }) => {

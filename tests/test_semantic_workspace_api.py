@@ -959,6 +959,7 @@ def test_workspace_external_gate_cancel_and_owner_isolation(
                 "upload_ids": [upload.upload_id],
                 "output_formats": ["xlsx"],
                 "provider": "deepseek",
+                "runtime_version": "legacy",
             },
         )
         assert created.status_code == 202
@@ -998,6 +999,7 @@ def test_workspace_recycle_bin_is_user_scoped(
                 "objective_text": "整理工作量表",
                 "upload_ids": [upload.upload_id],
                 "provider": "deepseek",
+                "runtime_version": "legacy",
             },
         ).json()
         task_id = created["task_id"]
@@ -1102,6 +1104,7 @@ def test_workspace_expired_recycle_records_are_removed(
                 "objective_text": "整理工作量表",
                 "upload_ids": [upload.upload_id],
                 "provider": "deepseek",
+                "runtime_version": "legacy",
             },
         ).json()
         task_id = created["task_id"]

@@ -416,6 +416,7 @@ def _client(
         | EmptyOutputPiRuntime
         | None
     ) = None,
+    routing_mode: RolloutMode | None = RolloutMode.ADMIN_GRAY,
 ) -> TestClient:
     monkeypatch.setattr(
         settings, "webui_db_path", str(tmp_path / "workspace.db")
@@ -429,6 +430,48 @@ def _client(
         str(tmp_path / "executions"),
     )
     auth_mod._store = None
+    if routing_mode is not None:
+        auth_mod.get_store()
+        database = Path(settings.webui_db_path)
+        migrate_runtime_routing(
+            database,
+            tmp_path / "workspace-before-runtime-routing.db",
+        )
+        routing = RuntimeRouting(SqliteRuntimeRoutingRepository(database))
+        passed = _g3_snapshot(passed=True)
+        admin_actor = RolloutActor(actor_id="admin-a", role="admin")
+        routing.record_gate(passed, admin_actor)
+        gray_approval = RolloutApproval(
+            approval_id="approval-test-admin-gray",
+            target_mode=RolloutMode.ADMIN_GRAY,
+            gate_snapshot_id=passed.snapshot_id,
+            approved_by="maintainer-a",
+        )
+        routing.record_approval(
+            gray_approval,
+            RolloutActor(actor_id="maintainer-a", role="user"),
+        )
+        routing.change_mode(
+            RolloutMode.ADMIN_GRAY,
+            gray_approval,
+            admin_actor,
+        )
+        if routing_mode is RolloutMode.VNEXT_DEFAULT:
+            default_approval = RolloutApproval(
+                approval_id="approval-test-vnext-default",
+                target_mode=RolloutMode.VNEXT_DEFAULT,
+                gate_snapshot_id=passed.snapshot_id,
+                approved_by="maintainer-a",
+            )
+            routing.record_approval(
+                default_approval,
+                RolloutActor(actor_id="maintainer-a", role="user"),
+            )
+            routing.change_mode(
+                RolloutMode.VNEXT_DEFAULT,
+                default_approval,
+                admin_actor,
+            )
     manager = SemanticWorkspaceManager(
         pi_runtime=pi_runtime or FakePiRuntime(),
     )
@@ -487,12 +530,94 @@ def _g3_snapshot(*, passed: bool) -> GateSnapshot:
     )
 
 
+def test_runtime_version_contract_is_optional_without_legacy_default(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        routing_mode=None,
+    )
+
+    schema = client.get("/openapi.json").json()
+    runtime_schema = schema["components"]["schemas"]["WorkspaceTaskCreateIn"][
+        "properties"
+    ]["runtime_version"]
+
+    assert "runtime_version" not in schema["components"]["schemas"][
+        "WorkspaceTaskCreateIn"
+    ].get("required", [])
+    assert "default" not in runtime_schema
+    assert "anyOf" not in runtime_schema
+
+    request = {
+        "objective_text": "验证 Runtime 输入契约",
+        "upload_ids": ["upload-not-used"],
+        "output_formats": ["json"],
+    }
+    for invalid_runtime in (None, "", "unknown"):
+        rejected = client.post(
+            "/api/semantic-workspace/tasks",
+            json={**request, "runtime_version": invalid_runtime},
+        )
+        assert rejected.status_code == 422, rejected.text
+
+
+def test_missing_routing_schema_fails_closed_for_explicit_pi(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "pi_runtime_enabled", True)
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        routing_mode=None,
+    )
+    document, _ = _uploads(tmp_path)
+    request = {
+        "objective_text": "提取附件内容并输出 JSON",
+        "upload_ids": [document],
+        "output_formats": ["json"],
+        "provider": "local",
+    }
+
+    with client:
+        explicit_pi = client.post(
+            "/api/semantic-workspace/tasks",
+            json={**request, "runtime_version": "pi"},
+        )
+        assert explicit_pi.status_code == 503, explicit_pi.text
+
+        tasks_after_rejection = client.get("/api/semantic-workspace/tasks")
+        assert tasks_after_rejection.status_code == 200
+        assert tasks_after_rejection.json() == []
+
+        platform_default = client.post(
+            "/api/semantic-workspace/tasks",
+            json=request,
+        )
+        assert platform_default.status_code == 202, platform_default.text
+        assert platform_default.json()["runtime_version"] == "legacy"
+        cancelled = client.post(
+            f"/api/semantic-workspace/tasks/{platform_default.json()['task_id']}/cancel"
+        )
+        assert cancelled.status_code in {200, 409}, cancelled.text
+
+
 def test_runtime_rollout_only_changes_new_tasks_and_p0_restores_legacy(
     tmp_path,
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(settings, "pi_runtime_enabled", True)
-    client = _client(tmp_path, monkeypatch, role="admin")
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        routing_mode=None,
+    )
     document, _ = _uploads(tmp_path)
     # 先让现有 Store 建完历史表，再在同一测试库执行显式 G3 迁移。
     auth_mod.get_store()
@@ -525,9 +650,27 @@ def test_runtime_rollout_only_changes_new_tasks_and_p0_restores_legacy(
         "provider": "local",
     }
     with client:
-        vnext = client.post("/api/semantic-workspace/tasks", json=request)
+        vnext = client.post(
+            "/api/semantic-workspace/tasks",
+            json=request,
+            headers={"Idempotency-Key": "runtime-intent-distinction"},
+        )
         assert vnext.status_code == 202, vnext.text
         assert vnext.json()["runtime_version"] == "pi"
+
+        changed_intent = client.post(
+            "/api/semantic-workspace/tasks",
+            json={**request, "runtime_version": "legacy"},
+            headers={"Idempotency-Key": "runtime-intent-distinction"},
+        )
+        assert changed_intent.status_code == 409, changed_intent.text
+
+        explicit_legacy = client.post(
+            "/api/semantic-workspace/tasks",
+            json={**request, "runtime_version": "legacy"},
+        )
+        assert explicit_legacy.status_code == 202, explicit_legacy.text
+        assert explicit_legacy.json()["runtime_version"] == "legacy"
 
         cancelled = client.post(
             f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}/cancel"
@@ -583,18 +726,45 @@ def test_runtime_rollout_only_changes_new_tasks_and_p0_restores_legacy(
         assert blocked.status_code == 409, blocked.text
         legacy = client.post(
             "/api/semantic-workspace/tasks",
-            json=request,
+            json={
+                **request,
+                "provider": "deepseek",
+                "model": "deepseek-chat",
+                "model_connection_id": "conn-must-not-freeze",
+                "model_connection_model": "model-must-not-freeze",
+                "external_api_confirmed": True,
+                "capability_pack_refs": [{
+                    "pack_id": "pack-must-not-freeze",
+                    "version": "1.0.0",
+                    "digest": "sha256:" + "d" * 64,
+                }],
+            },
             headers={"Idempotency-Key": "g3-p0-retry"},
         )
         assert legacy.status_code == 202, legacy.text
         assert legacy.json()["runtime_version"] == "legacy"
+        assert legacy.json()["model_connection_id"] is None
+        assert legacy.json()["provider"] == "local"
+        assert legacy.json()["model"] is None
+        frozen_legacy = AgenticRuntimeRepository(database).get(
+            "user-a",
+            legacy.json()["task_id"],
+            1,
+        )
+        assert frozen_legacy is not None
+        assert frozen_legacy["model_connection_id"] is None
+        assert frozen_legacy["external_api_confirmed"] is False
 
         unchanged = client.get(
             f"/api/semantic-workspace/tasks/{vnext.json()['task_id']}"
         )
         assert unchanged.status_code == 200
         assert unchanged.json()["runtime_version"] == "pi"
-        for task_id in (vnext.json()["task_id"], legacy.json()["task_id"]):
+        for task_id in (
+            vnext.json()["task_id"],
+            explicit_legacy.json()["task_id"],
+            legacy.json()["task_id"],
+        ):
             cancelled = client.post(
                 f"/api/semantic-workspace/tasks/{task_id}/cancel"
             )
@@ -998,6 +1168,7 @@ def test_external_provider_timeout_requires_user_retry_decision(
         monkeypatch,
         role="user",
         pi_runtime=ProviderTimeoutPiRuntime(),
+        routing_mode=RolloutMode.VNEXT_DEFAULT,
     )
     document, _ = _uploads(tmp_path)
     broker = ConnectionBroker(
@@ -1048,7 +1219,12 @@ def test_external_provider_timeout_requires_user_retry_decision(
 
 
 def test_pi_local_gray_entry_requires_admin(tmp_path, monkeypatch) -> None:
-    client = _client(tmp_path, monkeypatch, role="user")
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="user",
+        routing_mode=RolloutMode.VNEXT_DEFAULT,
+    )
     document, _ = _uploads(tmp_path)
     with client:
         response = client.post(
@@ -1066,7 +1242,7 @@ def test_pi_local_gray_entry_requires_admin(tmp_path, monkeypatch) -> None:
     ]
 
 
-def test_user_can_explicitly_use_own_verified_connection_for_standard_vnext_task(
+def test_user_can_use_platform_default_with_own_verified_connection(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -1076,6 +1252,7 @@ def test_user_can_explicitly_use_own_verified_connection_for_standard_vnext_task
         monkeypatch,
         role="user",
         pi_runtime=fake_runtime,
+        routing_mode=RolloutMode.VNEXT_DEFAULT,
     )
     document, _ = _uploads(tmp_path)
     broker = ConnectionBroker(
@@ -1123,7 +1300,6 @@ def test_user_can_explicitly_use_own_verified_connection_for_standard_vnext_task
                 "objective_text": "读取附件并输出一个 CSV",
                 "upload_ids": [document],
                 "output_formats": ["csv"],
-                "runtime_version": "pi",
                 "permission_profile": "standard",
                 "external_api_confirmed": True,
             },

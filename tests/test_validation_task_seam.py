@@ -292,6 +292,15 @@ class TestD9CreateTaskApi:
         )
         monkeypatch.setattr(settings, "pi_capability_host_enabled", True)
         monkeypatch.setattr(auth_mod, "_store", None)
+        auth_mod.get_store()
+        from tests.runtime_routing_test_support import (
+            enable_admin_gray_routing,
+        )
+
+        enable_admin_gray_routing(
+            Path(settings.webui_db_path),
+            tmp_path / "workspace-before-runtime-routing.db",
+        )
         repository = SqliteCapabilityCatalogRepository(settings.webui_db_path)
         actor = CatalogActor(owner_id=owner_id, role="admin")
         pack = CapabilityPack(
