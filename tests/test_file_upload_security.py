@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 from pathlib import Path
 
 import pytest
@@ -70,6 +71,96 @@ def test_resolve_returns_item_for_owner(tmp_path: Path):
 
     assert resolved.upload_id == item.upload_id
     assert resolved.user_id == "user-a"
+
+
+def test_sidecar_stores_managed_relative_path(tmp_path: Path):
+    """新 sidecar 不固化宿主机绝对路径。"""
+    store = UploadStore(root=str(tmp_path), max_bytes=1024)
+    item = store.save_bytes("user-a", "data.csv", b"id\n1\n")
+
+    meta_path = tmp_path / "user-a" / "objects" / f"{item.upload_id}.meta"
+    payload = json.loads(meta_path.read_text(encoding="utf-8"))
+
+    assert payload["storage_path"] == f"objects/{item.upload_id}"
+    assert Path(item.storage_path).is_absolute()
+
+
+def test_resolve_legacy_sidecar_uses_current_root_without_rewrite(
+    tmp_path: Path,
+) -> None:
+    """旧 Windows 路径仅作历史字段，读取时映射到当前上传根。"""
+    store = UploadStore(root=str(tmp_path), max_bytes=1024)
+    item = store.save_bytes("user-a", "data.csv", b"id\n1\n")
+    meta_path = tmp_path / "user-a" / "objects" / f"{item.upload_id}.meta"
+    payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    payload["storage_path"] = (
+        rf"D:\old-host\data\uploads\user-a\objects\{item.upload_id}"
+    )
+    legacy_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    meta_path.write_bytes(legacy_bytes)
+
+    resolved = store.resolve("user-a", item.upload_id)
+
+    assert Path(resolved.storage_path) == (
+        tmp_path / "user-a" / "objects" / item.upload_id
+    ).resolve()
+    assert meta_path.read_bytes() == legacy_bytes
+
+
+def test_resolve_rejects_object_tampering(tmp_path: Path) -> None:
+    """读取时继续按登记的大小和哈希失败关闭。"""
+    store = UploadStore(root=str(tmp_path), max_bytes=1024)
+    item = store.save_bytes("user-a", "data.csv", b"id\n1\n")
+    Path(item.storage_path).write_bytes(b"tampered")
+
+    with pytest.raises(PermissionError, match="完整性"):
+        store.resolve("user-a", item.upload_id)
+
+
+def test_user_id_normalization_cannot_collide_or_delete_owner_file(
+    tmp_path: Path,
+) -> None:
+    """不同原始 Owner 标识不能归一到同一目录。"""
+    store = UploadStore(root=str(tmp_path), max_bytes=1024)
+    item = store.save_bytes("usera", "data.csv", b"id\n1\n")
+
+    with pytest.raises((ValueError, PermissionError)):
+        store.delete("user/a", item.upload_id)
+
+    assert Path(item.storage_path).is_file()
+
+
+def test_delete_rejects_sidecar_owner_mismatch(tmp_path: Path) -> None:
+    """删除前必须复核 sidecar Owner，不能只相信目录位置。"""
+    store = UploadStore(root=str(tmp_path), max_bytes=1024)
+    item = store.save_bytes("user-a", "data.csv", b"id\n1\n")
+    meta_path = tmp_path / "user-a" / "objects" / f"{item.upload_id}.meta"
+    payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    payload["user_id"] = "user-b"
+    meta_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(PermissionError):
+        store.delete("user-a", item.upload_id)
+
+    assert Path(item.storage_path).is_file()
+
+
+def test_resolve_rejects_object_symlink_escape(tmp_path: Path) -> None:
+    """对象软链接即使内容哈希相同，也不能把读取带出 Owner 根。"""
+    store = UploadStore(root=str(tmp_path / "uploads"), max_bytes=1024)
+    data = b"id\n1\n"
+    item = store.save_bytes("user-a", "data.csv", data)
+    object_path = Path(item.storage_path)
+    outside = tmp_path / "outside.csv"
+    outside.write_bytes(data)
+    object_path.unlink()
+    try:
+        object_path.symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"当前环境不能创建文件软链接：{exc}")
+
+    with pytest.raises(PermissionError, match="无权访问"):
+        store.resolve("user-a", item.upload_id)
 
 
 def test_save_upload_streams_large_file_without_full_buffer(tmp_path: Path):

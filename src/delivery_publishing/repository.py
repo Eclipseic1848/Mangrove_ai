@@ -10,6 +10,7 @@ from threading import RLock
 from typing import Any
 
 from src.semantic_harness.delivery.models import DeliveryManifest
+from src.services.managed_paths import ManagedPathCodec
 
 from .models import PublishCommand
 
@@ -24,10 +25,28 @@ def _now() -> str:
 class DeliveryPublishingRepository:
     """历史 Delivery 保持只读；新表直接引用 vNext 身份。"""
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(
+        self,
+        db_path: str | Path,
+        *,
+        semantic_paths: ManagedPathCodec | None = None,
+    ) -> None:
         self.db_path = Path(db_path)
+        self.semantic_paths = semantic_paths
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ensure_schema()
+
+    def _persist_output_path(self, path: Path) -> str:
+        if self.semantic_paths is None:
+            # 仅兼容独立评测和旧单测；生产发布必须从调用方注入 execution root codec。
+            return str(path.resolve())
+        return self.semantic_paths.encode(path)
+
+    def _resolve_output_path(self, value: str) -> str:
+        if self.semantic_paths is None:
+            return value
+        # 旧绝对路径也只由 codec 按冻结锚点迁到当前根，禁止直接信任宿主路径。
+        return str(self.semantic_paths.decode(value))
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=30)
@@ -213,7 +232,7 @@ class DeliveryPublishingRepository:
                     command.delivery_spec_hash,
                     manifest.status.value,
                     manifest.model_dump_json(),
-                    str(output_dir.resolve()),
+                    self._persist_output_path(output_dir),
                     now,
                 ),
             )
@@ -237,7 +256,7 @@ class DeliveryPublishingRepository:
                         output.media_type,
                         output.sha256,
                         output.size_bytes,
-                        str(path),
+                        self._persist_output_path(path),
                         output.qa.model_dump_json(),
                         now,
                     ),
@@ -314,7 +333,7 @@ class DeliveryPublishingRepository:
             "media_type": row["media_type"],
             "sha256": row["sha256"],
             "size_bytes": row["size_bytes"],
-            "file_path": row["file_path"],
+            "file_path": self._resolve_output_path(row["file_path"]),
             "qa": json.loads(row["qa_json"]),
             "created_at": row["created_at"],
         }
