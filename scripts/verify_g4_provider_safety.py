@@ -1814,8 +1814,8 @@ def verify_vault_retention_safety(
         for value in provider_evidence_commits
     ):
         raise QualificationError("保留密钥的授权身份、原因和 Provider 证据提交不能为空")
-    if len(set(provider_evidence_commits)) != len(provider_evidence_commits):
-        raise QualificationError("Provider 证据提交不得重复")
+    # 多个 Provider 可以由同一份代码提交产生；兼容性按唯一提交复核即可。
+    provider_evidence_commits = list(dict.fromkeys(provider_evidence_commits))
     if not db_path.is_file() or not key_path.is_file():
         raise QualificationError("数据库或模型连接独立主密钥不存在")
     report_lock = output_path.with_name(f".{output_path.name}.lock")
@@ -2754,6 +2754,9 @@ def assess_g4_evidence(
         blockers.append("qualification_batch_invalid")
     if not pi_provider_chain_valid or combined_pi_provider_set != manifest_providers:
         blockers.append("pi_provider_chain_invalid")
+    unique_provider_evidence_commits = list(
+        dict.fromkeys(provider_evidence_commits)
+    )
     if (
         transport_report.get("git_commit") != expected_commit
         or transport_report.get("git_dirty") is not False
@@ -2772,7 +2775,7 @@ def assess_g4_evidence(
         vault_evidence_key = "vault_rotation"
         vault_evidence_path = rotation_report_path
         if (
-            any(commit != expected_commit for commit in provider_evidence_commits)
+            any(commit != expected_commit for commit in unique_provider_evidence_commits)
             or rotation_report.get("phase") != "finalized"
             or rotation_report.get("git_commit") != expected_commit
             or rotation_report.get("git_dirty") is not False
@@ -2822,7 +2825,7 @@ def assess_g4_evidence(
                 provider_evidence_commit=commit,
                 current_commit=expected_commit,
             )
-            for commit in provider_evidence_commits
+            for commit in unique_provider_evidence_commits
         ]
         if (
             retention_report.get("git_commit") != expected_commit
@@ -2844,7 +2847,7 @@ def assess_g4_evidence(
             or retention_report.get("synthetic_rotation_drill_passed") is not True
             or retention_report.get("retention_risk_accepted") is not True
             or not authorization_valid
-            or reported_commits_value != provider_evidence_commits
+            or reported_commits_value != unique_provider_evidence_commits
             or not isinstance(compatibilities, list)
             or compatibilities != rechecked_compatibility
             or not all(
@@ -2869,7 +2872,7 @@ def assess_g4_evidence(
         "qualification_blockers": [],
         "qualification_batch_ids": qualification_batch_ids,
         "qualification_ledger_id": qualification_ledger_ids[0],
-        "provider_evidence_commits": provider_evidence_commits,
+        "provider_evidence_commits": unique_provider_evidence_commits,
         "evidence_sha256": {
             "manifest": _file_sha256(manifest_path),
             "pi_provider": (

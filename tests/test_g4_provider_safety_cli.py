@@ -2716,20 +2716,22 @@ def test_retained_vault_safety_report_preserves_production_key_and_database(
         current_commit,
     ]
     assert len(multi_report["provider_runtime_compatibility"]) == 2
-    with pytest.raises(QualificationError, match="不得重复"):
-        verify_vault_retention_safety(
-            db_path=database,
-            key_path=key_path,
-            manifest_path=manifest_path,
-            output_path=tmp_path / "retention-duplicate-commit.json",
-            expected_commit=current_commit,
-            provider_evidence_commit=[provider_commit, provider_commit],
-            accepted_by="super-admin",
-            acceptance_reason="重复提交必须拒绝",
-            confirm_retain_production_key=True,
-            key_backup_roots=[backup_root],
-            git_identity={"git_commit": current_commit, "git_dirty": False},
-        )
+    same_commit_report = verify_vault_retention_safety(
+        db_path=database,
+        key_path=key_path,
+        manifest_path=manifest_path,
+        output_path=tmp_path / "retention-same-commit.json",
+        expected_commit=current_commit,
+        provider_evidence_commit=[provider_commit, provider_commit],
+        accepted_by="super-admin",
+        acceptance_reason="多个 Provider 共享同一证据提交",
+        confirm_retain_production_key=True,
+        key_backup_roots=[backup_root],
+        git_identity={"git_commit": current_commit, "git_dirty": False},
+    )
+    assert same_commit_report["provider_evidence_commit"] == provider_commit
+    assert "provider_evidence_commits" not in same_commit_report
+    assert same_commit_report["provider_runtime_compatibility"]["compatible"] is True
 
     with pytest.raises(QualificationError, match="拒绝覆盖"):
         verify_vault_retention_safety(
@@ -3156,9 +3158,11 @@ def test_g4_assessment_accepts_compatible_provider_report_with_retained_key(
         )
 
 
+@pytest.mark.parametrize("shared_provider_commit", [False, True])
 def test_g4_assessment_combines_independent_provider_batches(
     tmp_path,
     authoritative_ledger_path,
+    shared_provider_commit,
 ):
     old_commit = subprocess.run(
         ["git", "rev-parse", "a0560852^{commit}"],
@@ -3193,9 +3197,12 @@ def test_g4_assessment_combines_independent_provider_batches(
     reports: list[Path] = []
     batch_ids: list[str] = []
     compatibility: list[dict[str, object]] = []
-    for index, (preset_id, evidence_commit) in enumerate(
-        (("qwen", old_commit), ("deepseek", current_commit))
-    ):
+    provider_runs = (
+        (("qwen", current_commit), ("deepseek", current_commit))
+        if shared_provider_commit
+        else (("qwen", old_commit), ("deepseek", current_commit))
+    )
+    for index, (preset_id, evidence_commit) in enumerate(provider_runs):
         provider = next(
             dict(item)
             for item in combined_manifest["providers"]
@@ -3268,12 +3275,19 @@ def test_g4_assessment_combines_independent_provider_batches(
             )
         )
         batch_ids.append(str(batch["batch_id"]))
-        compatibility.append(
-            _provider_runtime_compatibility(
-                provider_evidence_commit=evidence_commit,
-                current_commit=current_commit,
+        if evidence_commit not in {
+            item["provider_evidence_commit"] for item in compatibility
+        }:
+            compatibility.append(
+                _provider_runtime_compatibility(
+                    provider_evidence_commit=evidence_commit,
+                    current_commit=current_commit,
+                )
             )
-        )
+
+    unique_evidence_commits = list(
+        dict.fromkeys(evidence_commit for _, evidence_commit in provider_runs)
+    )
 
     transport_report = write(
         "transport-multi.json",
@@ -3316,7 +3330,7 @@ def test_g4_assessment_combines_independent_provider_batches(
             "retention_risk_accepted": True,
             "accepted_by": "super-admin",
             "acceptance_reason": "保留生产密钥并逐份复核 Provider 证据",
-            "provider_evidence_commits": [old_commit, current_commit],
+            "provider_evidence_commits": unique_evidence_commits,
             "provider_runtime_compatibility": compatibility,
         },
     )
@@ -3337,6 +3351,7 @@ def test_g4_assessment_combines_independent_provider_batches(
 
     assert result["g4_qualified"] is True
     assert result["qualification_batch_ids"] == batch_ids
+    assert result["provider_evidence_commits"] == unique_evidence_commits
     assert len(result["evidence_sha256"]["pi_provider"]) == 2
 
     with pytest.raises(QualificationError, match="不得重复"):
