@@ -30,6 +30,7 @@ from scripts.verify_g4_provider_safety import (
     _database_path_sha256,
     _load_qualification_ledger_anchor,
     _parser,
+    _provider_runtime_compatibility,
     _sync_qualification_ledger_anchor,
     _qualification_state_paths,
     _require_authoritative_qualification_ledger,
@@ -2613,6 +2614,7 @@ def test_g4_assessment_requires_pi_transport_and_scoped_rotation_evidence(
 
 def test_retained_vault_safety_report_preserves_production_key_and_database(
     tmp_path,
+    monkeypatch,
 ):
     database = tmp_path / "webui.db"
     key_path = tmp_path / "webui.db.model-connections.key"
@@ -2760,6 +2762,83 @@ def test_retained_vault_safety_report_preserves_production_key_and_database(
     assert not (tmp_path / "incompatible.json").exists()
     assert not (tmp_path / "key-leak.json").exists()
 
+    (backup_root / "forbidden-key-copy.txt").unlink()
+    entered = threading.Event()
+    release = threading.Event()
+    database_write_blocked: list[bool] = []
+
+    def concurrent_write_probe() -> bool:
+        entered.set()
+        try:
+            with sqlite3.connect(database, timeout=0.1) as connection:
+                connection.execute(
+                    "UPDATE model_connections SET model = 'changed-model'"
+                )
+        except sqlite3.OperationalError:
+            database_write_blocked.append(True)
+        else:
+            database_write_blocked.append(False)
+        assert release.wait(timeout=10)
+        return True
+
+    monkeypatch.setattr(
+        "scripts.verify_g4_provider_safety._run_synthetic_vault_rotation_drill",
+        concurrent_write_probe,
+    )
+    concurrent_report = tmp_path / "concurrent-retention.json"
+    worker_result: list[object] = []
+
+    def first_request() -> None:
+        try:
+            worker_result.append(
+                verify_vault_retention_safety(
+                    db_path=database,
+                    key_path=key_path,
+                    manifest_path=manifest_path,
+                    output_path=concurrent_report,
+                    expected_commit=current_commit,
+                    provider_evidence_commit=provider_commit,
+                    accepted_by="super-admin",
+                    acceptance_reason="并发安全检查",
+                    confirm_retain_production_key=True,
+                    key_backup_roots=[backup_root],
+                    git_identity={
+                        "git_commit": current_commit,
+                        "git_dirty": False,
+                    },
+                )
+            )
+        except BaseException as exc:
+            worker_result.append(exc)
+
+    worker = threading.Thread(target=first_request)
+    worker.start()
+    assert entered.wait(timeout=10)
+    try:
+        with pytest.raises(QualificationError, match="安全报告正在生成"):
+            verify_vault_retention_safety(
+                db_path=database,
+                key_path=key_path,
+                manifest_path=manifest_path,
+                output_path=concurrent_report,
+                expected_commit=current_commit,
+                provider_evidence_commit=provider_commit,
+                accepted_by="super-admin",
+                acceptance_reason="并发重复请求",
+                confirm_retain_production_key=True,
+                key_backup_roots=[backup_root],
+                git_identity={"git_commit": current_commit, "git_dirty": False},
+            )
+    finally:
+        release.set()
+        worker.join(timeout=10)
+
+    assert not worker.is_alive()
+    assert database_write_blocked == [True]
+    assert len(worker_result) == 1
+    assert isinstance(worker_result[0], dict)
+    assert concurrent_report.is_file()
+
 
 def test_retained_vault_safety_has_explicit_cli_contract(tmp_path):
     args = _parser().parse_args(
@@ -2822,8 +2901,22 @@ def test_g4_assessment_accepts_compatible_provider_report_with_retained_key(
     tmp_path,
     authoritative_ledger_path,
 ):
-    provider_commit = "a" * 40
-    current_commit = "b" * 40
+    provider_commit = subprocess.run(
+        ["git", "rev-parse", "a0560852^{commit}"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.strip()
+    current_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.strip()
     database = tmp_path / "webui.db"
     _create_inventory_database(database)
     provider = {
@@ -2945,12 +3038,13 @@ def test_g4_assessment_accepts_compatible_provider_report_with_retained_key(
             ],
             "synthetic_rotation_drill_passed": True,
             "retention_risk_accepted": True,
+            "accepted_by": "super-admin",
+            "acceptance_reason": "明确保留现有生产密钥并接受剩余风险",
             "provider_evidence_commit": provider_commit,
-            "provider_runtime_compatibility": {
-                "compatible": True,
-                "provider_evidence_commit": provider_commit,
-                "current_commit": current_commit,
-            },
+            "provider_runtime_compatibility": _provider_runtime_compatibility(
+                provider_evidence_commit=provider_commit,
+                current_commit=current_commit,
+            ),
         },
     )
 
@@ -2971,6 +3065,47 @@ def test_g4_assessment_accepts_compatible_provider_report_with_retained_key(
     assert result["g4_qualified"] is True
     assert result["vault_evidence_mode"] == "retained"
     assert "vault_retention" in result["evidence_sha256"]
+
+    retention_payload = json.loads(retention_report.read_text(encoding="utf-8"))
+    retention_payload.pop("accepted_by")
+    write("retention-without-actor.json", retention_payload)
+    with pytest.raises(QualificationError, match="vault_retention_invalid"):
+        assess_g4_evidence(
+            db_path=database,
+            manifest_path=manifest,
+            pi_report_path=pi_report,
+            transport_report_path=transport_report,
+            rotation_report_path=None,
+            retention_report_path=tmp_path / "retention-without-actor.json",
+            output_path=tmp_path / "g4-final-forged.json",
+            expected_commit=current_commit,
+            expected_manifest_sha256=manifest_sha,
+            qualification_ledger_path=authoritative_ledger_path,
+            qualification_batch_id=str(batch["batch_id"]),
+        )
+
+    retention_payload["accepted_by"] = "super-admin"
+    retention_payload["provider_runtime_compatibility"] = {
+        **retention_payload["provider_runtime_compatibility"],
+        "reason": "forged-compatible",
+    }
+    write("retention-forged-compatibility.json", retention_payload)
+    with pytest.raises(QualificationError, match="vault_retention_invalid"):
+        assess_g4_evidence(
+            db_path=database,
+            manifest_path=manifest,
+            pi_report_path=pi_report,
+            transport_report_path=transport_report,
+            rotation_report_path=None,
+            retention_report_path=(
+                tmp_path / "retention-forged-compatibility.json"
+            ),
+            output_path=tmp_path / "g4-final-forged-compatibility.json",
+            expected_commit=current_commit,
+            expected_manifest_sha256=manifest_sha,
+            qualification_ledger_path=authoritative_ledger_path,
+            qualification_batch_id=str(batch["batch_id"]),
+        )
 
 
 def test_provider_relay_pins_validated_ip_and_preserves_tls_identity(tmp_path):

@@ -208,7 +208,7 @@ def _provider_runtime_compatibility(
 
     ast = __import__("ast")
 
-    def script_function_digest(revision: str) -> str | None:
+    def provider_runner_module_digest(revision: str) -> str | None:
         source = run_git("show", f"{revision}:scripts/verify_g4_provider_safety.py")
         if source.returncode:
             return None
@@ -216,18 +216,23 @@ def _provider_runtime_compatibility(
             module = ast.parse(source.stdout)
         except SyntaxError:
             return None
-        functions = {
-            node.name: ast.dump(node, include_attributes=False)
+        protected_body = [
+            node
             for node in module.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and node.name not in allowed_script_functions
-            and not node.name.startswith("_retained_")
-        }
-        payload = json.dumps(functions, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            if not (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and (
+                    node.name in allowed_script_functions
+                    or node.name.startswith("_retained_")
+                )
+            )
+        ]
+        protected_module = ast.Module(body=protected_body, type_ignores=[])
+        payload = ast.dump(protected_module, include_attributes=False).encode("utf-8")
         return hashlib.sha256(payload).hexdigest()
 
-    provider_script_digest = script_function_digest(provider_commit)
-    current_script_digest = script_function_digest(resolved_current_commit)
+    provider_script_digest = provider_runner_module_digest(provider_commit)
+    current_script_digest = provider_runner_module_digest(resolved_current_commit)
     script_compatible = (
         provider_script_digest is not None
         and provider_script_digest == current_script_digest
@@ -239,8 +244,8 @@ def _provider_runtime_compatibility(
         "provider_evidence_commit": provider_commit,
         "current_commit": resolved_current_commit,
         "protected_paths_changed": changed_paths,
-        "provider_runner_functions_compatible": script_compatible,
-        "provider_runner_digest": current_script_digest,
+        "provider_runner_module_compatible": script_compatible,
+        "provider_runner_module_digest": current_script_digest,
     }
 
 
@@ -1794,8 +1799,6 @@ def verify_vault_retention_safety(
 ) -> dict[str, object]:
     """保留现有生产密钥时生成补偿控制证据，不改写密钥和数据库。"""
 
-    if output_path.exists():
-        raise QualificationError("G4 保留密钥安全报告已存在，拒绝覆盖")
     if not confirm_retain_production_key:
         raise QualificationError("必须确认保留现有生产密钥及其剩余风险")
     if not all(
@@ -1805,90 +1808,107 @@ def verify_vault_retention_safety(
         raise QualificationError("保留密钥的授权身份、原因和 Provider 证据提交不能为空")
     if not db_path.is_file() or not key_path.is_file():
         raise QualificationError("数据库或模型连接独立主密钥不存在")
-    _require_active_superadmin(db_path=db_path, actor_user_id=accepted_by)
-    identity = dict(git_identity or _git_identity())
-    if identity != {"git_commit": expected_commit, "git_dirty": False}:
-        raise QualificationError("保留密钥安全检查必须绑定预期的干净 Git 提交")
-    verify_frozen_inventory(db_path=db_path, manifest_path=manifest_path)
-    manifest = _load_manifest(manifest_path)
-    checker = compatibility_checker or _provider_runtime_compatibility
-    compatibility = checker(
-        provider_evidence_commit=provider_evidence_commit,
-        current_commit=expected_commit,
-    )
-    if not isinstance(compatibility, dict) or compatibility.get("compatible") is not True:
-        raise QualificationError("既有 Provider 证据与当前运行时代码不兼容")
-
-    key_sha256_before = _file_sha256(key_path)
-    database_sha256_before = _file_sha256(db_path)
-    with _vault_rotation_lock(key_path):
-        vault = FernetCredentialVault.from_key_file(key_path)
-        if vault.has_inactive_keys:
-            raise QualificationError("保留密钥检查不接受未完成的双代际轮换")
-        uri = f"{db_path.resolve().as_uri()}?mode=ro"
-        with closing(sqlite3.connect(uri, uri=True)) as connection:
-            rows = connection.execute(
+    report_lock = output_path.with_name(f".{output_path.name}.lock")
+    with _exclusive_file_lock(report_lock, "G4 保留密钥安全报告正在生成"):
+        if output_path.exists():
+            raise QualificationError("G4 保留密钥安全报告已存在，拒绝覆盖")
+        with _vault_rotation_lock(key_path), closing(
+            sqlite3.connect(db_path, timeout=0)
+        ) as maintenance_connection:
+            try:
+                # 保留报告必须绑定一个阻止 Provider 配置并发写入的数据库快照。
+                maintenance_connection.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                raise QualificationError("Provider 连接正在变更，拒绝生成保留密钥报告") from exc
+            _require_active_superadmin(db_path=db_path, actor_user_id=accepted_by)
+            identity = dict(git_identity or _git_identity())
+            if identity != {"git_commit": expected_commit, "git_dirty": False}:
+                raise QualificationError("保留密钥安全检查必须绑定预期的干净 Git 提交")
+            verify_frozen_inventory(db_path=db_path, manifest_path=manifest_path)
+            manifest = _load_manifest(manifest_path)
+            checker = compatibility_checker or _provider_runtime_compatibility
+            compatibility = checker(
+                provider_evidence_commit=provider_evidence_commit,
+                current_commit=expected_commit,
+            )
+            if (
+                not isinstance(compatibility, dict)
+                or compatibility.get("compatible") is not True
+            ):
+                raise QualificationError("既有 Provider 证据与当前运行时代码不兼容")
+            normalized_provider_commit = str(
+                compatibility.get("provider_evidence_commit")
+                or provider_evidence_commit
+            )
+            key_sha256_before = _file_sha256(key_path)
+            database_sha256_before = _file_sha256(db_path)
+            vault = FernetCredentialVault.from_key_file(key_path)
+            if vault.has_inactive_keys:
+                raise QualificationError("保留密钥检查不接受未完成的双代际轮换")
+            rows = maintenance_connection.execute(
                 "SELECT ciphertext FROM model_connection_secrets "
                 "WHERE ciphertext IS NOT NULL"
             ).fetchall()
-        if not rows:
-            raise QualificationError("生产数据库不含可验证的 Provider Secret")
-        wrong_vault = FernetCredentialVault.generate()
-        for row in rows:
-            ciphertext = str(row[0])
-            try:
-                vault.decrypt(ciphertext)
-            except ValueError as exc:
-                raise QualificationError("当前生产密钥无法解开全部 Provider Secret") from exc
-            if wrong_vault.active_key_can_decrypt(ciphertext):
-                raise QualificationError("错误密钥意外解开 Provider Secret")
-        key_backup_scope = _verify_no_retained_key_backups(
-            db_path=db_path,
-            key_path=key_path,
-            roots=key_backup_roots,
-        )
-        backup_evidence = _verify_retained_database_backups(
-            db_path=db_path,
-            vault=vault,
-            wrong_vault=wrong_vault,
-        )
-        synthetic_rotation_drill_passed = _run_synthetic_vault_rotation_drill()
-        if not synthetic_rotation_drill_passed:
-            raise QualificationError("一次性密钥轮换演练失败")
-        if (
-            _file_sha256(key_path) != key_sha256_before
-            or _file_sha256(db_path) != database_sha256_before
-        ):
-            raise QualificationError("保留密钥安全检查意外改写生产密钥或数据库")
-
-    report: dict[str, object] = {
-        "schema_version": "g4-vault-retention-report-v1",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        **identity,
-        "manifest_sha256": manifest["manifest_sha256"],
-        "database_path_sha256": _database_path_sha256(db_path),
-        "key_sha256": key_sha256_before,
-        "production_key_changed": False,
-        "live_secret_count": len(rows),
-        "live_secrets_decryptable": True,
-        "wrong_key_rejected": True,
-        "key_backup_scope_verified": True,
-        "backup_scope_kind": "configured_data_backups_root",
-        "key_backup_scope": key_backup_scope,
-        "database_backup_recovery_verified": True,
-        "database_backup_evidence": backup_evidence,
-        "synthetic_rotation_drill_passed": True,
-        "retention_risk_accepted": True,
-        "accepted_by": accepted_by,
-        "acceptance_reason": acceptance_reason.strip(),
-        "provider_evidence_commit": provider_evidence_commit,
-        "provider_runtime_compatibility": compatibility,
-        "code_identity_stable": _git_identity() == identity if git_identity is None else True,
-    }
-    if report["code_identity_stable"] is not True:
-        raise QualificationError("保留密钥安全检查期间代码身份发生变化")
-    _write_json_atomic(output_path, report)
-    return report
+            if not rows:
+                raise QualificationError("生产数据库不含可验证的 Provider Secret")
+            wrong_vault = FernetCredentialVault.generate()
+            for row in rows:
+                ciphertext = str(row[0])
+                try:
+                    vault.decrypt(ciphertext)
+                except ValueError as exc:
+                    raise QualificationError("当前生产密钥无法解开全部 Provider Secret") from exc
+                if wrong_vault.active_key_can_decrypt(ciphertext):
+                    raise QualificationError("错误密钥意外解开 Provider Secret")
+            key_backup_scope = _verify_no_retained_key_backups(
+                db_path=db_path,
+                key_path=key_path,
+                roots=key_backup_roots,
+            )
+            backup_evidence = _verify_retained_database_backups(
+                db_path=db_path,
+                vault=vault,
+                wrong_vault=wrong_vault,
+            )
+            if not _run_synthetic_vault_rotation_drill():
+                raise QualificationError("一次性密钥轮换演练失败")
+            verify_frozen_inventory(db_path=db_path, manifest_path=manifest_path)
+            if (
+                _file_sha256(key_path) != key_sha256_before
+                or _file_sha256(db_path) != database_sha256_before
+            ):
+                raise QualificationError("保留密钥安全检查意外改写生产密钥或数据库")
+            report: dict[str, object] = {
+                "schema_version": "g4-vault-retention-report-v1",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                **identity,
+                "manifest_sha256": manifest["manifest_sha256"],
+                "database_path_sha256": _database_path_sha256(db_path),
+                "key_sha256": key_sha256_before,
+                "production_key_changed": False,
+                "live_secret_count": len(rows),
+                "live_secrets_decryptable": True,
+                "wrong_key_rejected": True,
+                "key_backup_scope_verified": True,
+                "backup_scope_kind": "configured_data_backups_root",
+                "key_backup_scope": key_backup_scope,
+                "database_backup_recovery_verified": True,
+                "database_backup_evidence": backup_evidence,
+                "synthetic_rotation_drill_passed": True,
+                "retention_risk_accepted": True,
+                "accepted_by": accepted_by,
+                "acceptance_reason": acceptance_reason.strip(),
+                "provider_evidence_commit": normalized_provider_commit,
+                "provider_runtime_compatibility": compatibility,
+                "code_identity_stable": (
+                    _git_identity() == identity if git_identity is None else True
+                ),
+            }
+            if report["code_identity_stable"] is not True:
+                raise QualificationError("保留密钥安全检查期间代码身份发生变化")
+            _write_json_atomic(output_path, report)
+            maintenance_connection.rollback()
+            return report
 
 
 def _execute_provider_smoke_unlocked(
@@ -2692,6 +2712,26 @@ def assess_g4_evidence(
         vault_evidence_key = "vault_retention"
         vault_evidence_path = retention_report_path
         compatibility = retention_report.get("provider_runtime_compatibility")
+        accepted_by = retention_report.get("accepted_by")
+        acceptance_reason = retention_report.get("acceptance_reason")
+        authorization_valid = (
+            isinstance(accepted_by, str)
+            and bool(accepted_by.strip())
+            and isinstance(acceptance_reason, str)
+            and bool(acceptance_reason.strip())
+        )
+        if authorization_valid:
+            try:
+                _require_active_superadmin(
+                    db_path=db_path,
+                    actor_user_id=accepted_by,
+                )
+            except QualificationError:
+                authorization_valid = False
+        rechecked_compatibility = _provider_runtime_compatibility(
+            provider_evidence_commit=provider_evidence_commit,
+            current_commit=expected_commit,
+        )
         if (
             retention_report.get("git_commit") != expected_commit
             or retention_report.get("git_dirty") is not False
@@ -2711,13 +2751,12 @@ def assess_g4_evidence(
             or not retention_report.get("database_backup_evidence")
             or retention_report.get("synthetic_rotation_drill_passed") is not True
             or retention_report.get("retention_risk_accepted") is not True
+            or not authorization_valid
             or retention_report.get("provider_evidence_commit")
             != provider_evidence_commit
             or not isinstance(compatibility, dict)
-            or compatibility.get("compatible") is not True
-            or compatibility.get("provider_evidence_commit")
-            != provider_evidence_commit
-            or compatibility.get("current_commit") != expected_commit
+            or compatibility != rechecked_compatibility
+            or rechecked_compatibility.get("compatible") is not True
         ):
             blockers.append("vault_retention_invalid")
     else:
