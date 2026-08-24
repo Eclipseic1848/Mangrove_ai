@@ -56,6 +56,7 @@ from src.observability.workspace_telemetry import (
     workspace_stage_span,
     workspace_task_span,
 )
+from src.services.managed_paths import ManagedPathCodec
 from src.services.upload_store import UploadStore
 from src.model_connections import get_default_broker
 
@@ -759,7 +760,13 @@ class SemanticWorkspaceManager:
             )
 
         publisher = DeliveryPublisher(
-            repository=DeliveryPublishingRepository(settings.webui_db_path),
+            repository=DeliveryPublishingRepository(
+                settings.webui_db_path,
+                semantic_paths=ManagedPathCodec(
+                    settings.semantic_execution_root,
+                    legacy_anchor=("data", "semantic-executions"),
+                ),
+            ),
             output_root=Path(settings.semantic_execution_root),
             candidate_resolver=adapter.resolve_candidates,
             gate_reader=publication_gate,

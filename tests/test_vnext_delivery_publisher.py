@@ -4,10 +4,12 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import shutil
 import sqlite3
 
 import pytest
 
+from src.api.store import WebUIStore
 from src.delivery_publishing.models import (
     CandidateRef,
     DeliverySpec,
@@ -17,6 +19,7 @@ from src.delivery_publishing.models import (
 )
 from src.delivery_publishing.repository import DeliveryPublishingRepository
 from src.delivery_publishing.service import DeliveryPublisher
+from src.services.managed_paths import ManagedPathCodec
 from src.runtime_routing import (
     GateCheck,
     GateSnapshot,
@@ -30,6 +33,13 @@ from src.runtime_routing import (
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _semantic_codec(root: Path) -> ManagedPathCodec:
+    return ManagedPathCodec(
+        root,
+        legacy_anchor=("data", "semantic-executions"),
+    )
 
 
 def _command(
@@ -292,6 +302,74 @@ def test_same_publication_is_idempotent_and_owner_scoped(
     assert len(first.outputs) == 1
     assert repository.get_delivery("owner-b", first.delivery_id) is None
     assert repository.get_output("owner-b", first.outputs[0].output_id) is None
+
+
+def test_formal_delivery_paths_survive_execution_root_move(
+    tmp_path: Path,
+    candidate: Path,
+) -> None:
+    db_path = tmp_path / "webui.db"
+    old_root = tmp_path / "old" / "semantic-executions"
+    repository = DeliveryPublishingRepository(
+        db_path,
+        semantic_paths=_semantic_codec(old_root),
+    )
+    publisher = DeliveryPublisher(
+        repository=repository,
+        output_root=old_root,
+        candidate_resolver=lambda _command: {"candidate_json": candidate},
+        gate_reader=lambda _command: PublicationGate(),
+    )
+    delivery = publisher.publish(_command(candidate), actor_id="owner-a")
+    output_id = delivery.outputs[0].output_id
+
+    with sqlite3.connect(db_path) as connection:
+        persisted_dir = connection.execute(
+            "SELECT output_dir FROM formal_delivery_runs"
+        ).fetchone()[0]
+        persisted_file = connection.execute(
+            "SELECT file_path FROM formal_delivery_outputs"
+        ).fetchone()[0]
+    assert persisted_dir.startswith("managed:v1/")
+    assert persisted_file.startswith("managed:v1/")
+
+    new_root = tmp_path / "new" / "semantic-executions"
+    new_root.parent.mkdir(parents=True)
+    shutil.move(str(old_root), str(new_root))
+    store = WebUIStore(
+        str(db_path),
+        semantic_paths=_semantic_codec(new_root),
+    )
+
+    moved = store.get_semantic_delivery_output("owner-a", output_id)
+
+    assert moved is not None
+    assert Path(moved["file_path"]).is_file()
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT file_path FROM formal_delivery_outputs"
+        ).fetchone()[0] == persisted_file
+
+    relative = persisted_file.removeprefix("managed:v1/")
+    legacy_file = (
+        "D:\\old\\data\\semantic-executions\\"
+        + relative.replace("/", "\\")
+    )
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "UPDATE formal_delivery_outputs SET file_path=?",
+            (legacy_file,),
+        )
+        connection.commit()
+
+    legacy = store.get_semantic_delivery_output("owner-a", output_id)
+
+    assert legacy is not None
+    assert Path(legacy["file_path"]).is_file()
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT file_path FROM formal_delivery_outputs"
+        ).fetchone()[0] == legacy_file
 
 
 def test_same_publication_key_with_different_frozen_input_conflicts(

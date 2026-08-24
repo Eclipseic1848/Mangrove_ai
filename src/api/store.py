@@ -20,6 +20,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
+from src.services.managed_paths import ManagedPathCodec
+
 _DDL = """
 CREATE TABLE IF NOT EXISTS users (
     user_id       TEXT PRIMARY KEY,
@@ -459,8 +461,14 @@ def _now() -> str:
 class WebUIStore:
     """用户与会话的 SQLite 存储。"""
 
-    def __init__(self, db_path: str = "data/webui.db") -> None:
+    def __init__(
+        self,
+        db_path: str = "data/webui.db",
+        *,
+        semantic_paths: ManagedPathCodec | None = None,
+    ) -> None:
         self.db_path = db_path
+        self.semantic_paths = semantic_paths
         Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         with self._conn() as conn:
@@ -2727,6 +2735,36 @@ class WebUIStore:
             for row in rows
         ]
 
+    def _persist_semantic_path(self, value: str | Path) -> str:
+        if self.semantic_paths is None:
+            # 仅兼容不触及语义路径的既有单测；生产 get_store 始终注入 codec。
+            return str(value)
+        return self.semantic_paths.encode(value)
+
+    def _resolve_semantic_path(self, value: str) -> str:
+        if self.semantic_paths is None:
+            # 不在这里静默构造默认根，避免测试配置与生产配置出现两套路径语义。
+            return value
+        return str(self.semantic_paths.decode(value))
+
+    def _persist_semantic_artifact_paths(
+        self,
+        paths: Dict[str, str],
+    ) -> Dict[str, str]:
+        return {
+            name: self._persist_semantic_path(path)
+            for name, path in paths.items()
+        }
+
+    def _resolve_semantic_artifact_paths(
+        self,
+        paths: Dict[str, str],
+    ) -> Dict[str, str]:
+        return {
+            name: self._resolve_semantic_path(path)
+            for name, path in paths.items()
+        }
+
     def save_semantic_harness_attempt(
         self,
         user_id: str,
@@ -2779,7 +2817,12 @@ class WebUIStore:
                     payload(tool_result),
                     payload(verification),
                     payload(repair_decision),
-                    json.dumps(artifact_paths or {}, ensure_ascii=False),
+                    json.dumps(
+                        self._persist_semantic_artifact_paths(
+                            artifact_paths or {}
+                        ),
+                        ensure_ascii=False,
+                    ),
                     _now(),
                 ),
             )
@@ -2791,8 +2834,8 @@ class WebUIStore:
         assert row is not None
         return self._semantic_harness_attempt_row(row, include_private=True)
 
-    @staticmethod
     def _semantic_harness_attempt_row(
+        self,
         row: sqlite3.Row,
         *,
         include_private: bool = False,
@@ -2823,8 +2866,8 @@ class WebUIStore:
             "created_at": row["created_at"],
         }
         if include_private:
-            payload["artifact_paths"] = json.loads(
-                row["artifact_paths_json"] or "{}"
+            payload["artifact_paths"] = self._resolve_semantic_artifact_paths(
+                json.loads(row["artifact_paths_json"] or "{}")
             )
         return payload
 
@@ -2878,7 +2921,13 @@ class WebUIStore:
                 "ORDER BY attempt_number DESC, created_at DESC LIMIT 1",
                 (user_id, run_id),
             ).fetchone()
-        return json.loads(row["artifact_paths_json"]) if row else {}
+        return (
+            self._resolve_semantic_artifact_paths(
+                json.loads(row["artifact_paths_json"])
+            )
+            if row
+            else {}
+        )
 
     def save_semantic_delivery(
         self,
@@ -2909,7 +2958,7 @@ class WebUIStore:
                     user_id,
                     payload["status"],
                     json.dumps(payload, ensure_ascii=False),
-                    str(output_dir.resolve()),
+                    self._persist_semantic_path(output_dir.resolve()),
                     _now(),
                 ),
             )
@@ -2931,7 +2980,7 @@ class WebUIStore:
                         output["media_type"],
                         output["sha256"],
                         output["size_bytes"],
-                        str(file_path),
+                        self._persist_semantic_path(file_path),
                         json.dumps(output["qa"], ensure_ascii=False),
                         _now(),
                     ),
@@ -2955,9 +3004,10 @@ class WebUIStore:
                 DeliveryPublishingRepository,
             )
 
-            return DeliveryPublishingRepository(self.db_path).get_delivery(
-                user_id, delivery_id
-            )
+            return DeliveryPublishingRepository(
+                self.db_path,
+                semantic_paths=self.semantic_paths,
+            ).get_delivery(user_id, delivery_id)
         payload = json.loads(row["manifest_json"])
         payload.pop("user_id", None)
         return payload
@@ -2978,9 +3028,10 @@ class WebUIStore:
                 DeliveryPublishingRepository,
             )
 
-            return DeliveryPublishingRepository(self.db_path).latest_delivery(
-                user_id, run_id
-            )
+            return DeliveryPublishingRepository(
+                self.db_path,
+                semantic_paths=self.semantic_paths,
+            ).latest_delivery(user_id, run_id)
         payload = json.loads(row["manifest_json"])
         payload.pop("user_id", None)
         return payload
@@ -3001,9 +3052,10 @@ class WebUIStore:
                 DeliveryPublishingRepository,
             )
 
-            return DeliveryPublishingRepository(self.db_path).get_output(
-                user_id, output_id
-            )
+            return DeliveryPublishingRepository(
+                self.db_path,
+                semantic_paths=self.semantic_paths,
+            ).get_output(user_id, output_id)
         return {
             "output_id": row["output_id"],
             "delivery_id": row["delivery_id"],
@@ -3013,7 +3065,7 @@ class WebUIStore:
             "media_type": row["media_type"],
             "sha256": row["sha256"],
             "size_bytes": row["size_bytes"],
-            "file_path": row["file_path"],
+            "file_path": self._resolve_semantic_path(row["file_path"]),
             "qa": json.loads(row["qa_json"]),
             "created_at": row["created_at"],
         }

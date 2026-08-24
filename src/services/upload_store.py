@@ -79,13 +79,19 @@ class UploadStore:
         self.max_bytes = max_bytes
 
     def _user_dir(self, user_id: str, sub: str) -> Path:
-        """用户隔离目录。user_id 只用于目录名，不做路径拼接防注入。"""
-        safe = "".join(c for c in user_id if c.isalnum() or c in "-_")
-        if not safe:
+        """用户隔离目录；Owner 标识必须原样构成单个安全目录段。"""
+        if not user_id or any(
+            not (c.isalnum() or c in "-_") for c in user_id
+        ):
             raise ValueError("无效用户标识")
-        d = self.root / safe / sub
+        root = self.root.expanduser().resolve()
+        d = root / user_id / sub
         d.mkdir(parents=True, exist_ok=True)
-        return d
+        resolved = d.resolve()
+        # Owner 目录可能被宿主机软链接替换；写入前必须确认仍在配置根内。
+        if not resolved.is_relative_to(root):
+            raise PermissionError("上传目录越界")
+        return resolved
 
     def _verify_magic(self, data_or_path: Any, original_name: str) -> None:
         """用 filetype 库检测魔数，与扩展名期望不一致则拒绝。"""
@@ -99,6 +105,56 @@ class UploadStore:
             raise ValueError(
                 f"魔数 {detected} 与扩展名 {ext} 期望 {expected} 不一致，疑似伪造文件类型"
             )
+
+    @staticmethod
+    def _write_sidecar(objects_dir: Path, item: UploadItem) -> None:
+        """sidecar 只记录用户目录内的受管相对路径，避免绑定宿主机。"""
+        persisted = item.model_copy(
+            update={"storage_path": f"objects/{item.upload_id}"}
+        )
+        meta_path = objects_dir / f"{item.upload_id}.meta"
+        meta_path.write_text(persisted.model_dump_json(), encoding="utf-8")
+
+    @staticmethod
+    def _verify_registered_object(
+        object_path: Path,
+        item: UploadItem,
+    ) -> None:
+        """按 sidecar 登记值复核对象，防止路径迁移掩盖内容篡改。"""
+        if object_path.stat().st_size != item.size_bytes:
+            raise PermissionError("上传完整性校验失败")
+        digest = hashlib.sha256()
+        with object_path.open("rb") as fh:
+            while chunk := fh.read(1024 * 1024):
+                digest.update(chunk)
+        if digest.hexdigest() != item.sha256:
+            raise PermissionError("上传完整性校验失败")
+
+    @staticmethod
+    def _confined_path(base: Path, path: Path) -> Path:
+        resolved_base = base.resolve()
+        resolved = path.resolve()
+        # 对象或 sidecar 软链接展开后仍须位于当前 Owner 的 objects 目录。
+        if not resolved.is_relative_to(resolved_base):
+            raise PermissionError("上传不存在或无权访问")
+        return resolved
+
+    @staticmethod
+    def _load_sidecar(
+        meta_path: Path,
+        *,
+        user_id: str,
+        upload_id: str,
+    ) -> UploadItem:
+        try:
+            item = UploadItem.model_validate_json(
+                meta_path.read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            raise PermissionError("上传元数据无效") from exc
+        if item.upload_id != upload_id or item.user_id != user_id:
+            raise PermissionError("上传不存在或无权访问")
+        return item
 
     def save_bytes(
         self,
@@ -143,8 +199,7 @@ class UploadStore:
             sha256=digest.hexdigest(),
         )
         # 元数据 sidecar（供 resolve 读回，不依赖重新读文件）
-        meta_path = objects_dir / f"{upload_id}.meta"
-        meta_path.write_text(item.model_dump_json(), encoding="utf-8")
+        self._write_sidecar(objects_dir, item)
         return item
 
     async def save_upload(
@@ -199,8 +254,7 @@ class UploadStore:
             size_bytes=size,
             sha256=digest.hexdigest(),
         )
-        meta_path = objects_dir / f"{upload_id}.meta"
-        meta_path.write_text(item.model_dump_json(), encoding="utf-8")
+        self._write_sidecar(objects_dir, item)
         return item
 
     def resolve(self, user_id: str, upload_id: str) -> UploadItem:
@@ -211,17 +265,28 @@ class UploadStore:
         objects_dir = self._user_dir(user_id, "objects")
         meta_path = objects_dir / f"{upload_id}.meta"
         object_path = objects_dir / upload_id
-        if not object_path.exists():
+        resolved_object = self._confined_path(objects_dir, object_path)
+        if not resolved_object.is_file():
             raise PermissionError("上传不存在或无权访问")
         if meta_path.exists():
-            return UploadItem.model_validate_json(meta_path.read_text(encoding="utf-8"))
+            resolved_meta = self._confined_path(objects_dir, meta_path)
+            item = self._load_sidecar(
+                resolved_meta,
+                user_id=user_id,
+                upload_id=upload_id,
+            )
+            self._verify_registered_object(resolved_object, item)
+            # 历史绝对路径不可信；实际对象始终由当前 root、Owner 和 upload_id 定位。
+            return item.model_copy(
+                update={"storage_path": str(resolved_object)}
+            )
         # 兜底：无 sidecar 时从文件重建（size/sha256 可恢复，original_name 不可恢复）
-        data = object_path.read_bytes()
+        data = resolved_object.read_bytes()
         return UploadItem(
             upload_id=upload_id,
             user_id=user_id,
             original_name="",
-            storage_path=str(object_path.resolve()),
+            storage_path=str(resolved_object),
             media_type="application/octet-stream",
             size_bytes=len(data),
             sha256=hashlib.sha256(data).hexdigest(),
@@ -235,7 +300,15 @@ class UploadStore:
         objects_dir = self._user_dir(user_id, "objects")
         object_path = objects_dir / upload_id
         meta_path = objects_dir / f"{upload_id}.meta"
-        if not object_path.exists():
+        resolved_object = self._confined_path(objects_dir, object_path)
+        if not resolved_object.is_file():
             raise PermissionError("上传不存在或无权访问")
+        if meta_path.exists():
+            resolved_meta = self._confined_path(objects_dir, meta_path)
+            self._load_sidecar(
+                resolved_meta,
+                user_id=user_id,
+                upload_id=upload_id,
+            )
         object_path.unlink(missing_ok=True)
         meta_path.unlink(missing_ok=True)

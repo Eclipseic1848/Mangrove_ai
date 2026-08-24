@@ -17,6 +17,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from src.config.settings import settings
+from src.services.managed_paths import ManagedPathCodec
 
 from .store import WebUIStore
 
@@ -44,7 +45,13 @@ _store: WebUIStore | None = None
 def get_store() -> WebUIStore:
     global _store
     if _store is None:
-        _store = WebUIStore(settings.webui_db_path)
+        _store = WebUIStore(
+            settings.webui_db_path,
+            semantic_paths=ManagedPathCodec(
+                settings.semantic_execution_root,
+                legacy_anchor=("data", "semantic-executions"),
+            ),
+        )
     return _store
 
 
