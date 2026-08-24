@@ -6,11 +6,11 @@
 >
 > 公开主线：`main`
 >
-> 当前工作分支：`codex/g4-key-retention-gate`
+> 当前工作分支：`codex/g3-vnext-acceptance`
 >
-> 分支基线：`b321989e5a195ead9c4845fb9c412b5df1f4cd3c`
+> 分支基线：`ecdd4eecfd7468cf6d8cc30d843e7af3637e5c1f`
 >
-> 当前工作：G4 保留生产密钥补偿控制门
+> 当前工作：G3/G4 正式收口与 Phase 4 状态同步
 
 ## 1. 开始前
 
@@ -36,15 +36,13 @@ evals/generalization-g1/fixtures.json
 
 - G1 已通过独立盲集正式运行并关闭 #37/#40。
 - G2 Office 3/3、AC-05 生产迁移与恢复已通过，#38 已关闭。
-- G3 工程门与 `admin_gray` 恢复验收已通过；生产仍保持 `admin_gray`，默认切换未执行，
-  #39 保持 OPEN。
-- G4 的 DeepSeek/百炼历史真实 Pi 链均曾通过；用户明确不更换现有生产 Vault Key，现按
-  ADR-0032 采用补偿控制。Qwen 的正式批次可复用；旧 DeepSeek 报告因无持久批次且当前连接
-  身份和资格执行代码已变化而不可复用。多报告逐份验真代码与 67 项 G4 回归已通过，用户已
-  授权只补跑一次当前 DeepSeek 正式批次；正式报告尚未生成，暂不写成完整合格。
+- G4 已完整合格：Qwen 旧正式批次经兼容性复核后复用，DeepSeek 只执行一次当前正式批次；
+  传输安全、保留生产 Vault Key 补偿控制与最终汇总均通过，`g4_qualified=true`。
+- G3 已完成 `vnext_default` 生产切换、8088 默认/Pi/Legacy/Owner 隔离、受控 P0 回滚、
+  `admin_gray` 中间恢复及目标模式恢复；旧任务、既有 Assignment 和 Delivery 零改写。
 - G5 本机工程门已通过；真实目标服务器验收移到未来部署阶段，不冒充已完成。
 
-GitHub 当前仅 #36、#39 为 OPEN，均标记 `ready-for-human`。
+GitHub #39 已满足关闭条件；#36 在本次状态同步合并后可按当前 Phase 4 工程边界关闭。
 
 ## 3. G5 本机前置包已完成
 
@@ -87,20 +85,14 @@ GitHub 当前仅 #36、#39 为 OPEN，均标记 `ready-for-human`。
 
 ### #39 / G4
 
-保留密钥补偿控制实现已完成。仍需在干净候选提交上：
-
-- 重新生成当前传输安全报告（不请求 Provider）；
-- 生成生产保留密钥报告（不改写 Key 或数据库）；
-- 复用 `a0560852` 的 Qwen 报告，只补跑一次当前 DeepSeek 正式批次，再完成最终 G4 汇总；
-- G4 通过后，另行执行并验收 `vnext_default`，不能自动切换。
+已完成。正式验收入口为
+`docs/plans/2026-08-23-g3-vnext-cutover-execution-report.md`。
 
 ## 5. 精确下一步
 
-1. 提交并双轴审查当前 G4 候选；
-2. 在干净提交上生成当前传输安全报告和生产保留密钥报告；
-3. 汇总最终 G4 报告；
-4. G4 通过后，按独立生产动作执行并验收 `vnext_default`；
-5. 未来取得目标服务器并进入部署阶段时，以新 Run ID 完成 8B-2，不复用本机报告。
+1. 合并本次 G3/G4 状态同步并关闭 #39/#36；
+2. 未来取得目标服务器并进入实际部署阶段时，以新 Run ID 完成部署时服务器验收，不复用
+   本机报告。
 
 ## 6. 验证与证据边界
 
@@ -116,8 +108,8 @@ GitHub 当前仅 #36、#39 为 OPEN，均标记 `ready-for-human`。
 
 ## 7. 路线与版本
 
-当前路线是：完成 G4 保留密钥正式证据；通过后独立执行 `vnext_default`；真实服务器 8B-2
-在部署阶段补验。远程 MCP/Secret、Registry 自动发现、普通用户平台能力开放、AC-08/AC-09、
+当前路线是：保持 `vnext_default` 并由累计 P0 门失败关闭；真实服务器验收在部署阶段补验。
+远程 MCP/Secret、Registry 自动发现、普通用户平台能力开放、AC-08/AC-09、
 Phase 4C 和 Phase 5 均为后续范围。
 
 稳定标签仍为 `v0.0.4`，不得移动或回写。当前没有获准的新版本号、RC、Tag 或 Release。
