@@ -712,6 +712,97 @@ async def test_unmatched_source_quote_fails_closed_before_semantic_judge(
 
 
 @pytest.mark.asyncio
+async def test_explicit_csv_and_json_goal_accepts_two_candidates(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.csv"
+    source.write_text(
+        "order_id,region,amount\n"
+        "SYN-001,华东,120.50\n"
+        "SYN-002,华南,200.00\n"
+        "SYN-003,华东,80.00\n",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "result.csv").write_text(
+        "region,total_amount\n华东,200.50\n华南,200.00\n",
+        encoding="utf-8",
+    )
+    (output / "result.json").write_text(
+        json.dumps(
+            [
+                {"region": "华东", "total_amount": 200.50},
+                {"region": "华南", "total_amount": 200.00},
+            ],
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    (output / "candidate-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "artifacts": [
+                    {
+                        "filename": filename,
+                        "format": output_format,
+                        "description": description,
+                        "evidence": [
+                            {
+                                "source": "source.csv",
+                                "locator": "row=2",
+                                "quote": "SYN-001,华东,120.50",
+                            }
+                        ],
+                    }
+                    for filename, output_format, description in (
+                        ("result.csv", "csv", "按区域汇总的 CSV"),
+                        ("result.json", "json", "按区域汇总的 JSON"),
+                    )
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    request = PiRuntimeRequest(
+        user_id="user-a",
+        task_id="task-multi-output",
+        revision=1,
+        objective_text=(
+            "仅处理这个纯合成 CSV。按 region 汇总 amount，金额保留两位小数；"
+            "输出一份 CSV 和一份 JSON。CSV 列固定为 region,total_amount，"
+            "按 region 升序；JSON 使用相同字段和值。不要补造任何记录。"
+        ),
+        requested_output_formats=("csv", "json"),
+        sources=(
+            SourceInput(
+                upload_id="upload-synthetic",
+                original_name="source.csv",
+                host_path=source,
+                sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                media_type="text/csv",
+            ),
+        ),
+        model="local-model",
+        base_url="http://127.0.0.1:6012/v1",
+        api_key="local-runtime",
+    )
+
+    report = await CandidateVerifier(
+        semantic_judge=AlwaysPassingSemanticJudge(),
+    ).verify(
+        request=request,
+        candidates=inspect_candidates(output, ("csv", "json")),
+        manifest_path=output / "candidate-manifest.json",
+    )
+
+    assert report.status is VerificationStatus.PASSED
+    assert all(check.passed for check in report.checks)
+
+
+@pytest.mark.asyncio
 async def test_explicit_single_file_goal_rejects_multiple_candidates(
     tmp_path: Path,
 ) -> None:

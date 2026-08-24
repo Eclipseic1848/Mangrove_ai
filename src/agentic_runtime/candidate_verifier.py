@@ -713,8 +713,10 @@ class CandidateVerifier:
                 ),
             )
         )
-        count_ok = not _expects_one_artifact(request.objective_text) or (
-            len(candidates) == 1
+        # 冻结多格式契约优先于目标文本中每种格式各自的单数量词。
+        count_ok = len(request.requested_output_formats) > 1 or (
+            not _expects_one_artifact(request.objective_text)
+            or len(candidates) == 1
         )
         checks.append(
             VerificationCheck(
