@@ -1789,7 +1789,7 @@ def verify_vault_retention_safety(
     manifest_path: Path,
     output_path: Path,
     expected_commit: str,
-    provider_evidence_commit: str,
+    provider_evidence_commit: str | list[str],
     accepted_by: str,
     acceptance_reason: str,
     confirm_retain_production_key: bool,
@@ -1801,11 +1801,21 @@ def verify_vault_retention_safety(
 
     if not confirm_retain_production_key:
         raise QualificationError("必须确认保留现有生产密钥及其剩余风险")
+    provider_evidence_commits = (
+        [provider_evidence_commit]
+        if isinstance(provider_evidence_commit, str)
+        else list(provider_evidence_commit)
+    )
     if not all(
         isinstance(value, str) and bool(value.strip())
-        for value in (accepted_by, acceptance_reason, provider_evidence_commit)
+        for value in (accepted_by, acceptance_reason)
+    ) or not provider_evidence_commits or not all(
+        isinstance(value, str) and bool(value.strip())
+        for value in provider_evidence_commits
     ):
         raise QualificationError("保留密钥的授权身份、原因和 Provider 证据提交不能为空")
+    if len(set(provider_evidence_commits)) != len(provider_evidence_commits):
+        raise QualificationError("Provider 证据提交不得重复")
     if not db_path.is_file() or not key_path.is_file():
         raise QualificationError("数据库或模型连接独立主密钥不存在")
     report_lock = output_path.with_name(f".{output_path.name}.lock")
@@ -1827,19 +1837,26 @@ def verify_vault_retention_safety(
             verify_frozen_inventory(db_path=db_path, manifest_path=manifest_path)
             manifest = _load_manifest(manifest_path)
             checker = compatibility_checker or _provider_runtime_compatibility
-            compatibility = checker(
-                provider_evidence_commit=provider_evidence_commit,
-                current_commit=expected_commit,
-            )
-            if (
-                not isinstance(compatibility, dict)
-                or compatibility.get("compatible") is not True
+            compatibilities = [
+                checker(
+                    provider_evidence_commit=commit,
+                    current_commit=expected_commit,
+                )
+                for commit in provider_evidence_commits
+            ]
+            if not all(
+                isinstance(item, dict) and item.get("compatible") is True
+                for item in compatibilities
             ):
                 raise QualificationError("既有 Provider 证据与当前运行时代码不兼容")
-            normalized_provider_commit = str(
-                compatibility.get("provider_evidence_commit")
-                or provider_evidence_commit
-            )
+            normalized_provider_commits = [
+                str(item.get("provider_evidence_commit") or commit)
+                for item, commit in zip(
+                    compatibilities,
+                    provider_evidence_commits,
+                    strict=True,
+                )
+            ]
             key_sha256_before = _file_sha256(key_path)
             database_sha256_before = _file_sha256(db_path)
             vault = FernetCredentialVault.from_key_file(key_path)
@@ -1898,14 +1915,21 @@ def verify_vault_retention_safety(
                 "retention_risk_accepted": True,
                 "accepted_by": accepted_by,
                 "acceptance_reason": acceptance_reason.strip(),
-                "provider_evidence_commit": normalized_provider_commit,
-                "provider_runtime_compatibility": compatibility,
+                "provider_runtime_compatibility": (
+                    compatibilities[0]
+                    if len(compatibilities) == 1
+                    else compatibilities
+                ),
                 "code_identity_stable": (
                     _git_identity() == identity if git_identity is None else True
                 ),
             }
             if report["code_identity_stable"] is not True:
                 raise QualificationError("保留密钥安全检查期间代码身份发生变化")
+            if len(normalized_provider_commits) == 1:
+                report["provider_evidence_commit"] = normalized_provider_commits[0]
+            else:
+                report["provider_evidence_commits"] = normalized_provider_commits
             _write_json_atomic(output_path, report)
             maintenance_connection.rollback()
             return report
@@ -2556,7 +2580,7 @@ def assess_g4_evidence(
     *,
     db_path: Path,
     manifest_path: Path,
-    pi_report_path: Path,
+    pi_report_path: Path | list[Path],
     transport_report_path: Path,
     rotation_report_path: Path | None = None,
     retention_report_path: Path | None = None,
@@ -2564,7 +2588,7 @@ def assess_g4_evidence(
     expected_commit: str,
     expected_manifest_sha256: str,
     qualification_ledger_path: Path,
-    qualification_batch_id: str,
+    qualification_batch_id: str | list[str],
 ) -> dict[str, object]:
     """只在三组独立证据身份一致时形成 G4 最终资格。"""
 
@@ -2578,6 +2602,9 @@ def assess_g4_evidence(
     manifest = _load_manifest(manifest_path)
     if manifest.get("manifest_sha256") != expected_manifest_sha256:
         raise QualificationError("G4 冻结清单摘要不匹配")
+    manifest_provider_values = [
+        dict(item) for item in manifest["providers"] if isinstance(item, dict)
+    ]
     manifest_providers = {
         (
             str(item["connection_id"]),
@@ -2589,10 +2616,25 @@ def assess_g4_evidence(
         for item in manifest["providers"]
         if isinstance(item, dict)
     }
-    pi_report = _load_evidence(
-        pi_report_path,
-        "g4-pi-provider-report-v1",
+    pi_report_paths = (
+        [pi_report_path] if isinstance(pi_report_path, Path) else list(pi_report_path)
     )
+    qualification_batch_ids = (
+        [qualification_batch_id]
+        if isinstance(qualification_batch_id, str)
+        else list(qualification_batch_id)
+    )
+    if (
+        not pi_report_paths
+        or len(pi_report_paths) != len(qualification_batch_ids)
+        or len(set(pi_report_paths)) != len(pi_report_paths)
+        or len(set(qualification_batch_ids)) != len(qualification_batch_ids)
+    ):
+        raise QualificationError("G4 Provider 报告与资格批次必须非空、一一对应且不得重复")
+    pi_reports = [
+        _load_evidence(path, "g4-pi-provider-report-v1")
+        for path in pi_report_paths
+    ]
     transport_report = _load_evidence(
         transport_report_path,
         "g4-transport-safety-report-v1",
@@ -2607,26 +2649,98 @@ def assess_g4_evidence(
         if retention_report_path is not None
         else None
     )
-    provider_evidence_commit = str(pi_report.get("git_commit") or "")
     blockers: list[str] = []
-    batch_ledger_valid = False
-    if qualification_ledger_path.is_file():
-        try:
-            _anchored_qualification_ledger(
-                db_path=db_path,
-                ledger_path=qualification_ledger_path,
-            ).validate_passed_batch(
-                batch_id=qualification_batch_id,
-                manifest_sha256=expected_manifest_sha256,
-                providers=[dict(item) for item in manifest["providers"]],
-                expected_commit=provider_evidence_commit,
-                expected_ledger_id=str(
-                    pi_report.get("qualification_ledger_id") or ""
-                ),
+    provider_evidence_commits: list[str] = []
+    qualification_ledger_ids: list[str] = []
+    combined_pi_provider_set: set[tuple[str, str, str, str, str]] = set()
+    pi_provider_chain_valid = True
+    batch_ledger_valid = qualification_ledger_path.is_file()
+    try:
+        anchored_ledger = _anchored_qualification_ledger(
+            db_path=db_path,
+            ledger_path=qualification_ledger_path,
+        )
+    except (QualificationError, QualificationLedgerError, sqlite3.Error, OSError):
+        anchored_ledger = None
+        batch_ledger_valid = False
+    for pi_report, batch_id in zip(
+        pi_reports,
+        qualification_batch_ids,
+        strict=True,
+    ):
+        provider_evidence_commit = str(pi_report.get("git_commit") or "")
+        provider_evidence_commits.append(provider_evidence_commit)
+        ledger_id = str(pi_report.get("qualification_ledger_id") or "")
+        qualification_ledger_ids.append(ledger_id)
+        pi_providers = pi_report.get("providers")
+        pi_provider_set = {
+            (
+                str(item.get("connection_id")),
+                str(item.get("connection_version")),
+                str(item.get("preset_id")),
+                str(item.get("model")),
+                str(item.get("api_format")),
             )
-            batch_ledger_valid = (
-                pi_report.get("qualification_batch_id")
-                == qualification_batch_id
+            for item in pi_providers
+            if isinstance(item, dict)
+        } if isinstance(pi_providers, list) else set()
+        subset_providers = [
+            item
+            for item in manifest_provider_values
+            if (
+                str(item["connection_id"]),
+                str(item["connection_version"]),
+                str(item["preset_id"]),
+                str(item["model"]),
+                str(item["api_format"]),
+            )
+            in pi_provider_set
+        ]
+        expected_subset_manifest_sha256 = _canonical_sha256(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "providers": subset_providers,
+            }
+        )
+        pi_provider_details_valid = bool(pi_provider_set) and all(
+            isinstance(item, dict)
+            and item.get("permission_profile") == "standard"
+            and bool(str(item.get("owner_user_id") or "").strip())
+            and item.get("outcome") == "passed"
+            and item.get("runtime_status") == "candidate_ready"
+            and item.get("usage_status") == "recorded"
+            and item.get("candidate_count") == 1
+            and item.get("verification_status") == "passed"
+            and item.get("pi_provider_chain_passed") is True
+            for item in (pi_providers or [])
+        )
+        if (
+            not provider_evidence_commit
+            or not ledger_id
+            or pi_report.get("qualification_batch_id") != batch_id
+            or pi_report.get("git_dirty") is not False
+            or pi_report.get("manifest_sha256")
+            != expected_subset_manifest_sha256
+            or pi_report.get("synthetic_egress_only") is not True
+            or pi_report.get("code_identity_stable") is not True
+            or pi_report.get("pi_provider_chain_passed") is not True
+            or not pi_provider_set.issubset(manifest_providers)
+            or len(subset_providers) != len(pi_providers or [])
+            or not pi_provider_details_valid
+            or bool(combined_pi_provider_set & pi_provider_set)
+        ):
+            pi_provider_chain_valid = False
+        combined_pi_provider_set.update(pi_provider_set)
+        if anchored_ledger is None:
+            batch_ledger_valid = False
+            continue
+        try:
+            anchored_ledger.validate_passed_batch(
+                batch_id=batch_id,
+                manifest_sha256=expected_subset_manifest_sha256,
+                providers=subset_providers,
+                expected_commit=provider_evidence_commit,
+                expected_ledger_id=ledger_id,
             )
         except (
             QualificationLedgerError,
@@ -2638,41 +2752,7 @@ def assess_g4_evidence(
             batch_ledger_valid = False
     if not batch_ledger_valid:
         blockers.append("qualification_batch_invalid")
-    pi_providers = pi_report.get("providers")
-    pi_provider_set = {
-        (
-            str(item.get("connection_id")),
-            str(item.get("connection_version")),
-            str(item.get("preset_id")),
-            str(item.get("model")),
-            str(item.get("api_format")),
-        )
-        for item in pi_providers
-        if isinstance(item, dict)
-    } if isinstance(pi_providers, list) else set()
-    pi_provider_details_valid = bool(pi_provider_set) and all(
-        isinstance(item, dict)
-        and item.get("permission_profile") == "standard"
-        and bool(str(item.get("owner_user_id") or "").strip())
-        and item.get("outcome") == "passed"
-        and item.get("runtime_status") == "candidate_ready"
-        and item.get("usage_status") == "recorded"
-        and item.get("candidate_count") == 1
-        and item.get("verification_status") == "passed"
-        and item.get("pi_provider_chain_passed") is True
-        for item in (pi_providers or [])
-    )
-    if (
-        not provider_evidence_commit
-        or pi_report.get("git_dirty") is not False
-        or pi_report.get("manifest_sha256") != expected_manifest_sha256
-        or pi_report.get("synthetic_egress_only") is not True
-        or pi_report.get("code_identity_stable") is not True
-        or pi_report.get("pi_provider_chain_passed") is not True
-        or pi_provider_set != manifest_providers
-        or len(pi_providers or []) != len(manifest_providers)
-        or not pi_provider_details_valid
-    ):
+    if not pi_provider_chain_valid or combined_pi_provider_set != manifest_providers:
         blockers.append("pi_provider_chain_invalid")
     if (
         transport_report.get("git_commit") != expected_commit
@@ -2692,7 +2772,7 @@ def assess_g4_evidence(
         vault_evidence_key = "vault_rotation"
         vault_evidence_path = rotation_report_path
         if (
-            provider_evidence_commit != expected_commit
+            any(commit != expected_commit for commit in provider_evidence_commits)
             or rotation_report.get("phase") != "finalized"
             or rotation_report.get("git_commit") != expected_commit
             or rotation_report.get("git_dirty") is not False
@@ -2711,7 +2791,16 @@ def assess_g4_evidence(
         vault_evidence_mode = "retained"
         vault_evidence_key = "vault_retention"
         vault_evidence_path = retention_report_path
-        compatibility = retention_report.get("provider_runtime_compatibility")
+        compatibility_value = retention_report.get("provider_runtime_compatibility")
+        compatibilities = (
+            [compatibility_value]
+            if isinstance(compatibility_value, dict)
+            else compatibility_value
+        )
+        reported_commits_value = retention_report.get(
+            "provider_evidence_commits",
+            [retention_report.get("provider_evidence_commit")],
+        )
         accepted_by = retention_report.get("accepted_by")
         acceptance_reason = retention_report.get("acceptance_reason")
         authorization_valid = (
@@ -2728,10 +2817,13 @@ def assess_g4_evidence(
                 )
             except QualificationError:
                 authorization_valid = False
-        rechecked_compatibility = _provider_runtime_compatibility(
-            provider_evidence_commit=provider_evidence_commit,
-            current_commit=expected_commit,
-        )
+        rechecked_compatibility = [
+            _provider_runtime_compatibility(
+                provider_evidence_commit=commit,
+                current_commit=expected_commit,
+            )
+            for commit in provider_evidence_commits
+        ]
         if (
             retention_report.get("git_commit") != expected_commit
             or retention_report.get("git_dirty") is not False
@@ -2752,11 +2844,13 @@ def assess_g4_evidence(
             or retention_report.get("synthetic_rotation_drill_passed") is not True
             or retention_report.get("retention_risk_accepted") is not True
             or not authorization_valid
-            or retention_report.get("provider_evidence_commit")
-            != provider_evidence_commit
-            or not isinstance(compatibility, dict)
-            or compatibility != rechecked_compatibility
-            or rechecked_compatibility.get("compatible") is not True
+            or reported_commits_value != provider_evidence_commits
+            or not isinstance(compatibilities, list)
+            or compatibilities != rechecked_compatibility
+            or not all(
+                isinstance(item, dict) and item.get("compatible") is True
+                for item in rechecked_compatibility
+            )
         ):
             blockers.append("vault_retention_invalid")
     else:
@@ -2773,16 +2867,23 @@ def assess_g4_evidence(
         "g4_qualified": True,
         "vault_evidence_mode": vault_evidence_mode,
         "qualification_blockers": [],
-        "qualification_batch_id": qualification_batch_id,
-        "qualification_ledger_id": pi_report["qualification_ledger_id"],
+        "qualification_batch_ids": qualification_batch_ids,
+        "qualification_ledger_id": qualification_ledger_ids[0],
+        "provider_evidence_commits": provider_evidence_commits,
         "evidence_sha256": {
             "manifest": _file_sha256(manifest_path),
-            "pi_provider": _file_sha256(pi_report_path),
+            "pi_provider": (
+                _file_sha256(pi_report_paths[0])
+                if len(pi_report_paths) == 1
+                else [_file_sha256(path) for path in pi_report_paths]
+            ),
             "transport_safety": _file_sha256(transport_report_path),
             vault_evidence_key: _file_sha256(vault_evidence_path),
             "qualification_ledger": _file_sha256(qualification_ledger_path),
         },
     }
+    if len(qualification_batch_ids) == 1:
+        report["qualification_batch_id"] = qualification_batch_ids[0]
     _write_json_atomic(output_path, report)
     return report
 
@@ -2910,7 +3011,11 @@ def _parser() -> argparse.ArgumentParser:
     retain.add_argument("--db-path", required=True, type=Path)
     retain.add_argument("--key-path", required=True, type=Path)
     retain.add_argument("--manifest", required=True, type=Path)
-    retain.add_argument("--provider-evidence-commit", required=True)
+    retain.add_argument(
+        "--provider-evidence-commit",
+        action="append",
+        required=True,
+    )
     retain.add_argument("--expected-commit", required=True)
     retain.add_argument("--output", required=True, type=Path)
     retain.add_argument(
@@ -2927,7 +3032,7 @@ def _parser() -> argparse.ArgumentParser:
         help="汇总 Pi、传输安全与密钥轮换证据",
     )
     assess.add_argument("--db-path", required=True, type=Path)
-    assess.add_argument("--pi-report", required=True, type=Path)
+    assess.add_argument("--pi-report", action="append", required=True, type=Path)
     assess.add_argument("--manifest", required=True, type=Path)
     assess.add_argument("--transport-report", required=True, type=Path)
     vault_evidence = assess.add_mutually_exclusive_group(required=True)
@@ -2935,7 +3040,11 @@ def _parser() -> argparse.ArgumentParser:
     vault_evidence.add_argument("--retention-report", type=Path)
     assess.add_argument("--expected-commit", required=True)
     assess.add_argument("--expected-manifest-sha256", required=True)
-    assess.add_argument("--qualification-batch-id", required=True)
+    assess.add_argument(
+        "--qualification-batch-id",
+        action="append",
+        required=True,
+    )
     assess.add_argument("--output", required=True, type=Path)
     rotate = subparsers.add_parser(
         "rotate-vault",

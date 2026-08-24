@@ -2698,6 +2698,39 @@ def test_retained_vault_safety_report_preserves_production_key_and_database(
     assert report["provider_runtime_compatibility"]["compatible"] is True
     assert json.loads(report_path.read_text(encoding="utf-8")) == report
 
+    multi_report = verify_vault_retention_safety(
+        db_path=database,
+        key_path=key_path,
+        manifest_path=manifest_path,
+        output_path=tmp_path / "retention-multi-commit.json",
+        expected_commit=current_commit,
+        provider_evidence_commit=[provider_commit, current_commit],
+        accepted_by="super-admin",
+        acceptance_reason="逐份绑定两个 Provider 证据提交",
+        confirm_retain_production_key=True,
+        key_backup_roots=[backup_root],
+        git_identity={"git_commit": current_commit, "git_dirty": False},
+    )
+    assert multi_report["provider_evidence_commits"] == [
+        provider_commit,
+        current_commit,
+    ]
+    assert len(multi_report["provider_runtime_compatibility"]) == 2
+    with pytest.raises(QualificationError, match="不得重复"):
+        verify_vault_retention_safety(
+            db_path=database,
+            key_path=key_path,
+            manifest_path=manifest_path,
+            output_path=tmp_path / "retention-duplicate-commit.json",
+            expected_commit=current_commit,
+            provider_evidence_commit=[provider_commit, provider_commit],
+            accepted_by="super-admin",
+            acceptance_reason="重复提交必须拒绝",
+            confirm_retain_production_key=True,
+            key_backup_roots=[backup_root],
+            git_identity={"git_commit": current_commit, "git_dirty": False},
+        )
+
     with pytest.raises(QualificationError, match="拒绝覆盖"):
         verify_vault_retention_safety(
             db_path=database,
@@ -2852,6 +2885,8 @@ def test_retained_vault_safety_has_explicit_cli_contract(tmp_path):
             str(tmp_path / "manifest.json"),
             "--provider-evidence-commit",
             "provider-commit",
+            "--provider-evidence-commit",
+            "current-commit",
             "--expected-commit",
             "current-commit",
             "--output",
@@ -2867,6 +2902,7 @@ def test_retained_vault_safety_has_explicit_cli_contract(tmp_path):
     )
 
     assert args.command == "verify-vault-retention"
+    assert args.provider_evidence_commit == ["provider-commit", "current-commit"]
     assert args.key_backup_root == [tmp_path / "backups"]
     assert args.confirm_retain_production_key is True
 
@@ -2876,7 +2912,9 @@ def test_retained_vault_safety_has_explicit_cli_contract(tmp_path):
             "--db-path",
             str(tmp_path / "webui.db"),
             "--pi-report",
-            str(tmp_path / "pi.json"),
+            str(tmp_path / "pi-qwen.json"),
+            "--pi-report",
+            str(tmp_path / "pi-deepseek.json"),
             "--manifest",
             str(tmp_path / "manifest.json"),
             "--transport-report",
@@ -2888,13 +2926,23 @@ def test_retained_vault_safety_has_explicit_cli_contract(tmp_path):
             "--expected-manifest-sha256",
             "manifest-sha",
             "--qualification-batch-id",
-            "batch-id",
+            "qwen-batch-id",
+            "--qualification-batch-id",
+            "deepseek-batch-id",
             "--output",
             str(tmp_path / "final.json"),
         ]
     )
     assert assess_args.rotation_report is None
     assert assess_args.retention_report == tmp_path / "retention.json"
+    assert assess_args.pi_report == [
+        tmp_path / "pi-qwen.json",
+        tmp_path / "pi-deepseek.json",
+    ]
+    assert assess_args.qualification_batch_id == [
+        "qwen-batch-id",
+        "deepseek-batch-id",
+    ]
 
 
 def test_g4_assessment_accepts_compatible_provider_report_with_retained_key(
@@ -3105,6 +3153,219 @@ def test_g4_assessment_accepts_compatible_provider_report_with_retained_key(
             expected_manifest_sha256=manifest_sha,
             qualification_ledger_path=authoritative_ledger_path,
             qualification_batch_id=str(batch["batch_id"]),
+        )
+
+
+def test_g4_assessment_combines_independent_provider_batches(
+    tmp_path,
+    authoritative_ledger_path,
+):
+    old_commit = subprocess.run(
+        ["git", "rev-parse", "a0560852^{commit}"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.strip()
+    current_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=True,
+    ).stdout.strip()
+    database = tmp_path / "webui.db"
+    _create_inventory_database(database)
+    combined_manifest = freeze_manifest(
+        db_path=database,
+        presets=["deepseek", "qwen"],
+    )
+
+    def write(name: str, payload: dict) -> Path:
+        path = tmp_path / name
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        return path
+
+    manifest_path = write("combined-manifest.json", combined_manifest)
+    ledger = QualificationBatchLedger(authoritative_ledger_path)
+    reports: list[Path] = []
+    batch_ids: list[str] = []
+    compatibility: list[dict[str, object]] = []
+    for index, (preset_id, evidence_commit) in enumerate(
+        (("qwen", old_commit), ("deepseek", current_commit))
+    ):
+        provider = next(
+            dict(item)
+            for item in combined_manifest["providers"]
+            if item["preset_id"] == preset_id
+        )
+        single_manifest = {
+            "schema_version": "g4-provider-manifest-v1",
+            "providers": [provider],
+        }
+        single_manifest_sha = _canonical_sha256(single_manifest)
+        batch = ledger.create_batch(
+            manifest_sha256=single_manifest_sha,
+            providers=[provider],
+            expected_commit=evidence_commit,
+            owner_user_id="g4-ordinary-user",
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay",
+            timeout_seconds=1800,
+            authorized_by="super-admin",
+            authorization_reason=f"测试 {preset_id} 独立正式批次",
+            idempotency_key=f"g4-multi-{preset_id}",
+            batch_kind="initial",
+            parent_batch_id=None,
+            previous_evidence=[],
+        )
+        _sync_qualification_ledger_anchor(
+            db_path=database,
+            ledger=ledger,
+            bootstrap_batch_id=(str(batch["batch_id"]) if index == 0 else None),
+            initialized_by=("super-admin" if index == 0 else None),
+        )
+        ledger.begin_attempt(
+            batch_id=str(batch["batch_id"]),
+            provider=provider,
+            attempt_context={"task_id_sha256": str(index + 1) * 64},
+        )
+        _sync_qualification_ledger_anchor(db_path=database, ledger=ledger)
+        ledger.finish_attempt(
+            batch_id=str(batch["batch_id"]),
+            provider=provider,
+            check={"outcome": "passed"},
+        )
+        _sync_qualification_ledger_anchor(db_path=database, ledger=ledger)
+        reports.append(
+            write(
+                f"pi-{preset_id}.json",
+                {
+                    "schema_version": "g4-pi-provider-report-v1",
+                    "manifest_sha256": single_manifest_sha,
+                    "git_commit": evidence_commit,
+                    "git_dirty": False,
+                    "synthetic_egress_only": True,
+                    "code_identity_stable": True,
+                    "pi_provider_chain_passed": True,
+                    "qualification_ledger_id": batch["ledger_id"],
+                    "qualification_batch_id": batch["batch_id"],
+                    "providers": [
+                        {
+                            **provider,
+                            "permission_profile": "standard",
+                            "owner_user_id": "g4-ordinary-user",
+                            "outcome": "passed",
+                            "runtime_status": "candidate_ready",
+                            "usage_status": "recorded",
+                            "candidate_count": 1,
+                            "verification_status": "passed",
+                            "pi_provider_chain_passed": True,
+                        }
+                    ],
+                },
+            )
+        )
+        batch_ids.append(str(batch["batch_id"]))
+        compatibility.append(
+            _provider_runtime_compatibility(
+                provider_evidence_commit=evidence_commit,
+                current_commit=current_commit,
+            )
+        )
+
+    transport_report = write(
+        "transport-multi.json",
+        {
+            "schema_version": "g4-transport-safety-report-v1",
+            "git_commit": current_commit,
+            "git_dirty": False,
+            "code_identity_stable": True,
+            "pytest_returncode": 0,
+            "test_count": 6,
+            "test_ids": list(
+                __import__(
+                    "scripts.verify_g4_provider_safety",
+                    fromlist=["_TRANSPORT_SAFETY_TESTS"],
+                )._TRANSPORT_SAFETY_TESTS
+            ),
+            "transport_safety_passed": True,
+        },
+    )
+    retention_report = write(
+        "retention-multi.json",
+        {
+            "schema_version": "g4-vault-retention-report-v1",
+            "git_commit": current_commit,
+            "git_dirty": False,
+            "code_identity_stable": True,
+            "manifest_sha256": combined_manifest["manifest_sha256"],
+            "database_path_sha256": _database_path_sha256(database),
+            "production_key_changed": False,
+            "live_secrets_decryptable": True,
+            "wrong_key_rejected": True,
+            "key_backup_scope_verified": True,
+            "backup_scope_kind": "configured_data_backups_root",
+            "key_backup_scope": [{"root_name": "backups", "file_count": 1}],
+            "database_backup_recovery_verified": True,
+            "database_backup_evidence": [
+                {"file_name": "webui-before.db", "sha256": "d" * 64}
+            ],
+            "synthetic_rotation_drill_passed": True,
+            "retention_risk_accepted": True,
+            "accepted_by": "super-admin",
+            "acceptance_reason": "保留生产密钥并逐份复核 Provider 证据",
+            "provider_evidence_commits": [old_commit, current_commit],
+            "provider_runtime_compatibility": compatibility,
+        },
+    )
+
+    result = assess_g4_evidence(
+        db_path=database,
+        manifest_path=manifest_path,
+        pi_report_path=reports,
+        transport_report_path=transport_report,
+        rotation_report_path=None,
+        retention_report_path=retention_report,
+        output_path=tmp_path / "g4-final-multi.json",
+        expected_commit=current_commit,
+        expected_manifest_sha256=str(combined_manifest["manifest_sha256"]),
+        qualification_ledger_path=authoritative_ledger_path,
+        qualification_batch_id=batch_ids,
+    )
+
+    assert result["g4_qualified"] is True
+    assert result["qualification_batch_ids"] == batch_ids
+    assert len(result["evidence_sha256"]["pi_provider"]) == 2
+
+    with pytest.raises(QualificationError, match="不得重复"):
+        assess_g4_evidence(
+            db_path=database,
+            manifest_path=manifest_path,
+            pi_report_path=[reports[0], reports[0]],
+            transport_report_path=transport_report,
+            rotation_report_path=None,
+            retention_report_path=retention_report,
+            output_path=tmp_path / "g4-final-duplicate-provider.json",
+            expected_commit=current_commit,
+            expected_manifest_sha256=str(combined_manifest["manifest_sha256"]),
+            qualification_ledger_path=authoritative_ledger_path,
+            qualification_batch_id=batch_ids,
+        )
+    with pytest.raises(QualificationError, match="pi_provider_chain_invalid"):
+        assess_g4_evidence(
+            db_path=database,
+            manifest_path=manifest_path,
+            pi_report_path=[reports[0]],
+            transport_report_path=transport_report,
+            rotation_report_path=None,
+            retention_report_path=retention_report,
+            output_path=tmp_path / "g4-final-missing-provider.json",
+            expected_commit=current_commit,
+            expected_manifest_sha256=str(combined_manifest["manifest_sha256"]),
+            qualification_ledger_path=authoritative_ledger_path,
+            qualification_batch_id=[batch_ids[0]],
         )
 
 
