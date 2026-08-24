@@ -139,6 +139,116 @@ def _git_identity() -> dict[str, object]:
     return {"git_commit": commit, "git_dirty": dirty}
 
 
+def _provider_runtime_compatibility(
+    *,
+    provider_evidence_commit: str,
+    current_commit: str,
+) -> dict[str, object]:
+    """确认旧 Provider 报告覆盖的关键执行代码未发生变化。"""
+
+    protected_paths = [
+        "src/model_connections",
+        "src/agentic_runtime",
+        "src/api/routes/model_relay.py",
+        "src/connectors/http_security.py",
+    ]
+    allowed_script_functions = {
+        "_database_backups_with_provider_secrets",
+        "_verify_database_backups_will_be_erased",
+        "_file_contains_material",
+        "_verify_no_retained_key_backups",
+        "_verify_retained_database_backups",
+        "_run_synthetic_vault_rotation_drill",
+        "verify_vault_retention_safety",
+        "_provider_runtime_compatibility",
+        "assess_g4_evidence",
+        "_parser",
+        "main",
+    }
+
+    def run_git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", *args],
+            cwd=PROJECT_ROOT,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=False,
+        )
+
+    provider_revision = run_git("rev-parse", "--verify", f"{provider_evidence_commit}^{{commit}}")
+    current_revision = run_git("rev-parse", "--verify", f"{current_commit}^{{commit}}")
+    if provider_revision.returncode or current_revision.returncode:
+        return {"compatible": False, "reason": "git_commit_unavailable"}
+    provider_commit = provider_revision.stdout.strip()
+    resolved_current_commit = current_revision.stdout.strip()
+    ancestry = run_git("merge-base", "--is-ancestor", provider_commit, resolved_current_commit)
+    if ancestry.returncode != 0:
+        return {
+            "compatible": False,
+            "reason": "provider_commit_not_ancestor",
+            "provider_evidence_commit": provider_commit,
+            "current_commit": resolved_current_commit,
+        }
+    changed = run_git(
+        "diff",
+        "--name-only",
+        f"{provider_commit}..{resolved_current_commit}",
+        "--",
+        *protected_paths,
+    )
+    if changed.returncode:
+        return {
+            "compatible": False,
+            "reason": "git_diff_failed",
+            "provider_evidence_commit": provider_commit,
+            "current_commit": resolved_current_commit,
+        }
+    changed_paths = sorted(line for line in changed.stdout.splitlines() if line)
+
+    ast = __import__("ast")
+
+    def provider_runner_module_digest(revision: str) -> str | None:
+        source = run_git("show", f"{revision}:scripts/verify_g4_provider_safety.py")
+        if source.returncode:
+            return None
+        try:
+            module = ast.parse(source.stdout)
+        except SyntaxError:
+            return None
+        protected_body = [
+            node
+            for node in module.body
+            if not (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and (
+                    node.name in allowed_script_functions
+                    or node.name.startswith("_retained_")
+                )
+            )
+        ]
+        protected_module = ast.Module(body=protected_body, type_ignores=[])
+        payload = ast.dump(protected_module, include_attributes=False).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    provider_script_digest = provider_runner_module_digest(provider_commit)
+    current_script_digest = provider_runner_module_digest(resolved_current_commit)
+    script_compatible = (
+        provider_script_digest is not None
+        and provider_script_digest == current_script_digest
+    )
+    compatible = not changed_paths and script_compatible
+    return {
+        "compatible": compatible,
+        "reason": "compatible" if compatible else "provider_runtime_changed",
+        "provider_evidence_commit": provider_commit,
+        "current_commit": resolved_current_commit,
+        "protected_paths_changed": changed_paths,
+        "provider_runner_module_compatible": script_compatible,
+        "provider_runner_module_digest": current_script_digest,
+    }
+
+
 def _validate_base_url(base_url: str) -> None:
     parsed = urlsplit(base_url)
     if (
@@ -1417,7 +1527,7 @@ def _database_backups_with_provider_secrets(root: Path) -> set[Path]:
             raise QualificationError("配置备份目录含不可读取文件") from exc
         try:
             uri = f"{candidate.resolve().as_uri()}?mode=ro"
-            with sqlite3.connect(uri, uri=True) as connection:
+            with closing(sqlite3.connect(uri, uri=True)) as connection:
                 table = connection.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' "
                     "AND name='model_connection_secrets'"
@@ -1471,7 +1581,7 @@ def _verify_database_backups_will_be_erased(
         if not backup_path.is_file():
             raise QualificationError("列出的数据库备份不存在")
         uri = f"{backup_path.resolve().as_uri()}?mode=ro"
-        with sqlite3.connect(uri, uri=True) as connection:
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
             rows = connection.execute(
                 "SELECT ciphertext FROM model_connection_secrets "
                 "WHERE ciphertext IS NOT NULL"
@@ -1493,6 +1603,336 @@ def _verify_database_backups_will_be_erased(
             }
         )
     return evidence
+
+
+def _retained_key_materials(key_path: Path) -> tuple[bytes, ...]:
+    """只在当前进程内读取密钥材料，用于检查限定备份目录。"""
+
+    raw = key_path.read_bytes().strip()
+    if not raw:
+        raise QualificationError("模型连接主密钥为空")
+    if not raw.startswith(b"{"):
+        return (raw,)
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+        active_key_id = str(payload["active_key_id"])
+        keys = payload["keys"]
+        if not isinstance(keys, dict) or set(keys) != {active_key_id}:
+            raise ValueError
+        material = str(keys[active_key_id]).encode("ascii")
+    except (KeyError, TypeError, ValueError, UnicodeError) as exc:
+        raise QualificationError("保留密钥检查要求单一有效密钥代际") from exc
+    return (material,)
+
+
+def _file_contains_material(
+    path: Path,
+    materials: tuple[bytes, ...],
+    *,
+    chunk_size: int = 1024 * 1024,
+) -> bool:
+    if chunk_size <= 0:
+        raise ValueError("分块大小必须大于 0")
+    overlap_size = max(len(item) for item in materials) - 1
+    overlap = b""
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            content = overlap + chunk
+            if any(material in content for material in materials):
+                return True
+            overlap = content[-overlap_size:] if overlap_size else b""
+    return False
+
+
+def _verify_no_retained_key_backups(
+    *,
+    db_path: Path,
+    key_path: Path,
+    roots: list[Path],
+) -> list[dict[str, object]]:
+    authoritative_root = _authoritative_backup_root(db_path)
+    if {item.resolve() for item in roots} != {authoritative_root}:
+        raise QualificationError("保留密钥检查范围必须是配置的 data/backups 目录")
+    materials = _retained_key_materials(key_path)
+    live_key = key_path.resolve()
+    evidence: list[dict[str, object]] = []
+    for root in roots:
+        if not root.is_dir():
+            raise QualificationError("保留密钥检查目录不存在")
+        resolved_root = root.resolve()
+        file_count = 0
+        byte_count = 0
+        for candidate in resolved_root.rglob("*"):
+            if not candidate.is_file() or candidate.resolve() == live_key:
+                continue
+            if _file_contains_material(candidate, materials):
+                raise QualificationError("配置备份目录仍含当前生产密钥材料")
+            file_count += 1
+            byte_count += candidate.stat().st_size
+        evidence.append(
+            {
+                "root_name": resolved_root.name,
+                "file_count": file_count,
+                "byte_count": byte_count,
+            }
+        )
+    return evidence
+
+
+def _verify_retained_database_backups(
+    *,
+    db_path: Path,
+    vault: FernetCredentialVault,
+    wrong_vault: FernetCredentialVault,
+) -> list[dict[str, object]]:
+    backup_root = _authoritative_backup_root(db_path)
+    backups = sorted(_database_backups_with_provider_secrets(backup_root))
+    if not backups:
+        raise QualificationError("配置备份目录缺少含 Provider Secret 的数据库备份")
+    evidence: list[dict[str, object]] = []
+    for backup_path in backups:
+        uri = f"{backup_path.resolve().as_uri()}?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as connection:
+            rows = connection.execute(
+                "SELECT ciphertext FROM model_connection_secrets "
+                "WHERE ciphertext IS NOT NULL"
+            ).fetchall()
+        if not rows:
+            raise QualificationError("数据库备份不含可验证的 Provider Secret")
+        for row in rows:
+            ciphertext = str(row[0])
+            try:
+                vault.decrypt(ciphertext)
+            except ValueError as exc:
+                raise QualificationError("数据库备份无法由当前生产密钥恢复") from exc
+            if wrong_vault.active_key_can_decrypt(ciphertext):
+                raise QualificationError("错误密钥意外解开 Provider Secret")
+        evidence.append(
+            {
+                "file_name": backup_path.name,
+                "sha256": _file_sha256(backup_path),
+                "secret_count": len(rows),
+            }
+        )
+    return evidence
+
+
+def _run_synthetic_vault_rotation_drill() -> bool:
+    """用一次性数据库和密钥演练轮换，不接触生产密钥或 Provider。"""
+
+    with tempfile.TemporaryDirectory(prefix="mangrove-g4-vault-drill-") as value:
+        root = Path(value)
+        database = root / "synthetic.db"
+        key_path = root / "synthetic.key"
+        backup_root = root / "backups"
+        backup_root.mkdir()
+        repository = ModelConnectionRepository(str(database))
+        vault = FernetCredentialVault.from_key_file(key_path)
+        repository.create_managed(
+            created_by="synthetic-g4-drill",
+            display_name="Synthetic",
+            base_url="https://provider.invalid",
+            model="synthetic-model",
+            api_format="openai_chat_completions",
+            locality="public_external",
+            ciphertext=vault.encrypt("synthetic-secret"),
+            key_hint="synthetic",
+            verified_at="2026-08-23T00:00:00Z",
+            preset_id="synthetic",
+            preset_version="synthetic-v1",
+        )
+        backup = backup_root / "synthetic-before.db"
+        with closing(sqlite3.connect(database)) as source, closing(
+            sqlite3.connect(backup)
+        ) as destination:
+            source.backup(destination)
+        if prepare_vault_rotation(
+            db_path=database,
+            key_path=key_path,
+            backend_stopped_check=lambda: True,
+        ) != 1:
+            return False
+        finalized, _, _ = finalize_vault_rotation(
+            db_path=database,
+            key_path=key_path,
+            backend_stopped_check=lambda: True,
+            key_backup_roots=[backup_root],
+            database_backup_paths=[backup],
+        )
+        if finalized != 1:
+            return False
+        current_vault = FernetCredentialVault.from_key_file(key_path)
+        with closing(sqlite3.connect(database)) as connection:
+            live_ciphertext = str(
+                connection.execute(
+                    "SELECT ciphertext FROM model_connection_secrets"
+                ).fetchone()[0]
+            )
+        with closing(sqlite3.connect(backup)) as connection:
+            old_ciphertext = str(
+                connection.execute(
+                    "SELECT ciphertext FROM model_connection_secrets"
+                ).fetchone()[0]
+            )
+        current_vault.decrypt(live_ciphertext)
+        try:
+            current_vault.decrypt(old_ciphertext)
+        except ValueError:
+            return True
+        return False
+
+
+def verify_vault_retention_safety(
+    *,
+    db_path: Path,
+    key_path: Path,
+    manifest_path: Path,
+    output_path: Path,
+    expected_commit: str,
+    provider_evidence_commit: str | list[str],
+    accepted_by: str,
+    acceptance_reason: str,
+    confirm_retain_production_key: bool,
+    key_backup_roots: list[Path],
+    git_identity: dict[str, object] | None = None,
+    compatibility_checker: Callable[..., dict[str, object]] | None = None,
+) -> dict[str, object]:
+    """保留现有生产密钥时生成补偿控制证据，不改写密钥和数据库。"""
+
+    if not confirm_retain_production_key:
+        raise QualificationError("必须确认保留现有生产密钥及其剩余风险")
+    provider_evidence_commits = (
+        [provider_evidence_commit]
+        if isinstance(provider_evidence_commit, str)
+        else list(provider_evidence_commit)
+    )
+    if not all(
+        isinstance(value, str) and bool(value.strip())
+        for value in (accepted_by, acceptance_reason)
+    ) or not provider_evidence_commits or not all(
+        isinstance(value, str) and bool(value.strip())
+        for value in provider_evidence_commits
+    ):
+        raise QualificationError("保留密钥的授权身份、原因和 Provider 证据提交不能为空")
+    # 多个 Provider 可以由同一份代码提交产生；兼容性按唯一提交复核即可。
+    provider_evidence_commits = list(dict.fromkeys(provider_evidence_commits))
+    if not db_path.is_file() or not key_path.is_file():
+        raise QualificationError("数据库或模型连接独立主密钥不存在")
+    report_lock = output_path.with_name(f".{output_path.name}.lock")
+    with _exclusive_file_lock(report_lock, "G4 保留密钥安全报告正在生成"):
+        if output_path.exists():
+            raise QualificationError("G4 保留密钥安全报告已存在，拒绝覆盖")
+        with _vault_rotation_lock(key_path), closing(
+            sqlite3.connect(db_path, timeout=0)
+        ) as maintenance_connection:
+            try:
+                # 保留报告必须绑定一个阻止 Provider 配置并发写入的数据库快照。
+                maintenance_connection.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                raise QualificationError("Provider 连接正在变更，拒绝生成保留密钥报告") from exc
+            _require_active_superadmin(db_path=db_path, actor_user_id=accepted_by)
+            identity = dict(git_identity or _git_identity())
+            if identity != {"git_commit": expected_commit, "git_dirty": False}:
+                raise QualificationError("保留密钥安全检查必须绑定预期的干净 Git 提交")
+            verify_frozen_inventory(db_path=db_path, manifest_path=manifest_path)
+            manifest = _load_manifest(manifest_path)
+            checker = compatibility_checker or _provider_runtime_compatibility
+            compatibilities = [
+                checker(
+                    provider_evidence_commit=commit,
+                    current_commit=expected_commit,
+                )
+                for commit in provider_evidence_commits
+            ]
+            if not all(
+                isinstance(item, dict) and item.get("compatible") is True
+                for item in compatibilities
+            ):
+                raise QualificationError("既有 Provider 证据与当前运行时代码不兼容")
+            normalized_provider_commits = [
+                str(item.get("provider_evidence_commit") or commit)
+                for item, commit in zip(
+                    compatibilities,
+                    provider_evidence_commits,
+                    strict=True,
+                )
+            ]
+            key_sha256_before = _file_sha256(key_path)
+            database_sha256_before = _file_sha256(db_path)
+            vault = FernetCredentialVault.from_key_file(key_path)
+            if vault.has_inactive_keys:
+                raise QualificationError("保留密钥检查不接受未完成的双代际轮换")
+            rows = maintenance_connection.execute(
+                "SELECT ciphertext FROM model_connection_secrets "
+                "WHERE ciphertext IS NOT NULL"
+            ).fetchall()
+            if not rows:
+                raise QualificationError("生产数据库不含可验证的 Provider Secret")
+            wrong_vault = FernetCredentialVault.generate()
+            for row in rows:
+                ciphertext = str(row[0])
+                try:
+                    vault.decrypt(ciphertext)
+                except ValueError as exc:
+                    raise QualificationError("当前生产密钥无法解开全部 Provider Secret") from exc
+                if wrong_vault.active_key_can_decrypt(ciphertext):
+                    raise QualificationError("错误密钥意外解开 Provider Secret")
+            key_backup_scope = _verify_no_retained_key_backups(
+                db_path=db_path,
+                key_path=key_path,
+                roots=key_backup_roots,
+            )
+            backup_evidence = _verify_retained_database_backups(
+                db_path=db_path,
+                vault=vault,
+                wrong_vault=wrong_vault,
+            )
+            if not _run_synthetic_vault_rotation_drill():
+                raise QualificationError("一次性密钥轮换演练失败")
+            verify_frozen_inventory(db_path=db_path, manifest_path=manifest_path)
+            if (
+                _file_sha256(key_path) != key_sha256_before
+                or _file_sha256(db_path) != database_sha256_before
+            ):
+                raise QualificationError("保留密钥安全检查意外改写生产密钥或数据库")
+            report: dict[str, object] = {
+                "schema_version": "g4-vault-retention-report-v1",
+                "generated_at": datetime.now(timezone.utc).isoformat(),
+                **identity,
+                "manifest_sha256": manifest["manifest_sha256"],
+                "database_path_sha256": _database_path_sha256(db_path),
+                "key_sha256": key_sha256_before,
+                "production_key_changed": False,
+                "live_secret_count": len(rows),
+                "live_secrets_decryptable": True,
+                "wrong_key_rejected": True,
+                "key_backup_scope_verified": True,
+                "backup_scope_kind": "configured_data_backups_root",
+                "key_backup_scope": key_backup_scope,
+                "database_backup_recovery_verified": True,
+                "database_backup_evidence": backup_evidence,
+                "synthetic_rotation_drill_passed": True,
+                "retention_risk_accepted": True,
+                "accepted_by": accepted_by,
+                "acceptance_reason": acceptance_reason.strip(),
+                "provider_runtime_compatibility": (
+                    compatibilities[0]
+                    if len(compatibilities) == 1
+                    else compatibilities
+                ),
+                "code_identity_stable": (
+                    _git_identity() == identity if git_identity is None else True
+                ),
+            }
+            if report["code_identity_stable"] is not True:
+                raise QualificationError("保留密钥安全检查期间代码身份发生变化")
+            if len(normalized_provider_commits) == 1:
+                report["provider_evidence_commit"] = normalized_provider_commits[0]
+            else:
+                report["provider_evidence_commits"] = normalized_provider_commits
+            _write_json_atomic(output_path, report)
+            maintenance_connection.rollback()
+            return report
 
 
 def _execute_provider_smoke_unlocked(
@@ -2140,14 +2580,15 @@ def assess_g4_evidence(
     *,
     db_path: Path,
     manifest_path: Path,
-    pi_report_path: Path,
+    pi_report_path: Path | list[Path],
     transport_report_path: Path,
-    rotation_report_path: Path,
+    rotation_report_path: Path | None = None,
+    retention_report_path: Path | None = None,
     output_path: Path,
     expected_commit: str,
     expected_manifest_sha256: str,
     qualification_ledger_path: Path,
-    qualification_batch_id: str,
+    qualification_batch_id: str | list[str],
 ) -> dict[str, object]:
     """只在三组独立证据身份一致时形成 G4 最终资格。"""
 
@@ -2156,9 +2597,14 @@ def assess_g4_evidence(
     )
     if output_path.exists():
         raise QualificationError("G4 最终报告已存在，拒绝覆盖")
+    if (rotation_report_path is None) == (retention_report_path is None):
+        raise QualificationError("G4 密钥证据必须在轮换报告和保留报告中二选一")
     manifest = _load_manifest(manifest_path)
     if manifest.get("manifest_sha256") != expected_manifest_sha256:
         raise QualificationError("G4 冻结清单摘要不匹配")
+    manifest_provider_values = [
+        dict(item) for item in manifest["providers"] if isinstance(item, dict)
+    ]
     manifest_providers = {
         (
             str(item["connection_id"]),
@@ -2170,37 +2616,131 @@ def assess_g4_evidence(
         for item in manifest["providers"]
         if isinstance(item, dict)
     }
-    pi_report = _load_evidence(
-        pi_report_path,
-        "g4-pi-provider-report-v1",
+    pi_report_paths = (
+        [pi_report_path] if isinstance(pi_report_path, Path) else list(pi_report_path)
     )
+    qualification_batch_ids = (
+        [qualification_batch_id]
+        if isinstance(qualification_batch_id, str)
+        else list(qualification_batch_id)
+    )
+    if (
+        not pi_report_paths
+        or len(pi_report_paths) != len(qualification_batch_ids)
+        or len(set(pi_report_paths)) != len(pi_report_paths)
+        or len(set(qualification_batch_ids)) != len(qualification_batch_ids)
+    ):
+        raise QualificationError("G4 Provider 报告与资格批次必须非空、一一对应且不得重复")
+    pi_reports = [
+        _load_evidence(path, "g4-pi-provider-report-v1")
+        for path in pi_report_paths
+    ]
     transport_report = _load_evidence(
         transport_report_path,
         "g4-transport-safety-report-v1",
     )
-    rotation_report = _load_evidence(
-        rotation_report_path,
-        "g4-vault-rotation-report-v2",
+    rotation_report = (
+        _load_evidence(rotation_report_path, "g4-vault-rotation-report-v2")
+        if rotation_report_path is not None
+        else None
+    )
+    retention_report = (
+        _load_evidence(retention_report_path, "g4-vault-retention-report-v1")
+        if retention_report_path is not None
+        else None
     )
     blockers: list[str] = []
-    batch_ledger_valid = False
-    if qualification_ledger_path.is_file():
-        try:
-            _anchored_qualification_ledger(
-                db_path=db_path,
-                ledger_path=qualification_ledger_path,
-            ).validate_passed_batch(
-                batch_id=qualification_batch_id,
-                manifest_sha256=expected_manifest_sha256,
-                providers=[dict(item) for item in manifest["providers"]],
-                expected_commit=expected_commit,
-                expected_ledger_id=str(
-                    pi_report.get("qualification_ledger_id") or ""
-                ),
+    provider_evidence_commits: list[str] = []
+    qualification_ledger_ids: list[str] = []
+    combined_pi_provider_set: set[tuple[str, str, str, str, str]] = set()
+    pi_provider_chain_valid = True
+    batch_ledger_valid = qualification_ledger_path.is_file()
+    try:
+        anchored_ledger = _anchored_qualification_ledger(
+            db_path=db_path,
+            ledger_path=qualification_ledger_path,
+        )
+    except (QualificationError, QualificationLedgerError, sqlite3.Error, OSError):
+        anchored_ledger = None
+        batch_ledger_valid = False
+    for pi_report, batch_id in zip(
+        pi_reports,
+        qualification_batch_ids,
+        strict=True,
+    ):
+        provider_evidence_commit = str(pi_report.get("git_commit") or "")
+        provider_evidence_commits.append(provider_evidence_commit)
+        ledger_id = str(pi_report.get("qualification_ledger_id") or "")
+        qualification_ledger_ids.append(ledger_id)
+        pi_providers = pi_report.get("providers")
+        pi_provider_set = {
+            (
+                str(item.get("connection_id")),
+                str(item.get("connection_version")),
+                str(item.get("preset_id")),
+                str(item.get("model")),
+                str(item.get("api_format")),
             )
-            batch_ledger_valid = (
-                pi_report.get("qualification_batch_id")
-                == qualification_batch_id
+            for item in pi_providers
+            if isinstance(item, dict)
+        } if isinstance(pi_providers, list) else set()
+        subset_providers = [
+            item
+            for item in manifest_provider_values
+            if (
+                str(item["connection_id"]),
+                str(item["connection_version"]),
+                str(item["preset_id"]),
+                str(item["model"]),
+                str(item["api_format"]),
+            )
+            in pi_provider_set
+        ]
+        expected_subset_manifest_sha256 = _canonical_sha256(
+            {
+                "schema_version": SCHEMA_VERSION,
+                "providers": subset_providers,
+            }
+        )
+        pi_provider_details_valid = bool(pi_provider_set) and all(
+            isinstance(item, dict)
+            and item.get("permission_profile") == "standard"
+            and bool(str(item.get("owner_user_id") or "").strip())
+            and item.get("outcome") == "passed"
+            and item.get("runtime_status") == "candidate_ready"
+            and item.get("usage_status") == "recorded"
+            and item.get("candidate_count") == 1
+            and item.get("verification_status") == "passed"
+            and item.get("pi_provider_chain_passed") is True
+            for item in (pi_providers or [])
+        )
+        if (
+            not provider_evidence_commit
+            or not ledger_id
+            or pi_report.get("qualification_batch_id") != batch_id
+            or pi_report.get("git_dirty") is not False
+            or pi_report.get("manifest_sha256")
+            != expected_subset_manifest_sha256
+            or pi_report.get("synthetic_egress_only") is not True
+            or pi_report.get("code_identity_stable") is not True
+            or pi_report.get("pi_provider_chain_passed") is not True
+            or not pi_provider_set.issubset(manifest_providers)
+            or len(subset_providers) != len(pi_providers or [])
+            or not pi_provider_details_valid
+            or bool(combined_pi_provider_set & pi_provider_set)
+        ):
+            pi_provider_chain_valid = False
+        combined_pi_provider_set.update(pi_provider_set)
+        if anchored_ledger is None:
+            batch_ledger_valid = False
+            continue
+        try:
+            anchored_ledger.validate_passed_batch(
+                batch_id=batch_id,
+                manifest_sha256=expected_subset_manifest_sha256,
+                providers=subset_providers,
+                expected_commit=provider_evidence_commit,
+                expected_ledger_id=ledger_id,
             )
         except (
             QualificationLedgerError,
@@ -2212,42 +2752,11 @@ def assess_g4_evidence(
             batch_ledger_valid = False
     if not batch_ledger_valid:
         blockers.append("qualification_batch_invalid")
-    pi_providers = pi_report.get("providers")
-    pi_provider_set = {
-        (
-            str(item.get("connection_id")),
-            str(item.get("connection_version")),
-            str(item.get("preset_id")),
-            str(item.get("model")),
-            str(item.get("api_format")),
-        )
-        for item in pi_providers
-        if isinstance(item, dict)
-    } if isinstance(pi_providers, list) else set()
-    pi_provider_details_valid = bool(pi_provider_set) and all(
-        isinstance(item, dict)
-        and item.get("permission_profile") == "standard"
-        and bool(str(item.get("owner_user_id") or "").strip())
-        and item.get("outcome") == "passed"
-        and item.get("runtime_status") == "candidate_ready"
-        and item.get("usage_status") == "recorded"
-        and item.get("candidate_count") == 1
-        and item.get("verification_status") == "passed"
-        and item.get("pi_provider_chain_passed") is True
-        for item in (pi_providers or [])
-    )
-    if (
-        pi_report.get("git_commit") != expected_commit
-        or pi_report.get("git_dirty") is not False
-        or pi_report.get("manifest_sha256") != expected_manifest_sha256
-        or pi_report.get("synthetic_egress_only") is not True
-        or pi_report.get("code_identity_stable") is not True
-        or pi_report.get("pi_provider_chain_passed") is not True
-        or pi_provider_set != manifest_providers
-        or len(pi_providers or []) != len(manifest_providers)
-        or not pi_provider_details_valid
-    ):
+    if not pi_provider_chain_valid or combined_pi_provider_set != manifest_providers:
         blockers.append("pi_provider_chain_invalid")
+    unique_provider_evidence_commits = list(
+        dict.fromkeys(provider_evidence_commits)
+    )
     if (
         transport_report.get("git_commit") != expected_commit
         or transport_report.get("git_dirty") is not False
@@ -2258,21 +2767,97 @@ def assess_g4_evidence(
         or transport_report.get("test_ids") != list(_TRANSPORT_SAFETY_TESTS)
     ):
         blockers.append("transport_safety_invalid")
-    if (
-        rotation_report.get("phase") != "finalized"
-        or rotation_report.get("git_commit") != expected_commit
-        or rotation_report.get("git_dirty") is not False
-        or rotation_report.get("code_identity_stable") is not True
-        or rotation_report.get("old_key_generation_retained") is not False
-        or rotation_report.get("key_backup_scope_verified") is not True
-        or rotation_report.get("backup_scope_kind")
-        != "configured_data_backups_root"
-        or not rotation_report.get("key_backup_scope")
-        or not rotation_report.get(
-            "verified_database_only_backups_unreadable_with_current_key"
+    vault_evidence_mode: str
+    vault_evidence_key: str
+    vault_evidence_path: Path
+    if rotation_report is not None and rotation_report_path is not None:
+        vault_evidence_mode = "rotated"
+        vault_evidence_key = "vault_rotation"
+        vault_evidence_path = rotation_report_path
+        if (
+            any(commit != expected_commit for commit in unique_provider_evidence_commits)
+            or rotation_report.get("phase") != "finalized"
+            or rotation_report.get("git_commit") != expected_commit
+            or rotation_report.get("git_dirty") is not False
+            or rotation_report.get("code_identity_stable") is not True
+            or rotation_report.get("old_key_generation_retained") is not False
+            or rotation_report.get("key_backup_scope_verified") is not True
+            or rotation_report.get("backup_scope_kind")
+            != "configured_data_backups_root"
+            or not rotation_report.get("key_backup_scope")
+            or not rotation_report.get(
+                "verified_database_only_backups_unreadable_with_current_key"
+            )
+        ):
+            blockers.append("vault_rotation_invalid")
+    elif retention_report is not None and retention_report_path is not None:
+        vault_evidence_mode = "retained"
+        vault_evidence_key = "vault_retention"
+        vault_evidence_path = retention_report_path
+        compatibility_value = retention_report.get("provider_runtime_compatibility")
+        compatibilities = (
+            [compatibility_value]
+            if isinstance(compatibility_value, dict)
+            else compatibility_value
         )
-    ):
-        blockers.append("vault_rotation_invalid")
+        reported_commits_value = retention_report.get(
+            "provider_evidence_commits",
+            [retention_report.get("provider_evidence_commit")],
+        )
+        accepted_by = retention_report.get("accepted_by")
+        acceptance_reason = retention_report.get("acceptance_reason")
+        authorization_valid = (
+            isinstance(accepted_by, str)
+            and bool(accepted_by.strip())
+            and isinstance(acceptance_reason, str)
+            and bool(acceptance_reason.strip())
+        )
+        if authorization_valid:
+            try:
+                _require_active_superadmin(
+                    db_path=db_path,
+                    actor_user_id=accepted_by,
+                )
+            except QualificationError:
+                authorization_valid = False
+        rechecked_compatibility = [
+            _provider_runtime_compatibility(
+                provider_evidence_commit=commit,
+                current_commit=expected_commit,
+            )
+            for commit in unique_provider_evidence_commits
+        ]
+        if (
+            retention_report.get("git_commit") != expected_commit
+            or retention_report.get("git_dirty") is not False
+            or retention_report.get("code_identity_stable") is not True
+            or retention_report.get("manifest_sha256")
+            != expected_manifest_sha256
+            or retention_report.get("database_path_sha256")
+            != _database_path_sha256(db_path)
+            or retention_report.get("production_key_changed") is not False
+            or retention_report.get("live_secrets_decryptable") is not True
+            or retention_report.get("wrong_key_rejected") is not True
+            or retention_report.get("key_backup_scope_verified") is not True
+            or retention_report.get("backup_scope_kind")
+            != "configured_data_backups_root"
+            or not retention_report.get("key_backup_scope")
+            or retention_report.get("database_backup_recovery_verified") is not True
+            or not retention_report.get("database_backup_evidence")
+            or retention_report.get("synthetic_rotation_drill_passed") is not True
+            or retention_report.get("retention_risk_accepted") is not True
+            or not authorization_valid
+            or reported_commits_value != unique_provider_evidence_commits
+            or not isinstance(compatibilities, list)
+            or compatibilities != rechecked_compatibility
+            or not all(
+                isinstance(item, dict) and item.get("compatible") is True
+                for item in rechecked_compatibility
+            )
+        ):
+            blockers.append("vault_retention_invalid")
+    else:
+        raise AssertionError("缺少密钥证据")
     if blockers:
         raise QualificationError(
             "G4 证据不完整：" + ",".join(blockers)
@@ -2283,17 +2868,25 @@ def assess_g4_evidence(
         "git_commit": expected_commit,
         "manifest_sha256": expected_manifest_sha256,
         "g4_qualified": True,
+        "vault_evidence_mode": vault_evidence_mode,
         "qualification_blockers": [],
-        "qualification_batch_id": qualification_batch_id,
-        "qualification_ledger_id": pi_report["qualification_ledger_id"],
+        "qualification_batch_ids": qualification_batch_ids,
+        "qualification_ledger_id": qualification_ledger_ids[0],
+        "provider_evidence_commits": unique_provider_evidence_commits,
         "evidence_sha256": {
             "manifest": _file_sha256(manifest_path),
-            "pi_provider": _file_sha256(pi_report_path),
+            "pi_provider": (
+                _file_sha256(pi_report_paths[0])
+                if len(pi_report_paths) == 1
+                else [_file_sha256(path) for path in pi_report_paths]
+            ),
             "transport_safety": _file_sha256(transport_report_path),
-            "vault_rotation": _file_sha256(rotation_report_path),
+            vault_evidence_key: _file_sha256(vault_evidence_path),
             "qualification_ledger": _file_sha256(qualification_ledger_path),
         },
     }
+    if len(qualification_batch_ids) == 1:
+        report["qualification_batch_id"] = qualification_batch_ids[0]
     _write_json_atomic(output_path, report)
     return report
 
@@ -2414,18 +3007,47 @@ def _parser() -> argparse.ArgumentParser:
     )
     safety.add_argument("--expected-commit", required=True)
     safety.add_argument("--output", required=True, type=Path)
+    retain = subparsers.add_parser(
+        "verify-vault-retention",
+        help="保留生产密钥并生成补偿控制证据",
+    )
+    retain.add_argument("--db-path", required=True, type=Path)
+    retain.add_argument("--key-path", required=True, type=Path)
+    retain.add_argument("--manifest", required=True, type=Path)
+    retain.add_argument(
+        "--provider-evidence-commit",
+        action="append",
+        required=True,
+    )
+    retain.add_argument("--expected-commit", required=True)
+    retain.add_argument("--output", required=True, type=Path)
+    retain.add_argument(
+        "--key-backup-root",
+        action="append",
+        required=True,
+        type=Path,
+    )
+    retain.add_argument("--accepted-by", required=True)
+    retain.add_argument("--acceptance-reason", required=True)
+    retain.add_argument("--confirm-retain-production-key", action="store_true")
     assess = subparsers.add_parser(
         "assess",
         help="汇总 Pi、传输安全与密钥轮换证据",
     )
     assess.add_argument("--db-path", required=True, type=Path)
-    assess.add_argument("--pi-report", required=True, type=Path)
+    assess.add_argument("--pi-report", action="append", required=True, type=Path)
     assess.add_argument("--manifest", required=True, type=Path)
     assess.add_argument("--transport-report", required=True, type=Path)
-    assess.add_argument("--rotation-report", required=True, type=Path)
+    vault_evidence = assess.add_mutually_exclusive_group(required=True)
+    vault_evidence.add_argument("--rotation-report", type=Path)
+    vault_evidence.add_argument("--retention-report", type=Path)
     assess.add_argument("--expected-commit", required=True)
     assess.add_argument("--expected-manifest-sha256", required=True)
-    assess.add_argument("--qualification-batch-id", required=True)
+    assess.add_argument(
+        "--qualification-batch-id",
+        action="append",
+        required=True,
+    )
     assess.add_argument("--output", required=True, type=Path)
     rotate = subparsers.add_parser(
         "rotate-vault",
@@ -2586,6 +3208,27 @@ def main() -> int:
                 flush=True,
             )
             return 0 if report["transport_safety_passed"] else 2
+        if args.command == "verify-vault-retention":
+            report = verify_vault_retention_safety(
+                db_path=args.db_path,
+                key_path=args.key_path,
+                manifest_path=args.manifest,
+                output_path=args.output,
+                expected_commit=args.expected_commit,
+                provider_evidence_commit=args.provider_evidence_commit,
+                accepted_by=args.accepted_by,
+                acceptance_reason=args.acceptance_reason,
+                confirm_retain_production_key=(
+                    args.confirm_retain_production_key
+                ),
+                key_backup_roots=args.key_backup_root,
+            )
+            print(
+                "G4_VAULT_RETENTION_SAFETY_PASS "
+                f"manifest_sha256={report['manifest_sha256']}",
+                flush=True,
+            )
+            return 0
         if args.command == "assess":
             report = assess_g4_evidence(
                 db_path=args.db_path,
@@ -2593,6 +3236,7 @@ def main() -> int:
                 pi_report_path=args.pi_report,
                 transport_report_path=args.transport_report,
                 rotation_report_path=args.rotation_report,
+                retention_report_path=args.retention_report,
                 output_path=args.output,
                 expected_commit=args.expected_commit,
                 expected_manifest_sha256=args.expected_manifest_sha256,
