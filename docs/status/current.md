@@ -55,7 +55,7 @@ TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍
 - G2 PG-05 已完成：Word/Excel 连续 3/3；AC-05 带备份生产迁移、恢复副本状态机、真实
   Docker 探针及验收均通过。PR #44 已合并，Issue #38 已关闭。该结论不代表 Phase 4、平台
   发布或普通用户开放完成。
-- G4 两条真实 Provider Pi 链和传输安全已通过；用户明确决定保留现有生产 Vault Key，并按
+- G4 已完整合格；用户明确决定保留现有生产 Vault Key，并按
   ADR-0032 改用补偿控制验收：地址解析、
   关闭 SDK 盲重试、显式确认、多轮 Usage 汇总和未知 Runtime 收口已完成。DeepSeek V4 Flash
   真实合成链形成 1 个候选并通过独立验证，6 次调用全部记录 Usage，合计 19,843 tokens。
@@ -65,14 +65,15 @@ TaskRevision 发起验证；普通用户、其他平台包和跨 Owner 任务仍
   Usage 全部为 `recorded`，合计 36,744 tokens；批次、Provider 与 Attempt 均为 `passed`，
   两个 Grant 已撤销，无重试、恢复事件或 Docker 残留。台账 revision 3 与生产锚点身份、版本和
   状态哈希一致。绑定 `a0560852` 的传输安全矩阵 6/6 通过。现已实现 Provider 关键代码兼容
-  检查、保留密钥补偿控制报告和多 Provider 逐份验真的二选一最终汇总。现场复核确认 Qwen
-  报告及其持久批次可以复用；旧 DeepSeek 报告早于持久台账，且连接身份和资格执行代码均已
-  变化，不能复用。用户已授权只补跑一次 DeepSeek 首个正式批次；随后仍须生成当前传输报告、
-  生产保留密钥报告并完成最终汇总，完成前 G4 不得表述为完整合格。
-- G3 Rollout P0 GateSnapshot、累计硬门、P0 自动回退与分阶段默认切换已完成工程实现、生产
-  迁移和生产 Gate/Approval 初始化；运行态核验曾因旧 8088 进程触发 P0 回退，后端现已重启
-  加载 G3、取得新合格快照并恢复到 `admin_gray`。工程代码已通过 PR #44 合入；生产默认切换
-  与完整默认切换验收未执行。
+  检查、保留密钥补偿控制报告和多 Provider 逐份验真的二选一最终汇总。Qwen 报告及其持久
+  批次经兼容性复核后复用；旧 DeepSeek 报告未复用，只执行一次绑定合并提交 `ecdd4eec` 的
+  当前正式批次并通过。当前传输报告、生产保留密钥报告与两份 Provider 报告已完成最终汇总：
+  `g4_qualified=true`、阻塞项为 0，组合 Manifest SHA-256 为
+  `367b8bf8d11db4b68fb37eb3e5bf57a70c505228d1185c005dfa882d8b00f297`。
+- G3 已完成生产默认切换与完整验收。活动 GateSnapshot 已加入 G4 硬门并累计 7 项合格；经
+  独立授权从 `admin_gray` 切换到 `vnext_default`。8088 默认/Pi/Legacy/Owner 隔离、P0 自动
+  回滚、人工恢复 `admin_gray`、再次独立授权恢复目标模式均通过。32 个既有交付文件完整，
+  非 Rollout 生产表与切换前恢复点逐表哈希一致，探针未创建业务记录。
 - 远程 MCP/Secret、Registry 自动发现、平台能力普通用户开放。
 - G5 本机前置包已通过真实运行：干净 Linux 镜像、Compose 接单就绪、非 root/只读根、
   真实浏览器闭环、20 用户 Owner 隔离、40 次并发重复抽取拒绝、进程重启、模型超时单次请求、
@@ -459,21 +460,26 @@ AC-07 主工单与未完成子工单已从旧仓库原生迁移到当前公开�
   已按“可用后所有用户默认使用”的产品决定取消该中间阶段：`admin_gray` 在累计硬门合格且
   获得独立授权后可直接进入 `vnext_default`；历史 `explicit_opt_in` 新任务失败关闭到 Legacy，
   且只能恢复 `admin_gray`。路由与 API 接缝测试已通过，PR #44 已合并，Issue #43 已关闭；
-  生产仍保持 `admin_gray`，G4 合格前不得扩大受众。
+  该阶段生产保持 `admin_gray`，直至本次 G4 合格后才执行默认切换。
 - G4 执行范围限定为平台共享 DeepSeek 与百炼连接，外发仅限冻结的纯合成数据。生产库脱敏
   核验确认两条连接均为 `platform_shared`、已绑定 Secret 且状态 `verified`；该状态只证明连接
   已配置，不等于 G4 合格。
+- 2026-08-23，G4 最终资格和 G3 默认切换完成。Qwen 旧正式批次经当前代码兼容性复核后复用，
+  DeepSeek 只执行一次当前正式批次；最终汇总 `g4_qualified=true`。生产 GateSnapshot 新增
+  `g4-provider-safety` 后累计 7 项合格，独立授权切换到 `vnext_default`。8088 默认/Pi/Legacy、
+  跨 Owner、受控 P0 回滚与两阶段人工恢复均通过；32 个既有 Delivery 文件完整，除 Rollout
+  审计表外所有生产表与切换前恢复点一致。详见
+  `docs/plans/2026-08-23-g3-vnext-cutover-execution-report.md`。
 
 ## 7. 当前优先顺序
 
 1. **G1 已合入并关闭**：PR #41 已合入 `main`，Issue #37/#40 已关闭；v3 正式结果功能
    96.8%、安全 100%，资格 PASS。
-2. **G2 已关闭、G3 `admin_gray` 恢复验收已通过**：PR #44 已合并并关闭 #38/#43；正式
-   默认切换仍由 G4 完整合格门阻断，Issue #39 保持 OPEN，生产不得提前扩大。
-3. **G4 部分通过、G5 本机前置通过**：传输矩阵与 DeepSeek/百炼 Pi 链均通过；Vault 轮换
-   证据缺失，因此 G4 最终汇总和 G3 默认切换仍被阻断。G5 已通过干净 Linux 镜像、Compose、
-   真实模型/浏览器、并发、故障、备份恢复与零残留本机前置包；路径可移植性代码门与本机
-   跨根回归完成，但目标 Linux 跨系统复验和服务器 8B-2 未执行，#36 仍保持 OPEN。
+2. **G3/G4 已完成**：G4 最终资格通过，生产已切换为 `vnext_default`；默认/Pi/Legacy、Owner
+   隔离、受控回滚和恢复验收通过，Issue #39 可关闭。
+3. **G5 本机前置通过**：干净 Linux 镜像、Compose、真实模型/浏览器、并发、故障、备份恢复、
+   零残留和路径可移植性本机门均完成。目标 Linux/GPU 服务器复验改为未来部署时执行，不再
+   作为当前本机 Phase 4 工程门的阻塞项。
 
 ## 8. 权威证据
 

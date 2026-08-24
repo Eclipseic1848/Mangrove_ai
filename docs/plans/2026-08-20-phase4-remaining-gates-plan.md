@@ -15,16 +15,16 @@
 |---|---|---|---|
 | **G1** 30 项泛化集 | ≥30 个未参与调优任务（文档/PDF/Excel/CSV/复合来源/模糊目标/多输出格式）；≥1/3 同义/口语/省略/顺序变化；≥1/3 相似表/章节/冲突来源；运行前冻结夹具哈希/GoalContract/Verifier；正式交付正确率 ≥90%，安全/权限/用户隔离/禁止项/失败不冒充成功 100%（`2026-07-29-agentic-runtime-vnext-evaluation-spec.md` §5） | 完成 | **QUALIFIED**：功能 30/31（96.8%）、安全 5/5（100%）；PR #41 合并，#37/#40 关闭 |
 | **G2** PG-05 收口 | ① Word/Excel 连续 3/3 真实任务（`scripts/verify_pi_runtime_pg05_office.py`/`_pdf.py` 已存在）；② AC-05 独立依赖获取状态机生产迁移 + 用户验收（audit P0-4：「生产数据库迁移未执行」） | 执行完成 | **PASS**：Office 3/3；AC-05 带备份生产迁移、恢复、真实 Docker 探针及用户验收通过 |
-| **G3** P0 GateSnapshot + 默认入口切换 | Rollout GateSnapshot、P0 自动阻断、默认切换（失败即回 Legacy，不迁移/覆盖/删除旧任务与既有 Delivery）；切换动作需用户单独确认（`2026-07-30-phase4-d3-delivery-default-state-machine.md`、ADR-0019） | 执行（实现+验收本机可做；**切换本身需用户单独授权**） | **ADMIN_GRAY ACCEPTED**：恢复验收通过；产品目标改为 G4 合格后全用户默认，尚未切换 |
-| **G4** 真实外部 Provider 端到端 | 对所有准备投入生产的外部 Provider 做 Pi→Grant→Relay→Provider→Usage Smoke + DNS rebinding/证书生命周期/Vault 生产安全门（audit §7） | 范围为平台共享 DeepSeek/百炼连接和纯合成数据；按 ADR-0032 保留生产 Key 并采用补偿控制 | DeepSeek/百炼 Pi 链 PASS；保留密钥报告与最终汇总工具已实现，待绑定干净候选生成正式证据 |
+| **G3** P0 GateSnapshot + 默认入口切换 | Rollout GateSnapshot、P0 自动阻断、默认切换（失败即回 Legacy，不迁移/覆盖/删除旧任务与既有 Delivery）；切换动作需用户单独确认（`2026-07-30-phase4-d3-delivery-default-state-machine.md`、ADR-0019） | 完成 | **VNEXT_DEFAULT ACCEPTED**：7 项累计硬门、默认/Pi/Legacy、Owner 隔离、受控回滚与恢复全部通过 |
+| **G4** 真实外部 Provider 端到端 | 对所有准备投入生产的外部 Provider 做 Pi→Grant→Relay→Provider→Usage Smoke + DNS rebinding/证书生命周期/Vault 生产安全门（audit §7） | 范围为平台共享 DeepSeek/百炼连接和纯合成数据；按 ADR-0032 保留生产 Key 并采用补偿控制 | **QUALIFIED**：Qwen + DeepSeek 两个正式批次、传输安全、保留密钥补偿控制和最终汇总全部通过 |
 | **G5** 8B Linux/Compose/并发/故障与目标服务器 | 干净镜像、Linux/Compose、并发、故障恢复和路径可移植性；真实服务器项在部署时复验（audit §5） | 当前无目标服务器；真实服务器验收后移到部署阶段 | **本机工程门完成**；部署时服务器验收未执行 |
 
 ## 1. 执行顺序
 
 G1 v3 独立正式运行已达到资格阈值，PR #41 已合并并关闭 #37/#40。G2 的 Office、AC-05
-生产迁移与验收均已通过，PR #44 已合并并关闭 #38/#43。G3 默认切换仍由 G4 完整资格阻断；
-G4 已完成两条 Provider Pi 链与传输安全复验；按 ADR-0032 实现保留密钥补偿控制后，仍须生成
-当前候选的正式三份证据。G5 本机工程门完成，真实服务器项留到部署阶段。默认切换不得自动进入。
+生产迁移与验收均已通过，PR #44 已合并并关闭 #38/#43。G4 最终资格已通过；G3 已按独立
+授权切换到 `vnext_default`，完成 8088 验收、受控回滚与目标模式恢复。G5 本机工程门完成，
+真实服务器项留到未来实际部署阶段。
 
 ## 2. 进度
 
@@ -49,14 +49,15 @@ G4 已完成两条 Provider Pi 链与传输安全复验；按 ADR-0032 实现保
   `39c168fb4009478fcd731dbe1f5f10d05d8685b5721cbe7bc5302eddc1ab9fa8` 已把运行态门标记
   为失败。8088 随后已重启加载 G3，新活动快照
   `a936510e53eebc2abb04ce984e1fb72821730d0dc1ce9d37760d2c85beec3571` 累计有效合格，
-  当前快照的 `admin_gray` 恢复 Approval 已记录并经独立授权执行；当前为 `admin_gray`、
+  当时快照的 `admin_gray` 恢复 Approval 已记录并经独立授权执行；当时为 `admin_gray`、
   `p0_blocked=false`。管理员 Pi、普通用户/默认 Legacy、跨 Owner 拒绝和 8088 三入口烟测通过；
-  恢复验收通过，未进入 vNext 默认。
+  恢复验收通过。随后在 G4 合格后新增 7 项硬门快照并切换为 `vnext_default`；受控 P0 回滚、
+  `admin_gray` 中间恢复和目标模式再次恢复均通过，既有 Delivery 零改写。
 - `explicit_opt_in` 切换前曾发现缺少“获准用户”资格门，并创建修复工单 #43。ADR-0030 已按
   “可用后所有用户默认使用”的决定取消该中间阶段；当前实现只允许合格 `admin_gray` 在独立
   授权后直接进入 `vnext_default`。历史 `explicit_opt_in` 新任务失败关闭到 Legacy，且只能恢复
-  `admin_gray`。PR #44 已合并并关闭 #43；生产继续保持 `admin_gray`，G4 完整合格前不执行
-  默认切换，Issue #39 保持 OPEN。
+  `admin_gray`。PR #44 已合并并关闭 #43；生产现已在 G4 完整合格后切换为
+  `vnext_default`。
 - G4 执行范围限定为现有平台共享 DeepSeek 与百炼连接。允许外发范围仅为冻结的
   合成文本/表格，不含用户业务数据、文件路径、身份信息、Secret 或原始工具日志；本轮资格只
   覆盖这两个实际启用的 Provider，后续新增 Provider 必须独立通过同一安全矩阵。
@@ -88,14 +89,13 @@ G4 已完成两条 Provider Pi 链与传输安全复验；按 ADR-0032 实现保
   Grant 已撤销，无重试、恢复事件或 Docker 残留。绑定 `a0560852` 的传输矩阵 6/6 通过。
   用户明确不轮换生产 Vault Key。ADR-0032 允许以严格补偿控制报告替代轮换报告，并只在
   Provider 关键代码未变化时复用既有 Pi 报告。现场逐份核验后，Qwen 报告可复用；旧
-  DeepSeek 报告无持久批次，且连接身份与资格执行代码已变化，必须补跑一次当前 DeepSeek
-  正式批次。多报告/多批次逐份验真与并集完整性实现及 67 项 G4 回归已通过；正式运行仍须
-  绑定干净候选提交。默认入口切换仍是独立动作。
+  DeepSeek 报告无持久批次，且连接身份与资格执行代码已变化，因此只补跑一次当前 DeepSeek
+  正式批次。多报告/多批次逐份验真与并集完整性实现及 68 项 G4 回归通过；正式运行绑定
+  `ecdd4eec`，最终 `g4_qualified=true`、阻塞项为 0。
 
 ## 3. 边界声明
 
-- G1-G3 的完成不自动等于 Phase 4 封板；G4 正式报告未形成前不得表述为完整合格。G5 本机
-  工程门完成不等于真实 Linux/GPU 服务器已经验收。
+- G1-G4 和 G5 本机工程门已完成；这不等于真实 Linux/GPU 服务器已经验收。
 - G4 已获准对 DeepSeek/百炼使用纯合成数据开工；现有连接状态和 G1 P1 对照仍不替代 G4
   安全矩阵结论。G5 真实服务器项在未来部署阶段取得环境后重新验证。
-- 默认入口切换（G3 末段）是独立授权点，不得在 G3 前段实现中自动执行。
+- 默认入口切换已按独立授权执行；后续 P0 回归仍必须自动回到 Legacy，恢复不得自动发生。
