@@ -26,7 +26,7 @@
 | CV-06 | 接入 Provider Attempt、重复外发确认与未知结果收口 | 安全纵切片 | `ENGINEERING_VERIFIED` | Grant/Usage 绑定、outcome_unknown、取消恢复 |
 | CV-07 | 建立精确 Attempt 绑定的显式正式发布动作 | 交付纵切片 | `ENGINEERING_VERIFIED` | Publish 接口、Owner/P0/幂等/QA 门 |
 | CV-08 | 完成普通用户重验与发布工作台流程 | 前端纵切片 | `ENGINEERING_VERIFIED` | Offer、确认框、时间线、显式发布、E2E |
-| CV-09 | 完成工程门、双轴审查与实施交接 | 收口门 | `ready-for-agent` | 相称回归、浏览器证据、审查修复、文档同步 |
+| CV-09 | 完成工程门、双轴审查与实施交接 | 收口门 | `ENGINEERING_VERIFIED` | 相称回归、浏览器证据、审查修复、文档同步 |
 | CV-10 | 生产迁移、真实同 Run 重验与 Owner 验收 | 人工门 | `ready-for-human` | 生产备份/迁移、LIVE_REVERIFIED、LIVE_ACCEPTED |
 
 GitHub 现场映射：CV-01～CV-10 分别为 #61～#70，父任务 P0-01 为 #54。所有远端写入均已
@@ -447,6 +447,17 @@ Provider 外发、真实 Candidate 重验、正式 Delivery 发布或用户验�
 
 **主要文件**：测试、实施报告和权威状态文档；除审查修复外不新增业务范围。
 
+**完成记录（2026-08-25）**：达到 `ENGINEERING_VERIFIED`。聚焦回归 196 passed，前端完整
+Playwright 64 passed，最终后端全仓在只排除 4 个已于固定基线干净复现的失败后为
+`1999 passed, 7 skipped, 4 deselected`；显式迁移覆盖空库、生产只读副本、旧 `0001`→新
+`0002`、重复执行和恢复副本，双轴终审无剩余 P1/P2，活动 Grant/Lease/测试端口/进程/临时目录
+为 0。详见 `docs/plans/2026-08-25-cv-09-engineering-gate-report.md`。
+
+生产只读核验同时披露一项历史偏差：CandidateVerification Schema 尚未迁移，但 CV-07 发布
+幂等空字段/索引已被旧 Repository 静默写入，非 NULL 记录为 0；当前代码已改为显式 `0002`，
+CV-10 必须以当前一致性恢复点接管，不能把该偏差隐去或自动回滚。该状态不代表真实 Provider
+外发、真实 Candidate 重验、正式 Delivery 发布或用户验收。
+
 ### CV-10 生产迁移、真实同 Run 重验与 Owner 验收
 
 **Blocked by**：CV-09。
@@ -545,6 +556,6 @@ DeliveryPublisher、Radix AlertDialog、TanStack Query/SSE/Sonner 已覆盖基�
 - 生产迁移、真实外发和正式发布被隔离在 `ready-for-human` 工单；
 - 没有把测试绿色冒充生产迁移、真实重验、用户验收或发布；
 - 用户已确认本任务集合并发布为 GitHub Issues；CV-01 已完成，CV-02 达到
-  `ENGINEERING_VERIFIED`，CV-03/CV-04 已获用户接受，CV-05～CV-08 达到
+  `ENGINEERING_VERIFIED`，CV-03/CV-04 已获用户接受，CV-05～CV-09 达到
   `ENGINEERING_VERIFIED`；真实连接、外发范围、费用、生产迁移和用户验收仍须
   在 CV-10 单独确认。

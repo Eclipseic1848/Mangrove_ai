@@ -2,29 +2,25 @@
 
 > 状态：active
 >
-> 最后现场核验：2026-08-24
+> 最后现场核验：2026-08-25
 >
 > 公开主线：`main`
 >
-> 核验 HEAD：`51d327d54aa298ab734f30f106f5405bb12619de`
+> 核验实现 HEAD：`7c2a25ce6e87cc001124b8b81d5715283d5876fc`（文档同步提交以现场 HEAD 为准）
 >
 > 当前阶段：Issues 清零后的产品化与生产安全收敛
 >
-> 唯一下一任务：P0-01「vNext 默认链路与真实普通用户闭环」
+> 唯一下一任务：P0-01/CV-10「生产迁移、真实同 Run 重验与 Owner 验收」
 
-## 0. 2026-08-24 客户端更新恢复点与当前门禁（优先于下文旧现场值）
+## 0. 2026-08-25 CV-09 工程恢复点与当前门禁（优先于下文旧现场值）
 
-> 暂停时间：2026-08-24T01:09:18-07:00
+> 实现 HEAD：`7c2a25ce6e87cc001124b8b81d5715283d5876fc`
 >
-> 暂停原因：用户更新 Codex 客户端；用户回来前不得自动继续
->
-> 现场 HEAD：`51d327d54aa298ab734f30f106f5405bb12619de`
->
-> 分支：`main`，比 `origin/main` 领先 2 个本地提交；未推送
+> 分支：`main`；`origin/main=f7aa895ed2af23786c5c6c47856824d1146957b3`；本地提交尚未推送
 >
 > 恢复进度：规格达到 SPEC_APPROVED，任务拆分达到 TICKETS_PUBLISHED；CV-01 已完成，
 > CV-02 已达到 ENGINEERING_VERIFIED，CV-03/CV-04 已获用户接受，CV-05～CV-08 已达到
-> ENGINEERING_VERIFIED；下一工程工单为 CV-09，真实 Provider 外发仍需单独授权
+> ENGINEERING_VERIFIED；CV-09 已达到 ENGINEERING_VERIFIED，下一门为 CV-10 人工生产/外发门
 >
 > GitHub：P0 顶层任务 #54～#60、P0-01/CV-01～CV-10 #61～#70 已创建并反读核验
 
@@ -44,13 +40,18 @@
 5. 已完成只读可行性诊断：现有重验入口只接受 `inconclusive`，当前报告为
    `failed/artifact_count`，因此不能使用当前产品入口同 Run 重验；业务语义也不应为平台
    Verifier 缺陷创建新 revision。
+6. CV-01～CV-09 正式能力、全仓回归、迁移演练与双轴审查已完成；实现提交：
+   - `3242eb374f48e004c3f1bac594c4f06b412d96b6`：完整 Candidate 重验工作流；
+   - `2d80288d6398b0c68d8de556ff867001818387ca`：Runtime Gate 测试接缝；
+   - `7c2a25ce6e87cc001124b8b81d5715283d5876fc`：P0 监督与显式 `0002` 迁移安全修复。
 
 ### 当前阶段与产物
 
 当前已完成 **CV-01 架构决策**、**CV-02 追加式 Attempt/显式迁移工程实现**、
 **CV-03 既有验证入口统一接入**、**CV-04 只读重验 Offer**，并完成 **CV-05 不重跑 Pi 的完整
 候选重验**、**CV-06 Provider 重验安全闭环**、**CV-07 精确 Attempt 显式正式发布**和
-**CV-08 普通用户重验与发布工作台**。用户明确
+**CV-08 普通用户重验与发布工作台**，并以 **CV-09 工程门** 完成跨切片回归、迁移演练和
+双轴终审。用户明确
 要求：不要以放宽条件、一次性脚本或人工改库的“打补丁”方式修复，要设计正式可复用能力。
 
 已批准规格：
@@ -154,25 +155,26 @@ CV-07 未迁移生产库、发布真实 Delivery、执行普通用户浏览器�
 
 ### 恢复后的精确下一步
 
-1. 先读本恢复点、ADR-0033、已批准规格、任务拆分和 CV-07 工程验证报告；
-2. CV-09 完成 CV-01～CV-08 的工程门、双轴审查与实施交接，不得把工程绿色冒充生产或用户
-   资格；
-3. 可以继续本地 TDD 与离线验证，但真实发布、连接、模型、外发输入范围和费用必须先展示并
-   取得单独授权；
-4. 不得自动迁移生产库、真实外发、写 GitHub 或执行 Git 操作。
+1. 先读本恢复点、ADR-0033、已批准规格、任务拆分和 CV-09 工程门报告；
+2. CV-10 先只读核对 HEAD、8088 运行提交、活动 Gate、数据库身份、活动任务/Attempt/Grant；
+3. 展示当前一致性备份路径、`0001/0002` DDL、恢复命令及生产 Schema 偏差后，再执行迁移；
+4. 真实 Provider 重验前展示 Owner、Candidate/Manifest、连接、模型、外发类别、费用和未知结果
+   处理；正式发布必须在 passed 报告检查后作为第二个独立动作；
+5. 不得把工程绿色冒充 LIVE_REVERIFIED、LIVE_ACCEPTED、Provider 资格或 Release。
 
 截至 2026-08-24，规格中的范围、权限、逐 Attempt 外发确认、验证/发布分离、规则变化资格和
 P0 阻断六项决定均已确认；权威内容见同 Run 重验规格和 ADR-0033，不在交接中复制维护。
 任务拆分已达到 `TICKETS_PUBLISHED`，CV-01 已完成，CV-02 达到 `ENGINEERING_VERIFIED`，
-CV-03/CV-04 已获用户接受，CV-05～CV-08 达到 `ENGINEERING_VERIFIED`；下一工程依赖门是
-CV-09。
+CV-03/CV-04 已获用户接受，CV-05～CV-09 达到 `ENGINEERING_VERIFIED`；下一依赖门是 CV-10。
 
 ### 暂停边界
 
 - CV-03 已将既有初验和语义重试接入业务 Module，但没有修改真实数据库，没有调用 Provider，
   没有重验真实 Candidate。
-- 已按持续目标创建并核验 GitHub #54～#70；没有创建分支、提交、推送、PR、版本标签、
-  Release 或部署。
+- 已按持续目标创建并核验 GitHub #54～#70；已形成上述本地提交，尚未推送、创建 PR、版本
+  标签、Release 或部署。
+- 生产 CandidateVerification `0001/0002` 尚未执行，但 CV-07 发布幂等空字段/索引已由旧代码
+  静默写入，非 NULL 记录为 0；CV-10 必须先备份当前状态并显式接管，禁止静默回滚旧恢复点。
 - 工作树中的 G1 评测文件、`frontend/premium-audit.json`、既有 `.scratch/` 和其他用户改动继续
   视为用户持有内容，禁止覆盖、清理或顺带提交。
 - 用户新增协作要求：缺少适配工具或依赖时必须先询问，不得自行改走明显更低效或降低验证
@@ -246,68 +248,52 @@ TaskRevision、来源、权限、模型连接和外发确认，动态执行任�
 
 ### 3.2 本会话刚完成的工作
 
-本会话没有改业务代码，完成了两件事：
+P0-01 默认 vNext 主链和真实普通用户多格式闭环已在 `2660ac6c`、`51d327d5` 完成；随后针对
+平台 Verifier 缺陷，正式实现同 Run Candidate 重验 CV-01～CV-09：
 
-1. 对代码、目录、README、配置、运行态、数据库、GitHub、安全和文档做了全项目审计；
-2. 新增产品化路线图：
-   `docs/plans/2026-08-23-post-issues-productization-roadmap.md`。
+- `3242eb37`：追加式 Attempt、统一 Module、Offer、完整本地/Provider 重验、精确发布与工作台；
+- `2d80288d`：保留 Runtime Gate 监督测试接缝；
+- `7c2a25ce`：运行期 P0 监督、提交 CAS 和独立显式 `0002` 发布幂等迁移。
 
-审计时验证证据：
-
-- `main` 与 `origin/main` 均为 `f7aa895ed2af23786c5c6c47856824d1146957b3`；
-- GitHub Open Issues 为 0；
-- `/api/health` 与 `/api/readiness` 通过；
-- 数据库 Rollout 为 `vnext_default`、`p0_blocked=0`、RuntimeAssignment 数量为 0；
-- OpenAPI 有 154 条路径、184 个操作；
-- pytest 可收集 1906 项；运行时路由/API 定向测试 53 项通过；前端正式构建通过；
-- 本轮没有执行全部 1906 项测试，没有创建真实业务任务，也没有进行新的 Provider 外发。
+最终聚焦后端 196 passed、前端完整 Playwright 64 passed；后端全仓只排除 4 个已在固定基线
+干净复现的失败后为 `1999 passed, 7 skipped, 4 deselected`。Standards/Spec 双轴终审无剩余
+P1/P2。权威报告为 `docs/plans/2026-08-25-cv-09-engineering-gate-report.md`。
 
 ## 4. 当前卡在哪里
 
-当前没有环境故障型阻塞，卡点是一个必须先修正的真实产品不一致：
+工程实现没有剩余 P1/P2；当前唯一阻塞是 CV-10 的生产和真实外发人工门：
 
-> 生产 Rollout 已是 `vnext_default`，但主界面创建任务时仍显式提交 `legacy`。
+- 生产库尚无 CandidateVerification `0001/0002`，但已存在旧 Repository 静默写入的 CV-07
+  发布幂等空字段/索引；非 NULL 记录为 0，既有恢复点均不含该 Schema；
+- 必须先备份当前生产状态并让显式迁移接管，不能回滚到会丢失后续业务数据的旧恢复点；
+- 真实 Candidate 重验涉及 Owner、Provider、模型、外发正文和费用；结果未知不得自动重试；
+- passed 只表示可发布，正式 Delivery 发布和 Owner LIVE_ACCEPTED 仍是后续独立动作。
 
-证据：
+## 5. 精确下一步：P0-01/CV-10
 
-- `frontend/src/components/workspace/TaskComposer.tsx` 把运行时初值设为 `legacy`；
-- `frontend/src/pages/SemanticWorkspacePage.tsx` 始终发送 `runtime_version`；
-- `src/runtime_routing/service.py` 会尊重显式 Legacy；
-- ADR-0030 明确要求所有普通用户的新任务默认使用 vNext，同时允许显式选择 Legacy；
-- 生产库 RuntimeAssignment 当前为 0，说明切换后还没有一条真实普通用户任务证明默认
-  vNext 正式 Delivery 已闭环。
+### 5.1 生产迁移门
 
-因此，G3 的状态切换和回滚验收是成立的，但“普通用户从当前主界面默认进入 vNext 并完成
-正式 Delivery”尚未得到真实证明。不要先做多媒体、远程 MCP 或大规模架构扩展。
+- 现场核对当前 HEAD、8088 运行提交、Gate、数据库身份、活动任务/Attempt/Grant 和工作树；
+- 生成当前一致性恢复点，记录 SHA-256、71 张旧表数据指纹、Schema 与恢复命令；
+- 显式执行 `0001_candidate_verification_attempts` 和
+  `0002_delivery_publication_idempotency`，验证旧空字段/索引由迁移记录接管；
+- 完整性、外键、旧数据零改写、幂等重放和恢复副本均通过后才恢复服务。
 
-## 5. 精确下一步：P0-01
+### 5.2 真实重验外发门
 
-### 5.1 开工前冻结范围
+- Owner 登录后展示冻结 Candidate/Manifest、旧/新 Ruleset、连接版本、模型、外发类别和费用；
+- 仅为该 Attempt 获取逐次确认，先落 Attempt/Grant 再外发；
+- 核对 Pi 调用次数 0、Run/revision/Candidate 文件哈希不变、旧失败 Attempt 保留；
+- `outcome_unknown` 时停止，由 Owner 决定是否承担重复请求和费用。
 
-先把 P0-01 细化成单一实施工单，写清 Scope、非 Scope、改动文件、测试矩阵、纯合成外发
-数据、拟用 Provider、验收步骤和授权门。是否创建 GitHub Issue、分支、提交或推送，必须
-分别取得明确授权，不能从“继续”或本交接文档推断。
+### 5.3 正式发布与验收门
 
-### 5.2 最小实现目标
+- Owner 检查 passed VerificationReport 后另行触发精确 Attempt 发布；
+- 核对 publication key、QA、Delivery/output、预览/下载、数据库和历史零改写；
+- Owner 明确给出 LIVE_ACCEPTED 或整改意见；CV-10 完成后才能关闭 P0-01 #54。
 
-1. 前端改为“平台默认 / 显式 Pi / 显式 Legacy”；未覆盖时不发送 `runtime_version`。
-2. API 请求模型不再暴露误导客户端的 Legacy 默认值；服务端 Rollout 是默认决策权威。
-3. 界面显示任务最终采用的运行时，并继续允许用户显式选择 Legacy。
-4. 保留 P0 自动回退：阻断时默认 Legacy，显式 Pi 失败关闭；恢复必须人工授权。
-5. 不删除 Legacy，不迁移历史任务，不扩大平台能力普通用户受众，不借机重构整个工作台。
-
-### 5.3 必须覆盖的测试与验收
-
-- 字段省略、显式 Pi、显式 Legacy、P0 阻断、人工恢复和 Owner 隔离；
-- 空值、重复请求、并发创建、锁超时、中途异常、取消、幂等和失败关闭；
-- 浏览器从主工作台默认创建任务，确认 RuntimeAssignment 持久化为 Pi；
-- 显式 Legacy 仍正常，历史任务和既有 Delivery 零改写；
-- 如要真实外发，先向用户展示连接、模型、纯合成输入范围和潜在费用；取得授权后只执行
-  一条上传→Pi→Candidate→独立 Verifier→Delivery→预览/下载链；
-- Provider 已收到请求但结果未知时不得自动重试，必须把选择交给用户；
-- 完成定向回归、与风险相称的完整回归、Standards/Spec 双轴审查和用户验收。
-
-P0-01 当前状态是 `READY_TO_SPEC`，不是 `IMPLEMENTED`。本会话只完成路线图和交接文档。
+P0-01 当前状态是 `CV-09 ENGINEERING_VERIFIED`，不是 LIVE_REVERIFIED、LIVE_ACCEPTED 或
+RELEASED。
 
 ## 6. 整体 Roadmap
 
@@ -450,20 +436,15 @@ evals/generalization-g1-independent/self-check-report.json
 evals/generalization-g1/fixtures.json
 ```
 
-本会话新增/修改但尚未提交：
-
-```text
-handoff.md
-docs/plans/2026-08-23-post-issues-productization-roadmap.md
-```
-
-这两份 Markdown 是本次正式交付内容，不是临时备份。当前没有授权提交或推送。
+CV-09 实现和报告使用精确允许列表提交；工作树仍有上列 10 个 G1 用户修改，以及用户持有的
+`.scratch/` 和 `frontend/premium-audit.json`，均未暂存、提交、覆盖或清理。
 
 ## 11. 第一次需要用户确认的门
 
-新会话读完并完成现场重验后，应先向用户确认：
+新会话读完并完成现场重验后，应先向用户展示并确认 CV-10 的三个精确门：
 
-> 是否按路线图开始 P0-01 的本地实现与验证；以及是否同时创建 GitHub Issue/分支。
+> 当前生产备份与 `0001/0002` 迁移范围；真实重验使用的 Owner/Candidate/Provider/模型/外发
+> 类别和费用；passed 后是否另行发布正式 Delivery。
 
-本地代码实现、真实 Provider 外发、生产数据库写入、GitHub 操作、提交推送和版本发布是不同
-授权门，必须分别说明后执行。
+生产迁移、真实 Provider 外发、正式 Delivery 发布、Owner LIVE_ACCEPTED 和版本发布仍是不同
+结果门；必须分别保留证据，不能由本次通用加速授权互相替代。
