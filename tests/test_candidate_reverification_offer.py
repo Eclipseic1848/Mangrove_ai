@@ -166,13 +166,14 @@ def _service(
     marker: str,
     *,
     p0_blocked: bool = False,
+    p0_reader=None,
     authority=None,
     provider_grant_revoker=None,
 ) -> CandidateVerificationService:
     return CandidateVerificationService(
         repository=repository,
         ruleset_resolver=_FixedRulesetResolver(marker),
-        p0_reader=lambda _request: p0_blocked,
+        p0_reader=p0_reader or (lambda _request: p0_blocked),
         broker_adapter=_AllowVerifierAdapter(),
         event_writer=lambda _event_type, _attempt: None,
         reverification_authority=authority or _AllowReverificationAuthority(),

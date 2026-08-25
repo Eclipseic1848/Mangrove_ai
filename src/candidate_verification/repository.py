@@ -12,10 +12,11 @@ import sqlite3
 
 from filelock import FileLock
 
-from .models import AttemptStatus, VerificationAttempt
+from .models import AttemptReason, AttemptStatus, VerificationAttempt
 
 
 _MIGRATION_ID = "0001_candidate_verification_attempts"
+_PUBLICATION_MIGRATION_ID = "0002_delivery_publication_idempotency"
 _MIGRATION_SQL = (
     Path(__file__).parent
     / "migrations"
@@ -282,6 +283,61 @@ def _import_legacy_attempts(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_delivery_publication_idempotency(
+    connection: sqlite3.Connection,
+) -> None:
+    """把 CV-07 发布幂等字段纳入同一个带恢复点的显式生产迁移。"""
+
+    table_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type='table' AND name='delivery_publish_intents'"
+    ).fetchone()
+    if table_exists is None:
+        return
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(delivery_publish_intents)"
+        ).fetchall()
+    }
+    if "request_idempotency_hash" not in columns:
+        connection.execute(
+            "ALTER TABLE delivery_publish_intents "
+            "ADD COLUMN request_idempotency_hash TEXT"
+        )
+    connection.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS "
+        "idx_dpi_owner_request_idempotency "
+        "ON delivery_publish_intents(owner_id, request_idempotency_hash) "
+        "WHERE request_idempotency_hash IS NOT NULL"
+    )
+
+
+def _publication_schema_complete(connection: sqlite3.Connection) -> bool:
+    table_exists = connection.execute(
+        "SELECT 1 FROM sqlite_master "
+        "WHERE type='table' AND name='delivery_publish_intents'"
+    ).fetchone()
+    if table_exists is None:
+        return True
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info(delivery_publish_intents)"
+        ).fetchall()
+    }
+    indexes = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA index_list(delivery_publish_intents)"
+        ).fetchall()
+    }
+    return (
+        "request_idempotency_hash" in columns
+        and "idx_dpi_owner_request_idempotency" in indexes
+    )
+
+
 def migrate_candidate_verification(
     db_path: str | Path,
     backup_path: str | Path,
@@ -301,9 +357,8 @@ def migrate_candidate_verification(
     with migration_lock:
         if not _database_integrity_ok(database):
             raise RuntimeError("候选验证迁移源数据库完整性检查失败")
-        if _schema_exists(database):
-            if not _database_integrity_ok(backup):
-                raise RuntimeError("候选验证迁移首次恢复点无效")
+        candidate_schema_installed = _schema_exists(database)
+        if candidate_schema_installed:
             try:
                 with closing(
                     sqlite3.connect(f"file:{database}?mode=ro", uri=True)
@@ -312,13 +367,19 @@ def migrate_candidate_verification(
                         "SELECT backup_sha256 "
                         "FROM candidate_verification_migrations "
                         "WHERE migration_id=?",
-                        (_MIGRATION_ID,),
+                        (_PUBLICATION_MIGRATION_ID,),
                     ).fetchone()
+                    publication_complete = _publication_schema_complete(migrated)
             except sqlite3.DatabaseError as exc:
                 raise RuntimeError("候选验证迁移 Schema 不完整") from exc
-            if row is None or row[0] != _file_sha256(backup):
-                raise RuntimeError("候选验证迁移首次恢复点不匹配")
-            return backup
+            if row is not None:
+                if not _database_integrity_ok(backup):
+                    raise RuntimeError("候选验证迁移首次恢复点无效")
+                if row[0] != _file_sha256(backup):
+                    raise RuntimeError("候选验证迁移首次恢复点不匹配")
+                if not publication_complete:
+                    raise RuntimeError("Delivery 发布迁移 Schema 不完整")
+                return backup
 
         with closing(sqlite3.connect(database, timeout=30)) as source:
             source.execute("BEGIN IMMEDIATE")
@@ -351,20 +412,33 @@ def migrate_candidate_verification(
                     ):
                         raise RuntimeError("候选验证迁移恢复点与源数据库不一致")
                     os.replace(temporary_backup, backup)
-                for statement in _sql_statements(_MIGRATION_SQL):
-                    source.execute(statement)
-                _import_legacy_attempts(source)
+                if not candidate_schema_installed:
+                    for statement in _sql_statements(_MIGRATION_SQL):
+                        source.execute(statement)
+                    _import_legacy_attempts(source)
+                    source.execute(
+                        "INSERT INTO candidate_verification_migrations "
+                        "(migration_id, backup_sha256, applied_at) VALUES (?, ?, ?)",
+                        (
+                            _MIGRATION_ID,
+                            _file_sha256(backup),
+                            datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
+                _migrate_delivery_publication_idempotency(source)
                 source.execute(
                     "INSERT INTO candidate_verification_migrations "
                     "(migration_id, backup_sha256, applied_at) VALUES (?, ?, ?)",
                     (
-                        _MIGRATION_ID,
+                        _PUBLICATION_MIGRATION_ID,
                         _file_sha256(backup),
                         datetime.now(timezone.utc).isoformat(),
                     ),
                 )
                 if _schema_signature(source) != _expected_schema_signature():
                     raise RuntimeError("候选验证迁移最终 Schema 不完整")
+                if not _publication_schema_complete(source):
+                    raise RuntimeError("Delivery 发布迁移最终 Schema 不完整")
                 if source.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     raise RuntimeError("候选验证迁移后完整性检查失败")
                 if source.execute("PRAGMA foreign_key_check").fetchall():
@@ -720,7 +794,8 @@ class SqliteCandidateVerificationRepository:
                 "AND EXISTS (SELECT 1 FROM semantic_workspace_tasks AS task "
                 "WHERE task.user_id=agentic_runtime_runs.user_id "
                 "AND task.task_id=agentic_runtime_runs.task_id "
-                "AND task.active_revision=agentic_runtime_runs.revision)",
+                "AND task.active_revision=agentic_runtime_runs.revision "
+                "AND task.cancel_requested=0)",
                 (
                     attempt.owner_id,
                     attempt.task_id,
@@ -983,6 +1058,7 @@ class SqliteCandidateVerificationRepository:
         finished_at: datetime,
         candidates_json: str,
         candidate_set_hash: str,
+        require_reverification_current: bool = False,
     ) -> VerificationAttempt:
         """原子冻结 Attempt 终态并维护旧 Runtime 读取投影。"""
 
@@ -1005,7 +1081,7 @@ class SqliteCandidateVerificationRepository:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             attempt_row = connection.execute(
-                "SELECT task_id, revision, run_id, candidate_set_hash "
+                "SELECT task_id, revision, run_id, candidate_set_hash, reason_code "
                 "FROM candidate_verification_attempts "
                 "WHERE owner_id=? AND attempt_id=? AND status='running'",
                 (owner_id, attempt_id),
@@ -1014,6 +1090,48 @@ class SqliteCandidateVerificationRepository:
                 raise PermissionError("候选验证 Attempt 不存在或状态不可完成")
             if attempt_row["candidate_set_hash"] != candidate_set_hash:
                 raise ValueError("Attempt 与兼容投影的 CandidateSet 不一致")
+
+            if require_reverification_current:
+                state = connection.execute(
+                    "SELECT p0_blocked FROM runtime_rollout_state WHERE state_id=1"
+                ).fetchone()
+                if state is None or bool(state["p0_blocked"]):
+                    raise PermissionError("P0/Gate 已阻断候选重验结论提交")
+                current = connection.execute(
+                    "SELECT 1 FROM agentic_runtime_runs AS runtime "
+                    "WHERE runtime.user_id=? AND runtime.task_id=? "
+                    "AND runtime.revision=? AND runtime.run_id=? "
+                    "AND runtime.runtime_version='pi' "
+                    "AND runtime.status='candidate_ready' "
+                    "AND runtime.verified_candidate_set_hash=? "
+                    "AND EXISTS (SELECT 1 FROM semantic_workspace_tasks AS task "
+                    "WHERE task.user_id=runtime.user_id "
+                    "AND task.task_id=runtime.task_id "
+                    "AND task.active_revision=runtime.revision "
+                    "AND task.cancel_requested=0)",
+                    (
+                        owner_id,
+                        attempt_row["task_id"],
+                        attempt_row["revision"],
+                        attempt_row["run_id"],
+                        candidate_set_hash,
+                    ),
+                ).fetchone()
+                if current is None:
+                    raise PermissionError("运行期任务权威身份已漂移或取消")
+                delivery = connection.execute(
+                    "SELECT 1 FROM formal_delivery_runs "
+                    "WHERE owner_id=? AND run_id=? AND status='succeeded' LIMIT 1",
+                    (owner_id, attempt_row["run_id"]),
+                ).fetchone()
+                if delivery is None:
+                    delivery = connection.execute(
+                        "SELECT 1 FROM semantic_delivery_runs "
+                        "WHERE user_id=? AND run_id=? LIMIT 1",
+                        (owner_id, attempt_row["run_id"]),
+                    ).fetchone()
+                if delivery is not None:
+                    raise PermissionError("候选已存在正式 Delivery，拒绝提交重验结论")
 
             # 两张表必须共享一个提交点；任一触发器或身份门拒绝时整体回滚。
             updated_projection = connection.execute(

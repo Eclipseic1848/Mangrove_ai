@@ -78,9 +78,10 @@ def _enable_execution_claim(database: Path) -> None:
             CREATE TABLE semantic_workspace_tasks (
                 task_id TEXT PRIMARY KEY,
                 user_id TEXT NOT NULL,
-                active_revision INTEGER NOT NULL
+                active_revision INTEGER NOT NULL,
+                cancel_requested INTEGER NOT NULL
             );
-            INSERT INTO semantic_workspace_tasks VALUES ('task-a', 'owner-a', 1);
+            INSERT INTO semantic_workspace_tasks VALUES ('task-a', 'owner-a', 1, 0);
             CREATE TABLE formal_delivery_runs (
                 owner_id TEXT NOT NULL,
                 run_id TEXT NOT NULL,
@@ -542,6 +543,110 @@ def test_running_provider_cancellation_is_outcome_unknown_and_revokes(
     assert revoked == [
         (requested.provider_attempt_id, "candidate_verify_outcome_unknown")
     ]
+
+
+def test_running_provider_attempt_stops_when_p0_flips_before_relay(
+    tmp_path: Path,
+) -> None:
+    repository, previous = _prepare_candidate(tmp_path, provider=True)
+    p0 = {"blocked": False}
+    revoked: list[tuple[str, str]] = []
+    service = _service(
+        repository,
+        "9",
+        p0_reader=lambda _request: p0["blocked"],
+        provider_grant_revoker=lambda grant_id, reason: revoked.append(
+            (grant_id, reason)
+        ),
+    )
+    _enable_execution_claim(tmp_path / "workspace.db")
+
+    async def scenario():
+        started = asyncio.Event()
+        release = asyncio.Event()
+        relay_calls = 0
+
+        class _Verifier:
+            async def verify(self, **_kwargs):
+                nonlocal relay_calls
+                started.set()
+                await release.wait()
+                relay_calls += 1
+                return await _PassingVerifier().verify(**_kwargs)
+
+        requested = await service.request_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+            expected_previous_attempt_id=previous.attempt_id,
+            external_api_confirmed=True,
+            idempotency_key="provider-p0-supervision-1",
+            verifier_factory=lambda _request, _run_id, _provider_id=None: _Verifier(),
+        )
+        execution = asyncio.create_task(
+            service.execute_requested_reverification(
+                owner_id="owner-a",
+                attempt_id=requested.attempt_id,
+                verifier_factory=lambda _request, _run_id, _provider_id=None: _Verifier(),
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=1)
+        p0["blocked"] = True
+        await asyncio.sleep(0.2)
+        release.set()
+        finished = await asyncio.wait_for(execution, timeout=1)
+        return requested, finished, relay_calls
+
+    requested, finished, relay_calls = asyncio.run(scenario())
+
+    assert finished.status.value == "outcome_unknown"
+    assert relay_calls == 0
+    assert revoked == [
+        (requested.provider_attempt_id, "candidate_verify_outcome_unknown")
+    ]
+
+
+def test_provider_result_cannot_commit_passed_after_p0_flip(
+    tmp_path: Path,
+) -> None:
+    repository, previous = _prepare_candidate(tmp_path, provider=True)
+    p0 = {"blocked": False}
+    service = _service(
+        repository,
+        "9",
+        p0_reader=lambda _request: p0["blocked"],
+        provider_grant_revoker=lambda _grant_id, _reason: True,
+    )
+    _enable_execution_claim(tmp_path / "workspace.db")
+
+    class _Verifier:
+        async def verify(self, **kwargs):
+            report = await _PassingVerifier().verify(**kwargs)
+            p0["blocked"] = True
+            return report
+
+    requested = asyncio.run(
+        service.request_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+            expected_previous_attempt_id=previous.attempt_id,
+            external_api_confirmed=True,
+            idempotency_key="provider-p0-commit-1",
+            verifier_factory=lambda _request, _run_id, _provider_id=None: _Verifier(),
+        )
+    )
+    finished = asyncio.run(
+        service.execute_requested_reverification(
+            owner_id="owner-a",
+            attempt_id=requested.attempt_id,
+            verifier_factory=lambda _request, _run_id, _provider_id=None: _Verifier(),
+        )
+    )
+
+    assert finished.status.value == "outcome_unknown"
+    assert finished.report_json is None
+    assert repository.get("owner-a", previous.attempt_id) == previous
 
 
 def test_provider_usage_is_bound_to_attempt_and_unknown_cost_is_not_zero(

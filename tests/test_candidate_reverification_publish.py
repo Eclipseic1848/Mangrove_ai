@@ -9,6 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from src.candidate_verification import migrate_candidate_verification
+
 from src.delivery_publishing.models import (
     CandidateRef,
     DeliverySpec,
@@ -138,6 +140,11 @@ def test_existing_publish_intent_schema_adds_hashed_http_idempotency_binding(
             """
         )
 
+    with pytest.raises(RuntimeError, match="显式迁移"):
+        DeliveryPublishingRepository(database)
+
+    backup = tmp_path / "legacy-publisher.backup.db"
+    migrate_candidate_verification(database, backup)
     DeliveryPublishingRepository(database)
 
     with sqlite3.connect(database) as connection:

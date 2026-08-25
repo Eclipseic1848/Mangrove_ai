@@ -55,6 +55,29 @@ class DeliveryPublishingRepository:
 
     def _ensure_schema(self) -> None:
         with _LOCK, self._conn() as conn:
+            existing_intents = conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='delivery_publish_intents'"
+            ).fetchone()
+            if existing_intents is not None:
+                columns = {
+                    str(row[1])
+                    for row in conn.execute(
+                        "PRAGMA table_info(delivery_publish_intents)"
+                    ).fetchall()
+                }
+                indexes = {
+                    str(row[1])
+                    for row in conn.execute(
+                        "PRAGMA index_list(delivery_publish_intents)"
+                    ).fetchall()
+                }
+                if (
+                    "request_idempotency_hash" not in columns
+                    or "idx_dpi_owner_request_idempotency" not in indexes
+                ):
+                    # 生产旧表只能经带恢复点的显式迁移升级，Repository 初始化不得静默 DDL。
+                    raise RuntimeError("Delivery 发布 Schema 需要先执行显式迁移")
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS delivery_publish_intents (
@@ -116,24 +139,13 @@ class DeliveryPublishingRepository:
                 ON formal_delivery_outputs(owner_id, run_id, created_at DESC);
                 """
             )
-            columns = {
-                str(row["name"])
-                for row in conn.execute(
-                    "PRAGMA table_info(delivery_publish_intents)"
-                ).fetchall()
-            }
-            if "request_idempotency_hash" not in columns:
+            if existing_intents is None:
+                # 新库随基础表一次创建；已有生产表只允许由显式迁移安装该索引。
                 conn.execute(
-                    "ALTER TABLE delivery_publish_intents "
-                    "ADD COLUMN request_idempotency_hash TEXT"
+                    "CREATE UNIQUE INDEX idx_dpi_owner_request_idempotency "
+                    "ON delivery_publish_intents(owner_id, request_idempotency_hash) "
+                    "WHERE request_idempotency_hash IS NOT NULL"
                 )
-            # HTTP 幂等键只保存摘要，并在 Owner 内唯一绑定一个冻结发布请求。
-            conn.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS "
-                "idx_dpi_owner_request_idempotency "
-                "ON delivery_publish_intents(owner_id, request_idempotency_hash) "
-                "WHERE request_idempotency_hash IS NOT NULL"
-            )
 
     def claim_intent(
         self,

@@ -221,6 +221,91 @@ def test_migration_replay_preserves_first_recovery_point(tmp_path) -> None:
     assert backup.read_bytes() == backup_before_replay
 
 
+def test_migration_upgrades_existing_0001_with_separate_recovery_point(
+    tmp_path,
+) -> None:
+    database = tmp_path / "production.db"
+    first_backup = tmp_path / "before-0001.db"
+    publication_backup = tmp_path / "before-0002.db"
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE delivery_publish_intents (
+                publication_key TEXT PRIMARY KEY,
+                command_hash TEXT NOT NULL,
+                owner_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                task_revision INTEGER NOT NULL,
+                run_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                commit_token TEXT,
+                staging_dir TEXT,
+                final_dir TEXT,
+                delivery_id TEXT,
+                manifest_json TEXT,
+                error_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO delivery_publish_intents VALUES (
+                'legacy-key', 'legacy-command', 'owner-a', 'task-a', 1,
+                'run-a', 'failed', NULL, NULL, NULL, NULL, NULL, NULL,
+                '2026-08-24T12:00:00+00:00',
+                '2026-08-24T12:00:00+00:00'
+            );
+            """
+        )
+    migrate_candidate_verification(database, first_backup)
+    with sqlite3.connect(database) as connection:
+        # 模拟已执行旧版 0001、但尚未发布 CV-07 迁移的合法阶段状态。
+        connection.execute(
+            "DELETE FROM candidate_verification_migrations "
+            "WHERE migration_id='0002_delivery_publication_idempotency'"
+        )
+        connection.execute("DROP INDEX idx_dpi_owner_request_idempotency")
+        connection.execute(
+            "ALTER TABLE delivery_publish_intents "
+            "DROP COLUMN request_idempotency_hash"
+        )
+
+    migrated = migrate_candidate_verification(database, publication_backup)
+    backup_before_replay = publication_backup.read_bytes()
+    replayed = migrate_candidate_verification(database, publication_backup)
+
+    assert migrated == replayed == publication_backup.resolve()
+    assert publication_backup.read_bytes() == backup_before_replay
+    with sqlite3.connect(database) as connection:
+        migrations = {
+            row[0]
+            for row in connection.execute(
+                "SELECT migration_id FROM candidate_verification_migrations"
+            )
+        }
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(delivery_publish_intents)"
+            )
+        }
+        indexes = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA index_list(delivery_publish_intents)"
+            )
+        }
+        legacy = connection.execute(
+            "SELECT publication_key, request_idempotency_hash "
+            "FROM delivery_publish_intents"
+        ).fetchone()
+    assert migrations == {
+        "0001_candidate_verification_attempts",
+        "0002_delivery_publication_idempotency",
+    }
+    assert "request_idempotency_hash" in columns
+    assert "idx_dpi_owner_request_idempotency" in indexes
+    assert legacy == ("legacy-key", None)
+
+
 def test_migration_replay_releases_database_file_handle(tmp_path) -> None:
     database = tmp_path / "production.db"
     backup = tmp_path / "before.db"

@@ -106,6 +106,10 @@ class ReverificationContractError(ValueError):
     """冻结候选或任务契约缺失、损坏，调用方必须先修复数据。"""
 
 
+class _P0ViolationAbort(RuntimeError):
+    """运行中 P0 翻转；调用方必须按是否可能外发选择安全终态。"""
+
+
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -984,6 +988,7 @@ class CandidateVerificationService:
             candidates=candidates,
             candidate_hash=candidate_hash,
             operation=operation,
+            supervise_p0=True,
         )
 
     def close_unstarted_reverification(
@@ -1216,6 +1221,7 @@ class CandidateVerificationService:
         candidates: tuple[CandidateArtifact, ...],
         candidate_hash: str,
         operation: Callable[[], Awaitable[VerificationReport]],
+        supervise_p0: bool = False,
     ) -> VerificationAttempt:
         """统一完成已认领 Attempt，并原子更新兼容 Runtime 投影。"""
 
@@ -1225,7 +1231,15 @@ class CandidateVerificationService:
         )
         try:
             self._event_writer("candidate_verification_attempt_started", running)
-            report = await operation()
+            report = (
+                await self._await_with_p0_supervision(request, operation)
+                if supervise_p0
+                else await operation()
+            )
+        except _P0ViolationAbort:
+            if running.provider_attempt_id is not None:
+                return self._finish_outcome_unknown(running)
+            return self._finish_cancelled(running)
         except asyncio.CancelledError:
             if running.provider_attempt_id is not None:
                 # 取消只能终止本地等待，不能证明 Provider 没有处理或计费。
@@ -1262,6 +1276,7 @@ class CandidateVerificationService:
                 finished_at=self._clock(),
                 candidates_json=candidates_json,
                 candidate_set_hash=candidate_hash,
+                require_reverification_current=supervise_p0,
             )
         except Exception:
             if running.provider_attempt_id is not None:
@@ -1278,6 +1293,47 @@ class CandidateVerificationService:
             raise
         self._event_writer("candidate_verification_attempt_finished", finished)
         return finished
+
+    async def _await_with_p0_supervision(
+        self,
+        request: PiRuntimeRequest,
+        operation: Callable[[], Awaitable[VerificationReport]],
+    ) -> VerificationReport:
+        """并发监督 P0；监督异常也失败关闭，完成竞态时监督优先。"""
+
+        def blocked() -> bool:
+            try:
+                return bool(self._p0_reader(request))
+            except Exception:
+                return True
+
+        if blocked():
+            raise _P0ViolationAbort("候选验证开始前 P0/Gate 已阻断")
+        execution = asyncio.create_task(operation())
+        try:
+            while True:
+                done, _pending = await asyncio.wait(
+                    {execution},
+                    timeout=0.05,
+                )
+                # 即使执行与监督同时完成，也必须让硬门优先，避免落入 passed。
+                if blocked():
+                    if not execution.done():
+                        execution.cancel()
+                    try:
+                        await execution
+                    except asyncio.CancelledError:
+                        pass
+                    raise _P0ViolationAbort("候选验证运行中 P0/Gate 已阻断")
+                if execution in done:
+                    return execution.result()
+        finally:
+            if not execution.done():
+                execution.cancel()
+                try:
+                    await execution
+                except asyncio.CancelledError:
+                    pass
 
     def _finish_outcome_unknown(
         self,
