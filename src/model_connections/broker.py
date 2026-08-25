@@ -58,6 +58,10 @@ class GrantError(ConnectionError):
     """Grant 无效、越权、过期或协议不匹配。"""
 
 
+class ProviderOutcomeUnknownError(ConnectionError):
+    """请求可能已到 Provider，但无法确认是否形成可用响应。"""
+
+
 class ConnectionBroker:
     """产品代码使用模型连接的唯一 Interface。"""
 
@@ -400,6 +404,7 @@ class ConnectionBroker:
         purpose: str,
         model_id: str | None = None,
         ttl_seconds: int | None = None,
+        grant_id: str | None = None,
     ) -> AccessGrant:
         """为一个 Run 的单一用途签发短期权利，不返回 Provider Secret。"""
 
@@ -432,10 +437,12 @@ class ConnectionBroker:
         connection = {**connection, "model": frozen_model}
         now = self._clock()
         expires_at = now + timedelta(seconds=effective_ttl)
-        grant_id = f"grant_{uuid.uuid4().hex}"
+        resolved_grant_id = grant_id or f"grant_{uuid.uuid4().hex}"
+        if not resolved_grant_id.startswith("grant_") or len(resolved_grant_id) > 160:
+            raise GrantError("Grant 身份格式无效")
         token = secrets.token_urlsafe(32)
         self._repository.create_grant(
-            grant_id=grant_id,
+            grant_id=resolved_grant_id,
             token_hash=_token_hash(token),
             owner_user_id=owner_user_id,
             task_id=task_id,
@@ -446,7 +453,7 @@ class ConnectionBroker:
             expires_at=expires_at.isoformat(),
         )
         return AccessGrant(
-            grant_id=grant_id,
+            grant_id=resolved_grant_id,
             token=token,
             connection_id=connection_id,
             connection_version=connection_version,
@@ -518,6 +525,39 @@ class ConnectionBroker:
             task_id=task_id,
             revision=revision,
         )
+
+    def get_usage_for_grant(
+        self,
+        owner_user_id: str,
+        *,
+        task_id: str,
+        revision: int,
+        run_id: str,
+        grant_id: str,
+    ) -> dict[str, object] | None:
+        """返回单次 Provider Attempt 的安全用量投影。"""
+
+        usage = self._repository.get_usage_for_grant(
+            owner_user_id,
+            task_id=task_id,
+            revision=revision,
+            run_id=run_id,
+            grant_id=grant_id,
+        )
+        if usage is None:
+            return None
+        return {
+            "provider_attempt_id": usage["grant_id"],
+            "run_id": usage["run_id"],
+            "status": usage["status"],
+            "input_tokens": usage["input_tokens"],
+            "output_tokens": usage["output_tokens"],
+            "total_tokens": usage["total_tokens"],
+            "request_count": usage["request_count"],
+            # 当前没有可信价格快照，费用必须明确保持未知，不能用 0 伪装。
+            "cost_status": "unknown",
+            "cost": None,
+        }
 
     async def relay(
         self,
@@ -595,7 +635,9 @@ class ConnectionBroker:
         except httpx.HTTPError as exc:
             await client.aclose()
             self._record_unknown_usage(grant)
-            raise ConnectionError("Provider Relay 连接失败") from exc
+            raise ProviderOutcomeUnknownError(
+                "Provider 连接失败，Relay 结果无法确认"
+            ) from exc
 
         def finalize(response_body: bytes) -> None:
             usage = _extract_native_usage(

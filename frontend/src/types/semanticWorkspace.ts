@@ -170,6 +170,35 @@ export interface RuntimeVerification {
   }>;
 }
 
+export type VerificationAttemptStatus =
+  | "requested"
+  | "running"
+  | "passed"
+  | "failed"
+  | "inconclusive"
+  | "outcome_unknown"
+  | "cancelled";
+
+export interface VerificationAttemptSummary {
+  attempt_id: string | null;
+  status: VerificationAttemptStatus | null;
+  reason: string | null;
+  ruleset_identity_status: string | null;
+}
+
+export interface ReverificationOffer {
+  eligible: boolean;
+  reason: string | null;
+  blockers: string[];
+  ruleset_changed: boolean | null;
+  ruleset_change_summary: string;
+  requires_provider: boolean;
+  connection_id: string | null;
+  model_id: string | null;
+  egress_categories: string[];
+  egress_summary: string;
+}
+
 export interface AgenticRuntimeInfo {
   runtime_version: "legacy" | "pi";
   permission_profile: "standard" | "extended" | "host_dev";
@@ -200,6 +229,9 @@ export interface AgenticRuntimeInfo {
     };
     ledger: Record<string, unknown>;
   } | null;
+  latest_verification_attempt?: VerificationAttemptSummary | null;
+  reverification_offer?: ReverificationOffer | null;
+  awaiting_publication?: boolean;
 }
 
 export interface WorkspaceTask {
@@ -247,6 +279,16 @@ export interface WorkspaceTask {
   permission_profile?: "standard" | "extended" | "host_dev";
   agentic_runtime?: AgenticRuntimeInfo;
   progress?: TaskProgressView;
+}
+
+export interface VerificationAttemptReceipt {
+  attempt_id: string;
+  task_id: string;
+  revision: number;
+  run_id: string;
+  previous_attempt_id: string;
+  status: VerificationAttemptStatus;
+  task: WorkspaceTask;
 }
 
 export interface TablePreview {

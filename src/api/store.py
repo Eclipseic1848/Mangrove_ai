@@ -3264,6 +3264,8 @@ class WebUIStore:
         self,
         user_id: str,
         task_id: str,
+        *,
+        expected_active_revision: int | None = None,
         **changes: Any,
     ) -> Dict[str, Any]:
         allowed = {
@@ -3330,14 +3332,24 @@ class WebUIStore:
                 values.append(value)
         sets.append("updated_at=?")
         values.extend([_now(), user_id, task_id])
+        where = " WHERE user_id=? AND task_id=?"
+        if expected_active_revision is not None:
+            where += " AND active_revision=?"
+            values.append(expected_active_revision)
         with self._lock, self._conn() as conn:
             cursor = conn.execute(
                 "UPDATE semantic_workspace_tasks SET "
                 + ", ".join(sets)
-                + " WHERE user_id=? AND task_id=?",
+                + where,
                 values,
             )
         if cursor.rowcount != 1:
+            if (
+                expected_active_revision is not None
+                and self.get_semantic_workspace_task(user_id, task_id)
+                is not None
+            ):
+                raise RuntimeError("活动版本已变化，任务状态未更新")
             raise KeyError("工作台任务不存在或无权访问")
         saved = self.get_semantic_workspace_task(user_id, task_id)
         assert saved is not None
@@ -3374,6 +3386,19 @@ class WebUIStore:
             revision = int(task["active_revision"]) + 1
             if expected_revision is not None and revision != expected_revision:
                 raise RuntimeError("活动版本已变化，禁止创建路由错配的 Revision")
+            publish_intents = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' "
+                "AND name='delivery_publish_intents'"
+            ).fetchone()
+            if publish_intents is not None:
+                committing = conn.execute(
+                    "SELECT 1 FROM delivery_publish_intents "
+                    "WHERE owner_id=? AND task_id=? AND task_revision=? "
+                    "AND status='committing' LIMIT 1",
+                    (user_id, task_id, revision - 1),
+                ).fetchone()
+                if committing is not None:
+                    raise RuntimeError("正式交付已越过提交点，禁止切换活动版本")
             frozen_contracts = table_output_contracts
             if frozen_contracts is None:
                 frozen_contracts = [
@@ -3546,12 +3571,15 @@ class WebUIStore:
         user_id: str,
         task_id: str,
         *,
+        event_id: Optional[str] = None,
         stage: str,
         event_type: str,
         summary: str,
         details: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         with self._lock, self._conn() as conn:
+            # 跨进程串行分配 sequence，避免两个 Web 进程读取到相同 MAX(sequence)。
+            conn.execute("BEGIN IMMEDIATE")
             owner = conn.execute(
                 "SELECT 1 FROM semantic_workspace_tasks "
                 "WHERE user_id=? AND task_id=?",
@@ -3564,15 +3592,16 @@ class WebUIStore:
                 "FROM semantic_workspace_events WHERE task_id=?",
                 (task_id,),
             ).fetchone()["value"]
-            event_id = f"workspace_event_{uuid.uuid4().hex[:16]}"
+            resolved_event_id = event_id or f"workspace_event_{uuid.uuid4().hex[:16]}"
             created_at = _now()
-            conn.execute(
-                "INSERT INTO semantic_workspace_events "
+            cursor = conn.execute(
+                ("INSERT OR IGNORE" if event_id is not None else "INSERT")
+                + " INTO semantic_workspace_events "
                 "(event_id, task_id, user_id, sequence, stage, event_type, "
                 "summary, details_json, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
-                    event_id,
+                    resolved_event_id,
                     task_id,
                     user_id,
                     sequence,
@@ -3583,8 +3612,26 @@ class WebUIStore:
                     created_at,
                 ),
             )
+            if event_id is not None and cursor.rowcount == 0:
+                existing = conn.execute(
+                    "SELECT event_id, sequence, stage, event_type, summary, "
+                    "details_json, created_at FROM semantic_workspace_events "
+                    "WHERE event_id=? AND user_id=? AND task_id=?",
+                    (resolved_event_id, user_id, task_id),
+                ).fetchone()
+                if existing is None:
+                    raise RuntimeError("工作台事件序号冲突")
+                return {
+                    "event_id": existing["event_id"],
+                    "sequence": existing["sequence"],
+                    "stage": existing["stage"],
+                    "event_type": existing["event_type"],
+                    "summary": existing["summary"],
+                    "details": json.loads(existing["details_json"]),
+                    "created_at": existing["created_at"],
+                }
         return {
-            "event_id": event_id,
+            "event_id": resolved_event_id,
             "sequence": sequence,
             "stage": stage,
             "event_type": event_type,

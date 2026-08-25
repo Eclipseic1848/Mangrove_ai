@@ -1799,6 +1799,369 @@ test.describe("统一数据工作台", () => {
     await expect(page.getByText("解析 PDF 文档结构", { exact: true })).toBeVisible();
   });
 
+  test("普通用户确认本次 Provider 外发后创建候选重验 Attempt", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await mockWorkspace(page, "light", "user");
+    const candidate = workspaceTask(
+      "task-reverification",
+      "candidate_ready",
+      "重新验证工作量结果",
+    );
+    const candidateDetail = workspaceDetail(candidate, {
+      agentic_runtime: {
+        runtime_version: "pi",
+        permission_profile: "standard",
+        status: "candidate_ready",
+        candidates: [{
+          artifact_id: "candidate-xlsx",
+          filename: "工作量结果.xlsx",
+          format: "xlsx",
+          sha256: "a".repeat(64),
+          size_bytes: 4096,
+          openable: true,
+          qa_checks: ["openable"],
+          download_url: "/api/download/candidate-xlsx",
+          download_allowed: true,
+        }],
+        verification: {
+          status: "failed",
+          summary: "旧规则错误地拒绝了文件数量。",
+          evidence_count: 1,
+          formal_delivery_eligible: false,
+          checks: [{
+            code: "artifact_count",
+            passed: false,
+            summary: "旧规则要求的文件数量不正确",
+          }],
+        },
+        latest_verification_attempt: {
+          attempt_id: "attempt-old",
+          status: "failed",
+          reason: "initial",
+          ruleset_identity_status: "versioned",
+        },
+        reverification_offer: {
+          eligible: true,
+          reason: "ruleset_changed",
+          blockers: [],
+          ruleset_changed: true,
+          ruleset_change_summary: "文件数量规则已修正",
+          requires_provider: true,
+          connection_id: "connection-deepseek",
+          model_id: "deepseek-chat",
+          egress_categories: ["目标摘要", "候选内容"],
+          egress_summary: "目标摘要和候选内容将发送给模型进行语义核对",
+        },
+        awaiting_publication: false,
+      },
+    });
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [candidate] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-reverification",
+      (route) => route.fulfill({ json: candidateDetail }),
+    );
+    let requestPayload: Record<string, unknown> | null = null;
+    let requestIdempotencyKey: string | undefined;
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-reverification/candidate-verifications",
+      async (route) => {
+        requestPayload = await route.request().postDataJSON();
+        requestIdempotencyKey = route.request().headers()["idempotency-key"];
+        if (candidateDetail.agentic_runtime) {
+          candidateDetail.agentic_runtime.latest_verification_attempt = {
+            attempt_id: "attempt-new",
+            status: "requested",
+            reason: "ruleset_changed",
+            ruleset_identity_status: "versioned",
+          };
+          candidateDetail.agentic_runtime.reverification_offer = {
+            ...candidateDetail.agentic_runtime.reverification_offer!,
+            eligible: false,
+            blockers: ["verification_attempt_active"],
+          };
+        }
+        await route.fulfill({
+          status: 202,
+          json: {
+            attempt_id: "attempt-new",
+            task_id: candidate.task_id,
+            revision: 1,
+            run_id: "run-1",
+            previous_attempt_id: "attempt-old",
+            status: "requested",
+            task: candidateDetail,
+          },
+        });
+      },
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /重新验证工作量结果/ }).click();
+    const reverifyTrigger = page.getByRole("button", { name: "使用最新规则重新验证" });
+    await reverifyTrigger.click();
+
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toContainText("不会重新执行整个任务或生成新文件");
+    await expect(dialog).toContainText("工作量结果.xlsx");
+    await expect(dialog).toContainText("文件数量规则已修正");
+    await expect(dialog).toContainText("deepseek-chat");
+    await expect(dialog).toContainText("目标摘要和候选内容");
+    await expect(dialog.getByRole("button", { name: "取消" })).toBeFocused();
+    await expect(dialog.getByRole("button", { name: "开始重新验证" })).toBeDisabled();
+    await page.keyboard.press("Escape");
+    await expect(dialog).toBeHidden();
+    await expect(reverifyTrigger).toBeFocused();
+    await reverifyTrigger.click();
+    await expect(dialog.getByRole("button", { name: "取消" })).toBeFocused();
+    if (process.env.MANGROVE_CV08_PROVIDER_SCREENSHOT) {
+      await page.screenshot({
+        path: process.env.MANGROVE_CV08_PROVIDER_SCREENSHOT,
+        fullPage: false,
+      });
+    }
+    const dialogBounds = await dialog.boundingBox();
+    const cancelBounds = await dialog.getByRole("button", { name: "取消" }).boundingBox();
+    expect(dialogBounds?.height).toBeLessThanOrEqual(760);
+    expect(cancelBounds?.y).toBeGreaterThanOrEqual(0);
+    expect((cancelBounds?.y ?? 0) + (cancelBounds?.height ?? 0)).toBeLessThanOrEqual(844);
+
+    // 1280×900 的浏览器在 200% 缩放下提供 640×450 CSS px 的布局视口。
+    await page.setViewportSize({ width: 640, height: 450 });
+    await expect(dialog.getByRole("button", { name: "取消" })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "开始重新验证" })).toBeVisible();
+    const dialogDoesNotOverflowHorizontally = await dialog.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth + 1,
+    );
+    expect(dialogDoesNotOverflowHorizontally).toBe(true);
+
+    await dialog.getByRole("checkbox", {
+      name: "我确认本次会向外部模型发送上述内容，并可能产生费用",
+    }).check();
+    await dialog.getByRole("button", { name: "开始重新验证" }).click();
+
+    await expect.poll(() => requestPayload).toEqual({
+      expected_revision: 1,
+      expected_previous_attempt_id: "attempt-old",
+      external_api_confirmed: true,
+      accept_duplicate_provider_cost: false,
+    });
+    expect(requestIdempotencyKey).toMatch(/^reverify-/);
+    await expect(page.getByRole("status")).toContainText("重验请求已受理");
+  });
+
+  test("候选重验状态刷新后可恢复，并用独立幂等键显式发布", async ({ page }) => {
+    await mockWorkspace(page, "dark", "user");
+    const candidate = workspaceTask(
+      "task-reverification-state",
+      "candidate_ready",
+      "候选重验状态",
+    );
+    let attemptStatus: "requested" | "outcome_unknown" | "passed" = "requested";
+    const detailForStatus = () => workspaceDetail(candidate, {
+      agentic_runtime: {
+        runtime_version: "pi",
+        permission_profile: "standard",
+        status: "candidate_ready",
+        candidates: [{
+          artifact_id: "candidate-csv",
+          filename: "结果.csv",
+          format: "csv",
+          sha256: "b".repeat(64),
+          size_bytes: 128,
+          openable: true,
+          qa_checks: ["openable"],
+          download_url: "/api/download/candidate-csv",
+          download_allowed: true,
+        }],
+        verification: {
+          status: attemptStatus === "passed" ? "passed" : "failed",
+          summary: "候选文件保持不变",
+          evidence_count: 1,
+          formal_delivery_eligible: attemptStatus === "passed",
+          checks: [],
+        },
+        latest_verification_attempt: {
+          attempt_id: "attempt-state",
+          status: attemptStatus,
+          reason: "ruleset_changed",
+          ruleset_identity_status: "versioned",
+        },
+        reverification_offer: {
+          eligible: false,
+          reason: null,
+          blockers: attemptStatus === "passed" ? [] : ["verification_attempt_active"],
+          ruleset_changed: false,
+          ruleset_change_summary: "规则身份未变化",
+          requires_provider: true,
+          connection_id: "connection-deepseek",
+          model_id: "deepseek-chat",
+          egress_categories: ["候选内容"],
+          egress_summary: "候选内容将发送给模型",
+        },
+        awaiting_publication: attemptStatus === "passed",
+      },
+    });
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [candidate] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-reverification-state",
+      (route) => route.fulfill({ json: detailForStatus() }),
+    );
+    let publishPayload: Record<string, unknown> | null = null;
+    let publishIdempotencyKey: string | undefined;
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-reverification-state/candidate-verifications/attempt-state/publish",
+      async (route) => {
+        publishPayload = await route.request().postDataJSON();
+        publishIdempotencyKey = route.request().headers()["idempotency-key"];
+        await route.fulfill({
+          json: {
+            delivery_id: "delivery-state",
+            run_id: "run-state",
+            plan_id: "plan-state",
+            status: "delivery_published",
+            outputs: [],
+            requested_formats: ["csv"],
+            created_at: "2026-08-24T12:00:00Z",
+          },
+        });
+      },
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /候选重验状态/ }).click();
+    await expect(page.getByRole("status")).toContainText("重验请求已受理");
+
+    attemptStatus = "outcome_unknown";
+    await page.reload();
+    await page.getByRole("button", { name: /候选重验状态/ }).click();
+    await expect(page.getByRole("alert")).toContainText("已停止自动重试");
+    await expect(page.getByRole("button", { name: "使用最新规则重新验证" })).toHaveCount(0);
+
+    attemptStatus = "passed";
+    await page.reload();
+    await page.getByRole("button", { name: /候选重验状态/ }).click();
+    await expect(page.getByRole("status")).toContainText("还不是正式交付");
+    await page.getByRole("button", { name: "发布正式结果" }).click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toContainText("不会重新运行任务或模型");
+    await expect(dialog.getByRole("button", { name: "取消" })).toBeFocused();
+    if (process.env.MANGROVE_CV08_PUBLISH_SCREENSHOT) {
+      await page.screenshot({
+        path: process.env.MANGROVE_CV08_PUBLISH_SCREENSHOT,
+        fullPage: false,
+      });
+    }
+    const scan = await new AxeBuilder({ page }).include('[role="alertdialog"]').analyze();
+    expect(
+      scan.violations.filter(
+        (item) => item.impact === "serious" || item.impact === "critical",
+      ),
+    ).toEqual([]);
+    await dialog.getByRole("button", { name: "确认发布" }).click();
+
+    await expect.poll(() => publishPayload).toEqual({ expected_revision: 1 });
+    expect(publishIdempotencyKey).toMatch(/^publish-/);
+    await expect(page.getByText("正式结果已发布")).toBeVisible();
+  });
+
+  test("本地重验不要求外发确认，服务端错误保留对话框并给出恢复建议", async ({ page }) => {
+    await mockWorkspace(page, "light", "user");
+    const candidate = workspaceTask(
+      "task-reverification-errors",
+      "candidate_ready",
+      "本地候选重验",
+    );
+    const detail = workspaceDetail(candidate, {
+      agentic_runtime: {
+        runtime_version: "pi",
+        permission_profile: "standard",
+        status: "candidate_ready",
+        candidates: [{
+          artifact_id: "candidate-json",
+          filename: "结果.json",
+          format: "json",
+          sha256: "c".repeat(64),
+          size_bytes: 256,
+          openable: true,
+          qa_checks: ["openable"],
+          download_url: "/api/download/candidate-json",
+          download_allowed: true,
+        }],
+        verification: {
+          status: "failed",
+          summary: "旧规则未通过",
+          evidence_count: 1,
+          formal_delivery_eligible: false,
+          checks: [],
+        },
+        latest_verification_attempt: {
+          attempt_id: "attempt-local-old",
+          status: "failed",
+          reason: "initial",
+          ruleset_identity_status: "versioned",
+        },
+        reverification_offer: {
+          eligible: true,
+          reason: "ruleset_changed",
+          blockers: [],
+          ruleset_changed: true,
+          ruleset_change_summary: "本地文件规则已修正",
+          requires_provider: false,
+          connection_id: null,
+          model_id: null,
+          egress_categories: [],
+          egress_summary: "本次不外发",
+        },
+        awaiting_publication: false,
+      },
+    });
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [candidate] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-reverification-errors",
+      (route) => route.fulfill({ json: detail }),
+    );
+    let responseStatus = 403;
+    const retryKeys: string[] = [];
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-reverification-errors/candidate-verifications",
+      (route) => {
+        retryKeys.push(route.request().headers()["idempotency-key"] ?? "");
+        return route.fulfill({
+          status: responseStatus,
+          contentType: "application/json",
+          json: { detail: "rejected" },
+        });
+      },
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /本地候选重验/ }).click();
+    await page.getByRole("button", { name: "使用最新规则重新验证" }).click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toContainText("本次不外发");
+    await expect(dialog.getByRole("checkbox")).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "开始重新验证" })).toBeEnabled();
+
+    const expected = [
+      [403, "请使用任务所有者账号"],
+      [409, "请刷新任务并核对最新状态"],
+      [422, "请重新核对外发内容"],
+      [503, "服务暂时不可用"],
+    ] as const;
+    for (const [status, message] of expected) {
+      responseStatus = status;
+      await dialog.getByRole("button", { name: "开始重新验证" }).click();
+      await expect(dialog.getByRole("alert")).toContainText(message);
+      await expect(dialog).toBeVisible();
+    }
+    expect(new Set(retryKeys)).toEqual(new Set([retryKeys[0]]));
+    expect(retryKeys[0]).toMatch(/^reverify-/);
+  });
+
   for (const theme of ["light", "dark"] as const) {
     test(`${theme} 主题没有严重或致命的可访问性问题`, async ({ page }) => {
       await mockWorkspace(page, theme);

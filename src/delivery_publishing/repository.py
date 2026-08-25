@@ -60,6 +60,7 @@ class DeliveryPublishingRepository:
                 CREATE TABLE IF NOT EXISTS delivery_publish_intents (
                     publication_key TEXT PRIMARY KEY,
                     command_hash TEXT NOT NULL,
+                    request_idempotency_hash TEXT,
                     owner_id TEXT NOT NULL,
                     task_id TEXT NOT NULL,
                     task_revision INTEGER NOT NULL,
@@ -115,6 +116,24 @@ class DeliveryPublishingRepository:
                 ON formal_delivery_outputs(owner_id, run_id, created_at DESC);
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(delivery_publish_intents)"
+                ).fetchall()
+            }
+            if "request_idempotency_hash" not in columns:
+                conn.execute(
+                    "ALTER TABLE delivery_publish_intents "
+                    "ADD COLUMN request_idempotency_hash TEXT"
+                )
+            # HTTP 幂等键只保存摘要，并在 Owner 内唯一绑定一个冻结发布请求。
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS "
+                "idx_dpi_owner_request_idempotency "
+                "ON delivery_publish_intents(owner_id, request_idempotency_hash) "
+                "WHERE request_idempotency_hash IS NOT NULL"
+            )
 
     def claim_intent(
         self,
@@ -129,14 +148,16 @@ class DeliveryPublishingRepository:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO delivery_publish_intents (
-                    publication_key, command_hash, owner_id, task_id,
+                    publication_key, command_hash, request_idempotency_hash,
+                    owner_id, task_id,
                     task_revision, run_id, status, staging_dir, final_dir,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, 'staging', ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'staging', ?, ?, ?, ?)
                 """,
                 (
                     command.publication_key,
                     command_hash,
+                    command.request_idempotency_hash,
                     command.owner_id,
                     command.task_id,
                     command.task_revision,
@@ -151,7 +172,19 @@ class DeliveryPublishingRepository:
                 "SELECT * FROM delivery_publish_intents WHERE publication_key=?",
                 (command.publication_key,),
             ).fetchone()
-        assert row is not None
+            if row is None and command.request_idempotency_hash is not None:
+                bound = conn.execute(
+                    "SELECT publication_key FROM delivery_publish_intents "
+                    "WHERE owner_id=? AND request_idempotency_hash=?",
+                    (
+                        command.owner_id,
+                        command.request_idempotency_hash,
+                    ),
+                ).fetchone()
+                if bound is not None:
+                    raise ValueError("幂等键已绑定其他发布请求")
+        if row is None:
+            raise RuntimeError("发布意图创建失败")
         if row["command_hash"] != command_hash:
             raise ValueError("发布幂等键已用于不同冻结输入")
         return dict(row)
@@ -193,6 +226,104 @@ class DeliveryPublishingRepository:
             )
         if cursor.rowcount != 1:
             raise KeyError("发布意图不存在")
+
+    def begin_commit(
+        self,
+        command: PublishCommand,
+        *,
+        commit_token: str,
+        manifest: DeliveryManifest,
+    ) -> None:
+        """在同一数据库写事务内冻结显式发布的最后业务 CAS。"""
+
+        with _LOCK, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if command.verification_attempt_id is not None:
+                task = conn.execute(
+                    "SELECT active_revision, cancel_requested "
+                    "FROM semantic_workspace_tasks "
+                    "WHERE user_id=? AND task_id=?",
+                    (command.owner_id, command.task_id),
+                ).fetchone()
+                if (
+                    task is None
+                    or int(task["active_revision"]) != command.task_revision
+                ):
+                    raise ValueError("活动版本已变化")
+                if bool(task["cancel_requested"]):
+                    raise ValueError("任务已取消")
+
+                routing_table = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='runtime_rollout_state'"
+                ).fetchone()
+                if routing_table is not None:
+                    routing = conn.execute(
+                        "SELECT p0_blocked FROM runtime_rollout_state "
+                        "WHERE state_id=1"
+                    ).fetchone()
+                    if routing is None or bool(routing["p0_blocked"]):
+                        raise ValueError("P0 发布门已阻断")
+
+                attempt = conn.execute(
+                    "SELECT status, report_hash, candidate_set_hash "
+                    "FROM candidate_verification_attempts "
+                    "WHERE owner_id=? AND attempt_id=? AND task_id=? "
+                    "AND revision=? AND run_id=?",
+                    (
+                        command.owner_id,
+                        command.verification_attempt_id,
+                        command.task_id,
+                        command.task_revision,
+                        command.run_id,
+                    ),
+                ).fetchone()
+                if (
+                    attempt is None
+                    or attempt["status"] != "passed"
+                    or attempt["report_hash"]
+                    != command.verification_report_hash
+                    or attempt["candidate_set_hash"]
+                    != command.candidate_set_hash
+                ):
+                    raise ValueError("候选验证 Attempt 冻结身份已变化")
+                latest = conn.execute(
+                    "SELECT attempt_id FROM candidate_verification_attempts "
+                    "WHERE owner_id=? AND task_id=? AND revision=? "
+                    "AND run_id=? AND candidate_set_hash=? "
+                    "ORDER BY created_at DESC, attempt_id DESC LIMIT 1",
+                    (
+                        command.owner_id,
+                        command.task_id,
+                        command.task_revision,
+                        command.run_id,
+                        command.candidate_set_hash,
+                    ),
+                ).fetchone()
+                if (
+                    latest is None
+                    or latest["attempt_id"]
+                    != command.verification_attempt_id
+                ):
+                    raise ValueError("候选验证 Attempt 已不是当前精确结果")
+
+            updated = conn.execute(
+                "UPDATE delivery_publish_intents "
+                "SET status='committing', commit_token=?, manifest_json=?, "
+                "error_json=NULL, updated_at=? "
+                "WHERE publication_key=? AND command_hash=? "
+                "AND status!='published'",
+                (
+                    commit_token,
+                    manifest.model_dump_json(),
+                    _now(),
+                    command.publication_key,
+                    command.frozen_hash(),
+                ),
+            )
+            if updated.rowcount != 1:
+                raise RuntimeError("发布意图已变化，无法进入提交点")
+            conn.commit()
 
     def commit_delivery(
         self,

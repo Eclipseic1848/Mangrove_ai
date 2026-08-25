@@ -2,7 +2,7 @@
 
 > status: active
 >
-> last_verified: 2026-08-23
+> last_verified: 2026-08-24
 >
 > branch: `main`
 >
@@ -29,6 +29,15 @@ PDF、Word、Excel、CSV 文件主链；数据库具备连接与测试基础。�
 | 多模型连接 | 工程实现 | 个人/平台多连接、Preset、自定义/LAN、Key 隔离和 TaskRevision 冻结 |
 | 对话转向与上下文编译 | 工程验证通过 | 状态追问不改 Run，实质变化形成待确认 revision 草案 |
 | Windows 本机一键启停 | 已实现（本机私有） | 8088 统一入口、5173 开发服务、双层后端监督和安全进程清理；脚本不公开发布 |
+
+### P0 产品化在制状态
+
+P0-01 同 Run Candidate 重验已完成 CV-01～CV-08 的架构、追加式 Attempt、统一验证入口、只读
+Offer、本地/Provider 完整重验、精确 Attempt 显式发布和普通用户工作台工程验证。工作台从
+服务端 `agentic_runtime` 投影恢复资格与 Attempt 状态，逐 Attempt 确认 Provider 外发，区分重验
+与正式发布，并对未知结果停止普通重试。未执行生产迁移、真实 Provider 外发、真实 Candidate
+重验、正式 Delivery 发布或用户验收。下一工程门为 CV-09 工程门与实施交接，CV-10 继续保留
+生产与真实外发人工门。
 
 ## 3. Agentic Capability
 

@@ -5,6 +5,7 @@ from .broker import (
     ConnectionError,
     ConnectionValidationError,
     GrantError,
+    ProviderOutcomeUnknownError,
     get_default_broker,
 )
 from .catalog import ProviderPreset, public_presets
@@ -15,6 +16,7 @@ __all__ = [
     "ConnectionError",
     "ConnectionValidationError",
     "GrantError",
+    "ProviderOutcomeUnknownError",
     "AccessGrant",
     "ConnectionBinding",
     "ProviderPreset",

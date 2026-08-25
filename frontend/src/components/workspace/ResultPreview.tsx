@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from "react";
+import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import { useQuery } from "@tanstack/react-query";
 import {
   type ColumnDef,
@@ -24,7 +25,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { toast } from "sonner";
-import { downloadFile } from "@/lib/api";
+import { ApiError, downloadFile } from "@/lib/api";
 import {
   downloadWorkspaceBundle,
   getWorkspacePreview,
@@ -64,27 +65,113 @@ function QualityBadge({ warning }: { warning: boolean }) {
   );
 }
 
+function candidateActionError(error: unknown) {
+  const status = error instanceof ApiError ? error.status : null;
+  if (status === 403) {
+    return "当前账号没有操作权限。请使用任务所有者账号重新打开任务。";
+  }
+  if (status === 409) {
+    return "任务、候选或验证状态已经变化。请刷新任务并核对最新状态后再操作。";
+  }
+  if (status === 422) {
+    return "确认信息不完整或已经失效。请重新核对外发内容并再次确认。";
+  }
+  if (status === 503) {
+    return "服务暂时不可用，本次操作尚未确认完成。请稍后重试。";
+  }
+  return error instanceof Error
+    ? `操作未完成：${error.message}。请检查网络后重试。`
+    : "操作未完成。请检查网络后重试。";
+}
+
+const REVERIFICATION_BLOCKER_TEXT: Record<string, string> = {
+  task_revision_drift: "任务版本已经变化，请打开最新版本后再检查候选。",
+  runtime_assignment_drift: "任务的执行配置已经变化，请创建新版本重新执行。",
+  source_binding_drift: "来源绑定已经变化，请创建新版本重新执行。",
+  provider_binding_forbidden: "当前模型连接不属于任务所有者，不能用于重验。",
+  provider_binding_unavailable: "冻结的模型连接当前不可用，请先恢复连接。",
+  authority_unavailable: "重验资格暂时无法核对，请稍后刷新。",
+  p0_blocked: "生产安全门当前阻断了新的候选重验。",
+  delivery_exists: "该候选已经形成正式交付，无需重复重验。",
+  candidate_drift: "候选文件与冻结记录不一致，不能继续重验。",
+  source_drift: "来源文件与冻结记录不一致，不能继续重验。",
+  active_attempt: "已有一次候选重验正在执行，请先等待当前结果。",
+  verification_attempt_active: "已有一次候选重验正在执行，请先等待当前结果。",
+  outcome_unknown: "上一次外部模型请求结果不确定，请先核对状态和用量。",
+  legacy_unversioned: "旧验证记录缺少可比较的规则身份，不能自动重验。",
+  manifest_drift: "候选清单已经变化，不能继续重验。",
+  goal_contract_drift: "任务目标已经变化，请创建新版本重新执行。",
+  delivery_spec_drift: "输出要求已经变化，请创建新版本重新执行。",
+  ruleset_unavailable: "当前验证规则暂时无法核对，请稍后刷新。",
+  ruleset_unchanged: "验证规则没有变化，重复重验不会形成新的有效结论。",
+  already_passed: "当前候选已经通过验证。",
+  previous_cancelled: "上一次验证已取消，请先核对任务状态。",
+};
+
+function reverificationBlockerText(blocker: string) {
+  return REVERIFICATION_BLOCKER_TEXT[blocker]
+    ?? "当前候选暂时不具备重新验证条件，请刷新任务后再检查。";
+}
+
 export function CandidatePreview({
   task,
   onRetryVerification,
+  onRequestReverification,
+  onPublishVerification,
+  providerConnectionLabel,
 }: {
   task: WorkspaceTask;
   onRetryVerification?: () => Promise<void>;
+  onRequestReverification?: (externalApiConfirmed: boolean) => Promise<void>;
+  onPublishVerification?: (attemptId: string) => Promise<void>;
+  providerConnectionLabel?: string;
 }) {
   const [retrying, setRetrying] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [egressConfirmed, setEgressConfirmed] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [legacyRetryError, setLegacyRetryError] = useState<string | null>(null);
+  const [reverificationDialogOpen, setReverificationDialogOpen] = useState(false);
+  const [publishDialogOpen, setPublishDialogOpen] = useState(false);
+  const cancelRef = useRef<HTMLButtonElement>(null);
+  const publishCancelRef = useRef<HTMLButtonElement>(null);
   const candidates = task.agentic_runtime?.candidates || [];
   if (!candidates.length) return null;
   const verification = task.agentic_runtime?.verification;
   const verificationPassed = verification?.status === "passed";
   const verificationFailed = verification?.status === "failed";
-  const canRetry = (
-    verification?.status === "inconclusive" && Boolean(onRetryVerification)
+  const offer = task.agentic_runtime?.reverification_offer;
+  const attempt = task.agentic_runtime?.latest_verification_attempt;
+  const attemptActive = attempt?.status === "requested" || attempt?.status === "running";
+  const awaitingPublication = Boolean(
+    task.agentic_runtime?.awaiting_publication && attempt?.status === "passed",
   );
-  const title = verificationPassed
-    ? "Mangrove 候选已通过独立验证"
-    : verificationFailed
-      ? "Mangrove 候选验证未通过"
-      : "Mangrove 未验证候选";
+  const canRetry = Boolean(
+    verification?.status === "inconclusive"
+      && !attemptActive
+      && attempt?.status !== "outcome_unknown"
+      && !awaitingPublication
+      && onRetryVerification,
+  );
+  const canReverify = Boolean(
+    offer?.eligible
+      && attempt?.attempt_id
+      && !attemptActive
+      && attempt?.status !== "outcome_unknown"
+      && !awaitingPublication
+      && onRequestReverification,
+  );
+  const title = attemptActive
+    ? "正在使用最新规则重新验证"
+    : attempt?.status === "outcome_unknown"
+      ? "重验结果尚无法确认"
+      : awaitingPublication
+        ? "候选重验已通过，等待正式发布"
+        : verificationPassed
+          ? "Mangrove 候选已通过独立验证"
+          : verificationFailed
+            ? "Mangrove 候选验证未通过"
+            : "Mangrove 未验证候选";
 
   return (
     <section className="mx-auto w-full max-w-6xl px-4 pb-8">
@@ -113,22 +200,228 @@ export function CandidatePreview({
               </ul>
             ) : null}
           </div>
-          {canRetry ? (
+          {awaitingPublication && attempt?.attempt_id && onPublishVerification ? (
+            <AlertDialog.Root
+              open={publishDialogOpen}
+              onOpenChange={(open) => {
+                if (!publishing) setPublishDialogOpen(open);
+                if (open) setActionError(null);
+              }}
+            >
+              <AlertDialog.Trigger asChild>
+                <button
+                  type="button"
+                  onClick={() => setPublishDialogOpen(true)}
+                  className="inline-flex h-10 shrink-0 items-center gap-2 rounded-xl bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                >
+                  <FileCheck2 className="h-4 w-4" />
+                  发布正式结果
+                </button>
+              </AlertDialog.Trigger>
+              <AlertDialog.Portal>
+                <AlertDialog.Overlay className="fixed inset-0 z-50 bg-slate-950/50" />
+                <AlertDialog.Content
+                  onOpenAutoFocus={(event) => {
+                    event.preventDefault();
+                    publishCancelRef.current?.focus();
+                  }}
+                  className="fixed left-1/2 top-1/2 z-50 w-[min(92vw,500px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-5 shadow-2xl sm:p-6"
+                >
+                  <AlertDialog.Title className="text-lg font-semibold">
+                    发布正式结果？
+                  </AlertDialog.Title>
+                  <AlertDialog.Description className="mt-3 text-sm leading-6 text-muted-foreground">
+                    将把验证尝试 {attempt.attempt_id} 对应的 {candidates.length} 个候选文件发布为正式交付。
+                    发布会再次执行完整性与 QA 检查；不会重新运行任务或模型。
+                  </AlertDialog.Description>
+                  {actionError ? (
+                    <div role="alert" className="mt-4 rounded-xl border border-destructive/25 bg-destructive/[0.05] p-3 text-sm text-destructive">
+                      {actionError}
+                    </div>
+                  ) : null}
+                  <div className="mt-5 flex justify-end gap-2">
+                    <AlertDialog.Cancel asChild>
+                      <button
+                        ref={publishCancelRef}
+                        type="button"
+                        disabled={publishing}
+                        onClick={() => setPublishDialogOpen(false)}
+                        className="h-10 rounded-lg border px-4 text-sm font-medium hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                      >
+                        取消
+                      </button>
+                    </AlertDialog.Cancel>
+                    <button
+                      type="button"
+                      disabled={publishing}
+                      aria-busy={publishing}
+                      onClick={async () => {
+                        if (publishing) return;
+                        setPublishing(true);
+                        setActionError(null);
+                        try {
+                          await onPublishVerification(attempt.attempt_id!);
+                          setPublishDialogOpen(false);
+                          toast.success("正式结果已发布");
+                        } catch (error) {
+                          setActionError(candidateActionError(error));
+                        } finally {
+                          setPublishing(false);
+                        }
+                      }}
+                      className="inline-flex h-10 min-w-32 items-center justify-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      {publishing && <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />}
+                      <span>{publishing ? "正在发布" : "确认发布"}</span>
+                    </button>
+                  </div>
+                </AlertDialog.Content>
+              </AlertDialog.Portal>
+            </AlertDialog.Root>
+          ) : canReverify ? (
+            <AlertDialog.Root
+              open={reverificationDialogOpen}
+              onOpenChange={(open) => {
+                if (!retrying) setReverificationDialogOpen(open);
+                if (!open) setEgressConfirmed(false);
+                if (open) setActionError(null);
+              }}
+            >
+              <AlertDialog.Trigger asChild>
+                <button
+                  type="button"
+                  onClick={() => setReverificationDialogOpen(true)}
+                  className="inline-flex h-10 shrink-0 items-center gap-2 rounded-xl border border-amber-500/30 bg-background px-3.5 text-sm font-medium text-amber-800 transition-colors hover:bg-amber-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 dark:text-amber-200"
+                >
+                  <RotateCcw className="h-4 w-4" />
+                  使用最新规则重新验证
+                </button>
+              </AlertDialog.Trigger>
+              <AlertDialog.Portal>
+                <AlertDialog.Overlay className="fixed inset-0 z-50 bg-slate-950/50" />
+                <AlertDialog.Content
+                  onOpenAutoFocus={(event) => {
+                    event.preventDefault();
+                    cancelRef.current?.focus();
+                  }}
+                  className="fixed left-1/2 top-1/2 z-50 flex max-h-[min(90dvh,720px)] w-[min(92vw,560px)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border bg-background shadow-2xl"
+                >
+                  <div className="overflow-y-auto p-5 sm:p-6">
+                    <AlertDialog.Title className="text-lg font-semibold">
+                      重新验证现有候选？
+                    </AlertDialog.Title>
+                    <AlertDialog.Description asChild>
+                      <div className="mt-3 space-y-4 text-sm leading-6 text-muted-foreground">
+                        <p>不会重新执行整个任务或生成新文件；旧验证记录会继续保留。</p>
+                        <div className="rounded-xl border bg-muted/25 p-3">
+                          <p className="font-medium text-foreground">
+                            将重新检查 {candidates.length} 个候选文件
+                          </p>
+                          <ul className="mt-1 list-disc pl-5">
+                            {candidates.map((candidate) => (
+                              <li key={candidate.artifact_id}>
+                                {candidate.filename}（{candidate.format.toUpperCase()}）
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                        <div>
+                          <p className="font-medium text-foreground">规则变化</p>
+                          <p>{offer?.ruleset_change_summary}</p>
+                        </div>
+                        {offer?.requires_provider ? (
+                          <div className="rounded-xl border border-amber-500/25 bg-amber-500/[0.05] p-3">
+                            <p className="font-medium text-foreground">
+                              本次会调用外部模型
+                            </p>
+                            <p>
+                              连接：{providerConnectionLabel ?? "任务冻结的模型连接"}
+                              {offer.model_id ? ` · 模型：${offer.model_id}` : ""}
+                            </p>
+                            <p>{offer.egress_summary}</p>
+                            <p>外发类别：{offer.egress_categories.join("、")}</p>
+                            <p>费用由 Provider 决定，当前可能未知或产生重复计费。</p>
+                            <label className="mt-3 flex cursor-pointer items-start gap-2 text-foreground">
+                              <input
+                                type="checkbox"
+                                checked={egressConfirmed}
+                                onChange={(event) => setEgressConfirmed(event.target.checked)}
+                                className="mt-1 h-4 w-4 rounded border-border accent-primary"
+                              />
+                              <span>我确认本次会向外部模型发送上述内容，并可能产生费用</span>
+                            </label>
+                          </div>
+                        ) : (
+                          <div className="rounded-xl border border-emerald-500/25 bg-emerald-500/[0.05] p-3 text-emerald-700 dark:text-emerald-300">
+                            本次不外发，只在本地重新验证。
+                          </div>
+                        )}
+                        <p>
+                          验证通过后仍需由你单独点击“发布正式结果”；关闭此窗口不会中断后台验证。
+                          如果 Provider 请求结果未知，平台会停止自动重发，请先核对 Provider 状态和用量。
+                        </p>
+                        {actionError ? (
+                          <div role="alert" className="rounded-xl border border-destructive/25 bg-destructive/[0.05] p-3 text-destructive">
+                            {actionError}
+                          </div>
+                        ) : null}
+                      </div>
+                    </AlertDialog.Description>
+                  </div>
+                  <div className="flex shrink-0 justify-end gap-2 border-t bg-background p-4 sm:px-6">
+                    <AlertDialog.Cancel asChild>
+                      <button
+                        ref={cancelRef}
+                        type="button"
+                        onClick={() => setReverificationDialogOpen(false)}
+                        className="h-10 rounded-lg border px-4 text-sm font-medium hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        取消
+                      </button>
+                    </AlertDialog.Cancel>
+                      <button
+                        type="button"
+                        disabled={retrying || Boolean(offer?.requires_provider && !egressConfirmed)}
+                        aria-busy={retrying}
+                        onClick={async () => {
+                          if (!onRequestReverification || retrying) return;
+                          setRetrying(true);
+                          setActionError(null);
+                          try {
+                            await onRequestReverification(
+                              Boolean(offer?.requires_provider && egressConfirmed),
+                            );
+                            setReverificationDialogOpen(false);
+                            toast.success("已创建候选重验");
+                          } catch (error) {
+                            setActionError(candidateActionError(error));
+                          } finally {
+                            setRetrying(false);
+                          }
+                        }}
+                        className="inline-flex h-10 min-w-32 items-center justify-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        {retrying && <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />}
+                        <span>{retrying ? "正在提交" : "开始重新验证"}</span>
+                      </button>
+                  </div>
+                </AlertDialog.Content>
+              </AlertDialog.Portal>
+            </AlertDialog.Root>
+          ) : canRetry ? (
             <button
               type="button"
               disabled={retrying}
               onClick={async () => {
                 if (!onRetryVerification) return;
                 setRetrying(true);
+                setLegacyRetryError(null);
                 try {
                   await onRetryVerification();
                   toast.success("候选重新验证已完成");
                 } catch (error) {
-                  toast.error(
-                    error instanceof Error
-                      ? error.message
-                      : "重新验证候选失败",
-                  );
+                  setLegacyRetryError(candidateActionError(error));
+                  toast.error("候选重新验证未完成");
                 } finally {
                   setRetrying(false);
                 }
@@ -136,7 +429,7 @@ export function CandidatePreview({
               className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-amber-500/30 bg-background px-3.5 py-2 text-sm font-medium text-amber-800 hover:bg-amber-500/10 disabled:cursor-wait disabled:opacity-60 dark:text-amber-200"
             >
               {retrying ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
+                <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
               ) : (
                 <RotateCcw className="h-4 w-4" />
               )}
@@ -144,6 +437,39 @@ export function CandidatePreview({
             </button>
           ) : null}
         </div>
+        {legacyRetryError ? (
+          <div role="alert" className="border-b border-destructive/25 bg-destructive/[0.05] px-5 py-4 text-sm leading-6 text-destructive">
+            {legacyRetryError}
+          </div>
+        ) : null}
+        {attemptActive ? (
+          <div role="status" aria-live="polite" className="flex min-h-14 items-center gap-3 border-b border-amber-500/20 px-5 py-3 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" />
+            <span>
+              {attempt?.status === "requested"
+                ? "重验请求已受理，正在等待执行。刷新或关闭页面不会丢失进度。"
+                : "正在重新检查候选文件与验证规则。进度以任务状态和时间线为准。"}
+            </span>
+          </div>
+        ) : null}
+        {attempt?.status === "outcome_unknown" ? (
+          <div role="alert" className="border-b border-amber-500/25 bg-amber-500/[0.06] px-5 py-4 text-sm leading-6 text-amber-800 dark:text-amber-200">
+            平台无法确认外部模型请求的最终结果，已停止自动重试。请先核对 Provider 状态和用量记录；不要直接重复发送。
+          </div>
+        ) : null}
+        {awaitingPublication ? (
+          <div role="status" aria-live="polite" className="border-b border-emerald-500/20 bg-emerald-500/[0.05] px-5 py-4 text-sm text-emerald-700 dark:text-emerald-300">
+            最新验证尝试已通过，但还不是正式交付。请检查候选文件后，再单独发布正式结果。
+          </div>
+        ) : null}
+        {offer && !offer.eligible && !attemptActive && attempt?.status !== "outcome_unknown" && !awaitingPublication ? (
+          <div className="border-b border-amber-500/20 px-5 py-4 text-sm leading-6 text-muted-foreground">
+            <p className="font-medium text-foreground">当前不能重新验证</p>
+            <ul className="mt-1 list-disc pl-5">
+              {offer.blockers.map((blocker) => <li key={blocker}>{reverificationBlockerText(blocker)}</li>)}
+            </ul>
+          </div>
+        ) : null}
         <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,260px),1fr))] gap-3 p-5">
           {candidates.map((candidate) => (
             <div

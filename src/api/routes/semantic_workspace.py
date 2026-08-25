@@ -53,6 +53,10 @@ from src.capability_catalog import (
     SqliteCapabilityCatalogRepository,
 )
 from src.config.settings import settings
+from src.candidate_verification import (
+    ReverificationContractError,
+    ReverificationUnavailableError,
+)
 from src.conversation_steering import (
     CapabilityMaturity,
     ConversationSteering,
@@ -354,6 +358,21 @@ class WorkspaceTurnIn(BaseModel):
         return value.strip()
 
 
+class CandidateReverificationIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1)
+    expected_previous_attempt_id: str = Field(min_length=1, max_length=160)
+    external_api_confirmed: bool = False
+    accept_duplicate_provider_cost: bool = False
+
+
+class CandidateVerificationPublishIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1)
+
+
 class WorkspaceRevisionDecisionIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -534,9 +553,10 @@ def _public_runtime(
         if row["run_id"]
         else None
     )
+    candidate_visible = row["status"].value == "candidate_ready"
     verification = (
         row["verification"].model_dump(mode="json")
-        if row["verification"]
+        if candidate_visible and row["verification"]
         else None
     )
     if verification and verification.get("status") == "inconclusive":
@@ -546,7 +566,7 @@ def _public_runtime(
                 check["summary"] = (
                     "语义验证服务暂时不可用，请稍后重新验证候选。"
                 )
-    return {
+    payload = {
         "runtime_version": row["runtime_version"].value,
         "permission_profile": row["permission_profile"].value,
             "model_connection_id": row["model_connection_id"],
@@ -568,7 +588,7 @@ def _public_runtime(
                     candidate_format=item.format,
                 ),
             }
-            for item in row["candidates"]
+            for item in (row["candidates"] if candidate_visible else ())
         ],
         "verification": verification,
         "failure": row["failure"],
@@ -594,6 +614,40 @@ def _public_runtime(
             else None
         ),
     }
+    if candidate_visible:
+        offer = get_semantic_workspace_manager().inspect_candidate_reverification(
+            user_id,
+            task_id,
+            revision,
+        )
+        payload["latest_verification_attempt"] = {
+            "attempt_id": offer.previous_attempt_id,
+            "status": (
+                offer.previous_status.value if offer.previous_status else None
+            ),
+            "reason": (
+                offer.previous_reason.value if offer.previous_reason else None
+            ),
+            "ruleset_identity_status": (
+                offer.ruleset_identity_status.value
+                if offer.ruleset_identity_status
+                else None
+            ),
+        }
+        payload["reverification_offer"] = {
+            "eligible": offer.eligible,
+            "reason": offer.reason.value if offer.reason else None,
+            "blockers": list(offer.blockers),
+            "ruleset_changed": offer.ruleset_changed,
+            "ruleset_change_summary": offer.ruleset_change_summary,
+            "requires_provider": offer.requires_provider,
+            "connection_id": offer.connection_id,
+            "model_id": offer.model_id,
+            "egress_categories": list(offer.egress_categories),
+            "egress_summary": offer.egress_summary,
+        }
+        payload["awaiting_publication"] = offer.awaiting_publication
+    return payload
 
 
 _SAFE_TEXT_CANDIDATE_FORMATS = {"csv", "json", "jsonl", "markdown", "txt"}
@@ -2146,6 +2200,94 @@ async def retry_candidate_verification(
             else ProgressAudience.USER
         ),
     )
+
+
+@router.post(
+    "/tasks/{task_id}/candidate-verifications",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def request_candidate_reverification(
+    task_id: str,
+    payload: CandidateReverificationIn,
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=240,
+        alias="Idempotency-Key",
+    ),
+    user=Depends(get_current_user),
+):
+    """创建完整候选重验 Attempt；执行与正式发布均不在 HTTP 连接内完成。"""
+
+    try:
+        attempt = await get_semantic_workspace_manager().request_candidate_reverification(
+            owner_id=user["user_id"],
+            task_id=task_id,
+            expected_revision=payload.expected_revision,
+            expected_previous_attempt_id=payload.expected_previous_attempt_id,
+            external_api_confirmed=payload.external_api_confirmed,
+            accept_duplicate_provider_cost=payload.accept_duplicate_provider_cost,
+            idempotency_key=idempotency_key,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ReverificationContractError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (ReverificationUnavailableError, sqlite3.OperationalError) as exc:
+        raise HTTPException(status_code=503, detail="候选重验服务暂时不可用") from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    audience = (
+        ProgressAudience.ADMIN
+        if is_admin_role(user.get("role"))
+        else ProgressAudience.USER
+    )
+    return {
+        "attempt_id": attempt.attempt_id,
+        "task_id": attempt.task_id,
+        "revision": attempt.revision,
+        "run_id": attempt.run_id,
+        "previous_attempt_id": attempt.previous_attempt_id,
+        "status": attempt.status.value,
+        "task": _task_detail(user["user_id"], task_id, audience=audience),
+    }
+
+
+@router.post(
+    "/tasks/{task_id}/candidate-verifications/{attempt_id}/publish",
+)
+async def publish_candidate_verification(
+    task_id: str,
+    attempt_id: str,
+    payload: CandidateVerificationPublishIn,
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=240,
+        alias="Idempotency-Key",
+    ),
+    user=Depends(get_current_user),
+):
+    """显式发布精确 passed Attempt；不会隐式重新执行 Pi 或 Provider。"""
+
+    try:
+        delivery = await get_semantic_workspace_manager().publish_candidate_verification(
+            owner_id=user["user_id"],
+            task_id=task_id,
+            expected_revision=payload.expected_revision,
+            attempt_id=attempt_id,
+            idempotency_key=idempotency_key,
+        )
+    except (KeyError, PermissionError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except sqlite3.OperationalError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="候选发布服务暂时不可用",
+        ) from exc
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return delivery.model_dump(mode="json", exclude={"user_id"})
 
 
 @router.post(

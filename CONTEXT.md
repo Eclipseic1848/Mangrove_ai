@@ -163,6 +163,28 @@ _Avoid_: 正式交付、验证通过即发布
 禁止项作出的结构化结论。
 _Avoid_: 执行者自评、测试日志
 
+**候选重验（CandidateReverification）**：
+针对同一 Owner、TaskRevision、Run 和不可变 CandidateSet，使用新的冻结 Verifier 规则集
+重新执行完整独立验证；它可以重新打开原件和候选，但不得重新执行 Agent、改变目标、生成
+文件或创建 revision。
+_Avoid_: 重新运行任务、修复候选、覆盖验证报告、发布 Delivery
+
+**验证尝试（VerificationAttempt）**：
+一次不可变的候选验证事实，绑定精确 CandidateSet、目标与交付语义、Verifier 规则身份、
+触发原因、Actor、外发确认和结构化 VerificationReport；旧尝试不会被后续结论覆盖。
+_Avoid_: Runtime 当前状态、可变验证记录、测试日志
+
+**Verifier 规则集（VerifierRuleset）**：
+决定候选文件、数量、结构、来源、禁止项和语义门行为的冻结规则身份；会影响结论的规则、
+Prompt、配置和依赖必须属于同一身份，并在验证执行时绑定实际进程。GateSnapshot 的门禁提交
+不能单独证明实际执行身份；无关提交变化只改变执行来源身份，不构成规则变化。
+_Avoid_: 仅分支名、当前 HEAD、GateSnapshot、人工口头声明
+
+**有效验证结论（EffectiveVerification）**：
+针对精确 CandidateSet 和当前 VerifierRuleset 可用于后续决策的确定验证结论；Publisher
+必须绑定具体 VerificationAttempt 与报告身份，不能依赖会漂移的“最新”指针。
+_Avoid_: 覆盖旧报告、验证通过即发布
+
 **正式交付（Delivery）**：
 通过发布门后面向任务所有者发布的不可变结果包；它引用唯一任务修订、候选、验证报告、
 输出制品和 Manifest。

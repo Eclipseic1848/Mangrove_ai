@@ -1393,3 +1393,29 @@ class ModelConnectionRepository:
                 (owner_user_id, task_id, revision),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get_usage_for_grant(
+        self,
+        owner_user_id: str,
+        *,
+        task_id: str,
+        revision: int,
+        run_id: str,
+        grant_id: str,
+    ) -> dict[str, object] | None:
+        """按冻结运行身份读取单次 Grant 用量，不回退到任务级模糊匹配。"""
+
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT grant_id, run_id, status, input_tokens, output_tokens,
+                       total_tokens, request_count
+                FROM model_provider_usage
+                WHERE owner_user_id=? AND task_id=? AND revision=?
+                  AND run_id=? AND grant_id=?
+                ORDER BY created_at DESC, usage_id DESC
+                LIMIT 1
+                """,
+                (owner_user_id, task_id, revision, run_id, grant_id),
+            ).fetchone()
+        return dict(row) if row else None

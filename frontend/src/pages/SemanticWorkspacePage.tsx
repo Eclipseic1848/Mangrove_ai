@@ -6,6 +6,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import {
   BookOpen,
+  ArrowLeft,
   ChevronDown,
   FileSearch,
   HelpCircle,
@@ -42,6 +43,8 @@ import {
   permanentlyDeleteWorkspaceTask,
   recycleWorkspaceTask,
   retryCandidateVerification,
+  requestCandidateReverification,
+  publishCandidateVerification,
   restoreWorkspaceTask,
   sendWorkspaceTurn,
   streamWorkspaceTask,
@@ -309,6 +312,14 @@ export function SemanticWorkspacePage() {
     fingerprint: string;
     key: string;
   } | null>(null);
+  const reverificationAttemptRef = useRef<{
+    fingerprint: string;
+    key: string;
+  } | null>(null);
+  const publicationAttemptRef = useRef<{
+    fingerprint: string;
+    key: string;
+  } | null>(null);
   const { user } = useAuth();
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [selectedRevision, setSelectedRevision] = useState<number | null>(null);
@@ -383,7 +394,11 @@ export function SemanticWorkspacePage() {
     enabled: Boolean(selectedTaskId),
     refetchInterval: (query) => {
       const status = query.state.data?.status;
-      return status && ["queued", "running", "cancelling"].includes(status)
+      const verificationStatus = query.state.data?.agentic_runtime
+        ?.latest_verification_attempt?.status;
+      return (
+        status && ["queued", "running", "cancelling"].includes(status)
+      ) || ["requested", "running"].includes(verificationStatus ?? "")
         ? 2_000
         : false;
     },
@@ -541,6 +556,19 @@ export function SemanticWorkspacePage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {selectedTaskId && !newTask ? (
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedTaskId(null);
+                setSelectedRevision(null);
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted md:hidden"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" />
+              任务列表
+            </button>
+          ) : null}
           {(newTask ? draftUploads.length > 0 : Boolean(task?.uploads?.length)) ? (
             <button
               type="button"
@@ -570,7 +598,11 @@ export function SemanticWorkspacePage() {
       />
 
       <div className="flex min-h-0 flex-1">
-        <WorkspaceTaskSidebar
+        <div className={cn(
+          "shrink-0",
+          selectedTaskId && !newTask && "max-md:hidden",
+        )}>
+          <WorkspaceTaskSidebar
           tasks={tasks.data || []}
           activeTaskId={selectedTaskId}
           filter={filter}
@@ -601,7 +633,8 @@ export function SemanticWorkspacePage() {
             setSelectedRevision(null);
             setNewTask(false);
           }}
-        />
+          />
+        </div>
 
         <div className="min-w-0 flex-1">
           {newTask ? (
@@ -786,7 +819,7 @@ export function SemanticWorkspacePage() {
                 source: inspectorOpen ? 32 : 0,
               }}
             >
-              <Panel id="content" minSize="560px" className="min-w-0">
+              <Panel id="content" minSize="0px" className="min-w-0 md:min-w-[560px]">
                 <div className="flex h-full min-h-0 flex-col">
                   {recycleBin && task.deleted_at ? (
                     <div className="flex h-full items-center justify-center p-8">
@@ -1011,6 +1044,69 @@ export function SemanticWorkspacePage() {
                         {task.status === "candidate_ready" && (
                           <CandidatePreview
                             task={task}
+                            providerConnectionLabel={
+                              modelConnections.data?.items.find(
+                                (connection) => connection.connection_id
+                                  === task.agentic_runtime?.reverification_offer?.connection_id,
+                              )?.display_name
+                            }
+                            onRequestReverification={async (externalApiConfirmed) => {
+                              const previousAttemptId = task.agentic_runtime
+                                ?.latest_verification_attempt?.attempt_id;
+                              if (!previousAttemptId) {
+                                throw new Error("缺少当前验证记录，请刷新后重试");
+                              }
+                              const revision = task.current_revision ?? task.active_revision;
+                              const fingerprint = `${task.task_id}:${revision}:${previousAttemptId}`;
+                              if (reverificationAttemptRef.current?.fingerprint !== fingerprint) {
+                                reverificationAttemptRef.current = {
+                                  fingerprint,
+                                  key: `reverify-${nanoid()}`,
+                                };
+                              }
+                              await requestCandidateReverification(
+                                task.task_id,
+                                {
+                                  expected_revision: revision,
+                                  expected_previous_attempt_id: previousAttemptId,
+                                  external_api_confirmed: externalApiConfirmed,
+                                  accept_duplicate_provider_cost: false,
+                                },
+                                reverificationAttemptRef.current.key,
+                              );
+                              await Promise.all([
+                                queryClient.invalidateQueries({
+                                  queryKey: ["semantic-workspace-task", task.task_id],
+                                }),
+                                queryClient.invalidateQueries({
+                                  queryKey: ["semantic-workspace-tasks"],
+                                }),
+                              ]);
+                            }}
+                            onPublishVerification={async (attemptId) => {
+                              const revision = task.current_revision ?? task.active_revision;
+                              const fingerprint = `${task.task_id}:${revision}:${attemptId}`;
+                              if (publicationAttemptRef.current?.fingerprint !== fingerprint) {
+                                publicationAttemptRef.current = {
+                                  fingerprint,
+                                  key: `publish-${nanoid()}`,
+                                };
+                              }
+                              await publishCandidateVerification(
+                                task.task_id,
+                                attemptId,
+                                revision,
+                                publicationAttemptRef.current.key,
+                              );
+                              await Promise.all([
+                                queryClient.invalidateQueries({
+                                  queryKey: ["semantic-workspace-task", task.task_id],
+                                }),
+                                queryClient.invalidateQueries({
+                                  queryKey: ["semantic-workspace-tasks"],
+                                }),
+                              ]);
+                            }}
                             onRetryVerification={async () => {
                               await retryCandidateVerification(task.task_id);
                               await Promise.all([

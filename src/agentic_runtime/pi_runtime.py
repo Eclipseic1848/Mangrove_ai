@@ -17,6 +17,7 @@ from urllib.parse import urlsplit, urlunsplit
 import uuid
 
 from src.config.settings import settings
+from src.candidate_verification import CandidateVerificationService
 from src.capability_catalog.models import PublicCapabilityDescriptor
 from src.capability_adapters import load_runtime_manifests
 from src.capability_host import CapabilityHost, CapabilityHostLease, CapabilityHostRequest
@@ -47,12 +48,14 @@ from .document_tools import (
     configure_default_document_tool_broker,
 )
 from .models import (
+    CandidateArtifact,
     PermissionProfile,
     PiRuntimeCheckpoint,
     PiRuntimeRequest,
     PiRuntimeResult,
     RuntimeEvent,
     RuntimeStatus,
+    VerificationReport,
     VerificationStatus,
 )
 from .repository import AgenticRuntimeRepository
@@ -427,6 +430,7 @@ class PiRuntime:
         relay_host_resolver: RelayHostResolver | None = None,
         capability_mount_resolver: CapabilityMountResolverFn | None = None,
         capability_host: CapabilityHost | None = None,
+        candidate_verification: CandidateVerificationService | None = None,
         configure_as_default_document_broker: bool = True,
     ) -> None:
         self.image = image or settings.pi_runtime_image
@@ -443,6 +447,7 @@ class PiRuntime:
             )
         )
         self._connection_broker = connection_broker
+        self._candidate_verification = candidate_verification
         self.relay_base_url = (
             relay_base_url
             or settings.pi_runtime_relay_base_url
@@ -481,6 +486,19 @@ class PiRuntime:
         self._document_grants: dict[
             tuple[str, str, int], DocumentToolGrant
         ] = {}
+
+    def bind_candidate_verification(
+        self,
+        service: CandidateVerificationService,
+    ) -> None:
+        """由产品组合根在显式迁移完成后绑定唯一验证 Module。"""
+
+        if (
+            self._candidate_verification is not None
+            and self._candidate_verification is not service
+        ):
+            raise RuntimeError("PiRuntime 已绑定其他 CandidateVerification Module")
+        self._candidate_verification = service
 
     def _describe_capabilities(
         self,
@@ -1345,6 +1363,22 @@ class PiRuntime:
         validated_candidates = None
         validated_verification = None
 
+        async def verify_candidates(
+            current_candidates: tuple[CandidateArtifact, ...],
+        ) -> VerificationReport:
+            if self._candidate_verification is None:
+                raise PiRuntimeError("CandidateVerification Module 尚未绑定")
+            attempt = await self._candidate_verification.verify_initial_current(
+                request=request,
+                run_id=run_id,
+                candidates=current_candidates,
+                manifest_path=output_dir / "candidate-manifest.json",
+                verifier=verifier,
+                actor_id=request.user_id,
+            )
+            assert attempt.report_json is not None
+            return VerificationReport.model_validate_json(attempt.report_json)
+
         async def check_settled_output() -> str | None:
             nonlocal validated_candidates, validated_verification
             if self._document_clarification(request) is not None:
@@ -1371,11 +1405,7 @@ class PiRuntime:
                 )
             except Exception as exc:
                 return f"候选文件无法通过完整性检查：{str(exc)[:300]}"
-            current_verification = await verifier.verify(
-                request=request,
-                candidates=current_candidates,
-                manifest_path=output_dir / "candidate-manifest.json",
-            )
+            current_verification = await verify_candidates(current_candidates)
             validated_candidates = current_candidates
             validated_verification = current_verification
             if current_verification.status is VerificationStatus.PASSED:
@@ -1426,10 +1456,8 @@ class PiRuntime:
                 output_dir,
                 request.requested_output_formats,
             )
-            verification = validated_verification or await verifier.verify(
-                request=request,
-                candidates=candidates,
-                manifest_path=output_dir / "candidate-manifest.json",
+            verification = validated_verification or await verify_candidates(
+                candidates
             )
             session_files = sorted(session_dir.rglob("*.jsonl"))
             session_file = (

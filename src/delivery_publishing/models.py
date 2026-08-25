@@ -100,6 +100,7 @@ class DeliverySpec(FrozenModel):
 class PublicationGate(FrozenModel):
     cancel_requested: bool = False
     p0_blocked: bool = False
+    revision_current: bool = True
 
 
 class PublishCommand(FrozenModel):
@@ -115,6 +116,16 @@ class PublishCommand(FrozenModel):
     verification_report_id: str = Field(min_length=1)
     verification_report_hash: str = Field(pattern=_HASH_PATTERN)
     verification_status: Literal["passed", "failed", "inconclusive"]
+    verification_attempt_id: str | None = Field(
+        default=None,
+        min_length=1,
+        exclude_if=lambda value: value is None,
+    )
+    request_idempotency_hash: str | None = Field(
+        default=None,
+        pattern=_HASH_PATTERN,
+        exclude_if=lambda value: value is None,
+    )
     delivery_spec: DeliverySpec
     delivery_spec_hash: str = Field(pattern=_HASH_PATTERN)
     source_snapshot_refs: tuple[str, ...]
@@ -136,6 +147,8 @@ class PublishCommand(FrozenModel):
         verification_status: Literal["passed", "failed", "inconclusive"],
         delivery_spec: DeliverySpec,
         source_snapshot_refs: tuple[str, ...],
+        verification_attempt_id: str | None = None,
+        request_idempotency_key: str | None = None,
     ) -> "PublishCommand":
         if not candidates:
             raise ValueError("发布命令缺少候选文件")
@@ -147,15 +160,20 @@ class PublishCommand(FrozenModel):
         delivery_spec_hash = canonical_hash(
             delivery_spec.model_dump(mode="json")
         )
-        publication_key = canonical_hash(
-            {
-                "owner_id": owner_id,
-                "task_revision_hash": task_revision_hash,
-                "candidate_set_hash": candidate_set_hash,
-                "verification_report_hash": verification_report_hash,
-                "delivery_spec_hash": delivery_spec_hash,
-            }
-        )
+        publication_identity = {
+            "owner_id": owner_id,
+            "task_revision_hash": task_revision_hash,
+            "candidate_set_hash": candidate_set_hash,
+            "verification_report_hash": verification_report_hash,
+            "delivery_spec_hash": delivery_spec_hash,
+        }
+        if verification_attempt_id is not None:
+            publication_identity["verification_attempt_id"] = (
+                verification_attempt_id
+            )
+        if request_idempotency_key is not None and not request_idempotency_key:
+            raise ValueError("幂等键不能为空")
+        publication_key = canonical_hash(publication_identity)
         return cls(
             owner_id=owner_id,
             task_id=task_id,
@@ -169,6 +187,12 @@ class PublishCommand(FrozenModel):
             verification_report_id=verification_report_id,
             verification_report_hash=verification_report_hash,
             verification_status=verification_status,
+            verification_attempt_id=verification_attempt_id,
+            request_idempotency_hash=(
+                canonical_hash(request_idempotency_key)
+                if request_idempotency_key is not None
+                else None
+            ),
             delivery_spec=delivery_spec,
             delivery_spec_hash=delivery_spec_hash,
             source_snapshot_refs=source_snapshot_refs,

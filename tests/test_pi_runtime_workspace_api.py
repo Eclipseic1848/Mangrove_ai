@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -12,6 +14,7 @@ import threading
 import time
 
 import httpx
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
@@ -22,6 +25,7 @@ import src.model_connections.broker as broker_mod
 from src.agentic_runtime.models import (
     CandidateArtifact,
     PermissionProfile,
+    PiRuntimeRequest,
     PiRuntimeResult,
     RuntimeEvent,
     RuntimeStatus,
@@ -36,7 +40,17 @@ from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.api.auth import get_current_user
 from src.api.routes import semantic_deliveries, semantic_workspace
 from src.api.semantic_workspace_runtime import SemanticWorkspaceManager
+from src.api.store import WebUIStore
 from src.config.settings import settings
+from src.candidate_verification import (
+    AttemptStatus,
+    CandidateVerificationService,
+    ReverificationBlocker,
+    SqliteCandidateVerificationRepository,
+    VerifierRulesetBinding,
+    migrate_candidate_verification,
+)
+from src.delivery_publishing.repository import DeliveryPublishingRepository
 from src.model_connections import ConnectionBroker
 from src.model_connections.storage import ModelConnectionRepository
 from src.model_connections.vault import FernetCredentialVault
@@ -53,6 +67,56 @@ from src.runtime_routing import (
 )
 
 
+class _FixedCandidateRulesetResolver:
+    def resolve(self, _verifier) -> VerifierRulesetBinding:
+        ruleset_hash = "5" * 64
+        return VerifierRulesetBinding(
+            verifier_ruleset_hash=ruleset_hash,
+            verifier_code_commit="6" * 40,
+            verifier_source_hash="7" * 64,
+            verifier_execution_identity_hash="8" * 64,
+            verifier_ruleset_manifest_json=json.dumps(
+                {
+                    "schema_version": 1,
+                    "verifier_ruleset_hash": ruleset_hash,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        )
+
+    def resolve_target(self) -> VerifierRulesetBinding:
+        return self.resolve(None)
+
+
+class _BlockSecondRulesetResolver(_FixedCandidateRulesetResolver):
+    def __init__(self) -> None:
+        self.calls = 0
+        self.second_started = threading.Event()
+        self.release = threading.Event()
+
+    def resolve(self, verifier) -> VerifierRulesetBinding:
+        self.calls += 1
+        # Offer、requested 冻结后，第三次才是 Worker 启动前的执行身份复核。
+        if self.calls == 3:
+            self.second_started.set()
+            self.release.wait(timeout=5)
+        return super().resolve(verifier)
+
+
+class _AllowCandidateVerifierAdapter:
+    def assert_verifier_binding(self, _request, _run_id, _verifier) -> None:
+        return None
+
+
+class _StaticReportVerifier:
+    def __init__(self, report: VerificationReport) -> None:
+        self._report = report
+
+    async def verify(self, **_kwargs) -> VerificationReport:
+        return self._report
+
+
 class FakePiRuntime:
     """不启动 Docker，只验证工作台与 Runtime Seam 的状态契约。"""
 
@@ -60,6 +124,10 @@ class FakePiRuntime:
         self.start_calls = 0
         self.requests: list[object] = []
         self.resume_calls: list[object] = []
+        self._candidate_verification = None
+
+    def bind_candidate_verification(self, service) -> None:
+        self._candidate_verification = service
 
     async def start(self, request, *, on_event):
         self.start_calls += 1
@@ -69,10 +137,13 @@ class FakePiRuntime:
     async def resume(self, request, *, checkpoint, on_event):
         self.requests.append(request)
         self.resume_calls.append(checkpoint)
-        return await self._complete(request, on_event=on_event)
+        return await self._complete(
+            request,
+            on_event=on_event,
+            run_id=checkpoint.run_id,
+        )
 
-    @staticmethod
-    async def _complete(request, *, on_event):
+    async def _complete(self, request, *, on_event, run_id=None):
         await on_event(
             RuntimeEvent(
                 event_type="agent.started",
@@ -85,6 +156,7 @@ class FakePiRuntime:
             Path(settings.semantic_execution_root)
             / "fake-pi"
             / request.task_id
+            / f"r{request.revision}"
         )
         output = root / "output"
         output.mkdir(parents=True, exist_ok=True)
@@ -111,55 +183,6 @@ class FakePiRuntime:
                 encoding="utf-8-sig",
             )
         digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
-        return PiRuntimeResult(
-            status=RuntimeStatus.CANDIDATE_READY,
-            run_id="pi_run_test",
-            workspace_root=root,
-            container_name="mangrove-pi-test",
-            candidates=(
-                CandidateArtifact(
-                    artifact_id=f"candidate_{digest[:16]}",
-                    filename=candidate.name,
-                    format=requested_format,
-                    host_path=candidate,
-                    sha256=digest,
-                    size_bytes=candidate.stat().st_size,
-                    openable=True,
-                    qa_checks=("non_empty", "reopened"),
-                ),
-            ),
-            verification=VerificationReport(
-                status=VerificationStatus.PASSED,
-                summary="候选已通过文件、来源证据和目标语义验证",
-                checks=(
-                    VerificationCheck(
-                        code="source_grounding",
-                        passed=True,
-                        summary="已从原件重新确认 1 条证据",
-                    ),
-                ),
-                evidence_count=1,
-                formal_delivery_eligible=False,
-            ),
-        )
-
-    async def cancel(
-        self,
-        _user_id: str,
-        _task_id: str,
-        _revision: int,
-    ) -> None:
-        return None
-
-
-class InconclusivePiRuntime(FakePiRuntime):
-    """先形成可下载候选，但模拟语义 Provider 瞬时无结论。"""
-
-    @staticmethod
-    async def _complete(request, *, on_event):
-        result = await FakePiRuntime._complete(request, on_event=on_event)
-        candidate = result.candidates[0]
-        output = candidate.host_path.parent
         source = request.sources[0]
         (output / "candidate-manifest.json").write_text(
             json.dumps(
@@ -167,8 +190,8 @@ class InconclusivePiRuntime(FakePiRuntime):
                     "version": 1,
                     "artifacts": [
                         {
-                            "filename": candidate.filename,
-                            "format": candidate.format,
+                            "filename": candidate.name,
+                            "format": requested_format,
                             "description": "用户要求的候选结果",
                             "evidence": [
                                 {
@@ -184,9 +207,73 @@ class InconclusivePiRuntime(FakePiRuntime):
             ),
             encoding="utf-8",
         )
+        result = PiRuntimeResult(
+            status=RuntimeStatus.CANDIDATE_READY,
+            run_id=run_id or f"pi_run_test_r{request.revision}",
+            workspace_root=root,
+            container_name="mangrove-pi-test",
+            candidates=(
+                CandidateArtifact(
+                    artifact_id=f"candidate_{digest[:16]}",
+                    filename=candidate.name,
+                    format=requested_format,
+                    host_path=candidate,
+                    sha256=digest,
+                    size_bytes=candidate.stat().st_size,
+                    openable=True,
+                    qa_checks=("non_empty", "reopened"),
+                ),
+            ),
+            verification=self._verification_report(),
+        )
+        if self._candidate_verification is None:
+            raise RuntimeError("测试 Runtime 未绑定 CandidateVerification Module")
+        attempt = await self._candidate_verification.verify_initial_current(
+            request=request,
+            run_id=result.run_id,
+            candidates=result.candidates,
+            manifest_path=output / "candidate-manifest.json",
+            verifier=_StaticReportVerifier(result.verification),
+            actor_id=request.user_id,
+        )
+        assert attempt.report_json is not None
         return result.model_copy(
             update={
-                "verification": VerificationReport(
+                "verification": VerificationReport.model_validate_json(
+                    attempt.report_json
+                )
+            }
+        )
+
+    def _verification_report(self) -> VerificationReport:
+        return VerificationReport(
+                status=VerificationStatus.PASSED,
+                summary="候选已通过文件、来源证据和目标语义验证",
+                checks=(
+                    VerificationCheck(
+                        code="source_grounding",
+                        passed=True,
+                        summary="已从原件重新确认 1 条证据",
+                    ),
+                ),
+                evidence_count=1,
+                formal_delivery_eligible=False,
+        )
+
+    async def cancel(
+        self,
+        _user_id: str,
+        _task_id: str,
+        _revision: int,
+    ) -> None:
+        return None
+
+
+class InconclusivePiRuntime(FakePiRuntime):
+    """先形成可下载候选，但模拟语义 Provider 瞬时无结论。"""
+
+    def _verification_report(self) -> VerificationReport:
+        return VerificationReport(
                     status=VerificationStatus.INCONCLUSIVE,
                     summary="文件与来源证据有效，但独立语义验证未形成可靠结论",
                     checks=(
@@ -216,8 +303,6 @@ class InconclusivePiRuntime(FakePiRuntime):
                     ),
                     evidence_count=1,
                     formal_delivery_eligible=False,
-                )
-            }
         )
 
 
@@ -228,6 +313,26 @@ class PassingRetryJudge:
             contains_unrequested_content=False,
             reason="候选满足目标且没有额外内容",
         )
+
+
+class BlockingFullVerifier:
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    async def verify(self, **_kwargs) -> VerificationReport:
+        self.started.set()
+        await asyncio.to_thread(self.release.wait)
+        return FakePiRuntime()._verification_report()
+
+
+class CountingFullVerifier:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def verify(self, **_kwargs) -> VerificationReport:
+        self.calls += 1
+        return FakePiRuntime()._verification_report()
 
 
 class ClarifyingPiRuntime(FakePiRuntime):
@@ -294,6 +399,9 @@ class BlockingPiRuntime:
         self.started = threading.Event()
         self.cancel_calls: list[tuple[str, str, int]] = []
 
+    def bind_candidate_verification(self, _service) -> None:
+        return None
+
     async def start(self, request, *, on_event):
         await on_event(
             RuntimeEvent(
@@ -346,6 +454,9 @@ class PreFreezeInspectingPiRuntime(BlockingPiRuntime):
 
 class EmptyOutputPiRuntime:
     """模拟容器已建立工作区，但没有形成任何用户结果。"""
+
+    def bind_candidate_verification(self, _service) -> None:
+        return None
 
     async def start(self, request, *, on_event):
         root = (
@@ -430,13 +541,15 @@ def _client(
         str(tmp_path / "executions"),
     )
     auth_mod._store = None
+    auth_mod.get_store()
+    database = Path(settings.webui_db_path)
     if routing_mode is not None:
-        auth_mod.get_store()
-        database = Path(settings.webui_db_path)
         migrate_runtime_routing(
             database,
             tmp_path / "workspace-before-runtime-routing.db",
         )
+
+
         routing = RuntimeRouting(SqliteRuntimeRoutingRepository(database))
         passed = _g3_snapshot(passed=True)
         admin_actor = RolloutActor(actor_id="admin-a", role="admin")
@@ -472,8 +585,21 @@ def _client(
                 default_approval,
                 admin_actor,
             )
+    migrate_candidate_verification(
+        database,
+        tmp_path / "workspace-before-candidate-verification.db",
+    )
+    candidate_verification = CandidateVerificationService(
+        repository=SqliteCandidateVerificationRepository(database),
+        ruleset_resolver=_FixedCandidateRulesetResolver(),
+        p0_reader=lambda _request: False,
+        broker_adapter=_AllowCandidateVerifierAdapter(),
+        event_writer=lambda _event_type, _attempt: None,
+        reverification_authority=runtime_mod._WorkspaceReverificationAuthority(),
+    )
     manager = SemanticWorkspaceManager(
         pi_runtime=pi_runtime or FakePiRuntime(),
+        candidate_verification=candidate_verification,
     )
     monkeypatch.setattr(runtime_mod, "_manager", manager)
 
@@ -1334,10 +1460,52 @@ def test_user_can_use_platform_default_with_own_verified_connection(
             client,
             created.json()["task_id"],
         )
+        provider_runtime = AgenticRuntimeRepository(
+            settings.webui_db_path
+        ).get("user-a", created.json()["task_id"], 2)
+        assert provider_runtime is not None
+
+        def logical_fingerprint() -> str:
+            with sqlite3.connect(settings.webui_db_path) as connection:
+                dump = "\n".join(connection.iterdump())
+            return hashlib.sha256(dump.encode("utf-8")).hexdigest()
+
+        before_offer = logical_fingerprint()
+        monkeypatch.setattr(broker_mod, "_default_broker", None)
+        authority_blockers = runtime_mod._WorkspaceReverificationAuthority().blockers(
+            fake_runtime.requests[-1],
+            provider_runtime["run_id"],
+        )
+        assert ReverificationBlocker.PROVIDER_BINDING_UNAVAILABLE not in (
+            authority_blockers
+        )
+        assert logical_fingerprint() == before_offer
+        assert broker_mod._default_broker is None
+        monkeypatch.setattr(broker_mod, "_default_broker", broker)
+        assert broker.delete_connection(
+            str(connection["connection_id"]),
+            "user-a",
+            can_manage=False,
+        ) is True
+        unavailable = client.get(
+            f"/api/semantic-workspace/tasks/{created.json()['task_id']}"
+        )
+        assert unavailable.status_code == 200
+        unavailable_offer = unavailable.json()["agentic_runtime"][
+            "reverification_offer"
+        ]
+        assert "provider_binding_unavailable" in unavailable_offer["blockers"]
+        assert unavailable_offer["eligible"] is False
 
     assert task["agentic_runtime"]["model_connection_id"] == connection[
         "connection_id"
     ]
+    assert task["agentic_runtime"]["reverification_offer"][
+        "requires_provider"
+    ] is True
+    assert "provider_binding_unavailable" not in task["agentic_runtime"][
+        "reverification_offer"
+    ]["blockers"]
     runtime_request = fake_runtime.requests[0]
     assert runtime_request.model_connection_id == connection["connection_id"]
     assert (
@@ -1523,6 +1691,19 @@ def test_retry_inconclusive_candidate_verification_does_not_rerun_pi(
         assert candidate["agentic_runtime"]["verification"]["status"] == (
             "inconclusive"
         )
+        assert candidate["agentic_runtime"]["latest_verification_attempt"][
+            "status"
+        ] == "inconclusive"
+        offer = candidate["agentic_runtime"]["reverification_offer"]
+        assert offer["eligible"] is True
+        assert offer["reason"] == "semantic_inconclusive"
+        assert offer["blockers"] == []
+        assert offer["ruleset_changed"] is False
+        assert offer["requires_provider"] is False
+        assert offer["model_id"]
+        assert offer["egress_categories"] == []
+        assert offer["egress_summary"] == "本次不外发"
+        assert candidate["agentic_runtime"]["awaiting_publication"] is False
         semantic_check = next(
             check
             for check in candidate["agentic_runtime"]["verification"]["checks"]
@@ -1533,6 +1714,87 @@ def test_retry_inconclusive_candidate_verification_does_not_rerun_pi(
         )
         assert "pydantic" not in str(candidate).lower()
         assert runtime.start_calls == 1
+        runtime_state = AgenticRuntimeRepository(
+            settings.webui_db_path
+        ).get("user-a", task_id, 1)
+        assert runtime_state is not None
+        authority_request = dict(runtime_state["request"])
+        authority_request["api_key"] = "local-runtime"
+        frozen_request = PiRuntimeRequest.model_validate(authority_request)
+        authority = runtime_mod._WorkspaceReverificationAuthority()
+        assert authority.blockers(
+            frozen_request,
+            runtime_state["run_id"],
+        ) == ()
+        assert ReverificationBlocker.TASK_REVISION_DRIFT in authority.blockers(
+            frozen_request.model_copy(update={"objective_text": "漂移目标"}),
+            runtime_state["run_id"],
+        )
+        changed_source = frozen_request.sources[0].model_copy(
+            update={"upload_id": "upload-drift"}
+        )
+        assert ReverificationBlocker.SOURCE_BINDING_DRIFT in authority.blockers(
+            frozen_request.model_copy(update={"sources": (changed_source,)}),
+            runtime_state["run_id"],
+        )
+        orphan_database = tmp_path / "workspace-without-assignment.db"
+        with sqlite3.connect(settings.webui_db_path) as source_connection:
+            with sqlite3.connect(orphan_database) as target_connection:
+                source_connection.backup(target_connection)
+        with sqlite3.connect(orphan_database) as connection:
+            connection.execute("DROP TRIGGER runtime_assignments_no_update")
+            connection.execute("DROP TRIGGER runtime_assignments_no_delete")
+            row = connection.execute(
+                "SELECT payload_json FROM runtime_assignments WHERE owner_id=? "
+                "AND task_id=? AND revision=1",
+                ("user-a", task_id),
+            ).fetchone()
+            assert row is not None
+            malformed = json.loads(row[0])
+            malformed.pop("assigned_by")
+            connection.execute(
+                "UPDATE runtime_assignments SET payload_json=? WHERE owner_id=? "
+                "AND task_id=? AND revision=1",
+                (json.dumps(malformed), "user-a", task_id),
+            )
+        live_database = settings.webui_db_path
+        monkeypatch.setattr(settings, "webui_db_path", str(orphan_database))
+        assert (
+            ReverificationBlocker.RUNTIME_ASSIGNMENT_DRIFT
+            in runtime_mod._WorkspaceReverificationAuthority().blockers(
+                frozen_request,
+                runtime_state["run_id"],
+            )
+        )
+        monkeypatch.setattr(settings, "webui_db_path", live_database)
+        with sqlite3.connect(orphan_database) as connection:
+            connection.execute(
+                "DELETE FROM runtime_assignments WHERE owner_id=? "
+                "AND task_id=? AND revision=1",
+                ("user-a", task_id),
+            )
+        monkeypatch.setattr(settings, "webui_db_path", str(orphan_database))
+        assert (
+            ReverificationBlocker.RUNTIME_ASSIGNMENT_DRIFT
+            in runtime_mod._WorkspaceReverificationAuthority().blockers(
+                frozen_request,
+                runtime_state["run_id"],
+            )
+        )
+        monkeypatch.setattr(settings, "webui_db_path", live_database)
+        attempt_repository = SqliteCandidateVerificationRepository(
+            settings.webui_db_path
+        )
+        initial_attempts = attempt_repository.list_for_candidate(
+            "user-a",
+            task_id=task_id,
+            revision=1,
+            run_id=runtime_state["run_id"],
+            candidate_set_hash=runtime_state["verified_candidate_set_hash"],
+        )
+        assert [item.status for item in initial_attempts] == [
+            AttemptStatus.INCONCLUSIVE
+        ]
 
         retried = client.post(
             f"/api/semantic-workspace/tasks/{task_id}/candidate-verification/retry"
@@ -1544,6 +1806,916 @@ def test_retry_inconclusive_candidate_verification_does_not_rerun_pi(
         assert payload["delivery"]["status"] == "succeeded"
         assert payload["agentic_runtime"]["verification"]["status"] == "passed"
         assert runtime.start_calls == 1
+        attempts = attempt_repository.list_for_candidate(
+            "user-a",
+            task_id=task_id,
+            revision=1,
+            run_id=runtime_state["run_id"],
+            candidate_set_hash=runtime_state["verified_candidate_set_hash"],
+        )
+        assert [item.status for item in attempts] == [
+            AttemptStatus.INCONCLUSIVE,
+            AttemptStatus.PASSED,
+        ]
+
+
+def test_candidate_offer_cross_owner_returns_404_without_content(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=InconclusivePiRuntime(),
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并只输出一份 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        owner_payload = _wait_for_status(client, task_id, "candidate_ready")
+        candidate_filename = owner_payload["agentic_runtime"]["candidates"][0][
+            "filename"
+        ]
+        client.app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "user-b",
+            "role": "user",
+        }
+
+        rejected = client.get(f"/api/semantic-workspace/tasks/{task_id}")
+
+        assert rejected.status_code == 404
+        assert task_id not in rejected.text
+    assert candidate_filename not in rejected.text
+
+
+def test_full_candidate_reverification_returns_202_without_rerunning_pi_or_publishing(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = InconclusivePiRuntime()
+    monkeypatch.setattr(
+        SemanticWorkspaceManager,
+        "_build_retry_semantic_judge",
+        lambda *_args, **_kwargs: PassingRetryJudge(),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        SemanticWorkspaceManager,
+        "_build_full_candidate_verifier",
+        lambda *_args, **_kwargs: _StaticReportVerifier(
+            FakePiRuntime()._verification_report()
+        ),
+        raising=False,
+    )
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=runtime,
+    )
+    runtime_mod._manager._candidate_verification._event_writer = (
+        runtime_mod._write_candidate_verification_event
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并只输出一份 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        before = _wait_for_status(client, task_id, "candidate_ready")
+        previous_attempt_id = before["agentic_runtime"][
+            "latest_verification_attempt"
+        ]["attempt_id"]
+        runtime_state = AgenticRuntimeRepository(settings.webui_db_path).get(
+            "user-a",
+            task_id,
+            1,
+        )
+        assert runtime_state is not None
+        candidate_path = runtime_state["candidates"][0].host_path
+        candidate_before = hashlib.sha256(candidate_path.read_bytes()).hexdigest()
+        workspace_root = Path(runtime_state["workspace_root"])
+        tree_before = {
+            path.relative_to(workspace_root).as_posix(): hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            for path in workspace_root.rglob("*")
+            if path.is_file()
+        }
+        events_before = len(
+            auth_mod.get_store().list_semantic_workspace_events(
+                "user-a",
+                task_id,
+            )
+        )
+        with sqlite3.connect(settings.webui_db_path) as connection:
+            provider_tables = tuple(
+                row[0]
+                for row in connection.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' "
+                    "AND (name LIKE '%grant%' OR name LIKE '%usage%')"
+                ).fetchall()
+            )
+            provider_counts_before = {
+                table: connection.execute(
+                    f'SELECT COUNT(*) FROM "{table}"'
+                ).fetchone()[0]
+                for table in provider_tables
+            }
+
+        response = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications",
+            headers={"Idempotency-Key": "reverify-api-1"},
+            json={
+                "expected_revision": 1,
+                "expected_previous_attempt_id": previous_attempt_id,
+                "external_api_confirmed": False,
+            },
+        )
+
+        assert response.status_code == 202, response.text
+        receipt = response.json()
+        assert receipt["previous_attempt_id"] == previous_attempt_id
+        assert receipt["status"] in {"requested", "running", "passed"}
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            current = client.get(
+                f"/api/semantic-workspace/tasks/{task_id}"
+            ).json()
+            latest = current["agentic_runtime"]["latest_verification_attempt"]
+            if latest["attempt_id"] == receipt["attempt_id"] and latest[
+                "status"
+            ] == "passed":
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError(f"完整候选重验未进入 passed 终态：{latest}")
+
+        assert current["agentic_runtime"]["awaiting_publication"] is True
+        assert current["delivery"] is None
+        assert runtime.start_calls == 1
+        assert runtime.resume_calls == []
+        assert hashlib.sha256(candidate_path.read_bytes()).hexdigest() == (
+            candidate_before
+        )
+        assert {
+            path.relative_to(workspace_root).as_posix(): hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            for path in workspace_root.rglob("*")
+            if path.is_file()
+        } == tree_before
+        new_events = auth_mod.get_store().list_semantic_workspace_events(
+            "user-a",
+            task_id,
+        )[events_before:]
+        attempt_events = [
+            event
+            for event in new_events
+            if event["details"].get("attempt_id") == receipt["attempt_id"]
+        ]
+        assert [event["event_type"] for event in attempt_events] == [
+            "candidate_verification_attempt_requested",
+            "candidate_verification_attempt_started",
+            "candidate_verification_attempt_finished",
+        ]
+        assert all(
+            "capability" not in event["event_type"]
+            and "dependency" not in event["event_type"]
+            for event in new_events
+        )
+        with sqlite3.connect(settings.webui_db_path) as connection:
+            assert {
+                table: connection.execute(
+                    f'SELECT COUNT(*) FROM "{table}"'
+                ).fetchone()[0]
+                for table in provider_tables
+            } == provider_counts_before
+        attempts = SqliteCandidateVerificationRepository(
+            settings.webui_db_path
+        ).list_for_candidate(
+            "user-a",
+            task_id=task_id,
+            revision=1,
+            run_id=runtime_state["run_id"],
+            candidate_set_hash=runtime_state["verified_candidate_set_hash"],
+        )
+        assert [item.attempt_id for item in attempts] == [
+            previous_attempt_id,
+            receipt["attempt_id"],
+        ]
+
+        stores = [WebUIStore(settings.webui_db_path) for _ in range(4)]
+
+        def append_concurrently(index: int, event_id: str) -> dict[str, object]:
+            return stores[index].append_semantic_workspace_event(
+                "user-a",
+                task_id,
+                event_id=event_id,
+                stage="verify",
+                event_type=f"atomic_event_{event_id}",
+                summary="并发事件原子性测试",
+            )
+
+        duplicate_id = "workspace_event_cv_atomic_duplicate"
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            duplicate_results = tuple(
+                executor.map(
+                    lambda index: append_concurrently(index, duplicate_id),
+                    range(4),
+                )
+            )
+        assert {item["event_id"] for item in duplicate_results} == {duplicate_id}
+
+        distinct_ids = tuple(
+            f"workspace_event_cv_atomic_distinct_{index}" for index in range(4)
+        )
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            tuple(
+                executor.map(
+                    lambda pair: append_concurrently(*pair),
+                    enumerate(distinct_ids),
+                )
+            )
+        atomic_events = auth_mod.get_store().list_semantic_workspace_events(
+            "user-a",
+            task_id,
+        )
+        assert sum(event["event_id"] == duplicate_id for event in atomic_events) == 1
+        assert {
+            event["event_id"]
+            for event in atomic_events
+            if event["event_id"] in distinct_ids
+        } == set(distinct_ids)
+
+
+def test_passed_candidate_reverification_requires_explicit_idempotent_publish(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = InconclusivePiRuntime()
+    monkeypatch.setattr(
+        SemanticWorkspaceManager,
+        "_build_full_candidate_verifier",
+        lambda *_args, **_kwargs: _StaticReportVerifier(
+            FakePiRuntime()._verification_report()
+        ),
+        raising=False,
+    )
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=runtime,
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并只输出一份 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        candidate = _wait_for_status(client, task_id, "candidate_ready")
+        previous_attempt_id = candidate["agentic_runtime"][
+            "latest_verification_attempt"
+        ]["attempt_id"]
+        requested = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications",
+            headers={"Idempotency-Key": "reverify-before-publish"},
+            json={
+                "expected_revision": 1,
+                "expected_previous_attempt_id": previous_attempt_id,
+                "external_api_confirmed": False,
+            },
+        )
+        assert requested.status_code == 202, requested.text
+        attempt_id = requested.json()["attempt_id"]
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            current = client.get(
+                f"/api/semantic-workspace/tasks/{task_id}"
+            ).json()
+            latest = current["agentic_runtime"]["latest_verification_attempt"]
+            if latest["attempt_id"] == attempt_id and latest["status"] == "passed":
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError(f"完整候选重验未进入 passed 终态：{latest}")
+        assert current["delivery"] is None
+        assert current["agentic_runtime"]["awaiting_publication"] is True
+        runtime_state = AgenticRuntimeRepository(settings.webui_db_path).get(
+            "user-a",
+            task_id,
+            1,
+        )
+        assert runtime_state is not None
+        candidate_path = runtime_state["candidates"][0].host_path
+        candidate_before = candidate_path.read_bytes()
+        attempt_repository = SqliteCandidateVerificationRepository(
+            settings.webui_db_path
+        )
+        attempt_before = attempt_repository.get("user-a", attempt_id)
+        assert attempt_before is not None
+
+        publish_path = (
+            f"/api/semantic-workspace/tasks/{task_id}/"
+            f"candidate-verifications/{attempt_id}/publish"
+        )
+        client.app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "user-b",
+            "role": "user",
+        }
+        cross_owner = client.post(
+            publish_path,
+            headers={"Idempotency-Key": "publish-cross-owner"},
+            json={"expected_revision": 1},
+        )
+        assert cross_owner.status_code == 404, cross_owner.text
+        assert attempt_id not in cross_owner.text
+        client.app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": "user-a",
+            "role": "admin",
+        }
+        stale = client.post(
+            publish_path,
+            headers={"Idempotency-Key": "publish-stale-revision"},
+            json={"expected_revision": 2},
+        )
+        assert stale.status_code == 409, stale.text
+        def publish_same_request(_index: int):
+            return client.post(
+                publish_path,
+                headers={"Idempotency-Key": "publish-exact-attempt"},
+                json={"expected_revision": 1},
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first, replay = tuple(
+                executor.map(publish_same_request, range(2))
+            )
+        assert first.status_code == 200, first.text
+        assert first.json()["provenance"]["verification_attempt_id"] == attempt_id
+        assert replay.status_code == 200, replay.text
+        assert replay.json()["delivery_id"] == first.json()["delivery_id"]
+        conflict = client.post(
+            publish_path,
+            headers={"Idempotency-Key": "publish-other-request"},
+            json={"expected_revision": 1},
+        )
+        assert conflict.status_code == 409, conflict.text
+        assert candidate_path.read_bytes() == candidate_before
+        assert attempt_repository.get("user-a", attempt_id) == attempt_before
+        with sqlite3.connect(settings.webui_db_path) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM formal_delivery_runs WHERE owner_id=?",
+                ("user-a",),
+            ).fetchone()[0] == 1
+
+        original_claim_intent = DeliveryPublishingRepository.claim_intent
+
+        def fail_database(*_args, **_kwargs):
+            raise sqlite3.OperationalError("database is locked")
+
+        monkeypatch.setattr(
+            DeliveryPublishingRepository,
+            "claim_intent",
+            fail_database,
+        )
+        unavailable = client.post(
+            publish_path,
+            headers={"Idempotency-Key": "publish-exact-attempt"},
+            json={"expected_revision": 1},
+        )
+        assert unavailable.status_code == 503, unavailable.text
+        monkeypatch.setattr(
+            DeliveryPublishingRepository,
+            "claim_intent",
+            original_claim_intent,
+        )
+
+        store = auth_mod.get_store()
+        store.create_semantic_workspace_revision(
+            "user-a",
+            task_id,
+            objective_text="新版本不得被旧发布覆盖",
+            output_formats=["json"],
+            change_summary="验证发布后任务状态 CAS",
+            expected_revision=2,
+        )
+        with pytest.raises(RuntimeError, match="活动版本已变化"):
+            store.update_semantic_workspace_task(
+                "user-a",
+                task_id,
+                expected_active_revision=1,
+                status="completed",
+            )
+        after_revision = store.get_semantic_workspace_task("user-a", task_id)
+        assert after_revision is not None
+        assert after_revision["active_revision"] == 2
+        assert after_revision["status"] == "queued"
+
+
+def test_full_candidate_reverification_is_idempotent_and_rejects_concurrent_key(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = InconclusivePiRuntime()
+    verifier = BlockingFullVerifier()
+    monkeypatch.setattr(
+        SemanticWorkspaceManager,
+        "_build_full_candidate_verifier",
+        lambda *_args, **_kwargs: verifier,
+        raising=False,
+    )
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=runtime,
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并只输出一份 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        task = _wait_for_status(client, task_id, "candidate_ready")
+        previous_attempt_id = task["agentic_runtime"][
+            "latest_verification_attempt"
+        ]["attempt_id"]
+        payload = {
+            "expected_revision": 1,
+            "expected_previous_attempt_id": previous_attempt_id,
+            "external_api_confirmed": False,
+        }
+        url = (
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications"
+        )
+
+        first = client.post(
+            url,
+            headers={"Idempotency-Key": "reverify-idempotent"},
+            json=payload,
+        )
+        assert first.status_code == 202, first.text
+        assert verifier.started.wait(timeout=5)
+        try:
+            same = client.post(
+                url,
+                headers={"Idempotency-Key": "reverify-idempotent"},
+                json=payload,
+            )
+            conflict = client.post(
+                url,
+                headers={"Idempotency-Key": "reverify-concurrent"},
+                json=payload,
+            )
+
+            assert same.status_code == 202, same.text
+            assert same.json()["attempt_id"] == first.json()["attempt_id"]
+            assert conflict.status_code == 409
+        finally:
+            verifier.release.set()
+
+
+def test_full_candidate_reverification_closes_requested_when_p0_flips(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = InconclusivePiRuntime()
+    verifier = CountingFullVerifier()
+    resolver = _BlockSecondRulesetResolver()
+    monkeypatch.setattr(
+        SemanticWorkspaceManager,
+        "_build_full_candidate_verifier",
+        lambda *_args, **_kwargs: verifier,
+        raising=False,
+    )
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=runtime,
+    )
+    manager = runtime_mod._manager
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并只输出一份 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        task = _wait_for_status(client, task_id, "candidate_ready")
+        previous_attempt_id = task["agentic_runtime"][
+            "latest_verification_attempt"
+        ]["attempt_id"]
+        manager._candidate_verification._ruleset_resolver = resolver
+        response = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications",
+            headers={"Idempotency-Key": "reverify-p0-flip"},
+            json={
+                "expected_revision": 1,
+                "expected_previous_attempt_id": previous_attempt_id,
+                "external_api_confirmed": False,
+            },
+        )
+        assert response.status_code == 202, response.text
+        assert resolver.second_started.wait(timeout=5)
+        try:
+            with sqlite3.connect(settings.webui_db_path) as connection:
+                connection.execute(
+                    "UPDATE runtime_rollout_state SET p0_blocked=1 "
+                    "WHERE state_id=1"
+                )
+            resolver.release.set()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                latest = client.get(
+                    f"/api/semantic-workspace/tasks/{task_id}"
+                ).json()["agentic_runtime"]["latest_verification_attempt"]
+                if latest["attempt_id"] == response.json()["attempt_id"] and latest[
+                    "status"
+                ] == "cancelled":
+                    break
+                time.sleep(0.02)
+            else:
+                raise AssertionError(f"P0 翻转后 Attempt 未安全收口：{latest}")
+            assert verifier.calls == 0
+        finally:
+            resolver.release.set()
+
+
+def test_full_candidate_reverification_closes_running_after_hard_restart(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        runtime_mod,
+        "REVERIFICATION_RECOVERY_POLL_SECONDS",
+        0.02,
+    )
+    monkeypatch.setattr(
+        runtime_mod,
+        "WORKSPACE_PURGE_INTERVAL_SECONDS",
+        0.02,
+    )
+    runtime = InconclusivePiRuntime()
+    monkeypatch.setattr(
+        SemanticWorkspaceManager,
+        "_build_full_candidate_verifier",
+        lambda *_args, **_kwargs: _StaticReportVerifier(
+            FakePiRuntime()._verification_report()
+        ),
+        raising=False,
+    )
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=runtime,
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并只输出一份 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        task = _wait_for_status(client, task_id, "candidate_ready")
+        previous_attempt_id = task["agentic_runtime"][
+            "latest_verification_attempt"
+        ]["attempt_id"]
+        service = runtime_mod._manager._candidate_verification
+        requested = asyncio.run(
+            service.request_reverification(
+                owner_id="user-a",
+                task_id=task_id,
+                revision=1,
+                expected_previous_attempt_id=previous_attempt_id,
+                external_api_confirmed=False,
+                idempotency_key="reverify-crash-window",
+                verifier_factory=lambda *_args: _StaticReportVerifier(
+                    FakePiRuntime()._verification_report()
+                ),
+            )
+        )
+        assert requested.status is AttemptStatus.REQUESTED
+        active_lease = SemanticWorkspaceManager._candidate_reverification_lease(
+            requested.attempt_id
+        )
+        active_lease.acquire(timeout=0)
+        with sqlite3.connect(settings.webui_db_path) as connection:
+            connection.execute(
+                "UPDATE candidate_verification_attempts "
+                "SET status='running', started_at=? "
+                "WHERE owner_id=? AND attempt_id=? AND status='requested'",
+                (
+                    datetime.now(timezone.utc).isoformat(),
+                    "user-a",
+                    requested.attempt_id,
+                ),
+            )
+
+    original_list_running = service.list_running_reverifications
+    scan_calls = 0
+
+    def fail_first_running_scan():
+        nonlocal scan_calls
+        scan_calls += 1
+        if scan_calls == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return original_list_running()
+
+    monkeypatch.setattr(
+        service,
+        "list_running_reverifications",
+        fail_first_running_scan,
+    )
+
+    async def recover() -> AttemptStatus:
+        protected_manager = SemanticWorkspaceManager(
+            pi_runtime=runtime,
+            candidate_verification=service,
+        )
+        protected_manager.start()
+        store = auth_mod.get_store()
+        original_purge = store.purge_expired_semantic_workspace_tasks
+        purge_calls = 0
+
+        def fail_first_purge():
+            nonlocal purge_calls
+            purge_calls += 1
+            if purge_calls == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return original_purge()
+
+        monkeypatch.setattr(
+            store,
+            "purge_expired_semantic_workspace_tasks",
+            fail_first_purge,
+        )
+        try:
+            await asyncio.sleep(0.05)
+            protected = SqliteCandidateVerificationRepository(
+                settings.webui_db_path
+            ).get("user-a", requested.attempt_id)
+            assert protected is not None
+            assert protected.status is AttemptStatus.RUNNING
+            active_lease.release()
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                recovered = SqliteCandidateVerificationRepository(
+                    settings.webui_db_path
+                ).get("user-a", requested.attempt_id)
+                assert recovered is not None
+                if (
+                    recovered.status is AttemptStatus.INCONCLUSIVE
+                    and purge_calls >= 2
+                ):
+                    assert scan_calls >= 2
+                    return recovered.status
+                await asyncio.sleep(0.02)
+            raise AssertionError("替代进程未持续接管已释放租约的 running Attempt")
+        finally:
+            await protected_manager.stop()
+            if active_lease.is_locked:
+                active_lease.release()
+
+    assert asyncio.run(recover()) is AttemptStatus.INCONCLUSIVE
+
+
+def test_full_candidate_reverification_reports_database_lock_as_unavailable(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = InconclusivePiRuntime()
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=runtime,
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并只输出一份 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        task = _wait_for_status(client, task_id, "candidate_ready")
+        previous_attempt_id = task["agentic_runtime"][
+            "latest_verification_attempt"
+        ]["attempt_id"]
+        original_connect = SqliteCandidateVerificationRepository._connect
+
+        def connect_without_wait(repository):
+            connection = sqlite3.connect(repository._db_path, timeout=0)
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys=ON")
+            return connection
+
+        lock = sqlite3.connect(settings.webui_db_path)
+        lock.execute("BEGIN IMMEDIATE")
+        monkeypatch.setattr(
+            SqliteCandidateVerificationRepository,
+            "_connect",
+            connect_without_wait,
+        )
+        try:
+            response = client.post(
+                f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications",
+                headers={"Idempotency-Key": "reverify-lock-timeout"},
+                json={
+                    "expected_revision": 1,
+                    "expected_previous_attempt_id": previous_attempt_id,
+                    "external_api_confirmed": False,
+                },
+            )
+        finally:
+            lock.rollback()
+            lock.close()
+            monkeypatch.setattr(
+                SqliteCandidateVerificationRepository,
+                "_connect",
+                original_connect,
+            )
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == "候选重验服务暂时不可用"
+
+
+def test_full_candidate_reverification_rejects_stale_active_revision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = InconclusivePiRuntime()
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=runtime,
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并只输出一份 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        task = _wait_for_status(client, task_id, "candidate_ready")
+        previous_attempt_id = task["agentic_runtime"][
+            "latest_verification_attempt"
+        ]["attempt_id"]
+        with sqlite3.connect(settings.webui_db_path) as connection:
+            connection.execute(
+                "UPDATE semantic_workspace_tasks SET active_revision=2 "
+                "WHERE user_id='user-a' AND task_id=?",
+                (task_id,),
+            )
+
+        response = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications",
+            headers={"Idempotency-Key": "reverify-stale-revision"},
+            json={
+                "expected_revision": 1,
+                "expected_previous_attempt_id": previous_attempt_id,
+                "external_api_confirmed": False,
+            },
+        )
+
+        assert response.status_code == 409
+
+
+def test_full_candidate_reverification_reports_corrupt_frozen_context_as_422(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = InconclusivePiRuntime()
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=runtime,
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并只输出一份 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        task = _wait_for_status(client, task_id, "candidate_ready")
+        previous_attempt_id = task["agentic_runtime"][
+            "latest_verification_attempt"
+        ]["attempt_id"]
+        with sqlite3.connect(settings.webui_db_path) as connection:
+            connection.execute(
+                "UPDATE agentic_runtime_runs SET request_json='{' "
+                "WHERE user_id='user-a' AND task_id=? AND revision=1",
+                (task_id,),
+            )
+
+        response = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications",
+            headers={"Idempotency-Key": "reverify-corrupt-context"},
+            json={
+                "expected_revision": 1,
+                "expected_previous_attempt_id": previous_attempt_id,
+                "external_api_confirmed": False,
+            },
+        )
+
+        assert response.status_code == 422
+        assert response.json()["detail"] == (
+            "候选缺少冻结运行信息，不能检查重验资格"
+        )
 
 
 def test_published_pi_json_can_be_previewed_from_formal_delivery(

@@ -8,6 +8,8 @@ import type {
   WorkspaceTask,
   WorkspaceRevision,
   SteeringResult,
+  DeliveryManifest,
+  VerificationAttemptReceipt,
 } from "@/types/semanticWorkspace";
 
 const BASE = "/api/semantic-workspace";
@@ -84,6 +86,36 @@ export function retryCandidateVerification(
   taskId: string,
 ): Promise<WorkspaceTask> {
   return api.post(`${BASE}/tasks/${taskId}/candidate-verification/retry`);
+}
+
+export function requestCandidateReverification(
+  taskId: string,
+  payload: {
+    expected_revision: number;
+    expected_previous_attempt_id: string;
+    external_api_confirmed: boolean;
+    accept_duplicate_provider_cost: boolean;
+  },
+  idempotencyKey: string,
+): Promise<VerificationAttemptReceipt> {
+  return api.post(
+    `${BASE}/tasks/${taskId}/candidate-verifications`,
+    payload,
+    { "Idempotency-Key": idempotencyKey },
+  );
+}
+
+export function publishCandidateVerification(
+  taskId: string,
+  attemptId: string,
+  expectedRevision: number,
+  idempotencyKey: string,
+): Promise<DeliveryManifest> {
+  return api.post(
+    `${BASE}/tasks/${taskId}/candidate-verifications/${attemptId}/publish`,
+    { expected_revision: expectedRevision },
+    { "Idempotency-Key": idempotencyKey },
+  );
 }
 
 export function createWorkspaceRevision(

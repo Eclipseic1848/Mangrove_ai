@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+import hashlib
+import json
+import logging
 from pathlib import Path
+import sqlite3
 import time
 from typing import Any
+
+from filelock import FileLock, Timeout
 
 from src.agentic_runtime.models import (
     PiRuntimeCheckpoint,
@@ -15,6 +21,7 @@ from src.agentic_runtime.models import (
     RuntimeStatus,
     RuntimeVersion,
     SourceInput,
+    VerificationReport,
     VerificationStatus,
 )
 from src.agentic_runtime.candidate_verifier import (
@@ -39,6 +46,13 @@ from src.api.routes.semantic_plans import (
     _run_and_save as compile_and_save,
 )
 from src.config.settings import settings
+from src.candidate_verification import (
+    AttemptStatus,
+    CandidateVerificationService,
+    CurrentVerifierRulesetResolver,
+    ReverificationBlocker,
+    SqliteCandidateVerificationRepository,
+)
 from src.conversation_steering import (
     ConversationSteering,
     SqliteSteeringRepository,
@@ -47,7 +61,7 @@ from src.delivery_publishing.models import PublicationGate
 from src.delivery_publishing.pi_adapter import PiCandidateAdapter
 from src.delivery_publishing.repository import DeliveryPublishingRepository
 from src.delivery_publishing.service import DeliveryPublisher
-from src.runtime_routing import runtime_routing_is_p0_blocked
+from src.runtime_routing import RuntimeAssignment, runtime_routing_is_p0_blocked
 from src.semantic_harness.compiler_models import ClarificationResolution
 from src.semantic_harness.harness_models import HarnessResume
 from src.semantic_harness.inspectors import UploadSourceInspector
@@ -61,6 +75,7 @@ from src.services.upload_store import UploadStore
 from src.model_connections import get_default_broker
 
 
+_LOGGER = logging.getLogger(__name__)
 _TERMINAL_STATUSES = {
     "completed",
     "candidate_ready",
@@ -69,10 +84,247 @@ _TERMINAL_STATUSES = {
 }
 # 运行期治理监督的投影检查节奏（秒）。
 RUNTIME_GATE_POLL_SECONDS = 30
+REVERIFICATION_RECOVERY_POLL_SECONDS = 5
+WORKSPACE_PURGE_INTERVAL_SECONDS = 3600
 
 
 class _GateViolationAbort(RuntimeError):
     """运行期治理门命中：任务已标记取消，调用方不得再覆盖状态。"""
+
+
+class _CandidateVerificationBrokerAdapter:
+    """确认实际 Verifier 使用冻结的本地或 Broker 路由。"""
+
+    def assert_verifier_binding(self, request, run_id, verifier) -> None:
+        if type(verifier) is not CandidateVerifier:
+            raise RuntimeError("候选验证器不是当前受控实现")
+        judge = verifier._semantic_judge
+        if request.model_connection_id is not None:
+            if type(judge) is not BrokerSemanticJudge or (
+                judge._owner_user_id,
+                judge._connection_id,
+                judge._connection_version,
+                judge._model_id,
+                judge._task_id,
+                judge._revision,
+                judge._run_id,
+            ) != (
+                request.user_id,
+                request.model_connection_id,
+                request.model_connection_version,
+                request.model_connection_model,
+                request.task_id,
+                request.revision,
+                run_id,
+            ):
+                raise RuntimeError("Verifier 的 Broker 路由与冻结任务不一致")
+            return
+        if type(judge) is not LocalModelSemanticJudge or (
+            judge.model,
+            judge.base_url,
+            judge.api_key,
+        ) != (request.model, request.base_url.rstrip("/"), request.api_key):
+            raise RuntimeError("Verifier 的本地模型路由与冻结任务不一致")
+
+
+class _WorkspaceReverificationAuthority:
+    """只读重开权威门：复核任务、路由与连接，不签发 Grant。"""
+
+    def blockers(self, request, run_id) -> tuple[ReverificationBlocker, ...]:
+        blockers: list[ReverificationBlocker] = []
+        database = Path(settings.webui_db_path)
+        try:
+            with sqlite3.connect(
+                f"file:{database}?mode=ro",
+                uri=True,
+                timeout=30,
+            ) as connection:
+                connection.row_factory = sqlite3.Row
+                revision = connection.execute(
+                    "SELECT r.run_id, r.objective_text, r.output_formats_json, "
+                    "r.table_output_contracts_json, t.upload_ids_json, "
+                    "t.active_revision "
+                    "FROM semantic_workspace_revisions AS r "
+                    "JOIN semantic_workspace_tasks AS t ON t.task_id=r.task_id "
+                    "AND t.user_id=r.user_id "
+                    "WHERE r.user_id=? AND r.task_id=? AND r.revision=?",
+                    (request.user_id, request.task_id, request.revision),
+                ).fetchone()
+                assignment_table = connection.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='runtime_assignments'"
+                ).fetchone()
+                assignment = (
+                    connection.execute(
+                        "SELECT payload_json, runtime_version, rollout_mode, "
+                        "gate_snapshot_id, assigned_at "
+                        "FROM runtime_assignments WHERE owner_id=? "
+                        "AND task_id=? AND revision=?",
+                        (request.user_id, request.task_id, request.revision),
+                    ).fetchone()
+                    if assignment_table is not None
+                    else None
+                )
+        except (sqlite3.DatabaseError, OSError):
+            return (ReverificationBlocker.AUTHORITY_UNAVAILABLE,)
+
+        try:
+            revision_matches = (
+                revision is not None
+                and revision["active_revision"] == request.revision
+                and revision["run_id"] == run_id
+                and revision["objective_text"] == request.objective_text
+                and tuple(json.loads(revision["output_formats_json"]))
+                == request.requested_output_formats
+                and tuple(json.loads(revision["table_output_contracts_json"]))
+                == tuple(
+                    item.model_dump(mode="json")
+                    for item in request.table_output_contracts
+                )
+            )
+        except (TypeError, json.JSONDecodeError):
+            revision_matches = False
+        if not revision_matches:
+            # Runtime 行不是 TaskRevision 权威；孤儿或串线记录必须失败关闭。
+            blockers.append(ReverificationBlocker.TASK_REVISION_DRIFT)
+        if revision is not None:
+            try:
+                upload_ids = tuple(json.loads(revision["upload_ids_json"]))
+            except (TypeError, json.JSONDecodeError):
+                upload_ids = ()
+            if upload_ids != tuple(source.upload_id for source in request.sources):
+                # 来源顺序和身份都属于冻结输入，不能用 Runtime 自报字段替代。
+                blockers.append(ReverificationBlocker.SOURCE_BINDING_DRIFT)
+
+        try:
+            frozen_assignment = (
+                RuntimeAssignment.model_validate_json(assignment["payload_json"])
+                if assignment
+                else None
+            )
+            assignment_matches = (
+                frozen_assignment is not None
+                and assignment["runtime_version"] == "pi"
+                and frozen_assignment.runtime_version.value == "pi"
+                and assignment["rollout_mode"]
+                == frozen_assignment.rollout_mode.value
+                and assignment["gate_snapshot_id"]
+                == frozen_assignment.gate_snapshot_id
+                and assignment["assigned_at"]
+                == frozen_assignment.assigned_at.isoformat()
+                and frozen_assignment.task_revision.owner_id == request.user_id
+                and frozen_assignment.task_revision.task_id == request.task_id
+                and frozen_assignment.task_revision.revision == request.revision
+            )
+        except (KeyError, TypeError, ValueError):
+            assignment_matches = False
+        if not assignment_matches:
+            # RuntimeAssignment 是不可变路由凭据；缺失时不能只相信可漂移 Runtime 行。
+            blockers.append(ReverificationBlocker.RUNTIME_ASSIGNMENT_DRIFT)
+
+        if request.model_connection_id:
+            provider_blocker = self._provider_binding_blocker(database, request)
+            if provider_blocker is not None:
+                # 只读复核 Owner、版本和模型；不签发 Grant，也不读取 Secret。
+                blockers.append(provider_blocker)
+        return tuple(dict.fromkeys(blockers))
+
+    @staticmethod
+    def _provider_binding_blocker(
+        database: Path,
+        request,
+    ) -> ReverificationBlocker | None:
+        """用 SQLite 只读 URI 复算冻结版本，冷查询不得初始化 Broker/Vault。"""
+
+        try:
+            with sqlite3.connect(
+                f"file:{database}?mode=ro",
+                uri=True,
+                timeout=30,
+            ) as connection:
+                connection.row_factory = sqlite3.Row
+                frozen = connection.execute(
+                    "SELECT connection_id, model, secret_id, owner_scope, "
+                    "status, "
+                    "owner_user_id "
+                    "FROM model_connections WHERE connection_id=?",
+                    (request.model_connection_id,),
+                ).fetchone()
+        except (sqlite3.DatabaseError, OSError):
+            return ReverificationBlocker.AUTHORITY_UNAVAILABLE
+        if frozen is None:
+            return ReverificationBlocker.PROVIDER_BINDING_UNAVAILABLE
+        if (
+            frozen["owner_scope"] == "user_personal"
+            and frozen["owner_user_id"] != request.user_id
+        ):
+            # 冻结请求来自服务端，不接受客户端替换；命中他 Owner 时显式拒绝。
+            return ReverificationBlocker.PROVIDER_BINDING_FORBIDDEN
+        if frozen["status"] != "verified":
+            return ReverificationBlocker.PROVIDER_BINDING_UNAVAILABLE
+        try:
+            with sqlite3.connect(
+                f"file:{database}?mode=ro",
+                uri=True,
+                timeout=30,
+            ) as connection:
+                model = connection.execute(
+                    "SELECT 1 FROM model_connection_models "
+                    "WHERE connection_id=? AND model_id=? "
+                    "AND status='available' AND enabled=1",
+                    (
+                        request.model_connection_id,
+                        request.model_connection_model,
+                    ),
+                ).fetchone()
+        except (sqlite3.DatabaseError, OSError):
+            return ReverificationBlocker.AUTHORITY_UNAVAILABLE
+        if model is None:
+            return ReverificationBlocker.PROVIDER_BINDING_UNAVAILABLE
+        secret_version = str(frozen["secret_id"] or frozen["connection_id"])
+        version = hashlib.sha256(
+            f"{secret_version}\0{frozen['model']}".encode("utf-8")
+        ).hexdigest()
+        return (
+            None
+            if version == request.model_connection_version
+            else ReverificationBlocker.PROVIDER_BINDING_UNAVAILABLE
+        )
+
+
+def _write_candidate_verification_event(event_type, attempt) -> None:
+    store = get_store()
+    event_digest = hashlib.sha256(
+        (
+            f"{attempt.owner_id}\0{attempt.task_id}\0{attempt.attempt_id}\0"
+            f"{event_type}\0{attempt.status.value}"
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    store.append_semantic_workspace_event(
+        attempt.owner_id,
+        attempt.task_id,
+        event_id=f"workspace_event_cv_{event_digest}",
+        stage="verify",
+        event_type=event_type,
+        summary=(
+            "候选验证请求已记录"
+            if attempt.status.value == "requested"
+            else "候选验证已开始"
+            if attempt.status.value == "running"
+            else "候选验证已形成不可变结论"
+        ),
+        details={
+            "attempt_id": attempt.attempt_id,
+            "revision": attempt.revision,
+            "run_id": attempt.run_id,
+            "reason": attempt.reason_code.value,
+            "status": attempt.status.value,
+            "ruleset_hash": attempt.verifier_ruleset_hash,
+            "report_hash": attempt.report_hash,
+            "external_api_confirmed": attempt.egress_confirmed_at is not None,
+            "provider_attempt_id": attempt.provider_attempt_id,
+        },
+    )
 
 
 def _capability_selections_table_exists() -> bool:
@@ -176,14 +428,21 @@ class SemanticWorkspaceManager:
         self,
         *,
         pi_runtime: PiRuntime | None = None,
+        candidate_verification: CandidateVerificationService | None = None,
     ) -> None:
         self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
         self._workers: list[asyncio.Task[None]] = []
         self._maintenance: asyncio.Task[None] | None = None
         self._active: dict[str, asyncio.Task[None]] = {}
+        self._reverification_tasks: set[asyncio.Task[None]] = set()
+        self._reverification_task_context: dict[
+            asyncio.Task[None],
+            tuple[str, str],
+        ] = {}
         self._queued: set[str] = set()
         self._deferred_requeue: set[str] = set()
         self._heavy = asyncio.Semaphore(1)
+        self._candidate_verification = candidate_verification
         self._pi_runtime = pi_runtime or PiRuntime(
             capability_mount_resolver=DefaultCapabilityMounts(
                 db_path=settings.webui_db_path,
@@ -210,7 +469,404 @@ class SemanticWorkspaceManager:
                 if settings.pi_capability_host_enabled
                 else None
             ),
+            candidate_verification=candidate_verification,
         )
+
+    def _candidate_verification_module(self) -> CandidateVerificationService:
+        if self._candidate_verification is None:
+            self._candidate_verification = CandidateVerificationService(
+                repository=SqliteCandidateVerificationRepository(
+                    settings.webui_db_path
+                ),
+                ruleset_resolver=CurrentVerifierRulesetResolver(
+                    Path(__file__).resolve().parents[2]
+                ),
+                p0_reader=lambda _request: runtime_routing_is_p0_blocked(
+                    settings.webui_db_path
+                ),
+                broker_adapter=_CandidateVerificationBrokerAdapter(),
+                event_writer=_write_candidate_verification_event,
+                reverification_authority=_WorkspaceReverificationAuthority(),
+                provider_grant_revoker=lambda provider_attempt_id, reason: (
+                    get_default_broker().revoke_grant(provider_attempt_id, reason)
+                ),
+            )
+        bind_candidate_verification = getattr(
+            self._pi_runtime,
+            "bind_candidate_verification",
+            None,
+        )
+        if bind_candidate_verification is None:
+            raise RuntimeError("Pi Runtime 未提供 CandidateVerification 绑定接缝")
+        bind_candidate_verification(self._candidate_verification)
+        return self._candidate_verification
+
+    def inspect_candidate_reverification(
+        self,
+        owner_id: str,
+        task_id: str,
+        revision: int,
+    ):
+        """为同步任务详情提供只读 Offer，不触发 Pi 或 Provider。"""
+
+        return self._candidate_verification_module().inspect_reverification_sync(
+            owner_id=owner_id,
+            task_id=task_id,
+            revision=revision,
+        )
+
+    async def request_candidate_reverification(
+        self,
+        *,
+        owner_id: str,
+        task_id: str,
+        expected_revision: int,
+        expected_previous_attempt_id: str,
+        external_api_confirmed: bool,
+        accept_duplicate_provider_cost: bool,
+        idempotency_key: str,
+    ):
+        """先落 requested Attempt，再交给后台任务执行完整验证。"""
+
+        task = get_store().get_semantic_workspace_task(owner_id, task_id)
+        if task is None:
+            raise KeyError("工作台任务不存在或无权访问")
+        module = self._candidate_verification_module()
+        verifier_factory = self._build_full_candidate_verifier
+        attempt = await module.request_reverification(
+            owner_id=owner_id,
+            task_id=task_id,
+            revision=expected_revision,
+            expected_previous_attempt_id=expected_previous_attempt_id,
+            external_api_confirmed=external_api_confirmed,
+            accept_duplicate_provider_cost=accept_duplicate_provider_cost,
+            idempotency_key=idempotency_key,
+            verifier_factory=verifier_factory,
+        )
+        if attempt.status is AttemptStatus.REQUESTED:
+            self._schedule_candidate_reverification(
+                owner_id=owner_id,
+                attempt_id=attempt.attempt_id,
+                verifier_factory=verifier_factory,
+            )
+        return attempt
+
+    async def publish_candidate_verification(
+        self,
+        *,
+        owner_id: str,
+        task_id: str,
+        expected_revision: int,
+        attempt_id: str,
+        idempotency_key: str,
+    ):
+        """以精确 passed Attempt 显式发布；重放沿用既有发布意图。"""
+
+        store = get_store()
+        task = store.get_semantic_workspace_task(owner_id, task_id)
+        if task is None:
+            raise KeyError("工作台任务不存在或无权访问")
+        if int(task["active_revision"]) != expected_revision:
+            raise ValueError("活动版本已变化，请查看最新结果后再发布")
+
+        module = self._candidate_verification_module()
+        attempt = module.get_attempt(
+            owner_id=owner_id,
+            attempt_id=attempt_id,
+        )
+        adapter = PiCandidateAdapter(
+            runtime_repository=AgenticRuntimeRepository(
+                settings.webui_db_path
+            ),
+            workspace_store=store,
+            upload_store=_upload_store(),
+        )
+        command = adapter.build_command(
+            owner_id=owner_id,
+            task_id=task_id,
+            revision=expected_revision,
+            verification_attempt=attempt,
+            request_idempotency_key=idempotency_key,
+        )
+        delivery_repository = DeliveryPublishingRepository(
+            settings.webui_db_path,
+            semantic_paths=ManagedPathCodec(
+                settings.semantic_execution_root,
+                legacy_anchor=("data", "semantic-executions"),
+            ),
+        )
+        existing_intent = delivery_repository.get_intent(
+            command.publication_key
+        )
+        def has_crossed_commit_point(intent) -> bool:
+            return bool(
+                intent
+                and intent["status"] in {"committing", "published"}
+            )
+
+        crossed_commit_point = has_crossed_commit_point(existing_intent)
+        if not crossed_commit_point:
+            # failed/aborted/staging 都仍在提交点前，重试必须重新计算完整资格。
+            try:
+                module.prepare_publication(
+                    owner_id=owner_id,
+                    task_id=task_id,
+                    revision=expected_revision,
+                    attempt_id=attempt_id,
+                )
+            except ValueError:
+                # Publisher 文件锁外的快照可能刚被同键并发请求推进到提交点。
+                refreshed = delivery_repository.get_intent(
+                    command.publication_key
+                )
+                if not has_crossed_commit_point(refreshed):
+                    raise
+                crossed_commit_point = True
+
+        def publication_gate(_command) -> PublicationGate:
+            if not crossed_commit_point:
+                # QA 前后都重开精确资格，避免 failed/staging 重试绕过 Ruleset/latest CAS。
+                module.prepare_publication(
+                    owner_id=owner_id,
+                    task_id=task_id,
+                    revision=expected_revision,
+                    attempt_id=attempt_id,
+                )
+            current = store.get_semantic_workspace_task(owner_id, task_id)
+            return PublicationGate(
+                cancel_requested=bool(
+                    current and current.get("cancel_requested")
+                ),
+                p0_blocked=runtime_routing_is_p0_blocked(
+                    settings.webui_db_path
+                ),
+                revision_current=bool(
+                    current
+                    and int(current["active_revision"]) == expected_revision
+                ),
+            )
+
+        publisher = DeliveryPublisher(
+            repository=delivery_repository,
+            output_root=Path(settings.semantic_execution_root),
+            candidate_resolver=adapter.resolve_candidates,
+            gate_reader=publication_gate,
+        )
+        try:
+            delivery = await asyncio.to_thread(
+                publisher.publish,
+                command,
+                actor_id=owner_id,
+            )
+        except sqlite3.OperationalError:
+            if existing_intent is None:
+                store.append_semantic_workspace_event(
+                    owner_id,
+                    task_id,
+                    stage="deliver",
+                    event_type="delivery_failed",
+                    summary="显式正式交付发布失败，请重试或查看任务状态",
+                    details={
+                        "attempt_id": attempt_id,
+                        "formal_delivery": False,
+                    },
+                )
+            _LOGGER.exception("显式正式交付数据库操作失败")
+            raise
+        except Exception as exc:
+            if existing_intent is None:
+                store.append_semantic_workspace_event(
+                    owner_id,
+                    task_id,
+                    stage="deliver",
+                    event_type="delivery_failed",
+                    summary="显式正式交付发布失败，请重试或查看任务状态",
+                    details={
+                        "attempt_id": attempt_id,
+                        "formal_delivery": False,
+                    },
+                )
+            _LOGGER.exception("显式正式交付发布失败")
+            raise ValueError("显式正式交付发布失败，请查看任务状态") from exc
+
+        current = store.get_semantic_workspace_task(owner_id, task_id)
+        if current is not None and current["status"] != "completed":
+            try:
+                store.update_semantic_workspace_task(
+                    owner_id,
+                    task_id,
+                    expected_active_revision=expected_revision,
+                    status="completed",
+                    summary=(
+                        "候选通过完整重验，已发布 "
+                        f"{len(delivery.outputs)} 个正式文件"
+                    ),
+                    error=None,
+                    failure=None,
+                    question=None,
+                    cancel_requested=False,
+                )
+            except RuntimeError:
+                # Delivery 已按旧 Revision 提交；新 Revision 的任务状态不得被旧结果覆盖。
+                return delivery
+            store.update_semantic_workspace_revision(
+                owner_id,
+                task_id,
+                expected_revision,
+                status="completed",
+                summary="候选通过完整重验并发布正式交付",
+            )
+            store.append_semantic_workspace_event(
+                owner_id,
+                task_id,
+                stage="deliver",
+                event_type="task_completed",
+                summary=(
+                    "完整重验与独立 QA 通过，已发布 "
+                    f"{len(delivery.outputs)} 个正式文件"
+                ),
+                details={
+                    "attempt_id": attempt_id,
+                    "delivery_id": delivery.delivery_id,
+                    "publication_key": command.publication_key,
+                    "formal_delivery": True,
+                },
+            )
+        return delivery
+
+    def _schedule_candidate_reverification(
+        self,
+        *,
+        owner_id: str,
+        attempt_id: str,
+        verifier_factory,
+    ) -> None:
+        if (owner_id, attempt_id) in self._reverification_task_context.values():
+            return
+        worker = asyncio.create_task(
+            self._execute_candidate_reverification(
+                owner_id=owner_id,
+                attempt_id=attempt_id,
+                verifier_factory=verifier_factory,
+            ),
+            name=f"candidate-reverification-{attempt_id}",
+        )
+        self._reverification_tasks.add(worker)
+        self._reverification_task_context[worker] = (owner_id, attempt_id)
+        worker.add_done_callback(self._candidate_reverification_done)
+
+    def _candidate_reverification_done(self, task: asyncio.Task[None]) -> None:
+        self._reverification_tasks.discard(task)
+        context = self._reverification_task_context.pop(task, None)
+        if task.cancelled():
+            if context is not None:
+                owner_id, attempt_id = context
+                try:
+                    self._candidate_verification_module().close_unstarted_reverification(
+                        owner_id=owner_id,
+                        attempt_id=attempt_id,
+                    )
+                except Exception:
+                    _LOGGER.exception(
+                        "候选重验后台任务取消后未能安全收口：%s",
+                        task.get_name(),
+                    )
+            return
+        error = task.exception()
+        if error is not None:
+            _LOGGER.error(
+                "候选重验后台任务未能安全收口：%s",
+                task.get_name(),
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+    async def _execute_candidate_reverification(
+        self,
+        *,
+        owner_id: str,
+        attempt_id: str,
+        verifier_factory,
+    ) -> None:
+        lease = self._candidate_reverification_lease(attempt_id)
+        try:
+            lease.acquire(timeout=0)
+        except Timeout:
+            # 另一 Web 进程仍在处理同一 Attempt；本进程不得重复执行或收口。
+            return
+        try:
+            try:
+                await self._candidate_verification_module().execute_requested_reverification(
+                    owner_id=owner_id,
+                    attempt_id=attempt_id,
+                    verifier_factory=verifier_factory,
+                )
+            except asyncio.CancelledError:
+                self._candidate_verification_module().close_unstarted_reverification(
+                    owner_id=owner_id,
+                    attempt_id=attempt_id,
+                )
+                raise
+            except Exception:
+                # 进程崩溃会保留 running 供租约恢复；预执行失败需释放 requested 活动槽。
+                self._candidate_verification_module().close_unstarted_reverification(
+                    owner_id=owner_id,
+                    attempt_id=attempt_id,
+                )
+                raise
+        finally:
+            lease.release()
+
+    @staticmethod
+    def _candidate_reverification_lease(attempt_id: str) -> FileLock:
+        database = Path(settings.webui_db_path)
+        lock_path = database.with_name(
+            f"{database.name}.candidate-reverification-{attempt_id}.lock"
+        )
+        return FileLock(str(lock_path))
+
+    def _recover_interrupted_candidate_reverifications(self, module) -> None:
+        try:
+            attempts = module.list_running_reverifications()
+        except Exception:
+            _LOGGER.exception("候选重验 running 扫描暂时失败，下一轮将重试")
+            return
+        for attempt in attempts:
+            lease = self._candidate_reverification_lease(attempt.attempt_id)
+            try:
+                lease.acquire(timeout=0)
+            except Timeout:
+                # 滚动启动期间旧进程仍持有租约，不能把活跃 Worker 误判为崩溃。
+                continue
+            try:
+                try:
+                    module.recover_interrupted_reverification(attempt)
+                except Exception:
+                    _LOGGER.exception(
+                        "候选重验 running 收口失败，下一轮将重试：%s",
+                        attempt.attempt_id,
+                    )
+            finally:
+                lease.release()
+
+    def _resume_requested_candidate_reverifications(self, module) -> None:
+        try:
+            attempts = module.list_requested_reverifications()
+        except Exception:
+            _LOGGER.exception("候选重验 requested 扫描暂时失败，下一轮将重试")
+            return
+        for attempt in attempts:
+            try:
+                module.ensure_requested_event(attempt)
+                self._schedule_candidate_reverification(
+                    owner_id=attempt.owner_id,
+                    attempt_id=attempt.attempt_id,
+                    verifier_factory=self._build_full_candidate_verifier,
+                )
+            except Exception:
+                _LOGGER.exception(
+                    "候选重验 requested 接管失败，下一轮将重试：%s",
+                    attempt.attempt_id,
+                )
 
     def start(self) -> None:
         if self._workers:
@@ -228,6 +884,14 @@ class SemanticWorkspaceManager:
             self._maintenance_loop(),
             name="semantic-workspace-maintenance",
         )
+        try:
+            module = self._candidate_verification_module()
+        except RuntimeError as exc:
+            # 显式迁移前不创建表；没有 CandidateVerification Schema 时只跳过恢复。
+            _LOGGER.info("候选重验恢复尚不可用：%s", exc)
+        else:
+            self._recover_interrupted_candidate_reverifications(module)
+            self._resume_requested_candidate_reverifications(module)
         # 恢复必须由 Web 服务进程接管，确保 Runtime 与文档 Relay 共享同一 Grant 域。
         for task in store.list_pending_semantic_workspace_tasks():
             if task["status"] == "cancelling":
@@ -253,6 +917,9 @@ class SemanticWorkspaceManager:
         )
 
     async def stop(self) -> None:
+        reverification_tasks = tuple(self._reverification_tasks)
+        for task in reverification_tasks:
+            task.cancel()
         for task in self._active.values():
             task.cancel()
         for task in self._workers:
@@ -262,20 +929,45 @@ class SemanticWorkspaceManager:
         tasks = [*self._active.values(), *self._workers]
         if self._maintenance is not None:
             tasks.append(self._maintenance)
+        for task in reverification_tasks:
+            # 异常已由专用 done callback 记录；关闭流程只负责消费，不能二次击穿 lifespan。
+            with suppress(asyncio.CancelledError, Exception):
+                await task
         for task in tasks:
             with suppress(asyncio.CancelledError):
                 await task
         self._active.clear()
+        self._reverification_tasks.clear()
+        self._reverification_task_context.clear()
         self._workers.clear()
         self._maintenance = None
         self._queued.clear()
         self._deferred_requeue.clear()
 
     async def _maintenance_loop(self) -> None:
-        """每小时清理一次到期回收站记录。"""
+        """持续接管重验孤儿，并每小时清理一次到期回收站记录。"""
+
+        last_purge = time.monotonic()
         while True:
-            await asyncio.sleep(3600)
-            get_store().purge_expired_semantic_workspace_tasks()
+            await asyncio.sleep(REVERIFICATION_RECOVERY_POLL_SECONDS)
+            try:
+                module = self._candidate_verification_module()
+            except RuntimeError:
+                module = None
+            if module is not None:
+                try:
+                    self._recover_interrupted_candidate_reverifications(module)
+                    self._resume_requested_candidate_reverifications(module)
+                except Exception:
+                    # 单轮意外失败不得杀死维护任务；下一轮继续接管。
+                    _LOGGER.exception("候选重验维护轮次失败，下一轮将重试")
+            if time.monotonic() - last_purge >= WORKSPACE_PURGE_INTERVAL_SECONDS:
+                try:
+                    get_store().purge_expired_semantic_workspace_tasks()
+                except Exception:
+                    _LOGGER.exception("工作台到期清理暂时失败，下一轮将重试")
+                else:
+                    last_purge = time.monotonic()
 
     async def _selection_has_capabilities(
         self,
@@ -598,6 +1290,7 @@ class SemanticWorkspaceManager:
         self,
         request: PiRuntimeRequest,
         run_id: str,
+        provider_attempt_id: str | None = None,
     ):
         if request.model_connection_id is not None:
             assert request.model_connection_version is not None
@@ -610,6 +1303,8 @@ class SemanticWorkspaceManager:
                 task_id=request.task_id,
                 revision=request.revision,
                 run_id=run_id,
+                provider_attempt_id=provider_attempt_id,
+                allow_response_retry=provider_attempt_id is None,
             )
         assert request.model is not None
         assert request.base_url is not None
@@ -619,6 +1314,20 @@ class SemanticWorkspaceManager:
             base_url=request.base_url,
             api_key=request.api_key,
             timeout_seconds=180,
+        )
+
+    def _build_full_candidate_verifier(
+        self,
+        request: PiRuntimeRequest,
+        run_id: str,
+        provider_attempt_id: str | None = None,
+    ) -> CandidateVerifier:
+        return CandidateVerifier(
+            semantic_judge=self._build_retry_semantic_judge(
+                request,
+                run_id,
+                provider_attempt_id,
+            )
         )
 
     async def retry_candidate_verification(
@@ -633,25 +1342,7 @@ class SemanticWorkspaceManager:
         if task is None:
             raise KeyError("工作台任务不存在或无权访问")
         revision = int(task["active_revision"])
-        repository = AgenticRuntimeRepository(settings.webui_db_path)
-        runtime = repository.get(user_id, task_id, revision)
-        if (
-            task["status"] != "candidate_ready"
-            or runtime is None
-            or runtime["runtime_version"] is not RuntimeVersion.PI
-            or runtime["status"] is not RuntimeStatus.CANDIDATE_READY
-            or not runtime["candidates"]
-            or runtime["verification"] is None
-            or runtime["verification"].status is not VerificationStatus.INCONCLUSIVE
-        ):
-            raise ValueError("当前任务没有可重新验证的候选")
-        if not runtime["request"] or not runtime["run_id"] or not runtime["workspace_root"]:
-            raise ValueError("候选缺少冻结运行信息，不能重新验证")
-        request_values = dict(runtime["request"])
-        if not request_values.get("model_connection_id"):
-            # 本地直连密钥从不落库；重验时只恢复固定占位值。
-            request_values["api_key"] = "local-runtime"
-        request = PiRuntimeRequest.model_validate(request_values)
+        candidate_verification = self._candidate_verification_module()
         store.append_semantic_workspace_event(
             user_id,
             task_id,
@@ -660,29 +1351,24 @@ class SemanticWorkspaceManager:
             summary="正在重新验证现有候选，不会重新读取来源或生成文件",
             details={"formal_delivery": False},
         )
-        verifier = CandidateVerifier(
-            semantic_judge=self._build_retry_semantic_judge(
-                request,
-                runtime["run_id"],
-            )
-        )
-        verification = await verifier.retry_semantic_verification(
-            request=request,
-            candidates=runtime["candidates"],
-            manifest_path=(
-                Path(runtime["workspace_root"])
-                / "output"
-                / "candidate-manifest.json"
+        attempt = await candidate_verification.retry_current_semantic(
+            owner_id=user_id,
+            task_id=task_id,
+            revision=revision,
+            verifier_factory=lambda request, run_id: CandidateVerifier(
+                semantic_judge=self._build_retry_semantic_judge(
+                    request,
+                    run_id,
+                )
             ),
-            previous_report=runtime["verification"],
         )
-        repository.update(
-            user_id,
-            task_id,
-            revision,
-            candidates=runtime["candidates"],
-            verification=verification,
+        assert attempt.report_json is not None
+        verification = VerificationReport.model_validate_json(
+            attempt.report_json
         )
+        repository = AgenticRuntimeRepository(settings.webui_db_path)
+        runtime = repository.get(user_id, task_id, revision)
+        assert runtime is not None
         if verification.status is not VerificationStatus.PASSED:
             store.update_semantic_workspace_task(
                 user_id,
@@ -1198,6 +1884,7 @@ class SemanticWorkspaceManager:
                 }
             )
         request = PiRuntimeRequest(**request_values)
+        self._candidate_verification_module()
         repository.update(
             user_id,
             task_id,
@@ -1405,19 +2092,24 @@ class SemanticWorkspaceManager:
             return
         if result.status is not RuntimeStatus.CANDIDATE_READY:
             raise ValueError("Pi Runtime 未形成候选结果")
+        if result.verification is None:
+            raise ValueError("Pi Runtime 未形成独立验证结论")
+        repository.update(
+            user_id,
+            task_id,
+            revision,
+            run_id=result.run_id,
+            container_name=result.container_name,
+            workspace_root=result.workspace_root,
+            session_file=result.session_file,
+        )
+        verification = result.verification
         repository.update(
             user_id,
             task_id,
             revision,
             status=result.status,
-            run_id=result.run_id,
-            container_name=result.container_name,
-            workspace_root=result.workspace_root,
-            session_file=result.session_file,
-            candidates=result.candidates,
-            verification=result.verification,
         )
-        verification = result.verification
         verification_passed = bool(
             verification and verification.status.value == "passed"
         )

@@ -11,6 +11,8 @@ import shutil
 from typing import Callable, Mapping
 import uuid
 
+from filelock import FileLock
+
 from src.semantic_harness.delivery.models import (
     DeliveryManifest,
     DeliveryOutput,
@@ -74,6 +76,18 @@ class DeliveryPublisher:
         *,
         actor_id: str,
     ) -> DeliveryManifest:
+        lock_root = self._output_root / ".publication-locks"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        lock_path = lock_root / f"{command.publication_key}.lock"
+        with FileLock(str(lock_path), timeout=30):
+            return self._publish_locked(command, actor_id=actor_id)
+
+    def _publish_locked(
+        self,
+        command: PublishCommand,
+        *,
+        actor_id: str,
+    ) -> DeliveryManifest:
         if actor_id != command.owner_id:
             raise PermissionError("发布 actor 不是任务所有者")
         if command.verification_status != "passed":
@@ -119,12 +133,54 @@ class DeliveryPublisher:
             )
             self._verify_published(manifest, final_dir)
             return manifest
-        if intent["status"] == "committing" and final_dir.is_dir():
-            return self._recover_commit(command, final_dir)
+        if intent["status"] == "committing":
+            if final_dir.is_dir():
+                frozen_payload = intent.get("manifest_json")
+                if not frozen_payload:
+                    raise RuntimeError("提交恢复缺少冻结 Manifest")
+                return self._recover_commit(
+                    command,
+                    final_dir,
+                    frozen_manifest_json=str(frozen_payload),
+                )
+            if final_dir.exists():
+                raise RuntimeError("提交恢复发现 final 不是目录")
+            if not staging.is_dir():
+                raise RuntimeError("提交恢复缺少冻结 staging")
+            frozen_payload = intent.get("manifest_json")
+            if not frozen_payload:
+                raise RuntimeError("提交恢复缺少冻结 Manifest")
+            frozen_manifest = DeliveryManifest.model_validate_json(
+                str(frozen_payload)
+            )
+            staged_manifest = self._load_manifest(
+                command,
+                staging,
+            )
+            if staged_manifest != frozen_manifest:
+                raise RuntimeError("提交恢复的 staging 与冻结 Manifest 不一致")
+            self._verify_published(staged_manifest, staging)
+            final_dir.parent.mkdir(parents=True, exist_ok=True)
+            staging.replace(final_dir)
+            return self._repository.commit_delivery(
+                command,
+                staged_manifest,
+                final_dir,
+            )
 
         gate = self._gate_reader(command)
-        if gate.cancel_requested or gate.p0_blocked:
-            reason = "任务已取消" if gate.cancel_requested else "P0 发布门已阻断"
+        if (
+            gate.cancel_requested
+            or gate.p0_blocked
+            or not gate.revision_current
+        ):
+            reason = (
+                "任务已取消"
+                if gate.cancel_requested
+                else "P0 发布门已阻断"
+                if gate.p0_blocked
+                else "活动版本已变化"
+            )
             self._repository.set_intent_status(
                 command.publication_key,
                 "aborted",
@@ -202,6 +258,15 @@ class DeliveryPublisher:
                     "verification_report_hash": command.verification_report_hash,
                     "delivery_spec_hash": command.delivery_spec_hash,
                     "publication_key": command.publication_key,
+                    **(
+                        {
+                            "verification_attempt_id": (
+                                command.verification_attempt_id
+                            )
+                        }
+                        if command.verification_attempt_id is not None
+                        else {}
+                    ),
                 },
             )
             (staging / "manifest.json").write_text(
@@ -210,8 +275,18 @@ class DeliveryPublisher:
             )
             # committing 是取消线性化点；进入前最后一次读取业务门禁。
             gate = self._gate_reader(command)
-            if gate.cancel_requested or gate.p0_blocked:
-                reason = "任务已取消" if gate.cancel_requested else "P0 发布门已阻断"
+            if (
+                gate.cancel_requested
+                or gate.p0_blocked
+                or not gate.revision_current
+            ):
+                reason = (
+                    "任务已取消"
+                    if gate.cancel_requested
+                    else "P0 发布门已阻断"
+                    if gate.p0_blocked
+                    else "活动版本已变化"
+                )
                 shutil.rmtree(staging)
                 self._repository.set_intent_status(
                     command.publication_key,
@@ -220,9 +295,8 @@ class DeliveryPublisher:
                 )
                 raise ValueError(reason)
             commit_token = uuid.uuid4().hex
-            self._repository.set_intent_status(
-                command.publication_key,
-                "committing",
+            self._repository.begin_commit(
+                command,
                 commit_token=commit_token,
                 manifest=manifest,
             )
@@ -234,17 +308,21 @@ class DeliveryPublisher:
             return self._repository.commit_delivery(command, manifest, final_dir)
         except Exception as exc:
             current = self._repository.get_intent(command.publication_key)
-            if current and current["status"] not in {
-                "committing",
-                "published",
-                "aborted",
-            }:
+            before_commit = bool(
+                current
+                and current["status"] not in {
+                    "committing",
+                    "published",
+                    "aborted",
+                }
+            )
+            if before_commit:
                 self._repository.set_intent_status(
                     command.publication_key,
                     "failed",
                     error={"reason": str(exc)[:1000]},
                 )
-            if staging.exists():
+            if staging.exists() and before_commit:
                 shutil.rmtree(staging)
             raise
 
@@ -252,22 +330,41 @@ class DeliveryPublisher:
         self,
         command: PublishCommand,
         final_dir: Path,
+        *,
+        frozen_manifest_json: str,
     ) -> DeliveryManifest:
-        manifest_path = final_dir / "manifest.json"
-        if not manifest_path.is_file():
-            raise RuntimeError("提交恢复缺少冻结 Manifest")
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest = DeliveryManifest.model_validate(
-            {**payload, "user_id": command.owner_id}
-        )
+        manifest = self._load_manifest(command, final_dir)
+        frozen = DeliveryManifest.model_validate_json(frozen_manifest_json)
+        if manifest != frozen:
+            raise RuntimeError("提交恢复的 final 与冻结 Manifest 不一致")
         self._verify_published(manifest, final_dir)
         return self._repository.commit_delivery(command, manifest, final_dir)
 
     @staticmethod
+    def _load_manifest(
+        command: PublishCommand,
+        directory: Path,
+    ) -> DeliveryManifest:
+        manifest_path = directory / "manifest.json"
+        if not manifest_path.is_file():
+            raise RuntimeError("提交恢复缺少冻结 Manifest")
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return DeliveryManifest.model_validate(
+            {**payload, "user_id": command.owner_id}
+        )
+
+    @staticmethod
     def _verify_published(manifest: DeliveryManifest, final_dir: Path) -> None:
+        root = final_dir.resolve()
         for output in manifest.outputs:
-            path = (final_dir / output.filename).resolve()
-            if not path.is_file() or path.stat().st_size != output.size_bytes:
+            raw_path = final_dir / output.filename
+            path = raw_path.resolve()
+            if (
+                root not in path.parents
+                or raw_path.is_symlink()
+                or not path.is_file()
+                or path.stat().st_size != output.size_bytes
+            ):
                 raise RuntimeError("正式交付文件缺失或大小不一致")
             if _sha256(path) != output.sha256:
                 raise RuntimeError("正式交付文件哈希不一致")

@@ -408,7 +408,19 @@ def test_recovers_commit_after_filesystem_rename(
     with pytest.raises(RuntimeError, match="模拟改名后进程中断"):
         publisher.publish(command, actor_id="owner-a")
 
-    assert repository.get_intent(command.publication_key)["status"] == "committing"
+    intent = repository.get_intent(command.publication_key)
+    assert intent["status"] == "committing"
+    manifest_path = Path(intent["final_dir"]) / "manifest.json"
+    frozen_manifest = manifest_path.read_text(encoding="utf-8")
+    tampered = json.loads(frozen_manifest)
+    tampered["provenance"]["task_id"] = "tampered-task"
+    manifest_path.write_text(
+        json.dumps(tampered, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="final 与冻结 Manifest 不一致"):
+        publisher.publish(command, actor_id="owner-a")
+    manifest_path.write_text(frozen_manifest, encoding="utf-8")
     recovered = publisher.publish(command, actor_id="owner-a")
     assert recovered.status.value == "succeeded"
     assert repository.get_intent(command.publication_key)["status"] == "published"

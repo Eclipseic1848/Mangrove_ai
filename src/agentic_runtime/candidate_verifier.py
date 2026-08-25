@@ -18,7 +18,7 @@ from openai import AsyncOpenAI
 from openpyxl import load_workbook
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.model_connections import ConnectionBroker
+from src.model_connections import ConnectionBroker, ProviderOutcomeUnknownError
 
 from .models import (
     CandidateArtifact,
@@ -178,6 +178,8 @@ class BrokerSemanticJudge:
         task_id: str,
         revision: int,
         run_id: str,
+        provider_attempt_id: str | None = None,
+        allow_response_retry: bool = True,
     ) -> None:
         self._broker = broker
         self._owner_user_id = owner_user_id
@@ -187,6 +189,8 @@ class BrokerSemanticJudge:
         self._task_id = task_id
         self._revision = revision
         self._run_id = run_id
+        self._provider_attempt_id = provider_attempt_id
+        self._allow_response_retry = allow_response_retry
 
     async def judge(
         self,
@@ -205,6 +209,7 @@ class BrokerSemanticJudge:
             run_id=self._run_id,
             purpose="candidate_verify",
             ttl_seconds=300,
+            grant_id=self._provider_attempt_id,
         )
         try:
             # 外发只包含已确认任务所需的有界内容，避免把完整来源静默交给验证模型。
@@ -239,7 +244,10 @@ class BrokerSemanticJudge:
                 payload=payload,
             )
             last_error: Exception | None = None
-            for attempt in range(_SEMANTIC_JUDGE_MAX_RETRIES + 1):
+            max_retries = (
+                _SEMANTIC_JUDGE_MAX_RETRIES if self._allow_response_retry else 0
+            )
+            for attempt in range(max_retries + 1):
                 relayed = await self._broker.relay(
                     grant_token=grant.token,
                     protocol_path=protocol_path,
@@ -271,7 +279,7 @@ class BrokerSemanticJudge:
                     return SemanticDecision.model_validate_json(normalized)
                 except Exception as exc:  # noqa: BLE001
                     last_error = exc
-                    if attempt >= _SEMANTIC_JUDGE_MAX_RETRIES:
+                    if attempt >= max_retries:
                         break
             raise SemanticVerificationUnavailable(
                 "语义验证服务连续返回空或无效结果"
@@ -902,6 +910,9 @@ class CandidateVerifier:
                 ),
                 evidence=tuple(grounded_evidence),
             )
+        except ProviderOutcomeUnknownError:
+            # 可能已计费的请求不能降级为普通 inconclusive 后自动重试。
+            raise
         except Exception as exc:
             # 技术异常只进入服务日志；普通用户只看到可行动的稳定说明。
             _logger.warning("候选语义验证未形成结论", exc_info=exc)
