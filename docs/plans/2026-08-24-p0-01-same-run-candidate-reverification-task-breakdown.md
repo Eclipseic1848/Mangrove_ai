@@ -31,7 +31,7 @@
 
 GitHub 现场映射：CV-01～CV-10 分别为 #61～#70，父任务 P0-01 为 #54。所有远端写入均已
 显式指定 `--repo Eclipseic1848/Mangrove_ai`；依赖通过正文 `Part of`、`Blocked by` 和 #54
-任务清单记录。
+任务清单记录。2026-08-25 已反读确认 #61～#69 CLOSED，#70 与 #54 OPEN/ready-for-human。
 
 ## 2. 依赖图
 

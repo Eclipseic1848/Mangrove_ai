@@ -42,6 +42,7 @@ Offer、本地/Provider 完整重验、精确 Attempt 显式发布和普通用�
 发布正式 Delivery 或完成用户验收。只读核验披露 CV-07 发布幂等空字段/索引已被旧 Repository
 静默写入生产 Schema，非 NULL 记录为 0；当前实现已禁止静默 DDL，CV-10 必须先以当前一致性
 恢复点显式接管该偏差，再进入真实外发和 Owner 验收人工门。工程通过不等于生产资格。
+GitHub #61～#69 已关闭；#70 与父任务 #54 保持 OPEN/ready-for-human。
 
 ## 3. Agentic Capability
 

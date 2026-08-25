@@ -6,7 +6,7 @@
 >
 > 公开主线：`main`
 >
-> 核验实现 HEAD：`7c2a25ce6e87cc001124b8b81d5715283d5876fc`（文档同步提交以现场 HEAD 为准）
+> 核验远端能力基线：`6f29a94ba955422fb2da539d7dc0721ea62d23a9`（当前文档提交以现场 HEAD 为准）
 >
 > 当前阶段：Issues 清零后的产品化与生产安全收敛
 >
@@ -14,15 +14,15 @@
 
 ## 0. 2026-08-25 CV-09 工程恢复点与当前门禁（优先于下文旧现场值）
 
-> 实现 HEAD：`7c2a25ce6e87cc001124b8b81d5715283d5876fc`
+> 已推送能力基线：`6f29a94ba955422fb2da539d7dc0721ea62d23a9`
 >
-> 分支：`main`；`origin/main=f7aa895ed2af23786c5c6c47856824d1146957b3`；本地提交尚未推送
+> 分支：`main`；`origin/main=6f29a94ba955422fb2da539d7dc0721ea62d23a9`
 >
 > 恢复进度：规格达到 SPEC_APPROVED，任务拆分达到 TICKETS_PUBLISHED；CV-01 已完成，
 > CV-02 已达到 ENGINEERING_VERIFIED，CV-03/CV-04 已获用户接受，CV-05～CV-08 已达到
 > ENGINEERING_VERIFIED；CV-09 已达到 ENGINEERING_VERIFIED，下一门为 CV-10 人工生产/外发门
 >
-> GitHub：P0 顶层任务 #54～#60、P0-01/CV-01～CV-10 #61～#70 已创建并反读核验
+> GitHub：CV-01～CV-09 #61～#69 已关闭；CV-10 #70 与父任务 #54 保持 OPEN/ready-for-human
 
 ### 已完成
 
@@ -171,8 +171,8 @@ CV-03/CV-04 已获用户接受，CV-05～CV-09 达到 `ENGINEERING_VERIFIED`；�
 
 - CV-03 已将既有初验和语义重试接入业务 Module，但没有修改真实数据库，没有调用 Provider，
   没有重验真实 Candidate。
-- 已按持续目标创建并核验 GitHub #54～#70；已形成上述本地提交，尚未推送、创建 PR、版本
-  标签、Release 或部署。
+- 已按持续目标创建并核验 GitHub #54～#70；上述提交已直接快进推送到 `origin/main`，#61～#69
+  已写入证据并关闭，#70/#54 保持 OPEN；未创建 PR、版本标签、Release 或部署。
 - 生产 CandidateVerification `0001/0002` 尚未执行，但 CV-07 发布幂等空字段/索引已由旧代码
   静默写入，非 NULL 记录为 0；CV-10 必须先备份当前状态并显式接管，禁止静默回滚旧恢复点。
 - 工作树中的 G1 评测文件、`frontend/premium-audit.json`、既有 `.scratch/` 和其他用户改动继续
