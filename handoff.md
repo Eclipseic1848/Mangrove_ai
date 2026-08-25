@@ -16,7 +16,7 @@
 
 > 已推送能力基线：`6f29a94ba955422fb2da539d7dc0721ea62d23a9`
 >
-> 分支：`main`；`origin/main=6f29a94ba955422fb2da539d7dc0721ea62d23a9`
+> 分支：`main`；`origin/main` 与当前文档提交一致，接手时仍须现场 `rev-parse` 复核
 >
 > 恢复进度：规格达到 SPEC_APPROVED，任务拆分达到 TICKETS_PUBLISHED；CV-01 已完成，
 > CV-02 已达到 ENGINEERING_VERIFIED，CV-03/CV-04 已获用户接受，CV-05～CV-08 已达到
