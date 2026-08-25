@@ -36,6 +36,11 @@ class _GateFakeRuntime:
 
     def __init__(self):
         self.cancel_calls: list[tuple] = []
+        self.candidate_verification = None
+
+    def bind_candidate_verification(self, service):
+        """测试替身遵守 Pi Runtime 的候选验证绑定接口。"""
+        self.candidate_verification = service
 
     async def cancel(self, user_id, task_id, revision):
         self.cancel_calls.append((user_id, task_id, revision))
@@ -519,7 +524,12 @@ class TestS6Supervision:
         monkeypatch.setattr(
             runtime_mod, "_upload_store", lambda: _UploadStore()
         )
-        manager = SemanticWorkspaceManager(pi_runtime=_StartFakeRuntime())
+        # 本用例只验证运行期 Gate 命中后的退出语义；显式数据库迁移门由独立迁移测试覆盖。
+        # 注入占位服务可避免测试误连维护者数据库，同时若执行越过 Gate 仍会因缺少方法而失败。
+        manager = SemanticWorkspaceManager(
+            pi_runtime=_StartFakeRuntime(),
+            candidate_verification=object(),
+        )
 
         async def gate_hit(self, *args, **kwargs):
             raise runtime_mod._GateViolationAbort("测试命中")
