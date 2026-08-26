@@ -173,7 +173,7 @@ plotly==6.6.0
 prettytable==3.17.0
 propcache==0.4.1
 protobuf==6.33.4
-pyarrow==22.0.0
+pyarrow==23.0.1
 duckdb==1.5.5
 pandera==0.32.1
 polars==1.43.2

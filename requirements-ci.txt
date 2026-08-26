@@ -8,7 +8,7 @@ langchain-openai==1.1.7
 openai==2.14.0
 pydantic==2.12.5
 pydantic-settings==2.12.0
-pyarrow==22.0.0
+pyarrow==23.0.1
 pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-randomly==4.1.0
