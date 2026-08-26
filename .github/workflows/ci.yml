@@ -1,0 +1,125 @@
+name: minimum-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: minimum-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-fast:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - name: 安装快速门依赖
+        run: |
+          set -euo pipefail
+          mkdir -p .artifacts/ci
+          python -m pip install --disable-pip-version-check -r requirements-ci.txt 2>&1 | tee .artifacts/ci/backend-install.log
+      - name: 验证依赖一致性
+        run: |
+          set -euo pipefail
+          mkdir -p .artifacts/ci
+          python scripts/ci/check_requirement_consistency.py --base requirements.txt --subset requirements-ci.txt | tee .artifacts/ci/requirements.json
+          python -m pip check
+      - name: 验证仓库 UTF-8
+        run: python scripts/ci/check_utf8.py | tee .artifacts/ci/utf8.json
+      - name: 运行快速单元、契约与迁移 dry-run
+        run: |
+          python -m pytest -q \
+            tests/test_ci_contract.py \
+            tests/test_data_prep_contracts.py \
+            tests/test_candidate_verification_migration.py \
+            --junitxml=.artifacts/ci/python-fast.xml
+      - name: 上传后端门证据
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: backend-fast-evidence
+          path: .artifacts/ci
+          if-no-files-found: error
+          retention-days: 14
+
+  frontend-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 安装锁定依赖
+        run: |
+          set -euo pipefail
+          mkdir -p ../.artifacts/ci
+          npm ci 2>&1 | tee ../.artifacts/ci/frontend-install.log
+      - name: 类型检查与生产构建
+        run: |
+          set -euo pipefail
+          mkdir -p ../.artifacts/ci
+          npm run build 2>&1 | tee ../.artifacts/ci/frontend-build.log
+      - name: 上传前端门证据
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: frontend-build-evidence
+          path: .artifacts/ci
+          if-no-files-found: error
+          retention-days: 14
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GITLEAKS_VERSION: '8.30.1'
+      GITLEAKS_LINUX_X64_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+      - name: 下载并校验 Gitleaks
+        run: |
+          set -euo pipefail
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl --fail --location --silent --show-error \
+            --output "/tmp/${archive}" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_LINUX_X64_SHA256}  /tmp/${archive}" | sha256sum --check
+          tar -xzf "/tmp/${archive}" -C /tmp gitleaks
+      - name: 扫描提交历史中的 Secret
+        run: |
+          mkdir -p .artifacts/ci
+          /tmp/gitleaks git --redact=100 --report-format json \
+            --report-path .artifacts/ci/gitleaks.json .
+      - name: 上传脱敏扫描证据
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: secret-scan-evidence
+          path: .artifacts/ci
+          if-no-files-found: warn
+          retention-days: 14

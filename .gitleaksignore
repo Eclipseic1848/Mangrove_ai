@@ -1,0 +1,12 @@
+# 已人工核对：模型连接 API 测试使用固定测试字面量，不是真实凭据。
+40fe88194ad008c4848a157e8c25968e558319cc:tests/test_model_connections_api.py:generic-api-key:822
+40fe88194ad008c4848a157e8c25968e558319cc:tests/test_model_connections_api.py:generic-api-key:978
+40fe88194ad008c4848a157e8c25968e558319cc:tests/test_model_connections_api.py:generic-api-key:1294
+40fe88194ad008c4848a157e8c25968e558319cc:tests/test_model_connections_api.py:generic-api-key:1516
+
+# 已人工核对：早期误提交本机命令中的 Authorization 值均为 __...__ 占位符。
+8dd234af3832b63e8c3b58e40fa1ae1fea91f51b:.claude/settings.local.json:curl-auth-header:196
+8dd234af3832b63e8c3b58e40fa1ae1fea91f51b:.claude/settings.local.json:curl-auth-header:201
+8dd234af3832b63e8c3b58e40fa1ae1fea91f51b:.claude/settings.local.json:curl-auth-header:203
+8dd234af3832b63e8c3b58e40fa1ae1fea91f51b:.claude/settings.local.json:curl-auth-header:204
+8dd234af3832b63e8c3b58e40fa1ae1fea91f51b:.claude/settings.local.json:curl-auth-header:205

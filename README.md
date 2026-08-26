@@ -130,16 +130,21 @@ py -3.13 -X utf8 -m playwright install chromium
 ### 运行门禁
 
 ```powershell
-py -3.13 -X utf8 -m pytest
+py -3.13 -X utf8 scripts/ci/check_requirement_consistency.py `
+  --base requirements.txt --subset requirements-ci.txt
+py -3.13 -X utf8 scripts/ci/check_utf8.py
+py -3.13 -X utf8 -m pytest tests/test_ci_contract.py `
+  tests/test_data_prep_contracts.py tests/test_candidate_verification_migration.py
 
 Set-Location frontend
+npm ci
 npm run build
-npm run test:e2e
 ```
 
-完整测试可能调用 Docker、OCR、本地模型或真实样例。应按当前工单风险选择最小充分门禁，
-并保留可重复的测试源码；生成物可用 `scripts/clean_generated_artifacts.ps1` 清理。自动化测试
-通过不等于用户验收或生产资格。
+GitHub 的 `minimum-ci` 还会用固定版本 Gitleaks 扫描完整提交历史，并上传脱敏日志、JSON 与
+JUnit 证据。完整 pytest、浏览器 E2E、Docker 构建和 G1 冻结契约只能人工触发
+`heavy-ci-manual`；真实样例和外部模型继续走独立人工授权门，任何 CI 都不读取生产 Secret。
+详细分层见 `CONTRIBUTING.md`。自动化测试通过不等于用户验收或生产资格。
 
 ## 可选第三方组件
 

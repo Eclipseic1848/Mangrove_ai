@@ -2,7 +2,7 @@
 
 > status: active
 >
-> last_verified: 2026-08-25
+> last_verified: 2026-08-26
 >
 > branch: `main`
 >
@@ -74,7 +74,18 @@ GitHub #61～#70 与父任务 #54 均已关闭。
 
 TaskOwner 随后明确回复“同意”，`liyi111` 的 P0-01 真实普通用户闭环达到 `LIVE_ACCEPTED`。
 实现与证据已由提交 `20d3a2a9` 推送到 `main`；GitHub #70 与父任务 #54 已写入完成证据并于
-2026-08-26 关闭。下一张依赖工单为 #55 最小 CI 工程门。
+2026-08-26 关闭。
+
+P0-04A #55 最小 CI 已在本地达到 `ENGINEERING_VERIFIED`：新增 `minimum-ci`，覆盖 Python 3.13
+快速契约/迁移 dry-run、前端锁文件安装/类型检查/生产构建、CI 子集依赖一致性、隔离环境
+`pip check`、1,163 个受跟踪非二进制文本文件 UTF-8 检查，以及固定 checksum 的 Gitleaks 8.30.1 完整
+历史扫描。干净 Python 环境最终回归为 34 passed，隔离前端 `npm ci + build` 通过，Gitleaks 扫描 330 个
+提交约 38.18 MB 后 0 条未处理发现。独立 `heavy-ci-manual` 仅允许人工选择完整回归、G1 冻结
+契约或 Docker 构建；真实 Provider 仍在 CI 外单独授权。CI 只上传脱敏日志、JSON 和 JUnit，
+普通 PR 不使用生产 Secret、不调用外部模型、不启动服务。Standards/Spec 双轴复审均为 PASS，
+无剩余 P1/P2。GitHub workflow 尚未提交/推送或远端运行，分支保护仍由
+#59 独立授权；#55 的远端证据与关闭也尚未执行。实施证据：
+`docs/plans/2026-08-26-p0-04a-minimum-ci-implementation-report.md`。
 
 Gate A 后发现 11 条旧任务因重验资格投影无法解析旧冻结上下文而导致详情接口失败，前端又将
 错误显示成空白。2026-08-25 已完成正式兼容修复：不回填或推断旧字段，任务详情和 Candidate

@@ -19,7 +19,7 @@
 |---|---|---|---|
 | #54 | P0-01 vNext 默认链路与真实普通用户闭环 | CLOSED / LIVE_ACCEPTED | 2026-08-26 远端收口 |
 | #70 | CV-10 生产迁移、真实同 Run 重验与 Owner 验收 | CLOSED / LIVE_ACCEPTED | 2026-08-26 远端收口 |
-| #55 | P0-04A 最小 CI 工程门 | OPEN / `ready-for-agent` | #54 |
+| #55 | P0-04A 最小 CI 工程门 | OPEN / `ENGINEERING_VERIFIED`（本地，待远端） | #54 |
 | #56 | P0-05 显式数据库迁移体系 | OPEN / `ready-for-agent` | #55 |
 | #57 | P0-02 Secret 存储统一 | OPEN / `ready-for-agent` | #56 |
 | #58 | P0-03 依赖拆分与漏洞治理 | OPEN / `ready-for-agent` | #55 |
@@ -122,7 +122,20 @@ Delivery。
 
 ## 5. 当前正在做什么、卡在哪里
 
-当前存在两个不同账号、不同 Candidate、不同业务原因的恢复任务。绝对不能混用授权或实现。
+### 5.0 #55 最小 CI 工程门
+
+#55 已完成本地 TDD 实现与隔离验证：`.github/workflows/ci.yml` 提供 Python 3.13 快速契约/迁移
+dry-run、前端 `npm ci + build`、UTF-8、依赖一致性/`pip check` 和 Gitleaks 8.30.1 完整历史扫描；
+`ci-heavy.yml` 只允许人工选择完整回归、G1 冻结契约或 Docker 构建，不接收生产 Secret。
+Action 均固定不可变提交，Gitleaks 二进制固定官方 checksum，证据只保存脱敏日志、JSON 与 JUnit。
+干净 Python 环境最终回归 34 passed，1,163 个受跟踪非二进制文本文件 UTF-8 通过，隔离前端安装/构建通过，Gitleaks
+330 个提交约 38.18 MB 扫描后 0 条未处理发现。当前没有修改生产数据、调用模型、使用 Secret、
+提交、推送或写 GitHub。Standards/Spec 双轴复审均为 PASS，无剩余 P1/P2；下一门是由用户决定是否授权提交/推送、远端运行和
+#55 Issue 更新/关闭；#59 分支保护仍是后续独立授权。
+
+证据：`docs/plans/2026-08-26-p0-04a-minimum-ci-implementation-report.md`。
+
+以下两个 Candidate 恢复任务均已完成并保留为历史证据；当前在制任务是上面的 #55。
 
 ### 5.1 已完成真实执行：历史 `inconclusive` 只重跑语义门
 
@@ -264,8 +277,8 @@ TaskOwner 随后明确回复“同意”，#70 达到 `LIVE_ACCEPTED`。现场�
 
 ### C. 按依赖完成剩余 P0 Issues
 
-1. #55：把 Python 3.13 快速测试、前端类型/构建、依赖一致性、Secret 扫描、迁移 dry-run、
-   UTF-8 检查固化为 CI；真实 Provider 与重门不进入 PR Secret；
+1. #55：本地实现、隔离验证与双轴复审已完成；待独立授权后的提交、推送、远端运行和 Issue
+   收口；
 2. #56：建立唯一显式迁移注册表、版本、备份、重放、恢复和并发锁；应用启动只验 Schema；
 3. #57：配置中心 Secret 迁入现有 Vault/SecretRef；是否轮换或销毁旧 Secret 必须另行确认；
 4. #58：拆分 runtime/dev/GPU/evaluation/可选依赖，处理 Critical/High 或形成可达性风险结论；
@@ -314,7 +327,7 @@ Security 和 GitHub About。稳定法律/治理/安全文件无语义变化时�
 
 当前工作树是脏的，至少包含：
 
-- 本会话的历史任务读取/语义重试代码、测试、规格和状态文档；
+- 本会话的 #55 CI workflow、检查脚本、测试、依赖子集和状态文档；
 - 用户持有的 G1 评测文件修改；
 - `.scratch/`、`frontend/premium-audit.json` 等本地或审计内容。
 
@@ -403,7 +416,7 @@ Security 和 GitHub About。稳定法律/治理/安全文件无语义变化时�
 
 ## 12. 给下一个会话的第一条执行指令
 
-先不要调用 Provider、发布或写 GitHub。保留全部工作树改动，读取 legacy 再基线实施报告并现场
-复核 Git、生产 Schema/Attempt/Grant/Delivery。`liyi` 的真实 Attempt 已确定失败且授权已消耗，
-不得重试或发布。当前第一项人工门是：是否授权只对生产 `data/webui.db` 执行 CandidateVerification
-0004 显式迁移；这不授权 `liyi111` Provider、真实 Attempt 或正式发布。
+先不要调用 Provider、迁移生产库或修改 GitHub。保留用户 G1 文件和全部工作树改动，读取
+`docs/plans/2026-08-26-p0-04a-minimum-ci-implementation-report.md`，现场复核 Git 与 #55 状态。
+当前精确下一步是展示 #55 本地证据；只有用户另行授权后才可提交、推送、运行
+远端 workflow、更新/关闭 #55。#55 远端收口后，下一张依赖工单是 #56 显式数据库迁移体系。
