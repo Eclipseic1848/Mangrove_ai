@@ -1,6 +1,6 @@
 # P0-04A 最小 CI 工程门实施报告
 
-> status: ENGINEERING_VERIFIED_LOCAL
+> status: REMOTE_CI_VERIFIED / ISSUE_CLOSED
 >
 > issue: GitHub #55
 >
@@ -11,11 +11,12 @@
 ## 1. 范围与结论
 
 本切片把现有后端契约/迁移测试、前端锁文件安装与生产构建、依赖一致性、UTF-8 和 Secret
-扫描固化为最小 GitHub Actions 工程门。结果达到本地 `ENGINEERING_VERIFIED`，但 workflow
-尚未提交、推送或在 GitHub 托管 runner 上运行，分支保护也未配置。
+扫描固化为最小 GitHub Actions 工程门。实现提交 `0c815bfd` 已推送到 `main`；GitHub Actions
+运行 `32947317082` 的 backend-fast、frontend-build、secret-scan 三个 Job 全部成功，#55 已写入
+证据并关闭。分支保护仍未配置，由 #59 独立处理。
 
 本次没有修改业务代码、生产数据库、端口或服务，没有调用外部模型，没有读取或使用生产
-Secret，也没有执行提交、推送、Issue 写入、分支保护或发布。
+Secret，也没有配置分支保护或发布；远端写入仅限获授权的提交、推送、CI 运行与 #55 收口。
 
 ## 2. 实现
 
@@ -81,7 +82,7 @@ Secret，也没有执行提交、推送、Issue 写入、分支保护或发布�
 
 ## 5. 未完成与后续边界
 
-- GitHub 托管 runner 尚未现场运行；提交、推送和 #55 更新/关闭需要独立授权。
+- GitHub 托管 runner 运行 `32947317082` 已成功，#55 已更新并关闭。
 - `main` required checks、禁止强推和测试 PR 属于 #59，不能由本实现自动配置。
 - 完整生产依赖拆分、Critical/High/Moderate 漏洞处置与可达性结论属于 #58。
 - 统一迁移注册表、所有子系统迁移入口和应用启动只验 Schema 属于 #56；本门只执行当前最完整的
