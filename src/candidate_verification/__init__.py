@@ -4,6 +4,13 @@
 from .models import (
     AttemptReason,
     AttemptStatus,
+    HistoricalAuthorityRecoveryConfirmation,
+    HistoricalAuthorityRecoveryOffer,
+    HistoricalReverificationAuthority,
+    HistoricalReverificationBinding,
+    HistoricalReverificationEvidence,
+    HistoricalReverificationPurpose,
+    RebaselineAuthorizationEvidence,
     ReverificationBlocker,
     ReverificationOffer,
     RulesetIdentityStatus,
@@ -14,6 +21,7 @@ from .repository import (
     SqliteCandidateVerificationRepository,
     migrate_candidate_verification,
 )
+from .runtime_request import parse_frozen_runtime_request
 from .service import (
     CandidateVerificationService,
     ReverificationContractError,
@@ -26,6 +34,13 @@ __all__ = [
     "AttemptStatus",
     "CandidateVerificationService",
     "CurrentVerifierRulesetResolver",
+    "HistoricalAuthorityRecoveryConfirmation",
+    "HistoricalAuthorityRecoveryOffer",
+    "HistoricalReverificationAuthority",
+    "HistoricalReverificationBinding",
+    "HistoricalReverificationEvidence",
+    "HistoricalReverificationPurpose",
+    "RebaselineAuthorizationEvidence",
     "ReverificationOffer",
     "ReverificationBlocker",
     "ReverificationContractError",
@@ -35,4 +50,5 @@ __all__ = [
     "VerificationAttempt",
     "VerifierRulesetBinding",
     "migrate_candidate_verification",
+    "parse_frozen_runtime_request",
 ]

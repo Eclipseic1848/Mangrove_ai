@@ -10,6 +10,7 @@ import sqlite3
 import pytest
 from src.agentic_runtime.candidate_verifier import BrokerSemanticJudge, CandidateVerifier
 from src.candidate_verification import ReverificationContractError
+from src.candidate_verification import RebaselineAuthorizationEvidence
 from src.model_connections import (
     AccessGrant,
     ConnectionBroker,
@@ -17,10 +18,28 @@ from src.model_connections import (
 )
 from src.model_connections.storage import ModelConnectionRepository
 from tests.test_candidate_reverification_offer import (
+    _InconclusiveVerifier,
     _PassingVerifier,
     _prepare_candidate,
+    _prepare_legacy_candidate,
     _service,
 )
+
+
+class _SemanticOnlyPassingVerifier:
+    def __init__(self) -> None:
+        self.verify_calls = 0
+        self.semantic_retry_calls = 0
+        self.previous_status = None
+
+    async def verify(self, **_kwargs):
+        self.verify_calls += 1
+        raise AssertionError("语义重试不得执行完整 Verifier")
+
+    async def retry_semantic_verification(self, *, previous_report, **kwargs):
+        self.semantic_retry_calls += 1
+        self.previous_status = previous_report.status
+        return await _PassingVerifier().verify(**kwargs)
 
 
 class _OutcomeUnknownVerifier:
@@ -120,6 +139,148 @@ def test_provider_reverification_persists_frozen_attempt_before_execution(
     assert attempt.egress_confirmed_at is not None
     assert attempt.provider_attempt_id is not None
     assert repository.get("owner-a", attempt.attempt_id) == attempt
+
+
+def test_semantic_inconclusive_worker_only_retries_semantic_gate(
+    tmp_path: Path,
+) -> None:
+    repository, previous = _prepare_candidate(
+        tmp_path,
+        verifier=_InconclusiveVerifier(),
+        provider=True,
+    )
+    service = _service(repository, "5")
+    _enable_execution_claim(tmp_path / "workspace.db")
+    verifier = _SemanticOnlyPassingVerifier()
+    factory = lambda _request, _run_id, _provider_attempt_id=None: verifier
+    requested = asyncio.run(
+        service.request_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+            expected_previous_attempt_id=previous.attempt_id,
+            external_api_confirmed=True,
+            idempotency_key="provider-semantic-only-1",
+            verifier_factory=factory,
+        )
+    )
+
+    finished = asyncio.run(
+        service.execute_requested_reverification(
+            owner_id="owner-a",
+            attempt_id=requested.attempt_id,
+            verifier_factory=factory,
+        )
+    )
+
+    assert requested.reason_code.value == "semantic_inconclusive"
+    assert finished.status.value == "passed"
+    assert verifier.semantic_retry_calls == 1
+    assert verifier.verify_calls == 0
+    assert verifier.previous_status.value == "inconclusive"
+    with sqlite3.connect(tmp_path / "workspace.db") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM formal_delivery_runs").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM semantic_delivery_runs").fetchone()[0] == 0
+
+
+def test_legacy_inconclusive_provider_retry_creates_versioned_attempt_without_delivery(
+    tmp_path: Path,
+) -> None:
+    repository = _prepare_legacy_candidate(
+        tmp_path,
+        provider=True,
+        inconclusive=True,
+        omit_external_confirmation=True,
+    )
+    service = _service(repository, "9")
+    _enable_execution_claim(tmp_path / "workspace.db")
+    offer = asyncio.run(
+        service.inspect_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+        )
+    )
+    verifier = _SemanticOnlyPassingVerifier()
+    factory = lambda _request, _run_id, _provider_attempt_id=None: verifier
+
+    requested = asyncio.run(
+        service.request_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+            expected_previous_attempt_id=offer.previous_attempt_id,
+            external_api_confirmed=True,
+            idempotency_key="legacy-provider-semantic-only-1",
+            verifier_factory=factory,
+        )
+    )
+    finished = asyncio.run(
+        service.execute_requested_reverification(
+            owner_id="owner-a",
+            attempt_id=requested.attempt_id,
+            verifier_factory=factory,
+        )
+    )
+
+    assert requested.ruleset_identity_status.value == "versioned"
+    assert requested.previous_attempt_id == offer.previous_attempt_id
+    assert requested.egress_confirmed_at is not None
+    assert finished.status.value == "passed"
+    assert verifier.semantic_retry_calls == 1
+    assert verifier.verify_calls == 0
+    with sqlite3.connect(tmp_path / "workspace.db") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM formal_delivery_runs").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM semantic_delivery_runs").fetchone()[0] == 0
+
+
+def test_invalid_previous_report_is_rejected_before_attempt_is_claimed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository, previous = _prepare_candidate(
+        tmp_path,
+        verifier=_InconclusiveVerifier(),
+        provider=True,
+    )
+    service = _service(repository, "5")
+    verifier = _SemanticOnlyPassingVerifier()
+    factory = lambda _request, _run_id, _provider_attempt_id=None: verifier
+    requested = asyncio.run(
+        service.request_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+            expected_previous_attempt_id=previous.attempt_id,
+            external_api_confirmed=True,
+            idempotency_key="provider-invalid-previous-report-1",
+            verifier_factory=factory,
+        )
+    )
+    original_list_for_candidate = repository.list_for_candidate
+
+    def tampered_history(*args, **kwargs):
+        return tuple(
+            attempt.model_copy(update={"report_json": "{}"})
+            if attempt.attempt_id == previous.attempt_id
+            else attempt
+            for attempt in original_list_for_candidate(*args, **kwargs)
+        )
+
+    monkeypatch.setattr(repository, "list_for_candidate", tampered_history)
+
+    with pytest.raises(RuntimeError, match="报告哈希"):
+        asyncio.run(
+            service.execute_requested_reverification(
+                owner_id="owner-a",
+                attempt_id=requested.attempt_id,
+                verifier_factory=factory,
+            )
+        )
+
+    assert repository.get("owner-a", requested.attempt_id).status.value == "requested"
+    assert verifier.semantic_retry_calls == 0
+    assert verifier.verify_calls == 0
 
 
 def test_provider_reverification_requires_fresh_owner_egress_confirmation(
@@ -437,6 +598,134 @@ def test_outcome_unknown_recovery_requires_new_cost_confirmation_and_attempt(
                 verifier_factory=factory,
             )
         )
+
+
+def test_legacy_rebaseline_outcome_unknown_recovers_with_distinct_reason(
+    tmp_path: Path,
+) -> None:
+    repository = _prepare_legacy_candidate(tmp_path, provider=True)
+    service = _service(repository, "9")
+    _enable_execution_claim(tmp_path / "workspace.db")
+    verifier = _OutcomeUnknownVerifier()
+    factory = lambda _request, _run_id, _provider_attempt_id=None: verifier
+    offer = asyncio.run(
+        service.inspect_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+        )
+    )
+    first = asyncio.run(
+        service.request_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+            expected_previous_attempt_id=str(offer.previous_attempt_id),
+            expected_candidate_set_hash=offer.candidate_set_hash,
+            expected_target_ruleset_hash=str(offer.target_ruleset_hash),
+            legacy_ruleset_unknown_acknowledged=True,
+            authorization_text_version="legacy-rebaseline-v1",
+            external_api_confirmed=True,
+            idempotency_key="legacy-provider-unknown-original",
+            verifier_factory=factory,
+        )
+    )
+    unknown = asyncio.run(
+        service.execute_requested_reverification(
+            owner_id="owner-a",
+            attempt_id=first.attempt_id,
+            verifier_factory=factory,
+        )
+    )
+    assert unknown.status.value == "outcome_unknown"
+
+    recovered = asyncio.run(
+        service.request_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+            expected_previous_attempt_id=unknown.attempt_id,
+            external_api_confirmed=True,
+            accept_duplicate_provider_cost=True,
+            idempotency_key="legacy-provider-unknown-recovery",
+            verifier_factory=factory,
+        )
+    )
+
+    assert unknown.status.value == "outcome_unknown"
+    assert recovered.reason_code.value == "provider_outcome_recovery"
+    assert recovered.rebaseline_authorization_json is None
+    assert recovered.previous_attempt_id == unknown.attempt_id
+
+
+def test_worker_cancels_legacy_rebaseline_when_frozen_authorization_drifts(
+    tmp_path: Path,
+) -> None:
+    repository = _prepare_legacy_candidate(tmp_path, provider=True)
+    service = _service(repository, "9")
+    _enable_execution_claim(tmp_path / "workspace.db")
+    verifier = _OutcomeUnknownVerifier()
+    offer = asyncio.run(
+        service.inspect_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+        )
+    )
+    requested = asyncio.run(
+        service.request_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+            expected_previous_attempt_id=str(offer.previous_attempt_id),
+            expected_candidate_set_hash=offer.candidate_set_hash,
+            expected_target_ruleset_hash=str(offer.target_ruleset_hash),
+            legacy_ruleset_unknown_acknowledged=True,
+            authorization_text_version="legacy-rebaseline-v1",
+            external_api_confirmed=True,
+            idempotency_key="legacy-authorization-drift",
+            verifier_factory=lambda *_args: verifier,
+        )
+    )
+    authorization = RebaselineAuthorizationEvidence.model_validate_json(
+        str(requested.rebaseline_authorization_json)
+    ).model_copy(update={"candidate_set_hash": "0" * 64})
+    with sqlite3.connect(tmp_path / "workspace.db") as connection:
+        trigger_rows = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' "
+            "AND name IN (?, ?)",
+            (
+                "candidate_verification_identity_no_update",
+                "candidate_verification_status_transition_guard",
+            ),
+        ).fetchall()
+        connection.execute("DROP TRIGGER candidate_verification_identity_no_update")
+        connection.execute(
+            "DROP TRIGGER candidate_verification_status_transition_guard"
+        )
+        connection.execute(
+            "UPDATE candidate_verification_attempts "
+            "SET rebaseline_authorization_json=?, rebaseline_authorization_hash=? "
+            "WHERE attempt_id=?",
+            (
+                authorization.canonical_json(),
+                authorization.sha256(),
+                requested.attempt_id,
+            ),
+        )
+        for (trigger_sql,) in trigger_rows:
+            connection.execute(trigger_sql)
+
+    cancelled = asyncio.run(
+        service.execute_requested_reverification(
+            owner_id="owner-a",
+            attempt_id=requested.attempt_id,
+            verifier_factory=lambda *_args: verifier,
+        )
+    )
+
+    assert cancelled.status.value == "cancelled"
+    assert verifier.calls == 0
 
 
 def test_worker_recovery_revokes_provider_grant_and_marks_outcome_unknown(

@@ -19,7 +19,7 @@ import {
   X,
 } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { isAdminish, useAuth } from "@/lib/auth";
 import { TaskComposer } from "@/components/workspace/TaskComposer";
 import {
@@ -42,7 +42,6 @@ import {
   listWorkspaceTasks,
   permanentlyDeleteWorkspaceTask,
   recycleWorkspaceTask,
-  retryCandidateVerification,
   requestCandidateReverification,
   publishCandidateVerification,
   restoreWorkspaceTask,
@@ -87,6 +86,17 @@ type ModelConnection = {
   }>;
 };
 type ModelConnectionsResponse = { items: ModelConnection[] };
+
+function taskRecoveryError(error: unknown) {
+  if (!(error instanceof ApiError)) {
+    return "任务详情暂时无法读取，请稍后重新加载。";
+  }
+  if (error.status === 401) return "登录状态已失效，请重新登录后再打开任务。";
+  if (error.status === 403) return "当前账号没有读取这条任务的权限。";
+  if (error.status === 404) return "这条任务已不存在或已被移出当前列表。";
+  if (error.status >= 500) return "历史任务详情暂时无法读取，请稍后重新加载。";
+  return error.message;
+}
 
 function FollowupComposer({
   task,
@@ -810,6 +820,42 @@ export function SemanticWorkspacePage() {
               <Loader2 className="h-5 w-5 animate-spin" />
               正在恢复任务
             </div>
+          ) : selectedTaskId && detail.isError ? (
+            <div className="flex h-full items-center justify-center px-5 py-8">
+              <section
+                role="alert"
+                aria-labelledby="task-recovery-error-title"
+                className="w-full max-w-md rounded-2xl border border-destructive/25 bg-destructive/[0.04] p-6 text-center shadow-sm"
+              >
+                <FileSearch className="mx-auto h-8 w-8 text-destructive" />
+                <h2
+                  id="task-recovery-error-title"
+                  className="mt-3 text-base font-semibold"
+                >
+                  任务恢复失败
+                </h2>
+                <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                  历史任务仍保留在任务列表中，本次只是详情读取失败。
+                </p>
+                <p className="mt-2 text-sm leading-6 text-destructive">
+                  {taskRecoveryError(detail.error)}
+                </p>
+                <button
+                  type="button"
+                  disabled={detail.isFetching}
+                  aria-busy={detail.isFetching}
+                  onClick={() => void detail.refetch()}
+                  className="mt-5 inline-flex h-10 min-w-28 cursor-pointer items-center justify-center gap-2 rounded-xl border bg-background px-4 text-sm font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {detail.isFetching ? (
+                    <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
+                  ) : (
+                    <RotateCcw className="h-4 w-4" />
+                  )}
+                  重新加载
+                </button>
+              </section>
+            </div>
           ) : task ? (
             <Group
               orientation="horizontal"
@@ -1050,14 +1096,26 @@ export function SemanticWorkspacePage() {
                                   === task.agentic_runtime?.reverification_offer?.connection_id,
                               )?.display_name
                             }
-                            onRequestReverification={async (externalApiConfirmed) => {
+                            onRequestReverification={async (
+                              externalApiConfirmed,
+                              historicalAuthorityRecovery,
+                              legacyRebaseline,
+                            ) => {
                               const previousAttemptId = task.agentic_runtime
                                 ?.latest_verification_attempt?.attempt_id;
                               if (!previousAttemptId) {
                                 throw new Error("缺少当前验证记录，请刷新后重试");
                               }
                               const revision = task.current_revision ?? task.active_revision;
-                              const fingerprint = `${task.task_id}:${revision}:${previousAttemptId}`;
+                              const offer = task.agentic_runtime?.reverification_offer;
+                              const fingerprint = [
+                                task.task_id,
+                                revision,
+                                previousAttemptId,
+                                offer?.reason ?? "none",
+                                offer?.candidate_set_hash ?? "none",
+                                offer?.target_ruleset_hash ?? "none",
+                              ].join(":");
                               if (reverificationAttemptRef.current?.fingerprint !== fingerprint) {
                                 reverificationAttemptRef.current = {
                                   fingerprint,
@@ -1071,6 +1129,9 @@ export function SemanticWorkspacePage() {
                                   expected_previous_attempt_id: previousAttemptId,
                                   external_api_confirmed: externalApiConfirmed,
                                   accept_duplicate_provider_cost: false,
+                                  historical_authority_recovery:
+                                    historicalAuthorityRecovery,
+                                  ...legacyRebaseline,
                                 },
                                 reverificationAttemptRef.current.key,
                               );
@@ -1101,20 +1162,6 @@ export function SemanticWorkspacePage() {
                               await Promise.all([
                                 queryClient.invalidateQueries({
                                   queryKey: ["semantic-workspace-task", task.task_id],
-                                }),
-                                queryClient.invalidateQueries({
-                                  queryKey: ["semantic-workspace-tasks"],
-                                }),
-                              ]);
-                            }}
-                            onRetryVerification={async () => {
-                              await retryCandidateVerification(task.task_id);
-                              await Promise.all([
-                                queryClient.invalidateQueries({
-                                  queryKey: [
-                                    "semantic-workspace-task",
-                                    task.task_id,
-                                  ],
                                 }),
                                 queryClient.invalidateQueries({
                                   queryKey: ["semantic-workspace-tasks"],

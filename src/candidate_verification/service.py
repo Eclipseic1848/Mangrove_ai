@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
+import sqlite3
 from typing import Protocol
 
 from src.agentic_runtime.models import (
@@ -22,6 +23,13 @@ from src.model_connections import ProviderOutcomeUnknownError
 from .models import (
     AttemptReason,
     AttemptStatus,
+    HistoricalAuthorityRecoveryConfirmation,
+    HistoricalAuthorityRecoveryOffer,
+    HistoricalReverificationAuthority,
+    HistoricalReverificationBinding,
+    HistoricalReverificationEvidence,
+    HistoricalReverificationPurpose,
+    RebaselineAuthorizationEvidence,
     ReverificationBlocker,
     ReverificationOffer,
     RulesetIdentityStatus,
@@ -29,6 +37,10 @@ from .models import (
     VerifierRulesetBinding,
 )
 from .repository import SqliteCandidateVerificationRepository
+from .runtime_request import (
+    frozen_request_contract_hashes,
+    parse_frozen_runtime_request,
+)
 
 
 class CandidateVerifierPort(Protocol):
@@ -97,6 +109,13 @@ class ReverificationAuthorityPort(Protocol):
         run_id: str,
     ) -> tuple[ReverificationBlocker, ...]: ...
 
+    def historical_recovery_evidence(
+        self,
+        request: PiRuntimeRequest,
+        run_id: str,
+        binding: HistoricalReverificationBinding,
+    ) -> HistoricalReverificationEvidence | None: ...
+
 
 class ReverificationUnavailableError(RuntimeError):
     """当前服务环境无法可靠冻结或执行重验。"""
@@ -112,6 +131,18 @@ class _P0ViolationAbort(RuntimeError):
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _historical_evidence_manifest(
+    evidence: HistoricalReverificationEvidence,
+) -> tuple[str, str]:
+    manifest = json.dumps(
+        evidence.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return manifest, _sha256_bytes(manifest.encode("utf-8"))
 
 
 def _candidate_set_hash(candidates: tuple[CandidateArtifact, ...]) -> str:
@@ -136,46 +167,36 @@ def _candidate_set_hash(candidates: tuple[CandidateArtifact, ...]) -> str:
 
 
 def _request_contract_hashes(request: PiRuntimeRequest) -> tuple[str, str]:
-    goal_payload = {
-        "owner_id": request.user_id,
-        "task_id": request.task_id,
-        "revision": request.revision,
-        "objective_text": request.objective_text,
-        "permission_profile": request.permission_profile.value,
-        "external_api_confirmed": request.external_api_confirmed,
-        "model_connection_id": request.model_connection_id,
-        "model_connection_version": request.model_connection_version,
-        "model_connection_model": request.model_connection_model,
-        "local_model": request.model,
-        "local_base_url_hash": (
-            _sha256_bytes(request.base_url.encode("utf-8"))
-            if request.base_url is not None
-            else None
-        ),
-        "sources": [
-            {
-                "upload_id": source.upload_id,
-                "original_name": source.original_name,
-                "sha256": source.sha256,
-            }
-            for source in request.sources
-        ],
-    }
-    delivery_payload = {
-        "requested_output_formats": request.requested_output_formats,
-        "table_output_contracts": [
-            item.model_dump(mode="json") for item in request.table_output_contracts
-        ],
-    }
-    encode = lambda value: json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return _sha256_bytes(encode(goal_payload)), _sha256_bytes(
-        encode(delivery_payload)
-    )
+    return frozen_request_contract_hashes(request)
+
+
+def _semantic_retry_report_is_eligible(
+    *,
+    previous: VerificationAttempt,
+    current_report_json: str,
+    request: PiRuntimeRequest,
+) -> bool:
+    if previous.report_json is None or previous.report_hash is None:
+        return False
+    if _sha256_bytes(previous.report_json.encode("utf-8")) != previous.report_hash:
+        return False
+    if _sha256_bytes(current_report_json.encode("utf-8")) != previous.report_hash:
+        return False
+    try:
+        report = VerificationReport.model_validate_json(previous.report_json)
+    except ValueError:
+        return False
+    if report.status is not VerificationStatus.INCONCLUSIVE:
+        return False
+    codes = tuple(check.code for check in report.checks)
+    if len(codes) != len(set(codes)):
+        return False
+    required = {"artifact_set", "artifact_count", "source_grounding"}
+    if request.table_output_contracts:
+        required.add("table_output_contract")
+    passed = {check.code for check in report.checks if check.passed}
+    failed = {check.code for check in report.checks if not check.passed}
+    return required.issubset(passed) and failed == {"semantic_goal"}
 
 
 def _manifest_identity_matches(
@@ -408,6 +429,77 @@ class CandidateVerificationService:
             revision=revision,
         )
 
+    def _project_historical_reverification_authority(
+        self,
+        *,
+        request: PiRuntimeRequest,
+        run_id: str,
+        binding: HistoricalReverificationBinding,
+    ) -> tuple[
+        list[ReverificationBlocker],
+        HistoricalReverificationEvidence | None,
+    ]:
+        """把合法旧缺口投影为窄恢复门；任何身份冲突仍保留漂移。"""
+
+        if self._reverification_authority is None:
+            return [ReverificationBlocker.AUTHORITY_UNAVAILABLE], None
+        try:
+            evidence = self._reverification_authority.historical_recovery_evidence(
+                request,
+                run_id,
+                binding,
+            )
+        except (OSError, sqlite3.DatabaseError, TypeError, ValueError):
+            return [ReverificationBlocker.RUNTIME_ASSIGNMENT_DRIFT], None
+        if evidence is None:
+            return [ReverificationBlocker.RUNTIME_ASSIGNMENT_DRIFT], None
+        if (
+            evidence.owner_id,
+            evidence.task_id,
+            evidence.revision,
+            evidence.run_id,
+            evidence.purpose,
+            evidence.candidate_set_hash,
+            evidence.candidate_manifest_hash,
+            evidence.goal_contract_hash,
+            evidence.delivery_spec_hash,
+            evidence.previous_attempt_id,
+            evidence.previous_report_hash,
+        ) != (
+            request.user_id,
+            request.task_id,
+            request.revision,
+            run_id,
+            HistoricalReverificationPurpose.SEMANTIC_INCONCLUSIVE_REVERIFICATION,
+            binding.candidate_set_hash,
+            binding.candidate_manifest_hash,
+            binding.goal_contract_hash,
+            binding.delivery_spec_hash,
+            binding.previous_attempt_id,
+            binding.previous_report_hash,
+        ):
+            return [ReverificationBlocker.RUNTIME_ASSIGNMENT_DRIFT], None
+        manifest, evidence_hash = _historical_evidence_manifest(evidence)
+        existing = self._repository.get_historical_authority(
+            owner_id=request.user_id,
+            task_id=request.task_id,
+            revision=request.revision,
+            run_id=run_id,
+            candidate_set_hash=binding.candidate_set_hash,
+            purpose=evidence.purpose,
+        )
+        if existing is None:
+            return [
+                ReverificationBlocker.HISTORICAL_AUTHORITY_RECOVERY_REQUIRED
+            ], evidence
+        if (
+            existing.actor_id != request.user_id
+            or existing.evidence_hash != evidence_hash
+            or existing.evidence_manifest_json != manifest
+        ):
+            return [ReverificationBlocker.RUNTIME_ASSIGNMENT_DRIFT], None
+        return [], None
+
     def inspect_reverification_sync(
         self,
         *,
@@ -430,10 +522,10 @@ class CandidateVerificationService:
                 "候选缺少冻结运行信息，不能检查重验资格"
             )
         try:
-            request_values = json.loads(str(context["request_json"]))
-            if not request_values.get("model_connection_id"):
-                request_values["api_key"] = "local-runtime"
-            request = PiRuntimeRequest.model_validate(request_values)
+            request, used_legacy_confirmation = parse_frozen_runtime_request(
+                request_json=str(context["request_json"]),
+                external_api_confirmed=context["external_api_confirmed"],
+            )
             candidates = tuple(
                 CandidateArtifact.model_validate(item)
                 for item in json.loads(str(context["candidates_json"]))
@@ -444,9 +536,9 @@ class CandidateVerificationService:
             ) from exc
         blockers: list[ReverificationBlocker] = []
         if self._reverification_authority is None:
-            blockers.append(ReverificationBlocker.AUTHORITY_UNAVAILABLE)
+            authority_blockers = [ReverificationBlocker.AUTHORITY_UNAVAILABLE]
         else:
-            blockers.extend(
+            authority_blockers = list(
                 self._reverification_authority.blockers(
                     request,
                     str(context["run_id"]),
@@ -502,13 +594,37 @@ class CandidateVerificationService:
         if not history:
             raise ValueError("当前验证投影缺少精确 Attempt 依据")
         previous = history[-1]
+        if (
+            used_legacy_confirmation
+            and previous.ruleset_identity_status
+            is not RulesetIdentityStatus.LEGACY_UNVERSIONED
+        ):
+            raise ReverificationContractError(
+                "候选缺少冻结运行信息，不能检查重验资格"
+            )
+        semantic_retry = previous.status is AttemptStatus.INCONCLUSIVE
+        if semantic_retry and not _semantic_retry_report_is_eligible(
+            previous=previous,
+            current_report_json=str(context["verification_json"] or ""),
+            request=request,
+        ):
+            blockers.append(ReverificationBlocker.SEMANTIC_RETRY_UNAVAILABLE)
         if previous.status in {AttemptStatus.REQUESTED, AttemptStatus.RUNNING}:
             # 活动 Attempt 的结论尚未冻结，再开放写入口会制造并发双真相。
             blockers.append(ReverificationBlocker.ACTIVE_ATTEMPT)
         elif previous.status is AttemptStatus.OUTCOME_UNKNOWN:
             # Provider 是否已执行无法确认时不得自动重发，必须先由 Owner 核对。
             blockers.append(ReverificationBlocker.OUTCOME_UNKNOWN)
-        if previous.ruleset_identity_status is RulesetIdentityStatus.LEGACY_UNVERSIONED:
+        manifest_hash: str | None = None
+        goal_hash, delivery_hash = _request_contract_hashes(request)
+        legacy_unversioned = (
+            previous.ruleset_identity_status
+            is RulesetIdentityStatus.LEGACY_UNVERSIONED
+        )
+        legacy_rebaseline = (
+            legacy_unversioned and previous.status is AttemptStatus.FAILED
+        )
+        if legacy_unversioned and not (semantic_retry or legacy_rebaseline):
             # 历史记录没有可证明的规则和契约身份，不能把“未知”伪装成漂移或未变化。
             blockers.append(ReverificationBlocker.LEGACY_UNVERSIONED)
         else:
@@ -519,9 +635,12 @@ class CandidateVerificationService:
                     / "candidate-manifest.json"
                 )
                 manifest_bytes = manifest_path.read_bytes()
+                manifest_hash = _sha256_bytes(manifest_bytes)
                 manifest_drift = (
-                    previous.manifest_hash is None
-                    or _sha256_bytes(manifest_bytes) != previous.manifest_hash
+                    (
+                        previous.manifest_hash is not None
+                        and manifest_hash != previous.manifest_hash
+                    )
                     or not _manifest_identity_matches(
                         manifest_bytes,
                         request,
@@ -533,11 +652,17 @@ class CandidateVerificationService:
             if manifest_drift:
                 blockers.append(ReverificationBlocker.MANIFEST_DRIFT)
             # Task 目标与输出契约任一改变都应创建新 Revision，不能复用旧 Candidate。
-            goal_hash, delivery_hash = _request_contract_hashes(request)
-            if previous.goal_contract_hash != goal_hash:
+            if (
+                previous.goal_contract_hash is not None
+                and previous.goal_contract_hash != goal_hash
+            ):
                 blockers.append(ReverificationBlocker.GOAL_CONTRACT_DRIFT)
-            if previous.delivery_spec_hash != delivery_hash:
+            if (
+                previous.delivery_spec_hash is not None
+                and previous.delivery_spec_hash != delivery_hash
+            ):
                 blockers.append(ReverificationBlocker.DELIVERY_SPEC_DRIFT)
+        target_ruleset_hash: str | None = None
         try:
             target = self._ruleset_resolver.resolve_target()
         except RuntimeError:
@@ -545,6 +670,7 @@ class CandidateVerificationService:
             blockers.append(ReverificationBlocker.RULESET_UNAVAILABLE)
             ruleset_changed = None
         else:
+            target_ruleset_hash = target.verifier_ruleset_hash
             ruleset_changed = (
                 None
                 if previous.ruleset_identity_status
@@ -552,21 +678,68 @@ class CandidateVerificationService:
                 else previous.verifier_ruleset_hash
                 != target.verifier_ruleset_hash
             )
-        semantic_retry = previous.status is AttemptStatus.INCONCLUSIVE
+        recovery_offer: HistoricalAuthorityRecoveryOffer | None = None
+        if (
+            not blockers
+            and authority_blockers
+            == [ReverificationBlocker.RUNTIME_ASSIGNMENT_DRIFT]
+            and semantic_retry
+            and manifest_hash is not None
+            and previous.report_hash is not None
+        ):
+            binding = HistoricalReverificationBinding(
+                candidate_set_hash=candidate_hash,
+                candidate_manifest_hash=manifest_hash,
+                goal_contract_hash=goal_hash,
+                delivery_spec_hash=delivery_hash,
+                previous_attempt_id=previous.attempt_id,
+                previous_report_hash=previous.report_hash,
+            )
+            authority_blockers, recovery_evidence = (
+                self._project_historical_reverification_authority(
+                    request=request,
+                    run_id=str(context["run_id"]),
+                    binding=binding,
+                )
+            )
+            if recovery_evidence is not None:
+                _manifest, evidence_hash = _historical_evidence_manifest(
+                    recovery_evidence
+                )
+                recovery_offer = HistoricalAuthorityRecoveryOffer(
+                    expected_evidence_hash=evidence_hash,
+                    purpose=recovery_evidence.purpose,
+                    owner_id=recovery_evidence.owner_id,
+                    task_id=recovery_evidence.task_id,
+                    revision=recovery_evidence.revision,
+                    run_id=recovery_evidence.run_id,
+                    candidate_set_hash=recovery_evidence.candidate_set_hash,
+                    explanation=(
+                        "系统不会补造旧 RuntimeAssignment；本确认只允许当前 "
+                        "CandidateSet 进入独立重验，不重跑 Pi、不授权发布。"
+                    ),
+                )
+        blockers.extend(authority_blockers)
         ruleset_retry = (
             previous.status is AttemptStatus.FAILED and ruleset_changed is True
         )
-        eligible = (semantic_retry or ruleset_retry) and not blockers
+        eligible = (
+            semantic_retry or ruleset_retry or legacy_rebaseline
+        ) and not blockers
         reason = (
             AttemptReason.SEMANTIC_INCONCLUSIVE
             if semantic_retry
-            else AttemptReason.RULESET_CHANGED if ruleset_retry else None
+            else AttemptReason.RULESET_CHANGED
+            if ruleset_retry
+            else AttemptReason.LEGACY_REBASELINE
+            if legacy_rebaseline
+            else None
         )
         if not eligible:
             reason = None
         if blockers:
             final_blockers = tuple(dict.fromkeys(blockers))
-        elif semantic_retry or ruleset_retry:
+        elif semantic_retry or ruleset_retry or legacy_rebaseline:
             final_blockers = ()
         elif previous.status is AttemptStatus.PASSED:
             final_blockers = (ReverificationBlocker.ALREADY_PASSED,)
@@ -584,7 +757,9 @@ class CandidateVerificationService:
             ruleset_identity_status=previous.ruleset_identity_status,
             ruleset_changed=ruleset_changed,
             ruleset_change_summary=(
-                "当前验证规则已更新"
+                "旧验证规则身份无法证明；当前验证规则身份已冻结"
+                if legacy_unversioned and target_ruleset_hash is not None
+                else "当前验证规则已更新"
                 if ruleset_changed is True
                 else "当前验证规则与上次相同"
                 if ruleset_changed is False
@@ -592,6 +767,8 @@ class CandidateVerificationService:
             ),
             candidate_count=len(candidates),
             candidate_formats=tuple(sorted({item.format for item in candidates})),
+            candidate_set_hash=candidate_hash,
+            target_ruleset_hash=target_ruleset_hash,
             requires_provider=bool(request.model_connection_id),
             connection_id=request.model_connection_id,
             model_id=request.model_connection_model or request.model,
@@ -610,6 +787,7 @@ class CandidateVerificationService:
                 and not delivery_exists
                 and not blockers
             ),
+            historical_authority_recovery=recovery_offer,
         )
 
     def get_attempt(
@@ -723,8 +901,15 @@ class CandidateVerificationService:
         task_id: str,
         revision: int,
         expected_previous_attempt_id: str,
+        expected_candidate_set_hash: str | None = None,
+        expected_target_ruleset_hash: str | None = None,
+        legacy_ruleset_unknown_acknowledged: bool = False,
+        authorization_text_version: str | None = None,
         external_api_confirmed: bool,
         accept_duplicate_provider_cost: bool = False,
+        historical_authority_recovery: (
+            HistoricalAuthorityRecoveryConfirmation | None
+        ) = None,
         idempotency_key: str,
         verifier_factory: SemanticVerifierFactoryPort,
     ) -> VerificationAttempt:
@@ -732,6 +917,35 @@ class CandidateVerificationService:
 
         existing = self._repository.get_by_idempotency(owner_id, idempotency_key)
         if existing is not None:
+            existing_rebaseline_authorization: (
+                RebaselineAuthorizationEvidence | None
+            ) = None
+            if existing.reason_code is AttemptReason.LEGACY_REBASELINE:
+                try:
+                    existing_rebaseline_authorization = (
+                        RebaselineAuthorizationEvidence.model_validate_json(
+                            str(existing.rebaseline_authorization_json)
+                        )
+                    )
+                except ValueError as exc:
+                    raise ReverificationContractError(
+                        "Legacy 再基线授权证据无效"
+                    ) from exc
+            existing_authority = self._repository.get_historical_authority(
+                owner_id=owner_id,
+                task_id=existing.task_id,
+                revision=existing.revision,
+                run_id=existing.run_id,
+                candidate_set_hash=existing.candidate_set_hash,
+                purpose=(
+                    HistoricalReverificationPurpose
+                    .SEMANTIC_INCONCLUSIVE_REVERIFICATION
+                ),
+            )
+            historical_confirmation_required = (
+                existing_authority is not None
+                and existing_authority.idempotency_key == idempotency_key
+            )
             existing_previous = (
                 self._repository.get(owner_id, existing.previous_attempt_id)
                 if existing.previous_attempt_id is not None
@@ -747,14 +961,85 @@ class CandidateVerificationService:
                 or existing.previous_attempt_id != expected_previous_attempt_id
                 or bool(existing.egress_confirmed_at) != external_api_confirmed
                 or duplicate_cost_required != accept_duplicate_provider_cost
+                or historical_confirmation_required
+                != (historical_authority_recovery is not None)
+                or (
+                    existing_rebaseline_authorization is not None
+                    and (
+                        expected_candidate_set_hash
+                        != existing_rebaseline_authorization.candidate_set_hash
+                        or expected_target_ruleset_hash
+                        != existing_rebaseline_authorization.target_ruleset_hash
+                        or legacy_ruleset_unknown_acknowledged is not True
+                        or authorization_text_version
+                        != existing_rebaseline_authorization.authorization_text_version
+                    )
+                )
+                or (
+                    existing_rebaseline_authorization is None
+                    and (
+                        expected_candidate_set_hash is not None
+                        or expected_target_ruleset_hash is not None
+                        or legacy_ruleset_unknown_acknowledged is True
+                        or authorization_text_version is not None
+                    )
+                )
+                or (
+                    historical_confirmation_required
+                    and historical_authority_recovery is not None
+                    and existing_authority is not None
+                    and historical_authority_recovery.expected_evidence_hash
+                    != existing_authority.evidence_hash
+                )
             ):
                 raise ValueError("幂等键已绑定其他候选验证请求")
             return existing
+        pending_historical_authority = (
+            self._repository.get_historical_authority_by_idempotency(
+                owner_id=owner_id,
+                idempotency_key=idempotency_key,
+            )
+        )
+        if pending_historical_authority is not None and (
+            pending_historical_authority.actor_id != owner_id
+            or pending_historical_authority.task_id != task_id
+            or pending_historical_authority.revision != revision
+            or pending_historical_authority.purpose
+            is not (
+                HistoricalReverificationPurpose
+                .SEMANTIC_INCONCLUSIVE_REVERIFICATION
+            )
+        ):
+            raise ValueError("幂等键已绑定其他历史重验权威请求")
         offer = await self.inspect_reverification(
             owner_id=owner_id,
             task_id=task_id,
             revision=revision,
         )
+        legacy_rebaseline = offer.reason is AttemptReason.LEGACY_REBASELINE
+        if legacy_rebaseline:
+            if legacy_ruleset_unknown_acknowledged is not True:
+                raise ReverificationContractError(
+                    "Legacy 再基线必须由 Owner 确认旧规则身份未知"
+                )
+            if authorization_text_version != "legacy-rebaseline-v1":
+                raise ReverificationContractError(
+                    "Legacy 再基线授权文案版本无效"
+                )
+            if (
+                expected_candidate_set_hash != offer.candidate_set_hash
+                or expected_target_ruleset_hash != offer.target_ruleset_hash
+            ):
+                raise ValueError("Legacy 再基线 Offer 已变化，请重新查看最新结果")
+        elif (
+            expected_candidate_set_hash is not None
+            or expected_target_ruleset_hash is not None
+            or legacy_ruleset_unknown_acknowledged is True
+            or authorization_text_version is not None
+        ):
+            raise ReverificationContractError(
+                "当前候选不接受 Legacy 再基线确认"
+            )
         recovering_unknown = offer.previous_status is AttemptStatus.OUTCOME_UNKNOWN
         if accept_duplicate_provider_cost and not recovering_unknown:
             raise ReverificationContractError(
@@ -770,7 +1055,49 @@ class CandidateVerificationService:
             and set(offer.blockers) == {ReverificationBlocker.OUTCOME_UNKNOWN}
             and offer.previous_reason is not None
         )
-        if not offer.eligible and not recoverable_unknown:
+        recovery_offer = offer.historical_authority_recovery
+        replaying_historical_authority = pending_historical_authority is not None
+        if (
+            recovery_offer is not None or replaying_historical_authority
+        ) and historical_authority_recovery is None:
+            raise ReverificationContractError(
+                "恢复历史重验权威必须由 TaskOwner 提交结构化确认"
+            )
+        if (
+            recovery_offer is None
+            and not replaying_historical_authority
+            and historical_authority_recovery is not None
+        ):
+            raise ReverificationContractError(
+                "当前候选不接受历史重验权威恢复确认"
+            )
+        expected_historical_evidence_hash = (
+            recovery_offer.expected_evidence_hash
+            if recovery_offer is not None
+            else (
+                pending_historical_authority.evidence_hash
+                if pending_historical_authority is not None
+                else None
+            )
+        )
+        if (
+            expected_historical_evidence_hash is not None
+            and historical_authority_recovery is not None
+            and historical_authority_recovery.expected_evidence_hash
+            != expected_historical_evidence_hash
+        ):
+            raise ReverificationContractError(
+                "历史重验权威证据已变化，请重新查看最新 Offer"
+            )
+        recoverable_historical = (
+            recovery_offer is not None
+            and historical_authority_recovery is not None
+            and set(offer.blockers)
+            == {
+                ReverificationBlocker.HISTORICAL_AUTHORITY_RECOVERY_REQUIRED
+            }
+        )
+        if not offer.eligible and not recoverable_unknown and not recoverable_historical:
             if ReverificationBlocker.PROVIDER_BINDING_FORBIDDEN in offer.blockers:
                 raise PermissionError("模型连接不存在或不属于当前 Owner")
             unavailable = {
@@ -794,7 +1121,82 @@ class CandidateVerificationService:
         if not uses_provider and external_api_confirmed:
             raise ValueError("本地完整重验不接受外发确认")
         run_id = str(context["run_id"])
-        reason = offer.reason or offer.previous_reason
+        historical_authority_id: str | None = None
+        if recoverable_historical or replaying_historical_authority:
+            manifest_path = (
+                Path(str(context["workspace_root"]))
+                / "output"
+                / "candidate-manifest.json"
+            )
+            if previous.report_hash is None:
+                raise ReverificationContractError(
+                    "历史重验权威缺少冻结的前序报告摘要"
+                )
+            goal_hash, delivery_hash = _request_contract_hashes(request)
+            binding = HistoricalReverificationBinding(
+                candidate_set_hash=_candidate_set_hash(candidates),
+                candidate_manifest_hash=_sha256_bytes(manifest_path.read_bytes()),
+                goal_contract_hash=goal_hash,
+                delivery_spec_hash=delivery_hash,
+                previous_attempt_id=previous.attempt_id,
+                previous_report_hash=previous.report_hash,
+            )
+            projected_blockers, evidence = (
+                self._project_historical_reverification_authority(
+                    request=request,
+                    run_id=run_id,
+                    binding=binding,
+                )
+            )
+            if replaying_historical_authority:
+                assert pending_historical_authority is not None
+                if (
+                    projected_blockers
+                    or evidence is not None
+                    or pending_historical_authority.run_id != run_id
+                    or pending_historical_authority.candidate_set_hash
+                    != binding.candidate_set_hash
+                ):
+                    raise ValueError("历史重验权威恢复资格已变化")
+                historical_authority_id = (
+                    pending_historical_authority.authority_id
+                )
+            else:
+                assert recovery_offer is not None
+                if (
+                    evidence is None
+                    or projected_blockers
+                    != [
+                        ReverificationBlocker
+                        .HISTORICAL_AUTHORITY_RECOVERY_REQUIRED
+                    ]
+                ):
+                    raise ValueError("历史重验权威恢复资格已变化")
+                _manifest, evidence_hash = _historical_evidence_manifest(evidence)
+                if evidence_hash != recovery_offer.expected_evidence_hash:
+                    raise ReverificationContractError(
+                        "历史重验权威证据已变化，请重新查看最新 Offer"
+                    )
+                authority = HistoricalReverificationAuthority.build(
+                    evidence=evidence,
+                    actor_id=owner_id,
+                    idempotency_key=idempotency_key,
+                    recorded_at=self._clock(),
+                )
+                authority = self._repository.create_historical_authority(authority)
+                historical_authority_id = authority.authority_id
+                offer = await self.inspect_reverification(
+                    owner_id=owner_id,
+                    task_id=task_id,
+                    revision=revision,
+                )
+                if not offer.eligible:
+                    raise ValueError("历史重验权威记录后资格仍未通过")
+        reason = (
+            AttemptReason.PROVIDER_OUTCOME_RECOVERY
+            if recoverable_unknown
+            else offer.reason
+        )
         if reason is None:
             raise ValueError("当前候选没有可恢复的重验原因")
         verifier = verifier_factory(request, run_id)
@@ -815,7 +1217,29 @@ class CandidateVerificationService:
         )
         manifest_hash = _sha256_bytes(manifest_path.read_bytes())
         candidate_hash = _candidate_set_hash(candidates)
+        if legacy_rebaseline and (
+            candidate_hash != expected_candidate_set_hash
+            or ruleset.verifier_ruleset_hash != expected_target_ruleset_hash
+        ):
+            raise ValueError("Legacy 再基线冻结身份已变化，请重新查看最新结果")
         goal_hash, delivery_hash = _request_contract_hashes(request)
+        created_at = self._clock()
+        rebaseline_authorization: RebaselineAuthorizationEvidence | None = None
+        if legacy_rebaseline:
+            rebaseline_authorization = RebaselineAuthorizationEvidence(
+                authorization_text_version="legacy-rebaseline-v1",
+                owner_id=owner_id,
+                task_id=task_id,
+                revision=revision,
+                run_id=run_id,
+                previous_attempt_id=previous.attempt_id,
+                candidate_set_hash=candidate_hash,
+                target_ruleset_hash=ruleset.verifier_ruleset_hash,
+                actor_id=owner_id,
+                legacy_ruleset_unknown_acknowledged=True,
+                external_api_confirmed=external_api_confirmed,
+                authorized_at=created_at,
+            )
         request_payload = {
             "owner_id": owner_id,
             "task_id": task_id,
@@ -830,6 +1254,23 @@ class CandidateVerificationService:
             "verifier_ruleset_hash": ruleset.verifier_ruleset_hash,
             "external_api_confirmed": external_api_confirmed,
             "accept_duplicate_provider_cost": accept_duplicate_provider_cost,
+            "historical_authority_id": historical_authority_id,
+            # 请求身份只绑定稳定授权语义；授权发生时间由首个成功写入者冻结，
+            # 不能让同幂等键的并发请求因时钟差异被误判为不同命令。
+            "rebaseline_authorization": (
+                {
+                    "authorization_text_version": (
+                        rebaseline_authorization.authorization_text_version
+                    ),
+                    "legacy_ruleset_unknown_acknowledged": True,
+                    "candidate_set_hash": candidate_hash,
+                    "target_ruleset_hash": ruleset.verifier_ruleset_hash,
+                    "actor_id": owner_id,
+                    "external_api_confirmed": external_api_confirmed,
+                }
+                if rebaseline_authorization is not None
+                else None
+            ),
         }
         request_hash = _sha256_bytes(
             json.dumps(
@@ -873,12 +1314,22 @@ class CandidateVerificationService:
                 connection_id=request.model_connection_id,
                 connection_version=request.model_connection_version,
                 model_id=request.model_connection_model or request.model,
-                egress_confirmed_at=(self._clock() if uses_provider else None),
+                egress_confirmed_at=(created_at if uses_provider else None),
                 provider_attempt_id=provider_attempt_id,
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
+                rebaseline_authorization_json=(
+                    rebaseline_authorization.canonical_json()
+                    if rebaseline_authorization is not None
+                    else None
+                ),
+                rebaseline_authorization_hash=(
+                    rebaseline_authorization.sha256()
+                    if rebaseline_authorization is not None
+                    else None
+                ),
                 status=AttemptStatus.REQUESTED,
-                created_at=self._clock(),
+                created_at=created_at,
             )
         )
         if created:
@@ -897,7 +1348,7 @@ class CandidateVerificationService:
         requested = self._repository.get(owner_id, attempt_id)
         if requested is None:
             raise PermissionError("候选验证 Attempt 不存在或 Owner 不匹配")
-        context, request, candidates, _previous = self._load_reverification_context(
+        context, request, candidates, previous = self._load_reverification_context(
             owner_id=owner_id,
             task_id=requested.task_id,
             revision=requested.revision,
@@ -930,10 +1381,55 @@ class CandidateVerificationService:
             for source in request.sources
         ):
             raise RuntimeError("资格预检后来源文件已漂移")
-        if self._reverification_authority is None or self._reverification_authority.blockers(
-            request,
-            requested.run_id,
+        authority_blockers = (
+            [ReverificationBlocker.AUTHORITY_UNAVAILABLE]
+            if self._reverification_authority is None
+            else list(
+                self._reverification_authority.blockers(
+                    request,
+                    requested.run_id,
+                )
+            )
+        )
+        historical_authority_id: str | None = None
+        if (
+            authority_blockers
+            == [ReverificationBlocker.RUNTIME_ASSIGNMENT_DRIFT]
+            and previous.report_hash is not None
         ):
+            authority_blockers, _recovery_evidence = (
+                self._project_historical_reverification_authority(
+                    request=request,
+                    run_id=requested.run_id,
+                    binding=HistoricalReverificationBinding(
+                        candidate_set_hash=candidate_hash,
+                        candidate_manifest_hash=_sha256_bytes(manifest_bytes),
+                        goal_contract_hash=goal_hash,
+                        delivery_spec_hash=delivery_hash,
+                        previous_attempt_id=previous.attempt_id,
+                        previous_report_hash=previous.report_hash,
+                    ),
+                )
+            )
+            if not authority_blockers:
+                historical_authority = self._repository.get_historical_authority(
+                    owner_id=owner_id,
+                    task_id=requested.task_id,
+                    revision=requested.revision,
+                    run_id=requested.run_id,
+                    candidate_set_hash=candidate_hash,
+                    purpose=(
+                        HistoricalReverificationPurpose
+                        .SEMANTIC_INCONCLUSIVE_REVERIFICATION
+                    ),
+                )
+                if historical_authority is None:
+                    authority_blockers = [
+                        ReverificationBlocker.RUNTIME_ASSIGNMENT_DRIFT
+                    ]
+                else:
+                    historical_authority_id = historical_authority.authority_id
+        if authority_blockers:
             raise PermissionError("资格预检后任务权威身份已漂移")
         verifier = (
             verifier_factory(
@@ -956,15 +1452,31 @@ class CandidateVerificationService:
             != requested.verifier_execution_identity_hash
         ):
             raise RuntimeError("资格预检后 Verifier 执行身份已漂移")
+        previous_report: VerificationReport | None = None
+        if requested.reason_code is AttemptReason.SEMANTIC_INCONCLUSIVE:
+            if previous.report_json is None or previous.report_hash is None:
+                raise RuntimeError("语义重试缺少冻结的前序验证报告")
+            if (
+                _sha256_bytes(previous.report_json.encode("utf-8"))
+                != previous.report_hash
+            ):
+                raise RuntimeError("语义重试前序验证报告哈希不一致")
+            try:
+                previous_report = VerificationReport.model_validate_json(
+                    previous.report_json
+                )
+            except ValueError as exc:
+                raise RuntimeError("语义重试前序验证报告无效") from exc
         running, claimed, cancelled_now = (
             self._repository.start_requested_if_current(
-            owner_id,
-            attempt_id,
-            started_at=self._clock(),
-            expected_workspace_root=str(context["workspace_root"]),
-            expected_request_json=str(context["request_json"]),
-            expected_candidates_json=str(context["candidates_json"]),
-            expected_verification_json=str(context["verification_json"]),
+                owner_id,
+                attempt_id,
+                started_at=self._clock(),
+                expected_workspace_root=str(context["workspace_root"]),
+                expected_request_json=str(context["request_json"]),
+                expected_candidates_json=str(context["candidates_json"]),
+                expected_verification_json=str(context["verification_json"]),
+                expected_historical_authority_id=historical_authority_id,
             )
         )
         if not claimed:
@@ -975,12 +1487,25 @@ class CandidateVerificationService:
                 )
             return running
 
-        async def operation() -> VerificationReport:
-            return await verifier.verify(
-                request=request,
-                candidates=candidates,
-                manifest_path=manifest_path,
-            )
+        if requested.reason_code is AttemptReason.SEMANTIC_INCONCLUSIVE:
+            assert previous_report is not None
+
+            async def operation() -> VerificationReport:
+                return await verifier.retry_semantic_verification(
+                    request=request,
+                    candidates=candidates,
+                    manifest_path=manifest_path,
+                    previous_report=previous_report,
+                )
+
+        else:
+
+            async def operation() -> VerificationReport:
+                return await verifier.verify(
+                    request=request,
+                    candidates=candidates,
+                    manifest_path=manifest_path,
+                )
 
         return await self._complete_running(
             running=running,
@@ -1073,10 +1598,10 @@ class CandidateVerificationService:
                 "候选缺少冻结运行信息，不能重新验证"
             )
         try:
-            request_values = json.loads(str(context["request_json"]))
-            if not request_values.get("model_connection_id"):
-                request_values["api_key"] = "local-runtime"
-            request = PiRuntimeRequest.model_validate(request_values)
+            request, used_legacy_confirmation = parse_frozen_runtime_request(
+                request_json=str(context["request_json"]),
+                external_api_confirmed=context["external_api_confirmed"],
+            )
             candidates = tuple(
                 CandidateArtifact.model_validate(item)
                 for item in json.loads(str(context["candidates_json"]))
@@ -1102,6 +1627,14 @@ class CandidateVerificationService:
         )
         if previous is None:
             raise ValueError("当前验证投影缺少精确 Attempt 依据")
+        if (
+            used_legacy_confirmation
+            and previous.ruleset_identity_status
+            is not RulesetIdentityStatus.LEGACY_UNVERSIONED
+        ):
+            raise ReverificationContractError(
+                "候选缺少冻结运行信息，不能重新验证"
+            )
         return context, request, candidates, previous
 
     async def _execute(

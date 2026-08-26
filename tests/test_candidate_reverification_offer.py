@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import threading
+
+import pytest
 
 from src.agentic_runtime.models import (
     CandidateArtifact,
@@ -25,7 +29,13 @@ from src.candidate_verification import (
     AttemptReason,
     AttemptStatus,
     CandidateVerificationService,
+    HistoricalAuthorityRecoveryConfirmation,
+    HistoricalReverificationAuthority,
+    HistoricalReverificationEvidence,
+    HistoricalReverificationPurpose,
     ReverificationBlocker,
+    ReverificationContractError,
+    ReverificationUnavailableError,
     SqliteCandidateVerificationRepository,
     VerifierRulesetBinding,
     migrate_candidate_verification,
@@ -61,12 +71,50 @@ class _InconclusiveVerifier:
             summary="独立语义验证暂时没有可靠结论",
             checks=(
                 VerificationCheck(
+                    code="artifact_set",
+                    passed=True,
+                    summary="候选集合与清单一致",
+                ),
+                VerificationCheck(
+                    code="artifact_count",
+                    passed=True,
+                    summary="候选数量符合要求",
+                ),
+                VerificationCheck(
+                    code="source_grounding",
+                    passed=True,
+                    summary="来源证据有效",
+                ),
+                VerificationCheck(
                     code="semantic_goal",
                     passed=False,
                     summary="语义验证服务暂时不可用",
                 ),
             ),
             evidence_count=1,
+            formal_delivery_eligible=False,
+        )
+
+
+class _DeterministicFailureInconclusiveVerifier:
+    async def verify(self, *, request, candidates, manifest_path):
+        del request, candidates, manifest_path
+        return VerificationReport(
+            status=VerificationStatus.INCONCLUSIVE,
+            summary="来源门失败且语义未形成结论",
+            checks=(
+                VerificationCheck(
+                    code="source_grounding",
+                    passed=False,
+                    summary="来源证据未通过",
+                ),
+                VerificationCheck(
+                    code="semantic_goal",
+                    passed=False,
+                    summary="语义验证未形成结论",
+                ),
+            ),
+            evidence_count=0,
             formal_delivery_eligible=False,
         )
 
@@ -86,6 +134,21 @@ class _PassingVerifier:
             ),
             evidence_count=1,
             formal_delivery_eligible=False,
+        )
+
+    async def retry_semantic_verification(
+        self,
+        *,
+        request,
+        candidates,
+        manifest_path,
+        previous_report,
+    ):
+        del previous_report
+        return await self.verify(
+            request=request,
+            candidates=candidates,
+            manifest_path=manifest_path,
         )
 
 
@@ -136,6 +199,40 @@ class _AllowReverificationAuthority:
 class _BlockingReverificationAuthority:
     def blockers(self, _request, _run_id):
         return (ReverificationBlocker.PROVIDER_BINDING_UNAVAILABLE,)
+
+
+class _HistoricalRecoveryReverificationAuthority:
+    def blockers(self, _request, _run_id):
+        return (ReverificationBlocker.RUNTIME_ASSIGNMENT_DRIFT,)
+
+    def historical_recovery_evidence(self, request, run_id, binding):
+        return HistoricalReverificationEvidence(
+            owner_id=request.user_id,
+            task_id=request.task_id,
+            revision=request.revision,
+            run_id=run_id,
+            purpose=(
+                HistoricalReverificationPurpose
+                .SEMANTIC_INCONCLUSIVE_REVERIFICATION
+            ),
+            legacy_runtime_created_at=_NOW - timedelta(days=2),
+            runtime_routing_migration_id="0001_runtime_routing",
+            runtime_routing_applied_at=_NOW - timedelta(days=1),
+            runtime_routing_backup_sha256="1" * 64,
+            runtime_request_hash="2" * 64,
+            task_revision_hash="3" * 64,
+            source_binding_hash="4" * 64,
+            runtime_event_chain_hash="5" * 64,
+            candidate_set_hash=binding.candidate_set_hash,
+            candidate_manifest_hash=binding.candidate_manifest_hash,
+            goal_contract_hash=binding.goal_contract_hash,
+            delivery_spec_hash=binding.delivery_spec_hash,
+            previous_attempt_id=binding.previous_attempt_id,
+            previous_report_hash=binding.previous_report_hash,
+            connection_id=request.model_connection_id,
+            connection_version=request.model_connection_version,
+            model_id=request.model_connection_model,
+        )
 
 
 def _manifest_json(candidate: CandidateArtifact) -> str:
@@ -413,7 +510,13 @@ def test_prepare_publication_does_not_replace_requested_attempt_with_latest(
     ) == newer
 
 
-def _prepare_legacy_candidate(tmp_path: Path):
+def _prepare_legacy_candidate(
+    tmp_path: Path,
+    *,
+    provider: bool = False,
+    inconclusive: bool = False,
+    omit_external_confirmation: bool = False,
+):
     database = tmp_path / "workspace.db"
     runtime_repository = AgenticRuntimeRepository(database)
     runtime_repository.register(
@@ -423,11 +526,15 @@ def _prepare_legacy_candidate(tmp_path: Path):
             revision=1,
             runtime_version=RuntimeVersion.PI,
             permission_profile=PermissionProfile.STANDARD,
+            model_connection_id=("connection-a" if provider else None),
+            model_connection_version=("version-a" if provider else None),
+            model_connection_model=("provider-model-a" if provider else None),
+            external_api_confirmed=provider,
         )
     )
     source = tmp_path / "source.txt"
     source.write_text("已确认来源", encoding="utf-8")
-    request = PiRuntimeRequest(
+    request_values = dict(
         user_id="owner-a",
         task_id="task-a",
         revision=1,
@@ -442,10 +549,21 @@ def _prepare_legacy_candidate(tmp_path: Path):
             ),
         ),
         permission_profile=PermissionProfile.STANDARD,
-        model="local-model",
-        base_url="http://127.0.0.1:18080/v1",
-        api_key="test-only",
     )
+    if provider:
+        request_values.update(
+            model_connection_id="connection-a",
+            model_connection_version="version-a",
+            model_connection_model="provider-model-a",
+            external_api_confirmed=True,
+        )
+    else:
+        request_values.update(
+            model="local-model",
+            base_url="http://127.0.0.1:18080/v1",
+            api_key="test-only",
+        )
+    request = PiRuntimeRequest(**request_values)
     workspace = tmp_path / "runtime-workspace"
     output = workspace / "output"
     output.mkdir(parents=True)
@@ -465,13 +583,47 @@ def _prepare_legacy_candidate(tmp_path: Path):
     (output / "candidate-manifest.json").write_text(
         _manifest_json(candidate), encoding="utf-8"
     )
-    report = asyncio.run(
-        _FailingVerifier().verify(
-            request=request,
-            candidates=(candidate,),
-            manifest_path=output / "candidate-manifest.json",
+    report = (
+        VerificationReport(
+            status=VerificationStatus.INCONCLUSIVE,
+            summary="确定性检查已通过，语义判断未形成可靠结论",
+            checks=(
+                VerificationCheck(
+                    code="artifact_set",
+                    passed=True,
+                    summary="候选集合与清单一致",
+                ),
+                VerificationCheck(
+                    code="artifact_count",
+                    passed=True,
+                    summary="候选数量符合要求",
+                ),
+                VerificationCheck(
+                    code="source_grounding",
+                    passed=True,
+                    summary="来源证据有效",
+                ),
+                VerificationCheck(
+                    code="semantic_goal",
+                    passed=False,
+                    summary="语义判断未形成可靠结论",
+                ),
+            ),
+            evidence_count=1,
+            formal_delivery_eligible=False,
+        )
+        if inconclusive
+        else asyncio.run(
+            _FailingVerifier().verify(
+                request=request,
+                candidates=(candidate,),
+                manifest_path=output / "candidate-manifest.json",
+            )
         )
     )
+    frozen_request = request.model_dump(mode="json", exclude={"api_key"})
+    if omit_external_confirmation:
+        frozen_request.pop("external_api_confirmed")
     runtime_repository.update(
         "owner-a",
         "task-a",
@@ -479,7 +631,7 @@ def _prepare_legacy_candidate(tmp_path: Path):
         status=RuntimeStatus.CANDIDATE_READY,
         run_id="pi_run_0123456789abcdef",
         workspace_root=workspace,
-        request=request.model_dump(mode="json", exclude={"api_key"}),
+        request=frozen_request,
         candidates=(candidate,),
         verification=report,
     )
@@ -541,6 +693,259 @@ def test_inconclusive_candidate_maps_to_semantic_retry(tmp_path: Path) -> None:
     assert offer.reason is AttemptReason.SEMANTIC_INCONCLUSIVE
     assert offer.previous_attempt_id == previous.attempt_id
     assert offer.ruleset_changed is False
+
+
+def test_historical_assignment_gap_requires_exact_owner_recovery_confirmation(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repository, previous = _prepare_candidate(
+        tmp_path,
+        _InconclusiveVerifier(),
+        provider=True,
+    )
+    with sqlite3.connect(tmp_path / "workspace.db") as connection:
+        connection.executescript(
+            """
+            CREATE TABLE runtime_routing_migrations (
+                migration_id TEXT PRIMARY KEY,
+                backup_sha256 TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            );
+            CREATE TABLE runtime_assignments (
+                owner_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                revision INTEGER NOT NULL,
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY (owner_id, task_id, revision)
+            );
+            CREATE TABLE runtime_rollout_state (
+                state_id INTEGER PRIMARY KEY,
+                p0_blocked INTEGER NOT NULL
+            );
+            CREATE TABLE semantic_workspace_tasks (
+                user_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                active_revision INTEGER NOT NULL,
+                cancel_requested INTEGER NOT NULL,
+                PRIMARY KEY (user_id, task_id)
+            );
+            CREATE TABLE semantic_delivery_runs (
+                user_id TEXT NOT NULL,
+                run_id TEXT NOT NULL
+            );
+            CREATE TABLE formal_delivery_runs (
+                owner_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                status TEXT NOT NULL
+            );
+            """
+        )
+        connection.execute(
+            "INSERT INTO runtime_rollout_state VALUES (1, 0)"
+        )
+        connection.execute(
+            "INSERT INTO semantic_workspace_tasks VALUES (?, ?, 1, 0)",
+            ("owner-a", "task-a"),
+        )
+        connection.execute(
+            "UPDATE agentic_runtime_runs SET created_at=? "
+            "WHERE user_id='owner-a' AND task_id='task-a' AND revision=1",
+            ((_NOW - timedelta(days=2)).isoformat(),),
+        )
+        connection.execute(
+            "INSERT INTO runtime_routing_migrations VALUES (?, ?, ?)",
+            (
+                "0001_runtime_routing",
+                "1" * 64,
+                (_NOW - timedelta(days=1)).isoformat(),
+            ),
+        )
+    service = _service(
+        repository,
+        "5",
+        authority=_HistoricalRecoveryReverificationAuthority(),
+    )
+    monkeypatch.setattr(
+        "src.candidate_verification.repository."
+        "_historical_database_evidence_matches",
+        lambda connection, _evidence, **_kwargs: connection.in_transaction,
+    )
+
+    offer = asyncio.run(
+        service.inspect_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+        )
+    )
+
+    assert offer.eligible is False
+    assert offer.reason is None
+    assert offer.blockers == ("historical_authority_recovery_required",)
+    assert offer.historical_authority_recovery is not None
+    recovery = offer.historical_authority_recovery
+    assert recovery.owner_id == "owner-a"
+    assert recovery.task_id == "task-a"
+    assert recovery.revision == 1
+    assert recovery.run_id == "pi_run_0123456789abcdef"
+    assert recovery.purpose == "semantic_inconclusive_reverification"
+    assert recovery.candidate_set_hash == previous.candidate_set_hash
+    assert len(recovery.expected_evidence_hash) == 64
+    assert repository.get_historical_authority(
+        owner_id="owner-a",
+        task_id="task-a",
+        revision=1,
+        run_id="pi_run_0123456789abcdef",
+        candidate_set_hash=previous.candidate_set_hash,
+        purpose=(
+            HistoricalReverificationPurpose
+            .SEMANTIC_INCONCLUSIVE_REVERIFICATION
+        ),
+    ) is None
+
+    try:
+        asyncio.run(
+            service.request_reverification(
+                owner_id="owner-a",
+                task_id="task-a",
+                revision=1,
+                expected_previous_attempt_id=previous.attempt_id,
+                external_api_confirmed=True,
+                idempotency_key="historical-recovery-request",
+                verifier_factory=lambda *_args: _PassingVerifier(),
+            )
+        )
+    except ReverificationContractError as exc:
+        assert "历史重验权威" in str(exc)
+    else:
+        raise AssertionError("缺少结构化 Owner 确认时不得恢复历史重验权威")
+
+    original_resolve = service._ruleset_resolver.resolve
+
+    def fail_ruleset_once(_verifier):
+        raise RuntimeError("规则身份暂时不可解析")
+
+    monkeypatch.setattr(service._ruleset_resolver, "resolve", fail_ruleset_once)
+    confirmation = HistoricalAuthorityRecoveryConfirmation(
+        expected_evidence_hash=recovery.expected_evidence_hash,
+        acknowledge_no_historical_assignment=True,
+        acknowledge_reverification_only=True,
+    )
+    with pytest.raises(ReverificationUnavailableError):
+        asyncio.run(
+            service.request_reverification(
+                owner_id="owner-a",
+                task_id="task-a",
+                revision=1,
+                expected_previous_attempt_id=previous.attempt_id,
+                external_api_confirmed=True,
+                historical_authority_recovery=confirmation,
+                idempotency_key="historical-recovery-request",
+                verifier_factory=lambda *_args: _PassingVerifier(),
+            )
+        )
+    assert repository.get_by_idempotency(
+        "owner-a",
+        "historical-recovery-request",
+    ) is None
+    monkeypatch.setattr(service._ruleset_resolver, "resolve", original_resolve)
+
+    requested = asyncio.run(
+        service.request_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+            expected_previous_attempt_id=previous.attempt_id,
+            external_api_confirmed=True,
+            historical_authority_recovery=confirmation,
+            idempotency_key="historical-recovery-request",
+            verifier_factory=lambda *_args: _PassingVerifier(),
+        )
+    )
+
+    assert requested.status is AttemptStatus.REQUESTED
+    authority = repository.get_historical_authority(
+        owner_id="owner-a",
+        task_id="task-a",
+        revision=1,
+        run_id="pi_run_0123456789abcdef",
+        candidate_set_hash=previous.candidate_set_hash,
+        purpose=(
+            HistoricalReverificationPurpose
+            .SEMANTIC_INCONCLUSIVE_REVERIFICATION
+        ),
+    )
+    assert isinstance(authority, HistoricalReverificationAuthority)
+    assert authority.actor_id == "owner-a"
+    assert authority.evidence_hash == recovery.expected_evidence_hash
+
+    repeated = asyncio.run(
+        service.request_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+            expected_previous_attempt_id=previous.attempt_id,
+            external_api_confirmed=True,
+            historical_authority_recovery=(
+                HistoricalAuthorityRecoveryConfirmation(
+                    expected_evidence_hash=recovery.expected_evidence_hash,
+                    acknowledge_no_historical_assignment=True,
+                    acknowledge_reverification_only=True,
+                )
+            ),
+            idempotency_key="historical-recovery-request",
+            verifier_factory=lambda *_args: _PassingVerifier(),
+        )
+    )
+    assert repeated.attempt_id == requested.attempt_id
+
+    try:
+        asyncio.run(
+            service.request_reverification(
+                owner_id="owner-a",
+                task_id="task-a",
+                revision=1,
+                expected_previous_attempt_id=previous.attempt_id,
+                external_api_confirmed=True,
+                idempotency_key="historical-recovery-request",
+                verifier_factory=lambda *_args: _PassingVerifier(),
+            )
+        )
+    except ValueError as exc:
+        assert "幂等键" in str(exc)
+    else:
+        raise AssertionError("同键省略历史恢复确认必须视为不同请求")
+
+    completed = asyncio.run(
+        service.execute_requested_reverification(
+            owner_id="owner-a",
+            attempt_id=requested.attempt_id,
+            verifier_factory=lambda *_args: _PassingVerifier(),
+        )
+    )
+    assert completed.status is AttemptStatus.PASSED
+
+
+def test_inconclusive_with_deterministic_failure_cannot_use_semantic_retry(
+    tmp_path: Path,
+) -> None:
+    repository, _previous = _prepare_candidate(
+        tmp_path,
+        _DeterministicFailureInconclusiveVerifier(),
+    )
+
+    offer = asyncio.run(
+        _service(repository, "5").inspect_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+        )
+    )
+
+    assert offer.eligible is False
+    assert offer.reason is None
+    assert offer.blockers == ("semantic_retry_unavailable",)
 
 
 def test_candidate_drift_blocks_reverification(tmp_path: Path) -> None:
@@ -850,7 +1255,7 @@ def test_legacy_delivery_also_blocks_reverification(tmp_path: Path) -> None:
     assert offer.blockers == ("delivery_exists",)
 
 
-def test_legacy_unversioned_attempt_is_not_automatically_eligible(
+def test_failed_legacy_unversioned_candidate_offers_one_rebaseline(
     tmp_path: Path,
 ) -> None:
     repository = _prepare_legacy_candidate(tmp_path)
@@ -863,10 +1268,310 @@ def test_legacy_unversioned_attempt_is_not_automatically_eligible(
         )
     )
 
-    assert offer.eligible is False
+    assert offer.eligible is True
+    assert offer.reason is not None
+    assert offer.reason.value == "legacy_rebaseline"
+    assert len(offer.candidate_set_hash) == 64
+    assert offer.target_ruleset_hash == "9" * 64
     assert offer.ruleset_changed is None
-    assert offer.ruleset_change_summary == "当前验证规则身份暂时无法证明"
-    assert offer.blockers == ("legacy_unversioned",)
+    assert offer.ruleset_change_summary == (
+        "旧验证规则身份无法证明；当前验证规则身份已冻结"
+    )
+    assert offer.blockers == ()
+
+
+def test_owner_can_request_one_local_legacy_rebaseline_from_current_offer(
+    tmp_path: Path,
+) -> None:
+    repository = _prepare_legacy_candidate(tmp_path)
+    service = _service(repository, "9")
+    offer = asyncio.run(
+        service.inspect_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+        )
+    )
+
+    requested = asyncio.run(
+        service.request_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+            expected_previous_attempt_id=str(offer.previous_attempt_id),
+            expected_candidate_set_hash=offer.candidate_set_hash,
+            expected_target_ruleset_hash=str(offer.target_ruleset_hash),
+            legacy_ruleset_unknown_acknowledged=True,
+            authorization_text_version="legacy-rebaseline-v1",
+            external_api_confirmed=False,
+            idempotency_key="legacy-rebaseline-request",
+            verifier_factory=lambda *_args: _PassingVerifier(),
+        )
+    )
+
+    assert requested.status is AttemptStatus.REQUESTED
+    assert requested.reason_code is AttemptReason.LEGACY_REBASELINE
+    assert requested.egress_confirmed_at is None
+    assert requested.rebaseline_authorization_json is not None
+    assert requested.rebaseline_authorization_hash is not None
+
+    replayed = asyncio.run(
+        service.request_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+            expected_previous_attempt_id=str(offer.previous_attempt_id),
+            expected_candidate_set_hash=offer.candidate_set_hash,
+            expected_target_ruleset_hash=str(offer.target_ruleset_hash),
+            legacy_ruleset_unknown_acknowledged=True,
+            authorization_text_version="legacy-rebaseline-v1",
+            external_api_confirmed=False,
+            idempotency_key="legacy-rebaseline-request",
+            verifier_factory=lambda *_args: _PassingVerifier(),
+        )
+    )
+    assert replayed.attempt_id == requested.attempt_id
+
+    with pytest.raises(ValueError, match="幂等键已绑定其他候选验证请求"):
+        asyncio.run(
+            service.request_reverification(
+                owner_id="owner-a",
+                task_id="task-a",
+                revision=1,
+                expected_previous_attempt_id=str(offer.previous_attempt_id),
+                expected_candidate_set_hash=offer.candidate_set_hash,
+                expected_target_ruleset_hash=str(offer.target_ruleset_hash),
+                legacy_ruleset_unknown_acknowledged=False,
+                authorization_text_version="legacy-rebaseline-v1",
+                external_api_confirmed=False,
+                idempotency_key="legacy-rebaseline-request",
+                verifier_factory=lambda *_args: _PassingVerifier(),
+            )
+        )
+
+
+def test_same_legacy_rebaseline_idempotency_key_converges_under_concurrency(
+    tmp_path: Path,
+) -> None:
+    repository = _prepare_legacy_candidate(tmp_path)
+    service = _service(repository, "9")
+    get_barrier = threading.Barrier(2)
+    create_barrier = threading.Barrier(2)
+    original_get = repository.get_by_idempotency
+    original_create = repository.create_with_result
+    clock_lock = threading.Lock()
+    clock_tick = 0
+
+    def concurrent_get(owner_id: str, idempotency_key: str):
+        result = original_get(owner_id, idempotency_key)
+        get_barrier.wait(timeout=5)
+        return result
+
+    def concurrent_create(attempt):
+        create_barrier.wait(timeout=5)
+        return original_create(attempt)
+
+    def advancing_clock():
+        nonlocal clock_tick
+        with clock_lock:
+            clock_tick += 1
+            return _NOW + timedelta(microseconds=clock_tick)
+
+    repository.get_by_idempotency = concurrent_get  # type: ignore[method-assign]
+    repository.create_with_result = concurrent_create  # type: ignore[method-assign]
+    service._clock = advancing_clock
+    offer = asyncio.run(
+        service.inspect_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+        )
+    )
+
+    def request_once():
+        return asyncio.run(
+            service.request_reverification(
+                owner_id="owner-a",
+                task_id="task-a",
+                revision=1,
+                expected_previous_attempt_id=str(offer.previous_attempt_id),
+                expected_candidate_set_hash=offer.candidate_set_hash,
+                expected_target_ruleset_hash=str(offer.target_ruleset_hash),
+                legacy_ruleset_unknown_acknowledged=True,
+                authorization_text_version="legacy-rebaseline-v1",
+                external_api_confirmed=False,
+                idempotency_key="legacy-concurrent-command",
+                verifier_factory=lambda *_args: _PassingVerifier(),
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        attempts = tuple(executor.map(lambda _index: request_once(), range(2)))
+
+    assert attempts[0].attempt_id == attempts[1].attempt_id
+    assert len(
+        repository.list_for_candidate(
+            "owner-a",
+            task_id="task-a",
+            revision=1,
+            run_id="pi_run_0123456789abcdef",
+            candidate_set_hash=offer.candidate_set_hash,
+        )
+    ) == 2
+
+
+
+def test_legacy_inconclusive_offer_uses_frozen_runtime_confirmation_only_for_parsing(
+    tmp_path: Path,
+) -> None:
+    repository = _prepare_legacy_candidate(
+        tmp_path,
+        provider=True,
+        inconclusive=True,
+        omit_external_confirmation=True,
+    )
+
+    offer = asyncio.run(
+        _service(repository, "9").inspect_reverification(
+            owner_id="owner-a",
+            task_id="task-a",
+            revision=1,
+        )
+    )
+
+    assert offer.eligible is True
+    assert offer.reason is AttemptReason.SEMANTIC_INCONCLUSIVE
+    assert offer.ruleset_identity_status.value == "legacy_unversioned"
+    assert offer.requires_provider is True
+    assert offer.connection_id == "connection-a"
+    assert offer.model_id == "provider-model-a"
+    assert offer.blockers == ()
+
+
+def test_versioned_request_missing_external_confirmation_does_not_use_legacy_compat(
+    tmp_path: Path,
+) -> None:
+    repository, _previous = _prepare_candidate(
+        tmp_path,
+        _InconclusiveVerifier(),
+        provider=True,
+    )
+    database = tmp_path / "workspace.db"
+    with sqlite3.connect(database) as connection:
+        raw = connection.execute(
+            "SELECT request_json FROM agentic_runtime_runs"
+        ).fetchone()[0]
+        request_values = json.loads(raw)
+        request_values.pop("external_api_confirmed")
+        connection.execute(
+            "UPDATE agentic_runtime_runs SET request_json=?",
+            (json.dumps(request_values, ensure_ascii=False),),
+        )
+
+    try:
+        asyncio.run(
+            _service(repository, "5").inspect_reverification(
+                owner_id="owner-a",
+                task_id="task-a",
+                revision=1,
+            )
+        )
+    except ValueError as exc:
+        assert "冻结运行信息" in str(exc)
+    else:
+        raise AssertionError("versioned 请求缺字段必须失败关闭")
+
+
+def test_frozen_request_confirmation_conflict_fails_closed(tmp_path: Path) -> None:
+    repository = _prepare_legacy_candidate(
+        tmp_path,
+        provider=True,
+        inconclusive=True,
+    )
+    database = tmp_path / "workspace.db"
+    with sqlite3.connect(database) as connection:
+        raw = connection.execute(
+            "SELECT request_json FROM agentic_runtime_runs"
+        ).fetchone()[0]
+        request_values = json.loads(raw)
+        request_values["external_api_confirmed"] = False
+        connection.execute(
+            "UPDATE agentic_runtime_runs SET request_json=?",
+            (json.dumps(request_values, ensure_ascii=False),),
+        )
+
+    try:
+        asyncio.run(
+            _service(repository, "5").inspect_reverification(
+                owner_id="owner-a",
+                task_id="task-a",
+                revision=1,
+            )
+        )
+    except ValueError as exc:
+        assert "冻结运行信息" in str(exc)
+    else:
+        raise AssertionError("Runtime 与请求外发确认冲突必须失败关闭")
+
+
+def test_frozen_request_confirmation_requires_boolean(tmp_path: Path) -> None:
+    repository = _prepare_legacy_candidate(
+        tmp_path,
+        provider=True,
+        inconclusive=True,
+    )
+    database = tmp_path / "workspace.db"
+    with sqlite3.connect(database) as connection:
+        raw = connection.execute(
+            "SELECT request_json FROM agentic_runtime_runs"
+        ).fetchone()[0]
+        request_values = json.loads(raw)
+        request_values["external_api_confirmed"] = "true"
+        connection.execute(
+            "UPDATE agentic_runtime_runs SET request_json=?",
+            (json.dumps(request_values, ensure_ascii=False),),
+        )
+
+    try:
+        asyncio.run(
+            _service(repository, "5").inspect_reverification(
+                owner_id="owner-a",
+                task_id="task-a",
+                revision=1,
+            )
+        )
+    except ValueError as exc:
+        assert "冻结运行信息" in str(exc)
+    else:
+        raise AssertionError("字符串外发确认必须失败关闭")
+
+
+@pytest.mark.parametrize("corrupt_confirmation", ["false", "0", 2])
+def test_runtime_confirmation_column_corruption_fails_closed(
+    tmp_path: Path,
+    corrupt_confirmation,
+) -> None:
+    repository = _prepare_legacy_candidate(
+        tmp_path,
+        provider=True,
+        inconclusive=True,
+        omit_external_confirmation=True,
+    )
+    database = tmp_path / "workspace.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE agentic_runtime_runs SET external_api_confirmed=?",
+            (corrupt_confirmation,),
+        )
+
+    with pytest.raises(ValueError, match="冻结运行信息"):
+        asyncio.run(
+            _service(repository, "5").inspect_reverification(
+                owner_id="owner-a",
+                task_id="task-a",
+                revision=1,
+            )
+        )
 
 
 def test_offer_queries_leave_database_logically_unchanged(tmp_path: Path) -> None:

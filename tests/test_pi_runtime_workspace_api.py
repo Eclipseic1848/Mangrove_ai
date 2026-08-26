@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
@@ -46,6 +46,8 @@ from src.candidate_verification import (
     AttemptStatus,
     CandidateVerificationService,
     ReverificationBlocker,
+    ReverificationContractError,
+    RulesetIdentityStatus,
     SqliteCandidateVerificationRepository,
     VerifierRulesetBinding,
     migrate_candidate_verification,
@@ -112,8 +114,21 @@ class _AllowCandidateVerifierAdapter:
 class _StaticReportVerifier:
     def __init__(self, report: VerificationReport) -> None:
         self._report = report
+        self.verify_calls = 0
+        self.semantic_retry_calls = 0
 
     async def verify(self, **_kwargs) -> VerificationReport:
+        self.verify_calls += 1
+        return self._report
+
+    async def retry_semantic_verification(
+        self,
+        *,
+        previous_report,
+        **_kwargs,
+    ) -> VerificationReport:
+        self.semantic_retry_calls += 1
+        assert previous_report.status is VerificationStatus.INCONCLUSIVE
         return self._report
 
 
@@ -321,6 +336,17 @@ class BlockingFullVerifier:
         self.release = threading.Event()
 
     async def verify(self, **_kwargs) -> VerificationReport:
+        self.started.set()
+        await asyncio.to_thread(self.release.wait)
+        return FakePiRuntime()._verification_report()
+
+    async def retry_semantic_verification(
+        self,
+        *,
+        previous_report,
+        **_kwargs,
+    ) -> VerificationReport:
+        assert previous_report.status is VerificationStatus.INCONCLUSIVE
         self.started.set()
         await asyncio.to_thread(self.release.wait)
         return FakePiRuntime()._verification_report()
@@ -1654,7 +1680,7 @@ def test_pi_gray_entry_accepts_mixed_sources_and_exposes_candidate(
         assert "已禁止下载" in blocked.json()["detail"]
 
 
-def test_retry_inconclusive_candidate_verification_does_not_rerun_pi(
+def test_legacy_retry_endpoint_is_retired_without_attempt_or_delivery(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -1800,11 +1826,8 @@ def test_retry_inconclusive_candidate_verification_does_not_rerun_pi(
             f"/api/semantic-workspace/tasks/{task_id}/candidate-verification/retry"
         )
 
-        assert retried.status_code == 200, retried.text
-        payload = retried.json()
-        assert payload["status"] == "completed"
-        assert payload["delivery"]["status"] == "succeeded"
-        assert payload["agentic_runtime"]["verification"]["status"] == "passed"
+        assert retried.status_code == 410, retried.text
+        assert "candidate-verifications" in retried.json()["detail"]
         assert runtime.start_calls == 1
         attempts = attempt_repository.list_for_candidate(
             "user-a",
@@ -1813,10 +1836,12 @@ def test_retry_inconclusive_candidate_verification_does_not_rerun_pi(
             run_id=runtime_state["run_id"],
             candidate_set_hash=runtime_state["verified_candidate_set_hash"],
         )
-        assert [item.status for item in attempts] == [
-            AttemptStatus.INCONCLUSIVE,
-            AttemptStatus.PASSED,
-        ]
+        assert [item.status for item in attempts] == [AttemptStatus.INCONCLUSIVE]
+        unchanged = client.get(
+            f"/api/semantic-workspace/tasks/{task_id}"
+        ).json()
+        assert unchanged["status"] == "candidate_ready"
+        assert unchanged["delivery"] is None
 
 
 def test_candidate_offer_cross_owner_returns_404_without_content(
@@ -2072,17 +2097,568 @@ def test_full_candidate_reverification_returns_202_without_rerunning_pi_or_publi
         } == set(distinct_ids)
 
 
+def test_legacy_rebaseline_runs_full_worker_without_rerunning_pi_or_publishing(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = InconclusivePiRuntime()
+    verifier = _StaticReportVerifier(FakePiRuntime()._verification_report())
+    monkeypatch.setattr(
+        SemanticWorkspaceManager,
+        "_build_full_candidate_verifier",
+        lambda *_args, **_kwargs: verifier,
+        raising=False,
+    )
+    client = _client(tmp_path, monkeypatch, role="admin", pi_runtime=runtime)
+    runtime_mod._manager._candidate_verification._event_writer = (
+        runtime_mod._write_candidate_verification_event
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并只输出一份 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        before = _wait_for_status(client, task_id, "candidate_ready")
+        original_attempt_id = before["agentic_runtime"][
+            "latest_verification_attempt"
+        ]["attempt_id"]
+        run_id = before["agentic_runtime"]["run_id"]
+
+        with sqlite3.connect(settings.webui_db_path) as database:
+            database.row_factory = sqlite3.Row
+            original = database.execute(
+                "SELECT * FROM candidate_verification_attempts "
+                "WHERE owner_id=? AND attempt_id=?",
+                ("user-a", original_attempt_id),
+            ).fetchone()
+            assert original is not None
+            values = dict(original)
+            legacy_attempt_id = "legacy_" + "d" * 64
+            database.execute(
+                "DROP TRIGGER candidate_verification_no_delete"
+            )
+            database.execute(
+                "DELETE FROM candidate_verification_attempts "
+                "WHERE owner_id=? AND attempt_id=?",
+                ("user-a", original_attempt_id),
+            )
+            database.execute(
+                """
+                CREATE TRIGGER candidate_verification_no_delete
+                BEFORE DELETE ON candidate_verification_attempts
+                BEGIN
+                    SELECT RAISE(ABORT, '候选验证 Attempt 不可删除');
+                END
+                """
+            )
+            values.update(
+                {
+                    "attempt_id": legacy_attempt_id,
+                    "previous_attempt_id": None,
+                    "reason_code": "initial",
+                    "status": "failed",
+                    "ruleset_identity_status": "legacy_unversioned",
+                    "verifier_ruleset_hash": None,
+                    "verifier_code_commit": None,
+                    "verifier_source_hash": None,
+                    "verifier_execution_identity_hash": None,
+                    "verifier_ruleset_manifest_json": None,
+                    "manifest_hash": None,
+                    "goal_contract_hash": None,
+                    "delivery_spec_hash": None,
+                    "idempotency_key": "legacy-rebaseline-api-fixture",
+                    "request_hash": "d" * 64,
+                    "created_at": (
+                        datetime.fromisoformat(values["created_at"])
+                        + timedelta(microseconds=1)
+                    ).isoformat(),
+                }
+            )
+            columns = tuple(values)
+            database.execute(
+                "INSERT INTO candidate_verification_attempts ("
+                + ", ".join(columns)
+                + ") VALUES ("
+                + ", ".join("?" for _ in columns)
+                + ")",
+                tuple(values[column] for column in columns),
+            )
+
+        current = client.get(f"/api/semantic-workspace/tasks/{task_id}").json()
+        offer = current["agentic_runtime"]["reverification_offer"]
+        assert offer["eligible"] is True
+        assert offer["reason"] == "legacy_rebaseline"
+
+        requested = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications",
+            headers={"Idempotency-Key": "legacy-rebaseline-api"},
+            json={
+                "expected_revision": 1,
+                "expected_previous_attempt_id": legacy_attempt_id,
+                "external_api_confirmed": False,
+                "expected_candidate_set_hash": offer["candidate_set_hash"],
+                "expected_target_ruleset_hash": offer["target_ruleset_hash"],
+                "legacy_ruleset_unknown_acknowledged": True,
+                "authorization_text_version": "legacy-rebaseline-v1",
+            },
+        )
+        assert requested.status_code == 202, requested.text
+        new_attempt_id = requested.json()["attempt_id"]
+
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            latest = client.get(
+                f"/api/semantic-workspace/tasks/{task_id}"
+            ).json()["agentic_runtime"]["latest_verification_attempt"]
+            if latest["attempt_id"] == new_attempt_id and latest["status"] == "passed":
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError(f"legacy 再基线未进入 passed 终态：{latest}")
+
+        stored = SqliteCandidateVerificationRepository(
+            settings.webui_db_path
+        ).get("user-a", new_attempt_id)
+        assert stored is not None
+        assert stored.reason_code.value == "legacy_rebaseline"
+        assert stored.rebaseline_authorization_hash is not None
+        assert runtime.start_calls == 1
+        assert runtime.resume_calls == []
+        assert client.get(f"/api/semantic-workspace/tasks/{task_id}").json()[
+            "delivery"
+        ] is None
+        assert run_id == stored.run_id
+
+
+@pytest.mark.parametrize(
+    "race_kind",
+    [
+        "none",
+        "assignment_before_claim",
+        "revision_before_authority",
+        "active_attempt_before_authority",
+        "legacy_unversioned_fields",
+    ],
+)
+def test_historical_candidate_reverification_records_narrow_authority_before_worker(
+    tmp_path,
+    monkeypatch,
+    race_kind,
+) -> None:
+    runtime = InconclusivePiRuntime()
+    verifier = _StaticReportVerifier(FakePiRuntime()._verification_report())
+    monkeypatch.setattr(
+        SemanticWorkspaceManager,
+        "_build_full_candidate_verifier",
+        lambda *_args, **_kwargs: verifier,
+        raising=False,
+    )
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="user",
+        pi_runtime=runtime,
+        routing_mode=RolloutMode.VNEXT_DEFAULT,
+    )
+    document, _ = _uploads(tmp_path)
+    broker = ConnectionBroker(
+        repository=ModelConnectionRepository(settings.webui_db_path),
+        vault=FernetCredentialVault.generate(),
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "OK"}}],
+                    "usage": {"total_tokens": 1},
+                },
+            )
+        ),
+        resolver=lambda _host: ["8.8.8.8"],
+    )
+    connection = asyncio.run(
+        broker.configure_personal(
+            owner_user_id="user-a",
+            preset_id="deepseek",
+            api_key="personal-provider-secret-1234",
+        )
+    )
+    broker.set_usage_preference(
+        "user-a",
+        str(connection["connection_id"]),
+        str(connection["default_model"]),
+    )
+    monkeypatch.setattr(broker_mod, "_default_broker", broker)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并只输出一份 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "permission_profile": "standard",
+                "external_api_confirmed": True,
+            },
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        before = _wait_for_status(client, task_id, "candidate_ready")
+        previous_attempt_id = before["agentic_runtime"][
+            "latest_verification_attempt"
+        ]["attempt_id"]
+        assert before["agentic_runtime"]["reverification_offer"][
+            "eligible"
+        ] is True
+
+        with sqlite3.connect(settings.webui_db_path) as database:
+            database.row_factory = sqlite3.Row
+            applied_at = datetime.fromisoformat(
+                database.execute(
+                    "SELECT applied_at FROM runtime_routing_migrations "
+                    "WHERE migration_id='0001_runtime_routing'"
+                ).fetchone()[0]
+            )
+            assignment_row = database.execute(
+                "SELECT * FROM runtime_assignments WHERE owner_id=? "
+                "AND task_id=? AND revision=1",
+                ("user-a", task_id),
+            ).fetchone()
+            assert assignment_row is not None
+            assignment_snapshot = dict(assignment_row)
+            database.execute("DROP TRIGGER runtime_assignments_no_update")
+            database.execute("DROP TRIGGER runtime_assignments_no_delete")
+            database.execute(
+                "DELETE FROM runtime_assignments WHERE owner_id=? "
+                "AND task_id=? AND revision=1",
+                ("user-a", task_id),
+            )
+            database.execute(
+                "UPDATE agentic_runtime_runs SET created_at=? "
+                "WHERE user_id=? AND task_id=? AND revision=1",
+                (
+                    (applied_at - timedelta(days=1)).isoformat(),
+                    "user-a",
+                    task_id,
+                ),
+            )
+            for index, event_type in enumerate(
+                (
+                    "runtime.preparing",
+                    "verification.completed",
+                    "candidate.ready",
+                ),
+                start=1,
+            ):
+                database.execute(
+                    "INSERT INTO agentic_runtime_events "
+                    "(event_id, user_id, task_id, revision, event_type, "
+                    "summary, details_json, created_at) "
+                    "VALUES (?, ?, ?, 1, ?, ?, '{}', ?)",
+                    (
+                        f"historical-event-{index}",
+                        "user-a",
+                        task_id,
+                        event_type,
+                        "历史事件链测试",
+                        (applied_at - timedelta(hours=1)).isoformat(),
+                    ),
+                )
+            if race_kind == "legacy_unversioned_fields":
+                original = database.execute(
+                    "SELECT * FROM candidate_verification_attempts "
+                    "WHERE owner_id=? AND attempt_id=?",
+                    ("user-a", previous_attempt_id),
+                ).fetchone()
+                assert original is not None
+                values = dict(original)
+                legacy_attempt_id = "legacy_" + "e" * 64
+                values.update(
+                    {
+                        "attempt_id": legacy_attempt_id,
+                        "previous_attempt_id": None,
+                        "manifest_hash": None,
+                        "goal_contract_hash": None,
+                        "delivery_spec_hash": None,
+                        "ruleset_identity_status": "legacy_unversioned",
+                        "verifier_ruleset_hash": None,
+                        "verifier_code_commit": None,
+                        "verifier_source_hash": None,
+                        "verifier_execution_identity_hash": None,
+                        "verifier_ruleset_manifest_json": None,
+                        "idempotency_key": "legacy-unversioned-fixture",
+                        "request_hash": "e" * 64,
+                        "created_at": (
+                            datetime.fromisoformat(values["created_at"])
+                            + timedelta(microseconds=1)
+                        ).isoformat(),
+                    }
+                )
+                columns = tuple(values)
+                database.execute(
+                    "INSERT INTO candidate_verification_attempts ("
+                    + ", ".join(columns)
+                    + ") VALUES ("
+                    + ", ".join("?" for _ in columns)
+                    + ")",
+                    tuple(values[column] for column in columns),
+                )
+                previous_attempt_id = legacy_attempt_id
+
+        historical = client.get(
+            f"/api/semantic-workspace/tasks/{task_id}"
+        ).json()
+        offer = historical["agentic_runtime"]["reverification_offer"]
+        assert offer["eligible"] is False
+        assert offer["blockers"] == [
+            "historical_authority_recovery_required"
+        ]
+        recovery = offer["historical_authority_recovery"]
+        assert recovery["owner_id"] == "user-a"
+        assert recovery["task_id"] == task_id
+        assert recovery["run_id"] == historical["agentic_runtime"]["run_id"]
+
+        missing_confirmation = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications",
+            headers={"Idempotency-Key": "historical-api-recovery"},
+            json={
+                "expected_revision": 1,
+                "expected_previous_attempt_id": previous_attempt_id,
+                "external_api_confirmed": True,
+            },
+        )
+        assert missing_confirmation.status_code == 422
+        with sqlite3.connect(settings.webui_db_path) as database:
+            assert database.execute(
+                "SELECT COUNT(*) FROM candidate_reverification_authorities"
+            ).fetchone()[0] == 0
+
+        if race_kind == "assignment_before_claim":
+            original_start = (
+                SqliteCandidateVerificationRepository.start_requested_if_current
+            )
+
+            def insert_assignment_before_claim(repository, *args, **kwargs):
+                with sqlite3.connect(settings.webui_db_path) as database:
+                    columns = tuple(assignment_snapshot)
+                    database.execute(
+                        "INSERT INTO runtime_assignments ("
+                        + ", ".join(columns)
+                        + ") VALUES ("
+                        + ", ".join("?" for _ in columns)
+                        + ")",
+                        tuple(assignment_snapshot[column] for column in columns),
+                    )
+                return original_start(repository, *args, **kwargs)
+
+            monkeypatch.setattr(
+                SqliteCandidateVerificationRepository,
+                "start_requested_if_current",
+                insert_assignment_before_claim,
+            )
+        elif race_kind == "revision_before_authority":
+            original_create_authority = (
+                SqliteCandidateVerificationRepository.create_historical_authority
+            )
+
+            def change_revision_before_authority(repository, authority):
+                with sqlite3.connect(settings.webui_db_path) as database:
+                    database.execute(
+                        "UPDATE semantic_workspace_revisions "
+                        "SET objective_text='并发改变的目标' "
+                        "WHERE user_id=? AND task_id=? AND revision=1",
+                        ("user-a", task_id),
+                    )
+                return original_create_authority(repository, authority)
+
+            monkeypatch.setattr(
+                SqliteCandidateVerificationRepository,
+                "create_historical_authority",
+                change_revision_before_authority,
+            )
+        elif race_kind == "active_attempt_before_authority":
+            original_create_authority = (
+                SqliteCandidateVerificationRepository.create_historical_authority
+            )
+
+            def create_active_attempt_before_authority(repository, authority):
+                with sqlite3.connect(settings.webui_db_path) as database:
+                    database.row_factory = sqlite3.Row
+                    row = database.execute(
+                        "SELECT * FROM candidate_verification_attempts "
+                        "WHERE owner_id=? AND attempt_id=?",
+                        ("user-a", previous_attempt_id),
+                    ).fetchone()
+                    assert row is not None
+                    values = dict(row)
+                    values.update(
+                        {
+                            "attempt_id": "verification_" + "f" * 32,
+                            "previous_attempt_id": previous_attempt_id,
+                            "reason_code": "semantic_inconclusive",
+                            "idempotency_key": "concurrent-before-authority",
+                            "request_hash": "f" * 64,
+                            "status": "requested",
+                            "started_at": None,
+                            "finished_at": None,
+                            "report_json": None,
+                            "report_hash": None,
+                            "created_at": (
+                                datetime.fromisoformat(values["created_at"])
+                                + timedelta(seconds=1)
+                            ).isoformat(),
+                        }
+                    )
+                    columns = tuple(values)
+                    database.execute(
+                        "INSERT INTO candidate_verification_attempts ("
+                        + ", ".join(columns)
+                        + ") VALUES ("
+                        + ", ".join("?" for _ in columns)
+                        + ")",
+                        tuple(values[column] for column in columns),
+                    )
+                return original_create_authority(repository, authority)
+
+            monkeypatch.setattr(
+                SqliteCandidateVerificationRepository,
+                "create_historical_authority",
+                create_active_attempt_before_authority,
+            )
+
+        accepted = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications",
+            headers={"Idempotency-Key": "historical-api-recovery"},
+            json={
+                "expected_revision": 1,
+                "expected_previous_attempt_id": previous_attempt_id,
+                "external_api_confirmed": True,
+                "historical_authority_recovery": {
+                    "expected_evidence_hash": recovery[
+                        "expected_evidence_hash"
+                    ],
+                    "acknowledge_no_historical_assignment": True,
+                    "acknowledge_reverification_only": True,
+                },
+            },
+        )
+        if race_kind in {
+            "revision_before_authority",
+            "active_attempt_before_authority",
+        }:
+            assert accepted.status_code == 409, accepted.text
+            with sqlite3.connect(settings.webui_db_path) as database:
+                assert database.execute(
+                    "SELECT COUNT(*) FROM candidate_reverification_authorities"
+                ).fetchone()[0] == 0
+                expected_attempts = (
+                    2 if race_kind == "active_attempt_before_authority" else 1
+                )
+                assert database.execute(
+                    "SELECT COUNT(*) FROM candidate_verification_attempts"
+                ).fetchone()[0] == expected_attempts
+            assert verifier.semantic_retry_calls == 0
+            return
+
+        assert accepted.status_code == 202, accepted.text
+        expected_status = (
+            "cancelled" if race_kind == "assignment_before_claim" else "passed"
+        )
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            current = client.get(
+                f"/api/semantic-workspace/tasks/{task_id}"
+            ).json()
+            latest = current["agentic_runtime"][
+                "latest_verification_attempt"
+            ]
+            if latest["attempt_id"] == accepted.json()["attempt_id"] and latest[
+                "status"
+            ] == expected_status:
+                break
+            time.sleep(0.02)
+        else:
+            raise AssertionError(f"历史候选重验未完成：{latest}")
+
+        with sqlite3.connect(settings.webui_db_path) as database:
+            authority_count = database.execute(
+                "SELECT COUNT(*) FROM candidate_reverification_authorities"
+            ).fetchone()[0]
+            assignment_count = database.execute(
+                "SELECT COUNT(*) FROM runtime_assignments WHERE owner_id=? "
+                "AND task_id=? AND revision=1",
+                ("user-a", task_id),
+            ).fetchone()[0]
+        assert authority_count == 1
+        assert assignment_count == int(race_kind == "assignment_before_claim")
+        assert current["delivery"] is None
+        assert runtime.start_calls == 1
+        assert verifier.semantic_retry_calls == int(
+            race_kind in {"none", "legacy_unversioned_fields"}
+        )
+
+
+def test_admin_cannot_request_reverification_for_another_owner(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client = _client(tmp_path, monkeypatch, role="admin")
+    task_id = "workspace_other_owner_candidate"
+
+    with client:
+        runtime_mod.get_store().create_semantic_workspace_task(
+            "other-owner",
+            task_id=task_id,
+            title="其他 Owner 的候选",
+            objective_text="只用于验证 Owner 隔离",
+            upload_ids=[],
+            output_formats=["json"],
+            provider="local",
+            model="local-model",
+            external_api_confirmed=False,
+        )
+
+        response = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications",
+            headers={"Idempotency-Key": "admin-cross-owner-recovery"},
+            json={
+                "expected_revision": 1,
+                "expected_previous_attempt_id": "verification_other_owner",
+                "external_api_confirmed": False,
+            },
+        )
+
+        assert response.status_code == 403
+        assert "TaskOwner" in response.json()["detail"]
+        with sqlite3.connect(settings.webui_db_path) as database:
+            assert database.execute(
+                "SELECT COUNT(*) FROM candidate_reverification_authorities"
+            ).fetchone()[0] == 0
+            assert database.execute(
+                "SELECT COUNT(*) FROM candidate_verification_attempts"
+            ).fetchone()[0] == 0
+
+
 def test_passed_candidate_reverification_requires_explicit_idempotent_publish(
     tmp_path,
     monkeypatch,
 ) -> None:
     runtime = InconclusivePiRuntime()
+    verifier = _StaticReportVerifier(FakePiRuntime()._verification_report())
     monkeypatch.setattr(
         SemanticWorkspaceManager,
         "_build_full_candidate_verifier",
-        lambda *_args, **_kwargs: _StaticReportVerifier(
-            FakePiRuntime()._verification_report()
-        ),
+        lambda *_args, **_kwargs: verifier,
         raising=False,
     )
     client = _client(
@@ -2108,6 +2684,24 @@ def test_passed_candidate_reverification_requires_explicit_idempotent_publish(
         assert created.status_code == 202, created.text
         task_id = created.json()["task_id"]
         candidate = _wait_for_status(client, task_id, "candidate_ready")
+        assert runtime.start_calls == 1
+        assert runtime.resume_calls == []
+        runtime_state = AgenticRuntimeRepository(settings.webui_db_path).get(
+            "user-a",
+            task_id,
+            1,
+        )
+        assert runtime_state is not None
+        candidate_path = runtime_state["candidates"][0].host_path
+        manifest_path = candidate_path.parent / "candidate-manifest.json"
+        candidate_before = candidate_path.read_bytes()
+        manifest_before = manifest_path.read_bytes()
+        with sqlite3.connect(settings.webui_db_path) as connection:
+            revision_count_before = connection.execute(
+                "SELECT COUNT(*) FROM semantic_workspace_revisions "
+                "WHERE task_id=?",
+                (task_id,),
+            ).fetchone()[0]
         previous_attempt_id = candidate["agentic_runtime"][
             "latest_verification_attempt"
         ]["attempt_id"]
@@ -2135,14 +2729,18 @@ def test_passed_candidate_reverification_requires_explicit_idempotent_publish(
             raise AssertionError(f"完整候选重验未进入 passed 终态：{latest}")
         assert current["delivery"] is None
         assert current["agentic_runtime"]["awaiting_publication"] is True
-        runtime_state = AgenticRuntimeRepository(settings.webui_db_path).get(
-            "user-a",
-            task_id,
-            1,
-        )
-        assert runtime_state is not None
-        candidate_path = runtime_state["candidates"][0].host_path
-        candidate_before = candidate_path.read_bytes()
+        assert runtime.start_calls == 1
+        assert runtime.resume_calls == []
+        assert verifier.semantic_retry_calls == 1
+        assert verifier.verify_calls == 0
+        assert candidate_path.read_bytes() == candidate_before
+        assert manifest_path.read_bytes() == manifest_before
+        with sqlite3.connect(settings.webui_db_path) as connection:
+            assert connection.execute(
+                "SELECT COUNT(*) FROM semantic_workspace_revisions "
+                "WHERE task_id=?",
+                (task_id,),
+            ).fetchone()[0] == revision_count_before
         attempt_repository = SqliteCandidateVerificationRepository(
             settings.webui_db_path
         )
@@ -2716,6 +3314,184 @@ def test_full_candidate_reverification_reports_corrupt_frozen_context_as_422(
         assert response.json()["detail"] == (
             "候选缺少冻结运行信息，不能检查重验资格"
         )
+
+
+def test_legacy_candidate_detail_remains_readable_when_reverification_context_is_incomplete(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = InconclusivePiRuntime()
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=runtime,
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并只输出一份 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        task = _wait_for_status(client, task_id, "candidate_ready")
+        previous_attempt = task["agentic_runtime"][
+            "latest_verification_attempt"
+        ]
+        attempt_repository = SqliteCandidateVerificationRepository(
+            settings.webui_db_path
+        )
+        original_attempt = attempt_repository.get(
+            "user-a", previous_attempt["attempt_id"]
+        )
+        assert original_attempt is not None
+
+        with sqlite3.connect(settings.webui_db_path) as connection:
+            row = connection.execute(
+                "SELECT request_json FROM agentic_runtime_runs "
+                "WHERE user_id='user-a' AND task_id=? AND revision=1",
+                (task_id,),
+            ).fetchone()
+            assert row is not None
+            request_payload = json.loads(row[0])
+            request_payload.pop("external_api_confirmed", None)
+            request_payload.update(
+                {
+                    "model_connection_id": "legacy-connection",
+                    "model_connection_version": "a" * 64,
+                    "model_connection_model": "legacy-model",
+                }
+            )
+            connection.execute(
+                "UPDATE agentic_runtime_runs SET request_json=? "
+                "WHERE user_id='user-a' AND task_id=? AND revision=1",
+                (
+                    json.dumps(request_payload, ensure_ascii=False),
+                    task_id,
+                ),
+            )
+
+        now = datetime.now(timezone.utc)
+        legacy_attempt = original_attempt.model_copy(
+            update={
+                "attempt_id": f"legacy-{task_id}",
+                "previous_attempt_id": original_attempt.attempt_id,
+                "ruleset_identity_status": (
+                    RulesetIdentityStatus.LEGACY_UNVERSIONED
+                ),
+                "verifier_ruleset_hash": None,
+                "verifier_code_commit": None,
+                "verifier_source_hash": None,
+                "verifier_execution_identity_hash": None,
+                "verifier_ruleset_manifest_json": None,
+                "idempotency_key": f"legacy-detail:{task_id}",
+                "request_hash": "b" * 64,
+                "status": AttemptStatus.REQUESTED,
+                "report_json": None,
+                "report_hash": None,
+                "created_at": now,
+                "started_at": None,
+                "finished_at": None,
+            }
+        )
+        attempt_repository.create(legacy_attempt)
+        attempt_repository.start(
+            "user-a", legacy_attempt.attempt_id, started_at=now
+        )
+        attempt_repository.finish(
+            "user-a",
+            legacy_attempt.attempt_id,
+            status=original_attempt.status,
+            report_json=original_attempt.report_json,
+            report_hash=original_attempt.report_hash,
+            finished_at=now,
+        )
+
+        response = client.get(f"/api/semantic-workspace/tasks/{task_id}")
+
+        assert response.status_code == 200, response.text
+        agentic_runtime = response.json()["agentic_runtime"]
+        assert len(agentic_runtime["candidates"]) == 1
+        assert agentic_runtime["latest_verification_attempt"] == {
+            "attempt_id": legacy_attempt.attempt_id,
+            "status": original_attempt.status.value,
+            "reason": original_attempt.reason_code.value,
+            "ruleset_identity_status": "legacy_unversioned",
+        }
+        assert agentic_runtime["reverification_offer"] is None
+        assert agentic_runtime["reverification_unavailable_reason"] == (
+            "该历史任务缺少可证明的冻结运行信息，暂不能重新验证。"
+        )
+
+
+def test_versioned_candidate_detail_rejects_corrupt_reverification_context(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = InconclusivePiRuntime()
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=runtime,
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并只输出一份 JSON",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        _wait_for_status(client, task_id, "candidate_ready")
+
+        with sqlite3.connect(settings.webui_db_path) as connection:
+            row = connection.execute(
+                "SELECT request_json FROM agentic_runtime_runs "
+                "WHERE user_id='user-a' AND task_id=? AND revision=1",
+                (task_id,),
+            ).fetchone()
+            assert row is not None
+            request_payload = json.loads(row[0])
+            request_payload.pop("external_api_confirmed", None)
+            request_payload.update(
+                {
+                    "model_connection_id": "corrupt-connection",
+                    "model_connection_version": "a" * 64,
+                    "model_connection_model": "corrupt-model",
+                }
+            )
+            connection.execute(
+                "UPDATE agentic_runtime_runs SET request_json=? "
+                "WHERE user_id='user-a' AND task_id=? AND revision=1",
+                (
+                    json.dumps(request_payload, ensure_ascii=False),
+                    task_id,
+                ),
+            )
+
+        with pytest.raises(
+            ReverificationContractError,
+            match="候选缺少冻结运行信息，不能检查重验资格",
+        ):
+            client.get(f"/api/semantic-workspace/tasks/{task_id}")
 
 
 def test_published_pi_json_can_be_previewed_from_formal_delivery(

@@ -71,6 +71,78 @@ def test_explicit_migration_preserves_recovery_point_before_installing_ledger(
     SqliteCandidateVerificationRepository(database)
 
 
+def test_explicit_migration_installs_legacy_rebaseline_ledger_contract(
+    tmp_path,
+) -> None:
+    database = tmp_path / "legacy-rebaseline.db"
+    backup = tmp_path / "legacy-rebaseline-before.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE existing_data (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO existing_data VALUES ('kept')")
+
+    migrate_candidate_verification(database, backup)
+
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(candidate_verification_attempts)"
+            )
+        }
+        table_sql = connection.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='table' AND name='candidate_verification_attempts'"
+        ).fetchone()[0]
+        migrations = {
+            row[0]
+            for row in connection.execute(
+                "SELECT migration_id FROM candidate_verification_migrations"
+            )
+        }
+        assert connection.execute("SELECT value FROM existing_data").fetchone() == (
+            "kept",
+        )
+
+    assert "rebaseline_authorization_json" in columns
+    assert "rebaseline_authorization_hash" in columns
+    assert "legacy_rebaseline" in table_sql
+    assert "0004_legacy_candidate_rebaseline" in migrations
+
+
+def test_rebaseline_replay_accepts_older_authority_migration_recovery_point(
+    tmp_path,
+) -> None:
+    database = tmp_path / "staged-production.db"
+    rebaseline_backup = tmp_path / "before-rebaseline.db"
+    sqlite3.connect(database).close()
+    migrate_candidate_verification(database, rebaseline_backup)
+
+    # 模拟 0003 与 0004 在不同生产门执行，各自冻结不同恢复点。
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "DROP TRIGGER candidate_verification_migrations_no_update"
+        )
+        connection.execute(
+            "UPDATE candidate_verification_migrations SET backup_sha256=? "
+            "WHERE migration_id='0003_historical_reverification_authorities'",
+            ("a" * 64,),
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER candidate_verification_migrations_no_update
+            BEFORE UPDATE ON candidate_verification_migrations
+            BEGIN
+                SELECT RAISE(ABORT, '候选验证迁移记录不可改写');
+            END
+            """
+        )
+
+    assert migrate_candidate_verification(
+        database,
+        rebaseline_backup,
+    ) == rebaseline_backup.resolve()
+
+
 @pytest.mark.parametrize("legacy_status", ["passed", "failed", "inconclusive"])
 def test_migration_imports_legacy_report_without_guessing_ruleset_identity(
     tmp_path,
@@ -220,8 +292,62 @@ def test_migration_replay_preserves_first_recovery_point(tmp_path) -> None:
     assert first == second == backup.resolve()
     assert backup.read_bytes() == backup_before_replay
 
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(candidate_verification_migrations)"
+            )
+        }
+        authority_migration = connection.execute(
+            "SELECT ddl_sha256 FROM candidate_verification_migrations "
+            "WHERE migration_id='0003_historical_reverification_authorities'"
+        ).fetchone()
+        assert "ddl_sha256" in columns
+        assert authority_migration is not None
+        assert len(authority_migration[0]) == 64
+        with pytest.raises(sqlite3.IntegrityError, match="迁移记录不可改写"):
+            connection.execute(
+                "UPDATE candidate_verification_migrations SET applied_at='changed' "
+                "WHERE migration_id='0003_historical_reverification_authorities'"
+            )
+        with pytest.raises(sqlite3.IntegrityError, match="迁移记录不可删除"):
+            connection.execute(
+                "DELETE FROM candidate_verification_migrations "
+                "WHERE migration_id='0003_historical_reverification_authorities'"
+            )
 
-def test_migration_upgrades_existing_0001_with_separate_recovery_point(
+
+def test_repository_rejects_tampered_authority_migration_digest(tmp_path) -> None:
+    database = tmp_path / "production.db"
+    backup = tmp_path / "before-candidate-verification.db"
+    sqlite3.connect(database).close()
+    migrate_candidate_verification(database, backup)
+
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "DROP TRIGGER candidate_verification_migrations_no_update"
+        )
+        connection.execute(
+            "UPDATE candidate_verification_migrations SET ddl_sha256=? "
+            "WHERE migration_id='0003_historical_reverification_authorities'",
+            ("0" * 64,),
+        )
+        connection.execute(
+            """
+            CREATE TRIGGER candidate_verification_migrations_no_update
+            BEFORE UPDATE ON candidate_verification_migrations
+            BEGIN
+                SELECT RAISE(ABORT, '候选验证迁移记录不可改写');
+            END
+            """
+        )
+
+    with pytest.raises(RuntimeError, match="尚未执行带备份迁移"):
+        SqliteCandidateVerificationRepository(database)
+
+
+def test_migration_repairs_missing_publication_step_with_separate_recovery_point(
     tmp_path,
 ) -> None:
     database = tmp_path / "production.db"
@@ -257,10 +383,30 @@ def test_migration_upgrades_existing_0001_with_separate_recovery_point(
         )
     migrate_candidate_verification(database, first_backup)
     with sqlite3.connect(database) as connection:
-        # 模拟已执行旧版 0001、但尚未发布 CV-07 迁移的合法阶段状态。
+        # 模拟 CandidateVerification 账本完整、但 CV-07 发布迁移缺失的阶段状态。
+        connection.execute(
+            "DROP TRIGGER candidate_verification_migrations_no_update"
+        )
+        connection.execute(
+            "DROP TRIGGER candidate_verification_migrations_no_delete"
+        )
         connection.execute(
             "DELETE FROM candidate_verification_migrations "
             "WHERE migration_id='0002_delivery_publication_idempotency'"
+        )
+        connection.executescript(
+            """
+            CREATE TRIGGER candidate_verification_migrations_no_update
+            BEFORE UPDATE ON candidate_verification_migrations
+            BEGIN
+                SELECT RAISE(ABORT, '候选验证迁移记录不可改写');
+            END;
+            CREATE TRIGGER candidate_verification_migrations_no_delete
+            BEFORE DELETE ON candidate_verification_migrations
+            BEGIN
+                SELECT RAISE(ABORT, '候选验证迁移记录不可删除');
+            END;
+            """
         )
         connection.execute("DROP INDEX idx_dpi_owner_request_idempotency")
         connection.execute(
@@ -269,11 +415,8 @@ def test_migration_upgrades_existing_0001_with_separate_recovery_point(
         )
 
     migrated = migrate_candidate_verification(database, publication_backup)
-    backup_before_replay = publication_backup.read_bytes()
-    replayed = migrate_candidate_verification(database, publication_backup)
 
-    assert migrated == replayed == publication_backup.resolve()
-    assert publication_backup.read_bytes() == backup_before_replay
+    assert migrated == publication_backup.resolve()
     with sqlite3.connect(database) as connection:
         migrations = {
             row[0]
@@ -300,6 +443,8 @@ def test_migration_upgrades_existing_0001_with_separate_recovery_point(
     assert migrations == {
         "0001_candidate_verification_attempts",
         "0002_delivery_publication_idempotency",
+        "0003_historical_reverification_authorities",
+        "0004_legacy_candidate_rebaseline",
     }
     assert "request_idempotency_hash" in columns
     assert "idx_dpi_owner_request_idempotency" in indexes

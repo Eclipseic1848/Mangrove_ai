@@ -34,6 +34,8 @@ import { cn } from "@/lib/utils";
 import { productText } from "@/lib/productText";
 import type {
   DocumentPreviewItem,
+  HistoricalAuthorityRecoveryConfirmation,
+  LegacyRebaselineConfirmation,
   WorkspaceTask,
 } from "@/types/semanticWorkspace";
 
@@ -74,7 +76,7 @@ function candidateActionError(error: unknown) {
     return "任务、候选或验证状态已经变化。请刷新任务并核对最新状态后再操作。";
   }
   if (status === 422) {
-    return "确认信息不完整或已经失效。请重新核对外发内容并再次确认。";
+    return "确认信息不完整或已经失效。请重新核对恢复证据和外发内容后再次确认。";
   }
   if (status === 503) {
     return "服务暂时不可用，本次操作尚未确认完成。请稍后重试。";
@@ -106,6 +108,7 @@ const REVERIFICATION_BLOCKER_TEXT: Record<string, string> = {
   ruleset_unchanged: "验证规则没有变化，重复重验不会形成新的有效结论。",
   already_passed: "当前候选已经通过验证。",
   previous_cancelled: "上一次验证已取消，请先核对任务状态。",
+  semantic_retry_unavailable: "文件、数量、契约或来源证据门未全部通过，不能只重跑语义验证。",
 };
 
 function reverificationBlockerText(blocker: string) {
@@ -115,22 +118,26 @@ function reverificationBlockerText(blocker: string) {
 
 export function CandidatePreview({
   task,
-  onRetryVerification,
   onRequestReverification,
   onPublishVerification,
   providerConnectionLabel,
 }: {
   task: WorkspaceTask;
-  onRetryVerification?: () => Promise<void>;
-  onRequestReverification?: (externalApiConfirmed: boolean) => Promise<void>;
+  onRequestReverification?: (
+    externalApiConfirmed: boolean,
+    historicalAuthorityRecovery?: HistoricalAuthorityRecoveryConfirmation,
+    legacyRebaseline?: LegacyRebaselineConfirmation,
+  ) => Promise<void>;
   onPublishVerification?: (attemptId: string) => Promise<void>;
   providerConnectionLabel?: string;
 }) {
   const [retrying, setRetrying] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [egressConfirmed, setEgressConfirmed] = useState(false);
+  const [historicalGapConfirmed, setHistoricalGapConfirmed] = useState(false);
+  const [reverificationOnlyConfirmed, setReverificationOnlyConfirmed] = useState(false);
+  const [legacyRulesUnknownConfirmed, setLegacyRulesUnknownConfirmed] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [legacyRetryError, setLegacyRetryError] = useState<string | null>(null);
   const [reverificationDialogOpen, setReverificationDialogOpen] = useState(false);
   const [publishDialogOpen, setPublishDialogOpen] = useState(false);
   const cancelRef = useRef<HTMLButtonElement>(null);
@@ -141,20 +148,24 @@ export function CandidatePreview({
   const verificationPassed = verification?.status === "passed";
   const verificationFailed = verification?.status === "failed";
   const offer = task.agentic_runtime?.reverification_offer;
+  const historicalRecovery = offer?.historical_authority_recovery;
+  const historicalRecoveryRequired = Boolean(
+    historicalRecovery
+      && offer?.blockers.length === 1
+      && offer.blockers[0] === "historical_authority_recovery_required",
+  );
+  const reverificationUnavailableReason =
+    task.agentic_runtime?.reverification_unavailable_reason;
   const attempt = task.agentic_runtime?.latest_verification_attempt;
   const attemptActive = attempt?.status === "requested" || attempt?.status === "running";
   const awaitingPublication = Boolean(
     task.agentic_runtime?.awaiting_publication && attempt?.status === "passed",
   );
-  const canRetry = Boolean(
-    verification?.status === "inconclusive"
-      && !attemptActive
-      && attempt?.status !== "outcome_unknown"
-      && !awaitingPublication
-      && onRetryVerification,
-  );
+  const semanticRetry = offer?.reason === "semantic_inconclusive"
+    || historicalRecovery?.purpose === "semantic_inconclusive_reverification";
+  const legacyRebaseline = offer?.reason === "legacy_rebaseline";
   const canReverify = Boolean(
-    offer?.eligible
+    (offer?.eligible || historicalRecoveryRequired)
       && attempt?.attempt_id
       && !attemptActive
       && attempt?.status !== "outcome_unknown"
@@ -162,12 +173,14 @@ export function CandidatePreview({
       && onRequestReverification,
   );
   const title = attemptActive
-    ? "正在使用最新规则重新验证"
+    ? semanticRetry
+      ? "正在重跑候选语义验证"
+      : "正在使用最新规则重新验证"
     : attempt?.status === "outcome_unknown"
       ? "重验结果尚无法确认"
       : awaitingPublication
         ? "候选重验已通过，等待正式发布"
-        : verificationPassed
+          : verificationPassed
           ? "Mangrove 候选已通过独立验证"
           : verificationFailed
             ? "Mangrove 候选验证未通过"
@@ -198,6 +211,14 @@ export function CandidatePreview({
                   </li>
                 ))}
               </ul>
+            ) : null}
+            {reverificationUnavailableReason ? (
+              <p
+                role="status"
+                className="mt-3 rounded-xl border border-amber-500/25 bg-background/70 px-3 py-2 text-xs leading-5 text-amber-800 dark:text-amber-200"
+              >
+                {reverificationUnavailableReason}
+              </p>
             ) : null}
           </div>
           {awaitingPublication && attempt?.attempt_id && onPublishVerification ? (
@@ -283,7 +304,12 @@ export function CandidatePreview({
               open={reverificationDialogOpen}
               onOpenChange={(open) => {
                 if (!retrying) setReverificationDialogOpen(open);
-                if (!open) setEgressConfirmed(false);
+                if (!open) {
+                  setEgressConfirmed(false);
+                  setHistoricalGapConfirmed(false);
+                  setReverificationOnlyConfirmed(false);
+                  setLegacyRulesUnknownConfirmed(false);
+                }
                 if (open) setActionError(null);
               }}
             >
@@ -294,7 +320,13 @@ export function CandidatePreview({
                   className="inline-flex h-10 shrink-0 items-center gap-2 rounded-xl border border-amber-500/30 bg-background px-3.5 text-sm font-medium text-amber-800 transition-colors hover:bg-amber-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 dark:text-amber-200"
                 >
                   <RotateCcw className="h-4 w-4" />
-                  使用最新规则重新验证
+                  {historicalRecoveryRequired
+                    ? "恢复并重新验证候选"
+                    : legacyRebaseline
+                      ? "建立当前验证基线"
+                    : semanticRetry
+                      ? "只重跑语义验证"
+                      : "使用最新规则重新验证"}
                 </button>
               </AlertDialog.Trigger>
               <AlertDialog.Portal>
@@ -308,26 +340,136 @@ export function CandidatePreview({
                 >
                   <div className="overflow-y-auto p-5 sm:p-6">
                     <AlertDialog.Title className="text-lg font-semibold">
-                      重新验证现有候选？
+                      {historicalRecoveryRequired
+                        ? "恢复历史重验权威并重新验证？"
+                        : legacyRebaseline
+                          ? "为旧候选建立当前验证基线？"
+                        : semanticRetry
+                          ? "只重跑语义验证？"
+                          : "重新验证现有候选？"}
                     </AlertDialog.Title>
                     <AlertDialog.Description asChild>
                       <div className="mt-3 space-y-4 text-sm leading-6 text-muted-foreground">
-                        <p>不会重新执行整个任务或生成新文件；旧验证记录会继续保留。</p>
+                        <p>
+                          {historicalRecoveryRequired
+                            ? "这条旧任务早于 RuntimeRouting 上线，系统会记录你现在对精确候选集的窄重验确认。不会补造旧 RuntimeAssignment，也不会重跑 Pi、生成文件或创建任务版本。"
+                            : legacyRebaseline
+                              ? "旧验证规则身份无法证明。本次只对同一冻结候选使用当前规则建立新的可信验证基线；不会重跑任务、不会修改候选，通过后仍需单独发布。"
+                            : semanticRetry
+                            ? "只会对冻结候选重新执行语义判断；不会重跑 Pi、生成新文件或创建任务版本，旧验证记录会继续保留。"
+                            : "不会重新执行整个任务或生成新文件；旧验证记录会继续保留。"}
+                        </p>
                         <div className="rounded-xl border bg-muted/25 p-3">
                           <p className="font-medium text-foreground">
-                            将重新检查 {candidates.length} 个候选文件
+                            {semanticRetry
+                              ? `将重新核验 ${candidates.length} 个候选文件的冻结身份`
+                              : `将重新检查 ${candidates.length} 个候选文件`}
                           </p>
                           <ul className="mt-1 list-disc pl-5">
                             {candidates.map((candidate) => (
                               <li key={candidate.artifact_id}>
-                                {candidate.filename}（{candidate.format.toUpperCase()}）
+                                <span>{candidate.filename}（{candidate.format.toUpperCase()}）</span>
+                                <span className="mt-0.5 block break-all font-mono text-[11px] text-muted-foreground">
+                                  Candidate ID：{candidate.artifact_id}
+                                </span>
+                                <span className="block break-all font-mono text-[11px] text-muted-foreground">
+                                  SHA-256：{candidate.sha256}
+                                </span>
                               </li>
                             ))}
                           </ul>
                         </div>
+                        {historicalRecoveryRequired && historicalRecovery ? (
+                          <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.05] p-3">
+                            <p className="font-medium text-foreground">
+                              需要恢复历史重验权威
+                            </p>
+                            <p className="mt-1">{historicalRecovery.explanation}</p>
+                            <dl className="mt-3 grid gap-x-4 gap-y-1 text-xs sm:grid-cols-2">
+                              <div>
+                                <dt className="inline font-medium text-foreground">Owner：</dt>
+                                <dd className="inline">{historicalRecovery.owner_id}</dd>
+                              </div>
+                              <div>
+                                <dt className="inline font-medium text-foreground">任务：</dt>
+                                <dd className="inline break-all">{historicalRecovery.task_id}</dd>
+                              </div>
+                              <div>
+                                <dt className="inline font-medium text-foreground">版本：</dt>
+                                <dd className="inline">V{historicalRecovery.revision}</dd>
+                              </div>
+                              <div>
+                                <dt className="inline font-medium text-foreground">Run：</dt>
+                                <dd className="inline break-all">{historicalRecovery.run_id}</dd>
+                              </div>
+                              <div className="sm:col-span-2">
+                                <dt className="inline font-medium text-foreground">范围：</dt>
+                                <dd className="inline">
+                                  {offer?.candidate_count ?? candidates.length} 个候选 · {
+                                    (offer?.candidate_formats?.length
+                                      ? offer.candidate_formats
+                                      : [...new Set(candidates.map((candidate) => candidate.format))]
+                                    ).map((format) => format.toUpperCase()).join("、")
+                                  }
+                                </dd>
+                              </div>
+                            </dl>
+                            <p className="mt-2 break-all font-mono text-[11px]">
+                              Evidence SHA-256：{historicalRecovery.expected_evidence_hash}
+                            </p>
+                            <div className="mt-3 space-y-2">
+                              <label className="flex cursor-pointer items-start gap-2 text-foreground">
+                                <input
+                                  type="checkbox"
+                                  checked={historicalGapConfirmed}
+                                  onChange={(event) => setHistoricalGapConfirmed(event.target.checked)}
+                                  className="mt-1 h-4 w-4 rounded border-border accent-primary"
+                                />
+                                <span>我确认旧任务没有可证明的 RuntimeAssignment，系统不会补造这段历史</span>
+                              </label>
+                              <label className="flex cursor-pointer items-start gap-2 text-foreground">
+                                <input
+                                  type="checkbox"
+                                  checked={reverificationOnlyConfirmed}
+                                  onChange={(event) => setReverificationOnlyConfirmed(event.target.checked)}
+                                  className="mt-1 h-4 w-4 rounded border-border accent-primary"
+                                />
+                                <span>我确认本授权只用于当前候选重验，不重跑 Pi、不创建版本、不发布</span>
+                              </label>
+                            </div>
+                          </div>
+                        ) : null}
+                        {legacyRebaseline ? (
+                          <div className="rounded-xl border border-amber-500/30 bg-amber-500/[0.05] p-3">
+                            <p className="font-medium text-foreground">旧规则身份未知</p>
+                            <p className="mt-1">
+                              系统会保留旧的失败记录，并把本次授权绑定到当前候选集和当前验证规则。
+                            </p>
+                            <label className="mt-3 flex cursor-pointer items-start gap-2 text-foreground">
+                              <input
+                                type="checkbox"
+                                checked={legacyRulesUnknownConfirmed}
+                                onChange={(event) => setLegacyRulesUnknownConfirmed(event.target.checked)}
+                                className="mt-1 h-4 w-4 rounded border-border accent-primary"
+                              />
+                              <span>我理解旧验证规则身份无法证明，本次将使用当前规则建立新的可信基线</span>
+                            </label>
+                          </div>
+                        ) : null}
                         <div>
-                          <p className="font-medium text-foreground">规则变化</p>
-                          <p>{offer?.ruleset_change_summary}</p>
+                          <p className="font-medium text-foreground">
+                            {legacyRebaseline ? "当前验证基线" : semanticRetry ? "验证范围" : "规则变化"}
+                          </p>
+                          <p>
+                            {semanticRetry
+                              ? `复用已通过的确定性检查，不会重新读取 ${verification?.evidence_count ?? 0} 条来源证据，也不会执行完整 Verifier。`
+                              : offer?.ruleset_change_summary}
+                          </p>
+                          {legacyRebaseline && offer?.target_ruleset_hash ? (
+                            <p className="mt-1 break-all font-mono text-[11px]">
+                              Target Ruleset SHA-256：{offer.target_ruleset_hash}
+                            </p>
+                          ) : null}
                         </div>
                         {offer?.requires_provider ? (
                           <div className="rounded-xl border border-amber-500/25 bg-amber-500/[0.05] p-3">
@@ -381,7 +523,15 @@ export function CandidatePreview({
                     </AlertDialog.Cancel>
                       <button
                         type="button"
-                        disabled={retrying || Boolean(offer?.requires_provider && !egressConfirmed)}
+                        disabled={
+                          retrying
+                          || Boolean(offer?.requires_provider && !egressConfirmed)
+                          || Boolean(
+                            historicalRecoveryRequired
+                            && (!historicalGapConfirmed || !reverificationOnlyConfirmed),
+                          )
+                          || Boolean(legacyRebaseline && !legacyRulesUnknownConfirmed)
+                        }
                         aria-busy={retrying}
                         onClick={async () => {
                           if (!onRequestReverification || retrying) return;
@@ -390,9 +540,35 @@ export function CandidatePreview({
                           try {
                             await onRequestReverification(
                               Boolean(offer?.requires_provider && egressConfirmed),
+                              historicalRecoveryRequired && historicalRecovery
+                                ? {
+                                    expected_evidence_hash:
+                                      historicalRecovery.expected_evidence_hash,
+                                    acknowledge_no_historical_assignment: true,
+                                    acknowledge_reverification_only: true,
+                                }
+                                : undefined,
+                              legacyRebaseline
+                                && offer?.candidate_set_hash
+                                && offer.target_ruleset_hash
+                                ? {
+                                    expected_candidate_set_hash: offer.candidate_set_hash,
+                                    expected_target_ruleset_hash: offer.target_ruleset_hash,
+                                    legacy_ruleset_unknown_acknowledged: true,
+                                    authorization_text_version: "legacy-rebaseline-v1",
+                                  }
+                                : undefined,
                             );
                             setReverificationDialogOpen(false);
-                            toast.success("已创建候选重验");
+                            toast.success(
+                              historicalRecoveryRequired
+                                ? "已恢复历史重验权威并创建语义验证"
+                                : legacyRebaseline
+                                  ? "已创建当前规则验证基线"
+                                : semanticRetry
+                                  ? "已创建语义验证"
+                                  : "已创建候选重验",
+                            );
                           } catch (error) {
                             setActionError(candidateActionError(error));
                           } finally {
@@ -402,46 +578,24 @@ export function CandidatePreview({
                         className="inline-flex h-10 min-w-32 items-center justify-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground disabled:cursor-not-allowed disabled:opacity-50"
                       >
                         {retrying && <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />}
-                        <span>{retrying ? "正在提交" : "开始重新验证"}</span>
+                        <span>
+                          {retrying
+                            ? "正在提交"
+                            : historicalRecoveryRequired
+                              ? "恢复并开始语义验证"
+                              : legacyRebaseline
+                                ? "开始建立验证基线"
+                              : semanticRetry
+                              ? "开始语义验证"
+                              : "开始重新验证"}
+                        </span>
                       </button>
                   </div>
                 </AlertDialog.Content>
               </AlertDialog.Portal>
             </AlertDialog.Root>
-          ) : canRetry ? (
-            <button
-              type="button"
-              disabled={retrying}
-              onClick={async () => {
-                if (!onRetryVerification) return;
-                setRetrying(true);
-                setLegacyRetryError(null);
-                try {
-                  await onRetryVerification();
-                  toast.success("候选重新验证已完成");
-                } catch (error) {
-                  setLegacyRetryError(candidateActionError(error));
-                  toast.error("候选重新验证未完成");
-                } finally {
-                  setRetrying(false);
-                }
-              }}
-              className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-amber-500/30 bg-background px-3.5 py-2 text-sm font-medium text-amber-800 hover:bg-amber-500/10 disabled:cursor-wait disabled:opacity-60 dark:text-amber-200"
-            >
-              {retrying ? (
-                <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" />
-              ) : (
-                <RotateCcw className="h-4 w-4" />
-              )}
-              {retrying ? "正在重新验证" : "重新验证候选"}
-            </button>
           ) : null}
         </div>
-        {legacyRetryError ? (
-          <div role="alert" className="border-b border-destructive/25 bg-destructive/[0.05] px-5 py-4 text-sm leading-6 text-destructive">
-            {legacyRetryError}
-          </div>
-        ) : null}
         {attemptActive ? (
           <div role="status" aria-live="polite" className="flex min-h-14 items-center gap-3 border-b border-amber-500/20 px-5 py-3 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none" />
@@ -462,7 +616,7 @@ export function CandidatePreview({
             最新验证尝试已通过，但还不是正式交付。请检查候选文件后，再单独发布正式结果。
           </div>
         ) : null}
-        {offer && !offer.eligible && !attemptActive && attempt?.status !== "outcome_unknown" && !awaitingPublication ? (
+        {offer && !offer.eligible && !historicalRecoveryRequired && !attemptActive && attempt?.status !== "outcome_unknown" && !awaitingPublication ? (
           <div className="border-b border-amber-500/20 px-5 py-4 text-sm leading-6 text-muted-foreground">
             <p className="font-medium text-foreground">当前不能重新验证</p>
             <ul className="mt-1 list-disc pl-5">

@@ -18,6 +18,8 @@ from src.agentic_runtime.models import (
     SemanticDecision,
     SourceInput,
     TableOutputContract,
+    VerificationCheck,
+    VerificationReport,
     VerificationStatus,
 )
 
@@ -138,4 +140,100 @@ async def test_complete_local_reverification_reopens_all_gates_without_writing_c
         "source_grounding",
         "semantic_goal",
     }
+    assert _tree_hashes(output) == before
+
+
+@pytest.mark.asyncio
+async def test_semantic_retry_reuses_frozen_evidence_without_reading_source(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "output"
+    output.mkdir()
+    candidate_path = output / "result.json"
+    candidate_path.write_text('[{"name":"Alice","fee":100}]', encoding="utf-8")
+    (output / "candidate-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "artifacts": [
+                        {
+                            "filename": "result.json",
+                            "format": "json",
+                            "description": "一份费用结果",
+                            "evidence": [
+                            {
+                                "source": "missing-source.pdf",
+                                "locator": "page:1",
+                                "quote": "Service Fee Details - Alice - 100",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    missing_source = tmp_path / "missing-source.pdf"
+    request = PiRuntimeRequest(
+        user_id="owner-a",
+        task_id="task-a",
+        revision=1,
+        objective_text="Extract one fee table and no other content.",
+        requested_output_formats=("json",),
+        sources=(
+            SourceInput(
+                upload_id="upload-a",
+                original_name=missing_source.name,
+                host_path=missing_source,
+                sha256="0" * 64,
+                media_type="application/pdf",
+            ),
+        ),
+        permission_profile=PermissionProfile.STANDARD,
+        model="local-model",
+        base_url="http://127.0.0.1:18080/v1",
+        api_key="local-runtime",
+    )
+    previous_report = VerificationReport(
+        status=VerificationStatus.INCONCLUSIVE,
+        summary="文件与来源门通过，但语义门无结论",
+        checks=(
+            VerificationCheck(
+                code="artifact_set",
+                passed=True,
+                summary="候选集合已通过",
+            ),
+            VerificationCheck(
+                code="artifact_count",
+                passed=True,
+                summary="候选数量已通过",
+            ),
+            VerificationCheck(
+                code="source_grounding",
+                passed=True,
+                summary="来源证据已通过",
+            ),
+            VerificationCheck(
+                code="semantic_goal",
+                passed=False,
+                summary="语义服务未形成可靠结论",
+            ),
+        ),
+        evidence_count=1,
+        formal_delivery_eligible=False,
+    )
+    candidates = inspect_candidates(output, ("json",))
+    before = _tree_hashes(output)
+
+    report = await CandidateVerifier(
+        semantic_judge=_PassingLocalJudge()
+    ).retry_semantic_verification(
+        request=request,
+        candidates=candidates,
+        manifest_path=output / "candidate-manifest.json",
+        previous_report=previous_report,
+    )
+
+    assert report.status is VerificationStatus.PASSED
+    assert missing_source.exists() is False
     assert _tree_hashes(output) == before

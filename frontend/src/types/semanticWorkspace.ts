@@ -195,8 +195,37 @@ export interface ReverificationOffer {
   requires_provider: boolean;
   connection_id: string | null;
   model_id: string | null;
+  candidate_count?: number;
+  candidate_formats?: string[];
+  candidate_set_hash?: string;
+  target_ruleset_hash?: string;
   egress_categories: string[];
   egress_summary: string;
+  historical_authority_recovery?: HistoricalAuthorityRecoveryOffer | null;
+}
+
+export interface HistoricalAuthorityRecoveryOffer {
+  expected_evidence_hash: string;
+  purpose: "semantic_inconclusive_reverification";
+  owner_id: string;
+  task_id: string;
+  revision: number;
+  run_id: string;
+  candidate_set_hash: string;
+  explanation: string;
+}
+
+export interface HistoricalAuthorityRecoveryConfirmation {
+  expected_evidence_hash: string;
+  acknowledge_no_historical_assignment: true;
+  acknowledge_reverification_only: true;
+}
+
+export interface LegacyRebaselineConfirmation {
+  expected_candidate_set_hash: string;
+  expected_target_ruleset_hash: string;
+  legacy_ruleset_unknown_acknowledged: true;
+  authorization_text_version: "legacy-rebaseline-v1";
 }
 
 export interface AgenticRuntimeInfo {
@@ -231,6 +260,7 @@ export interface AgenticRuntimeInfo {
   } | null;
   latest_verification_attempt?: VerificationAttemptSummary | null;
   reverification_offer?: ReverificationOffer | null;
+  reverification_unavailable_reason?: string | null;
   awaiting_publication?: boolean;
 }
 

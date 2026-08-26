@@ -10,6 +10,8 @@ import type {
   SteeringResult,
   DeliveryManifest,
   VerificationAttemptReceipt,
+  HistoricalAuthorityRecoveryConfirmation,
+  LegacyRebaselineConfirmation,
 } from "@/types/semanticWorkspace";
 
 const BASE = "/api/semantic-workspace";
@@ -95,6 +97,11 @@ export function requestCandidateReverification(
     expected_previous_attempt_id: string;
     external_api_confirmed: boolean;
     accept_duplicate_provider_cost: boolean;
+    historical_authority_recovery?: HistoricalAuthorityRecoveryConfirmation;
+    expected_candidate_set_hash?: LegacyRebaselineConfirmation["expected_candidate_set_hash"];
+    expected_target_ruleset_hash?: LegacyRebaselineConfirmation["expected_target_ruleset_hash"];
+    legacy_ruleset_unknown_acknowledged?: true;
+    authorization_text_version?: "legacy-rebaseline-v1";
   },
   idempotencyKey: string,
 ): Promise<VerificationAttemptReceipt> {

@@ -169,6 +169,29 @@ _Avoid_: 执行者自评、测试日志
 文件或创建 revision。
 _Avoid_: 重新运行任务、修复候选、覆盖验证报告、发布 Delivery
 
+**Legacy Candidate 再基线（LegacyCandidateRebaseline）**：
+当最新验证明确失败且旧 VerifierRuleset 身份无法证明时，TaskOwner 对同一不可变 CandidateSet
+使用当前可证明规则建立第一条 versioned 验证基线；每条 Candidate 链最多执行一次，之后永久
+回到 ADR-0033 既有资格规则；V1 不适用于其他旧终态，也不修复候选或发布。
+_Avoid_: 通用历史重试、规则已变化、修复旧报告、重新运行任务
+
+**再基线授权证据（RebaselineAuthorizationEvidence）**：
+随 `legacy_rebaseline` 新 Attempt 以结构化数据和匹配哈希冻结的 TaskOwner 授权事实，绑定授权
+文案版本、旧 Attempt、不可变 CandidateSet、当前 Ruleset 及 Actor；它是验证事实的一部分，
+不能由前端日志或普通审计事件替代。
+_Avoid_: UI 点击日志、可变审计备注、通用 Provider 外发授权、发布授权
+
+**历史语义重试恢复（HistoricalSemanticRetryRecovery）**：
+对旧任务中确定性文件与来源门已经通过、但独立语义门未形成结论的同一 CandidateSet，重新取得
+Owner 的本次外发授权后只重跑语义门，并追加可信验证事实；它不证明旧规则身份、不重跑任务，
+也不自动发布正式结果。
+_Avoid_: Legacy Candidate 再基线、复用旧外发确认、重新执行确定性门、验证通过即发布
+
+**历史重验权威（HistoricalReverificationAuthority）**：
+TaskOwner 在 RuntimeRouting 上线后，针对精确的旧 TaskRevision、Run、CandidateSet 和重验用途
+追加的当前授权事实；它不证明旧任务曾有 RuntimeAssignment，也不授权任务恢复、Provider 调用或发布。
+_Avoid_: 回填 RuntimeAssignment、历史路由证明、通用恢复令牌、发布授权
+
 **验证尝试（VerificationAttempt）**：
 一次不可变的候选验证事实，绑定精确 CandidateSet、目标与交付语义、Verifier 规则身份、
 触发原因、Actor、外发确认和结构化 VerificationReport；旧尝试不会被后续结论覆盖。

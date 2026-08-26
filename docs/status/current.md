@@ -38,11 +38,64 @@ Offer、本地/Provider 完整重验、精确 Attempt 显式发布和普通用�
 与正式发布，并对未知结果停止普通重试。CV-09 最终后端全仓为 `1999 passed, 7 skipped,
 4 deselected`，前端完整 E2E 64 passed，双轴终审无剩余 P1/P2。
 
-生产 CandidateVerification `0001/0002` 尚未执行，未调用真实 Provider、重验真实 Candidate、
-发布正式 Delivery 或完成用户验收。只读核验披露 CV-07 发布幂等空字段/索引已被旧 Repository
-静默写入生产 Schema，非 NULL 记录为 0；当前实现已禁止静默 DDL，CV-10 必须先以当前一致性
-恢复点显式接管该偏差，再进入真实外发和 Owner 验收人工门。工程通过不等于生产资格。
+生产 CandidateVerification `0001/0002` 已在 CV-10 Gate A 以唯一一致性恢复点显式执行：原
+71 张表、10,313 行逻辑指纹零改写，35 条 legacy 报告导入为不可变 Attempt，CV-07 发布幂等
+Schema 偏差已由正式迁移接管；重放、完整性、外键和 8088 冷启动均通过。Gate A 本身没有调用
+Provider、创建真实重验 Attempt 或发布正式 Delivery；其后 `liyi` 的另一条历史 Candidate 已按
+下文独立权威与授权执行一次重验，不能混作 #70 验收。#70 的 `liyi111` 生产目标仍未调用真实
+Provider、创建新 Attempt、发布 Delivery 或完成 Owner 验收。Gate A 后的生产装配 Offer 已确认
+该目标被唯一
+`legacy_unversioned` blocker 阻断；这是 ADR-0033 的已批准失败关闭行为。Legacy Candidate 再基线
+LR-01～LR-04 已达到 `ENGINEERING_VERIFIED`：一次性链级 CAS、结构化不可变 Owner 授权、完整
+Verifier、独立 Provider 未知结果恢复、普通用户双确认页面和 0004 显式迁移均已实现；合并回归
+153 passed、工作台 E2E 31 passed、前端构建和严格设计审计通过。生产一致性副本的 73 张业务表、
+10,196 行逻辑摘要在 0004 前向/重放后零改写，完整性和外键通过。随后生产 0004 已经独立授权并
+完成：唯一恢复点为 `data/backups/webui-before-cv10-rebaseline-20260825-235401.db`，SHA-256 为
+`106bb38f50d523e383e36c0a549188fa389b53265a018152b55f905e9fe35a68`；现场 73 张既有业务表、
+10,197 行在恢复点/迁移后/重放后的逻辑摘要一致，完整性和外键通过，8088/5173 已恢复。当前下一门
+是 LR-05B / Gate B；尚未调用 `liyi111` Provider、创建真实 Attempt 或发布。工程绿色和生产迁移
+不等于 LIVE_REVERIFIED、LIVE_ACCEPTED 或发布资格。实施证据：
+`docs/plans/2026-08-25-legacy-candidate-rebaseline-implementation-report.md`；生产迁移证据：
+`docs/plans/2026-08-25-legacy-candidate-rebaseline-production-migration-report.md`。
+Standards 与 Spec 终审均为 PASS，无剩余 P1/P2。
+
+Gate B 随后已按 Owner 授权真实执行：唯一 Attempt
+`verification_4b4f150b993422fc41ff2dc58b93a915` 使用 Qwen 完成 1 次请求并 `passed`，四项验证门全部
+通过，重新确认 6 条来源证据；Usage 为 input 421 / output 1,869 / total 2,290 tokens，Grant 已
+撤销。Pi、revision、Run、CandidateSet 和两个 Candidate SHA 均未变化，正式 Delivery 与发布意图
+仍为 0。当前达到 `LIVE_REVERIFIED`，下一门为 Gate C 的独立正式发布与 Owner 验收。证据：
+`docs/plans/2026-08-26-legacy-candidate-rebaseline-live-execution-report.md`。
+
+Gate C 随后已按 Owner 独立授权发布：正式 Delivery `delivery_84956666b2f34ed7` 状态
+`succeeded`，CSV/JSON 两个输出均通过非空、SHA-256 与重开 QA，无警告；CSV 为 2 行。Delivery
+精确绑定上述 passed Attempt 与报告哈希。当前等待 Owner 给出 `LIVE_ACCEPTED` 或整改意见；这不
+自动授权 GitHub Issue 更新/关闭。
 GitHub #61～#69 已关闭；#70 与父任务 #54 保持 OPEN/ready-for-human。
+
+TaskOwner 随后明确回复“同意”，`liyi111` 的 P0-01 真实普通用户闭环达到 `LIVE_ACCEPTED`。
+GitHub #70 与父任务 #54 的现场完成条件已经满足，但远端仍为 OPEN；评论、标签和关闭尚未授权。
+
+Gate A 后发现 11 条旧任务因重验资格投影无法解析旧冻结上下文而导致详情接口失败，前端又将
+错误显示成空白。2026-08-25 已完成正式兼容修复：不回填或推断旧字段，任务详情和 Candidate
+恢复可读，重验仍失败关闭并明确说明原因；前端增加持久错误态和手动重新加载。生产 23 条未
+删除任务只读探针达到 23/23 可读，前后逻辑指纹一致；后端 34 passed、数据工作台 E2E
+29 passed、前端构建通过。该读取修复不解除目标 `legacy_unversioned` blocker。
+
+旧账号 `liyi` 的真实历史 Candidate 已完成一次受控生产语义重验。生产 CandidateVerification
+`0003` 以恢复点 `data/backups/webui-before-cv10-authority-20260825-211250.db` 显式迁移，恢复点
+SHA-256 为 `f9487724fc3a7975f799916e1a4a477ac300661980c9d530bc6e891a57067882`；既有
+72 张非迁移表、10,169 行零改写，迁移重放、完整性和外键均通过。TaskOwner `liyi / u_9505fd620899`
+为精确旧 CandidateSet 追加唯一 `HistoricalReverificationAuthority`，没有补写普通 Assignment。
+
+真实 Attempt `verification_4f29b69d56306a8583ce7a4b45a237d3` 使用 `deepseek-v4-flash` 完成一次
+请求，Usage 为 input 3,625 / output 1,441 / total 5,066 tokens，Grant 已撤销。确定性三门
+`artifact_set`、`artifact_count`、`source_grounding` 通过并从原件确认 88 条证据；`semantic_goal`
+失败：CSV 混入业务用户量、未来用户增长、免费维护期和在线专家支持等非技术指标，同时多项架构、
+中间件版本和前端框架在已验证来源中没有对应。Attempt 因此为 `failed`，不是
+`outcome_unknown`，`formal_delivery_eligible=false`。旧 Attempt、revision、run、CandidateSet 和 CSV
+SHA 均未改写，正式 Delivery 仍为 0；本次授权已经消耗，不得自动重试或发布。工程回归合并覆盖
+166 passed，双轴终审 PASS。详见
+`docs/plans/2026-08-25-historical-reverification-authority-recovery-implementation-report.md`。
 
 ## 3. Agentic Capability
 

@@ -54,8 +54,11 @@ from src.capability_catalog import (
 )
 from src.config.settings import settings
 from src.candidate_verification import (
+    HistoricalAuthorityRecoveryConfirmation,
     ReverificationContractError,
     ReverificationUnavailableError,
+    RulesetIdentityStatus,
+    SqliteCandidateVerificationRepository,
 )
 from src.conversation_steering import (
     CapabilityMaturity,
@@ -363,8 +366,21 @@ class CandidateReverificationIn(BaseModel):
 
     expected_revision: int = Field(ge=1)
     expected_previous_attempt_id: str = Field(min_length=1, max_length=160)
+    expected_candidate_set_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    expected_target_ruleset_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    legacy_ruleset_unknown_acknowledged: Literal[True] | None = None
+    authorization_text_version: Literal["legacy-rebaseline-v1"] | None = None
     external_api_confirmed: bool = False
     accept_duplicate_provider_cost: bool = False
+    historical_authority_recovery: (
+        HistoricalAuthorityRecoveryConfirmation | None
+    ) = None
 
 
 class CandidateVerificationPublishIn(BaseModel):
@@ -615,11 +631,46 @@ def _public_runtime(
         ),
     }
     if candidate_visible:
-        offer = get_semantic_workspace_manager().inspect_candidate_reverification(
-            user_id,
-            task_id,
-            revision,
-        )
+        try:
+            offer = (
+                get_semantic_workspace_manager().inspect_candidate_reverification(
+                    user_id,
+                    task_id,
+                    revision,
+                )
+            )
+        except ReverificationContractError:
+            history = SqliteCandidateVerificationRepository(
+                settings.webui_db_path
+            ).list_for_candidate(
+                user_id,
+                task_id=task_id,
+                revision=revision,
+                run_id=str(row["run_id"]),
+                candidate_set_hash=str(row["verified_candidate_set_hash"]),
+            )
+            latest_attempt = history[-1] if history else None
+            if (
+                latest_attempt is None
+                or latest_attempt.ruleset_identity_status
+                is not RulesetIdentityStatus.LEGACY_UNVERSIONED
+            ):
+                # 只有可证明的旧版 Attempt 可以降级读取；现代记录损坏必须显式失败。
+                raise
+            # 旧任务可以继续读取，但缺失的冻结上下文不能被推断或补写。
+            payload["latest_verification_attempt"] = {
+                "attempt_id": latest_attempt.attempt_id,
+                "status": latest_attempt.status.value,
+                "reason": latest_attempt.reason_code.value,
+                "ruleset_identity_status": (
+                    latest_attempt.ruleset_identity_status.value
+                ),
+            }
+            payload["reverification_offer"] = None
+            payload["reverification_unavailable_reason"] = (
+                "该历史任务缺少可证明的冻结运行信息，暂不能重新验证。"
+            )
+            return payload
         payload["latest_verification_attempt"] = {
             "attempt_id": offer.previous_attempt_id,
             "status": (
@@ -643,8 +694,17 @@ def _public_runtime(
             "requires_provider": offer.requires_provider,
             "connection_id": offer.connection_id,
             "model_id": offer.model_id,
+            "candidate_count": offer.candidate_count,
+            "candidate_formats": list(offer.candidate_formats),
+            "candidate_set_hash": offer.candidate_set_hash,
+            "target_ruleset_hash": offer.target_ruleset_hash,
             "egress_categories": list(offer.egress_categories),
             "egress_summary": offer.egress_summary,
+            "historical_authority_recovery": (
+                offer.historical_authority_recovery.model_dump(mode="json")
+                if offer.historical_authority_recovery is not None
+                else None
+            ),
         }
         payload["awaiting_publication"] = offer.awaiting_publication
     return payload
@@ -2180,24 +2240,14 @@ async def retry_candidate_verification(
     task_id: str,
     user=Depends(get_current_user),
 ):
-    """只重试现有候选的语义验证；不创建 revision，也不重新执行任务。"""
+    """旧同步入口已退役，避免绕过外发确认与独立发布门。"""
 
-    try:
-        await get_semantic_workspace_manager().retry_candidate_verification(
-            user["user_id"],
-            task_id,
-        )
-    except KeyError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return _task_detail(
-        user["user_id"],
-        task_id,
-        audience=(
-            ProgressAudience.ADMIN
-            if is_admin_role(user.get("role"))
-            else ProgressAudience.USER
+    del task_id, user
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=(
+            "旧候选重试入口已退役；请先读取重验 Offer，再使用 "
+            "candidate-verifications 创建追加式验证 Attempt"
         ),
     )
 
@@ -2218,14 +2268,33 @@ async def request_candidate_reverification(
 ):
     """创建完整候选重验 Attempt；执行与正式发布均不在 HTTP 连接内完成。"""
 
+    if (
+        is_admin_role(user.get("role"))
+        and get_store().get_semantic_workspace_task(user["user_id"], task_id)
+        is None
+    ):
+        # 管理角色可以看跨 Owner 管理元数据，但不能代替 TaskOwner 签发重验权威。
+        raise HTTPException(
+            status_code=403,
+            detail="候选重验与历史权威恢复只能由 TaskOwner 发起",
+        )
     try:
         attempt = await get_semantic_workspace_manager().request_candidate_reverification(
             owner_id=user["user_id"],
             task_id=task_id,
             expected_revision=payload.expected_revision,
             expected_previous_attempt_id=payload.expected_previous_attempt_id,
+            expected_candidate_set_hash=payload.expected_candidate_set_hash,
+            expected_target_ruleset_hash=payload.expected_target_ruleset_hash,
+            legacy_ruleset_unknown_acknowledged=(
+                payload.legacy_ruleset_unknown_acknowledged is True
+            ),
+            authorization_text_version=payload.authorization_text_version,
             external_api_confirmed=payload.external_api_confirmed,
             accept_duplicate_provider_cost=payload.accept_duplicate_provider_cost,
+            historical_authority_recovery=(
+                payload.historical_authority_recovery
+            ),
             idempotency_key=idempotency_key,
         )
     except KeyError as exc:

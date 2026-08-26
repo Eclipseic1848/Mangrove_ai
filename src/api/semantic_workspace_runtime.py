@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from datetime import datetime
 import hashlib
 import json
 import logging
@@ -50,8 +51,13 @@ from src.candidate_verification import (
     AttemptStatus,
     CandidateVerificationService,
     CurrentVerifierRulesetResolver,
+    HistoricalReverificationBinding,
+    HistoricalAuthorityRecoveryConfirmation,
+    HistoricalReverificationEvidence,
+    HistoricalReverificationPurpose,
     ReverificationBlocker,
     SqliteCandidateVerificationRepository,
+    parse_frozen_runtime_request,
 )
 from src.conversation_steering import (
     ConversationSteering,
@@ -228,6 +234,189 @@ class _WorkspaceReverificationAuthority:
                 # 只读复核 Owner、版本和模型；不签发 Grant，也不读取 Secret。
                 blockers.append(provider_blocker)
         return tuple(dict.fromkeys(blockers))
+
+    def historical_recovery_evidence(
+        self,
+        request: PiRuntimeRequest,
+        run_id: str,
+        binding: HistoricalReverificationBinding,
+    ) -> HistoricalReverificationEvidence | None:
+        """只为迁移前的精确缺口构造摘要；不会写库或伪造 Assignment。"""
+
+        database = Path(settings.webui_db_path)
+        try:
+            with sqlite3.connect(
+                f"file:{database}?mode=ro",
+                uri=True,
+                timeout=30,
+            ) as connection:
+                connection.row_factory = sqlite3.Row
+                revision = connection.execute(
+                    "SELECT r.run_id, r.objective_text, r.output_formats_json, "
+                    "r.table_output_contracts_json, t.upload_ids_json, "
+                    "t.active_revision "
+                    "FROM semantic_workspace_revisions AS r "
+                    "JOIN semantic_workspace_tasks AS t ON t.task_id=r.task_id "
+                    "AND t.user_id=r.user_id "
+                    "WHERE r.user_id=? AND r.task_id=? AND r.revision=?",
+                    (request.user_id, request.task_id, request.revision),
+                ).fetchone()
+                runtime = connection.execute(
+                    "SELECT run_id, runtime_version, status, request_json, "
+                    "external_api_confirmed, created_at "
+                    "FROM agentic_runtime_runs WHERE user_id=? "
+                    "AND task_id=? AND revision=?",
+                    (request.user_id, request.task_id, request.revision),
+                ).fetchone()
+                migration = connection.execute(
+                    "SELECT migration_id, backup_sha256, applied_at "
+                    "FROM runtime_routing_migrations "
+                    "WHERE migration_id='0001_runtime_routing'",
+                ).fetchone()
+                assignment = connection.execute(
+                    "SELECT 1 FROM runtime_assignments WHERE owner_id=? "
+                    "AND task_id=? AND revision=?",
+                    (request.user_id, request.task_id, request.revision),
+                ).fetchone()
+                events = connection.execute(
+                    "SELECT sequence, event_id, event_type, created_at "
+                    "FROM agentic_runtime_events WHERE user_id=? AND task_id=? "
+                    "AND revision=? ORDER BY sequence",
+                    (request.user_id, request.task_id, request.revision),
+                ).fetchall()
+        except (sqlite3.DatabaseError, OSError):
+            return None
+
+        if (
+            revision is None
+            or runtime is None
+            or migration is None
+            or assignment is not None
+            or runtime["run_id"] != run_id
+            or runtime["runtime_version"] != "pi"
+            or runtime["status"] != "candidate_ready"
+            or revision["run_id"] != run_id
+            or revision["active_revision"] != request.revision
+            or revision["objective_text"] != request.objective_text
+        ):
+            return None
+        try:
+            output_formats = tuple(json.loads(revision["output_formats_json"]))
+            table_contracts = tuple(
+                json.loads(revision["table_output_contracts_json"])
+            )
+            upload_ids = tuple(json.loads(revision["upload_ids_json"]))
+            frozen_request, _used_legacy_confirmation = (
+                parse_frozen_runtime_request(
+                    request_json=runtime["request_json"],
+                    external_api_confirmed=runtime[
+                        "external_api_confirmed"
+                    ],
+                )
+            )
+            runtime_created_at = datetime.fromisoformat(runtime["created_at"])
+            migration_applied_at = datetime.fromisoformat(migration["applied_at"])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        if (
+            runtime_created_at.tzinfo is None
+            or migration_applied_at.tzinfo is None
+            or runtime_created_at >= migration_applied_at
+            or output_formats != request.requested_output_formats
+            or table_contracts
+            != tuple(
+                item.model_dump(mode="json")
+                for item in request.table_output_contracts
+            )
+            or upload_ids != tuple(source.upload_id for source in request.sources)
+            or frozen_request.model_dump(mode="json", exclude={"api_key"})
+            != request.model_dump(mode="json", exclude={"api_key"})
+            or not request.model_connection_id
+            or not request.model_connection_version
+            or not request.model_connection_model
+        ):
+            return None
+        required_events = {
+            "runtime.preparing",
+            "agent.started",
+            "verification.completed",
+            "candidate.ready",
+        }
+        if not required_events.issubset({row["event_type"] for row in events}):
+            return None
+        backup_sha256 = str(migration["backup_sha256"])
+        if len(backup_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in backup_sha256
+        ):
+            return None
+
+        def digest(payload: object) -> str:
+            encoded = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return hashlib.sha256(encoded).hexdigest()
+
+        source_binding = [
+            {
+                "upload_id": source.upload_id,
+                "original_name": source.original_name,
+                "sha256": source.sha256,
+                "media_type": source.media_type,
+            }
+            for source in request.sources
+        ]
+        return HistoricalReverificationEvidence(
+            owner_id=request.user_id,
+            task_id=request.task_id,
+            revision=request.revision,
+            run_id=run_id,
+            purpose=(
+                HistoricalReverificationPurpose
+                .SEMANTIC_INCONCLUSIVE_REVERIFICATION
+            ),
+            legacy_runtime_created_at=runtime_created_at,
+            runtime_routing_migration_id="0001_runtime_routing",
+            runtime_routing_applied_at=migration_applied_at,
+            runtime_routing_backup_sha256=backup_sha256,
+            runtime_request_hash=digest(
+                frozen_request.model_dump(mode="json", exclude={"api_key"})
+            ),
+            task_revision_hash=digest(
+                {
+                    "owner_id": request.user_id,
+                    "task_id": request.task_id,
+                    "revision": request.revision,
+                    "run_id": run_id,
+                    "objective_text": request.objective_text,
+                    "output_formats": output_formats,
+                    "table_output_contracts": table_contracts,
+                }
+            ),
+            source_binding_hash=digest(source_binding),
+            runtime_event_chain_hash=digest(
+                [
+                    {
+                        "sequence": row["sequence"],
+                        "event_id": row["event_id"],
+                        "event_type": row["event_type"],
+                        "created_at": row["created_at"],
+                    }
+                    for row in events
+                ]
+            ),
+            candidate_set_hash=binding.candidate_set_hash,
+            candidate_manifest_hash=binding.candidate_manifest_hash,
+            goal_contract_hash=binding.goal_contract_hash,
+            delivery_spec_hash=binding.delivery_spec_hash,
+            previous_attempt_id=binding.previous_attempt_id,
+            previous_report_hash=binding.previous_report_hash,
+            connection_id=request.model_connection_id,
+            connection_version=request.model_connection_version,
+            model_id=request.model_connection_model,
+        )
 
     @staticmethod
     def _provider_binding_blocker(
@@ -522,8 +711,15 @@ class SemanticWorkspaceManager:
         task_id: str,
         expected_revision: int,
         expected_previous_attempt_id: str,
+        expected_candidate_set_hash: str | None,
+        expected_target_ruleset_hash: str | None,
+        legacy_ruleset_unknown_acknowledged: bool,
+        authorization_text_version: str | None,
         external_api_confirmed: bool,
         accept_duplicate_provider_cost: bool,
+        historical_authority_recovery: (
+            HistoricalAuthorityRecoveryConfirmation | None
+        ),
         idempotency_key: str,
     ):
         """先落 requested Attempt，再交给后台任务执行完整验证。"""
@@ -538,8 +734,15 @@ class SemanticWorkspaceManager:
             task_id=task_id,
             revision=expected_revision,
             expected_previous_attempt_id=expected_previous_attempt_id,
+            expected_candidate_set_hash=expected_candidate_set_hash,
+            expected_target_ruleset_hash=expected_target_ruleset_hash,
+            legacy_ruleset_unknown_acknowledged=(
+                legacy_ruleset_unknown_acknowledged
+            ),
+            authorization_text_version=authorization_text_version,
             external_api_confirmed=external_api_confirmed,
             accept_duplicate_provider_cost=accept_duplicate_provider_cost,
+            historical_authority_recovery=historical_authority_recovery,
             idempotency_key=idempotency_key,
             verifier_factory=verifier_factory,
         )

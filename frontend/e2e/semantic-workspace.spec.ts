@@ -770,10 +770,30 @@ test.describe("统一数据工作台", () => {
           evidence_count: 37,
           formal_delivery_eligible: false,
         },
+        latest_verification_attempt: {
+          attempt_id: "legacy-inconclusive-attempt",
+          status: "inconclusive",
+          reason: "initial",
+          ruleset_identity_status: "legacy_unversioned",
+        },
+        reverification_offer: {
+          eligible: true,
+          reason: "semantic_inconclusive",
+          blockers: [],
+          ruleset_changed: null,
+          ruleset_change_summary: "当前验证规则身份暂时无法证明",
+          requires_provider: true,
+          connection_id: "connection-deepseek",
+          model_id: "deepseek-v4-flash",
+          egress_categories: ["任务目标", "候选预览", "来源证据"],
+          egress_summary: "将外发任务目标、候选预览和 37 条来源证据",
+        },
+        awaiting_publication: false,
         events: [],
       },
     });
-    let retryCalls = 0;
+    let legacyRetryCalls = 0;
+    let retryPayload: Record<string, unknown> | null = null;
     let revisionCalls = 0;
     await page.route("**/api/semantic-workspace/tasks?*", (route) =>
       route.fulfill({ json: [candidateTask] }));
@@ -787,8 +807,26 @@ test.describe("统一数据工作台", () => {
     await page.route(
       "**/api/semantic-workspace/tasks/task-candidate-inconclusive/candidate-verification/retry",
       (route) => {
-        retryCalls += 1;
+        legacyRetryCalls += 1;
         return route.fulfill({ json: detail });
+      },
+    );
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-candidate-inconclusive/candidate-verifications",
+      (route) => {
+        retryPayload = route.request().postDataJSON();
+        return route.fulfill({
+          status: 202,
+          json: {
+            attempt_id: "semantic-attempt-new",
+            task_id: candidateTask.task_id,
+            revision: 1,
+            run_id: "pi-run-inconclusive",
+            previous_attempt_id: "legacy-inconclusive-attempt",
+            status: "requested",
+            task: detail,
+          },
+        });
       },
     );
     await page.route(
@@ -800,11 +838,24 @@ test.describe("统一数据工作台", () => {
     await page.getByRole("button", { name: "待确认" }).click();
     await page.getByText("待重新验证候选").first().click();
     await page.getByRole("button", {
-      name: "重新验证候选",
+      name: "只重跑语义验证",
       exact: true,
     }).click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toContainText("不会重新读取 37 条来源证据");
+    await expect(dialog).toContainText("deepseek-v4-flash");
+    await expect(dialog).toContainText("candidate-retry");
+    await expect(dialog).toContainText("b".repeat(64));
+    await dialog.getByRole("checkbox").check();
+    await dialog.getByRole("button", { name: "开始语义验证" }).click();
 
-    await expect.poll(() => retryCalls).toBe(1);
+    await expect.poll(() => retryPayload).toEqual({
+      expected_revision: 1,
+      expected_previous_attempt_id: "legacy-inconclusive-attempt",
+      external_api_confirmed: true,
+      accept_duplicate_provider_cost: false,
+    });
+    expect(legacyRetryCalls).toBe(0);
     expect(revisionCalls).toBe(0);
   });
 
@@ -1114,6 +1165,48 @@ test.describe("统一数据工作台", () => {
     await page.getByRole("button", { name: "确认取消" }).click();
     await expect(page.getByText("任务已取消，未发布新的正式交付。")).toBeVisible();
     await expect(page.getByText("已取消", { exact: true }).first()).toBeVisible();
+  });
+
+  test("历史任务详情加载失败时说明原因并可重试恢复", async ({ page }) => {
+    await mockWorkspace(page);
+    const historical = workspaceTask(
+      "task-history-retry",
+      "completed",
+      "历史工作量结果",
+    );
+    await page.unroute("**/api/semantic-workspace/tasks?*");
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [historical] }));
+    let detailAttempts = 0;
+    let detailAvailable = false;
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-history-retry",
+      (route) => {
+        detailAttempts += 1;
+        if (!detailAvailable) {
+          return route.fulfill({
+            status: 500,
+            contentType: "application/json",
+            json: { detail: "历史任务详情暂时无法读取" },
+          });
+        }
+        return route.fulfill({ json: workspaceDetail(historical) });
+      },
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /历史工作量结果/ }).click();
+
+    const recovery = page.getByRole("alert", { name: "任务恢复失败" });
+    await expect(recovery).toContainText("历史任务仍保留在任务列表中");
+    await expect(recovery).toContainText("历史任务详情暂时无法读取");
+    detailAvailable = true;
+    await recovery.getByRole("button", { name: "重新加载" }).click();
+
+    await expect(
+      page.getByRole("heading", { name: "历史工作量结果" }),
+    ).toBeVisible();
+    expect(detailAttempts).toBeGreaterThan(1);
   });
 
   test("完成任务可以移入回收站并从回收站恢复", async ({ page }) => {
@@ -1799,6 +1892,68 @@ test.describe("统一数据工作台", () => {
     await expect(page.getByText("解析 PDF 文档结构", { exact: true })).toBeVisible();
   });
 
+  test("旧候选可读取且明确说明暂不能重新验证", async ({ page }) => {
+    await mockWorkspace(page, "light", "user");
+    const candidate = workspaceTask(
+      "task-legacy-candidate",
+      "candidate_ready",
+      "旧版候选结果",
+    );
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [candidate] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-legacy-candidate",
+      (route) => route.fulfill({
+        json: workspaceDetail(candidate, {
+          agentic_runtime: {
+            runtime_version: "pi",
+            permission_profile: "standard",
+            status: "candidate_ready",
+            candidates: [{
+              artifact_id: "candidate-legacy-json",
+              filename: "历史结果.json",
+              format: "json",
+              sha256: "d".repeat(64),
+              size_bytes: 256,
+              openable: true,
+              qa_checks: ["openable"],
+              download_url: "/api/download/candidate-legacy-json",
+              download_allowed: true,
+            }],
+            verification: {
+              status: "failed",
+              summary: "历史验证未通过",
+              evidence_count: 1,
+              formal_delivery_eligible: false,
+              checks: [],
+            },
+            latest_verification_attempt: {
+              attempt_id: "legacy-attempt-1",
+              status: "failed",
+              reason: "initial",
+              ruleset_identity_status: "legacy_unversioned",
+            },
+            reverification_offer: null,
+            reverification_unavailable_reason:
+              "该历史任务缺少可证明的冻结运行信息，暂不能重新验证。",
+            awaiting_publication: false,
+          },
+        }),
+      }),
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /旧版候选结果/ }).click();
+
+    await expect(page.getByText("历史结果.json")).toBeVisible();
+    await expect(page.getByRole("status")).toContainText(
+      "该历史任务缺少可证明的冻结运行信息，暂不能重新验证。",
+    );
+    await expect(
+      page.getByRole("button", { name: "使用最新规则重新验证" }),
+    ).toHaveCount(0);
+  });
+
   test("普通用户确认本次 Provider 外发后创建候选重验 Attempt", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.emulateMedia({ reducedMotion: "reduce" });
@@ -1948,6 +2103,266 @@ test.describe("统一数据工作台", () => {
       accept_duplicate_provider_cost: false,
     });
     expect(requestIdempotencyKey).toMatch(/^reverify-/);
+    await expect(page.getByRole("status")).toContainText("重验请求已受理");
+  });
+
+  test("旧规则身份未知的候选可双确认建立当前验证基线", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockWorkspace(page, "light", "user");
+    const candidate = workspaceTask(
+      "task-legacy-rebaseline",
+      "candidate_ready",
+      "旧候选建立验证基线",
+    );
+    const candidateDetail = workspaceDetail(candidate, {
+      agentic_runtime: {
+        runtime_version: "pi",
+        permission_profile: "standard",
+        status: "candidate_ready",
+        run_id: "pi-run-legacy",
+        candidates: [{
+          artifact_id: "candidate-legacy-csv",
+          filename: "技术指标.csv",
+          format: "csv",
+          sha256: "d".repeat(64),
+          size_bytes: 4096,
+          openable: true,
+          qa_checks: ["openable"],
+          download_url: "/api/download/candidate-legacy-csv",
+          download_allowed: true,
+        }],
+        verification: {
+          status: "failed",
+          summary: "旧验证规则身份无法证明",
+          evidence_count: 88,
+          formal_delivery_eligible: false,
+          checks: [],
+        },
+        latest_verification_attempt: {
+          attempt_id: "attempt-legacy-old",
+          status: "failed",
+          reason: "initial",
+          ruleset_identity_status: "legacy_unversioned",
+        },
+        reverification_offer: {
+          eligible: true,
+          reason: "legacy_rebaseline",
+          blockers: [],
+          ruleset_changed: null,
+          ruleset_change_summary: "旧规则身份未知，将以当前规则建立可信基线",
+          requires_provider: true,
+          connection_id: "connection-deepseek",
+          model_id: "deepseek-chat",
+          candidate_set_hash: "a".repeat(64),
+          target_ruleset_hash: "b".repeat(64),
+          egress_categories: ["任务目标", "候选内容", "来源证据"],
+          egress_summary: "任务目标、候选内容和来源证据将发送给模型",
+        },
+        awaiting_publication: false,
+      },
+    });
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [candidate] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-legacy-rebaseline",
+      (route) => route.fulfill({ json: candidateDetail }),
+    );
+    let requestPayload: Record<string, unknown> | null = null;
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-legacy-rebaseline/candidate-verifications",
+      async (route) => {
+        requestPayload = await route.request().postDataJSON();
+        await route.fulfill({
+          status: 202,
+          json: {
+            attempt_id: "attempt-legacy-new",
+            task_id: candidate.task_id,
+            revision: 1,
+            run_id: "pi-run-legacy",
+            previous_attempt_id: "attempt-legacy-old",
+            status: "requested",
+            task: candidateDetail,
+          },
+        });
+      },
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /旧候选建立验证基线/ }).click();
+    await page.getByRole("button", { name: "建立当前验证基线" }).click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toContainText("旧验证规则身份无法证明");
+    await expect(dialog).toContainText(`Target Ruleset SHA-256：${"b".repeat(64)}`);
+    await expect(dialog).toContainText("不会重跑任务、不会修改候选");
+    await expect(dialog).toContainText("通过后仍需单独发布");
+    const submit = dialog.getByRole("button", { name: "开始建立验证基线" });
+    await expect(submit).toBeDisabled();
+    await dialog.getByRole("checkbox", {
+      name: "我理解旧验证规则身份无法证明，本次将使用当前规则建立新的可信基线",
+    }).check();
+    await expect(submit).toBeDisabled();
+    await dialog.getByRole("checkbox", {
+      name: "我确认本次会向外部模型发送上述内容，并可能产生费用",
+    }).check();
+    await expect(submit).toBeEnabled();
+    await submit.click();
+
+    await expect.poll(() => requestPayload).toEqual({
+      expected_revision: 1,
+      expected_previous_attempt_id: "attempt-legacy-old",
+      external_api_confirmed: true,
+      accept_duplicate_provider_cost: false,
+      expected_candidate_set_hash: "a".repeat(64),
+      expected_target_ruleset_hash: "b".repeat(64),
+      legacy_ruleset_unknown_acknowledged: true,
+      authorization_text_version: "legacy-rebaseline-v1",
+    });
+  });
+
+  test("历史候选由 Owner 双确认恢复窄重验权威", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockWorkspace(page, "dark", "user");
+    const candidate = workspaceTask(
+      "task-historical-reverification",
+      "candidate_ready",
+      "历史候选重验",
+    );
+    const candidateDetail = workspaceDetail(candidate, {
+      agentic_runtime: {
+        runtime_version: "pi",
+        permission_profile: "standard",
+        status: "candidate_ready",
+        run_id: "pi-run-old",
+        candidates: [{
+          artifact_id: "candidate-historical-csv",
+          filename: "历史结果.csv",
+          format: "csv",
+          sha256: "d".repeat(64),
+          size_bytes: 4096,
+          openable: true,
+          qa_checks: ["openable"],
+          download_url: "/api/download/candidate-historical-csv",
+          download_allowed: true,
+        }],
+        verification: {
+          status: "inconclusive",
+          summary: "文件和来源证据有效，但语义判断未形成可靠结论",
+          evidence_count: 88,
+          formal_delivery_eligible: false,
+          checks: [],
+        },
+        latest_verification_attempt: {
+          attempt_id: "attempt-historical-old",
+          status: "inconclusive",
+          reason: "semantic_inconclusive",
+          ruleset_identity_status: "legacy_unversioned",
+        },
+        reverification_offer: {
+          eligible: false,
+          reason: null,
+          blockers: ["historical_authority_recovery_required"],
+          ruleset_changed: null,
+          ruleset_change_summary: "当前验证规则身份可冻结",
+          requires_provider: true,
+          connection_id: "connection-deepseek",
+          model_id: "deepseek-v4-flash",
+          candidate_count: 1,
+          candidate_formats: ["csv"],
+          egress_categories: ["任务目标", "候选预览", "来源证据"],
+          egress_summary: "任务目标、候选预览和来源证据将发送给模型",
+          historical_authority_recovery: {
+            expected_evidence_hash: "e".repeat(64),
+            purpose: "semantic_inconclusive_reverification",
+            owner_id: "user-a",
+            task_id: "task-historical-reverification",
+            revision: 1,
+            run_id: "pi-run-old",
+            candidate_set_hash: "f".repeat(64),
+            explanation: "系统不会补造旧 RuntimeAssignment；只记录当前重验确认。",
+          },
+        },
+        awaiting_publication: false,
+      },
+    });
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [candidate] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-historical-reverification",
+      (route) => route.fulfill({ json: candidateDetail }),
+    );
+    let requestPayload: Record<string, unknown> | null = null;
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-historical-reverification/candidate-verifications",
+      async (route) => {
+        requestPayload = await route.request().postDataJSON();
+        if (candidateDetail.agentic_runtime) {
+          candidateDetail.agentic_runtime.latest_verification_attempt = {
+            attempt_id: "attempt-historical-new",
+            status: "requested",
+            reason: "semantic_inconclusive",
+            ruleset_identity_status: "versioned",
+          };
+        }
+        await route.fulfill({
+          status: 202,
+          json: {
+            attempt_id: "attempt-historical-new",
+            task_id: candidate.task_id,
+            revision: 1,
+            run_id: "pi-run-old",
+            previous_attempt_id: "attempt-historical-old",
+            status: "requested",
+            task: candidateDetail,
+          },
+        });
+      },
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /历史候选重验/ }).click();
+    const trigger = page.getByRole("button", { name: "恢复并重新验证候选" });
+    await trigger.click();
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog.getByRole("button", { name: "取消" })).toBeFocused();
+    await expect(dialog).toContainText("不会补造旧 RuntimeAssignment");
+    await expect(dialog).toContainText("Owner：user-a");
+    await expect(dialog).toContainText("Run：pi-run-old");
+    await expect(dialog).toContainText("1 个候选 · CSV");
+    const accessibility = await new AxeBuilder({ page })
+      .include('[role="alertdialog"]')
+      .analyze();
+    expect(accessibility.violations).toEqual([]);
+    const submit = dialog.getByRole("button", { name: "恢复并开始语义验证" });
+    await expect(submit).toBeDisabled();
+    await dialog.getByRole("checkbox", {
+      name: "我确认旧任务没有可证明的 RuntimeAssignment，系统不会补造这段历史",
+    }).check();
+    await dialog.getByRole("checkbox", {
+      name: "我确认本授权只用于当前候选重验，不重跑 Pi、不创建版本、不发布",
+    }).check();
+    await expect(submit).toBeDisabled();
+    await page.setViewportSize({ width: 640, height: 450 });
+    await expect(dialog.getByRole("button", { name: "取消" })).toBeVisible();
+    await expect(submit).toBeVisible();
+    expect(await dialog.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth + 1,
+    )).toBe(true);
+    await dialog.getByRole("checkbox", {
+      name: "我确认本次会向外部模型发送上述内容，并可能产生费用",
+    }).check();
+    await submit.click();
+
+    await expect.poll(() => requestPayload).toEqual({
+      expected_revision: 1,
+      expected_previous_attempt_id: "attempt-historical-old",
+      external_api_confirmed: true,
+      accept_duplicate_provider_cost: false,
+      historical_authority_recovery: {
+        expected_evidence_hash: "e".repeat(64),
+        acknowledge_no_historical_assignment: true,
+        acknowledge_reverification_only: true,
+      },
+    });
     await expect(page.getByRole("status")).toContainText("重验请求已受理");
   });
 
@@ -2149,7 +2564,7 @@ test.describe("统一数据工作台", () => {
     const expected = [
       [403, "请使用任务所有者账号"],
       [409, "请刷新任务并核对最新状态"],
-      [422, "请重新核对外发内容"],
+      [422, "请重新核对恢复证据和外发内容"],
       [503, "服务暂时不可用"],
     ] as const;
     for (const [status, message] of expected) {

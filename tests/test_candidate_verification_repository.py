@@ -10,6 +10,8 @@ import pytest
 from src.candidate_verification import (
     AttemptReason,
     AttemptStatus,
+    RebaselineAuthorizationEvidence,
+    RulesetIdentityStatus,
     SqliteCandidateVerificationRepository,
     VerificationAttempt,
     migrate_candidate_verification,
@@ -82,6 +84,222 @@ def test_created_attempt_is_retrievable_with_all_frozen_identity(tmp_path) -> No
 
     assert created == requested
     assert repository.get("owner-a", "attempt-1") == requested
+
+
+def test_legacy_rebaseline_authorization_is_retrievable_as_frozen_evidence(
+    tmp_path,
+) -> None:
+    repository = _migrated_repository(tmp_path)
+    versioned_template = _requested_attempt()
+    previous = VerificationAttempt.model_validate(
+        {
+            **versioned_template.model_dump(mode="json"),
+            "ruleset_identity_status": "legacy_unversioned",
+            "verifier_ruleset_hash": None,
+            "verifier_code_commit": None,
+            "verifier_source_hash": None,
+            "verifier_execution_identity_hash": None,
+            "verifier_ruleset_manifest_json": None,
+        }
+    )
+    repository.create(previous)
+    repository.start(
+        "owner-a",
+        previous.attempt_id,
+        started_at=datetime(2026, 8, 24, 1, tzinfo=timezone.utc),
+    )
+    repository.finish(
+        "owner-a",
+        previous.attempt_id,
+        status=AttemptStatus.FAILED,
+        report_json='{"status":"failed"}',
+        report_hash=(
+            "759315d5ae8c31136d2a7bc803e591554894987559325cdf7e0b5965bec0eaca"
+        ),
+        finished_at=datetime(2026, 8, 24, 2, tzinfo=timezone.utc),
+    )
+    evidence = RebaselineAuthorizationEvidence(
+        authorization_text_version="legacy-rebaseline-v1",
+        owner_id="owner-a",
+        task_id="task-a",
+        revision=1,
+        run_id="run-a",
+        previous_attempt_id="attempt-1",
+        candidate_set_hash="1" * 64,
+        target_ruleset_hash="5" * 64,
+        actor_id="owner-a",
+        legacy_ruleset_unknown_acknowledged=True,
+        external_api_confirmed=False,
+        authorized_at=datetime(2026, 8, 24, 3, tzinfo=timezone.utc),
+    )
+    successor = versioned_template.model_copy(
+        update={
+            "attempt_id": "attempt-rebaseline",
+            "previous_attempt_id": previous.attempt_id,
+            "reason_code": AttemptReason.LEGACY_REBASELINE,
+            "idempotency_key": "idem-rebaseline",
+            "request_hash": "a" * 64,
+            "rebaseline_authorization_json": evidence.canonical_json(),
+            "rebaseline_authorization_hash": evidence.sha256(),
+            "created_at": datetime(2026, 8, 24, 3, tzinfo=timezone.utc),
+        }
+    )
+
+    mismatched_evidence = evidence.model_copy(
+        update={"target_ruleset_hash": "0" * 64}
+    )
+    mismatched = successor.model_copy(
+        update={
+            "rebaseline_authorization_json": mismatched_evidence.canonical_json(),
+            "rebaseline_authorization_hash": mismatched_evidence.sha256(),
+        }
+    )
+    with pytest.raises(ValueError, match="授权证据与冻结 Attempt 身份不一致"):
+        repository.create(mismatched)
+
+    repository.create(successor)
+
+    stored = repository.get("owner-a", "attempt-rebaseline")
+    assert stored is not None
+    assert stored.rebaseline_authorization_json == evidence.canonical_json()
+    assert stored.rebaseline_authorization_hash == evidence.sha256()
+
+    repository.start(
+        "owner-a",
+        successor.attempt_id,
+        started_at=datetime(2026, 8, 24, 4, tzinfo=timezone.utc),
+    )
+    repository.finish(
+        "owner-a",
+        successor.attempt_id,
+        status=AttemptStatus.FAILED,
+        report_json='{"status":"failed"}',
+        report_hash=(
+            "759315d5ae8c31136d2a7bc803e591554894987559325cdf7e0b5965bec0eaca"
+        ),
+        finished_at=datetime(2026, 8, 24, 5, tzinfo=timezone.utc),
+    )
+    second_evidence = evidence.model_copy(
+        update={"authorized_at": datetime(2026, 8, 24, 6, tzinfo=timezone.utc)}
+    )
+    second = successor.model_copy(
+        update={
+            "attempt_id": "attempt-rebaseline-second",
+            "idempotency_key": "idem-rebaseline-second",
+            "request_hash": "b" * 64,
+            "rebaseline_authorization_json": second_evidence.canonical_json(),
+            "rebaseline_authorization_hash": second_evidence.sha256(),
+            "created_at": datetime(2026, 8, 24, 6, tzinfo=timezone.utc),
+        }
+    )
+    with pytest.raises(ValueError, match="最新|已经建立 versioned"):
+        repository.create(second)
+
+
+def test_legacy_rebaseline_rejects_versioned_failed_predecessor(tmp_path) -> None:
+    repository = _migrated_repository(tmp_path)
+    previous = _requested_attempt()
+    repository.create(previous)
+    repository.start(
+        "owner-a",
+        previous.attempt_id,
+        started_at=datetime(2026, 8, 24, 1, tzinfo=timezone.utc),
+    )
+    repository.finish(
+        "owner-a",
+        previous.attempt_id,
+        status=AttemptStatus.FAILED,
+        report_json='{"status":"failed"}',
+        report_hash=(
+            "759315d5ae8c31136d2a7bc803e591554894987559325cdf7e0b5965bec0eaca"
+        ),
+        finished_at=datetime(2026, 8, 24, 2, tzinfo=timezone.utc),
+    )
+    evidence = RebaselineAuthorizationEvidence(
+        authorization_text_version="legacy-rebaseline-v1",
+        owner_id="owner-a",
+        task_id="task-a",
+        revision=1,
+        run_id="run-a",
+        previous_attempt_id="attempt-1",
+        candidate_set_hash="1" * 64,
+        target_ruleset_hash="5" * 64,
+        actor_id="owner-a",
+        legacy_ruleset_unknown_acknowledged=True,
+        external_api_confirmed=False,
+        authorized_at=datetime(2026, 8, 24, 3, tzinfo=timezone.utc),
+    )
+    successor = previous.model_copy(
+        update={
+            "attempt_id": "attempt-rebaseline",
+            "previous_attempt_id": previous.attempt_id,
+            "reason_code": AttemptReason.LEGACY_REBASELINE,
+            "idempotency_key": "idem-rebaseline",
+            "request_hash": "a" * 64,
+            "rebaseline_authorization_json": evidence.canonical_json(),
+            "rebaseline_authorization_hash": evidence.sha256(),
+            "created_at": datetime(2026, 8, 24, 3, tzinfo=timezone.utc),
+        }
+    )
+
+    with pytest.raises(ValueError, match="failed.*legacy_unversioned"):
+        repository.create(successor)
+
+
+def test_provider_outcome_recovery_requires_latest_unknown_predecessor(
+    tmp_path,
+) -> None:
+    repository = _migrated_repository(tmp_path)
+    previous = _requested_attempt()
+    repository.create(previous)
+    repository.start(
+        "owner-a",
+        previous.attempt_id,
+        started_at=datetime(2026, 8, 24, 1, tzinfo=timezone.utc),
+    )
+    repository.finish(
+        "owner-a",
+        previous.attempt_id,
+        status=AttemptStatus.OUTCOME_UNKNOWN,
+        report_json=None,
+        report_hash=None,
+        finished_at=datetime(2026, 8, 24, 2, tzinfo=timezone.utc),
+    )
+    first = previous.model_copy(
+        update={
+            "attempt_id": "attempt-provider-recovery-1",
+            "previous_attempt_id": previous.attempt_id,
+            "reason_code": AttemptReason.PROVIDER_OUTCOME_RECOVERY,
+            "idempotency_key": "provider-recovery-1",
+            "request_hash": "a" * 64,
+            "created_at": datetime(2026, 8, 24, 3, tzinfo=timezone.utc),
+        }
+    )
+    repository.create(first)
+    repository.start(
+        "owner-a",
+        first.attempt_id,
+        started_at=datetime(2026, 8, 24, 4, tzinfo=timezone.utc),
+    )
+    repository.finish(
+        "owner-a",
+        first.attempt_id,
+        status=AttemptStatus.OUTCOME_UNKNOWN,
+        report_json=None,
+        report_hash=None,
+        finished_at=datetime(2026, 8, 24, 5, tzinfo=timezone.utc),
+    )
+    second = first.model_copy(
+        update={
+            "attempt_id": "attempt-provider-recovery-2",
+            "idempotency_key": "provider-recovery-2",
+            "request_hash": "b" * 64,
+            "created_at": datetime(2026, 8, 24, 6, tzinfo=timezone.utc),
+        }
+    )
+
+    with pytest.raises(ValueError, match="不是最新"):
+        repository.create(second)
 
 
 def test_create_rejects_requested_attempt_with_runtime_fields(tmp_path) -> None:
