@@ -6,7 +6,7 @@
 >
 > 当前分支：`main`
 >
-> 当前 HEAD / `origin/main`：`7efaf2fd78a8f1df0b86929b19e27cf0a7b5ca03`
+> P0-01 实现基线：`20d3a2a9adc3d72429a753721892e3a77939ff26`；当前 HEAD / `origin/main` 开工时现场查询
 >
 > 当前会话终点：完成本交接冻结的 GitHub Open Issues；全部完成、验证、按需验收并关闭后，本会话才结束
 
@@ -17,8 +17,8 @@
 
 | Issue | 任务 | 当前状态 | 依赖 |
 |---|---|---|---|
-| #54 | P0-01 vNext 默认链路与真实普通用户闭环 | LIVE_ACCEPTED / GitHub OPEN | 子任务 #70 已完成现场门 |
-| #70 | CV-10 生产迁移、真实同 Run 重验与 Owner 验收 | LIVE_ACCEPTED / GitHub OPEN | 待远端证据收口 |
+| #54 | P0-01 vNext 默认链路与真实普通用户闭环 | CLOSED / LIVE_ACCEPTED | 2026-08-26 远端收口 |
+| #70 | CV-10 生产迁移、真实同 Run 重验与 Owner 验收 | CLOSED / LIVE_ACCEPTED | 2026-08-26 远端收口 |
 | #55 | P0-04A 最小 CI 工程门 | OPEN / `ready-for-agent` | #54 |
 | #56 | P0-05 显式数据库迁移体系 | OPEN / `ready-for-agent` | #55 |
 | #57 | P0-02 Secret 存储统一 | OPEN / `ready-for-agent` | #56 |
@@ -233,7 +233,8 @@ Gate C 已按 Owner 独立授权发布：正式 Delivery `delivery_84956666b2f34
 更新/关闭仍未授权。
 
 TaskOwner 随后明确回复“同意”，#70 达到 `LIVE_ACCEPTED`。现场只读核对 GitHub 后，#70 三个人工
-门与 #54 十个子任务及真实闭环的完成条件均已满足；两张 Issue 仍为 OPEN，远端评论/关闭尚未授权。
+门与 #54 十个子任务及真实闭环的完成条件均已满足。实现与证据已由提交 `20d3a2a9` 推送到
+`main`；完成证据已写入 GitHub，#70 与 #54 均于 2026-08-26 关闭。
 
 #70 的两个独立人工门已完成：
 
@@ -259,7 +260,7 @@ TaskOwner 随后明确回复“同意”，#70 达到 `LIVE_ACCEPTED`。现场�
 3. 已完成：Gate B 精确 Owner/CandidateSet/Ruleset/连接/模型授权，以及唯一真实 Attempt；
 4. 已完成：Attempt `passed`，Usage 已记录，Grant 已撤销，无自动重试；
 5. 已完成：Gate C 正式发布与 Owner `LIVE_ACCEPTED`；
-6. 下一门：更新 #70/#54 证据并关闭；这是 GitHub 远端写操作，执行前仍需用户明确授权。
+6. 已完成：提交 `20d3a2a9` 推送、#70/#54 完成证据写入与远端关闭；下一任务为 #55。
 
 ### C. 按依赖完成剩余 P0 Issues
 

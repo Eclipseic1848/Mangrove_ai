@@ -70,10 +70,11 @@ Gate C 随后已按 Owner 独立授权发布：正式 Delivery `delivery_8495666
 `succeeded`，CSV/JSON 两个输出均通过非空、SHA-256 与重开 QA，无警告；CSV 为 2 行。Delivery
 精确绑定上述 passed Attempt 与报告哈希。当前等待 Owner 给出 `LIVE_ACCEPTED` 或整改意见；这不
 自动授权 GitHub Issue 更新/关闭。
-GitHub #61～#69 已关闭；#70 与父任务 #54 保持 OPEN/ready-for-human。
+GitHub #61～#70 与父任务 #54 均已关闭。
 
 TaskOwner 随后明确回复“同意”，`liyi111` 的 P0-01 真实普通用户闭环达到 `LIVE_ACCEPTED`。
-GitHub #70 与父任务 #54 的现场完成条件已经满足，但远端仍为 OPEN；评论、标签和关闭尚未授权。
+实现与证据已由提交 `20d3a2a9` 推送到 `main`；GitHub #70 与父任务 #54 已写入完成证据并于
+2026-08-26 关闭。下一张依赖工单为 #55 最小 CI 工程门。
 
 Gate A 后发现 11 条旧任务因重验资格投影无法解析旧冻结上下文而导致详情接口失败，前端又将
 错误显示成空白。2026-08-25 已完成正式兼容修复：不回填或推断旧字段，任务详情和 Candidate
