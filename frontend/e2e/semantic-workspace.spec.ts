@@ -196,6 +196,53 @@ function workspaceDetail(
   };
 }
 
+function sourceAttempt(
+  status: "succeeded" | "failed",
+  extra: Record<string, unknown> = {},
+) {
+  const succeeded = status === "succeeded";
+  return {
+    attempt_id: `source-${status}`,
+    idempotency_key: `key-${status}`,
+    request_url: "https://example.com/article#intro",
+    normalized_url: "https://example.com/article",
+    allowed_scope: {
+      kind: "current_page",
+      normalized_url: "https://example.com/article",
+    },
+    purpose: "读取公开网页内容，供当前数据任务分析",
+    status,
+    started_at: "2026-08-27T10:00:00Z",
+    finished_at: "2026-08-27T10:00:01Z",
+    snapshot_id: succeeded ? "snapshot-1" : null,
+    error_code: succeeded ? null : "non_html",
+    error_message: succeeded ? null : "页面不是 HTML",
+    snapshot: succeeded ? {
+      snapshot_id: "snapshot-1",
+      attempt_id: `source-${status}`,
+      allowed_scope: {
+        kind: "current_page",
+        normalized_url: "https://example.com/article",
+      },
+      valid_page_count: 1,
+      failed_page_count: 0,
+      created_at: "2026-08-27T10:00:01Z",
+      artifacts: [{
+        artifact_id: "artifact-1",
+        request_url: "https://example.com/article",
+        final_url: "https://example.com/article",
+        read_at: "2026-08-27T10:00:01Z",
+        content_sha256: "a".repeat(64),
+        media_type: "text/html",
+        size_bytes: 1024,
+        title: "示例产品说明",
+        text_preview: "这是页面中冻结的公开产品说明。",
+      }],
+    } : null,
+    ...extra,
+  };
+}
+
 test.describe("统一数据工作台", () => {
   for (const item of [
     { theme: "light" as const, width: 1366, height: 768 },
@@ -227,6 +274,140 @@ test.describe("统一数据工作台", () => {
       }
     });
   }
+
+  test("公开网页来源会先披露范围并从持久事实恢复", async ({ page }) => {
+    await mockWorkspace(page);
+    let submitted: Record<string, unknown> | null = null;
+    let idempotencyKey = "";
+    const saved = sourceAttempt("succeeded");
+    await page.route("**/api/semantic-workspace/source-acquisitions", async (route) => {
+      submitted = route.request().postDataJSON();
+      idempotencyKey = route.request().headers()["idempotency-key"] ?? "";
+      await route.fulfill({ status: 202, json: saved });
+    });
+    await page.route(
+      "**/api/semantic-workspace/source-acquisitions/source-succeeded",
+      (route) => route.fulfill({ json: saved }),
+    );
+    await page.goto("/data-prep");
+
+    const webMode = page.getByRole("radio", { name: "公开网页" });
+    await webMode.focus();
+    await webMode.press("Space");
+    await expect(webMode).toBeChecked();
+    const url = page.getByLabel("精确网址");
+    await url.focus();
+    await url.fill("HTTPS://Example.com:443/article#intro");
+    await expect(page.getByText("实际请求：")).toBeVisible();
+    await expect(page.getByText("https://example.com/article", { exact: true }))
+      .toBeVisible();
+    await expect(page.getByText("允许范围：仅当前页面")).toBeVisible();
+    await expect(page.getByText("可能外发：标题、正文、网址")).toBeVisible();
+    await expect(page.getByText("本步骤不调用模型。", { exact: false }))
+      .toBeVisible();
+
+    const acquire = page.getByRole("button", { name: "获取网页" });
+    await expect(acquire).toBeEnabled();
+    await acquire.click();
+
+    await expect(
+      page.getByRole("region", { name: "获取一个公开网页" })
+        .getByText("网页来源已冻结", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByRole("article", { name: "网页正文预览" }))
+      .toContainText("这是页面中冻结的公开产品说明");
+    expect(submitted).toEqual({
+      url: "https://example.com/article",
+      purpose: "读取公开网页内容，供当前数据任务分析",
+      allowed_scope: "current_page",
+    });
+    expect(idempotencyKey.length).toBeGreaterThan(5);
+
+    await page.reload();
+    await page.getByText("公开网页", { exact: true }).click();
+    await expect(
+      page.getByRole("region", { name: "获取一个公开网页" })
+        .getByText("网页来源已冻结", { exact: true }),
+    ).toBeVisible();
+    await expect(page.getByText("这是页面中冻结的公开产品说明。"))
+      .toBeVisible();
+  });
+
+  test("网页来源在收到 Attempt ID 前刷新仍复用同一幂等请求", async ({ page }) => {
+    await mockWorkspace(page);
+    await page.addInitScript(() => {
+      localStorage.setItem("mangrove_web_source_attempt_u1", JSON.stringify({
+        attempt_id: null,
+        idempotency_key: "pending-reconnect-key",
+        url: "https://example.com/article",
+        purpose: "读取公开网页内容，供当前数据任务分析",
+      }));
+    });
+    const acquiring = sourceAttempt("succeeded", {
+      attempt_id: "source-restored",
+      idempotency_key: "pending-reconnect-key",
+      status: "acquiring",
+      finished_at: null,
+      snapshot_id: null,
+      snapshot: null,
+    });
+    const succeeded = sourceAttempt("succeeded", {
+      attempt_id: "source-restored",
+      idempotency_key: "pending-reconnect-key",
+    });
+    let createCalls = 0;
+    const receivedKeys: string[] = [];
+    await page.route("**/api/semantic-workspace/source-acquisitions", (route) => {
+      createCalls += 1;
+      receivedKeys.push(route.request().headers()["idempotency-key"] ?? "");
+      return route.fulfill({
+        status: 202,
+        json: createCalls >= 3 ? succeeded : acquiring,
+      });
+    });
+    await page.route(
+      "**/api/semantic-workspace/source-acquisitions/source-restored",
+      (route) => route.fulfill({ json: succeeded }),
+    );
+
+    await page.goto("/data-prep");
+    await page.getByText("公开网页", { exact: true }).click();
+
+    await expect(
+      page.getByRole("region", { name: "获取一个公开网页" })
+        .getByText("网页来源已冻结", { exact: true }),
+    ).toBeVisible();
+    expect(createCalls).toBeGreaterThanOrEqual(1);
+    expect(new Set(receivedKeys)).toEqual(new Set(["pending-reconnect-key"]));
+  });
+
+  test("网页来源失败在窄屏深色主题中明确说明零下游结果", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await mockWorkspace(page, "dark");
+    await page.route("**/api/semantic-workspace/source-acquisitions", (route) =>
+      route.fulfill({ status: 202, json: sourceAttempt("failed") }));
+    await page.goto("/data-prep");
+
+    await page.getByText("公开网页", { exact: true }).click();
+    await page.getByLabel("精确网址").fill("https://example.com/file.pdf");
+    await page.getByRole("button", { name: "获取网页" }).click();
+
+    await expect(page.getByRole("alert")).toContainText("没有形成可用来源");
+    await expect(page.getByRole("alert")).toContainText("不是 HTML 页面");
+    await expect(page.locator("html")).toHaveClass(/dark/);
+    await page.getByRole("button", { name: "打开导航" }).click();
+    await expect(page.getByRole("link", { name: "对话工作区" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "浅色主题" })).toBeVisible();
+    await page.locator("aside").getByRole("button", { name: "关闭导航" }).click();
+    await expect(page.getByRole("link", { name: "对话工作区" })).toBeHidden();
+    await page.getByRole("button", { name: "打开导航" }).click();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("link", { name: "对话工作区" })).toBeHidden();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth))
+      .toBeLessThanOrEqual(390);
+    const accessibility = await new AxeBuilder({ page }).analyze();
+    expect(accessibility.violations).toEqual([]);
+  });
 
   test("文件、目标、模型和输出格式形成可提交任务", async ({ page }) => {
     await mockWorkspace(page);

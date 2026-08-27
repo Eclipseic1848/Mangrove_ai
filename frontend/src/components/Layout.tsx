@@ -1,5 +1,6 @@
-import { LayoutDashboard, MessagesSquare, CalendarClock, Moon, Sun, LogOut, Library, Brain, Settings, Users, BarChart3, Database } from "lucide-react";
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { LayoutDashboard, MessagesSquare, CalendarClock, Moon, Sun, LogOut, Library, Brain, Settings, Users, BarChart3, Database, Menu, X } from "lucide-react";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useAuth, isAdminish } from "@/lib/auth";
 import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
@@ -24,17 +25,55 @@ export function Layout() {
   const { user, logout } = useAuth();
   const { theme, toggle } = useTheme();
   const navigate = useNavigate();
+  const location = useLocation();
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const compactDataPrep = location.pathname === "/data-prep";
+
+  useEffect(() => {
+    setMobileNavOpen(false);
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMobileNavOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [mobileNavOpen]);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background">
+      {compactDataPrep && mobileNavOpen && (
+        <button
+          type="button"
+          aria-label="关闭导航背景"
+          onClick={() => setMobileNavOpen(false)}
+          className="fixed inset-0 z-40 bg-foreground/20 md:hidden"
+        />
+      )}
       {/* 左侧导航 */}
-      <aside className="flex w-60 shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground">
+      <aside className={cn(
+        "flex w-60 shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground",
+        compactDataPrep && !mobileNavOpen && "max-md:hidden",
+        compactDataPrep && mobileNavOpen && "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50",
+      )}>
         <div className="flex items-center gap-2.5 px-5 py-5">
           <img src="/logo.svg" alt="howso@Mangrove" className="h-8 w-8" />
           <div className="leading-tight">
             <div className="text-[15px] font-semibold text-foreground">howso@Mangrove</div>
             <div className="text-[11px] text-muted-foreground">数据治理智能体</div>
           </div>
+          {compactDataPrep && mobileNavOpen && (
+            <button
+              type="button"
+              aria-label="关闭导航"
+              onClick={() => setMobileNavOpen(false)}
+              className="ml-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:hidden"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
 
         <nav className="flex-1 space-y-1 px-3 py-2">
@@ -43,6 +82,7 @@ export function Layout() {
               key={item.to}
               to={item.to}
               end={item.end}
+              onClick={() => setMobileNavOpen(false)}
               className={({ isActive }) =>
                 cn(
                   "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
@@ -63,6 +103,7 @@ export function Layout() {
                 key={item.to}
                 to={item.to}
                 end={item.end}
+                onClick={() => setMobileNavOpen(false)}
                 className={({ isActive }) =>
                   cn(
                     "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
@@ -117,6 +158,20 @@ export function Layout() {
 
       {/* 主内容 */}
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        {compactDataPrep && (
+          <div className="hidden h-11 shrink-0 items-center justify-between border-b bg-background px-3 max-md:flex">
+            <button
+              type="button"
+              aria-label={mobileNavOpen ? "关闭导航" : "打开导航"}
+              aria-expanded={mobileNavOpen}
+              onClick={() => setMobileNavOpen((open) => !open)}
+              className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              {mobileNavOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
+            </button>
+            <span className="text-xs font-medium text-muted-foreground">Mangrove 数据工作台</span>
+          </div>
+        )}
         <Outlet />
       </main>
     </div>

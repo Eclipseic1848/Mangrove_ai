@@ -12,6 +12,7 @@ import type {
   VerificationAttemptReceipt,
   HistoricalAuthorityRecoveryConfirmation,
   LegacyRebaselineConfirmation,
+  SourceAcquisitionAttempt,
 } from "@/types/semanticWorkspace";
 
 const BASE = "/api/semantic-workspace";
@@ -88,6 +89,33 @@ export function retryCandidateVerification(
   taskId: string,
 ): Promise<WorkspaceTask> {
   return api.post(`${BASE}/tasks/${taskId}/candidate-verification/retry`);
+}
+
+export function createSourceAcquisition(
+  payload: {
+    url: string;
+    purpose: string;
+    allowed_scope: "current_page";
+  },
+  idempotencyKey: string,
+): Promise<SourceAcquisitionAttempt> {
+  return api.post(
+    `${BASE}/source-acquisitions`,
+    payload,
+    { "Idempotency-Key": idempotencyKey },
+  );
+}
+
+export function getSourceAcquisition(
+  attemptId: string,
+): Promise<SourceAcquisitionAttempt> {
+  return api.get(`${BASE}/source-acquisitions/${attemptId}`);
+}
+
+export function cancelSourceAcquisition(
+  attemptId: string,
+): Promise<SourceAcquisitionAttempt> {
+  return api.post(`${BASE}/source-acquisitions/${attemptId}/cancel`);
 }
 
 export function requestCandidateReverification(

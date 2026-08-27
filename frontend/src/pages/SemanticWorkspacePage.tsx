@@ -29,6 +29,7 @@ import {
 import { SourcePreviewPanel } from "@/components/workspace/SourcePreviewPanel";
 import { TaskTimeline } from "@/components/workspace/TaskTimeline";
 import { WorkspaceTaskSidebar } from "@/components/workspace/WorkspaceTaskSidebar";
+import { WebSourceIntake } from "@/components/workspace/WebSourceIntake";
 import {
   answerWorkspaceTask,
   cancelWorkspaceTask,
@@ -343,6 +344,7 @@ export function SemanticWorkspacePage() {
   const [selectedEvidence, setSelectedEvidence] =
     useState<Record<string, unknown> | null>(null);
   const [draftUploads, setDraftUploads] = useState<UploadItem[]>([]);
+  const [sourceMode, setSourceMode] = useState<"file" | "web">("file");
   const [liveEvents, setLiveEvents] = useState<WorkspaceEvent[]>([]);
   const [helpOpen, setHelpOpen] = useState(false);
   const [exampleSeed, setExampleSeed] = useState<{
@@ -655,7 +657,7 @@ export function SemanticWorkspacePage() {
                     "mx-auto max-w-5xl",
                     draftUploads.length
                       ? "px-4 pb-8 pt-6"
-                      : "px-8 pb-12 pt-14",
+                      : "px-4 pb-12 pt-8 sm:px-8 sm:pt-14",
                   )}
                 >
                 {draftUploads.length === 0 ? (
@@ -688,7 +690,7 @@ export function SemanticWorkspacePage() {
                             <ChevronDown className="h-4 w-4" />
                           </button>
                         </div>
-                        <div className="mt-4 grid grid-cols-3 gap-4">
+                        <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
                           {guidance.data.onboarding.map((item, index) => (
                             <div key={item.title} className="flex gap-2">
                               <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[10px] font-semibold text-primary">
@@ -721,7 +723,34 @@ export function SemanticWorkspacePage() {
                     draftUploads.length === 0 && "mt-6",
                   )}
                 >
-                  <TaskComposer
+                  <fieldset className="mb-3 flex items-center gap-1 border-b pb-3">
+                    <legend className="mr-2 text-xs font-medium text-muted-foreground">
+                      资料来源
+                    </legend>
+                    {(["file", "web"] as const).map((mode) => (
+                      <label
+                        key={mode}
+                        className={cn(
+                          "cursor-pointer rounded-lg px-3 py-1.5 text-xs transition-colors focus-within:ring-2 focus-within:ring-ring",
+                          sourceMode === mode
+                            ? "bg-primary/10 font-medium text-teal-800 dark:text-primary"
+                            : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                        )}
+                      >
+                        <input
+                          type="radio"
+                          name="workspace-source-mode"
+                          value={mode}
+                          checked={sourceMode === mode}
+                          onChange={() => setSourceMode(mode)}
+                          className="sr-only"
+                        />
+                        {mode === "file" ? "文件" : "公开网页"}
+                      </label>
+                    ))}
+                  </fieldset>
+                  {sourceMode === "file" ? (
+                    <TaskComposer
                     key={exampleSeed?.key || "new-task"}
                     initialPrompt={exampleSeed?.prompt}
                     initialFormats={exampleSeed?.formats}
@@ -743,13 +772,18 @@ export function SemanticWorkspacePage() {
                     grayCapabilities={grayCapabilities.data?.items ?? []}
                     onUploadsChange={handleDraftUploadsChange}
                     onSubmit={submitNew}
-                  />
+                    />
+                  ) : (
+                    <WebSourceIntake ownerId={user?.user_id ?? "current"} />
+                  )}
                   <p className="mt-2 text-center text-[11px] text-muted-foreground">
-                    支持拖放、点击和粘贴文件；上传完成后会立即显示原件预览。
+                    {sourceMode === "file"
+                      ? "支持拖放、点击和粘贴文件；上传完成后会立即显示原件预览。"
+                      : "当前只读取一个精确公开页面；不会跟随链接或创建分析任务。"}
                   </p>
                 </div>
 
-                {draftUploads.length === 0 && guidance.data && (
+                {sourceMode === "file" && draftUploads.length === 0 && guidance.data && (
                   <div className="mt-12">
                     <div className="flex items-end justify-between">
                       <div>
@@ -766,7 +800,7 @@ export function SemanticWorkspacePage() {
                         更多示例
                       </button>
                     </div>
-                    <div className="mt-4 grid grid-cols-3 gap-3">
+                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
                       {guidance.data.examples.slice(0, 6).map((example) => (
                         <button
                           key={example.id}

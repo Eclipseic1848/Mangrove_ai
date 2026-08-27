@@ -75,7 +75,7 @@ def test_current_webui_installs_component_schemas_and_evidence(tmp_path: Path) -
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("webui_0004",)
+        ).fetchone() == ("webui_0005",)
         candidate_rows = connection.execute(
             "SELECT migration_id, backup_sha256 "
             "FROM candidate_verification_migrations ORDER BY migration_id"
@@ -211,7 +211,7 @@ def test_current_webui_resumes_known_history_without_rewriting_evidence(
             )
         connection.commit()
 
-    _upgrade(database, "webui_0004")
+    _upgrade(database, "webui_0005")
 
     attempts = SqliteCandidateVerificationRepository(database).list_for_candidate(
         "owner-a",
