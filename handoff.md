@@ -1,422 +1,263 @@
 # Mangrove 零上下文交接
 
-> 状态：`ACTIVE_GOAL`
+> 状态：`P0_CLOSEOUT_FINAL_GATE`
 >
-> 最后现场核验：2026-08-26
+> 起草日期：2026-08-26
 >
-> 当前分支：`main`
->
-> P0-01 实现基线：`20d3a2a9adc3d72429a753721892e3a77939ff26`；当前 HEAD / `origin/main` 开工时现场查询
->
-> 当前会话终点：完成本交接冻结的 GitHub Open Issues；全部完成、验证、按需验收并关闭后，本会话才结束
+> 适用仓库：`Eclipseic1848/Mangrove_ai`
+> 说明：本文件写给完全没有上下文的新会话；会随 #60 文档收口进入 `main`。文档自身未来
+> merge SHA 与 Issue 关闭状态以 GitHub 现场读取为准，不保留会在合并瞬间过期的占位符。
 
-## 1. 我们在做什么
+## 1. 当前任务
 
-本会话的长期目标不是只修一个页面或跑一次模型，而是完成 2026-08-25 现场冻结的
-`Eclipseic1848/Mangrove_ai` 当前版本全部 Open Issues：
-
-| Issue | 任务 | 当前状态 | 依赖 |
-|---|---|---|---|
-| #54 | P0-01 vNext 默认链路与真实普通用户闭环 | CLOSED / LIVE_ACCEPTED | 2026-08-26 远端收口 |
-| #70 | CV-10 生产迁移、真实同 Run 重验与 Owner 验收 | CLOSED / LIVE_ACCEPTED | 2026-08-26 远端收口 |
-| #55 | P0-04A 最小 CI 工程门 | CLOSED / `REMOTE_CI_VERIFIED` | 2026-08-26 远端收口 |
-| #56 | P0-05 显式数据库迁移体系 | OPEN / `ready-for-agent` | #55 |
-| #57 | P0-02 Secret 存储统一 | OPEN / `ready-for-agent` | #56 |
-| #58 | P0-03 依赖拆分与漏洞治理 | OPEN / `ready-for-agent` | #55 |
-| #59 | P0-04B 主分支保护落地 | OPEN / `ready-for-human` | #55、#58 |
-| #60 | P0-06 当前状态与交接收口 | OPEN / `ready-for-agent` | #54～#59 |
-
-冻结的推荐顺序：
+本会话要完成目标启动时冻结的五张 GitHub Open Issue：#56～#60。后续新建 Issue 不自动并入。
 
 ```text
-#54 / #70
-    └─ #55
-        ├─ #56 ─ #57
-        └─ #58 ─ #59
-                    └─ #60
+#55（已关闭）
+├─ #56 显式数据库迁移 ─ #57 SecretRef 统一
+└─ #58 依赖与漏洞治理 ─ #59 main 保护
+                              └─ #60 状态、公共入口与交接收口
 ```
 
-后续新建 Issue 不自动并入本目标，必须先由用户确认是否扩大范围。GitHub 当前没有 Milestone，
-也没有 Release；不要臆造版本里程碑或发布状态。
+| Issue | 完成定义 | 最终状态 |
+| --- | --- | --- |
+| #56 | 中央显式迁移、失败关闭、备份/恢复、生产库副本演练、工程与双轴审查、远端收口 | `CLOSED / ENGINEERING_VERIFIED`；PR #76、`main@453e9008`、CI 33039608828 |
+| #57 | 25 个配置 Secret 迁为 Owner/键绑定 SecretRef；真实生产副本、Vault key、备份/WAL/journal 扫描；工程与双轴审查、远端收口 | `CLOSED / COPY_REHEARSED`；副本读取/重放/扫描/清理完成，生产原库与 key 未改写 |
+| #58 | 五组依赖、干净解析/安装、生产镜像、Python/Node 漏洞处置、限期风险、工程与双轴审查、远端收口 | `CLOSED / ENGINEERING_VERIFIED`；最终 CI 修复已纳入 PR #76，合并后 CI 三项全绿 |
+| #59 | `main` 强制 PR、三项 CI、讨论解决、禁止强推、无常驻 bypass，并用真实测试 PR 验证 | `CLOSED / REMOTE_ENFORCED`；用户确认单维护者审批数 0，Ruleset `21624053`，PR #78 验收完成 |
+| #60 | 精简权威状态、同步公共入口、逐项完成审计、最终 `handoff.md` | 公共/权威文档已完成；以本文件所在 PR 与 GitHub Issue #60 的现场状态为最终远端证据 |
 
-## 2. 新会话第一步
+接手时先核对的远端事实：
 
-按顺序读取并现场复核，不要从历史聊天猜状态：
+- #56～#58 当前合入 `main` SHA：`453e900837109be18da47985db997e58863fbf30`
+- 当前文档收口分支：`codex/p0-06-closeout`；编制基线 `origin/main` 为
+  `453e900837109be18da47985db997e58863fbf30`。本文件进入 `main` 后必须重新 fetch，不能把
+  编制基线当成最终公开 SHA
+- 本地名为 `main` 的分支仍为 `4e8e5f9c878002d9781dca622bafe7cd035ddb66`，落后
+  `origin/main` 5 个提交；接手时必须现场核验，不得把本地分支名当成公开主线事实
+- #56/#57/#58/#59：均为 CLOSED；#60 以 GitHub Issue 现场读取为准
+- #56～#58 工程 PR：[PR #76](https://github.com/Eclipseic1848/Mangrove_ai/pull/76)，状态 MERGED
+- #59 Ruleset：[`main-required-ci-single-maintainer`](https://github.com/Eclipseic1848/Mangrove_ai/rules/21624053)，ID `21624053`，active
+- #59 测试 PR：[PR #78](https://github.com/Eclipseic1848/Mangrove_ai/pull/78)，CLOSED、未合并、探针分支已删除
+- #56～#58 合并后 CI：[运行 33039608828](https://github.com/Eclipseic1848/Mangrove_ai/actions/runs/33039608828)，`backend-fast`、`frontend-build`、`secret-scan` 全绿
+- #59 失败门：[运行 33040744184](https://github.com/Eclipseic1848/Mangrove_ai/actions/runs/33040744184)；成功门：[运行 33040840714](https://github.com/Eclipseic1848/Mangrove_ai/actions/runs/33040840714)
 
-1. 本文件；
-2. `AGENTS.md`；
-3. `docs/status/current.md`；
-4. `CONTEXT.md` 与 `docs/agents/`；
-5. 当前任务引用的规格、ADR 和执行报告；
-6. `git status --short`、`git rev-parse HEAD`、`git rev-parse origin/main`；
-7. `gh issue list --repo Eclipseic1848/Mangrove_ai --state open`，并逐张读取正文和评论；
-8. 8088、数据库、活动 Attempt/Grant 和 Provider 状态的只读现场探针。
+## 2. 项目和不可变产品边界
 
-`docs/plans/2026-08-23-post-issues-productization-roadmap.md` 是 P0/P1/P2 路线来源，但其中
-“Open Issues 为 0”“下一任务为 P0-01”等是 2026-08-23 快照，已过期。当前进度以本文件、
-`docs/status/current.md`、GitHub 和现场代码/数据库为准。
+Mangrove 是统一数据任务平台：用户提交来源和自然语言目标，系统冻结 TaskRevision、Owner、来源、模型连接、外发确认与能力身份，执行生成 Candidate，独立 Verifier 验证，最后由 Publisher 形成正式 Delivery。
 
-2026-08-25 再次只读核对 GitHub：#54 的最新评论仍写 `main=6f29a94b`，#70 的最新评论仍写
-“CandidateVerification 0001/0002 尚未执行”，两者都是 Gate A 前的历史快照。现场
-`main/origin/main=7efaf2fd78a8f1df0b86929b19e27cf0a7b5ca03`，Gate A 已按第 4.3 节完成；不得用旧评论
-覆盖现场 Git、迁移报告和数据库事实。
+- `8088` 是统一产品入口；`5173` 仅是前端开发入口。
+- `/data-prep` 是当前主工作台；历史任务和 Legacy Delivery 在正式迁移完成前继续兼容读取。
+- Candidate、验证通过或 `eligible_for_delivery` 都不是正式交付；只有 `delivery_published` 且完整性/QA 通过的 `output_id` 才是 Delivery。
+- Mangrove 自有 Schema 只允许经 `src/database_migrations` 显式迁移；Repository/startup 只验版本并失败关闭。LangGraph checkpoint 与用户连接器库不在该体系内。
+- `runtime_config` 的 25 个 `secret=True` 键只在业务表保存 Owner/配置键绑定的 SecretRef；原值由共享 Vault 密文边界持有。
+- 生产镜像只安装 runtime + collectors；dev、evaluation、gpu 是独立 overlay。GPU overlay 当前有意为空，不得无真实进程内 GPU workload 证据加入 CUDA/Triton。
+- 普通用户、管理员、超级管理员是产品角色；“高级用户”不是权限角色。
 
-## 3. 项目是什么
+## 3. 已完成并有证据的工作
 
-Mangrove 是统一数据任务平台：用户提交文件或其他来源，用自然语言定义目标；系统冻结
-TaskRevision、来源、Owner、模型连接、外发确认和能力身份，运行 Pi 或兼容 Runtime 生成
-Candidate，再由独立 Verifier 验证，最后只有完整性和 QA 都通过的结果才能发布为正式
-Delivery。
+### 3.1 前置依赖
 
-稳定边界：
+- #54、#55、#70 已完成并关闭；#55 的最小 CI 固定 `backend-fast`、`frontend-build`、`secret-scan` 三项检查。
+- G1～G4 和 AC-07 的既有结果继续由 `docs/status/current.md` 与历史报告负责；本交接不再复制逐次 Attempt、Token、恢复点和阶段流水，以免历史快照冒充当前状态。
 
-- `8088` 是统一产品入口，`5173` 只用于前端开发；
-- `/data-prep` 是当前主工作台，历史任务和 Legacy Delivery 在迁移完成前继续兼容读取；
-- Candidate、验证通过、`eligible_for_delivery` 都不是正式交付；只有
-  `delivery_published` 且通过完整性/QA 的 `output_id` 才是正式 Delivery；
-- 普通用户、管理员、超级管理员是产品角色；“高级用户”不是权限角色；
-- Owner、TaskRevision、Run、CandidateSet、连接版本、外发确认、Ruleset/能力身份和来源必须
-  冻结并失败关闭。
+### 3.2 #56 显式数据库迁移
 
-## 4. 已经完成了什么
+已验证事实：
 
-### 4.1 历史主线能力
+- `src/database_migrations` 是 Mangrove 自有 Schema 的唯一写入口，具有 profile、不可变 revision/manifest、状态/计划/应用/验证、唯一备份、receipt、恢复和并发锁。
+- Repository 与服务启动不再静默建表或 `ALTER`；旧/超前/损坏 Schema 失败关闭。
+- 生产 `data/webui.db` 的只读副本演练已完成：原库 SHA、大小和 mtime 未变化；副本完成 `webui_0001..0003`，74 张既有表、10,216 行无意外改写；重放零 revision；备份恢复逐字节一致；旧 Schema 启动被拒绝。
+- 演练首次暴露合法 `runtime_rollout_state.mode='vnext_default'` 未纳入 revision 契约，已通过 TDD 将冻结权威枚举修正，不能再用错误的 `gray/all` 集合。
 
-- G1 独立盲集正式运行合格：功能 30/31，安全 5/5；这不是整个平台发布资格。
-- G2 Word/Excel 代表任务和 AC-05 生产迁移、恢复、并发、Docker 探针完成。
-- G3/G4 完成 `vnext_default`、P0 回滚/恢复和 DeepSeek/Qwen Provider 安全资格。
-- G5 本机 Linux/Compose、真实浏览器、并发、超时、重启、SQLite 备份恢复和路径可移植性工程门
-  完成；真实目标 Linux/GPU 服务器仍未验收。
-- AC-07 新仓库 #9～#17 已完成并关闭，两条真实能力治理纵切面已走过验证、供应链、签名、
-  发布、装载、隔离、恢复和撤销链；普通用户能力市场仍未开放。
+最终收口：Standards/Spec 终审无剩余 P1/P2；PR #76 已合入
+`main@453e900837109be18da47985db997e58863fbf30`，合并后 CI 33039608828 三项全绿，#56 已关闭。
 
-### 4.2 P0-01 / Candidate 重验主线
+### 3.3 #57 SecretRef 工程实现
 
-- CV-01～CV-09（GitHub #61～#69）已实现、写入证据并关闭。
-- 已形成正式 CandidateVerification Module：追加式不可变 Attempt、只读 Offer、同 Run 完整
-  重验、逐 Attempt Provider Grant/Usage、`outcome_unknown` 零自动重试、精确 Attempt 独立发布
-  和普通用户工作台。
-- CV-09 工程门证据：后端 `1999 passed, 7 skipped, 4 deselected`，前端完整 E2E 64 passed，
-  Standards/Spec 双轴审查无剩余 P1/P2。工程绿色不等于生产验收。
-- 实现基线已推送；当前 `main` 与 `origin/main` 一致。没有创建版本标签或 Release。
+已验证事实：
 
-### 4.3 CV-10 Gate A
+- 冻结 25 个 Registry Secret 键；业务表只保存 `secretref:runtime-config:<uuid>`，Ref 同时绑定 Owner scope 与配置键。
+- 新配置密文和模型连接共享同一个 key 与 `FernetCredentialVault` 边界，但不共享 Provider 密文表、删除或 Grant 生命周期。
+- `webui_0004` 原子迁移旧明文；缺/坏 key、坏密文、跨 Owner/跨键、未知 Ref、部分 Schema、并发或中断均失败关闭并回滚。
+- 更新/删除先验证旧 Ref 和 Vault，单事务替换并清理旧密文；API、诊断、Cookie 健康与后台异常均有脱敏门。
+- 工程回归与生产副本后的 Standards/Spec 双轴终审均为 0 P1 / 0 P2。
+- 经单独授权完成高敏生产副本演练：8088 无监听且源库静止；生产库与匹配 key 复制到仅当前
+  Windows 用户可访问的受限目录，原生产库 SHA、大小、mtime 与原 key 均未改写。
+- 副本从 legacy 依次迁至 `webui_0004`；实际 1 条配置 Secret 形成 1 个 opaque ref 和 1 条密文，
+  孤儿为 0；受信读取、恢复点重放、完整性和外键验证通过，且没有输出 Secret、密文、Ref 或 Owner。
+- 迁移副本、迁移后新备份和恢复点重放副本明文命中均为 0；当时不存在 WAL/journal/shm，
+  所以没有可扫描 sidecar。迁移前恢复点按预期命中 1 项旧明文，仅在受限目录内用于恢复重放。
+- 完成证据后已不可恢复地删除受限目录内 11 个临时文件（145,882,653 bytes）并确认目录不存在；
+  生产原库与原 key 仍存在。PR #76 已合入 `main@453e9008`，CI 33039608828 全绿，#57 已关闭。
 
-- 用户已授权并完成生产 CandidateVerification `0001/0002` 显式迁移。
-- 唯一恢复点：`data/backups/webui-before-cv10-20260825-010051.db`；SHA-256：
-  `09838edfad1826b876821e7857993aa8b858cf18f98335d1815bd535ce6342d1`。
-- 原 71 张表、10,313 行逻辑指纹零改写；35 条历史报告导入为 27 passed、4 failed、
-  4 inconclusive；迁移重放、完整性、外键和服务恢复均通过。
-- Gate A 没有调用 Provider、创建真实重验 Attempt 或发布 Delivery。
-- 权威证据：
-  `docs/plans/2026-08-25-cv-10-gate-a-production-migration-report.md`。
+生产原库迁移、旧备份处置、Secret/key 轮换或销毁不是副本演练的隐含授权。
 
-### 4.4 历史任务详情空白修复
+### 3.4 #58 依赖拆分与漏洞治理
 
-- 23 条未删除生产任务详情已从部分可读恢复为 23/23 可读；缺少可信冻结上下文的旧 Candidate
-  只关闭重验 Offer，不回填、不补猜历史字段。
-- 前端详情错误会显示原因和“重新加载”，不再表现为空白。
-- 已有证据：后端 34 passed、数据工作台 Playwright 29 passed、前端构建通过、生产库逻辑
-  指纹前后一致。
-- 权威证据：`docs/plans/2026-08-25-history-task-restoration-report.md`。
+已验证事实：
 
-## 5. 当前正在做什么、卡在哪里
+- 依赖已分为 runtime、collectors、dev、evaluation、gpu；五个 Python 3.13 空环境均可解析和安装，`pip check`、深 import smoke 与 `pip-audit==2.10.1` 为 0 个已知漏洞。
+- 最终 Linux Phase4B 镜像以 `10001:10001` 非 root 运行，实际镜像 Python 环境 audit 为 0；runtime/collectors、禁入包、无 CUDA/Triton、Chromium、只读 rootfs、断网启动和 readiness 均有真实证据。
+- 完整核心回归为 `2165 passed, 7 skipped, 3 deselected`。三个 deselect 分别有独立干净 dev 环境验证、待最终提交 SHA 的 VerifierRuleset 身份门、以及不得改写的用户 G1 冻结集，不能静默计作通过。
+- Promptfoo lockfile 由 npm 正常重建并真实 `npm ci`；冻结六案例 6/6、12/12 通过，无模型/HTTP 调用。
 
-### 5.0 #55 最小 CI 工程门
+Node 限期风险不是“零漏洞”：
 
-#55 已完成 TDD 实现、隔离验证与远端收口：`.github/workflows/ci.yml` 提供 Python 3.13 快速契约/迁移
-dry-run、前端 `npm ci + build`、UTF-8、依赖一致性/`pip check` 和 Gitleaks 8.30.1 完整历史扫描；
-`ci-heavy.yml` 只允许人工选择完整回归、G1 冻结契约或 Docker 构建，不接收生产 Secret。
-Action 均固定不可变提交，Gitleaks 二进制固定官方 checksum，证据只保存脱敏日志、JSON 与 JUnit。
-干净 Python 环境最终回归 34 passed，1,163 个受跟踪非二进制文本文件 UTF-8 通过，隔离前端安装/构建通过，Gitleaks
-330 个提交约 38.18 MB 扫描后 0 条未处理发现。本任务未修改生产数据、调用模型或使用 Secret。
-Standards/Spec 双轴复审均为 PASS，无剩余 P1/P2；提交 `0c815bfd`
-已推送到 `main`，远端运行 `32947317082` 三个 Job 全部成功，#55 已写入证据并关闭。#59 分支
-保护仍是后续独立授权。
+| 风险 | 隔离/缓解 | Owner | 最晚复查 | 提前触发 |
+| --- | --- | --- | --- | --- |
+| React Router 6.30.6：2 Moderate | 保持 CSR BrowserRouter；跳转只来自受跟踪内部常量；不接收外部 redirect/returnTo/to | 前端依赖维护者 | 2026-09-25 | 开始 SSR/hydration、加入用户可控跳转，或上游发布兼容修复 |
+| Promptfoo 0.122.1：5 High 传递节点 | 只在隔离评测目录运行固定六案例；`--no-cache --no-share`；不处理不可信 ZIP/图像/模型；不进入生产镜像或最小 CI | 评测工具维护者 | 2026-09-25 | 扩展输入/可达路径、PoC 升正式门、目录进入生产/最小 CI，或上游发布修复 |
 
-证据：`docs/plans/2026-08-26-p0-04a-minimum-ci-implementation-report.md`。
+到期前必须重跑三个 Node 工作区的 `npm audit --json`；这不是无限期接受。Standards/Spec
+终审无剩余 P1/P2；PR #76 已包含 Alembic、Gitleaks 窄误报和 env ignore 等最终 CI 修复并合入
+`main@453e9008`，合并后 CI 33039608828 三项全绿，#58 已关闭。
 
-以下两个 Candidate 恢复任务均已完成并保留为历史证据；#55 也已完成，下一张执行工单为 #56。
+### 3.5 P0 公共入口预审
 
-### 5.1 已完成真实执行：历史 `inconclusive` 只重跑语义门
+- 需要按最终能力同步：`README.md`、`CONTRIBUTING.md`、`AGENTS.md`、`CONTEXT.md`、`docs/status/current.md`、最终 `handoff.md`。
+- 已检查、当前无需语义变化：`CODE_OF_CONDUCT.md`、MIT `LICENSE`。
+- `SECURITY.md` 已按现场事实修正支持范围：公开开发阶段不等于存在同名 Tag、Release 或稳定
+  生产版本；该改动仍须随 #60 最终文档 PR 一并验证和收口。
+- GitHub About 的描述、topics、homepage 已只读核验；只有最终现场仍一致且确无语义变化时，才记录“已检查、无需变化”。About 属于远端写入，不能由本地文档修改代替。
 
-精确对象：
+## 4. #59 远端保护结果与当前剩余边界
 
-- Owner：`liyi / u_9505fd620899`；
-- Task：`workspace_c115f33be1004f51`，revision 1；
-- Run：`pi_run_42daee348b9a45bc`；
-- CandidateSet：1 个 CSV，冻结 88 条来源证据摘要；
-- 连接：`7d45d047-68de-4db0-b8b0-b1e4638aa591`；
-- 模型：`deepseek-v4-flash`；
-- 前序 Attempt：`inconclusive + legacy_unversioned`，只有 `semantic_goal` 未形成可靠结论。
+仓库只有 `Eclipseic1848` 一个 collaborator，PR 作者不能批准自己的 PR。用户确认没有第二位
+真人 reviewer，并明确选择单维护者模式，避免把 `main` 锁死：
 
-该一次性 DeepSeek 授权已经执行并消耗。不得把它用于新 Attempt、`liyi111`、Pi 重跑、CSV/证据
-修改、新 revision 或正式发布。
+- Ruleset `21624053` active，仅命中 `refs/heads/main`；无 bypass，当前用户也不能绕过。
+- 强制 PR、讨论解决、strict `backend-fast` / `frontend-build` / `secret-scan`（Integration ID
+  `15368`）和 `non_fast_forward`；审批数 0、最后提交他人批准关闭。
+- PR #78 首次运行 33040744184 的 `backend-fast` 故意失败，PR 为 `BLOCKED`；修复后运行
+  33040840714 三项全绿，PR 为 `CLEAN/MERGEABLE`，没有审批也不会锁死。
+- PR #78 未合并，远端/本地探针分支与 `%TEMP%` worktree 已删除，`main@453e9008` 未含探针；
+  #59 已关闭。
 
-当前工程实现已收口为 `ENGINEERING_VERIFIED`：
+当前没有 P0 工程卡点。未来真实加入第二位维护者时，应另开权限变更把审批数从 0 提升为 1，
+重新验证独立批准；在此之前不得声称当前规则包含人工审批。生产原库迁移、Secret/key 轮换、
+目标服务器部署、Tag/Release 和普通用户能力开放仍是独立人工门，不属于本轮完成事实。
 
-- 后端允许合格的历史 `inconclusive` 进入 `semantic_inconclusive` Attempt，只调用
-  `retry_semantic_verification`；确定性门失败继续阻断；
-- 旧请求仅缺 `external_api_confirmed` 时可从同一 Runtime 冻结列内存解析；非布尔值或字段冲突
-  失败关闭；
-- 预检在 Attempt 认领前完成，避免无效报告把 requested Attempt 卡成 running；
-- 旧 `/candidate-verification/retry` API 已退役为 HTTP 410，不能再绕过新 Attempt 自动发布；
-- 前端改成服务端 Offer 驱动的“只重跑语义验证”确认流，展示 Candidate 文件、ID 和完整 SHA；
-- 无效旧报告测试改用 Repository 只读投影模拟，没有修改终态 Attempt 或放宽数据库 Trigger；
-- 实际 `CandidateVerifier` 测试证明原来源不存在时仍只复用冻结 Manifest/旧报告，候选树零改写；
-- API 纵切面证明 Pi start 保持 1、resume 为 0、revision/Candidate/Manifest 不变、passed 零
-  Delivery、显式发布后唯一 Delivery；
-- 后端聚焦回归 84 passed，Semantic Workspace E2E 29 passed，前端 build、Python compile、
-  `git diff --check` 通过；Standards/Spec 最终复审均无发现；
-- Frontend Design Premium strict audit 仍是既有 26 项，规则 ID 和文件集合未新增；不要顺手修
-  无关旧债。
+## 5. 新会话的精确下一步
 
-六项业务决定和 TDD 实现已经完成。CandidateVerification 现有追加式
-`HistoricalReverificationAuthority`：只记录 TaskOwner 现在对精确旧 CandidateSet 的窄重验授权，
-不补写、不合成普通 RuntimeAssignment，也不能用于 Pi 恢复、新 revision 或发布。`0003` 迁移记录
-DDL 摘要并保护迁移/authority 不可改删；authority 只能由受控 Repository 追加。请求写锁内重建
-TaskRevision、Runtime 请求/事件、Candidate/Manifest/合同/前序报告、连接、P0、Delivery 和历史边界；
-Worker 认领事务再次原子确认精确 authority 且普通 Assignment 仍不存在。
+1. 读取 GitHub `main`、Open Issues、Ruleset `21624053` 和 `docs/status/current.md`；不要信任本地旧
+   `main` 或本文编制基线。
+2. P0 #54～#59 已收口，不重复执行迁移副本、Secret 扫描、依赖 clean install 或 Ruleset 探针。
+   当前唯一动作是让 #60 文档 PR 三项 CI 全绿、普通合并并关闭 Issue；随后用极小纯状态 PR
+   同时把 `docs/status/current.md` 切为 `P0_COMPLETE`、把本交接切为 `P0_COMPLETE_HANDOFF`，
+   并勾选最后验收项，不得夹带工程改动。
+3. 只有 GitHub #60 已关闭且最终状态 PR 已合入，才能继续产品路线。届时先为 P1-01 的“网页来源”
+   纵切片编写产品流程、领域契约和迁移 ADR，
+   冻结来源快照、连接版本、Owner、外发确认与能力 digest，再建立/确认单一工单；HTTP 与数据库
+   不自动并入。
+4. 若用户要生产迁移、部署、发布、提升审批数或开放普通用户能力，先单独确认精确范围、恢复和
+   权限边界；不得从 P0 完成自动推断授权。
 
-生产门与结果：
+## 6. Roadmap 与版本计划
 
-- CandidateVerification `0003` 已显式迁移；恢复点为
-  `data/backups/webui-before-cv10-authority-20260825-211250.db`，SHA-256
-  `f9487724fc3a7975f799916e1a4a477ac300661980c9d530bc6e891a57067882`；72 张既有非迁移表、
-  10,169 行零改写，重放、完整性和外键通过；
-- 生产夹具暴露两处仅真实旧数据触发的失败关闭缺口：旧 `request_json` 唯一缺外发字段时三处解析
-  不一致，以及合法 `legacy_unversioned` Attempt 的 Manifest/Goal/Delivery 版本列为空时写锁误拒。
-  两处均以 `diagnosing-bugs` 紧反馈和 TDD 修复；现在只兼容精确 legacy 缺口，损坏列、冲突值和
-  versioned 缺字段继续失败关闭；
-- 合并影响面回归 `166 passed`，Python compile、`git diff --check` 和 Standards/Spec 双轴终审 PASS；
-- 唯一 authority：
-  `historical_authority_119a855f4f7356cecf06cc69fe6d19540f39c90bd849a406a3f349ca84e5091e`，
-  actor 为精确 TaskOwner `u_9505fd620899`；
-- 唯一新 Attempt：`verification_4f29b69d56306a8583ce7a4b45a237d3`，状态 `failed`，精确链接前序
-  `legacy_65e0903778f50e42b140ed96549ea3af2249e65dd21bad62555e52b6d65fc441`；
-- DeepSeek Usage：1 request，input 3,625 / output 1,441 / total 5,066 tokens；Grant
-  `grant_cv_43a0b9e820584ab35ef23d402825ec30` 已以 `candidate_verify_closed` 撤销；
-- 结果：文件集、数量和 88 条来源证据通过；`semantic_goal` 失败。CSV 混入“业务用户量”“未来5年
-  用户量增长”“免费系统维护期”“在线专家支持”等非技术内容，且多项技术架构/中间件/前端框架
-  在已验证来源中无对应，不能证明完整提取所有技术指标；
-- `formal_delivery_eligible=false`，正式 Delivery 为 0；revision、run、CandidateSet、旧 Attempt 和
-  CSV SHA `9d5820f799e811303933efd99084836759286d09043e30a4fd53b6aefe83e71f` 均未改写。
+### P0：产品真实性与生产安全基线
 
-这条 `liyi` 任务现在没有待发布结果，也没有剩余重试授权。若业务上要修正 CSV，必须创建新
-revision/新 Candidate，重新确认范围与 Provider 外发；不得把 failed Attempt 改绿或复用本次授权。
+当前五张冻结 Issue 的共同目标，是把正式 Delivery 主链的 CI、显式 Schema 迁移、SecretRef、依赖安全、`main` 保护和权威状态台账收口。P0 完成不自动等于生产 Release、目标服务器部署验收或普通用户能力市场开放。
 
-规格：`docs/plans/2026-08-25-historical-inconclusive-semantic-retry-spec.md`；实现证据：
-`docs/plans/2026-08-25-historical-inconclusive-semantic-retry-implementation-report.md`；权威恢复规格：
-`docs/plans/2026-08-25-historical-reverification-authority-recovery-spec.md`；实现证据：
-`docs/plans/2026-08-25-historical-reverification-authority-recovery-implementation-report.md`。
-
-### 5.2 #70 主目标：`failed + legacy_unversioned` 再基线
-
-精确对象：`liyi111 / workspace_8363695f133645ac / revision 1 /
-pi_run_c033ae394ae94cf4`，CandidateSet 为 CSV + JSON。Gate A 后只读 Offer 的唯一 blocker 是
-`legacy_unversioned`。
-
-这是 ADR-0033 的正确失败关闭结果：旧实际 Ruleset 无法证明，不能把当前 Ruleset、服务重启、
-GateSnapshot 或人工声明冒充旧执行身份。它又与 #70 要求真实重验的验收目标冲突，因此不能直接
-进入 Gate B。
-
-规格 `docs/plans/2026-08-25-legacy-candidate-rebaseline-spec.md` 已完成五项人工业务决定并批准；
-LR-01～LR-04 已达到 `ENGINEERING_VERIFIED`。实现新增正式 `legacy_rebaseline`：承认旧 Ruleset
-未知，保留旧 failed Attempt，对同一不可变 CandidateSet 使用当前完整 Verifier 建立第一条
-versioned 基线；链级 CAS、Worker 授权复核、并发幂等、`provider_outcome_recovery`、普通用户双
-确认和 0004 显式迁移均已有回归。后端 153 passed、工作台 E2E 31 passed、前端构建、严格设计审计
-和生产一致性副本迁移/重放均通过，Standards/Spec 终审 PASS，无剩余 P1/P2。生产 0004 随后已
-独立授权并完成：恢复点为 `data/backups/webui-before-cv10-rebaseline-20260825-235401.db`，
-SHA-256 为 `106bb38f50d523e383e36c0a549188fa389b53265a018152b55f905e9fe35a68`；73 张既有业务表、
-10,197 行逻辑摘要在恢复点/迁移后/重放后一致，完整性、外键和服务恢复通过。当前未执行真实
-Provider 或发布。工程证据：
-`docs/plans/2026-08-25-legacy-candidate-rebaseline-implementation-report.md`；生产迁移证据：
-`docs/plans/2026-08-25-legacy-candidate-rebaseline-production-migration-report.md`。
-迁移并恢复服务后的只读 Offer 为 `eligible=true / legacy_rebaseline / blockers=[]`，目标 Ruleset 为
-`891b0a5874681f14839d3b322a62f10602486a799db92a688973f811550fa88d`。
-
-Gate B 已按 Owner 授权真实执行并达到 `LIVE_REVERIFIED`：唯一 Attempt
-`verification_4b4f150b993422fc41ff2dc58b93a915` 为 `passed`，四项验证门全过，重新确认 6 条来源证据；
-Qwen 只调用 1 次，Usage 为 input 421 / output 1,869 / total 2,290 tokens，Grant 已撤销。Pi、
-revision、Run、CandidateSet 和 Candidate SHA 均未改写，正式 Delivery 与发布意图仍为 0。真实执行
-证据：`docs/plans/2026-08-26-legacy-candidate-rebaseline-live-execution-report.md`。
-
-Gate C 已按 Owner 独立授权发布：正式 Delivery `delivery_84956666b2f34ed7` 为 `succeeded`；CSV
-`output_184a1dd3ece24095` 与 JSON `output_48e9010d0bf74d82` 均通过非空、SHA-256 与重开 QA，
-无警告，CSV 为 2 行。当前只差 Owner 对该正式结果给出 `LIVE_ACCEPTED` 或整改意见；GitHub Issue
-更新/关闭仍未授权。
-
-TaskOwner 随后明确回复“同意”，#70 达到 `LIVE_ACCEPTED`。现场只读核对 GitHub 后，#70 三个人工
-门与 #54 十个子任务及真实闭环的完成条件均已满足。实现与证据已由提交 `20d3a2a9` 推送到
-`main`；完成证据已写入 GitHub，#70 与 #54 均于 2026-08-26 关闭。
-
-#70 的两个独立人工门已完成：
-
-- Gate B：Owner 已对该 VerificationAttempt 的真实 Provider 外发单独授权并执行；
-- Gate C：Owner 已检查 passed 结果、单独授权正式发布并给出 `LIVE_ACCEPTED`。
-
-`liyi` 的一次语义重试授权绝不能用于 `liyi111` 的完整再基线或正式发布。
-
-## 6. 精确下一步计划
-
-### A. 处理 `liyi` failed 结果
-
-1. 保留 failed Attempt、authority、Usage 和撤销 Grant，不自动重试、不发布；
-2. 如果用户希望得到合格 CSV，先由用户确认是否创建新 revision 并修改目标/抽取规则；这会形成新
-   Candidate，不属于本次历史重验授权；
-3. 新 revision 若涉及 Provider，重新展示并确认该次外发和费用；不能复用本次一次性授权。
-
-### B. 完成 #54 / #70
-
-1. 已完成：规格、任务拆分、LR-01～LR-04 TDD 实现、相称回归、生产副本迁移演练和双轴审查；
-2. 已完成：生产 CandidateVerification 0004 独立授权迁移、唯一恢复点、前向、重放、完整性、
-   外键、既有业务逻辑零改写和服务恢复；
-3. 已完成：Gate B 精确 Owner/CandidateSet/Ruleset/连接/模型授权，以及唯一真实 Attempt；
-4. 已完成：Attempt `passed`，Usage 已记录，Grant 已撤销，无自动重试；
-5. 已完成：Gate C 正式发布与 Owner `LIVE_ACCEPTED`；
-6. 已完成：提交 `20d3a2a9` 推送、#70/#54 完成证据写入与远端关闭；下一任务为 #55。
-
-### C. 按依赖完成剩余 P0 Issues
-
-1. #55：实现、隔离验证、双轴复审、提交推送、远端 CI 和 Issue 关闭均已完成；
-2. #56：建立唯一显式迁移注册表、版本、备份、重放、恢复和并发锁；应用启动只验 Schema；
-3. #57：配置中心 Secret 迁入现有 Vault/SecretRef；是否轮换或销毁旧 Secret 必须另行确认；
-4. #58：拆分 runtime/dev/GPU/evaluation/可选依赖，处理 Critical/High 或形成可达性风险结论；
-5. #59：经独立授权配置 `main` 分支保护并用测试 PR 验证；禁止静默绕过；
-6. #60：最终精简 `docs/status/current.md` 和本交接，核对 README、AGENTS 与现场；
-7. 全部 Issue 的工程、真实验收和远端关闭证据齐备后，才把本会话目标标记完成。
-
-P0-02 与 P0-03 理论上可并行，但默认串行；未经用户确认不要扩大并行写面或共享未冻结的迁移/
-依赖变更。
-
-## 7. 总体 Roadmap 与版本计划
-
-### 当前 P0：产品真实性与生产安全基线
-
-目标是让普通用户从统一入口稳定完成正式 Delivery，并建立 CI、显式数据库迁移、SecretRef、
-依赖治理、主分支保护和可信状态台账。当前冻结的 8 个 Open Issues 就是 P0 剩余范围。
-
-公开版本边界：`v0.0.4` 是稳定封板标签，不得移动或回写；当前 `main` 承接 `v0.0.8` 开发能力，
-但没有创建同名标签、Release 或封板。P0 全部完成不自动授权版本号、标签或 Release；版本发布
-必须另行确认。
+版本现场事实：远端当前没有 Tag 或 Release；本地 `v0.0.4` 只保留历史版本语义，不是远端当前
+Tag、Release 或本轮发布事实。是否创建新标签、Release 或部署必须重新现场核验并取得独立授权。
 
 ### P1：统一产品主流程
 
-- P1-01：文件、网页、HTTP、数据库统一 Source → TaskRevision → Delivery；
-- P1-02：深化 Semantic Workspace，收窄路由、生命周期、Repository 和前端状态机接口；
-- P1-03：生产可观测性、SLO、告警与认证安全加固；
-- P1-04：在受众、配额、成本、外发、审计和回滚闭环下开放平台能力给普通用户；
-- P1-05：组件测试、包体预算、按需加载、性能和无障碍治理。
+- 统一文件、网页、HTTP、数据库的 Source → TaskRevision → Delivery。
+- 深化 Semantic Workspace，收窄路由、生命周期、Repository 和前端状态机接口。
+- 建立生产可观测性、SLO、告警与认证安全加固。
+- 在受众、配额、成本、外发、审计、回滚闭环下逐步开放平台能力。
+- 治理组件测试、包体、按需加载、性能与无障碍。
 
-P1 是 P0 完成后的路线，不属于当前冻结的 GitHub Issue 完成范围；要启动必须重新规格化和创建/
-确认工单。
+P1 不属于当前冻结范围。第一项 P1-01 的精确开工条件是：#60 已关闭、最终状态 PR 已合入并
+现场复核 P0 基线；
+先形成产品流程、领域契约和迁移 ADR，冻结来源快照、连接版本、Owner、外发确认与能力 digest；
+再建立/确认只覆盖“网页来源”首个纵切片的工单。HTTP 与数据库切片不得自动并入。
 
 ### P2：条件型扩展
 
-只有真实触发条件出现后才启动：目标 Linux/GPU 服务器验收、远程 MCP/Registry/SecretRef、
-多媒体、多节点/分布式队列、对象存储/PostgreSQL、SQLite/TSV 正式输出。不要为了预期扩容提前
-引入分布式复杂度。
+只有真实触发后才启动：目标 Linux/GPU 服务器验收、远程 MCP/Registry/SecretRef、多媒体、多节点队列、对象存储/PostgreSQL、SQLite/TSV 正式输出。不要为假设中的未来规模提前引入分布式复杂度。
 
-### 顶层 Phase 公共仓库同步门
+## 7. 证据等级
 
-P0、P1 等顶层 Phase 完成时必须检查 README、Code of Conduct、Contributing、MIT License、
-Security 和 GitHub About。稳定法律/治理/安全文件无语义变化时记录“已检查、无需变化”，不要
-为了制造差异改写。提交、推送、About、标签和 Release 仍是独立远端授权门。
+- `IMPLEMENTED`：代码存在，尚不能证明行为正确。
+- `ENGINEERING_VERIFIED`：自动测试、静态检查、工程探针和双轴审查通过。
+- `COPY_REHEARSED`：真实生产源的只读副本完成迁移/恢复/扫描，原源未改写；不等于生产原库迁移。
+- `REMOTE_ENFORCED`：远端规则真实生效并经测试 PR 证明；本地配置稿不算。
+- `LIVE_REVERIFIED`：真实 Candidate 的新 Attempt 确定性收口。
+- `LIVE_ACCEPTED`：Owner 验收真实正式 Delivery。
+- `RELEASED`：经独立授权完成相应提交/合并/标签/Release/部署动作。
 
-## 8. 工作树所有权与授权边界
+测试、审查、镜像 audit 或副本演练都不能跨级冒充生产迁移、用户验收、远端保护或 Release。
 
-当前工作树是脏的，至少包含：
+## 8. 人工控制边界
 
-- 本会话的 #55 CI workflow、检查脚本、测试、依赖子集和状态文档；
-- 用户持有的 G1 评测文件修改；
-- `.scratch/`、`frontend/premium-audit.json` 等本地或审计内容。
+以下事项始终由用户控制：业务范围、数据含义、角色/权限与安全边界、真实数据/模型外发、Provider 费用、生产原库迁移、恢复覆盖、Secret/key 使用/轮换/销毁、Git/GitHub 写入、协作者邀请、Ruleset、正式发布、标签/Release/部署和其他不可逆操作。
 
-不得 `git reset --hard`、`git clean`、广泛 checkout、`git add .` 或覆盖不明改动。提交时必须使用
-明确文件允许列表；但当前没有提交、推送、PR、Issue 写入、标签、Release 或部署授权。
+缺工具或依赖时，说明名称、版本、用途、收益、风险与外发后询问；不得静默换成更低效或降低验证质量的路线。一次授权不能扩展到新 Provider、新数据、新 Attempt、生产原库或邻接阶段。
 
-以下动作始终由用户控制：业务范围、数据含义、权限与安全边界、真实数据外发、Provider 费用、
-生产迁移、Secret 使用/轮换/销毁、正式发布、Git/GitHub 远端写入和不可逆操作。
+## 9. 工作树所有权与必须保留内容
 
-缺少工具或依赖时，先说明工具名称、版本、用途、收益、风险和数据外发，再询问是否安装；不得
-静默改走明显更低效或降低验证质量的路线。已安装工具的既有授权不能自动扩展到新工具。
+以下 10 个 tracked G1 文件属于用户，绝不能暂存、覆盖、恢复或删除：
 
-## 9. 绝对不要再踩的坑
+```text
+evals/generalization-g1-independent/freeze.json
+evals/generalization-g1-independent/heldout_manifest.json
+evals/generalization-g1-independent/self-check-report.json
+evals/generalization-g1-independent-v2/freeze.json
+evals/generalization-g1-independent-v2/heldout_manifest.json
+evals/generalization-g1-independent-v2/self-check-report.json
+evals/generalization-g1-independent-v3/freeze.json
+evals/generalization-g1-independent-v3/heldout_manifest.json
+evals/generalization-g1-independent-v3/self-check-report.json
+evals/generalization-g1/fixtures.json
+```
 
-1. **不要混淆两个目标。** `liyi` 是 inconclusive 语义重试；`liyi111` 是 failed legacy 再基线。
-2. **不要把 Candidate 当 Delivery。** 页面看起来正确、CSV 可下载或 Verifier passed 都不等于
-   正式发布。
-3. **不要绕过权威门。** 缺 RuntimeAssignment、旧 Ruleset 身份或冻结字段时必须失败关闭；禁止
-   人工改库、临时白名单、目标特判或把当前状态倒填成历史事实。
-4. **不要复用旧外发授权。** 只可使用用户对精确 Owner/Task/Attempt 给出的授权；未知结果不
-   自动重试。
-5. **不要走旧重试自动发布路径。** 旧 API 已退役；重验与发布必须是两个动作。
-6. **不要在业务校验前写 started/running。** 先完成资格、身份、哈希、P0、连接和报告校验，再
-   原子认领 Attempt。
-7. **不要破坏不可变终态。** 测试需要伪造损坏读取时 monkeypatch Repository 模型，不得 UPDATE
-   终态 Attempt 或放宽数据库 Trigger。
-8. **不要把测试绿色冒充更高证据。** `ENGINEERING_VERIFIED`、`LIVE_REVERIFIED`、
-   `LIVE_ACCEPTED`、`RELEASED` 分开记录。
-9. **不要信任旧 SHA、Issue、服务或数据库快照。** 每次开工重新查询；GitHub #70 现有评论仍
-   写着“迁移未执行”，已被 Gate A 现场事实取代，远端评论尚未更新。
-10. **不要只相信停止脚本的成功文案。** 外层 Backend Supervisor 可能继续拉起 8088；必须复核
-    端口、精确进程树和数据库连续静止性，再迁移。
-11. **迁移探针必须跟随真实 Schema 契约。** 0004 使用结构化 JSON + 哈希两列，不是九个拆分列；
-    探针预期错误不能冒充生产迁移失败。
-10. **不要顺手重构或清旧债。** Frontend Premium 26 项、停止脚本端口枚举缺口和用户评测文件
-    都不是当前语义重试切片范围。
-11. **不要把 8088 第一次探测失败当最终失败。** 重依赖加载期间监督进程可能尚未监听；要检查
-    进程日志、最终 readiness 和端口归属。
-12. **不要用旧恢复点覆盖后续生产数据。** 迁移失败只能按当次冻结恢复策略处理；恢复点保留，
-    不得擅自清理。
-13. **不要改写历史 ADR/报告结论。** 决策变化用新 ADR 表达替代关系，滚动状态只进 current/
-    handoff。
-14. **不要重试 `liyi` 的 failed Attempt。** 这不是未知结果；一次性授权已消耗。若要修正 CSV，
-    必须走新 revision、新 Candidate 和新的 Provider 授权。
+`.scratch/**`、`.artifacts/**`、`frontend/premium-audit.json`、`data/**`、`logs/**`、`.env*`、数据库/备份/WAL/journal/key/Secret、本机启停脚本均不得提交。只能用正向精确 allowlist；ignore 规则不是所有权保护。
 
-## 10. 验证和关闭标准
+## 10. 绝不能重踩的坑
 
-每个 Issue 至少经过：现场重验 → 冻结范围/非范围/DoD → TDD → 最小实现 → 定向与相称完整回归
-→ Standards/Spec 双轴审查 → 必要的真实入口/Provider/数据库/浏览器验收 → 状态和 GitHub 证据
-收口。
+1. 不要相信旧交接里的 SHA、Issue、服务、数据库或 Ruleset；每次现场重取。
+2. 不要让 Repository/startup 隐式 DDL，也不要改写已执行 revision；revision 必须自包含并由内容摘要约束。
+3. 迁移真实副本暴露合法值后，应修正权威契约；不能把真实合法数据当坏数据，也不能放宽到未知值。
+4. 不要把副本演练说成生产迁移；不要覆盖旧恢复点，也不要擅自处理旧备份或 key。
+5. SecretRef 不是凭据或 Provider Grant；业务表、日志、异常、审计和证据都不得出现原值。
+6. 不要把 Python/生产镜像 0 漏洞说成仓库 0 漏洞；Node 的 2 Moderate 与 5 High 必须保留到 2026-09-25 或提前触发复查。
+7. 不要接受 npm 建议的破坏性降级冒充安全修复；Promptfoo 必须以 clean lock、真实安装和冻结案例证明。
+8. 不要把三个 deselect 静默计作通过；尤其不得为本轮提交改写用户 G1 冻结集。
+9. 不要在只有一个 collaborator 时强开 1 人审批导致维护死锁；当前经用户确认采用审批数 0 的
+   单维护者模式。只有第二位真人实际获得可计入审批的权限后，才可另行提升为 1。
+10. 不要设置常驻 bypass，也不要用真实 `main` 强推测试保护规则；测试 PR 不合并探针内容。
+11. 不要广泛暂存、清理或 reset 脏工作树；提交前后都要证明 G1、本地审计、数据和 Secret 未进入 index。
+12. 不要把本地实现、绿色测试、PR、Issue CLOSED、Ruleset、生产迁移、Release 混为一个证据等级。
+13. 不要把旧 `handoff.md` 的长历史流水原样搬回最终交接；历史细节留在 ADR/实施报告，最终交接只保留当前事实、剩余门、下一步、边界、路线和证据入口。
 
-证据等级必须分开：
+## 11. 权威证据入口
 
-- `IMPLEMENTED`：代码存在；
-- `ENGINEERING_VERIFIED`：自动测试和工程探针通过；
-- `LIVE_REVERIFIED`：真实 Candidate 的新 Attempt 确定性收口并经 Owner 检查；
-- `LIVE_ACCEPTED`：Owner 验收真实正式 Delivery；
-- `RELEASED`：经独立授权完成提交/合并/标签/Release/部署中的相应动作。
+- 当前滚动状态：`docs/status/current.md`
+- 工程规则：`AGENTS.md`
+- 领域词汇：`CONTEXT.md`
+- #55：`docs/plans/2026-08-26-p0-04a-minimum-ci-implementation-report.md`
+- #56：`docs/plans/2026-08-26-p0-05-explicit-database-migrations-spec.md`、`docs/plans/2026-08-26-p0-05-migration-tool-research.md`、PR #76、CI 33039608828、已关闭 Issue #56
+- #57：`docs/plans/2026-08-26-p0-02-secretref-unification-spec.md`、`docs/plans/2026-08-26-p0-02-secretref-unification-implementation-report.md`、PR #76、CI 33039608828、已关闭 Issue #57
+- #58：`docs/plans/2026-08-26-p0-03-dependency-security-evidence.md`
+- #59：Ruleset `21624053`、PR #78、CI 33040744184 / 33040840714、已关闭 Issue #59
+- #56～#58 远端收口：PR #76、CI 33039608828、Issues #56/#57/#58 CLOSED
+- #60：本文件、`docs/status/current.md`、公共入口文档与 GitHub Issue #60
 
-只有本交接第 1 节冻结的 8 个 Open Issues 全部达到各自 DoD、必要人工门完成、远端状态经授权
-收口且没有遗留 P0 阻断，本会话目标才完成。不要因为 token、时间、测试绿色或局部工单结束而
-提前宣布整个目标完成。
+## 12. 最终交接验收清单
 
-## 11. 关键证据入口
+- [x] #56～#58 均 CLOSED，且 PR #76、`main@453e9008`、CI 33039608828 和对应实施证据可复核。
+- [x] #57 副本演练完成；生产原库/key 未改写；11 个临时高敏文件及目录已清理。
+- [x] #58 最终双轴审查通过；Node 限期风险仍准确且有 Owner/截止/触发条件。
+- [x] 所有临时远端证据占位符已删除；动态 SHA/Issue 状态改为现场读取，避免自引用过期。
+- [x] #59 CLOSED；Ruleset active、无 bypass、三项 strict CI、审批数 0、禁止强推；PR #78 已证明并安全清理。
+- [x] `README.md`、`CONTRIBUTING.md`、`AGENTS.md`、`CONTEXT.md`、`SECURITY.md`、`docs/status/current.md` 与本交接一致。
+- [x] Code of Conduct、MIT License、GitHub About 已检查且无需变化；Security 的开发版本表述已同步。
+- [x] 用户 G1、本地审计、生产数据、数据库、Secret/key 与本机路径未进入精确文档 allowlist。
+- [x] 未创建未经授权的标签、Release、部署或普通用户能力开放声明。
+- [ ] 本文档收口 PR 的三项 CI 全绿并普通合并；随后在 GitHub #60 写入最终 `main` SHA/CI 并关闭。
 
-- 当前台账：`docs/status/current.md`
-- 产品化路线：`docs/plans/2026-08-23-post-issues-productization-roadmap.md`
-- P0-01 规格：`docs/plans/2026-08-24-p0-01-same-run-candidate-reverification-spec.md`
-- P0-01 工单拆分：`docs/plans/2026-08-24-p0-01-same-run-candidate-reverification-task-breakdown.md`
-- Candidate 重验 ADR：`docs/adr/0033-candidate-reverification-and-verifier-ruleset.md`
-- CV-09 工程门：`docs/plans/2026-08-25-cv-09-engineering-gate-report.md`
-- CV-10 Gate A：`docs/plans/2026-08-25-cv-10-gate-a-production-migration-report.md`
-- legacy 阻断诊断：`docs/plans/2026-08-25-cv-10-legacy-unversioned-diagnosis.md`
-- legacy 再基线规格：`docs/plans/2026-08-25-legacy-candidate-rebaseline-spec.md`
-- legacy 再基线实施证据：
-  `docs/plans/2026-08-25-legacy-candidate-rebaseline-implementation-report.md`
-- 历史任务读取恢复：`docs/plans/2026-08-25-history-task-restoration-report.md`
-- 历史 inconclusive 诊断：`docs/plans/2026-08-25-legacy-inconclusive-retry-diagnosis.md`
-- 历史语义重试规格：`docs/plans/2026-08-25-historical-inconclusive-semantic-retry-spec.md`
-- 历史语义重试实现报告：
-  `docs/plans/2026-08-25-historical-inconclusive-semantic-retry-implementation-report.md`
-- 历史候选重验权威恢复规格：
-  `docs/plans/2026-08-25-historical-reverification-authority-recovery-spec.md`
-- 历史候选重验权威恢复实现报告：
-  `docs/plans/2026-08-25-historical-reverification-authority-recovery-implementation-report.md`
-
-## 12. 给下一个会话的第一条执行指令
-
-先不要调用 Provider、迁移生产库或修改 GitHub。保留用户 G1 文件和全部工作树改动，读取
-`docs/plans/2026-08-26-p0-04a-minimum-ci-implementation-report.md`，现场复核 Git 与 #55 状态。
-当前精确下一步是读取 #56 的工单与引用规格，冻结显式数据库迁移体系的实现边界；生产库备份、
-迁移和恢复演练仍需在具体方案明确后单独授权。#58 同样已由 #55 解锁，但按冻结顺序先执行 #56。
+最后一项由当前会话在本文档 PR 合并后立即完成；新会话如果看到它仍未勾选，只需先现场读取
+GitHub #60，不能重新执行已完成的 P0 工程工作。

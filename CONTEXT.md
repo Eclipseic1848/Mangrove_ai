@@ -224,6 +224,12 @@ _Avoid_: 回收站备份、永久任务副本
 
 ## 连接与授权
 
+**秘密引用（SecretRef）**：
+业务表对一个受保护 Secret 的不透明、带用途与 Owner 绑定的引用；原始值只存在于 Vault 密文、
+受信进程内存和获准调用的短暂上下文。SecretRef 不是凭据、AccessGrant、账号级授权，也不能跨
+Owner 或配置键复用。
+_Avoid_: 明文配置、可解码 Token、通用 Secret ID、Provider 调用授权
+
 **Provider 预设（ProviderPreset）**：
 平台维护且不含秘密的版本化模型连接模板，固定 Provider、协议路线、端点和友好模型目录；
 普通用户只选择预设并配置自己的凭证。
