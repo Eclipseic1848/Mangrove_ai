@@ -282,5 +282,5 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
 
 
 def test_p0_04b_ruleset_rejects_a_failing_required_check() -> None:
-    # 临时探针故意失败，只用于证明 main 的 required check 会阻止合并；本分支绝不合并。
-    assert False
+    # 临时探针已修复，只用于证明 required checks 全绿后 PR 恢复可合并；本分支绝不合并。
+    assert True
