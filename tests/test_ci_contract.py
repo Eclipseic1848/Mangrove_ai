@@ -180,6 +180,7 @@ def test_minimum_ci_workflow_is_pinned_bounded_and_evidence_producing() -> None:
         "python scripts/ci/check_requirement_consistency.py",
         ".artifacts/ci/backend-install.log",
         "tests/test_candidate_verification_migration.py",
+        '-k "not collectors_import_smoke_reaches_scrapling_runtime_seams"',
         "--junitxml=.artifacts/ci/python-fast.xml",
         "npm ci",
         ".artifacts/ci/frontend-install.log",
@@ -216,6 +217,26 @@ def test_ci_subset_contains_migration_test_runtime_dependencies() -> None:
 
     assert "alembic==1.18.3" in requirements
     assert "SQLAlchemy==2.0.45" in requirements
+
+
+def test_alembic_environment_is_not_hidden_by_local_env_ignore_rule() -> None:
+    ignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
+    tracked = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "--error-unmatch",
+            "src/database_migrations/alembic/env.py",
+        ],
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert "!src/database_migrations/alembic/env.py" in ignore
+    assert tracked.returncode == 0
 
 
 def test_heavy_ci_is_manual_only_and_never_receives_secrets() -> None:

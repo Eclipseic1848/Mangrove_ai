@@ -9,6 +9,7 @@ venv/
 .venv/
 .venv-*/
 env*
+!src/database_migrations/alembic/env.py
 venv*
 ENV/
 env.bak/

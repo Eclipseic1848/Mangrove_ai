@@ -58,11 +58,13 @@ jobs:
         run: python scripts/ci/check_utf8.py | tee .artifacts/ci/utf8.json
       - name: 运行快速单元、契约与迁移 dry-run
         run: |
+          # Collector 真实导入需要完整 collectors overlay，由重 CI/干净分组门负责；快速门保留其余分组契约。
           python -m pytest -q \
             tests/test_ci_contract.py \
             tests/test_dependency_groups.py \
             tests/test_data_prep_contracts.py \
             tests/test_candidate_verification_migration.py \
+            -k "not collectors_import_smoke_reaches_scrapling_runtime_seams" \
             --junitxml=.artifacts/ci/python-fast.xml
       - name: 上传后端门证据
         if: always()
