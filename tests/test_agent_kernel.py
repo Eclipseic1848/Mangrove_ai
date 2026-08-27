@@ -27,6 +27,7 @@ from src.agentic_runtime.models import (
     RuntimeVersion,
 )
 from src.agentic_runtime.repository import AgenticRuntimeRepository
+from src.agentic_runtime.pi_runtime import PiRuntime
 from tests.database_migration_helpers import migrated_webui_database
 
 
@@ -151,9 +152,11 @@ class _FakePiRuntimeEngine:
         contract: _ContractAdapter | None = None,
         *,
         image: str = "mangrove/pi-coding-agent:test-a",
+        image_digest: str = "sha256:" + "a" * 64,
     ) -> None:
         self.contract = contract or _ContractAdapter()
         self.image = image
+        self.runtime_artifact_digest = image_digest
 
     async def start(self, request, *, on_event, run_id=None):
         binding = type("Binding", (), {"external_run_id": run_id})()
@@ -265,6 +268,48 @@ def _contract_adapter(
     if adapter_kind == "fake":
         return contract
     return PiAgentKernelAdapter(_FakePiRuntimeEngine(contract))
+
+
+@pytest.mark.asyncio
+async def test_pi_runtime_resolves_immutable_image_content_digest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    digest = "sha256:" + "c" * 64
+
+    class _InspectProcess:
+        returncode = 0
+
+        async def communicate(self):
+            return f"{digest}\n".encode("utf-8"), b""
+
+    async def fake_create_subprocess_exec(*arguments, **options):
+        assert arguments == (
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "{{.Id}}",
+            "mangrove/pi-coding-agent:0.80.10",
+        )
+        assert options["stdout"] is asyncio.subprocess.PIPE
+        return _InspectProcess()
+
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+    runtime = PiRuntime(
+        image="mangrove/pi-coding-agent:0.80.10",
+        configure_as_default_document_broker=False,
+    )
+
+    artifact = await runtime.resolve_runtime_artifact()
+
+    assert artifact == (
+        "oci-image-ref=mangrove/pi-coding-agent:0.80.10;"
+        f"content-digest={digest}"
+    )
 
 
 @pytest.mark.asyncio
@@ -608,6 +653,44 @@ async def test_resume_rejects_changed_pi_runtime_artifact(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_resume_rejects_same_tag_with_changed_image_digest(
+    tmp_path: Path,
+) -> None:
+    repository = _registered_repository(tmp_path)
+    image = "mangrove/pi-coding-agent:0.80.10"
+    first_adapter = PiAgentKernelAdapter(
+        _FakePiRuntimeEngine(image=image, image_digest="sha256:" + "a" * 64)
+    )
+
+    async def sink(_event) -> None:
+        return None
+
+    first = await AgentKernel(
+        adapter=first_adapter,
+        repository=repository,
+    ).start(_request(tmp_path), on_event=sink)
+    changed_runtime = AgentKernel(
+        adapter=PiAgentKernelAdapter(
+            _FakePiRuntimeEngine(
+                image=image,
+                image_digest="sha256:" + "b" * 64,
+            )
+        ),
+        repository=repository,
+    )
+
+    with pytest.raises(AgentKernelCapabilityError, match="RuntimeBinding"):
+        await changed_runtime.resume(
+            _request(tmp_path),
+            checkpoint=PiRuntimeCheckpoint(
+                run_id=first.run_id,
+                workspace_root=tmp_path,
+            ),
+            on_event=sink,
+        )
+
+
+@pytest.mark.asyncio
 async def test_cancel_failure_does_not_claim_quiescence(tmp_path: Path) -> None:
     repository = _registered_repository(tmp_path)
     adapter = _CancelFailingAdapter()
@@ -644,6 +727,35 @@ async def test_cancelled_run_rejects_late_candidate_result(tmp_path: Path) -> No
     result = await execution
 
     assert result.status is RuntimeStatus.CANCELLED
+    snapshot = kernel.query("user-a", "task-a", 1)
+    assert snapshot.status is RuntimeStatus.CANCELLED
+    assert snapshot.quiescent is True
+
+
+@pytest.mark.asyncio
+async def test_restarted_kernel_persists_cancel_via_repository_factory(
+    tmp_path: Path,
+) -> None:
+    repository = _registered_repository(tmp_path)
+    adapter = _ContractAdapter()
+
+    async def sink(_event) -> None:
+        return None
+
+    await AgentKernel(adapter=adapter, repository=repository).start(
+        _request(tmp_path),
+        on_event=sink,
+    )
+    repository.update(
+        "user-a",
+        "task-a",
+        1,
+        status=RuntimeStatus.RUNNING,
+    )
+    kernel = AgentKernel(adapter=adapter, repository=lambda: repository)
+
+    await kernel.cancel("user-a", "task-a", 1)
+
     snapshot = kernel.query("user-a", "task-a", 1)
     assert snapshot.status is RuntimeStatus.CANCELLED
     assert snapshot.quiescent is True

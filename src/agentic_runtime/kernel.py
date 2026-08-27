@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import uuid
 from typing import Any, Awaitable, Callable, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..database_migrations import SchemaNotCurrentError
 from .models import (
     PiRuntimeCheckpoint,
     PiRuntimeRequest,
@@ -159,15 +161,7 @@ class PiAgentKernelAdapter:
 
     def __init__(self, runtime: Any) -> None:
         self._runtime = runtime
-        image = str(getattr(runtime, "image", "") or "").strip()
-        runtime_artifact = (
-            f"oci-image:{image}"
-            if image
-            else (
-                "python-runtime:"
-                f"{type(runtime).__module__}.{type(runtime).__qualname__}"
-            )
-        )
+        runtime_artifact = self._initial_runtime_artifact(runtime)
         capabilities = ["start", "resume", "cancel"]
         if callable(getattr(runtime, "steer", None)):
             capabilities.append("steer")
@@ -181,6 +175,23 @@ class PiAgentKernelAdapter:
             optional_capabilities=("steer",),
             available_capabilities=tuple(capabilities),
         )
+
+    async def prepare_manifest(self) -> AgentKernelCapabilityManifest:
+        """在创建外部 Run 前解析不可变 Runtime 内容身份。"""
+
+        resolver = getattr(self._runtime, "resolve_runtime_artifact", None)
+        if callable(resolver):
+            runtime_artifact = str(await resolver()).strip()
+        else:
+            runtime_artifact = self._initial_runtime_artifact(self._runtime)
+        if not self._artifact_is_immutable(runtime_artifact):
+            raise AgentKernelCapabilityError(
+                "Pi Runtime 未提供不可变的内容摘要"
+            )
+        self.manifest = self.manifest.model_copy(
+            update={"runtime_artifact": runtime_artifact}
+        )
+        return self.manifest
 
     def new_external_run_id(self) -> str:
         return f"pi_run_{uuid.uuid4().hex[:16]}"
@@ -200,6 +211,7 @@ class PiAgentKernelAdapter:
         binding: RuntimeBinding,
         on_event: EventSink,
     ) -> PiRuntimeResult:
+        await self._assert_binding_artifact(binding)
         try:
             return await self._runtime.start(
                 request,
@@ -220,6 +232,7 @@ class PiAgentKernelAdapter:
     ) -> PiRuntimeResult:
         if checkpoint.run_id != binding.external_run_id:
             raise AgentKernelError("Pi 恢复检查点与冻结 RuntimeBinding 不一致")
+        await self._assert_binding_artifact(binding)
         try:
             return await self._runtime.resume(
                 request,
@@ -249,6 +262,41 @@ class PiAgentKernelAdapter:
     def _raise_unknown(exc: Exception) -> None:
         if "模型请求结果不确定" in str(exc):
             raise AgentKernelResultUnknownError(str(exc)) from exc
+
+    async def _assert_binding_artifact(self, binding: RuntimeBinding) -> None:
+        manifest = await self.prepare_manifest()
+        if manifest.runtime_artifact != binding.runtime_artifact:
+            raise AgentKernelCapabilityError(
+                "Pi Runtime 内容身份与冻结 RuntimeBinding 不一致"
+            )
+
+    @staticmethod
+    def _initial_runtime_artifact(runtime: Any) -> str:
+        image = str(getattr(runtime, "image", "") or "").strip()
+        digest = str(
+            getattr(runtime, "runtime_artifact_digest", "") or ""
+        ).strip()
+        if image and digest:
+            return f"oci-image-ref={image};content-digest={digest}"
+        if image:
+            return f"unresolved-oci-image-ref={image}"
+        identity = f"{type(runtime).__module__}.{type(runtime).__qualname__}"
+        try:
+            source = inspect.getsource(type(runtime))
+        except (OSError, TypeError):
+            source = identity
+        source_digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        return f"python-runtime={identity};content-digest=sha256:{source_digest}"
+
+    @staticmethod
+    def _artifact_is_immutable(runtime_artifact: str) -> bool:
+        marker = "content-digest=sha256:"
+        if marker not in runtime_artifact:
+            return False
+        digest = runtime_artifact.rsplit(marker, 1)[1]
+        return len(digest) == 64 and all(
+            character in "0123456789abcdef" for character in digest
+        )
 
 
 class AgentKernel:
@@ -294,7 +342,7 @@ class AgentKernel:
     ) -> PiRuntimeResult:
         """在创建外部 Run 前验证 Adapter 合同。"""
 
-        self._assert_compatible()
+        await self._prepare_adapter_manifest()
         if self._find_binding(request.user_id, request.task_id, request.revision):
             raise AgentKernelError("同一 Run 已冻结 RuntimeBinding，不能重新启动或改绑")
         binding = self._build_binding(
@@ -339,7 +387,7 @@ class AgentKernel:
     ) -> PiRuntimeResult:
         """只沿已冻结绑定恢复同一外部 Run。"""
 
-        self._assert_compatible()
+        await self._prepare_adapter_manifest()
         binding = self._find_binding(
             request.user_id,
             request.task_id,
@@ -401,7 +449,7 @@ class AgentKernel:
     ) -> Any:
         """向声明支持 steer 的 Adapter 发送运行中指令。"""
 
-        self._assert_compatible()
+        await self._prepare_adapter_manifest()
         if "steer" not in self._adapter.manifest.available_capabilities:
             raise AgentKernelCapabilityError("当前 Runtime Adapter 不支持直接 steer")
         steer = getattr(self._adapter, "steer", None)
@@ -417,16 +465,22 @@ class AgentKernel:
         self._cancel_requests[key] = done
         try:
             await self._adapter.cancel(user_id, task_id, revision)
-            if self._repository is not None:
-                # 治理门的硬停不得为了写状态才打开延迟 Repository；
-                # 真实 Run 在冻结 Binding 时已打开，仍会持久化取消。
-                self._repository.update(
-                    user_id,
-                    task_id,
-                    revision,
-                    status=RuntimeStatus.CANCELLED,
-                    clear_failure=True,
-                )
+            try:
+                repository = self._repo()
+            except SchemaNotCurrentError:
+                # 治理硬停不能被未迁移的状态库阻断；真实启动
+                # 流程会先经 startup preflight，此分支只保留失败关闭的硬停。
+                repository = None
+            if repository is not None:
+                existing = repository.get(user_id, task_id, revision)
+                if existing is not None:
+                    repository.update(
+                        user_id,
+                        task_id,
+                        revision,
+                        status=RuntimeStatus.CANCELLED,
+                        clear_failure=True,
+                    )
         except BaseException:
             self._cancel_requests.pop(key, None)
             done.set()
@@ -636,6 +690,18 @@ class AgentKernel:
                 raise AgentKernelError("AgentKernel 缺少 Runtime Repository")
             self._repository = self._repository_factory()
         return self._repository
+
+    async def _prepare_adapter_manifest(self) -> None:
+        # 先检查静态协议/能力，避免不兼容 Adapter 触发外部解析。
+        self._assert_compatible()
+        prepare = getattr(self._adapter, "prepare_manifest", None)
+        if callable(prepare):
+            manifest = await prepare()
+            if manifest != self._adapter.manifest:
+                raise AgentKernelCapabilityError(
+                    "Runtime Adapter 返回的能力清单与当前清单不一致"
+                )
+        self._assert_compatible()
 
     def _assert_binding_matches_manifest(self, binding: RuntimeBinding) -> None:
         manifest = self._adapter.manifest
