@@ -79,6 +79,7 @@ from src.conversation_steering import (
 from src.model_connections import GrantError, get_default_broker
 from src.delivery_publishing.models import TableOutputContract
 from src.services.upload_store import UploadStore
+from src.source_acquisition import SourceAcquisitionRepository
 from src.runtime_routing import (
     RolloutActor,
     RolloutSnapshot,
@@ -258,7 +259,12 @@ class WorkspaceTaskCreateIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     objective_text: str = Field(min_length=1, max_length=20_000)
-    upload_ids: tuple[str, ...] = Field(min_length=1)
+    upload_ids: tuple[str, ...] = ()
+    source_snapshot_id: str | None = Field(default=None, min_length=1, max_length=160)
+    must_include: tuple[str, ...] = ()
+    explicit_exclusions: tuple[str, ...] = ()
+    quantity_requirement: str | None = Field(default=None, min_length=1, max_length=500)
+    completeness_requirement: str | None = Field(default=None, min_length=1, max_length=500)
     output_formats: tuple[str, ...] = ("xlsx",)
     table_output_contracts: tuple[TableOutputContract, ...] = ()
     provider: str = Field(default="local", min_length=1)
@@ -291,6 +297,20 @@ class WorkspaceTaskCreateIn(BaseModel):
             raise ValueError("upload_ids 不得重复")
         return value
 
+    @field_validator("must_include", "explicit_exclusions")
+    @classmethod
+    def bounded_web_constraints(
+        cls, value: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        normalized = tuple(item.strip() for item in value)
+        if len(normalized) > 50:
+            raise ValueError("网页目标合同每类最多填写 50 条约束")
+        if any(not item or len(item) > 500 for item in normalized):
+            raise ValueError("网页目标合同每条约束长度必须为 1 至 500 个字符")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("网页目标合同约束不得重复")
+        return normalized
+
     @field_validator("output_formats")
     @classmethod
     def valid_formats(cls, value: tuple[str, ...]) -> tuple[str, ...]:
@@ -317,6 +337,32 @@ class WorkspaceTaskCreateIn(BaseModel):
 
     @model_validator(mode="after")
     def validate_validation_target(self) -> "WorkspaceTaskCreateIn":
+        if bool(self.upload_ids) == bool(self.source_snapshot_id):
+            raise ValueError("任务必须且只能选择上传文件或一个网页来源快照")
+        web_contract_values = (
+            self.must_include,
+            self.explicit_exclusions,
+            self.quantity_requirement,
+            self.completeness_requirement,
+        )
+        if self.source_snapshot_id is not None:
+            if self.quantity_requirement is None or self.completeness_requirement is None:
+                raise ValueError("网页任务启动前必须确认数量和完整性要求")
+            if self.runtime_version is not RuntimeVersion.PI:
+                raise ValueError("网页来源当前只能由 AgentKernel 统一运行时执行")
+            constraint_lines = (
+                *(f"必须包含：{item}" for item in self.must_include),
+                *(f"明确不要：{item}" for item in self.explicit_exclusions),
+                f"数量要求：{self.quantity_requirement}",
+                f"完整性边界：{self.completeness_requirement}",
+            )
+            execution_objective = "\n".join(
+                (self.objective_text, "", "执行约束：", *constraint_lines)
+            )
+            if len(execution_objective) > 20_000:
+                raise ValueError("网页目标与执行约束合计不能超过 20000 个字符")
+        elif any(web_contract_values):
+            raise ValueError("网页目标合同只能绑定网页来源快照")
         contract_formats = [
             item.format for item in self.table_output_contracts
         ]
@@ -1059,6 +1105,22 @@ def _task_detail(
     task["model_connection_id"] = task["agentic_runtime"][
         "model_connection_id"
     ]
+    task["web_source"] = None
+    web_contract = store.get_web_task_contract(
+        user_id,
+        task_id,
+        selected_revision["revision"],
+    )
+    if web_contract is not None:
+        snapshot = SourceAcquisitionRepository(
+            settings.webui_db_path
+        ).get_snapshot(user_id, web_contract["source_snapshot_id"])
+        if snapshot is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="冻结网页来源快照已缺失",
+            )
+        task["web_source"] = {**web_contract, "snapshot": snapshot}
     task["progress"] = ProgressProjection().project(
         _structured_progress_events(task),
         audience=audience,
@@ -1077,6 +1139,7 @@ async def create_task(
     user=Depends(get_current_user),
 ):
     user_id = user["user_id"]
+    user_objective = payload.objective_text
     idempotency_payload = payload.model_dump(
         mode="json",
         exclude_unset=True,
@@ -1293,6 +1356,41 @@ async def create_task(
             "sha256": upload.sha256,
         })
         input_suffixes.add(Path(upload.original_name).suffix.lower())
+    source_snapshot = None
+    if payload.source_snapshot_id is not None:
+        source_snapshot = SourceAcquisitionRepository(
+            settings.webui_db_path
+        ).get_snapshot(user_id, payload.source_snapshot_id)
+        if source_snapshot is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="网页来源快照不存在或无权访问",
+            )
+        if int(source_snapshot["valid_page_count"]) < 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="网页来源快照没有可执行的有效页面",
+            )
+        source_refs = [
+            {
+                "kind": "web_artifact",
+                "snapshot_id": payload.source_snapshot_id,
+                "artifact_id": artifact["artifact_id"],
+                "sha256": artifact["content_sha256"],
+            }
+            for artifact in source_snapshot["artifacts"]
+        ]
+        constraint_lines = [
+            *(f"必须包含：{item}" for item in payload.must_include),
+            *(f"明确不要：{item}" for item in payload.explicit_exclusions),
+            f"数量要求：{payload.quantity_requirement}",
+            f"完整性边界：{payload.completeness_requirement}",
+        ]
+        # 约束必须进入同一冻结 Revision，Agent 与独立 Verifier 才会执行，
+        # 不能只把字段存进旁路合同而让运行时看不到。
+        payload.objective_text = "\n".join(
+            (user_objective, "", "执行约束：", *constraint_lines)
+        )
     if (
         payload.runtime_version is RuntimeVersion.LEGACY
         and input_suffixes & _DOCUMENT_INPUTS
@@ -1414,6 +1512,34 @@ async def create_task(
         ),
         external_api_confirmed=bool(connection_binding),
     )
+    prepared_binding = None
+    prepared_manifest = None
+    if payload.source_snapshot_id is not None:
+        try:
+            prepared_binding, prepared_manifest = (
+                await get_semantic_workspace_manager().prepare_runtime_binding(
+                    model_connection_id=runtime_config.model_connection_id,
+                    model_connection_version=(
+                        runtime_config.model_connection_version
+                    ),
+                    model=(
+                        runtime_config.model_connection_model
+                        or payload.model
+                        or settings.llm_model_name
+                    ),
+                )
+            )
+        except Exception:
+            if claimed_key:
+                repository.release_idempotency(
+                    user_id,
+                    claimed_key,
+                    task_id=task_id,
+                )
+            raise
+        runtime_config = runtime_config.model_copy(
+            update={"run_id": prepared_binding.external_run_id}
+        )
     payload.runtime_version, transaction_hook = _prepare_runtime_binding(
         _RevisionRoutingPlan(
             selected_runtime=payload.runtime_version,
@@ -1424,6 +1550,51 @@ async def create_task(
         ),
         runtime_config,
     )
+    if payload.source_snapshot_id is not None:
+        assert prepared_binding is not None
+        assert prepared_manifest is not None
+        base_transaction_hook = transaction_hook
+        goal_contract = {
+            "objective": user_objective,
+            "must_include": list(payload.must_include),
+            "explicit_exclusions": list(payload.explicit_exclusions),
+            "quantity_requirement": payload.quantity_requirement,
+            "completeness_requirement": payload.completeness_requirement,
+        }
+        delivery_spec = {"formats": list(payload.output_formats)}
+        runtime_binding = prepared_binding.model_dump(mode="json")
+
+        def bind_web_contract(connection: sqlite3.Connection) -> None:
+            if base_transaction_hook is not None:
+                base_transaction_hook(connection)
+            _runtime_repository().freeze_runtime_binding(
+                user_id,
+                task_id,
+                1,
+                run_id=prepared_binding.external_run_id,
+                binding=runtime_binding,
+                capability_manifest=prepared_manifest.model_dump(mode="json"),
+                adopted_existing_run=False,
+                preallocated_run=True,
+                connection=connection,
+            )
+            connection.execute(
+                "INSERT INTO web_task_contracts "
+                "(owner_id, task_id, revision, source_snapshot_id, "
+                "goal_contract_json, delivery_spec_json, runtime_binding_json, "
+                "created_at) VALUES (?, ?, 1, ?, ?, ?, ?, ?)",
+                (
+                    user_id,
+                    task_id,
+                    payload.source_snapshot_id,
+                    json.dumps(goal_contract, ensure_ascii=False),
+                    json.dumps(delivery_spec, ensure_ascii=False),
+                    json.dumps(runtime_binding, ensure_ascii=False),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+        transaction_hook = bind_web_contract
     first_line = payload.objective_text.splitlines()[0].strip()
     title = first_line[:40] + ("…" if len(first_line) > 40 else "")
     store = get_store()
@@ -1477,7 +1648,11 @@ async def create_task(
         task_id,
         stage="queued",
         event_type="task_created",
-        summary=f"任务已创建，共 {len(payload.upload_ids)} 个文件",
+        summary=(
+            f"任务已创建，共 {len(payload.upload_ids)} 个文件"
+            if payload.upload_ids
+            else f"任务已创建，共 {len(source_refs)} 个网页来源"
+        ),
     )
     get_semantic_workspace_manager().enqueue(user_id, task_id)
     return {

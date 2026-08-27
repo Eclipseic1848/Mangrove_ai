@@ -78,6 +78,7 @@ from src.observability.workspace_telemetry import (
     workspace_task_span,
 )
 from src.services.managed_paths import ManagedPathCodec
+from src.source_acquisition import SourceAcquisitionRepository
 from src.services.upload_store import UploadStore
 from src.model_connections import get_default_broker
 
@@ -97,6 +98,10 @@ WORKSPACE_PURGE_INTERVAL_SECONDS = 3600
 
 class _GateViolationAbort(RuntimeError):
     """运行期治理门命中：任务已标记取消，调用方不得再覆盖状态。"""
+
+
+class _DeliveryRetryPending(RuntimeError):
+    """候选已冻结，后续恢复只能重试 Publisher。"""
 
 
 class _CandidateVerificationBrokerAdapter:
@@ -632,6 +637,8 @@ class SemanticWorkspaceManager:
         ] = {}
         self._queued: set[str] = set()
         self._deferred_requeue: set[str] = set()
+        self._delivery_retry_attempts: dict[str, int] = {}
+        self._delivery_retry_after: dict[str, float] = {}
         self._heavy = asyncio.Semaphore(1)
         self._candidate_verification = candidate_verification
         self._agent_kernel = agent_kernel
@@ -676,6 +683,21 @@ class SemanticWorkspaceManager:
 
         assert self._agent_kernel is not None
         return self._agent_kernel
+
+    async def prepare_runtime_binding(
+        self,
+        *,
+        model_connection_id: str | None,
+        model_connection_version: str | None,
+        model: str,
+    ):
+        """在任务聚合事务前解析并验证完整 RuntimeBinding。"""
+
+        return await self._kernel().prepare_binding(
+            model_connection_id=model_connection_id,
+            model_connection_version=model_connection_version,
+            model=model,
+        )
 
     def _candidate_verification_module(self) -> CandidateVerificationService:
         if self._candidate_verification is None:
@@ -1162,6 +1184,8 @@ class SemanticWorkspaceManager:
         self._maintenance = None
         self._queued.clear()
         self._deferred_requeue.clear()
+        self._delivery_retry_attempts.clear()
+        self._delivery_retry_after.clear()
 
     async def _maintenance_loop(self) -> None:
         """持续接管重验孤儿，并每小时清理一次到期回收站记录。"""
@@ -1180,6 +1204,19 @@ class SemanticWorkspaceManager:
                 except Exception:
                     # 单轮意外失败不得杀死维护任务；下一轮继续接管。
                     _LOGGER.exception("候选重验维护轮次失败，下一轮将重试")
+            # worker 异常退出或 Publisher 暂时失败后，持久化的非终态任务由
+            # 当前进程重新接管；enqueue 会跳过仍在执行的同一 Task。
+            try:
+                pending_tasks = get_store().list_pending_semantic_workspace_tasks()
+                now = time.monotonic()
+                for pending in pending_tasks:
+                    if self._delivery_retry_after.get(
+                        pending["task_id"], 0.0
+                    ) > now:
+                        continue
+                    self.enqueue(pending["user_id"], pending["task_id"])
+            except Exception:
+                _LOGGER.exception("工作台非终态任务接管失败，下一轮将重试")
             if time.monotonic() - last_purge >= WORKSPACE_PURGE_INTERVAL_SECONDS:
                 try:
                     get_store().purge_expired_semantic_workspace_tasks()
@@ -1683,17 +1720,22 @@ class SemanticWorkspaceManager:
                 actor_id=user_id,
             )
         except Exception as exc:
+            retryable = self._delivery_error_is_retryable(exc)
             store.append_semantic_workspace_event(
                 user_id,
                 task_id,
                 stage="deliver",
                 event_type="delivery_failed",
                 summary=f"正式交付发布失败：{str(exc)[:300]}",
-                details={"formal_delivery": False},
+                details={
+                    "formal_delivery": False,
+                    "retryable": retryable,
+                },
             )
-            raise ValueError(
-                f"正式交付发布失败：{str(exc) or exc.__class__.__name__}"
-            ) from exc
+            message = f"正式交付发布失败：{str(exc) or exc.__class__.__name__}"
+            if retryable:
+                raise _DeliveryRetryPending(message) from exc
+            raise ValueError(message) from exc
         store.update_semantic_workspace_task(
             user_id,
             task_id,
@@ -1723,6 +1765,19 @@ class SemanticWorkspaceManager:
                 "formal_delivery": True,
             },
         )
+        self._delivery_retry_attempts.pop(task_id, None)
+        self._delivery_retry_after.pop(task_id, None)
+
+    @staticmethod
+    def _delivery_error_is_retryable(exc: Exception) -> bool:
+        """只重试明确的锁、数据库暂态和文件系统 I/O 故障。"""
+
+        current: BaseException | None = exc
+        while current is not None:
+            if isinstance(current, (sqlite3.OperationalError, OSError, Timeout)):
+                return True
+            current = current.__cause__
+        return False
 
     async def _worker(self, _index: int) -> None:
         while True:
@@ -2000,6 +2055,30 @@ class SemanticWorkspaceManager:
             await self._execute_harness(
                 user_id, task_id, revision, run["run_id"]
             )
+        except _DeliveryRetryPending as exc:
+            # Candidate/Verification 已经持久化，不能把任务标成普通失败后再跑 Agent。
+            # 保持可恢复状态；服务重启或维护轮次只会重试同一 PublicationKey。
+            store.update_semantic_workspace_task(
+                user_id,
+                task_id,
+                status="running",
+                summary=str(exc),
+                error=None,
+                failure=None,
+            )
+            store.update_semantic_workspace_revision(
+                user_id,
+                task_id,
+                revision,
+                status="running",
+                summary="候选已冻结，正式交付等待恢复",
+            )
+            attempts = self._delivery_retry_attempts.get(task_id, 0) + 1
+            self._delivery_retry_attempts[task_id] = attempts
+            self._delivery_retry_after[task_id] = time.monotonic() + min(
+                60.0,
+                2.0 * (2 ** (attempts - 1)),
+            )
         except asyncio.CancelledError:
             self._mark_cancelled(user_id, task_id, revision)
         except Exception as exc:  # noqa: BLE001
@@ -2041,6 +2120,19 @@ class SemanticWorkspaceManager:
         )
         if task_revision is None:
             raise ValueError("Pi Runtime 对应的冻结 TaskRevision 不存在")
+        if (
+            runtime["status"] is RuntimeStatus.CANDIDATE_READY
+            and runtime["verification"] is not None
+            and runtime["verification"].status is VerificationStatus.PASSED
+        ):
+            await self._publish_verified_candidates(
+                user_id=user_id,
+                task_id=task_id,
+                revision=revision,
+                repository=repository,
+                upload_store=_upload_store(),
+            )
+            return
         checkpoint = None
         if (
             runtime["status"]
@@ -2069,6 +2161,52 @@ class SemanticWorkspaceManager:
                     host_path=Path(upload.storage_path),
                     sha256=upload.sha256,
                     media_type=upload.media_type,
+                )
+            )
+        web_repository = SourceAcquisitionRepository(settings.webui_db_path)
+        for source_ref in task.get("source_refs", []):
+            if source_ref.get("kind") != "web_artifact":
+                continue
+            artifact = web_repository.get_artifact(
+                user_id,
+                str(source_ref["artifact_id"]),
+                include_content=True,
+            )
+            if (
+                artifact is None
+                or artifact["snapshot_id"] != source_ref.get("snapshot_id")
+                or artifact["content_sha256"] != source_ref.get("sha256")
+            ):
+                raise ValueError("冻结网页来源身份不存在或与任务修订不一致")
+            content = bytes(artifact["content_blob"])
+            if hashlib.sha256(content).hexdigest() != artifact["content_sha256"]:
+                raise ValueError("冻结网页来源内容哈希校验失败")
+            owner_key = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:16]
+            artifact_key = hashlib.sha256(
+                artifact["artifact_id"].encode("utf-8")
+            ).hexdigest()[:24]
+            source_path = (
+                Path(settings.semantic_execution_root)
+                / "frozen-web-sources"
+                / owner_key
+                / f"{artifact_key}.html"
+            )
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            if (
+                not source_path.exists()
+                or hashlib.sha256(source_path.read_bytes()).hexdigest()
+                != artifact["content_sha256"]
+            ):
+                temporary = source_path.with_suffix(".tmp")
+                temporary.write_bytes(content)
+                temporary.replace(source_path)
+            sources.append(
+                SourceInput(
+                    upload_id=artifact["artifact_id"],
+                    original_name=(artifact["title"] or artifact["final_url"]),
+                    host_path=source_path,
+                    sha256=artifact["content_sha256"],
+                    media_type=artifact["media_type"],
                 )
             )
         request_values: dict[str, Any] = {

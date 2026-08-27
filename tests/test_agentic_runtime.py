@@ -737,7 +737,7 @@ async def test_pi_external_mode_uses_relay_grant_without_provider_secret(
         returncode = 0
 
         async def communicate(self) -> tuple[bytes, bytes]:
-            return b"", b""
+            return (b"sha256:" + b"a" * 64, b"")
 
     async def inspect_image(
         *command: str,
@@ -1216,7 +1216,7 @@ async def test_pi_runtime_start_is_forced_through_business_egress(
         returncode = 0
 
         async def communicate(self) -> tuple[bytes, bytes]:
-            return b"", b""
+            return (b"sha256:" + b"a" * 64, b"")
 
     async def inspect_image(
         *command: str,
@@ -1328,6 +1328,85 @@ async def test_pi_runtime_start_is_forced_through_business_egress(
 
 
 @pytest.mark.asyncio
+async def test_pi_runtime_rebuilds_uncheckpointed_pre_dispatch_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """checkpoint 落库前崩溃只能重建准备区，不能形成第二个 Run。"""
+
+    class CheckpointPersisted(RuntimeError):
+        pass
+
+    class ImageInspectProcess:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (b"sha256:" + b"a" * 64, b"")
+
+    async def inspect_image(*_command: str, **_kwargs: object) -> ImageInspectProcess:
+        return ImageInspectProcess()
+
+    async def record_docker(_command: tuple[str, ...]) -> DockerCommandResult:
+        return DockerCommandResult(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", inspect_image)
+    source = tmp_path / "source.txt"
+    source.write_text("来源事实", encoding="utf-8")
+    request = PiRuntimeRequest(
+        user_id="user-a",
+        task_id="task-pre-dispatch-recovery",
+        revision=1,
+        objective_text="只输出一份 TXT",
+        requested_output_formats=("txt",),
+        sources=(
+            SourceInput(
+                upload_id="upload-a",
+                original_name="source.txt",
+                host_path=source,
+                sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+            ),
+        ),
+        model="local-model",
+        base_url="http://192.168.1.20:6012/v1",
+        api_key="local-runtime",
+    )
+    execution_root = tmp_path / "runtime"
+    run_id = "pi_run_1234567890abcdef"
+    safe_user = hashlib.sha256(b"user-a").hexdigest()[:16]
+    stale_root = (
+        execution_root
+        / "agentic-vnext"
+        / safe_user
+        / request.task_id
+        / "r1"
+        / run_id
+    )
+    stale_root.mkdir(parents=True)
+    (stale_root / "pre-dispatch.tmp").write_text("未启动模型", encoding="utf-8")
+    runtime = PiRuntime(
+        state_store=AgenticRuntimeRepository(
+            migrated_webui_database(tmp_path / "pi-runtime-state.db")
+        ),
+        execution_root=execution_root,
+        egress_controller=SmokescreenEgressController(
+            image="mangrove/smokescreen:da4840c9",
+            command_runner=record_docker,
+        ),
+    )
+
+    async def stop_after_checkpoint(event: object) -> None:
+        if getattr(event, "event_type", "") == "runtime.preparing":
+            assert getattr(event, "details")["_checkpoint"]["run_id"] == run_id
+            raise CheckpointPersisted
+
+    with pytest.raises(CheckpointPersisted):
+        await runtime.start(request, on_event=stop_after_checkpoint, run_id=run_id)
+
+    assert not (stale_root / "pre-dispatch.tmp").exists()
+    assert (stale_root / "trace" / "docker-command.json").is_file()
+
+
+@pytest.mark.asyncio
 async def test_pi_runtime_cancel_revokes_egress_before_returning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1338,7 +1417,7 @@ async def test_pi_runtime_cancel_revokes_egress_before_returning(
         returncode = 0
 
         async def communicate(self) -> tuple[bytes, bytes]:
-            return b"", b""
+            return (b"sha256:" + b"a" * 64, b"")
 
         async def wait(self) -> int:
             return 0
@@ -1437,7 +1516,7 @@ async def test_pi_runtime_resume_restores_business_egress(
         returncode = 0
 
         async def communicate(self) -> tuple[bytes, bytes]:
-            return b"", b""
+            return (b"sha256:" + b"a" * 64, b"")
 
     async def inspect_image(
         *command: str,

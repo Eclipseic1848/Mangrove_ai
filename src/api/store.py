@@ -2611,6 +2611,30 @@ class WebUIStore:
             ).fetchone()
         return self._semantic_workspace_task_row(row)
 
+    def get_web_task_contract(
+        self,
+        user_id: str,
+        task_id: str,
+        revision: int,
+    ) -> Optional[Dict[str, Any]]:
+        """返回 Owner 隔离的冻结网页任务合同。"""
+
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM web_task_contracts "
+                "WHERE owner_id=? AND task_id=? AND revision=?",
+                (user_id, task_id, revision),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "source_snapshot_id": row["source_snapshot_id"],
+            "goal_contract": json.loads(row["goal_contract_json"]),
+            "delivery_spec": json.loads(row["delivery_spec_json"]),
+            "runtime_binding": json.loads(row["runtime_binding_json"]),
+            "created_at": row["created_at"],
+        }
+
     def list_semantic_workspace_tasks(
         self,
         user_id: str,

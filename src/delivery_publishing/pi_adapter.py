@@ -117,6 +117,15 @@ class PiCandidateAdapter:
             upload = self._upload_store.resolve(owner_id, upload_id)
             source_hashes[upload_id] = upload.sha256
             source_refs.append(f"{upload_id}:{upload.sha256}")
+        for source_ref in task.get("source_refs", []):
+            if source_ref.get("kind") != "web_artifact":
+                continue
+            artifact_id = str(source_ref["artifact_id"])
+            source_sha256 = str(source_ref["sha256"])
+            source_hashes[artifact_id] = source_sha256
+            source_refs.append(
+                f"{source_ref['snapshot_id']}:{artifact_id}:{source_sha256}"
+            )
         frozen_request_sources = {
             str(item.get("upload_id")): str(item.get("sha256"))
             for item in request.get("sources") or []

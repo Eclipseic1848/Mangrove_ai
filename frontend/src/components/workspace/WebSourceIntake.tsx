@@ -14,10 +14,37 @@ import { nanoid } from "nanoid/non-secure";
 import { toast } from "sonner";
 import {
   cancelSourceAcquisition,
+  createWorkspaceTask,
   createSourceAcquisition,
   getSourceAcquisition,
 } from "@/lib/semanticWorkspaceApi";
-import type { SourceAcquisitionAttempt } from "@/types/semanticWorkspace";
+import type {
+  SourceAcquisitionAttempt,
+  WorkspaceTask,
+} from "@/types/semanticWorkspace";
+
+type ModelConnection = {
+  connection_id: string;
+  display_name: string;
+  default_model?: string | null;
+  models?: Array<{
+    model_id: string;
+    display_name: string;
+    status: string;
+    enabled: boolean;
+  }>;
+};
+
+type WebSourceIntakeProps = {
+  ownerId: string;
+  allowLocalRuntime: boolean;
+  localModels: Array<{ model: string; label: string }>;
+  defaultLocalModel: string | null;
+  modelConnections: ModelConnection[];
+  defaultConnectionId: string | null;
+  defaultConnectionModel: string | null;
+  onTaskCreated: (task: WorkspaceTask) => Promise<void> | void;
+};
 
 const ERROR_LABELS: Record<string, string> = {
   timeout: "网页读取超时",
@@ -35,6 +62,14 @@ type StoredSourceAcquisition = {
   idempotency_key: string;
   url: string;
   purpose: string;
+};
+
+type WorkspaceTaskPayload = Parameters<typeof createWorkspaceTask>[0];
+
+type StoredTaskAttempt = {
+  fingerprint: string;
+  idempotency_key: string;
+  payload: WorkspaceTaskPayload;
 };
 
 function readStoredAcquisition(value: string): StoredSourceAcquisition | null {
@@ -92,14 +127,56 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024).toFixed(1)} KB`;
 }
 
-export function WebSourceIntake({ ownerId }: { ownerId: string }) {
+export function WebSourceIntake({
+  ownerId,
+  allowLocalRuntime,
+  localModels,
+  defaultLocalModel,
+  modelConnections,
+  defaultConnectionId,
+  defaultConnectionModel,
+  onTaskCreated,
+}: WebSourceIntakeProps) {
+  const initialConnectionId = defaultConnectionId
+    ?? (!allowLocalRuntime ? modelConnections[0]?.connection_id : "")
+    ?? "";
+  const initialConnection = modelConnections.find(
+    (connection) => connection.connection_id === initialConnectionId,
+  );
+  const initialConnectionModel = defaultConnectionModel
+    ?? initialConnection?.default_model
+    ?? initialConnection?.models?.find(
+      (model) => model.status === "available" && model.enabled,
+    )?.model_id
+    ?? "";
   const storageKey = `mangrove_web_source_attempt_${ownerId}`;
+  const taskStorageKey = `mangrove_web_task_attempt_${ownerId}`;
   const [url, setUrl] = useState("");
   const [purpose, setPurpose] = useState("读取公开网页内容，供当前数据任务分析");
   const [attempt, setAttempt] = useState<SourceAcquisitionAttempt | null>(null);
   const [loading, setLoading] = useState(false);
+  const [starting, setStarting] = useState(false);
+  const [objective, setObjective] = useState("");
+  const [mustInclude, setMustInclude] = useState("");
+  const [exclusions, setExclusions] = useState("");
+  const [quantity, setQuantity] = useState("当前页面中有证据的全部内容");
+  const [completeness, setCompleteness] = useState("仅对当前精确页面负责");
+  const [format, setFormat] = useState("markdown");
+  const [connectionId, setConnectionId] = useState(initialConnectionId);
+  const [connectionModel, setConnectionModel] = useState(initialConnectionModel);
+  const [localModel, setLocalModel] = useState(
+    defaultLocalModel ?? localModels[0]?.model ?? "",
+  );
+  const [egressConfirmed, setEgressConfirmed] = useState(false);
   const keyRef = useRef<{ fingerprint: string; key: string } | null>(null);
+  const taskKeyRef = useRef<{ fingerprint: string; key: string } | null>(null);
+  const taskReplayPromiseRef = useRef<Promise<WorkspaceTask> | null>(null);
+  const onTaskCreatedRef = useRef(onTaskCreated);
   const normalized = useMemo(() => normalizedUrl(url), [url]);
+
+  useEffect(() => {
+    onTaskCreatedRef.current = onTaskCreated;
+  }, [onTaskCreated]);
 
   useEffect(() => {
     const raw = localStorage.getItem(storageKey);
@@ -144,6 +221,51 @@ export function WebSourceIntake({ ownerId }: { ownerId: string }) {
       active = false;
     };
   }, [storageKey]);
+
+  useEffect(() => {
+    const raw = localStorage.getItem(taskStorageKey);
+    if (!raw) return;
+    let active = true;
+    try {
+      const stored = JSON.parse(raw) as StoredTaskAttempt;
+      if (
+        typeof stored.fingerprint !== "string"
+        || typeof stored.idempotency_key !== "string"
+        || !stored.payload
+      ) {
+        localStorage.removeItem(taskStorageKey);
+        return;
+      }
+      taskKeyRef.current = {
+        fingerprint: stored.fingerprint,
+        key: stored.idempotency_key,
+      };
+      setStarting(true);
+      taskReplayPromiseRef.current ??= createWorkspaceTask(
+        stored.payload,
+        stored.idempotency_key,
+      );
+      void taskReplayPromiseRef.current
+        .then(async (created) => {
+          if (!active) return;
+          localStorage.removeItem(taskStorageKey);
+          taskKeyRef.current = null;
+          toast.success("已恢复上次网页任务");
+          await onTaskCreatedRef.current(created);
+        })
+        .catch(() => {
+          // 结果仍未知时保留原请求；下次重连继续使用同一幂等键。
+        })
+        .finally(() => {
+          if (active) setStarting(false);
+        });
+    } catch {
+      localStorage.removeItem(taskStorageKey);
+    }
+    return () => {
+      active = false;
+    };
+  }, [taskStorageKey]);
 
   useEffect(() => {
     if (!attempt || attempt.status !== "acquiring" || attempt.attempt_id === "pending") {
@@ -233,6 +355,68 @@ export function WebSourceIntake({ ownerId }: { ownerId: string }) {
   };
 
   const artifact = attempt?.snapshot?.artifacts[0];
+  const selectedConnection = modelConnections.find(
+    (connection) => connection.connection_id === connectionId,
+  );
+  const availableModels = selectedConnection?.models?.filter(
+    (model) => model.status === "available" && model.enabled,
+  ) ?? [];
+  const splitLines = (value: string) => value
+    .split(/[\n,，]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const canStart = Boolean(
+    attempt?.snapshot_id
+    && objective.trim()
+    && quantity.trim()
+    && completeness.trim()
+    && (
+      (allowLocalRuntime && !connectionId && localModel)
+      || (connectionId && connectionModel && egressConfirmed)
+    ),
+  );
+
+  const startTask = async () => {
+    if (!attempt?.snapshot_id || !canStart || starting) return;
+    const payload = {
+      objective_text: objective.trim(),
+      upload_ids: [],
+      source_snapshot_id: attempt.snapshot_id,
+      must_include: splitLines(mustInclude),
+      explicit_exclusions: splitLines(exclusions),
+      quantity_requirement: quantity.trim(),
+      completeness_requirement: completeness.trim(),
+      output_formats: [format],
+      runtime_version: "pi" as const,
+      permission_profile: "standard" as const,
+      provider: "local",
+      model: connectionId ? null : localModel,
+      model_connection_id: connectionId || null,
+      model_connection_model: connectionId ? connectionModel : null,
+      external_api_confirmed: Boolean(connectionId && egressConfirmed),
+    };
+    const fingerprint = JSON.stringify(payload);
+    if (taskKeyRef.current?.fingerprint !== fingerprint) {
+      taskKeyRef.current = { fingerprint, key: nanoid() };
+    }
+    localStorage.setItem(taskStorageKey, JSON.stringify({
+      fingerprint,
+      idempotency_key: taskKeyRef.current.key,
+      payload,
+    } satisfies StoredTaskAttempt));
+    setStarting(true);
+    try {
+      const created = await createWorkspaceTask(payload, taskKeyRef.current.key);
+      localStorage.removeItem(taskStorageKey);
+      taskKeyRef.current = null;
+      toast.success("网页任务已启动");
+      await onTaskCreated(created);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "网页任务启动失败");
+    } finally {
+      setStarting(false);
+    }
+  };
   return (
     <section
       aria-labelledby="web-source-title"
@@ -394,6 +578,158 @@ export function WebSourceIntake({ ownerId }: { ownerId: string }) {
               {artifact.text_preview}
             </p>
           </article>
+          <div className="mt-5 border-t pt-5">
+            <div className="flex flex-wrap items-end justify-between gap-2">
+              <div>
+                <p className="text-sm font-semibold">确认任务后启动</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  以下内容只在点击启动后冻结；网页不会再次读取。
+                </p>
+              </div>
+              <span className="text-[11px] text-muted-foreground">AgentKernel · 正式 Delivery</span>
+            </div>
+            <label className="mt-4 block text-xs font-medium" htmlFor="web-task-objective">
+              想得到什么结果
+            </label>
+            <textarea
+              id="web-task-objective"
+              rows={3}
+              value={objective}
+              onChange={(event) => setObjective(event.target.value)}
+              placeholder="例如：根据当前页面生成一份产品能力摘要，并标注每条结论的来源证据"
+              className="mt-2 w-full resize-y rounded-xl border bg-background px-3 py-2 text-sm leading-6 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
+            />
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <label className="text-xs font-medium">
+                必须包含
+                <textarea
+                  rows={2}
+                  value={mustInclude}
+                  onChange={(event) => setMustInclude(event.target.value)}
+                  placeholder="每行一项；可留空"
+                  className="mt-2 w-full resize-y rounded-xl border bg-background px-3 py-2 text-sm font-normal leading-6 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
+                />
+              </label>
+              <label className="text-xs font-medium">
+                明确不要
+                <textarea
+                  rows={2}
+                  value={exclusions}
+                  onChange={(event) => setExclusions(event.target.value)}
+                  placeholder="例如：不要推测页面未公开的信息"
+                  className="mt-2 w-full resize-y rounded-xl border bg-background px-3 py-2 text-sm font-normal leading-6 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
+                />
+              </label>
+            </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <label className="text-xs font-medium">
+                数量要求
+                <input
+                  value={quantity}
+                  onChange={(event) => setQuantity(event.target.value)}
+                  className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
+                />
+              </label>
+              <label className="text-xs font-medium">
+                完整性边界
+                <input
+                  value={completeness}
+                  onChange={(event) => setCompleteness(event.target.value)}
+                  className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
+                />
+              </label>
+            </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <label className="text-xs font-medium">
+                正式交付格式
+                <select
+                  value={format}
+                  onChange={(event) => setFormat(event.target.value)}
+                  className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
+                >
+                  <option value="json">JSON</option>
+                  <option value="markdown">Markdown</option>
+                  <option value="docx">Word</option>
+                  <option value="pdf">PDF</option>
+                </select>
+              </label>
+              <label className="text-xs font-medium">
+                模型连接
+                <select
+                  value={connectionId}
+                  onChange={(event) => {
+                    const next = event.target.value;
+                    const connection = modelConnections.find((item) => item.connection_id === next);
+                    setConnectionId(next);
+                    setConnectionModel(connection?.default_model ?? connection?.models?.find((item) => item.enabled && item.status === "available")?.model_id ?? "");
+                    setEgressConfirmed(false);
+                  }}
+                  className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
+                >
+                  {allowLocalRuntime && <option value="">本地模型（不外发）</option>}
+                  {modelConnections.map((connection) => (
+                    <option key={connection.connection_id} value={connection.connection_id}>
+                      {connection.display_name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            {connectionId && (
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <label className="text-xs font-medium">
+                  精确模型
+                  <select
+                    value={connectionModel}
+                    onChange={(event) => setConnectionModel(event.target.value)}
+                    className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
+                  >
+                    {availableModels.map((model) => (
+                      <option key={model.model_id} value={model.model_id}>{model.display_name}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex items-start gap-2 rounded-xl border px-3 py-3 text-xs leading-5">
+                  <input
+                    type="checkbox"
+                    checked={egressConfirmed}
+                    onChange={(event) => setEgressConfirmed(event.target.checked)}
+                    className="mt-0.5 h-4 w-4 rounded border"
+                  />
+                  <span>我确认将当前公开页面的标题、正文、网址和任务要求发送给所选模型。</span>
+                </label>
+              </div>
+            )}
+            {!connectionId && allowLocalRuntime && (
+              <label className="mt-3 block text-xs font-medium">
+                精确模型
+                <select
+                  value={localModel}
+                  onChange={(event) => setLocalModel(event.target.value)}
+                  className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 sm:max-w-[calc(50%-0.375rem)]"
+                >
+                  {localModels.map((model) => (
+                    <option key={model.model} value={model.model}>{model.label}</option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <div className="mt-4 flex items-center justify-between gap-3 border-t pt-4">
+              <p className="text-[11px] leading-5 text-muted-foreground">
+                智能体结果先作为 Candidate；独立验证通过后才会成为正式 Delivery。
+              </p>
+              <button
+                type="button"
+                disabled={!canStart || starting}
+                aria-busy={starting}
+                onClick={() => void startTask()}
+                className="inline-flex h-10 shrink-0 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-45"
+              >
+                {starting ? <Loader2 className="h-4 w-4 animate-spin motion-reduce:animate-none" /> : <ArrowRight className="h-4 w-4" />}
+                {starting ? "正在启动" : "启动任务"}
+              </button>
+            </div>
+          </div>
         </div>
       ) : (
         <div className="p-4" role="alert" aria-live="assertive">

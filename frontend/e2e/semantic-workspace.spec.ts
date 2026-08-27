@@ -279,6 +279,8 @@ test.describe("统一数据工作台", () => {
     await mockWorkspace(page);
     let submitted: Record<string, unknown> | null = null;
     let idempotencyKey = "";
+    let taskSubmitted: Record<string, unknown> | null = null;
+    let taskIdempotencyKey = "";
     const saved = sourceAttempt("succeeded");
     await page.route("**/api/semantic-workspace/source-acquisitions", async (route) => {
       submitted = route.request().postDataJSON();
@@ -289,6 +291,15 @@ test.describe("统一数据工作台", () => {
       "**/api/semantic-workspace/source-acquisitions/source-succeeded",
       (route) => route.fulfill({ json: saved }),
     );
+    const createdTask = workspaceTask("web-task-1", "queued", "公开网页产品摘要");
+    await page.route("**/api/semantic-workspace/tasks", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      taskSubmitted = route.request().postDataJSON();
+      taskIdempotencyKey = route.request().headers()["idempotency-key"] ?? "";
+      await route.fulfill({ status: 202, json: createdTask });
+    });
+    await page.route("**/api/semantic-workspace/tasks/web-task-1", (route) =>
+      route.fulfill({ json: workspaceDetail(createdTask) }));
     await page.goto("/data-prep");
 
     const webMode = page.getByRole("radio", { name: "公开网页" });
@@ -322,6 +333,26 @@ test.describe("统一数据工作台", () => {
       allowed_scope: "current_page",
     });
     expect(idempotencyKey.length).toBeGreaterThan(5);
+
+    await page.getByLabel("想得到什么结果").fill("生成产品摘要并保留来源证据");
+    await page.getByLabel("必须包含").fill("产品名称\n公开说明");
+    await page.getByLabel("明确不要").fill("不要推测未公开价格");
+    await page.getByRole("button", { name: "启动任务" }).click();
+    await expect.poll(() => taskSubmitted).not.toBeNull();
+    expect(taskSubmitted).toMatchObject({
+      objective_text: "生成产品摘要并保留来源证据",
+      upload_ids: [],
+      source_snapshot_id: "snapshot-1",
+      must_include: ["产品名称", "公开说明"],
+      explicit_exclusions: ["不要推测未公开价格"],
+      quantity_requirement: "当前页面中有证据的全部内容",
+      completeness_requirement: "仅对当前精确页面负责",
+      output_formats: ["markdown"],
+      runtime_version: "pi",
+      model_connection_id: null,
+      external_api_confirmed: false,
+    });
+    expect(taskIdempotencyKey.length).toBeGreaterThan(5);
 
     await page.reload();
     await page.getByText("公开网页", { exact: true }).click();
@@ -379,6 +410,66 @@ test.describe("统一数据工作台", () => {
     ).toBeVisible();
     expect(createCalls).toBeGreaterThanOrEqual(1);
     expect(new Set(receivedKeys)).toEqual(new Set(["pending-reconnect-key"]));
+  });
+
+  test("网页任务在收到 Task ID 前刷新仍复用同一幂等请求", async ({ page }) => {
+    await mockWorkspace(page);
+    const saved = sourceAttempt("succeeded");
+    const pendingPayload = {
+      objective_text: "生成产品摘要并保留来源证据",
+      upload_ids: [],
+      source_snapshot_id: "snapshot-1",
+      must_include: ["产品名称"],
+      explicit_exclusions: ["不得推测价格"],
+      quantity_requirement: "当前页面中有证据的全部内容",
+      completeness_requirement: "仅对当前精确页面负责",
+      output_formats: ["markdown"],
+      runtime_version: "pi",
+      permission_profile: "standard",
+      provider: "local",
+      model: "local-model",
+      model_connection_id: null,
+      model_connection_model: null,
+      external_api_confirmed: false,
+    };
+    await page.addInitScript(({ source, payload }) => {
+      localStorage.setItem("mangrove_web_source_attempt_u1", JSON.stringify({
+        attempt_id: source.attempt_id,
+        idempotency_key: source.idempotency_key,
+        url: source.normalized_url,
+        purpose: source.purpose,
+      }));
+      localStorage.setItem("mangrove_web_task_attempt_u1", JSON.stringify({
+        fingerprint: JSON.stringify(payload),
+        idempotency_key: "pending-task-reconnect-key",
+        payload,
+      }));
+    }, { source: saved, payload: pendingPayload });
+    await page.route(
+      "**/api/semantic-workspace/source-acquisitions/source-succeeded",
+      (route) => route.fulfill({ json: saved }),
+    );
+    const createdTask = workspaceTask("web-task-restored", "queued", "公开网页产品摘要");
+    const receivedKeys: string[] = [];
+    let receivedPayload: Record<string, unknown> | null = null;
+    await page.route("**/api/semantic-workspace/tasks", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      receivedKeys.push(route.request().headers()["idempotency-key"] ?? "");
+      receivedPayload = route.request().postDataJSON();
+      await route.fulfill({ status: 202, json: createdTask });
+    });
+    await page.route("**/api/semantic-workspace/tasks/web-task-restored", (route) =>
+      route.fulfill({ json: workspaceDetail(createdTask) }));
+
+    await page.goto("/data-prep");
+    await page.getByText("公开网页", { exact: true }).click();
+
+    await expect.poll(() => receivedKeys.length).toBe(1);
+    expect(receivedKeys).toEqual(["pending-task-reconnect-key"]);
+    expect(receivedPayload).toEqual(pendingPayload);
+    await expect.poll(() => page.evaluate(() => (
+      localStorage.getItem("mangrove_web_task_attempt_u1")
+    ))).toBeNull();
   });
 
   test("网页来源失败在窄屏深色主题中明确说明零下游结果", async ({ page }) => {

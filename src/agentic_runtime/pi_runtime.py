@@ -852,6 +852,14 @@ class PiRuntime:
             / f"r{request.revision}"
             / run_id
         )
+        if root.exists():
+            expected_parent = root.parent.resolve()
+            resolved_root = root.resolve()
+            if root.is_symlink() or resolved_root.parent != expected_parent:
+                raise PiRuntimeError("待恢复的 Pi 工作区不属于当前冻结 Run")
+            # start 只会在数据库尚无 checkpoint 时进入。Pi 会在真正启动容器前
+            # await 持久化 checkpoint，因此这里的残留必然尚未调用模型，可以安全重建。
+            shutil.rmtree(resolved_root)
         input_dir = root / "input"
         work_dir = root / "work"
         output_dir = root / "output"
