@@ -1,6 +1,6 @@
 # Mangrove 当前状态台账
 
-> status: `P0_CLOSEOUT_IN_PROGRESS`
+> status: `P0_COMPLETE`
 >
 > last_verified: 2026-08-26
 >
@@ -10,7 +10,7 @@
 >
 > identity_rule: 公开身份以 GitHub `main` 与本文件所在提交现场读取结果为准
 
-本文件只保留当前能力、在制门禁和下一阶段路线。历史细节以第 8 节列出的不可变规格、ADR 与
+本文件只保留当前能力、有效治理门和下一阶段路线。历史细节以第 8 节列出的不可变规格、ADR 与
 执行报告为证据，不再在滚动台账中重复时间线。`ENGINEERING_VERIFIED`、`LIVE_ACCEPTED`、
 `REMOTE_ENFORCED` 和 `RELEASED` 是不同证据等级，不能互相替代。
 
@@ -18,11 +18,11 @@
 
 - 公开仓库：`Eclipseic1848/Mangrove_ai`；默认分支：`main`；当前访问权限：管理员。
 - P0 #56～#58 工程基线为 `main@453e900837109be18da47985db997e58863fbf30`；#59 是
-  GitHub Ruleset 远端状态，#60 是本文件所在的文档收口提交。当前检出收口分支为
-  `codex/p0-06-closeout`，编制基线与 `origin/main` 均为上述 SHA。
-  本地名为 `main` 的分支仍停在 `4e8e5f9c878002d9781dca622bafe7cd035ddb66`，落后远端
-  5 个提交；接手者必须重新 `fetch` 并现场读取 GitHub `main`，不得仅凭本地分支名或本文
-  编制基线判断当前公开 SHA。
+  GitHub Ruleset 远端状态；#60 文档 PR #79 合入 `main@a2f13e3db715f71daa392e8ee5c36ec63c0ababe`。
+  本最终状态提交分支为 `codex/p0-06-final-status`，以该 SHA 为父提交，只改两份权威文档。
+  原工作区本地名为 `main` 的分支仍停在
+  `4e8e5f9c878002d9781dca622bafe7cd035ddb66`；接手者必须重新 `fetch` 并现场读取 GitHub
+  `main`，不得仅凭本地分支名或历史基线判断当前公开 SHA。
 - 远端当前没有 Tag 或 GitHub Release；本地 `v0.0.4` 只保留历史版本语义，不是远端当前
   Tag、Release 或本轮发布事实。不得把路线图版本名、本地标签或工程验证结果表述为已发布版本。
 - GitHub About 当前描述为“面向在线/离线与公域/私域数据的智能数据任务平台”，无主页；Topics
@@ -77,7 +77,7 @@ Mangrove 是统一数据任务平台。用户从文件或其他来源创建不�
 | #57 P0-02 | 配置中心 SecretRef 统一 | `CLOSED / COPY_REHEARSED`；PR #76 合入 `453e9008`，生产高敏副本、匹配 key、读取/重放/扫描/清理和双轴审查完成 | 无；生产原库迁移及 Secret/key 轮换仍是独立人工门 |
 | #58 P0-03 | 依赖拆分与漏洞治理 | `CLOSED / ENGINEERING_VERIFIED`；PR #76 合入 `453e9008`，五组 clean install、真实 Linux 镜像、完整核心回归、最终审查和风险记录完成 | 无；Node 限期风险仍须复查 |
 | #59 P0-04B | `main` 分支保护 | `CLOSED / REMOTE_ENFORCED`；用户确认单维护者模式，Ruleset `21624053` active；PR #78 证明失败阻断、修复后可合并且未合并探针 | 无；未来有第二维护者时另开权限变更把审批数从 0 提升为 1 |
-| #60 P0-06 | 当前状态与交接收口 | P0 公共/权威文档已精简并经双轴审查；Code of Conduct、MIT License、About 无需变化，Security 已同步 | 本文件进入 `main` 后以 GitHub Issue #60 的关闭评论作为最终远端证据 |
+| #60 P0-06 | 当前状态与交接收口 | `CLOSED`；PR #79 普通合入 `main@a2f13e3d`，合并后 CI 33041624585 三项全绿；公共/权威文档与 Security 已同步，Code of Conduct、MIT License、About 无需变化 | 无；最终状态只从本文件所在提交和 GitHub #60 现场读取 |
 
 ## 5. 生产差异与风险
 

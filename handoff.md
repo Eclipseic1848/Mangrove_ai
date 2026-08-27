@@ -1,16 +1,16 @@
 # Mangrove 零上下文交接
 
-> 状态：`P0_CLOSEOUT_FINAL_GATE`
+> 状态：`P0_COMPLETE_HANDOFF`
 >
 > 起草日期：2026-08-26
 >
 > 适用仓库：`Eclipseic1848/Mangrove_ai`
-> 说明：本文件写给完全没有上下文的新会话；会随 #60 文档收口进入 `main`。文档自身未来
-> merge SHA 与 Issue 关闭状态以 GitHub 现场读取为准，不保留会在合并瞬间过期的占位符。
+> 说明：本文件写给完全没有上下文的新会话。#60 文档 PR #79 已进入 `main` 且 Issue 已关闭；
+> 本次仅同步最终状态。当前 SHA 仍以 GitHub `main` 与本文件所在提交现场读取为准。
 
 ## 1. 当前任务
 
-本会话要完成目标启动时冻结的五张 GitHub Open Issue：#56～#60。后续新建 Issue 不自动并入。
+本会话已完成目标启动时冻结的五张 GitHub Issue：#56～#60。后续新建 Issue 不属于本目标。
 
 ```text
 #55（已关闭）
@@ -25,17 +25,18 @@
 | #57 | 25 个配置 Secret 迁为 Owner/键绑定 SecretRef；真实生产副本、Vault key、备份/WAL/journal 扫描；工程与双轴审查、远端收口 | `CLOSED / COPY_REHEARSED`；副本读取/重放/扫描/清理完成，生产原库与 key 未改写 |
 | #58 | 五组依赖、干净解析/安装、生产镜像、Python/Node 漏洞处置、限期风险、工程与双轴审查、远端收口 | `CLOSED / ENGINEERING_VERIFIED`；最终 CI 修复已纳入 PR #76，合并后 CI 三项全绿 |
 | #59 | `main` 强制 PR、三项 CI、讨论解决、禁止强推、无常驻 bypass，并用真实测试 PR 验证 | `CLOSED / REMOTE_ENFORCED`；用户确认单维护者审批数 0，Ruleset `21624053`，PR #78 验收完成 |
-| #60 | 精简权威状态、同步公共入口、逐项完成审计、最终 `handoff.md` | 公共/权威文档已完成；以本文件所在 PR 与 GitHub Issue #60 的现场状态为最终远端证据 |
+| #60 | 精简权威状态、同步公共入口、逐项完成审计、最终 `handoff.md` | `CLOSED`；PR #79 合入 `main@a2f13e3d`，合并后 CI 33041624585 三项全绿 |
 
 接手时先核对的远端事实：
 
 - #56～#58 当前合入 `main` SHA：`453e900837109be18da47985db997e58863fbf30`
-- 当前文档收口分支：`codex/p0-06-closeout`；编制基线 `origin/main` 为
-  `453e900837109be18da47985db997e58863fbf30`。本文件进入 `main` 后必须重新 fetch，不能把
-  编制基线当成最终公开 SHA
-- 本地名为 `main` 的分支仍为 `4e8e5f9c878002d9781dca622bafe7cd035ddb66`，落后
-  `origin/main` 5 个提交；接手时必须现场核验，不得把本地分支名当成公开主线事实
-- #56/#57/#58/#59：均为 CLOSED；#60 以 GitHub Issue 现场读取为准
+- 文档收口 PR #79 的分支为 `codex/p0-06-closeout`，已合入
+  `main@a2f13e3db715f71daa392e8ee5c36ec63c0ababe`；本最终状态分支为
+  `codex/p0-06-final-status`，以该 SHA 为父提交，只改 current/handoff。接手时仍必须重新
+  fetch，不能把任一历史基线当成当前公开 SHA
+- 原工作区本地名为 `main` 的分支仍为 `4e8e5f9c878002d9781dca622bafe7cd035ddb66`；接手时
+  必须现场核验，不得把本地分支名当成公开主线事实
+- #56/#57/#58/#59/#60：均为 CLOSED
 - #56～#58 工程 PR：[PR #76](https://github.com/Eclipseic1848/Mangrove_ai/pull/76)，状态 MERGED
 - #59 Ruleset：[`main-required-ci-single-maintainer`](https://github.com/Eclipseic1848/Mangrove_ai/rules/21624053)，ID `21624053`，active
 - #59 测试 PR：[PR #78](https://github.com/Eclipseic1848/Mangrove_ai/pull/78)，CLOSED、未合并、探针分支已删除
@@ -118,7 +119,7 @@ Node 限期风险不是“零漏洞”：
 - 需要按最终能力同步：`README.md`、`CONTRIBUTING.md`、`AGENTS.md`、`CONTEXT.md`、`docs/status/current.md`、最终 `handoff.md`。
 - 已检查、当前无需语义变化：`CODE_OF_CONDUCT.md`、MIT `LICENSE`。
 - `SECURITY.md` 已按现场事实修正支持范围：公开开发阶段不等于存在同名 Tag、Release 或稳定
-  生产版本；该改动仍须随 #60 最终文档 PR 一并验证和收口。
+  生产版本；该改动已随 PR #79 验证并收口。
 - GitHub About 的描述、topics、homepage 已只读核验；只有最终现场仍一致且确无语义变化时，才记录“已检查、无需变化”。About 属于远端写入，不能由本地文档修改代替。
 
 ## 4. #59 远端保护结果与当前剩余边界
@@ -142,12 +143,9 @@ Node 限期风险不是“零漏洞”：
 
 1. 读取 GitHub `main`、Open Issues、Ruleset `21624053` 和 `docs/status/current.md`；不要信任本地旧
    `main` 或本文编制基线。
-2. P0 #54～#59 已收口，不重复执行迁移副本、Secret 扫描、依赖 clean install 或 Ruleset 探针。
-   当前唯一动作是让 #60 文档 PR 三项 CI 全绿、普通合并并关闭 Issue；随后用极小纯状态 PR
-   同时把 `docs/status/current.md` 切为 `P0_COMPLETE`、把本交接切为 `P0_COMPLETE_HANDOFF`，
-   并勾选最后验收项，不得夹带工程改动。
-3. 只有 GitHub #60 已关闭且最终状态 PR 已合入，才能继续产品路线。届时先为 P1-01 的“网页来源”
-   纵切片编写产品流程、领域契约和迁移 ADR，
+2. P0 #54～#60 已全部收口，不重复执行迁移副本、Secret 扫描、依赖 clean install、Ruleset
+   探针或文档收口。
+3. 若继续产品路线，先为 P1-01 的“网页来源”纵切片编写产品流程、领域契约和迁移 ADR，
    冻结来源快照、连接版本、Owner、外发确认与能力 digest，再建立/确认单一工单；HTTP 与数据库
    不自动并入。
 4. 若用户要生产迁移、部署、发布、提升审批数或开放普通用户能力，先单独确认精确范围、恢复和
@@ -257,7 +255,7 @@ evals/generalization-g1/fixtures.json
 - [x] Code of Conduct、MIT License、GitHub About 已检查且无需变化；Security 的开发版本表述已同步。
 - [x] 用户 G1、本地审计、生产数据、数据库、Secret/key 与本机路径未进入精确文档 allowlist。
 - [x] 未创建未经授权的标签、Release、部署或普通用户能力开放声明。
-- [ ] 本文档收口 PR 的三项 CI 全绿并普通合并；随后在 GitHub #60 写入最终 `main` SHA/CI 并关闭。
+- [x] PR #79 三项 CI 全绿并普通合入 `main@a2f13e3d`，合并后 CI 33041624585 全绿；GitHub #60 已写入证据并关闭；本次最终状态提交只改两份权威文档。
 
-最后一项由当前会话在本文档 PR 合并后立即完成；新会话如果看到它仍未勾选，只需先现场读取
-GitHub #60，不能重新执行已完成的 P0 工程工作。
+全部验收项已经满足。新会话从 P1-01 规格化或用户另行授权的生产/发布门开始，不能重新执行
+已完成的 P0 工程工作。
