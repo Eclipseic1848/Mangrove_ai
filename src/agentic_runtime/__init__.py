@@ -16,6 +16,13 @@ from .models import (
     SourceInput,
 )
 if TYPE_CHECKING:
+    from .kernel import (
+        AgentKernel,
+        AgentKernelCapabilityManifest,
+        AgentKernelRunSnapshot,
+        PiAgentKernelAdapter,
+        RuntimeBinding,
+    )
     from .pi_runtime import PiRuntime
     from .repository import AgenticRuntimeRepository
 
@@ -23,6 +30,16 @@ if TYPE_CHECKING:
 def __getattr__(name: str) -> Any:
     """避免读取 Egress 等轻量子 Module 时加载全部可选 Runtime 依赖。"""
 
+    if name in {
+        "AgentKernel",
+        "AgentKernelCapabilityManifest",
+        "AgentKernelRunSnapshot",
+        "PiAgentKernelAdapter",
+        "RuntimeBinding",
+    }:
+        from . import kernel
+
+        return getattr(kernel, name)
     if name == "PiRuntime":
         from .pi_runtime import PiRuntime
 
@@ -34,13 +51,18 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(name)
 
 __all__ = [
+    "AgentKernel",
+    "AgentKernelCapabilityManifest",
+    "AgentKernelRunSnapshot",
     "AgenticRuntimeRepository",
     "CandidateArtifact",
     "PermissionProfile",
+    "PiAgentKernelAdapter",
     "PiRuntime",
     "PiRuntimeRequest",
     "PiRuntimeResult",
     "RuntimeEvent",
+    "RuntimeBinding",
     "RuntimeStatus",
     "RuntimeTaskConfig",
     "RuntimeVersion",

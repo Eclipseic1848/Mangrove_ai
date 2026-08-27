@@ -30,6 +30,7 @@ from src.agentic_runtime.candidate_verifier import (
     CandidateVerifier,
     LocalModelSemanticJudge,
 )
+from src.agentic_runtime.kernel import AgentKernel, PiAgentKernelAdapter
 from src.agentic_runtime.pi_runtime import PiRuntime
 from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.api.auth import get_store
@@ -616,6 +617,7 @@ class SemanticWorkspaceManager:
     def __init__(
         self,
         *,
+        agent_kernel: AgentKernel | None = None,
         pi_runtime: PiRuntime | None = None,
         candidate_verification: CandidateVerificationService | None = None,
     ) -> None:
@@ -632,34 +634,48 @@ class SemanticWorkspaceManager:
         self._deferred_requeue: set[str] = set()
         self._heavy = asyncio.Semaphore(1)
         self._candidate_verification = candidate_verification
-        self._pi_runtime = pi_runtime or PiRuntime(
-            capability_mount_resolver=DefaultCapabilityMounts(
-                db_path=settings.webui_db_path,
-                oci_layout_path=settings.capability_oci_layout_path,
-                mount_root=settings.capability_mount_cache_path,
-                platform_oci_layout_path=(
-                    settings.capability_platform_oci_layout_path
-                ),
-                platform_oras_executable_factory=_platform_oras_executable,
-                platform_signing_public_key_path=(
-                    settings.capability_platform_signing_public_key
-                ),
-                signing_runtime_factory=_platform_signing_runtime_factory,
-                actor_role_resolver=_resolve_actor_role,
-            ),
-            capability_host=(
-                CapabilityHost(
-                    image=settings.pi_capability_host_image,
-                    execution_root=(
-                        Path(settings.semantic_execution_root)
-                        / "capability-hosts"
+        self._agent_kernel = agent_kernel
+        if agent_kernel is None:
+            runtime = pi_runtime or PiRuntime(
+                capability_mount_resolver=DefaultCapabilityMounts(
+                    db_path=settings.webui_db_path,
+                    oci_layout_path=settings.capability_oci_layout_path,
+                    mount_root=settings.capability_mount_cache_path,
+                    platform_oci_layout_path=(
+                        settings.capability_platform_oci_layout_path
                     ),
-                )
-                if settings.pi_capability_host_enabled
-                else None
-            ),
-            candidate_verification=candidate_verification,
-        )
+                    platform_oras_executable_factory=_platform_oras_executable,
+                    platform_signing_public_key_path=(
+                        settings.capability_platform_signing_public_key
+                    ),
+                    signing_runtime_factory=_platform_signing_runtime_factory,
+                    actor_role_resolver=_resolve_actor_role,
+                ),
+                capability_host=(
+                    CapabilityHost(
+                        image=settings.pi_capability_host_image,
+                        execution_root=(
+                            Path(settings.semantic_execution_root)
+                            / "capability-hosts"
+                        ),
+                    )
+                    if settings.pi_capability_host_enabled
+                    else None
+                ),
+                candidate_verification=candidate_verification,
+            )
+            self._agent_kernel = AgentKernel(
+                adapter=PiAgentKernelAdapter(runtime),
+                repository=lambda: AgenticRuntimeRepository(
+                    settings.webui_db_path
+                ),
+            )
+
+    def _kernel(self) -> AgentKernel:
+        """首次需要 Runtime 时才验证数据库 Schema 并建立 Kernel。"""
+
+        assert self._agent_kernel is not None
+        return self._agent_kernel
 
     def _candidate_verification_module(self) -> CandidateVerificationService:
         if self._candidate_verification is None:
@@ -681,7 +697,7 @@ class SemanticWorkspaceManager:
                 ),
             )
         bind_candidate_verification = getattr(
-            self._pi_runtime,
+            self._kernel(),
             "bind_candidate_verification",
             None,
         )
@@ -1287,7 +1303,7 @@ class SemanticWorkspaceManager:
             # 硬门命中：先停容器与 Sidecar（阻断后续能力调用），
             # 再标记取消，最后取消执行协程并等待其清理收尾。
             try:
-                await self._pi_runtime.cancel(user_id, task_id, revision)
+                await self._kernel().cancel(user_id, task_id, revision)
             except Exception as error:
                 # 容器清理失败不能掩盖治理取消事实；留痕供审计。
                 get_store().append_semantic_workspace_event(
@@ -1396,7 +1412,7 @@ class SemanticWorkspaceManager:
         ):
             # 先显式终止容器，再取消编排协程；不能依赖 CancelledError
             # 恰好传播到底层，否则第三方 Adapter 可能留下继续运行的子进程。
-            await self._pi_runtime.cancel(
+            await self._kernel().cancel(
                 user_id,
                 task_id,
                 task["active_revision"],
@@ -2028,7 +2044,11 @@ class SemanticWorkspaceManager:
         checkpoint = None
         if (
             runtime["status"]
-            in {RuntimeStatus.PREPARING, RuntimeStatus.RUNNING}
+            in {
+                RuntimeStatus.PREPARING,
+                RuntimeStatus.RUNNING,
+                RuntimeStatus.NEEDS_INPUT,
+            }
             and runtime["run_id"]
             and runtime["workspace_root"]
         ):
@@ -2149,14 +2169,6 @@ class SemanticWorkspaceManager:
                 for key, value in event.details.items()
                 if not key.startswith("_")
             }
-            repository.append_event(
-                user_id,
-                task_id,
-                revision,
-                event_type=event.event_type,
-                summary=event.summary,
-                details=public_details,
-            )
             tool_name = str(public_details.get("tool") or "")
             tool_stages = {
                 "freeze_coverage": "goal_interpretation",
@@ -2238,7 +2250,7 @@ class SemanticWorkspaceManager:
         try:
             if checkpoint is not None:
                 execution: asyncio.Future = asyncio.ensure_future(
-                    self._pi_runtime.resume(
+                    self._kernel().resume(
                         request,
                         checkpoint=checkpoint,
                         on_event=on_event,
@@ -2246,7 +2258,7 @@ class SemanticWorkspaceManager:
                 )
             else:
                 execution = asyncio.ensure_future(
-                    self._pi_runtime.start(
+                    self._kernel().start(
                         request,
                         on_event=on_event,
                     )
@@ -2260,7 +2272,7 @@ class SemanticWorkspaceManager:
         except _RevisionSwitchAtSafePoint:
             # 新 revision 已冻结后，显式终止旧版本容器；旧工作区仍保留为
             # 审计证据，但不会被登记成新版本候选或正式交付。
-            await self._pi_runtime.cancel(user_id, task_id, revision)
+            await self._kernel().cancel(user_id, task_id, revision)
             return
         except _GateViolationAbort:
             # 治理门命中：状态已由监督标记为 cancelled，静默退出；

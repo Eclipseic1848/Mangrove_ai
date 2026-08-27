@@ -1589,15 +1589,22 @@ class PiRuntime:
             )
 
     async def _assert_image(self) -> None:
+        await self.resolve_runtime_artifact()
+
+    async def resolve_runtime_artifact(self) -> str:
+        """返回当前 Pi 镜像的内容寻址身份，不信任可改写 Tag。"""
+
         process = await asyncio.create_subprocess_exec(
             "docker",
             "image",
             "inspect",
+            "--format",
+            "{{.Id}}",
             self.image,
-            stdout=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr = await process.communicate()
+        stdout, stderr = await process.communicate()
         if process.returncode != 0:
             detail = stderr.decode("utf-8", errors="replace").strip()
             raise PiRuntimeError(
@@ -1605,6 +1612,10 @@ class PiRuntime:
                 f"docker build -t {self.image} docker/pi-runtime"
                 + (f"；Docker 返回：{detail[:300]}" if detail else "")
             )
+        digest = stdout.decode("utf-8", errors="strict").strip().lower()
+        if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
+            raise PiRuntimeError("Pi Runtime 镜像未返回有效的 sha256 内容摘要")
+        return f"oci-image-ref={self.image};content-digest={digest}"
 
     @staticmethod
     def _copy_sources(
