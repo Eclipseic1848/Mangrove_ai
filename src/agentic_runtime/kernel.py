@@ -2,6 +2,7 @@
 """Mangrove 自有 AgentKernel 合同与 Runtime Adapter 接缝。"""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import uuid
@@ -54,6 +55,7 @@ class AgentKernelCapabilityManifest(BaseModel):
 
     adapter_id: str = Field(min_length=1)
     adapter_version: str = Field(min_length=1)
+    runtime_artifact: str = Field(min_length=1)
     protocol_version: str = Field(min_length=1)
     event_schema_version: str = Field(min_length=1)
     required_capabilities: tuple[str, ...]
@@ -103,6 +105,7 @@ class RuntimeBinding(BaseModel):
     kernel_version: str = AGENT_KERNEL_VERSION
     adapter_id: str = Field(min_length=1)
     adapter_version: str = Field(min_length=1)
+    runtime_artifact: str = Field(min_length=1)
     protocol_version: str = Field(min_length=1)
     event_schema_version: str = Field(min_length=1)
     capability_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -156,12 +159,22 @@ class PiAgentKernelAdapter:
 
     def __init__(self, runtime: Any) -> None:
         self._runtime = runtime
+        image = str(getattr(runtime, "image", "") or "").strip()
+        runtime_artifact = (
+            f"oci-image:{image}"
+            if image
+            else (
+                "python-runtime:"
+                f"{type(runtime).__module__}.{type(runtime).__qualname__}"
+            )
+        )
         capabilities = ["start", "resume", "cancel"]
         if callable(getattr(runtime, "steer", None)):
             capabilities.append("steer")
         self.manifest = AgentKernelCapabilityManifest(
             adapter_id="pi-runtime",
             adapter_version="1.0.0",
+            runtime_artifact=runtime_artifact,
             protocol_version=AGENT_KERNEL_PROTOCOL_VERSION,
             event_schema_version=AGENT_KERNEL_EVENT_SCHEMA_VERSION,
             required_capabilities=("start", "resume", "cancel"),
@@ -246,7 +259,10 @@ class AgentKernel:
         self._repository = None if callable(repository) else repository
         self._repository_factory = repository if callable(repository) else None
         self._quiescent: set[tuple[str, str, int]] = set()
-        self._result_status: dict[tuple[str, str, int], RuntimeStatus] = {}
+        self._cancel_requests: dict[
+            tuple[str, str, int], asyncio.Event
+        ] = {}
+        self._cancelled: set[tuple[str, str, int]] = set()
 
     def _assert_compatible(self) -> None:
         manifest = self._adapter.manifest
@@ -294,29 +310,25 @@ class AgentKernel:
                 binding=binding,
                 on_event=self._persisting_sink(request, on_event),
             )
+            return await self._accept_result(request, binding, result)
         except AgentKernelResultUnknownError as exc:
-            self._repo().update(
-                request.user_id,
-                request.task_id,
-                request.revision,
-                status=RuntimeStatus.FAILED,
-                failure={
-                    "error_code": "MODEL_OUTCOME_UNKNOWN",
-                    "cause_summary": str(exc)[:500],
-                },
-            )
-            self._result_status[key] = RuntimeStatus.FAILED
-            self._quiescent.add(key)
+            if not await self._cancel_won(key):
+                self._persist_failure(
+                    request,
+                    error_code="MODEL_OUTCOME_UNKNOWN",
+                    cause=exc,
+                )
             raise
-        except BaseException:
-            self._quiescent.add(key)
+        except asyncio.CancelledError:
             raise
-        self._quiescent.add(key)
-        if result.run_id != binding.external_run_id:
-            raise AgentKernelError("Runtime Adapter 返回的 Run 身份与冻结绑定不一致")
-        self._assert_result_quiescent(result)
-        self._result_status[key] = result.status
-        return result
+        except Exception as exc:
+            if not await self._cancel_won(key):
+                self._persist_failure(
+                    request,
+                    error_code="ADAPTER_EXECUTION_FAILED",
+                    cause=exc,
+                )
+            raise
 
     async def resume(
         self,
@@ -360,29 +372,25 @@ class AgentKernel:
                 checkpoint=checkpoint,
                 on_event=self._persisting_sink(request, on_event),
             )
+            return await self._accept_result(request, binding, result)
         except AgentKernelResultUnknownError as exc:
-            self._repo().update(
-                request.user_id,
-                request.task_id,
-                request.revision,
-                status=RuntimeStatus.FAILED,
-                failure={
-                    "error_code": "MODEL_OUTCOME_UNKNOWN",
-                    "cause_summary": str(exc)[:500],
-                },
-            )
-            self._result_status[key] = RuntimeStatus.FAILED
-            self._quiescent.add(key)
+            if not await self._cancel_won(key):
+                self._persist_failure(
+                    request,
+                    error_code="MODEL_OUTCOME_UNKNOWN",
+                    cause=exc,
+                )
             raise
-        except BaseException:
-            self._quiescent.add(key)
+        except asyncio.CancelledError:
             raise
-        self._quiescent.add(key)
-        if result.run_id != binding.external_run_id:
-            raise AgentKernelError("恢复结果的 Run 身份与冻结绑定不一致")
-        self._assert_result_quiescent(result)
-        self._result_status[key] = result.status
-        return result
+        except Exception as exc:
+            if not await self._cancel_won(key):
+                self._persist_failure(
+                    request,
+                    error_code="ADAPTER_EXECUTION_FAILED",
+                    cause=exc,
+                )
+            raise
 
     async def steer(
         self,
@@ -405,9 +413,28 @@ class AgentKernel:
         """终止 Adapter；返回后不再接受本 Run 的迟到事件。"""
 
         key = (user_id, task_id, revision)
+        done = asyncio.Event()
+        self._cancel_requests[key] = done
+        try:
+            await self._adapter.cancel(user_id, task_id, revision)
+            if self._repository is not None:
+                # 治理门的硬停不得为了写状态才打开延迟 Repository；
+                # 真实 Run 在冻结 Binding 时已打开，仍会持久化取消。
+                self._repository.update(
+                    user_id,
+                    task_id,
+                    revision,
+                    status=RuntimeStatus.CANCELLED,
+                    clear_failure=True,
+                )
+        except BaseException:
+            self._cancel_requests.pop(key, None)
+            done.set()
+            raise
+        self._cancelled.add(key)
         self._quiescent.add(key)
-        self._result_status[key] = RuntimeStatus.CANCELLED
-        await self._adapter.cancel(user_id, task_id, revision)
+        self._cancel_requests.pop(key, None)
+        done.set()
 
     def events(
         self,
@@ -430,21 +457,14 @@ class AgentKernel:
         row = self._repo().get(user_id, task_id, revision)
         if row is None:
             raise KeyError("AgentKernel Run 不存在或无权访问")
-        key = (user_id, task_id, revision)
-        status = self._result_status.get(key, row["status"])
+        status = row["status"]
         failure = row.get("failure") or {}
         events = self.events(user_id, task_id, revision)
-        quiescent_statuses = {
-            RuntimeStatus.NEEDS_INPUT,
-            RuntimeStatus.CANDIDATE_READY,
-            RuntimeStatus.FAILED,
-            RuntimeStatus.CANCELLED,
-        }
         return AgentKernelRunSnapshot(
             binding=self._binding(user_id, task_id, revision),
             status=status,
             result_known=failure.get("error_code") != "MODEL_OUTCOME_UNKNOWN",
-            quiescent=(key in self._quiescent or status in quiescent_statuses),
+            quiescent=status in _QUIESCENT_RESULT_STATUSES,
             last_event_sequence=(events[-1]["sequence"] if events else None),
         )
 
@@ -466,7 +486,11 @@ class AgentKernel:
         key = (request.user_id, request.task_id, request.revision)
 
         async def persist(event: RuntimeEvent) -> None:
-            if key in self._quiescent:
+            if (
+                key in self._quiescent
+                or key in self._cancel_requests
+                or key in self._cancelled
+            ):
                 return
             public_details = {
                 name: value
@@ -484,6 +508,61 @@ class AgentKernel:
             await downstream(event)
 
         return persist
+
+    async def _accept_result(
+        self,
+        request: PiRuntimeRequest,
+        binding: RuntimeBinding,
+        result: PiRuntimeResult,
+    ) -> PiRuntimeResult:
+        key = (request.user_id, request.task_id, request.revision)
+        if result.run_id != binding.external_run_id:
+            raise AgentKernelError(
+                "Runtime Adapter 返回的 Run 身份与冻结绑定不一致"
+            )
+        if await self._cancel_won(key):
+            return result.model_copy(update={"status": RuntimeStatus.CANCELLED})
+        self._assert_result_quiescent(result)
+        update: dict[str, Any] = {
+            "status": result.status,
+            "clear_failure": result.failure is None,
+        }
+        if result.failure is not None:
+            update["failure"] = result.failure
+        self._repo().update(
+            request.user_id,
+            request.task_id,
+            request.revision,
+            **update,
+        )
+        self._quiescent.add(key)
+        return result
+
+    async def _cancel_won(self, key: tuple[str, str, int]) -> bool:
+        pending = self._cancel_requests.get(key)
+        if pending is not None:
+            await pending.wait()
+        return key in self._cancelled
+
+    def _persist_failure(
+        self,
+        request: PiRuntimeRequest,
+        *,
+        error_code: str,
+        cause: Exception,
+    ) -> None:
+        key = (request.user_id, request.task_id, request.revision)
+        self._repo().update(
+            request.user_id,
+            request.task_id,
+            request.revision,
+            status=RuntimeStatus.FAILED,
+            failure={
+                "error_code": error_code,
+                "cause_summary": str(cause)[:500],
+            },
+        )
+        self._quiescent.add(key)
 
     def _binding(self, user_id: str, task_id: str, revision: int) -> RuntimeBinding:
         binding = self._find_binding(user_id, task_id, revision)
@@ -524,6 +603,7 @@ class AgentKernel:
         return RuntimeBinding(
             adapter_id=manifest.adapter_id,
             adapter_version=manifest.adapter_version,
+            runtime_artifact=manifest.runtime_artifact,
             protocol_version=manifest.protocol_version,
             event_schema_version=manifest.event_schema_version,
             capability_digest=manifest.digest,
@@ -564,6 +644,7 @@ class AgentKernel:
             AGENT_KERNEL_VERSION,
             manifest.adapter_id,
             manifest.adapter_version,
+            manifest.runtime_artifact,
             manifest.protocol_version,
             manifest.event_schema_version,
             manifest.digest,
@@ -573,6 +654,7 @@ class AgentKernel:
             binding.kernel_version,
             binding.adapter_id,
             binding.adapter_version,
+            binding.runtime_artifact,
             binding.protocol_version,
             binding.event_schema_version,
             binding.capability_digest,

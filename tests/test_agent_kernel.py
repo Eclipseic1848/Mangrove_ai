@@ -93,6 +93,7 @@ class _ContractAdapter:
     manifest = AgentKernelCapabilityManifest(
         adapter_id="fake-runtime",
         adapter_version="1.0.0",
+        runtime_artifact="python-runtime:tests.fake-runtime@1.0.0",
         protocol_version=AGENT_KERNEL_PROTOCOL_VERSION,
         event_schema_version=AGENT_KERNEL_EVENT_SCHEMA_VERSION,
         required_capabilities=("start", "resume", "cancel"),
@@ -145,8 +146,14 @@ class _ContractAdapter:
 class _FakePiRuntimeEngine:
     """Pi Adapter 后方的最小 Runtime 引擎，不启动 Docker。"""
 
-    def __init__(self) -> None:
-        self.contract = _ContractAdapter()
+    def __init__(
+        self,
+        contract: _ContractAdapter | None = None,
+        *,
+        image: str = "mangrove/pi-coding-agent:test-a",
+    ) -> None:
+        self.contract = contract or _ContractAdapter()
+        self.image = image
 
     async def start(self, request, *, on_event, run_id=None):
         binding = type("Binding", (), {"external_run_id": run_id})()
@@ -186,6 +193,22 @@ class _BlockingAdapter(_ContractAdapter):
             run_id=binding.external_run_id,
             workspace_root=Path.cwd(),
         )
+
+
+class _LateCandidateAdapter(_BlockingAdapter):
+    async def start(self, request, *, binding, on_event):
+        result = await super().start(
+            request,
+            binding=binding,
+            on_event=on_event,
+        )
+        return result.model_copy(update={"status": RuntimeStatus.CANDIDATE_READY})
+
+
+class _CancelFailingAdapter(_BlockingAdapter):
+    async def cancel(self, _user_id, _task_id, _revision) -> None:
+        self.cancel_calls += 1
+        raise RuntimeError("底层 Runtime 取消失败")
 
 
 class _UnknownAdapter(_ContractAdapter):
@@ -235,6 +258,15 @@ def _request(tmp_path: Path) -> PiRuntimeRequest:
     )
 
 
+def _contract_adapter(
+    adapter_kind: str,
+    contract: _ContractAdapter,
+):
+    if adapter_kind == "fake":
+        return contract
+    return PiAgentKernelAdapter(_FakePiRuntimeEngine(contract))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("protocol_version", "required_capabilities", "available_capabilities"),
@@ -266,6 +298,7 @@ async def test_kernel_fails_closed_before_run_when_contract_is_incompatible(
         AgentKernelCapabilityManifest(
             adapter_id="test-adapter",
             adapter_version="1.0.0",
+            runtime_artifact="python-runtime:tests.test-adapter@1.0.0",
             protocol_version=protocol_version,
             event_schema_version=AGENT_KERNEL_EVENT_SCHEMA_VERSION,
             required_capabilities=required_capabilities,
@@ -298,6 +331,7 @@ async def test_kernel_freezes_exact_binding_before_adapter_start(
     manifest = AgentKernelCapabilityManifest(
         adapter_id="pi-runtime",
         adapter_version="1.0.0",
+        runtime_artifact="oci-image:mangrove/pi-coding-agent:test-a",
         protocol_version=AGENT_KERNEL_PROTOCOL_VERSION,
         event_schema_version=AGENT_KERNEL_EVENT_SCHEMA_VERSION,
         required_capabilities=("start", "resume", "cancel"),
@@ -353,11 +387,14 @@ async def test_fake_and_pi_adapters_share_kernel_event_contract(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("adapter_kind", ["fake", "pi"])
 async def test_resume_reuses_binding_without_duplicate_start_input(
     tmp_path: Path,
+    adapter_kind: str,
 ) -> None:
     repository = _registered_repository(tmp_path)
-    adapter = _ContractAdapter()
+    contract = _ContractAdapter()
+    adapter = _contract_adapter(adapter_kind, contract)
     kernel = AgentKernel(adapter=adapter, repository=repository)
 
     async def sink(_event) -> None:
@@ -374,8 +411,8 @@ async def test_resume_reuses_binding_without_duplicate_start_input(
         on_event=sink,
     )
 
-    assert adapter.start_calls == 1
-    assert adapter.resume_calls == 1
+    assert contract.start_calls == 1
+    assert contract.resume_calls == 1
     assert sum(
         event["event_type"] == "kernel.binding.frozen"
         for event in kernel.events("user-a", "task-a", 1)
@@ -433,27 +470,30 @@ async def test_repository_rejects_run_id_rebinding_after_freeze(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("adapter_kind", ["fake", "pi"])
 async def test_cancel_is_quiescent_and_discards_late_adapter_events(
     tmp_path: Path,
+    adapter_kind: str,
 ) -> None:
     repository = _registered_repository(tmp_path)
-    adapter = _BlockingAdapter()
+    contract = _BlockingAdapter()
+    adapter = _contract_adapter(adapter_kind, contract)
     kernel = AgentKernel(adapter=adapter, repository=repository)
 
     async def sink(_event) -> None:
         return None
 
     execution = asyncio.create_task(kernel.start(_request(tmp_path), on_event=sink))
-    await asyncio.wait_for(adapter.started.wait(), timeout=2)
+    await asyncio.wait_for(contract.started.wait(), timeout=2)
     await kernel.cancel("user-a", "task-a", 1)
-    assert adapter.on_event is not None
-    await adapter.on_event(
+    assert contract.on_event is not None
+    await contract.on_event(
         RuntimeEvent(event_type="tool.completed", summary="取消后的迟到结果")
     )
-    adapter.release.set()
+    contract.release.set()
     await execution
 
-    assert adapter.cancel_calls == 1
+    assert contract.cancel_calls == 1
     assert all(
         event["summary"] != "取消后的迟到结果"
         for event in kernel.events("user-a", "task-a", 1)
@@ -462,11 +502,14 @@ async def test_cancel_is_quiescent_and_discards_late_adapter_events(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("adapter_kind", ["fake", "pi"])
 async def test_query_exposes_unknown_result_without_retrying(
     tmp_path: Path,
+    adapter_kind: str,
 ) -> None:
     repository = _registered_repository(tmp_path)
-    adapter = _UnknownAdapter()
+    contract = _UnknownAdapter()
+    adapter = _contract_adapter(adapter_kind, contract)
     kernel = AgentKernel(adapter=adapter, repository=repository)
 
     async def sink(_event) -> None:
@@ -479,7 +522,7 @@ async def test_query_exposes_unknown_result_without_retrying(
     assert snapshot.status is RuntimeStatus.FAILED
     assert snapshot.result_known is False
     assert snapshot.quiescent is True
-    assert adapter.start_calls == 0
+    assert contract.start_calls == 0
 
 
 @pytest.mark.asyncio
@@ -500,11 +543,110 @@ async def test_failed_run_is_quiescent_and_discards_late_events(
         RuntimeEvent(event_type="tool.completed", summary="失败后的迟到结果")
     )
 
-    assert kernel.query("user-a", "task-a", 1).quiescent is True
+    snapshot = kernel.query("user-a", "task-a", 1)
+    assert snapshot.status is RuntimeStatus.FAILED
+    assert snapshot.quiescent is True
+    saved = repository.get("user-a", "task-a", 1)
+    assert saved is not None
+    assert saved["failure"]["error_code"] == "ADAPTER_EXECUTION_FAILED"
     assert all(
         event["summary"] != "失败后的迟到结果"
         for event in kernel.events("user-a", "task-a", 1)
     )
+
+
+@pytest.mark.asyncio
+async def test_query_survives_kernel_restart(tmp_path: Path) -> None:
+    repository = _registered_repository(tmp_path)
+    adapter = _ContractAdapter()
+
+    async def sink(_event) -> None:
+        return None
+
+    await AgentKernel(adapter=adapter, repository=repository).start(
+        _request(tmp_path),
+        on_event=sink,
+    )
+
+    restarted = AgentKernel(adapter=adapter, repository=repository)
+    snapshot = restarted.query("user-a", "task-a", 1)
+    assert snapshot.status is RuntimeStatus.CANDIDATE_READY
+    assert snapshot.result_known is True
+    assert snapshot.quiescent is True
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_changed_pi_runtime_artifact(tmp_path: Path) -> None:
+    repository = _registered_repository(tmp_path)
+    first_adapter = PiAgentKernelAdapter(
+        _FakePiRuntimeEngine(image="mangrove/pi-coding-agent:test-a")
+    )
+
+    async def sink(_event) -> None:
+        return None
+
+    first = await AgentKernel(
+        adapter=first_adapter,
+        repository=repository,
+    ).start(_request(tmp_path), on_event=sink)
+    changed_runtime = AgentKernel(
+        adapter=PiAgentKernelAdapter(
+            _FakePiRuntimeEngine(image="mangrove/pi-coding-agent:test-b")
+        ),
+        repository=repository,
+    )
+
+    with pytest.raises(AgentKernelCapabilityError, match="RuntimeBinding"):
+        await changed_runtime.resume(
+            _request(tmp_path),
+            checkpoint=PiRuntimeCheckpoint(
+                run_id=first.run_id,
+                workspace_root=tmp_path,
+            ),
+            on_event=sink,
+        )
+
+
+@pytest.mark.asyncio
+async def test_cancel_failure_does_not_claim_quiescence(tmp_path: Path) -> None:
+    repository = _registered_repository(tmp_path)
+    adapter = _CancelFailingAdapter()
+    kernel = AgentKernel(adapter=adapter, repository=repository)
+
+    async def sink(_event) -> None:
+        return None
+
+    execution = asyncio.create_task(kernel.start(_request(tmp_path), on_event=sink))
+    await asyncio.wait_for(adapter.started.wait(), timeout=2)
+    with pytest.raises(RuntimeError, match="取消失败"):
+        await kernel.cancel("user-a", "task-a", 1)
+
+    snapshot = kernel.query("user-a", "task-a", 1)
+    assert snapshot.status is not RuntimeStatus.CANCELLED
+    assert snapshot.quiescent is False
+    adapter.release.set()
+    await execution
+
+
+@pytest.mark.asyncio
+async def test_cancelled_run_rejects_late_candidate_result(tmp_path: Path) -> None:
+    repository = _registered_repository(tmp_path)
+    adapter = _LateCandidateAdapter()
+    kernel = AgentKernel(adapter=adapter, repository=repository)
+
+    async def sink(_event) -> None:
+        return None
+
+    execution = asyncio.create_task(kernel.start(_request(tmp_path), on_event=sink))
+    await asyncio.wait_for(adapter.started.wait(), timeout=2)
+    await kernel.cancel("user-a", "task-a", 1)
+    adapter.release.set()
+    result = await execution
+
+    assert result.status is RuntimeStatus.CANCELLED
+    snapshot = kernel.query("user-a", "task-a", 1)
+    assert snapshot.status is RuntimeStatus.CANCELLED
+    assert snapshot.quiescent is True
 
 
 @pytest.mark.asyncio
