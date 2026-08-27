@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import asyncio
+import re
 
 import pytest
 
@@ -26,6 +27,8 @@ from src.agentic_runtime.models import (
     RuntimeTaskConfig,
     RuntimeVersion,
 )
+
+
 from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.agentic_runtime.pi_runtime import PiRuntime
 from tests.database_migration_helpers import migrated_webui_database
@@ -198,6 +201,22 @@ class _BlockingAdapter(_ContractAdapter):
         )
 
 
+@pytest.mark.asyncio
+async def test_pi_binding_preparation_allocates_runtime_accepted_run_id() -> None:
+    kernel = AgentKernel(
+        adapter=PiAgentKernelAdapter(_FakePiRuntimeEngine()),
+        repository=None,
+    )
+
+    binding, _manifest = await kernel.prepare_binding(
+        model_connection_id=None,
+        model_connection_version=None,
+        model="local-model",
+    )
+
+    assert re.fullmatch(r"pi_run_[0-9a-f]{16}", binding.external_run_id)
+
+
 class _LateCandidateAdapter(_BlockingAdapter):
     async def start(self, request, *, binding, on_event):
         result = await super().start(
@@ -272,6 +291,7 @@ def _contract_adapter(
 
 @pytest.mark.asyncio
 async def test_pi_runtime_resolves_immutable_image_content_digest(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     digest = "sha256:" + "c" * 64
@@ -301,6 +321,9 @@ async def test_pi_runtime_resolves_immutable_image_content_digest(
     )
     runtime = PiRuntime(
         image="mangrove/pi-coding-agent:0.80.10",
+        state_store=AgenticRuntimeRepository(
+            migrated_webui_database(tmp_path / "webui.db")
+        ),
         configure_as_default_document_broker=False,
     )
 

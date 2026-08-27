@@ -10,6 +10,7 @@ import {
   CircleStop,
   Clock3,
   FileCheck2,
+  Globe2,
   Loader2,
   RotateCcw,
   Settings2,
@@ -551,6 +552,21 @@ export function TaskTimeline({
     <section className="mx-auto w-full max-w-4xl px-6 py-6">
       {task.question && (
         <QuestionDialog question={task.question} onAnswer={onAnswer} />
+      )}
+      {task.web_source && (
+        <div className="mb-4 flex items-start gap-3 border-b pb-4 text-sm">
+          <Globe2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
+          <div className="min-w-0">
+            <p className="font-medium">来源快照已冻结</p>
+            <p className="mt-1 break-all text-xs leading-5 text-muted-foreground">
+              {task.web_source.snapshot.artifacts[0]?.final_url}
+              {" · "}
+              {new Date(task.web_source.snapshot.created_at).toLocaleString("zh-CN")}
+              {" · "}
+              运行时不会重新读取网页
+            </p>
+          </div>
+        </div>
       )}
       <div className="flex items-start justify-between gap-4">
         <div className="min-w-0">

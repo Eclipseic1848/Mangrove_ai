@@ -309,6 +309,31 @@ export interface WorkspaceTask {
   permission_profile?: "standard" | "extended" | "host_dev";
   agentic_runtime?: AgenticRuntimeInfo;
   progress?: TaskProgressView;
+  web_source?: {
+    source_snapshot_id: string;
+    goal_contract: {
+      objective: string;
+      must_include: string[];
+      explicit_exclusions: string[];
+      quantity_requirement: string;
+      completeness_requirement: string;
+    };
+    delivery_spec: { formats: string[] };
+    runtime_binding: {
+      adapter_id: string;
+      adapter_version: string;
+      runtime_artifact: string;
+      protocol_version: string;
+      event_schema_version: string;
+      capability_digest: string;
+      external_run_id: string;
+      model_connection_id: string | null;
+      model_connection_version: string | null;
+      model: string;
+    };
+    created_at: string;
+    snapshot: SourceSnapshot;
+  } | null;
 }
 
 export interface VerificationAttemptReceipt {

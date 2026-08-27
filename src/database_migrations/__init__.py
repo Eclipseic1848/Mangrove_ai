@@ -104,7 +104,7 @@ class RestoreVerification:
 
 
 _PROFILE_HEADS = {
-    "webui": "webui_0005",
+    "webui": "webui_0006",
     "scheduler": "scheduler_0001",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
@@ -162,6 +162,11 @@ _PROFILE_REQUIRED_COLUMNS = {
             "artifact_id", "owner_id", "snapshot_id", "request_url",
             "final_url", "read_at", "content_sha256", "media_type",
             "size_bytes", "content_blob",
+        ),
+        "web_task_contracts": (
+            "owner_id", "task_id", "revision", "source_snapshot_id",
+            "goal_contract_json", "delivery_spec_json",
+            "runtime_binding_json", "created_at",
         ),
         "conversation_raw_turns": ("turn_id", "owner_id", "revision"),
         "conversation_context_deltas": ("delta_id", "turn_id", "payload_json"),

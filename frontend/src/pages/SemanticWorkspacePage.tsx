@@ -774,12 +774,44 @@ export function SemanticWorkspacePage() {
                     onSubmit={submitNew}
                     />
                   ) : (
-                    <WebSourceIntake ownerId={user?.user_id ?? "current"} />
+                    <WebSourceIntake
+                      ownerId={user?.user_id ?? "current"}
+                      allowLocalRuntime={canUseLocalPiRuntime}
+                      localModels={(models.data?.options ?? [])
+                        .filter((model) => model.provider === "local")
+                        .map((model) => ({ model: model.model, label: model.label }))}
+                      defaultLocalModel={
+                        models.data?.default?.provider === "local"
+                          ? models.data.default.model
+                          : null
+                      }
+                      modelConnections={verifiedModelConnections}
+                      defaultConnectionId={
+                        modelPreference.data?.preference?.available
+                          ? modelPreference.data.preference.connection_id
+                          : null
+                      }
+                      defaultConnectionModel={
+                        modelPreference.data?.preference?.available
+                          ? modelPreference.data.preference.model_id
+                          : null
+                      }
+                      onTaskCreated={async (created) => {
+                        setSelectedTaskId(created.task_id);
+                        setSelectedRevision(null);
+                        setNewTask(false);
+                        setRecycleBin(false);
+                        setLiveEvents([]);
+                        await queryClient.invalidateQueries({
+                          queryKey: ["semantic-workspace-tasks"],
+                        });
+                      }}
+                    />
                   )}
                   <p className="mt-2 text-center text-[11px] text-muted-foreground">
                     {sourceMode === "file"
                       ? "支持拖放、点击和粘贴文件；上传完成后会立即显示原件预览。"
-                      : "当前只读取一个精确公开页面；不会跟随链接或创建分析任务。"}
+                      : "当前只读取一个精确公开页面；来源冻结后可核对要求并启动正式任务。"}
                   </p>
                 </div>
 

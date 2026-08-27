@@ -55,12 +55,18 @@ export function getWorkspaceTask(
 export function createWorkspaceTask(payload: {
   objective_text: string;
   upload_ids: string[];
+  source_snapshot_id?: string;
+  must_include?: string[];
+  explicit_exclusions?: string[];
+  quantity_requirement?: string;
+  completeness_requirement?: string;
   output_formats: string[];
   provider?: string;
   model?: string | null;
   runtime_version?: "legacy" | "pi";
   permission_profile?: "standard";
   model_connection_id?: string | null;
+  model_connection_model?: string | null;
   external_api_confirmed?: boolean;
   capability_pack_refs?: Array<{
     pack_id: string;

@@ -343,13 +343,61 @@ class AgentKernel:
         """在创建外部 Run 前验证 Adapter 合同。"""
 
         await self._prepare_adapter_manifest()
-        if self._find_binding(request.user_id, request.task_id, request.revision):
-            raise AgentKernelError("同一 Run 已冻结 RuntimeBinding，不能重新启动或改绑")
-        binding = self._build_binding(
-            request,
-            external_run_id=self._adapter.new_external_run_id(),
+        binding = self._find_binding(
+            request.user_id,
+            request.task_id,
+            request.revision,
         )
-        self._persist_binding(request, binding, adopted_existing_run=False)
+        runtime_row = self._repo().get(
+            request.user_id,
+            request.task_id,
+            request.revision,
+        )
+        preallocated_run_id = (
+            str(runtime_row["run_id"])
+            if runtime_row is not None and runtime_row.get("run_id")
+            else None
+        )
+        if binding is not None:
+            binding_event = next(
+                (
+                    event
+                    for event in self._repo().list_events(
+                        request.user_id,
+                        request.task_id,
+                        request.revision,
+                    )
+                    if event["event_type"] == "kernel.binding.frozen"
+                ),
+                None,
+            )
+            preallocated = bool(
+                binding_event
+                and binding_event.get("details", {}).get("preallocated_run")
+            )
+            status = runtime_row.get("status") if runtime_row else None
+            if not preallocated or status not in {
+                RuntimeStatus.QUEUED,
+                RuntimeStatus.PREPARING,
+                RuntimeStatus.RUNNING,
+            }:
+                raise AgentKernelError(
+                    "同一 Run 已冻结 RuntimeBinding，不能重新启动或改绑"
+                )
+            self._assert_binding_matches_manifest(binding)
+            self._assert_request_matches_binding(request, binding)
+        if binding is None:
+            binding = self._build_binding(
+                request,
+                external_run_id=(
+                    preallocated_run_id or self._adapter.new_external_run_id()
+                ),
+            )
+            self._persist_binding(
+                request,
+                binding,
+                adopted_existing_run=preallocated_run_id is not None,
+            )
         key = (request.user_id, request.task_id, request.revision)
         self._quiescent.discard(key)
         try:
@@ -531,6 +579,33 @@ class AgentKernel:
                 "Runtime Adapter 未提供 CandidateVerification 绑定接缝"
             )
         bind(service)
+
+    async def prepare_binding(
+        self,
+        *,
+        model_connection_id: str | None,
+        model_connection_version: str | None,
+        model: str,
+    ) -> tuple[RuntimeBinding, AgentKernelCapabilityManifest]:
+        """在聚合事务前解析并校验不可变 Adapter 身份。"""
+
+        await self._prepare_adapter_manifest()
+        manifest = self._adapter.manifest
+        return (
+            RuntimeBinding(
+                adapter_id=manifest.adapter_id,
+                adapter_version=manifest.adapter_version,
+                runtime_artifact=manifest.runtime_artifact,
+                protocol_version=manifest.protocol_version,
+                event_schema_version=manifest.event_schema_version,
+                capability_digest=manifest.digest,
+                external_run_id=self._adapter.new_external_run_id(),
+                model_connection_id=model_connection_id,
+                model_connection_version=model_connection_version,
+                model=model,
+            ),
+            manifest,
+        )
 
     def _persisting_sink(
         self,

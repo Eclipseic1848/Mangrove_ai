@@ -60,6 +60,7 @@ class RuntimeTaskConfig(BaseModel):
     user_id: str = Field(min_length=1)
     task_id: str = Field(min_length=1)
     revision: int = Field(ge=1)
+    run_id: str | None = Field(default=None, min_length=1)
     runtime_version: RuntimeVersion = RuntimeVersion.LEGACY
     permission_profile: PermissionProfile = PermissionProfile.STANDARD
     model_connection_id: str | None = Field(
