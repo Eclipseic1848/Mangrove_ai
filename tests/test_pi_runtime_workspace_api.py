@@ -146,10 +146,14 @@ class FakePiRuntime:
     def bind_candidate_verification(self, service) -> None:
         self._candidate_verification = service
 
-    async def start(self, request, *, on_event):
+    async def start(self, request, *, on_event, run_id=None):
         self.start_calls += 1
         self.requests.append(request)
-        return await self._complete(request, on_event=on_event)
+        return await self._complete(
+            request,
+            on_event=on_event,
+            run_id=run_id,
+        )
 
     async def resume(self, request, *, checkpoint, on_event):
         self.requests.append(request)
@@ -364,7 +368,7 @@ class CountingFullVerifier:
 
 
 class ClarifyingPiRuntime(FakePiRuntime):
-    async def start(self, request, *, on_event):
+    async def start(self, request, *, on_event, run_id=None):
         self.start_calls += 1
         self.requests.append(request)
         await on_event(
@@ -382,7 +386,7 @@ class ClarifyingPiRuntime(FakePiRuntime):
         root.mkdir(parents=True, exist_ok=True)
         return PiRuntimeResult(
             status=RuntimeStatus.NEEDS_INPUT,
-            run_id="pi_run_clarify",
+            run_id=run_id or "pi_run_clarify",
             workspace_root=root,
             summary="你需要第一条记录，还是全部记录？",
             clarification={
@@ -395,7 +399,7 @@ class ClarifyingPiRuntime(FakePiRuntime):
 class CapabilityPiRuntime(FakePiRuntime):
     """模拟任务确实加载了冻结能力，验证可选阶段会按事实出现。"""
 
-    async def start(self, request, *, on_event):
+    async def start(self, request, *, on_event, run_id=None):
         self.start_calls += 1
         self.requests.append(request)
         await on_event(
@@ -417,7 +421,11 @@ class CapabilityPiRuntime(FakePiRuntime):
                 },
             )
         )
-        return await self._complete(request, on_event=on_event)
+        return await self._complete(
+            request,
+            on_event=on_event,
+            run_id=run_id,
+        )
 
 
 class BlockingPiRuntime:
@@ -430,7 +438,8 @@ class BlockingPiRuntime:
     def bind_candidate_verification(self, _service) -> None:
         return None
 
-    async def start(self, request, *, on_event):
+    async def start(self, request, *, on_event, run_id=None):
+        del run_id
         await on_event(
             RuntimeEvent(
                 event_type="agent.started",
@@ -441,7 +450,11 @@ class BlockingPiRuntime:
         await asyncio.Event().wait()
 
     async def resume(self, request, *, checkpoint, on_event):
-        return await self.start(request, on_event=on_event)
+        return await self.start(
+            request,
+            on_event=on_event,
+            run_id=checkpoint.run_id,
+        )
 
     async def cancel(
         self,
@@ -455,7 +468,8 @@ class BlockingPiRuntime:
 class PreFreezeInspectingPiRuntime(BlockingPiRuntime):
     """模拟 Pi 为理解目标先观察来源，随后才冻结覆盖契约。"""
 
-    async def start(self, request, *, on_event):
+    async def start(self, request, *, on_event, run_id=None):
+        del run_id
         await on_event(
             RuntimeEvent(
                 event_type="agent.started",
@@ -486,7 +500,7 @@ class EmptyOutputPiRuntime:
     def bind_candidate_verification(self, _service) -> None:
         return None
 
-    async def start(self, request, *, on_event):
+    async def start(self, request, *, on_event, run_id=None):
         root = (
             Path(settings.semantic_execution_root)
             / "empty-pi"
@@ -499,7 +513,7 @@ class EmptyOutputPiRuntime:
                 summary="已建立隔离工作区",
                 details={
                     "_checkpoint": {
-                        "run_id": "pi_run_empty",
+                        "run_id": run_id or "pi_run_empty",
                         "workspace_root": str(root),
                         "container_name": "mangrove-pi-empty",
                         "session_file": None,
@@ -510,7 +524,11 @@ class EmptyOutputPiRuntime:
         raise ValueError("Pi 未生成可重新打开的请求格式文件：json")
 
     async def resume(self, request, *, checkpoint, on_event):
-        return await self.start(request, on_event=on_event)
+        return await self.start(
+            request,
+            on_event=on_event,
+            run_id=checkpoint.run_id,
+        )
 
     async def cancel(
         self,
@@ -529,14 +547,22 @@ class AmbiguousProviderPiRuntime(EmptyOutputPiRuntime):
         "请由用户决定是否创建新版本重新执行"
     )
 
-    async def start(self, request, *, on_event):
+    async def start(self, request, *, on_event, run_id=None):
         try:
-            await super().start(request, on_event=on_event)
+            await super().start(
+                request,
+                on_event=on_event,
+                run_id=run_id,
+            )
         except ValueError as exc:
             raise ValueError(self.failure_message) from exc
 
     async def resume(self, request, *, checkpoint, on_event):
-        await self.start(request, on_event=on_event)
+        await self.start(
+            request,
+            on_event=on_event,
+            run_id=checkpoint.run_id,
+        )
 
 
 class ProviderTimeoutPiRuntime(AmbiguousProviderPiRuntime):
@@ -1176,6 +1202,12 @@ def test_pi_material_ambiguity_becomes_one_reopenable_question(
             created.json()["task_id"],
             "needs_input",
         )
+        answered = client.post(
+            f"/api/semantic-workspace/tasks/{task['task_id']}/answer",
+            json={"answer": "全部记录"},
+        )
+        assert answered.status_code == 200, answered.text
+        completed = _wait_for_delivery(client, task["task_id"])
 
     assert task["question"]["kind"] == "plan"
     assert task["question"]["allow_free_text"] is True
@@ -1183,6 +1215,14 @@ def test_pi_material_ambiguity_becomes_one_reopenable_question(
         "你需要第一条记录，还是全部记录？"
     )
     assert runtime.start_calls == 1
+    assert len(runtime.resume_calls) == 1
+    assert completed["status"] == "completed"
+    binding_events = [
+        event
+        for event in completed["agentic_runtime"]["events"]
+        if event["event_type"] == "kernel.binding.frozen"
+    ]
+    assert len(binding_events) == 1
 
 
 def test_empty_pi_workspace_is_not_reported_as_intermediate_result(
@@ -1589,6 +1629,8 @@ def test_pi_gray_entry_accepts_mixed_sources_and_exposes_candidate(
         assert "姓名,费用合计" in downloaded.content.decode(
             "utf-8-sig"
         )
+
+
         formal_output = task["delivery"]["outputs"][0]
         formal_download = client.get(formal_output["download_url"])
         assert formal_download.status_code == 200
@@ -1655,6 +1697,44 @@ def test_pi_gray_entry_accepts_mixed_sources_and_exposes_candidate(
         )
         assert blocked.status_code == 409
         assert "已禁止下载" in blocked.json()["detail"]
+
+
+def test_pi_workspace_persists_one_agent_kernel_event_stream(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    fake_runtime = FakePiRuntime()
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=fake_runtime,
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "读取附件并输出一个 CSV",
+                "upload_ids": [document],
+                "output_formats": ["csv"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task = _wait_for_delivery(client, created.json()["task_id"])
+
+    event_types = [
+        event["event_type"] for event in task["agentic_runtime"]["events"]
+    ]
+    assert event_types[0] == "kernel.binding.frozen"
+    assert event_types.count("agent.started") == 1
+    binding = task["agentic_runtime"]["events"][0]["details"]["binding"]
+    assert binding["external_run_id"] == task["agentic_runtime"]["run_id"]
+    assert binding["model"] == settings.llm_model_name
 
 
 def test_legacy_retry_endpoint_is_retired_without_attempt_or_delivery(
@@ -3694,6 +3774,16 @@ def test_manager_restart_resumes_persisted_pi_run_instead_of_starting_again(
     assert task["status"] == "completed"
     assert fake_runtime.start_calls == 0
     assert len(fake_runtime.resume_calls) == 1
+    binding_events = [
+        event
+        for event in repository.list_events("user-a", task_id, 1)
+        if event["event_type"] == "kernel.binding.frozen"
+    ]
+    assert len(binding_events) == 1
+    assert binding_events[0]["details"]["adopted_existing_run"] is True
+    assert binding_events[0]["details"]["binding"]["external_run_id"] == (
+        "pi_run_interrupted"
+    )
 
 
 def test_cancel_running_pi_task_calls_runtime_hard_stop(

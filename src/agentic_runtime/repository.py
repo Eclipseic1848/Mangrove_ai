@@ -348,6 +348,26 @@ class AgenticRuntimeRepository:
         assignments = ", ".join(f"{key}=?" for key in changes)
         values = [*changes.values(), user_id, task_id, revision]
         with _LOCK, self._conn() as conn:
+            if run_id is not None:
+                frozen_row = conn.execute(
+                    """
+                    SELECT details_json FROM agentic_runtime_events
+                    WHERE user_id=? AND task_id=? AND revision=?
+                      AND event_type='kernel.binding.frozen'
+                    ORDER BY sequence LIMIT 1
+                    """,
+                    (user_id, task_id, revision),
+                ).fetchone()
+                if frozen_row is not None:
+                    frozen_details = json.loads(
+                        frozen_row["details_json"] or "{}"
+                    )
+                    frozen_run_id = frozen_details.get("binding", {}).get(
+                        "external_run_id"
+                    )
+                    if frozen_run_id != run_id:
+                        # Run ID 是 RuntimeBinding 的一部分，冻结后只能写回同值。
+                        raise ValueError("冻结 RuntimeBinding 后 Run ID 不可修改")
             cursor = conn.execute(
                 f"""
                 UPDATE agentic_runtime_runs SET {assignments}
@@ -399,6 +419,107 @@ class AgenticRuntimeRepository:
             "event_type": event_type,
             "summary": summary,
             "details": details or {},
+            "created_at": created_at,
+        }
+
+    def freeze_runtime_binding(
+        self,
+        user_id: str,
+        task_id: str,
+        revision: int,
+        *,
+        run_id: str,
+        binding: dict[str, Any],
+        capability_manifest: dict[str, Any],
+        adopted_existing_run: bool,
+    ) -> dict[str, Any]:
+        """原子冻结 Run ID 与绑定事件；同一 revision 不允许改绑。"""
+
+        event_id = f"agent_event_{uuid.uuid4().hex[:16]}"
+        created_at = _now()
+        details = {
+            "binding": binding,
+            "capability_manifest": capability_manifest,
+            "adopted_existing_run": adopted_existing_run,
+        }
+        with _LOCK, self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT run_id FROM agentic_runtime_runs
+                WHERE user_id=? AND task_id=? AND revision=?
+                """,
+                (user_id, task_id, revision),
+            ).fetchone()
+            if row is None:
+                raise KeyError("Agentic Runtime 记录不存在或无权访问")
+            existing = conn.execute(
+                """
+                SELECT sequence, event_id, event_type, summary,
+                       details_json, created_at
+                FROM agentic_runtime_events
+                WHERE user_id=? AND task_id=? AND revision=?
+                  AND event_type='kernel.binding.frozen'
+                ORDER BY sequence LIMIT 1
+                """,
+                (user_id, task_id, revision),
+            ).fetchone()
+            if existing is not None:
+                frozen = json.loads(existing["details_json"] or "{}")
+                if frozen != details:
+                    raise ValueError("同一 Run 的 RuntimeBinding 不可修改")
+                return {
+                    "sequence": existing["sequence"],
+                    "event_id": existing["event_id"],
+                    "event_type": existing["event_type"],
+                    "summary": existing["summary"],
+                    "details": frozen,
+                    "created_at": existing["created_at"],
+                }
+            current_run_id = row["run_id"]
+            if adopted_existing_run:
+                if current_run_id != run_id:
+                    raise ValueError("历史 Run ID 与待接管绑定不一致")
+            elif current_run_id is not None:
+                # 新 Run 只能从未绑定状态进入；已有身份必须走显式历史接管。
+                raise ValueError("Runtime revision 已存在未证明的 Run 身份")
+            conn.execute(
+                """
+                UPDATE agentic_runtime_runs
+                SET run_id=?, updated_at=?
+                WHERE user_id=? AND task_id=? AND revision=?
+                """,
+                (run_id, created_at, user_id, task_id, revision),
+            )
+            summary = (
+                "已接管历史运行并冻结 RuntimeBinding"
+                if adopted_existing_run
+                else "已冻结本次运行的 RuntimeBinding"
+            )
+            cursor = conn.execute(
+                """
+                INSERT INTO agentic_runtime_events (
+                    event_id, user_id, task_id, revision, event_type,
+                    summary, details_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event_id,
+                    user_id,
+                    task_id,
+                    revision,
+                    "kernel.binding.frozen",
+                    summary,
+                    json.dumps(details, ensure_ascii=False),
+                    created_at,
+                ),
+            )
+            sequence = int(cursor.lastrowid)
+        return {
+            "sequence": sequence,
+            "event_id": event_id,
+            "event_type": "kernel.binding.frozen",
+            "summary": summary,
+            "details": details,
             "created_at": created_at,
         }
 
