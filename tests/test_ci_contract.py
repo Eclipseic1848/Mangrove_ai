@@ -279,3 +279,8 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     assert len(ignored) == 9
     assert all("*" not in fingerprint for fingerprint in ignored)
     assert all(fingerprint.count(":") >= 3 for fingerprint in ignored)
+
+
+def test_p0_04b_ruleset_rejects_a_failing_required_check() -> None:
+    # 临时探针故意失败，只用于证明 main 的 required check 会阻止合并；本分支绝不合并。
+    assert False
