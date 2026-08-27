@@ -367,6 +367,8 @@ def test_webui_0004_migrates_legacy_plaintext_and_backup_has_no_plaintext(
     _upgrade(database, "webui_0004")
     backup = tmp_path / "webui-after-secretref.db"
     shutil.copy2(database, backup)
+    # 先冻结 webui_0004 专属备份，再升到当前头供 Repository 失败关闭门使用。
+    _upgrade(database, "webui_0005")
 
     store = WebUIStore(str(database))
     assert store.config_all("global")["smtp_password"] == "legacy-smtp-secret-4400"
@@ -389,7 +391,7 @@ def test_webui_0004_migrates_legacy_plaintext_and_backup_has_no_plaintext(
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("webui_0004",)
+        ).fetchone() == ("webui_0005",)
         values = {
             row[0]
             for row in connection.execute(

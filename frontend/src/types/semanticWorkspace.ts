@@ -375,3 +375,53 @@ export interface WorkspaceStorage {
   retention: string;
   calculated_at: string;
 }
+
+export type SourceAcquisitionStatus =
+  | "acquiring"
+  | "succeeded"
+  | "failed"
+  | "canceled";
+
+export interface SourceArtifact {
+  artifact_id: string;
+  request_url: string;
+  final_url: string;
+  read_at: string;
+  content_sha256: string;
+  media_type: string;
+  size_bytes: number;
+  title: string;
+  text_preview: string;
+}
+
+export interface SourceSnapshot {
+  snapshot_id: string;
+  attempt_id: string;
+  allowed_scope: {
+    kind: "current_page";
+    normalized_url: string;
+  };
+  valid_page_count: number;
+  failed_page_count: number;
+  created_at: string;
+  artifacts: SourceArtifact[];
+}
+
+export interface SourceAcquisitionAttempt {
+  attempt_id: string;
+  idempotency_key: string;
+  request_url: string;
+  normalized_url: string;
+  allowed_scope: {
+    kind: "current_page";
+    normalized_url: string;
+  };
+  purpose: string;
+  status: SourceAcquisitionStatus;
+  started_at: string;
+  finished_at: string | null;
+  snapshot_id: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  snapshot: SourceSnapshot | null;
+}

@@ -38,7 +38,7 @@ from src.api.routes import (  # noqa: E402
     admin_routes, auth_routes, capability_governance, chat, config_routes, confirm, conversations, data_sources, data_tasks, downloads,
     feedback_routes, lessons_routes, library_dedup_routes, memory_routes, model_connections, model_relay, models, overview,
     semantic_bindings, semantic_deliveries, semantic_documents, semantic_executions, semantic_harness, semantic_plans,
-    semantic_workspace, document_tools,
+    semantic_workspace, source_acquisition, document_tools,
     settings_routes, tasks, templates_routes,
 )
 
@@ -101,6 +101,7 @@ for r in (auth_routes, conversations, chat, confirm, tasks, models, downloads,
           settings_routes, admin_routes, config_routes, feedback_routes, data_sources, data_tasks,
           semantic_plans, semantic_bindings, semantic_executions, semantic_documents,
           semantic_harness, semantic_deliveries, semantic_workspace,
+          source_acquisition,
           document_tools):
     app.include_router(r.router)
 app.include_router(capability_governance.admin_router)
