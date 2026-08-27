@@ -127,7 +127,8 @@ jobs:
       - name: 扫描提交历史中的 Secret
         run: |
           mkdir -p .artifacts/ci
-          /tmp/gitleaks git --redact=100 --report-format json \
+          /tmp/gitleaks git --config .gitleaks.toml \
+            --redact=100 --report-format json \
             --report-path .artifacts/ci/gitleaks.json .
       - name: 上传脱敏扫描证据
         if: always()

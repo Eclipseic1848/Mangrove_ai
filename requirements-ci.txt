@@ -1,5 +1,6 @@
 # P0-04A 快速门只安装被选中单元/契约测试直接需要的现有依赖。
 # 完整生产依赖拆分与漏洞治理属于 P0-03（#58）。
+alembic==1.18.3
 cryptography==50.0.1
 filelock==3.20.3
 httpx==0.28.1
@@ -15,3 +16,4 @@ pytest-asyncio==1.4.0
 pytest-randomly==4.1.0
 pytest-timeout==2.4.0
 python-dotenv==1.2.2
+SQLAlchemy==2.0.45

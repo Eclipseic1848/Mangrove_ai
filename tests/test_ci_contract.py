@@ -187,6 +187,7 @@ def test_minimum_ci_workflow_is_pinned_bounded_and_evidence_producing() -> None:
         "GITLEAKS_VERSION: '8.30.1'",
         "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
         "--redact",
+        "--config .gitleaks.toml",
         "if: always()",
         "path: .artifacts/ci",
     )
@@ -206,6 +207,15 @@ def test_minimum_ci_workflow_is_pinned_bounded_and_evidence_producing() -> None:
     assert "secrets." not in workflow
     assert "data/webui.db" not in workflow
     assert "provider" not in workflow.lower()
+
+
+def test_ci_subset_contains_migration_test_runtime_dependencies() -> None:
+    requirements = (PROJECT_ROOT / "requirements-ci.txt").read_text(
+        encoding="utf-8"
+    )
+
+    assert "alembic==1.18.3" in requirements
+    assert "SQLAlchemy==2.0.45" in requirements
 
 
 def test_heavy_ci_is_manual_only_and_never_receives_secrets() -> None:
@@ -237,9 +247,11 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     ]
 
     assert "useDefault = true" in config
-    assert config.count('targetRules = ["generic-api-key"]') == 3
-    assert config.count('condition = "AND"') == 3
+    assert config.count('targetRules = ["generic-api-key"]') == 4
+    assert config.count('condition = "AND"') == 4
     assert 'regexTarget = "line"' in config
+    assert '^src/database_migrations/schema_manifest\\.json$' in config
+    assert 'model_connection_secrets|runtime_config_secrets' in config
     assert "commits =" not in config
     assert "tests/.*" not in config
     assert "evals/.*" not in config
