@@ -30,11 +30,19 @@
 
 ```powershell
 Copy-Item .env.example .env
-py -3.13 -X utf8 -m pip install -r requirements.txt
+py -3.13 -X utf8 -m pip install `
+  -r requirements.txt `
+  -r requirements-collectors.txt `
+  -r requirements-dev.txt
 Set-Location frontend
-npm install
+npm ci
 npm run build
+Set-Location ..
 ```
+
+首次启动或 Schema 变更后，按 README 使用 `src.database_migrations` 对 `webui` 和 `scheduler`
+执行 `status` / `apply`，并为每次 `apply` 指定新的备份名。Repository 构造、服务 startup 和
+首次请求不得执行 DDL 或数据回填。
 
 公开仓库使用 `py -3.13 -X utf8 scripts/dev_reload.py` 启动后端；构建后的产品入口是
 `8088`，`5173` 仅用于前端开发。维护者本机的一键启停脚本不随仓库发布。可选外部采集器
@@ -57,11 +65,20 @@ dry-run；前端使用 `npm ci`、TypeScript 检查和生产构建；Gitleaks �
 服务、不占用端口、不读取生产数据库、不调用外部模型，也不使用生产 Secret。缓存只加速下载，
 锁文件、checksum 和测试结果仍是正确性来源。
 
+`main` 的 repository Ruleset 强制 PR、讨论解决、三项 strict minimum-ci 和禁止强推，且无
+bypass。当前只有一名维护者，审批数经明确决策设为 0；贡献者不得把它描述为已有独立人工
+review。第二位维护者加入后，审批数提升与验收必须作为单独的权限变更处理。
+
 本地快速门：
 
 ```powershell
 py -3.13 -X utf8 scripts/ci/check_requirement_consistency.py `
-  --base requirements.txt --subset requirements-ci.txt
+  --base requirements.txt `
+  --base requirements-collectors.txt `
+  --base requirements-dev.txt `
+  --base requirements-evaluation.txt `
+  --base requirements-gpu.txt `
+  --subset requirements-ci.txt
 py -3.13 -X utf8 scripts/ci/check_utf8.py
 py -3.13 -X utf8 -m pytest tests/test_ci_contract.py `
   tests/test_data_prep_contracts.py tests/test_candidate_verification_migration.py
@@ -75,9 +92,10 @@ npm run build
 网络无残留。真实 Provider、生产迁移、Secret 使用、发布和远端规则变更属于人工授权门，不得
 因快速门或完整门通过而自动执行。
 
-GitHub 的 `heavy-ci-manual` 只允许维护者人工选择完整回归、G1 冻结契约或 Docker 构建，不在
-PR、push 或定时事件自动运行，也不接收生产 Secret。真实 G1 资格运行、真实 Provider 和生产
-环境验收仍需先确认精确数据、连接、费用与恢复边界，不能用该 workflow 替代。
+GitHub 的 `heavy-ci-manual` 只允许维护者人工选择完整回归、G1 冻结契约、五组依赖干净安装/
+import smoke 或 Docker 构建，不在 PR、push 或定时事件自动运行，也不接收生产 Secret。每个
+overlay 都与 runtime 一起安装。真实 G1 资格运行、真实 Provider 和生产环境验收仍需先确认
+精确数据、连接、费用与恢复边界，不能用该 workflow 替代。
 
 CI 上传的 `.artifacts/ci` 只包含依赖/构建日志、UTF-8/依赖 JSON、JUnit 和已脱敏的 Gitleaks
 报告，保留 14 天；不得把用户文件、数据库、原始工具日志或 Secret 放入证据制品。自动化测试
@@ -88,6 +106,11 @@ CI 上传的 `.artifacts/ci` 只包含依赖/构建日志、UTF-8/依赖 JSON、
 - 使用清晰的提交说明，例如 `feat: ...`、`fix: ...`、`docs: ...`、`test: ...`。
 - PR 描述至少包括：问题、范围、方案、安全/数据影响、验证证据和未完成项。
 - 不要强推维护者分支，不要移动既有标签。
+- Schema 变更必须新增不可变 revision、更新 revision/schema manifest，并提供空库、Legacy、
+  重放、失败注入、备份/恢复证据；不得改写已经执行的 revision。
+- 依赖变更必须进入唯一职责组，并验证一致性、干净解析、`pip check`、import smoke 和与风险
+  相称的安全审计。
+- Secret 变更不得把原值写入业务表、日志、异常、审计或证据制品。
 - 若变更改变架构决策、领域词汇或当前状态，应分别更新 ADR、`CONTEXT.md` 或
   `docs/status/current.md`，不要在多个文件重复维护滚动状态。
 

@@ -40,9 +40,13 @@
 ## 4. Git 与发布边界
 
 - 当前公开开发分支为 `main`；首次公开快照承接 `v0.0.8` 的开发能力，但没有创建同名标签或封板。
-- `v0.0.4` 是稳定封板标签，不得移动或回写。
+- `v0.0.4` 只表示历史稳定版本语义，不能据此推断远端仍有同名 Tag 或 Release；Tag/Release
+  必须现场查询，未经授权不得创建、移动或回写。
 - 只有用户明确授权才能创建分支、标签、版本、PR、Release、提交或推送。
 - 公开开发远端为 `origin`（`Eclipseic1848/Mangrove_ai`）；执行前仍必须现场核对，不能套用历史记忆。
+- `main` 当前由 repository Ruleset 强制 PR、讨论解决、strict 三项 minimum-ci 与禁止强推，
+  `bypass_actors=[]`。仓库只有一名维护者，经用户确认采用审批数 0 的单维护者模式；不得误述为
+  已有独立人工审批。未来提升审批数必须先有第二位真人维护者并另行授权、复验。
 - 工作树可能包含用户或其他任务改动。使用明确文件允许列表，禁止 `git add .`。
 - 禁止 `git reset --hard`、`git clean`、强推或未经确认覆盖本地改动。
 - 本机设置、绝对路径、Secret、运行数据和本地审计报告不得进入版本控制。
@@ -57,6 +61,12 @@
 - 只有 `delivery_published` 且通过完整性/QA 的 `output_id` 是正式交付。
 - Candidate、`eligible_for_delivery`、中间 AST、Parquet 或验证通过状态都不能冒充正式交付。
 - TaskRevision、来源快照、连接版本、外发确认、能力 digest 和 Owner 隔离必须冻结且失败关闭。
+- Mangrove 自有 Schema 只允许经 `src/database_migrations` 显式迁移；Repository 和 startup
+  只验证版本并失败关闭。LangGraph checkpoint 与用户连接器数据库不属于该迁移体系。
+- `runtime_config` 的 25 个 `secret=True` 键只保存 Owner/配置键绑定的 SecretRef，原值由共享
+  Vault 密文边界持有；生产原库迁移、旧备份处置和 Secret/Key 轮换仍是独立人工门。
+- 依赖职责分为 runtime、collectors、dev、evaluation、gpu；生产镜像只安装 runtime 与
+  collectors。GPU overlay 当前为空，不得无证据加入 CUDA/Triton。
 - 普通用户、管理员、超级管理员是产品角色；“高级用户”不是权限角色。
 - 管理员可查看跨 Owner 的任务管理元数据；读取个人业务正文必须显式说明原因并产生审计记录。
 
@@ -70,6 +80,10 @@
 - 能力目录与治理：`src/capability_catalog/`、`src/capability_governance/`
 - 任务级能力宿主：`src/capability_host/`
 - 模型连接：`src/model_connections/`
+- 显式数据库迁移：`src/database_migrations/`
+- 配置 SecretRef：`src/config/secret_refs.py`
+- 依赖分组：`requirements.txt`、`requirements-collectors.txt`、`requirements-dev.txt`、
+  `requirements-evaluation.txt`、`requirements-gpu.txt`
 - 测试：`tests/`，以及仍由 `pytest.ini` 收集的 `scripts/test_*.py`
 - 当前状态：`docs/status/current.md`
 
@@ -116,7 +130,9 @@
   迁移演练（备份/前向/重放/零改写/恢复）、完整回归 419 passed、浏览器验收 16 项全过、
   AC1-AC7 对照 ✅；PR #34 合并、Issue CLOSED）。AC-07 主线 #9-#17 全部完成并关闭。
 - AC-06 两项历史 `admin_gray_only` 兼容包只是过渡例外，不扩大普通用户权限。
-- 30 项泛化集、完整 PG-05、真实外部 Provider 安全端到端、远程 MCP 与 8B 仍未完成。
+- G1 独立泛化、G2 PG-05、G3 默认切换和 G4 外部 Provider 安全端到端已有正式证据；这些结论
+  不等于目标 Linux/GPU 服务器部署验收、远程 MCP/Registry、平台能力普通用户开放或稳定
+  生产 Release，后四项仍未完成。
 
 ## 8. 文档职责
 

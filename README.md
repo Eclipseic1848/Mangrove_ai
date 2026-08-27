@@ -37,8 +37,9 @@ Mangrove 是一个统一数据任务平台。用户描述目标，平台负责�
 > [`docs/status/current.md`](docs/status/current.md) 为准。
 
 > [!NOTE]
-> 企业 API、业务系统、本地路径、对象存储、远程 MCP、普通用户平台能力开放、完整 PG-05
-> 和 Linux/多人生产门仍在规划或后续验证中。
+> 企业 API、业务系统、本地路径、对象存储、远程 MCP、普通用户平台能力开放和目标
+> Linux/多人生产门仍在规划或后续验证中。G2 的完整 PG-05 已有工程与代表任务证据，但不
+> 等于上述部署、受众开放或稳定 Release 已完成。
 
 ## 当前仓库具备什么能力
 
@@ -78,17 +79,44 @@ Agent 可以动态选择路线，但不能绕过这些边界。
 
 ```powershell
 Copy-Item .env.example .env
-py -3.13 -X utf8 -m pip install -r requirements.txt
+py -3.13 -X utf8 -m pip install `
+  -r requirements.txt `
+  -r requirements-collectors.txt
 
 Set-Location frontend
-npm install
+npm ci
 npm run build
 Set-Location ..
 ```
 
 按需在 `.env` 中配置模型与采集账号。真实凭据、Cookie、数据库、日志和任务制品不得提交。
 
-### 2. 启动统一入口
+### 2. 显式初始化数据库
+
+Mangrove 自有 Schema 只通过中央迁移命令变更。首次启动和升级既有数据库前，都先查看状态并
+使用唯一备份名显式迁移：
+
+```powershell
+New-Item -ItemType Directory -Force data/backups | Out-Null
+$migrationStamp = Get-Date -Format yyyyMMdd-HHmmss
+
+py -3.13 -X utf8 -m src.database_migrations status `
+  --profile webui --database data/webui.db
+py -3.13 -X utf8 -m src.database_migrations apply `
+  --profile webui --database data/webui.db `
+  --backup "data/backups/webui-before-$migrationStamp.db"
+
+py -3.13 -X utf8 -m src.database_migrations status `
+  --profile scheduler --database data/scheduler.db
+py -3.13 -X utf8 -m src.database_migrations apply `
+  --profile scheduler --database data/scheduler.db `
+  --backup "data/backups/scheduler-before-$migrationStamp.db"
+```
+
+`apply` 会生成备份、SHA 和 Receipt；服务启动只验证 Schema，不会静默迁移。不要覆盖既有备份。
+真实生产数据库迁移、恢复覆盖、旧备份处置和 Secret/Key 轮换不属于快速开始动作。
+
+### 3. 启动统一入口
 
 ```powershell
 py -3.13 -X utf8 scripts/dev_reload.py
@@ -101,7 +129,7 @@ py -3.13 -X utf8 scripts/dev_reload.py
 > `http://localhost:5173` 只用于前端热更新，不是统一产品入口。需要前端开发服务时，在第二个
 > 终端进入 `frontend/` 后运行 `npm run dev -- --host 0.0.0.0`。
 
-### 3. 按需准备采集组件
+### 4. 按需准备采集组件
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
@@ -123,15 +151,26 @@ Docker Desktop 用于 Pi Runtime、Capability Host 与隔离验证。维护者�
 ### 安装测试依赖
 
 ```powershell
-py -3.13 -X utf8 -m pip install -r requirements.txt
+py -3.13 -X utf8 -m pip install `
+  -r requirements.txt `
+  -r requirements-collectors.txt `
+  -r requirements-dev.txt
 py -3.13 -X utf8 -m playwright install chromium
 ```
+
+离线评测另加 `-r requirements-evaluation.txt`。`requirements-gpu.txt` 当前是有意为空的
+overlay：项目没有进程内 GPU workload，不应从历史开发机复制 CUDA/Triton pin。
 
 ### 运行门禁
 
 ```powershell
 py -3.13 -X utf8 scripts/ci/check_requirement_consistency.py `
-  --base requirements.txt --subset requirements-ci.txt
+  --base requirements.txt `
+  --base requirements-collectors.txt `
+  --base requirements-dev.txt `
+  --base requirements-evaluation.txt `
+  --base requirements-gpu.txt `
+  --subset requirements-ci.txt
 py -3.13 -X utf8 scripts/ci/check_utf8.py
 py -3.13 -X utf8 -m pytest tests/test_ci_contract.py `
   tests/test_data_prep_contracts.py tests/test_candidate_verification_migration.py
@@ -142,8 +181,12 @@ npm run build
 ```
 
 GitHub 的 `minimum-ci` 还会用固定版本 Gitleaks 扫描完整提交历史，并上传脱敏日志、JSON 与
-JUnit 证据。完整 pytest、浏览器 E2E、Docker 构建和 G1 冻结契约只能人工触发
-`heavy-ci-manual`；真实样例和外部模型继续走独立人工授权门，任何 CI 都不读取生产 Secret。
+JUnit 证据。`heavy-ci-manual` 只能由维护者人工选择完整回归、G1 冻结契约、五组依赖干净安装
+或 Docker 构建；真实样例、外部模型、生产迁移和 Secret 继续走独立人工授权门，任何 CI 都不
+读取生产 Secret。
+`main` 由 active Ruleset 强制 PR、讨论解决、strict `backend-fast` / `frontend-build` /
+`secret-scan` 和禁止强推，且没有 bypass。当前仓库只有一名维护者，经明确决策审批数为 0；
+这不代表已有独立人工审查，未来加入第二位维护者后应另行提升并复验审批门。
 详细分层见 `CONTRIBUTING.md`。自动化测试通过不等于用户验收或生产资格。
 
 ## 可选第三方组件
@@ -169,6 +212,10 @@ JUnit 证据。完整 pytest、浏览器 E2E、Docker 构建和 G1 冻结契约�
 - `data/lessons/`、`data/templates/` 和 `memory/` 中的运行学习结果或个人偏好默认只保存在本机。
 - 不要整体删除 `data/`、`downloads/` 或外部采集器的浏览器登录态。
 - 外部发布、数据外发、权限扩大、凭据处理和不可逆删除均需要人工确认。
+- Mangrove 自有数据库结构只通过 `src.database_migrations` 显式迁移；应用启动只验证版本并在
+  不兼容时失败关闭。
+- 配置中心标记为 `secret=True` 的值只在业务表保存 Owner/配置键绑定的 SecretRef，原值由共享
+  Vault 密文边界持有。副本迁移通过不代表生产原库已经迁移，也不授权轮换或销毁密钥。
 
 发现安全问题时，请阅读 [`SECURITY.md`](SECURITY.md) 并使用 GitHub 私密漏洞报告；不要在
 公开 Issue、Discussion、PR 或日志中披露漏洞细节、用户数据或凭据。
