@@ -72,10 +72,73 @@ def test_utf8_default_scan_covers_extensionless_and_dotfiles(tmp_path) -> None:
 
 
 def test_ci_requirements_must_match_authoritative_pins(tmp_path) -> None:
-    base = tmp_path / "requirements.txt"
+    runtime = tmp_path / "requirements.txt"
+    development = tmp_path / "requirements-dev.txt"
     subset = tmp_path / "requirements-ci.txt"
-    base.write_text("pydantic==2.12.5\npytest==9.1.1\n", encoding="utf-8")
-    subset.write_text("pytest==9.1.1\n", encoding="utf-8")
+    runtime.write_text(
+        'pydantic==2.12.5\nuvloop==0.22.1; sys_platform != "win32"\n',
+        encoding="utf-8",
+    )
+    development.write_text("pytest==9.1.1\n", encoding="utf-8")
+    subset.write_text("pydantic==2.12.5\npytest==9.1.1\n", encoding="utf-8")
+
+    accepted = _run(
+        "scripts/ci/check_requirement_consistency.py",
+        "--base",
+        str(runtime),
+        "--base",
+        str(development),
+        "--subset",
+        str(subset),
+    )
+    development.write_text("pydantic==2.11.0\npytest==9.1.1\n", encoding="utf-8")
+    rejected = _run(
+        "scripts/ci/check_requirement_consistency.py",
+        "--base",
+        str(runtime),
+        "--base",
+        str(development),
+        "--subset",
+        str(subset),
+    )
+
+    assert accepted.returncode == 0
+    assert json.loads(accepted.stdout)["matched_requirements"] == 2
+    assert rejected.returncode == 1
+    assert "跨分组版本冲突" in rejected.stderr
+
+
+def test_authoritative_requirements_reject_non_exact_pins(tmp_path) -> None:
+    subset = tmp_path / "requirements-ci.txt"
+    subset.write_text("pydantic==2.12.5\n", encoding="utf-8")
+
+    for invalid in ("example>=1\n", "example\n", "--index-url https://example.invalid\n"):
+        base = tmp_path / "requirements.txt"
+        base.write_text(f"pydantic==2.12.5\n{invalid}", encoding="utf-8")
+        rejected = _run(
+            "scripts/ci/check_requirement_consistency.py",
+            "--base",
+            str(base),
+            "--subset",
+            str(subset),
+        )
+
+        assert rejected.returncode == 1
+        assert "权威清单只允许精确版本或安全的 -c/-r 引用" in rejected.stderr
+
+
+def test_authoritative_requirement_references_must_be_safe_and_exist(tmp_path) -> None:
+    base = tmp_path / "requirements.txt"
+    constraints = tmp_path / "constraints.txt"
+    included = tmp_path / "included.txt"
+    subset = tmp_path / "requirements-ci.txt"
+    constraints.write_text("shared==1.0\n", encoding="utf-8")
+    included.write_text("extra==2.0\n", encoding="utf-8")
+    subset.write_text("pydantic==2.12.5\n", encoding="utf-8")
+    base.write_text(
+        "pydantic==2.12.5\n-c constraints.txt\n-r included.txt\n",
+        encoding="utf-8",
+    )
 
     accepted = _run(
         "scripts/ci/check_requirement_consistency.py",
@@ -84,19 +147,19 @@ def test_ci_requirements_must_match_authoritative_pins(tmp_path) -> None:
         "--subset",
         str(subset),
     )
-    subset.write_text("pytest==9.0.0\n", encoding="utf-8")
-    rejected = _run(
-        "scripts/ci/check_requirement_consistency.py",
-        "--base",
-        str(base),
-        "--subset",
-        str(subset),
-    )
-
     assert accepted.returncode == 0
-    assert json.loads(accepted.stdout)["matched_requirements"] == 1
-    assert rejected.returncode == 1
-    assert "pytest==9.0.0" in rejected.stderr
+
+    for unsafe in ("-c missing.txt\n", "-r ../outside.txt\n", f"-c {constraints.resolve()}\n"):
+        base.write_text(f"pydantic==2.12.5\n{unsafe}", encoding="utf-8")
+        rejected = _run(
+            "scripts/ci/check_requirement_consistency.py",
+            "--base",
+            str(base),
+            "--subset",
+            str(subset),
+        )
+        assert rejected.returncode == 1
+        assert "依赖引用" in rejected.stderr
 
 
 def test_minimum_ci_workflow_is_pinned_bounded_and_evidence_producing() -> None:

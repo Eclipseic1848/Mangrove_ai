@@ -30,6 +30,7 @@ FROM python:3.13-slim-bookworm@sha256:9d7f287598e1a5a978c015ee176d8216435aaf335e
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
@@ -42,19 +43,26 @@ RUN --mount=type=cache,id=phase4b-apt-lists,target=/var/lib/apt/lists,sharing=lo
         build-essential \
         git
 
-COPY requirements.txt ./
-COPY docker/phase4b/constraints.txt docker/phase4b/constraints.txt
+COPY requirements.txt requirements-collectors.txt ./
 RUN --mount=type=cache,id=phase4b-pip-cache,target=/root/.cache/pip,sharing=locked \
     python -m venv /opt/venv \
-    && python -m pip install -r requirements.txt -c docker/phase4b/constraints.txt
+    && python -m pip install --upgrade pip==26.2 \
+    && python -m pip install -r requirements.txt -r requirements-collectors.txt \
+    && python -m playwright install chromium
 
 FROM python:3.13-slim-bookworm@sha256:9d7f287598e1a5a978c015ee176d8216435aaf335ed69ac3c38dd1bbb10e8d64 AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
+    CAPABILITY_SUPPLY_CHAIN_TOOL_ROOT=/opt/mangrove-tools \
+    CAPABILITY_SUPPLY_CHAIN_LOCK_PATH=/app/config/supply-chain-tools.linux-amd64.lock.json \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PATH="/opt/venv/bin:$PATH"
 
 WORKDIR /app
+
+COPY --from=python-build /opt/venv /opt/venv
+COPY --from=python-build /ms-playwright /ms-playwright
 
 RUN --mount=type=cache,id=phase4b-apt-lists,target=/var/lib/apt/lists,sharing=locked \
     --mount=type=cache,id=phase4b-apt-cache,target=/var/cache/apt,sharing=locked \
@@ -67,12 +75,13 @@ RUN --mount=type=cache,id=phase4b-apt-lists,target=/var/lib/apt/lists,sharing=lo
         libglib2.0-0 \
         libgomp1 \
         libmagic1 \
-        poppler-utils
+        poppler-utils \
+    && python -m playwright install-deps chromium
 
-COPY --from=python-build /opt/venv /opt/venv
 COPY --from=toolchain-build /opt/mangrove-tools /opt/mangrove-tools
 
-RUN groupadd --gid 10001 mangrove \
+RUN chmod -R a+rX /ms-playwright \
+    && groupadd --gid 10001 mangrove \
     && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/mangrove mangrove \
     && mkdir -p /app/data /app/logs \
     && chown -R 10001:10001 /app/data /app/logs /home/mangrove
@@ -87,4 +96,5 @@ RUN chmod 0555 /app/docker/phase4b/entrypoint.sh
 
 USER 10001:10001
 EXPOSE 8088
+ENTRYPOINT ["/app/docker/phase4b/entrypoint.sh"]
 CMD ["python", "-m", "src.api.main"]

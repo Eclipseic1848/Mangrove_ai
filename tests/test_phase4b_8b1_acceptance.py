@@ -416,9 +416,6 @@ def test_acceptance_compose_is_isolated_and_non_root() -> None:
 
 def test_clean_image_is_pinned_built_and_runs_as_non_root() -> None:
     dockerfile = Path("docker/phase4b/Dockerfile").read_text(encoding="utf-8")
-    constraints = Path("docker/phase4b/constraints.txt").read_text(
-        encoding="utf-8"
-    )
 
     assert (
         "FROM node:22-bookworm-slim@sha256:"
@@ -433,8 +430,12 @@ def test_clean_image_is_pinned_built_and_runs_as_non_root() -> None:
     assert "RUN npm ci && npm run build" in dockerfile
     assert (
         "python -m pip install -r requirements.txt "
-        "-c docker/phase4b/constraints.txt"
+        "-r requirements-collectors.txt"
     ) in dockerfile
+    python_build = dockerfile.split(" AS python-build", maxsplit=1)[1].split(
+        " AS runtime", maxsplit=1
+    )[0]
+    assert "python -m pip install --upgrade pip==26.2" in python_build
     assert "COPY src ./src" in dockerfile
     assert "COPY --from=frontend-build /build/frontend/dist ./frontend/dist" in dockerfile
     assert "COPY . ." not in dockerfile
@@ -442,11 +443,7 @@ def test_clean_image_is_pinned_built_and_runs_as_non_root() -> None:
     assert "mkdir -p /app/data /app/logs" in dockerfile
     assert "USER 10001:10001" in dockerfile
     assert 'CMD ["python", "-m", "src.api.main"]' in dockerfile
-    assert constraints.splitlines() == [
-        "chardet==5.2.0",
-        "playwright==1.60.0",
-        "yt-dlp==2026.7.4",
-    ]
+    assert "constraints.txt" not in dockerfile
 
 
 def test_system_dependency_downloads_are_cached_retried_and_not_in_runtime() -> None:
@@ -472,6 +469,7 @@ def test_docker_context_is_allowlisted_and_excludes_local_secrets() -> None:
     assert rules[0] == "**"
     assert {
         "!requirements.txt",
+        "!requirements-collectors.txt",
         "!frontend/",
         "!frontend/**",
         "!src/",
@@ -483,7 +481,6 @@ def test_docker_context_is_allowlisted_and_excludes_local_secrets() -> None:
         "!docker/",
         "!docker/phase4b/",
         "!docker/phase4b/Dockerfile",
-        "!docker/phase4b/constraints.txt",
     }.issubset(rules)
     assert {
         "frontend/node_modules/",
@@ -505,14 +502,19 @@ def test_clean_requirements_satisfy_pdfplumber_pillow_floor() -> None:
     requirements = Path("requirements.txt").read_text(encoding="utf-8").splitlines()
 
     assert "pdfplumber==0.11.10" in requirements
-    assert "pillow==12.2.0" in requirements
+    assert "pillow==12.3.0" in requirements
 
 
 def test_clean_requirements_resolve_crawler_lxml_ranges() -> None:
-    requirements = Path("requirements.txt").read_text(encoding="utf-8").splitlines()
+    requirements = (
+        Path("requirements.txt").read_text(encoding="utf-8").splitlines()
+        + Path("requirements-collectors.txt")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    )
 
     assert "crawl4ai==0.9.1" in requirements
-    assert "scrapling==0.4.9" in requirements
+    assert "scrapling[fetchers]==0.4.9" in requirements
     assert "lxml==6.1.1" in requirements
     assert "orjson==3.11.8" in requirements
 
@@ -565,6 +567,7 @@ def test_linux_image_uses_separate_digest_locked_supply_chain_tools() -> None:
 
 def test_clean_image_fetches_and_copies_digest_locked_linux_tools() -> None:
     dockerfile = Path("docker/phase4b/Dockerfile").read_text(encoding="utf-8")
+    runtime_stage = dockerfile.split(" AS runtime", maxsplit=1)[1]
     compose = yaml.safe_load(
         Path("docker/phase4b/compose.acceptance.yaml").read_text(encoding="utf-8")
     )
@@ -582,6 +585,13 @@ def test_clean_image_fetches_and_copies_digest_locked_linux_tools() -> None:
         "COPY --from=toolchain-build /opt/mangrove-tools /opt/mangrove-tools"
         in dockerfile
     )
+    assert (
+        "CAPABILITY_SUPPLY_CHAIN_TOOL_ROOT=/opt/mangrove-tools" in runtime_stage
+    )
+    assert (
+        "CAPABILITY_SUPPLY_CHAIN_LOCK_PATH="
+        "/app/config/supply-chain-tools.linux-amd64.lock.json" in runtime_stage
+    )
     assert environment["CAPABILITY_SUPPLY_CHAIN_TOOL_ROOT"] == "/opt/mangrove-tools"
     assert environment["CAPABILITY_SUPPLY_CHAIN_LOCK_PATH"] == (
         "/app/config/supply-chain-tools.linux-amd64.lock.json"
@@ -596,6 +606,8 @@ def test_acceptance_container_bootstraps_managed_roots_and_uses_readiness() -> N
     environment = app["environment"]
     health_script = " ".join(app["healthcheck"]["test"])
     dockerfile = Path("docker/phase4b/Dockerfile").read_text(encoding="utf-8")
+    entrypoint = Path("docker/phase4b/entrypoint.sh").read_bytes()
+    attributes = Path(".gitattributes").read_text(encoding="utf-8").splitlines()
 
     assert environment["DATA_PREP_UPLOAD_ROOT"] == "/app/data/uploads"
     assert environment["SEMANTIC_EXECUTION_ROOT"] == (
@@ -617,6 +629,10 @@ def test_acceptance_container_bootstraps_managed_roots_and_uses_readiness() -> N
     assert environment["LLM_DEFAULT_PROVIDER"] == "local"
     assert app["entrypoint"] == ["/app/docker/phase4b/entrypoint.sh"]
     assert app["command"] == ["python", "-m", "src.api.main"]
+    assert 'ENTRYPOINT ["/app/docker/phase4b/entrypoint.sh"]' in dockerfile
+    assert entrypoint.startswith(b"#!/bin/sh\n")
+    assert b"\r\n" not in entrypoint
+    assert "docker/phase4b/entrypoint.sh text eol=lf" in attributes
     assert "/api/readiness" in health_script
     assert "/api/health" not in health_script
     assert "COPY docker/phase4b/entrypoint.sh" in dockerfile

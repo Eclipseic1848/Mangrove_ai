@@ -1,0 +1,4 @@
+# 离线评测专用，不得进入生产镜像。
+docxtpl==0.20.2
+jiwer==4.0.0
+markitdown[docx,pdf,pptx,xlsx]==0.1.6
