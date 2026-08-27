@@ -1,10 +1,4 @@
-# Phase 4B 批次 0 评测专用依赖。
+# Phase 4B 历史兼容入口；精确版本只在运行时与评测分组中维护一次。
 # 必须安装到独立虚拟环境，不并入 Mangrove 主服务解释器。
-duckdb==1.5.5
-polars==1.43.0
-pandera==0.32.1
-deepdiff==9.1.0
-docxtpl==0.20.2
-reportlab==5.0.0
-xlsxwriter==3.2.9
-markitdown[docx,pdf,pptx,xlsx]==0.1.6
+-r requirements.txt
+-r requirements-evaluation.txt

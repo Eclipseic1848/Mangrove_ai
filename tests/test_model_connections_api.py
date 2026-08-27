@@ -19,6 +19,7 @@ from src.model_connections import ConnectionBroker, ConnectionError, GrantError
 from src.model_connections.storage import ModelConnectionRepository
 from src.model_connections.vault import FernetCredentialVault
 from src.config.settings import settings
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _connection_version(
@@ -102,7 +103,7 @@ def test_authenticated_user_sees_seven_small_provider_presets_without_internal_e
 
 def test_user_sets_isolated_default_connection_and_model(tmp_path):
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -158,7 +159,7 @@ def test_user_configures_and_lists_personal_preset_connection(tmp_path):
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -210,7 +211,7 @@ def test_user_creates_two_named_personal_connections_for_same_provider(tmp_path)
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -303,7 +304,7 @@ def test_personal_connection_keeps_independent_model_results_and_available_defau
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(db_path)),
+        repository=ModelConnectionRepository(str(migrated_webui_database(db_path))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -367,7 +368,7 @@ def test_all_recommended_models_failing_does_not_create_connection_or_secret(
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(db_path)),
+        repository=ModelConnectionRepository(str(migrated_webui_database(db_path))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -454,7 +455,7 @@ def test_each_model_validation_failure_has_stable_product_status(
         return httpx.Response(200, json={"unexpected": "private"})
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -498,7 +499,7 @@ def test_user_retries_failed_model_changes_default_and_controls_model_state(tmp_
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -595,7 +596,7 @@ def test_admin_publishes_provider_preset_with_required_key(tmp_path):
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -666,7 +667,7 @@ def test_manager_publishes_multiple_platform_connections_with_partial_models(
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -726,7 +727,7 @@ async def test_only_manager_controls_platform_models_and_disabling_revokes_grant
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -840,7 +841,7 @@ def test_only_admin_roles_can_publish_an_exact_lan_model_connection(
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
     )
@@ -894,7 +895,7 @@ def test_only_admin_roles_can_publish_an_exact_lan_model_connection(
 
 def test_public_custom_connection_requires_api_key(tmp_path):
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -930,7 +931,7 @@ def test_exact_lan_connection_may_use_service_without_api_key(tmp_path):
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
     )
@@ -960,7 +961,7 @@ def test_personal_connection_cannot_be_deleted_or_seen_by_another_user(tmp_path)
         )
     )
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=transport,
         resolver=lambda _host: ["8.8.8.8"],
@@ -991,7 +992,7 @@ def test_personal_connection_cannot_be_deleted_or_seen_by_another_user(tmp_path)
 
 def test_failed_provider_verification_does_not_persist_connection(tmp_path):
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -1026,7 +1027,7 @@ def test_managed_connection_rejects_cloud_metadata_before_transport(tmp_path):
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
     )
@@ -1060,7 +1061,7 @@ def test_managed_public_endpoint_requires_https_before_transport(tmp_path):
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -1086,7 +1087,7 @@ def test_managed_public_endpoint_requires_https_before_transport(tmp_path):
 def test_personal_secret_is_encrypted_and_replacement_removes_old_secret(tmp_path):
     db_path = tmp_path / "webui.db"
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(db_path)),
+        repository=ModelConnectionRepository(str(migrated_webui_database(db_path))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -1167,8 +1168,8 @@ def test_old_single_connection_database_upgrades_idempotently(tmp_path):
             """
         )
 
-    repository = ModelConnectionRepository(str(db_path))
-    ModelConnectionRepository(str(db_path))
+    repository = ModelConnectionRepository(str(migrated_webui_database(db_path)))
+    ModelConnectionRepository(str(migrated_webui_database(db_path)))
     created = repository.create_personal(
         owner_user_id="user-a",
         preset_id="deepseek",
@@ -1215,6 +1216,7 @@ def test_legacy_user_key_import_is_idempotent_and_never_calls_provider(
 ):
     monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "webui.db"))
     auth_mod._store = None
+    migrated_webui_database(settings.webui_db_path)
     store = auth_mod.get_store()
     store.config_set(
         "user-a", "deepseek_api_key", "legacy-personal-secret-7788", "user-a"
@@ -1227,7 +1229,7 @@ def test_legacy_user_key_import_is_idempotent_and_never_calls_provider(
         return httpx.Response(500)
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -1265,7 +1267,7 @@ def test_imported_lan_connection_without_key_can_be_verified(tmp_path):
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["192.168.50.10"],
@@ -1302,7 +1304,7 @@ def test_imported_lan_connection_without_key_can_be_verified(tmp_path):
 
 def test_imported_official_preset_can_retry_through_clash_fake_ip(tmp_path):
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -1356,7 +1358,7 @@ def test_manager_discovers_four_protocols_but_user_cannot_probe_custom_endpoint(
         return httpx.Response(404)
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -1419,7 +1421,7 @@ def test_manager_saves_each_custom_protocol_after_real_minimal_probe(
         return httpx.Response(200, json=provider_payload)
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / f"{api_format}.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / f"{api_format}.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -1463,7 +1465,7 @@ def test_openai_preset_is_verified_through_responses_api(tmp_path):
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -1501,7 +1503,7 @@ def test_qwen_preset_uses_shared_china_responses_route_and_frozen_model(tmp_path
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -1544,7 +1546,7 @@ def test_anthropic_preset_is_verified_through_native_messages_api(tmp_path):
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -1596,7 +1598,7 @@ def test_gemini_preset_is_verified_through_native_generate_content(tmp_path):
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -1619,7 +1621,12 @@ def test_gemini_preset_is_verified_through_native_generate_content(tmp_path):
     assert response.json()["api_format"] == "gemini_generate_content"
 
 
-def test_product_app_exposes_model_connection_interface():
+def test_product_app_exposes_model_connection_interface(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    database = migrated_webui_database(tmp_path / "product-webui.db")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
     from src.api.main import app as product_app
 
     paths = product_app.openapi()["paths"]
@@ -1670,7 +1677,7 @@ def test_broker_relay_uses_scoped_grant_and_records_native_stream_usage(
 
     now = datetime(2026, 7, 30, tzinfo=timezone.utc)
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -1869,7 +1876,7 @@ def test_broker_relay_preserves_each_native_protocol_and_usage(
         return httpx.Response(200, json=relay_response)
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -1944,7 +1951,7 @@ def test_broker_fails_closed_for_owner_expiry_revocation_and_rotation(
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -2064,7 +2071,7 @@ def test_broker_records_unknown_usage_when_provider_send_fails(tmp_path):
         raise httpx.ConnectError("provider unavailable", request=request)
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -2146,7 +2153,7 @@ def test_broker_restores_gemini_sse_query_and_json_content_type(tmp_path):
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -2225,7 +2232,7 @@ def test_broker_decodes_compressed_provider_response_before_forwarding(
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -2293,7 +2300,7 @@ def test_internal_relay_http_adapter_forwards_grant_and_is_not_documented(
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],

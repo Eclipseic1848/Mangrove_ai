@@ -235,7 +235,10 @@ def _after_set(key: str) -> None:
             from src.llm.provider import reload_provider
             reload_provider()
         except Exception as e:  # noqa: BLE001 联动失败不阻断配置保存
-            logger.warning("LLM 供应商缓存重建失败: %s", e)
+            logger.warning(
+                "LLM 供应商缓存重建失败: %s",
+                redact_sensitive_text(str(e)),
+            )
 
 
 def apply_global_overrides(store) -> int:
@@ -286,6 +289,30 @@ def mask_value(key: str, raw: Optional[str]) -> str:
         s = str(raw)
         return ("····" + s[-4:]) if len(s) > 4 else "····"
     return str(raw)
+
+
+def redact_sensitive_text(text: str) -> str:
+    """从异常、诊断与日志文本移除当前进程可见的运行时 Secret。"""
+    values: set[str] = set()
+    for key, metadata in REGISTRY.items():
+        if not metadata.get("secret"):
+            continue
+        configured = str(getattr(settings, key, "") or "")
+        if configured:
+            values.add(configured)
+        try:
+            from src.config.user_ctx import get_user_override
+
+            personal = str(get_user_override(key) or "")
+        except Exception:  # noqa: BLE001 脱敏不能因上下文不可用而扩大异常面
+            personal = ""
+        if personal:
+            values.add(personal)
+    redacted = str(text)
+    # 先替换长值，避免某个短 Secret 是长 Secret 的子串而留下尾部。
+    for value in sorted(values, key=len, reverse=True):
+        redacted = redacted.replace(value, "[SECRET]")
+    return redacted
 
 
 def describe(store) -> List[Dict[str, Any]]:

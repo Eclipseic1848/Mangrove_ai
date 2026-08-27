@@ -14,6 +14,12 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.api.store import WebUIStore
+from tests.database_migration_helpers import migrated_webui_database
+
+
+def _fresh_store(tmp_dir: str) -> WebUIStore:
+    database = migrated_webui_database(Path(tmp_dir) / "w.db")
+    return WebUIStore(str(database))
 
 
 def _seed(store: WebUIStore):
@@ -26,7 +32,7 @@ def _seed(store: WebUIStore):
 
 def test_search_by_username_or_display_name():
     with tempfile.TemporaryDirectory() as d:
-        store = WebUIStore(str(Path(d) / "w.db"))
+        store = _fresh_store(d)
         _seed(store)
         users, total = store.list_users(q="ali")
         assert total == 1 and users[0]["username"] == "alice", (total, users)
@@ -36,7 +42,7 @@ def test_search_by_username_or_display_name():
 
 def test_filter_by_role():
     with tempfile.TemporaryDirectory() as d:
-        store = WebUIStore(str(Path(d) / "w.db"))
+        store = _fresh_store(d)
         _seed(store)
         users, total = store.list_users(role="admin")
         assert total == 1 and users[0]["username"] == "alice", (total, users)
@@ -44,7 +50,7 @@ def test_filter_by_role():
 
 def test_filter_by_status():
     with tempfile.TemporaryDirectory() as d:
-        store = WebUIStore(str(Path(d) / "w.db"))
+        store = _fresh_store(d)
         _seed(store)
         _, pending_total = store.list_users(status="pending")
         assert pending_total == 1, pending_total
@@ -56,7 +62,7 @@ def test_filter_by_status():
 
 def test_pagination_boundaries():
     with tempfile.TemporaryDirectory() as d:
-        store = WebUIStore(str(Path(d) / "w.db"))
+        store = _fresh_store(d)
         for i in range(25):
             store.create_user(f"user{i:02d}", "hash", f"用户{i:02d}")
         page1, total = store.list_users(page=1, page_size=20)
@@ -72,7 +78,7 @@ def test_route_response_shape():
     import src.api.auth as auth_mod
 
     with tempfile.TemporaryDirectory() as d:
-        store = WebUIStore(str(Path(d) / "w.db"))
+        store = _fresh_store(d)
         _seed(store)
         original = auth_mod._store
         auth_mod._store = store

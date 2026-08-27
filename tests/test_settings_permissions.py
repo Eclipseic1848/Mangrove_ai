@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from src.api.auth import get_current_user
 from src.api.routes import config_routes, settings_routes
 from src.api.store import WebUIStore
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _client(
@@ -82,7 +83,9 @@ def test_manager_can_reach_platform_selfcheck(role):
 
 
 def test_model_connection_guide_state_is_persisted_per_user(tmp_path):
-    store = WebUIStore(str(tmp_path / "settings.db"))
+    store = WebUIStore(
+        str(migrated_webui_database(tmp_path / "settings.db"))
+    )
     user_a = _client(role="user", user_id="user-a", store=store)
     user_b = _client(role="user", user_id="user-b", store=store)
 

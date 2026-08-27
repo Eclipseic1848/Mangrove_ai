@@ -11,6 +11,7 @@ from typing import Any
 from src.api.store import WebUIStore
 from src.semantic_harness.harness_models import HarnessRun
 from src.services.managed_paths import ManagedPathCodec
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _codec(root: Path) -> ManagedPathCodec:
@@ -68,7 +69,7 @@ def _manifest() -> _Manifest:
 def test_new_semantic_paths_are_managed_and_survive_root_move(
     tmp_path: Path,
 ) -> None:
-    db_path = tmp_path / "webui.db"
+    db_path = migrated_webui_database(tmp_path / "webui.db")
     old_root = tmp_path / "old" / "semantic-executions"
     artifact = old_root / "runs" / "run-a" / "result.csv"
     artifact.parent.mkdir(parents=True)
@@ -134,7 +135,7 @@ def test_new_semantic_paths_are_managed_and_survive_root_move(
 def test_legacy_semantic_paths_map_without_rewriting_database(
     tmp_path: Path,
 ) -> None:
-    db_path = tmp_path / "webui.db"
+    db_path = migrated_webui_database(tmp_path / "webui.db")
     root = tmp_path / "current" / "semantic-executions"
     artifact = root / "runs" / "run-a" / "result.csv"
     artifact.parent.mkdir(parents=True)

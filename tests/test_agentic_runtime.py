@@ -60,6 +60,7 @@ from src.model_connections import (
 )
 from src.model_connections.storage import ModelConnectionRepository
 from src.model_connections.vault import FernetCredentialVault
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def test_unified_scripts_manage_pi_egress_runtime() -> None:
@@ -301,7 +302,7 @@ def test_root_docker_context_excludes_tests_but_keeps_runtime_scripts() -> None:
 def test_runtime_repository_isolates_users_and_persists_candidate_state(
     tmp_path: Path,
 ) -> None:
-    repository = AgenticRuntimeRepository(tmp_path / "webui.db")
+    repository = AgenticRuntimeRepository(migrated_webui_database(tmp_path / "webui.db"))
     config = RuntimeTaskConfig(
         user_id="user-a",
         task_id="workspace-1",
@@ -355,7 +356,7 @@ def test_runtime_repository_isolates_users_and_persists_candidate_state(
 def test_runtime_repository_clears_stale_failure_when_same_run_resumes(
     tmp_path: Path,
 ) -> None:
-    repository = AgenticRuntimeRepository(tmp_path / "webui.db")
+    repository = AgenticRuntimeRepository(migrated_webui_database(tmp_path / "webui.db"))
     repository.register(
         RuntimeTaskConfig(
             user_id="user-a",
@@ -388,7 +389,7 @@ def test_runtime_repository_clears_stale_failure_when_same_run_resumes(
 def test_runtime_repository_rejects_changes_to_frozen_revision(
     tmp_path: Path,
 ) -> None:
-    repository = AgenticRuntimeRepository(tmp_path / "webui.db")
+    repository = AgenticRuntimeRepository(migrated_webui_database(tmp_path / "webui.db"))
     original = RuntimeTaskConfig(
         user_id="user-a",
         task_id="workspace-frozen",
@@ -757,7 +758,7 @@ async def test_pi_external_mode_uses_relay_grant_without_provider_secret(
     )
     provider_secret = "external-provider-secret-4455"
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -808,6 +809,9 @@ async def test_pi_external_mode_uses_relay_grant_without_provider_secret(
         external_api_confirmed=True,
     )
     runtime = PiRuntime(
+        state_store=AgenticRuntimeRepository(
+            migrated_webui_database(tmp_path / "pi-runtime-state.db")
+        ),
         execution_root=tmp_path / "runtime",
         connection_broker=broker,
         relay_base_url=(
@@ -919,7 +923,7 @@ async def test_pi_cancel_after_restart_revokes_persisted_revision_grants(
 ) -> None:
     provider_secret = "restart-cancel-provider-secret-3377"
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -952,6 +956,9 @@ async def test_pi_cancel_after_restart_revokes_persisted_revision_grants(
         purpose="agent_inference",
     )
     restarted_runtime = PiRuntime(
+        state_store=AgenticRuntimeRepository(
+            migrated_webui_database(tmp_path / "pi-runtime-state.db")
+        ),
         execution_root=tmp_path / "runtime",
         connection_broker=broker,
     )
@@ -980,7 +987,7 @@ async def test_pi_resume_without_session_revokes_old_grant_before_restart(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -1035,6 +1042,9 @@ async def test_pi_resume_without_session_revokes_old_grant_before_restart(
         purpose="agent_inference",
     )
     runtime = PiRuntime(
+        state_store=AgenticRuntimeRepository(
+            migrated_webui_database(tmp_path / "pi-runtime-state.db")
+        ),
         execution_root=tmp_path / "runtime",
         connection_broker=broker,
     )
@@ -1263,6 +1273,9 @@ async def test_pi_runtime_start_is_forced_through_business_egress(
             )
 
     runtime = PiRuntime(
+        state_store=AgenticRuntimeRepository(
+            migrated_webui_database(tmp_path / "pi-runtime-state.db")
+        ),
         execution_root=tmp_path / "runtime",
         capability_mount_resolver=NamedCapabilityResolver(),
         egress_controller=SmokescreenEgressController(
@@ -1373,7 +1386,13 @@ async def test_pi_runtime_cancel_revokes_egress_before_returning(
         base_url="http://192.168.1.20:6012/v1",
         api_key="local-runtime",
     )
+    state_database = migrated_webui_database(tmp_path / "pi-runtime-state.db")
     runtime = PiRuntime(
+        state_store=AgenticRuntimeRepository(state_database),
+        connection_broker=ConnectionBroker(
+            repository=ModelConnectionRepository(str(state_database)),
+            vault=FernetCredentialVault.generate(),
+        ),
         execution_root=tmp_path / "runtime",
         egress_controller=SmokescreenEgressController(
             image="mangrove/smokescreen:da4840c9",
@@ -1461,6 +1480,9 @@ async def test_pi_runtime_resume_restores_business_egress(
         api_key="local-runtime",
     )
     runtime = PiRuntime(
+        state_store=AgenticRuntimeRepository(
+            migrated_webui_database(tmp_path / "pi-runtime-state.db")
+        ),
         execution_root=tmp_path / "runtime",
         egress_controller=SmokescreenEgressController(
             image="mangrove/smokescreen:da4840c9",
@@ -1578,6 +1600,9 @@ async def test_pi_rpc_transport_accepts_large_jsonl_events(
     )
 
     process = await PiRuntime(
+        state_store=AgenticRuntimeRepository(
+            migrated_webui_database(tmp_path / "pi-runtime-state.db")
+        ),
         execution_root=tmp_path,
     )._spawn_rpc_process(("docker", "run"))
 
@@ -1602,6 +1627,9 @@ def test_pi_runtime_resolves_local_relay_in_docker_network(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     runtime = PiRuntime(
+        state_store=AgenticRuntimeRepository(
+            migrated_webui_database(tmp_path / "pi-runtime-state.db")
+        ),
         image="mangrove/pi-coding-agent:0.80.10",
         execution_root=tmp_path,
         relay_base_url="http://127.0.0.1:8088/internal/model-relay",
@@ -1667,7 +1695,12 @@ async def test_pi_runtime_stops_after_ambiguous_provider_error(
         returncode=0,
         wait=lambda: asyncio.sleep(0),
     )
-    runtime = PiRuntime(execution_root=tmp_path)
+    runtime = PiRuntime(
+        execution_root=tmp_path,
+        state_store=AgenticRuntimeRepository(
+            migrated_webui_database(tmp_path / "pi-runtime-state.db")
+        ),
+    )
 
     async def fake_spawn(_command: tuple[str, ...]) -> object:
         return fake_process
@@ -1844,6 +1877,9 @@ def test_pdf_manifest_accepts_canonical_upload_id_as_evidence_source(
             return object(), ledger
 
     runtime = PiRuntime(
+        state_store=AgenticRuntimeRepository(
+            migrated_webui_database(tmp_path / "pi-runtime-state.db")
+        ),
         execution_root=tmp_path,
         document_tool_broker=Broker(),  # type: ignore[arg-type]
     )

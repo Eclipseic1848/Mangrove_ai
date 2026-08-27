@@ -1,3 +1,0 @@
-chardet==5.2.0
-playwright==1.60.0
-yt-dlp==2026.7.4

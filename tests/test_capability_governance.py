@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -36,6 +37,7 @@ from src.conversation_steering import (
     CapabilityPack,
     ProcedureScope,
 )
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _personal_pack(version: str, digest_char: str) -> CapabilityPack:
@@ -47,6 +49,34 @@ def _personal_pack(version: str, digest_char: str) -> CapabilityPack:
         maturity=LegacyCapabilityMaturity.DRAFT,
         owner_id="owner-a",
     )
+
+
+def test_sqlite_repository_connections_enforce_integrity_and_lock_timeout(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = migrated_webui_database(tmp_path / "connection-policy.db")
+    repository = SqliteCapabilityGovernanceRepository(str(database))
+    real_connect = sqlite3.connect
+    connections: list[sqlite3.Connection] = []
+
+    def tracked_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(
+        "src.capability_governance.sqlite_repository.sqlite3.connect",
+        tracked_connect,
+    )
+
+    assert repository.list_events() == ()
+    connection = connections[-1]
+    try:
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        connection.close()
 
 
 def test_registration_projects_each_exact_digest_and_is_idempotent() -> None:
@@ -396,6 +426,7 @@ def test_sqlite_migration_backs_up_and_reopens_without_rewriting_catalog(
 ) -> None:
     db_path = tmp_path / "webui.db"
     first_backup = tmp_path / "backup-before-ac07.db"
+    migrated_webui_database(db_path)
     catalog = CapabilityCatalog(
         SqliteCapabilityCatalogRepository(str(db_path))
     )
@@ -552,6 +583,7 @@ def test_owner_requests_exact_digest_validation_idempotently() -> None:
 def test_validation_run_is_persisted_and_idempotent_after_reopen(tmp_path) -> None:
     db_path = tmp_path / "webui.db"
     backup = tmp_path / "before-validation-run.db"
+    migrated_webui_database(db_path)
     catalog = CapabilityCatalog(SqliteCapabilityCatalogRepository(str(db_path)))
     owner = CatalogActor(owner_id="owner-a", role="user")
     pack = _personal_pack("1.0.0", "a")
@@ -808,6 +840,7 @@ def test_sqlite_lease_merges_workers_and_recovers_completed_steps(tmp_path) -> N
             )
 
     db_path = tmp_path / "webui.db"
+    migrated_webui_database(db_path)
     catalog = CapabilityCatalog(SqliteCapabilityCatalogRepository(str(db_path)))
     owner = CatalogActor(owner_id="owner-a", role="user")
     pack = _personal_pack("1.0.0", "a")
@@ -973,6 +1006,7 @@ def test_real_task_ref_is_recomputed_from_owner_revision_and_formal_output(
     from src.services.upload_store import UploadStore
 
     db_path = tmp_path / "webui.db"
+    migrated_webui_database(db_path)
     store = WebUIStore(str(db_path))
     AgenticRuntimeRepository(db_path)
     upload_root = tmp_path / "uploads"
@@ -1084,7 +1118,6 @@ def test_real_task_ref_is_recomputed_from_owner_revision_and_formal_output(
                 "2026-08-07T00:00:00+00:00",
             ),
         )
-    migrate_capability_governance(db_path, tmp_path / "before-real-ref.db")
     task_resolver = SqliteValidationTaskResolver(
         str(db_path),
         upload_root=upload_root,

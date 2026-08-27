@@ -16,6 +16,7 @@ from src.agentic_runtime.models import (
 )
 from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.config.settings import settings
+from tests.database_migration_helpers import migrated_webui_database
 from src.conversation_steering import (
     ContextDelta,
     DeltaConfidence,
@@ -85,7 +86,8 @@ def test_running_followup_uses_turn_api_without_creating_revision(
     tmp_path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "workspace.db"))
+    database = migrated_webui_database(tmp_path / "workspace.db")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
     auth_mod._store = None
     user = {"value": "user-a"}
     app = FastAPI()
@@ -152,7 +154,8 @@ def test_material_followup_only_creates_confirmation_proposal(
     tmp_path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "workspace.db"))
+    database = migrated_webui_database(tmp_path / "workspace.db")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
     auth_mod._store = None
     app = FastAPI()
     app.include_router(semantic_workspace.router)
@@ -240,7 +243,8 @@ def test_confirmed_cancel_now_applies_semantic_delta_as_v2(
     tmp_path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "workspace.db"))
+    database = migrated_webui_database(tmp_path / "workspace.db")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
     auth_mod._store = None
     manager = _ApiManager()
     app = FastAPI()
@@ -305,7 +309,8 @@ def test_after_safe_point_is_persisted_then_applied_by_worker(
     tmp_path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "workspace.db"))
+    database = migrated_webui_database(tmp_path / "workspace.db")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
     auth_mod._store = None
     app = FastAPI()
     app.include_router(semantic_workspace.router)
@@ -364,7 +369,8 @@ def test_new_task_choice_keeps_current_run_and_creates_isolated_task(
     tmp_path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "workspace.db"))
+    database = migrated_webui_database(tmp_path / "workspace.db")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
     auth_mod._store = None
     manager = _ApiManager()
     app = FastAPI()
@@ -424,7 +430,8 @@ def test_external_revision_confirmation_is_required_before_cancelling_run(
     tmp_path,
     monkeypatch,
 ) -> None:
-    monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "workspace.db"))
+    database = migrated_webui_database(tmp_path / "workspace.db")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
     auth_mod._store = None
     manager = _ApiManager()
     app = FastAPI()

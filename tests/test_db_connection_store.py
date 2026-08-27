@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from src.api.store import WebUIStore, _now
+from src.database_migrations import SchemaNotCurrentError
 from src.services.db_connections import (
     DbConnectionIn,
     DbConnectionPublic,
@@ -21,13 +22,14 @@ from src.services.db_connections import (
     resolve_credential,
     to_public_dict,
 )
+from tests.database_migration_helpers import migrated_webui_database
 
 
 # ---------------- helpers ----------------
 
 
 def _make_store(tmp_path: Path) -> WebUIStore:
-    db = str(tmp_path / "test.db")
+    db = str(migrated_webui_database(tmp_path / "test.db"))
     store = WebUIStore(db)
     return store
 
@@ -253,8 +255,8 @@ class TestPublicDict:
 
 
 class TestCheckpointMigration:
-    def test_migration_idempotent(self, tmp_path):
-        """data_prep_tasks 增加 checkpoint_json 列的 ALTER 幂等（表创建时已含列则跳过）。"""
+    def test_unknown_partial_schema_fails_closed(self, tmp_path):
+        """中央迁移拒绝猜测只有局部旧表的未知 Schema。"""
         db_path = str(tmp_path / "test.db")
         # 直接裸 sqlite3 建库不含新列
         bare = sqlite3.connect(db_path)
@@ -267,14 +269,11 @@ class TestCheckpointMigration:
         CREATE INDEX IF NOT EXISTS idx_dpt_user ON data_prep_tasks(user_id);
         """)
         bare.close()
-        # 初始化 WebUIStore——应在 ALTER 时补充 checkpoint_json 列
-        store = WebUIStore(db_path)
-        # 幂等：再次初始化不报错
-        store2 = WebUIStore(db_path)
-        assert store2 is not None
+        with pytest.raises(SchemaNotCurrentError, match="Schema 未被识别"):
+            migrated_webui_database(db_path)
 
     def test_checkpoint_column_present_after_init(self, tmp_path):
-        db_path = str(tmp_path / "test.db")
+        db_path = str(migrated_webui_database(tmp_path / "test.db"))
         store = WebUIStore(db_path)
         with store._conn() as conn:
             cols = {r["name"] for r in conn.execute("PRAGMA table_info(data_prep_tasks)").fetchall()}

@@ -10,6 +10,8 @@ import sqlite3
 import pytest
 from pydantic import ValidationError
 
+from tests.database_migration_helpers import migrated_webui_database
+
 from src.conversation_steering import (
     CapabilityMaturity,
     CapabilityPack,
@@ -35,6 +37,11 @@ from src.conversation_steering import (
     TurnIntent,
     build_context_rewriter,
 )
+
+
+@pytest.fixture(autouse=True)
+def _migrated_database(tmp_path: Path) -> None:
+    migrated_webui_database(tmp_path / "steering.db")
 
 
 def test_capability_scope_and_raw_turn_are_immutable_contracts() -> None:

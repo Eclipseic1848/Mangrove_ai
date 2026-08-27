@@ -83,7 +83,13 @@ class CookieHealthScanner:
             try:
                 await self._run_one_scan()
             except Exception as e:  # noqa: BLE001 扫描本身意外出错也不能让循环死掉
-                logger.exception("Cookie 健康巡检：本轮扫描异常：%s", e)
+                from src.config import runtime_config as rc
+
+                logger.error(
+                    "Cookie 健康巡检：本轮扫描异常 type=%s detail=%s",
+                    type(e).__name__,
+                    rc.redact_sensitive_text(str(e)),
+                )
             self._last_scan_at = time.time()
 
 

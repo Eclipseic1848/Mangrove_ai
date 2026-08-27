@@ -20,6 +20,7 @@ from src.evaluation.formal_delivery import (
     publish_runtime_result_as_formal_delivery,
     qualify_formal_delivery,
 )
+from tests.database_migration_helpers import migrated_webui_database
 from src.agentic_runtime.models import (
     CandidateArtifact,
     PermissionProfile,
@@ -64,7 +65,9 @@ def _formal_publish_context(
         ),
         source_snapshot_refs=("upload-json:" + "4" * 64,),
     )
-    repository = DeliveryPublishingRepository(root / "evaluation.db")
+    repository = DeliveryPublishingRepository(
+        migrated_webui_database(root / "evaluation.db")
+    )
     publisher = DeliveryPublisher(
         repository=repository,
         output_root=root / "deliveries",
@@ -75,7 +78,9 @@ def _formal_publish_context(
 
 
 def test_candidate_without_formal_delivery_cannot_pass_g1(tmp_path: Path) -> None:
-    repository = DeliveryPublishingRepository(tmp_path / "evaluation.db")
+    repository = DeliveryPublishingRepository(
+        migrated_webui_database(tmp_path / "evaluation.db")
+    )
 
     result = qualify_formal_delivery(
         repository=repository,
@@ -127,7 +132,9 @@ def test_persisted_delivery_with_independent_qa_can_pass_g1(tmp_path: Path) -> N
         ),
         source_snapshot_refs=("upload-json:" + "4" * 64,),
     )
-    repository = DeliveryPublishingRepository(tmp_path / "evaluation.db")
+    repository = DeliveryPublishingRepository(
+        migrated_webui_database(tmp_path / "evaluation.db")
+    )
     publisher = DeliveryPublisher(
         repository=repository,
         output_root=tmp_path / "deliveries",
@@ -202,7 +209,9 @@ def test_runtime_result_is_published_before_g1_scoring(tmp_path: Path) -> None:
             formal_delivery_eligible=False,
         ),
     )
-    repository = DeliveryPublishingRepository(tmp_path / "evaluation.db")
+    repository = DeliveryPublishingRepository(
+        migrated_webui_database(tmp_path / "evaluation.db")
+    )
 
     qualification = publish_runtime_result_as_formal_delivery(
         repository=repository,

@@ -72,10 +72,73 @@ def test_utf8_default_scan_covers_extensionless_and_dotfiles(tmp_path) -> None:
 
 
 def test_ci_requirements_must_match_authoritative_pins(tmp_path) -> None:
-    base = tmp_path / "requirements.txt"
+    runtime = tmp_path / "requirements.txt"
+    development = tmp_path / "requirements-dev.txt"
     subset = tmp_path / "requirements-ci.txt"
-    base.write_text("pydantic==2.12.5\npytest==9.1.1\n", encoding="utf-8")
-    subset.write_text("pytest==9.1.1\n", encoding="utf-8")
+    runtime.write_text(
+        'pydantic==2.12.5\nuvloop==0.22.1; sys_platform != "win32"\n',
+        encoding="utf-8",
+    )
+    development.write_text("pytest==9.1.1\n", encoding="utf-8")
+    subset.write_text("pydantic==2.12.5\npytest==9.1.1\n", encoding="utf-8")
+
+    accepted = _run(
+        "scripts/ci/check_requirement_consistency.py",
+        "--base",
+        str(runtime),
+        "--base",
+        str(development),
+        "--subset",
+        str(subset),
+    )
+    development.write_text("pydantic==2.11.0\npytest==9.1.1\n", encoding="utf-8")
+    rejected = _run(
+        "scripts/ci/check_requirement_consistency.py",
+        "--base",
+        str(runtime),
+        "--base",
+        str(development),
+        "--subset",
+        str(subset),
+    )
+
+    assert accepted.returncode == 0
+    assert json.loads(accepted.stdout)["matched_requirements"] == 2
+    assert rejected.returncode == 1
+    assert "跨分组版本冲突" in rejected.stderr
+
+
+def test_authoritative_requirements_reject_non_exact_pins(tmp_path) -> None:
+    subset = tmp_path / "requirements-ci.txt"
+    subset.write_text("pydantic==2.12.5\n", encoding="utf-8")
+
+    for invalid in ("example>=1\n", "example\n", "--index-url https://example.invalid\n"):
+        base = tmp_path / "requirements.txt"
+        base.write_text(f"pydantic==2.12.5\n{invalid}", encoding="utf-8")
+        rejected = _run(
+            "scripts/ci/check_requirement_consistency.py",
+            "--base",
+            str(base),
+            "--subset",
+            str(subset),
+        )
+
+        assert rejected.returncode == 1
+        assert "权威清单只允许精确版本或安全的 -c/-r 引用" in rejected.stderr
+
+
+def test_authoritative_requirement_references_must_be_safe_and_exist(tmp_path) -> None:
+    base = tmp_path / "requirements.txt"
+    constraints = tmp_path / "constraints.txt"
+    included = tmp_path / "included.txt"
+    subset = tmp_path / "requirements-ci.txt"
+    constraints.write_text("shared==1.0\n", encoding="utf-8")
+    included.write_text("extra==2.0\n", encoding="utf-8")
+    subset.write_text("pydantic==2.12.5\n", encoding="utf-8")
+    base.write_text(
+        "pydantic==2.12.5\n-c constraints.txt\n-r included.txt\n",
+        encoding="utf-8",
+    )
 
     accepted = _run(
         "scripts/ci/check_requirement_consistency.py",
@@ -84,19 +147,19 @@ def test_ci_requirements_must_match_authoritative_pins(tmp_path) -> None:
         "--subset",
         str(subset),
     )
-    subset.write_text("pytest==9.0.0\n", encoding="utf-8")
-    rejected = _run(
-        "scripts/ci/check_requirement_consistency.py",
-        "--base",
-        str(base),
-        "--subset",
-        str(subset),
-    )
-
     assert accepted.returncode == 0
-    assert json.loads(accepted.stdout)["matched_requirements"] == 1
-    assert rejected.returncode == 1
-    assert "pytest==9.0.0" in rejected.stderr
+
+    for unsafe in ("-c missing.txt\n", "-r ../outside.txt\n", f"-c {constraints.resolve()}\n"):
+        base.write_text(f"pydantic==2.12.5\n{unsafe}", encoding="utf-8")
+        rejected = _run(
+            "scripts/ci/check_requirement_consistency.py",
+            "--base",
+            str(base),
+            "--subset",
+            str(subset),
+        )
+        assert rejected.returncode == 1
+        assert "依赖引用" in rejected.stderr
 
 
 def test_minimum_ci_workflow_is_pinned_bounded_and_evidence_producing() -> None:
@@ -117,6 +180,7 @@ def test_minimum_ci_workflow_is_pinned_bounded_and_evidence_producing() -> None:
         "python scripts/ci/check_requirement_consistency.py",
         ".artifacts/ci/backend-install.log",
         "tests/test_candidate_verification_migration.py",
+        '-k "not collectors_import_smoke_reaches_scrapling_runtime_seams"',
         "--junitxml=.artifacts/ci/python-fast.xml",
         "npm ci",
         ".artifacts/ci/frontend-install.log",
@@ -124,6 +188,7 @@ def test_minimum_ci_workflow_is_pinned_bounded_and_evidence_producing() -> None:
         "GITLEAKS_VERSION: '8.30.1'",
         "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb",
         "--redact",
+        "--config .gitleaks.toml",
         "if: always()",
         "path: .artifacts/ci",
     )
@@ -143,6 +208,35 @@ def test_minimum_ci_workflow_is_pinned_bounded_and_evidence_producing() -> None:
     assert "secrets." not in workflow
     assert "data/webui.db" not in workflow
     assert "provider" not in workflow.lower()
+
+
+def test_ci_subset_contains_migration_test_runtime_dependencies() -> None:
+    requirements = (PROJECT_ROOT / "requirements-ci.txt").read_text(
+        encoding="utf-8"
+    )
+
+    assert "alembic==1.18.3" in requirements
+    assert "SQLAlchemy==2.0.45" in requirements
+
+
+def test_alembic_environment_is_not_hidden_by_local_env_ignore_rule() -> None:
+    ignore = (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8")
+    tracked = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "--error-unmatch",
+            "src/database_migrations/alembic/env.py",
+        ],
+        cwd=PROJECT_ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+
+    assert "!src/database_migrations/alembic/env.py" in ignore
+    assert tracked.returncode == 0
 
 
 def test_heavy_ci_is_manual_only_and_never_receives_secrets() -> None:
@@ -174,9 +268,11 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     ]
 
     assert "useDefault = true" in config
-    assert config.count('targetRules = ["generic-api-key"]') == 3
-    assert config.count('condition = "AND"') == 3
+    assert config.count('targetRules = ["generic-api-key"]') == 4
+    assert config.count('condition = "AND"') == 4
     assert 'regexTarget = "line"' in config
+    assert '^src/database_migrations/schema_manifest\\.json$' in config
+    assert 'model_connection_secrets|runtime_config_secrets' in config
     assert "commits =" not in config
     assert "tests/.*" not in config
     assert "evals/.*" not in config

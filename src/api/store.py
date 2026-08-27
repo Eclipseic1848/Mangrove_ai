@@ -20,438 +20,17 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
+from src.database_migrations import DatabaseTarget, inspect_database
+from src.config.secret_refs import (
+    RUNTIME_CONFIG_SECRET_KEYS,
+    SecretRefResolutionError,
+    load_or_create_vault,
+    load_vault,
+    parse_secret_ref,
+    secret_ref,
+)
+from src.model_connections.vault import VaultDecryptionError
 from src.services.managed_paths import ManagedPathCodec
-
-_DDL = """
-CREATE TABLE IF NOT EXISTS users (
-    user_id       TEXT PRIMARY KEY,
-    username      TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    display_name  TEXT,
-    role          TEXT NOT NULL DEFAULT 'user',   -- admin | user（RBAC 双角色）
-    disabled      INTEGER NOT NULL DEFAULT 0,      -- 1=禁用，禁止登录
-    pending       INTEGER NOT NULL DEFAULT 0,      -- 1=待管理员审批，审批前禁止登录
-    created_at    TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS app_settings (
-    key   TEXT PRIMARY KEY,
-    value TEXT
-);
-CREATE TABLE IF NOT EXISTS user_ui_state (
-    user_id   TEXT NOT NULL,
-    key       TEXT NOT NULL,
-    value     TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    PRIMARY KEY (user_id, key)
-);
-CREATE TABLE IF NOT EXISTS conversations (
-    conv_id       TEXT PRIMARY KEY,
-    user_id       TEXT NOT NULL,
-    title         TEXT NOT NULL DEFAULT '新会话',
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS messages (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    conv_id       TEXT NOT NULL,
-    role          TEXT NOT NULL,          -- user | assistant
-    content       TEXT NOT NULL,
-    task_id       TEXT,                   -- 关联的 conductor 任务 id（产出文件按此定位）
-    meta_json     TEXT,                   -- 富信息 JSON：files/grade/collector/token_usage 等（供重载会话重建展示）
-    created_at    TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS message_feedback (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id  INTEGER NOT NULL,
-    conv_id     TEXT NOT NULL,            -- 冗余，便于按会话查反馈
-    user_id     TEXT NOT NULL,
-    rating      TEXT NOT NULL,            -- 'up' | 'down'
-    reasons     TEXT,                     -- JSON 数组（点踩原因）
-    comment     TEXT,                     -- 自由描述
-    created_at  TEXT NOT NULL,
-    status      TEXT NOT NULL DEFAULT 'pending',  -- pending/resolved/ignored（管理员处理状态）
-    admin_note  TEXT,                             -- 管理员处理备注
-    UNIQUE(message_id, user_id)           -- 一人一消息一反馈（覆盖更新）
-);
-CREATE TABLE IF NOT EXISTS runtime_config (
-    scope      TEXT NOT NULL,               -- 'global' 或 user_id（按用户隔离的凭证覆盖）
-    key        TEXT NOT NULL,               -- settings 字段名（白名单见 runtime_config.REGISTRY）
-    value      TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    updated_by TEXT,
-    PRIMARY KEY (scope, key)
-);
-CREATE TABLE IF NOT EXISTS cookie_health (
-    key        TEXT PRIMARY KEY,            -- 配置键，如 mc_cookie_xhs / jd_cookie
-    status     TEXT NOT NULL,               -- valid | invalid | unknown
-    message    TEXT,                        -- 人话原因；失效/无法判断时给出线索
-    checked_at TEXT NOT NULL,
-    checked_by TEXT NOT NULL                -- manual | scheduled
-);
-CREATE TABLE IF NOT EXISTS user_memory (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id    TEXT NOT NULL,               -- 归属用户，按用户隔离（区别于全局共享的 memory/user-preferences.md）
-    text       TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS library_dedup_scan_log (
-    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-    ran_at               TEXT NOT NULL,
-    templates_scanned    INTEGER NOT NULL,
-    templates_merged     INTEGER NOT NULL,
-    lessons_scanned      INTEGER NOT NULL,
-    lessons_merged       INTEGER NOT NULL,
-    stale_drafts_deleted INTEGER NOT NULL,
-    details              TEXT NOT NULL DEFAULT ''   -- 该轮每步操作（合并/清理）的 JSON 明细数组
-);
-CREATE TABLE IF NOT EXISTS memory_hit_log (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    hit_at        TEXT NOT NULL,
-    hit_type      TEXT NOT NULL,    -- lesson / template / skill
-    slug          TEXT NOT NULL,    -- 命中的 slug；未命中为空串
-    threshold     REAL NOT NULL,    -- 命中阈值（rerank 分数/余弦值/0=关键词兜底或未命中）
-    degrade_path  TEXT NOT NULL,    -- semantic / keyword / none（none=无候选，semantic=召回过但被筛空）
-    task_id       TEXT,
-    hit           INTEGER NOT NULL DEFAULT 1  -- 1=命中 0=未命中（E3：分母也要记，才能算命中率）
-);
-CREATE INDEX IF NOT EXISTS idx_conv_user ON conversations(user_id);
-CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conv_id);
-CREATE INDEX IF NOT EXISTS idx_mem_user ON user_memory(user_id);
-CREATE TABLE IF NOT EXISTS data_prep_tasks (
-    task_id       TEXT PRIMARY KEY,
-    user_id       TEXT NOT NULL,
-    unit_id       TEXT,
-    spec_json     TEXT NOT NULL,               -- DataPrepTaskSpec 序列化
-    status        TEXT NOT NULL DEFAULT 'RUNNING',  -- RUNNING/SUCCEEDED/SUCCEEDED_WITH_WARNINGS/FAILED
-    record_counts TEXT,                        -- JSON 账本
-    quality_json  TEXT,                        -- QualityReport 序列化
-    manifest_path TEXT,
-    error         TEXT,
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_dpt_user ON data_prep_tasks(user_id);
-CREATE TABLE IF NOT EXISTS data_prep_task_uploads (
-    task_id       TEXT NOT NULL,
-    upload_id     TEXT NOT NULL,
-    ordinal       INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (task_id, upload_id),
-    FOREIGN KEY (task_id) REFERENCES data_prep_tasks(task_id)
-);
-CREATE INDEX IF NOT EXISTS idx_dptu_upload ON data_prep_task_uploads(upload_id);
-CREATE TABLE IF NOT EXISTS document_task_units (
-    unit_id       TEXT PRIMARY KEY,
-    user_id       TEXT NOT NULL,
-    unit_type     TEXT NOT NULL,                -- single_file | file_set
-    name          TEXT NOT NULL,
-    business_type TEXT NOT NULL DEFAULT '',
-    archived_at   TEXT,
-    created_at    TEXT NOT NULL,
-    updated_at    TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_dtu_user ON document_task_units(user_id, updated_at);
-CREATE TABLE IF NOT EXISTS document_task_unit_members (
-    unit_id       TEXT NOT NULL,
-    upload_id     TEXT NOT NULL,
-    ordinal       INTEGER NOT NULL DEFAULT 0,
-    added_at      TEXT NOT NULL,
-    PRIMARY KEY (unit_id, upload_id),
-    FOREIGN KEY (unit_id) REFERENCES document_task_units(unit_id)
-);
-CREATE INDEX IF NOT EXISTS idx_dtum_upload ON document_task_unit_members(upload_id);
-CREATE TABLE IF NOT EXISTS document_workspaces (
-    user_id            TEXT PRIMARY KEY,
-    upload_ids_json    TEXT NOT NULL DEFAULT '[]',
-    checked_upload_ids_json TEXT NOT NULL DEFAULT '[]',
-    active_unit_id     TEXT,
-    active_task_id     TEXT,
-    selected_upload_id TEXT,
-    updated_at         TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS db_connections (
-    connection_id  TEXT PRIMARY KEY,
-    user_id        TEXT NOT NULL,
-    name           TEXT NOT NULL,
-    dialect        TEXT NOT NULL,              -- sqlite | mysql | postgresql
-    host           TEXT NOT NULL DEFAULT '',
-    port           INTEGER NOT NULL DEFAULT 0,
-    database_name  TEXT NOT NULL DEFAULT '',
-    username       TEXT NOT NULL DEFAULT '',
-    password_enc   TEXT NOT NULL DEFAULT '',   -- Fernet 加密；空字符串=无密码
-    sqlite_relpath TEXT NOT NULL DEFAULT '',   -- sqlite 方言使用
-    created_at     TEXT NOT NULL,
-    updated_at     TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_dbc_user ON db_connections(user_id);
-CREATE TABLE IF NOT EXISTS semantic_plan_revisions (
-    plan_id             TEXT NOT NULL,
-    revision            INTEGER NOT NULL,
-    task_id             TEXT NOT NULL,
-    user_id             TEXT NOT NULL,
-    status              TEXT NOT NULL,
-    request_json        TEXT NOT NULL,
-    plan_json           TEXT,
-    summary             TEXT NOT NULL DEFAULT '',
-    diagnostics_json    TEXT NOT NULL DEFAULT '[]',
-    clarification_json  TEXT,
-    provenance_json     TEXT NOT NULL,
-    plan_hash           TEXT,
-    created_at          TEXT NOT NULL,
-    PRIMARY KEY (plan_id, revision)
-);
-CREATE INDEX IF NOT EXISTS idx_spr_user_plan
-ON semantic_plan_revisions(user_id, plan_id, revision DESC);
-CREATE TABLE IF NOT EXISTS source_inspection_reports (
-    inspection_id       TEXT PRIMARY KEY,
-    user_id             TEXT NOT NULL,
-    plan_id             TEXT NOT NULL,
-    logical_revision    INTEGER NOT NULL,
-    artifact_id         TEXT NOT NULL,
-    artifact_sha256     TEXT NOT NULL,
-    inspector_version   TEXT NOT NULL,
-    report_hash         TEXT NOT NULL,
-    report_json         TEXT NOT NULL,
-    created_at          TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_sir_user_artifact
-ON source_inspection_reports(
-    user_id, artifact_sha256, inspector_version, created_at DESC
-);
-CREATE TABLE IF NOT EXISTS semantic_binding_revisions (
-    plan_id             TEXT NOT NULL,
-    binding_revision    INTEGER NOT NULL,
-    logical_revision    INTEGER NOT NULL,
-    user_id             TEXT NOT NULL,
-    status              TEXT NOT NULL,
-    reports_json        TEXT NOT NULL,
-    result_json         TEXT NOT NULL,
-    bound_plan_json     TEXT,
-    bound_plan_hash     TEXT,
-    resolutions_json    TEXT NOT NULL DEFAULT '{}',
-    created_at          TEXT NOT NULL,
-    PRIMARY KEY (plan_id, binding_revision)
-);
-CREATE INDEX IF NOT EXISTS idx_sbr_user_plan
-ON semantic_binding_revisions(user_id, plan_id, binding_revision DESC);
-CREATE TABLE IF NOT EXISTS physical_plan_revisions (
-    physical_plan_id      TEXT PRIMARY KEY,
-    plan_id               TEXT NOT NULL,
-    logical_revision      INTEGER NOT NULL,
-    binding_revision      INTEGER NOT NULL,
-    user_id               TEXT NOT NULL,
-    status                TEXT NOT NULL,
-    physical_plan_hash    TEXT NOT NULL,
-    physical_plan_json    TEXT NOT NULL,
-    created_at            TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_ppr_user_plan
-ON physical_plan_revisions(user_id, plan_id, created_at DESC);
-CREATE TABLE IF NOT EXISTS table_execution_runs (
-    run_id                TEXT PRIMARY KEY,
-    user_id               TEXT NOT NULL,
-    plan_id               TEXT NOT NULL,
-    physical_plan_id      TEXT NOT NULL,
-    status                TEXT NOT NULL,
-    tool_result_json      TEXT NOT NULL,
-    verification_json     TEXT NOT NULL,
-    artifact_paths_json   TEXT NOT NULL DEFAULT '{}',
-    created_at            TEXT NOT NULL,
-    FOREIGN KEY (physical_plan_id) REFERENCES physical_plan_revisions(physical_plan_id)
-);
-CREATE INDEX IF NOT EXISTS idx_ter_user_plan
-ON table_execution_runs(user_id, plan_id, created_at DESC);
-CREATE TABLE IF NOT EXISTS document_execution_runs (
-    run_id                TEXT PRIMARY KEY,
-    user_id               TEXT NOT NULL,
-    plan_id               TEXT NOT NULL,
-    physical_plan_id      TEXT NOT NULL,
-    status                TEXT NOT NULL,
-    result_json           TEXT NOT NULL,
-    tool_result_json      TEXT NOT NULL,
-    verification_json     TEXT NOT NULL,
-    artifact_paths_json   TEXT NOT NULL DEFAULT '{}',
-    created_at            TEXT NOT NULL,
-    FOREIGN KEY (physical_plan_id) REFERENCES physical_plan_revisions(physical_plan_id)
-);
-CREATE INDEX IF NOT EXISTS idx_der_user_plan
-ON document_execution_runs(user_id, plan_id, created_at DESC);
-CREATE TABLE IF NOT EXISTS semantic_harness_runs (
-    run_id                TEXT PRIMARY KEY,
-    user_id               TEXT NOT NULL,
-    thread_id             TEXT NOT NULL,
-    logical_plan_id       TEXT NOT NULL,
-    logical_revision      INTEGER NOT NULL,
-    logical_plan_hash     TEXT NOT NULL,
-    binding_revision      INTEGER NOT NULL,
-    binding_hash          TEXT NOT NULL,
-    capability_id         TEXT NOT NULL,
-    capability_version    TEXT NOT NULL,
-    runtime_profile       TEXT NOT NULL,
-    policy_json           TEXT NOT NULL,
-    status                TEXT NOT NULL,
-    current_node          TEXT NOT NULL,
-    repair_rounds         INTEGER NOT NULL DEFAULT 0,
-    semantic_replans      INTEGER NOT NULL DEFAULT 0,
-    transient_retries     INTEGER NOT NULL DEFAULT 0,
-    same_failure_count    INTEGER NOT NULL DEFAULT 0,
-    last_failure_fingerprint TEXT,
-    question_json         TEXT,
-    final_verification_json TEXT,
-    eligible_for_delivery INTEGER NOT NULL DEFAULT 0,
-    created_at            TEXT NOT NULL,
-    updated_at            TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_shr_user_created
-ON semantic_harness_runs(user_id, created_at DESC);
-CREATE TABLE IF NOT EXISTS semantic_harness_attempts (
-    attempt_id            TEXT PRIMARY KEY,
-    run_id                TEXT NOT NULL,
-    user_id               TEXT NOT NULL,
-    node                  TEXT NOT NULL,
-    attempt_number        INTEGER NOT NULL,
-    idempotency_key       TEXT NOT NULL UNIQUE,
-    input_hash            TEXT NOT NULL,
-    status                TEXT NOT NULL,
-    failure_kind          TEXT,
-    tool_result_json      TEXT,
-    verification_json     TEXT,
-    repair_decision_json  TEXT,
-    artifact_paths_json   TEXT NOT NULL DEFAULT '{}',
-    created_at            TEXT NOT NULL,
-    FOREIGN KEY (run_id) REFERENCES semantic_harness_runs(run_id)
-);
-CREATE INDEX IF NOT EXISTS idx_sha_user_run
-ON semantic_harness_attempts(user_id, run_id, attempt_number);
-CREATE TABLE IF NOT EXISTS semantic_harness_events (
-    event_id              TEXT PRIMARY KEY,
-    event_key             TEXT NOT NULL UNIQUE,
-    run_id                TEXT NOT NULL,
-    user_id               TEXT NOT NULL,
-    sequence              INTEGER NOT NULL,
-    node                  TEXT NOT NULL,
-    event_type            TEXT NOT NULL,
-    summary               TEXT NOT NULL,
-    details_json          TEXT NOT NULL DEFAULT '{}',
-    created_at            TEXT NOT NULL,
-    FOREIGN KEY (run_id) REFERENCES semantic_harness_runs(run_id),
-    UNIQUE (run_id, sequence)
-);
-CREATE INDEX IF NOT EXISTS idx_she_user_run
-ON semantic_harness_events(user_id, run_id, sequence);
-CREATE TABLE IF NOT EXISTS semantic_delivery_runs (
-    delivery_id           TEXT PRIMARY KEY,
-    run_id                TEXT NOT NULL,
-    user_id               TEXT NOT NULL,
-    status                TEXT NOT NULL,
-    manifest_json         TEXT NOT NULL,
-    output_dir            TEXT NOT NULL,
-    created_at            TEXT NOT NULL,
-    FOREIGN KEY (run_id) REFERENCES semantic_harness_runs(run_id)
-);
-CREATE INDEX IF NOT EXISTS idx_sdr_user_run
-ON semantic_delivery_runs(user_id, run_id, created_at DESC);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_sdr_run_unique
-ON semantic_delivery_runs(run_id);
-CREATE TABLE IF NOT EXISTS semantic_delivery_outputs (
-    output_id             TEXT PRIMARY KEY,
-    delivery_id           TEXT NOT NULL,
-    run_id                TEXT NOT NULL,
-    user_id               TEXT NOT NULL,
-    format                TEXT NOT NULL,
-    filename              TEXT NOT NULL,
-    media_type            TEXT NOT NULL,
-    sha256                TEXT NOT NULL,
-    size_bytes            INTEGER NOT NULL,
-    file_path             TEXT NOT NULL,
-    qa_json               TEXT NOT NULL,
-    created_at            TEXT NOT NULL,
-    FOREIGN KEY (delivery_id) REFERENCES semantic_delivery_runs(delivery_id)
-);
-CREATE INDEX IF NOT EXISTS idx_sdo_user_run
-ON semantic_delivery_outputs(user_id, run_id, created_at DESC);
-CREATE TABLE IF NOT EXISTS semantic_workspace_tasks (
-    task_id                 TEXT PRIMARY KEY,
-    user_id                 TEXT NOT NULL,
-    title                   TEXT NOT NULL,
-    objective_text          TEXT NOT NULL,
-    upload_ids_json         TEXT NOT NULL DEFAULT '[]',
-    source_refs_json        TEXT NOT NULL DEFAULT '[]',
-    output_formats_json     TEXT NOT NULL DEFAULT '[]',
-    table_output_contracts_json TEXT NOT NULL DEFAULT '[]',
-    provider                TEXT NOT NULL DEFAULT 'local',
-    model                   TEXT,
-    external_api_confirmed  INTEGER NOT NULL DEFAULT 0,
-    status                  TEXT NOT NULL DEFAULT 'queued',
-    active_revision         INTEGER NOT NULL DEFAULT 1,
-    plan_id                 TEXT,
-    logical_revision        INTEGER,
-    binding_revision        INTEGER,
-    run_id                  TEXT,
-    summary                 TEXT NOT NULL DEFAULT '',
-    error                   TEXT,
-    failure_json            TEXT,
-    question_json           TEXT,
-    cancel_requested        INTEGER NOT NULL DEFAULT 0,
-    deleted_at              TEXT,
-    purge_after             TEXT,
-    created_at              TEXT NOT NULL,
-    updated_at              TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_swt_user_updated
-ON semantic_workspace_tasks(user_id, deleted_at, updated_at DESC);
-CREATE TABLE IF NOT EXISTS semantic_workspace_revisions (
-    task_id                 TEXT NOT NULL,
-    revision                INTEGER NOT NULL,
-    user_id                 TEXT NOT NULL,
-    objective_text          TEXT NOT NULL,
-    output_formats_json     TEXT NOT NULL DEFAULT '[]',
-    table_output_contracts_json TEXT NOT NULL DEFAULT '[]',
-    plan_id                 TEXT,
-    logical_revision        INTEGER,
-    binding_revision        INTEGER,
-    run_id                  TEXT,
-    status                  TEXT NOT NULL,
-    summary                 TEXT NOT NULL DEFAULT '',
-    change_summary          TEXT NOT NULL DEFAULT '',
-    created_at              TEXT NOT NULL,
-    updated_at              TEXT NOT NULL,
-    PRIMARY KEY (task_id, revision),
-    FOREIGN KEY (task_id) REFERENCES semantic_workspace_tasks(task_id)
-);
-CREATE INDEX IF NOT EXISTS idx_swr_user_task
-ON semantic_workspace_revisions(user_id, task_id, revision DESC);
-CREATE TABLE IF NOT EXISTS semantic_workspace_events (
-    event_id                TEXT PRIMARY KEY,
-    task_id                 TEXT NOT NULL,
-    user_id                 TEXT NOT NULL,
-    sequence                INTEGER NOT NULL,
-    stage                   TEXT NOT NULL,
-    event_type              TEXT NOT NULL,
-    summary                 TEXT NOT NULL,
-    details_json            TEXT NOT NULL DEFAULT '{}',
-    created_at              TEXT NOT NULL,
-    FOREIGN KEY (task_id) REFERENCES semantic_workspace_tasks(task_id),
-    UNIQUE (task_id, sequence)
-);
-CREATE INDEX IF NOT EXISTS idx_swe_user_task
-ON semantic_workspace_events(user_id, task_id, sequence);
-CREATE TABLE IF NOT EXISTS semantic_workspace_audit_tombstones (
-    task_id                 TEXT PRIMARY KEY,
-    user_id                 TEXT NOT NULL,
-    objective_sha256        TEXT NOT NULL,
-    source_refs_json        TEXT NOT NULL DEFAULT '[]',
-    result_refs_json        TEXT NOT NULL DEFAULT '[]',
-    requested_formats_json  TEXT NOT NULL DEFAULT '[]',
-    terminal_status         TEXT NOT NULL,
-    error_code              TEXT,
-    task_created_at         TEXT NOT NULL,
-    deleted_at              TEXT,
-    purged_at               TEXT NOT NULL,
-    purge_reason            TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_swat_user_purged
-ON semantic_workspace_audit_tombstones(user_id, purged_at DESC);
-"""
 
 
 def _now() -> str:
@@ -471,309 +50,16 @@ class WebUIStore:
         self.semantic_paths = semantic_paths
         Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        with self._conn() as conn:
-            conn.executescript(_DDL)
-            # 向后兼容：旧库的 messages 表补加 task_id / meta_json 列
-            cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
-            for col in ("task_id", "meta_json"):
-                if col not in cols:
-                    conn.execute(f"ALTER TABLE messages ADD COLUMN {col} TEXT")
-            # 向后兼容：旧库的 users 表补加 RBAC 列
-            ucols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
-            if "role" not in ucols:
-                conn.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
-            if "disabled" not in ucols:
-                conn.execute("ALTER TABLE users ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0")
-            # pending 默认 0：旧库已在用的用户视为已审批，不被锁出
-            if "pending" not in ucols:
-                conn.execute("ALTER TABLE users ADD COLUMN pending INTEGER NOT NULL DEFAULT 0")
-            # 向后兼容：旧库的 memory_hit_log 表补加 hit 列（方案 E3，历史行视为命中）
-            hcols = {r["name"] for r in conn.execute("PRAGMA table_info(memory_hit_log)").fetchall()}
-            if "hit" not in hcols:
-                conn.execute("ALTER TABLE memory_hit_log ADD COLUMN hit INTEGER NOT NULL DEFAULT 1")
-            # 向后兼容：旧库的 library_dedup_scan_log 表补加 details 列（巡检操作明细，历史行为空）
-            lcols = {r["name"] for r in conn.execute("PRAGMA table_info(library_dedup_scan_log)").fetchall()}
-            if "details" not in lcols:
-                conn.execute("ALTER TABLE library_dedup_scan_log ADD COLUMN details TEXT NOT NULL DEFAULT ''")
-            # 向后兼容：旧库的 message_feedback 表补加 status/admin_note 列（管理员处理状态）
-            fcols = {r["name"] for r in conn.execute("PRAGMA table_info(message_feedback)").fetchall()}
-            if "status" not in fcols:
-                conn.execute("ALTER TABLE message_feedback ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'")
-            if "admin_note" not in fcols:
-                conn.execute("ALTER TABLE message_feedback ADD COLUMN admin_note TEXT")
-            # 引导：无任何超级管理员时，把最早创建的用户提升为 super_admin（顶层，避免无人可管）
-            has_super = conn.execute("SELECT 1 FROM users WHERE role='super_admin' LIMIT 1").fetchone()
-            if not has_super:
-                first = conn.execute(
-                    "SELECT user_id FROM users ORDER BY created_at, rowid LIMIT 1"
-                ).fetchone()
-                if first:
-                    conn.execute("UPDATE users SET role='super_admin' WHERE user_id=?", (first["user_id"],))
-
-            # 向后兼容：旧库的 data_prep_tasks 表补加 checkpoint_json 列（Phase 3 增量断点续跑）
-            dpt_cols = {r["name"] for r in conn.execute("PRAGMA table_info(data_prep_tasks)").fetchall()}
-            if "checkpoint_json" not in dpt_cols:
-                conn.execute("ALTER TABLE data_prep_tasks ADD COLUMN checkpoint_json TEXT")
-            if "unit_id" not in dpt_cols:
-                conn.execute("ALTER TABLE data_prep_tasks ADD COLUMN unit_id TEXT")
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_dpt_unit "
-                "ON data_prep_tasks(unit_id)"
-            )
-            workspace_cols = {
-                r["name"]
-                for r in conn.execute("PRAGMA table_info(document_workspaces)").fetchall()
-            }
-            if "checked_upload_ids_json" not in workspace_cols:
-                conn.execute(
-                    "ALTER TABLE document_workspaces "
-                    "ADD COLUMN checked_upload_ids_json TEXT NOT NULL DEFAULT '[]'"
-                )
-                conn.execute(
-                    "UPDATE document_workspaces "
-                    "SET checked_upload_ids_json=upload_ids_json"
-                )
-            if "active_unit_id" not in workspace_cols:
-                conn.execute(
-                    "ALTER TABLE document_workspaces ADD COLUMN active_unit_id TEXT"
-                )
-            harness_attempt_cols = {
-                r["name"]
-                for r in conn.execute(
-                    "PRAGMA table_info(semantic_harness_attempts)"
-                ).fetchall()
-            }
-            if "artifact_paths_json" not in harness_attempt_cols:
-                conn.execute(
-                    "ALTER TABLE semantic_harness_attempts "
-                    "ADD COLUMN artifact_paths_json TEXT NOT NULL DEFAULT '{}'"
-                )
-            semantic_workspace_cols = {
-                r["name"]
-                for r in conn.execute(
-                    "PRAGMA table_info(semantic_workspace_tasks)"
-                ).fetchall()
-            }
-            if "failure_json" not in semantic_workspace_cols:
-                conn.execute(
-                    "ALTER TABLE semantic_workspace_tasks "
-                    "ADD COLUMN failure_json TEXT"
-                )
-            if "source_refs_json" not in semantic_workspace_cols:
-                conn.execute(
-                    "ALTER TABLE semantic_workspace_tasks "
-                    "ADD COLUMN source_refs_json TEXT NOT NULL DEFAULT '[]'"
-                )
-            if "table_output_contracts_json" not in semantic_workspace_cols:
-                conn.execute(
-                    "ALTER TABLE semantic_workspace_tasks "
-                    "ADD COLUMN table_output_contracts_json "
-                    "TEXT NOT NULL DEFAULT '[]'"
-                )
-            semantic_revision_cols = {
-                r["name"]
-                for r in conn.execute(
-                    "PRAGMA table_info(semantic_workspace_revisions)"
-                ).fetchall()
-            }
-            if "table_output_contracts_json" not in semantic_revision_cols:
-                conn.execute(
-                    "ALTER TABLE semantic_workspace_revisions "
-                    "ADD COLUMN table_output_contracts_json "
-                    "TEXT NOT NULL DEFAULT '[]'"
-                )
-            unit_cols = {
-                r["name"]
-                for r in conn.execute(
-                    "PRAGMA table_info(document_task_units)"
-                ).fetchall()
-            }
-            if "archived_at" not in unit_cols:
-                conn.execute(
-                    "ALTER TABLE document_task_units ADD COLUMN archived_at TEXT"
-                )
-            # 为旧文档任务回填任务—上传关联，供文件历史和版本查询。
-            old_tasks = conn.execute(
-                "SELECT task_id, spec_json FROM data_prep_tasks "
-                "WHERE task_id NOT IN (SELECT DISTINCT task_id FROM data_prep_task_uploads)"
-            ).fetchall()
-            for old_task in old_tasks:
-                try:
-                    spec = json.loads(old_task["spec_json"] or "{}")
-                except (TypeError, ValueError, json.JSONDecodeError):
-                    continue
-                if spec.get("task_type") != "document_extraction":
-                    continue
-                for ordinal, upload_id in enumerate(spec.get("upload_ids") or []):
-                    conn.execute(
-                        "INSERT OR IGNORE INTO data_prep_task_uploads "
-                        "(task_id, upload_id, ordinal) VALUES (?, ?, ?)",
-                        (old_task["task_id"], str(upload_id), ordinal),
-                    )
-            self._migrate_document_task_units(conn)
-
-    @staticmethod
-    def _legacy_unit_id(user_id: str, kind: str, identity: str) -> str:
-        """为历史迁移生成稳定 ID，重复启动不会制造重复任务单位。"""
-        value = uuid.uuid5(
-            uuid.NAMESPACE_URL,
-            f"mangrove-document-unit:{user_id}:{kind}:{identity}",
-        )
-        return f"du_{value.hex[:16]}"
-
-    def _migrate_document_task_units(self, conn: sqlite3.Connection) -> None:
-        """把旧任务无损归入单文件单位或历史批次。
-
-        旧工作区会累积勾选文件，因此“本次首次出现且只有一个的新文件”视为用户
-        新上传的独立文件；父子修订沿用父任务单位。真正同时首次出现多个文件的
-        历史任务才迁移为文件集。
-        """
-        rows = conn.execute(
-            "SELECT task_id, user_id, unit_id, spec_json, created_at, updated_at "
-            "FROM data_prep_tasks ORDER BY user_id, created_at, rowid"
-        ).fetchall()
-        seen_uploads: Dict[str, set[str]] = {}
-        task_units: Dict[str, str] = {}
-        for row in rows:
-            try:
-                spec = json.loads(row["spec_json"] or "{}")
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
-            if spec.get("task_type") != "document_extraction":
-                continue
-            user_id = str(row["user_id"])
-            upload_ids = list(dict.fromkeys(
-                str(item) for item in (spec.get("upload_ids") or [])
-            ))
-            if not upload_ids:
-                continue
-            unit_id = row["unit_id"] or spec.get("unit_id")
-            parent_id = str(spec.get("parent_task_id") or "")
-            if not unit_id and parent_id:
-                unit_id = task_units.get(parent_id)
-            known = seen_uploads.setdefault(user_id, set())
-            new_uploads = [item for item in upload_ids if item not in known]
-            if not unit_id and len(new_uploads) == 1:
-                primary_upload = new_uploads[0]
-                unit_id = self._legacy_unit_id(
-                    user_id,
-                    "single",
-                    primary_upload,
-                )
-                unit_type = "single_file"
-                members = [primary_upload]
-                name = primary_upload
-            elif not unit_id and len(upload_ids) == 1:
-                primary_upload = upload_ids[0]
-                unit_id = self._legacy_unit_id(
-                    user_id,
-                    "single",
-                    primary_upload,
-                )
-                unit_type = "single_file"
-                members = [primary_upload]
-                name = primary_upload
-            elif not unit_id:
-                unit_id = self._legacy_unit_id(
-                    user_id,
-                    "batch",
-                    parent_id or str(row["task_id"]),
-                )
-                unit_type = "file_set"
-                members = upload_ids
-                intents = spec.get("intent_messages") or []
-                name = f"历史批次 · {str(intents[-1] if intents else row['task_id'])[:60]}"
-            else:
-                existing = conn.execute(
-                    "SELECT unit_type, name FROM document_task_units "
-                    "WHERE unit_id=?",
-                    (unit_id,),
-                ).fetchone()
-                if existing:
-                    unit_type = str(existing["unit_type"])
-                    name = str(existing["name"])
-                    members = [
-                        str(item["upload_id"])
-                        for item in conn.execute(
-                            "SELECT upload_id FROM document_task_unit_members "
-                            "WHERE unit_id=? ORDER BY ordinal",
-                            (unit_id,),
-                        ).fetchall()
-                    ]
-                else:
-                    unit_type = "file_set" if len(upload_ids) > 1 else "single_file"
-                    members = upload_ids
-                    name = upload_ids[0] if unit_type == "single_file" else "历史文件集"
-            now = str(row["updated_at"] or row["created_at"] or _now())
-            conn.execute(
-                "INSERT OR IGNORE INTO document_task_units "
-                "(unit_id, user_id, unit_type, name, business_type, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, '', ?, ?)",
-                (
-                    unit_id,
-                    user_id,
-                    unit_type,
-                    name,
-                    str(row["created_at"] or now),
-                    now,
-                ),
-            )
-            for ordinal, upload_id in enumerate(members):
-                conn.execute(
-                    "INSERT OR IGNORE INTO document_task_unit_members "
-                    "(unit_id, upload_id, ordinal, added_at) VALUES (?, ?, ?, ?)",
-                    (unit_id, upload_id, ordinal, now),
-                )
-            spec["unit_id"] = unit_id
-            conn.execute(
-                "UPDATE data_prep_tasks SET unit_id=?, spec_json=? WHERE task_id=?",
-                (
-                    unit_id,
-                    json.dumps(spec, ensure_ascii=False),
-                    row["task_id"],
-                ),
-            )
-            task_units[str(row["task_id"])] = str(unit_id)
-            known.update(upload_ids)
-
-        # 工作区中还没有任务的文件也必须作为独立任务单位出现。
-        for row in conn.execute(
-            "SELECT user_id, upload_ids_json, updated_at FROM document_workspaces"
-        ).fetchall():
-            user_id = str(row["user_id"])
-            try:
-                upload_ids = json.loads(row["upload_ids_json"] or "[]")
-            except (TypeError, ValueError, json.JSONDecodeError):
-                upload_ids = []
-            for upload_id in upload_ids:
-                upload_id = str(upload_id)
-                exists = conn.execute(
-                    "SELECT 1 FROM document_task_unit_members m "
-                    "JOIN document_task_units u ON u.unit_id=m.unit_id "
-                    "WHERE u.user_id=? AND u.unit_type='single_file' "
-                    "AND m.upload_id=? LIMIT 1",
-                    (user_id, upload_id),
-                ).fetchone()
-                if exists:
-                    continue
-                unit_id = self._legacy_unit_id(user_id, "single", upload_id)
-                now = str(row["updated_at"] or _now())
-                conn.execute(
-                    "INSERT OR IGNORE INTO document_task_units "
-                    "(unit_id, user_id, unit_type, name, business_type, created_at, updated_at) "
-                    "VALUES (?, ?, 'single_file', ?, '', ?, ?)",
-                    (unit_id, user_id, upload_id, now, now),
-                )
-                conn.execute(
-                    "INSERT OR IGNORE INTO document_task_unit_members "
-                    "(unit_id, upload_id, ordinal, added_at) VALUES (?, ?, 0, ?)",
-                    (unit_id, upload_id, now),
-                )
+        inspect_database(
+            DatabaseTarget(profile="webui", path=Path(self.db_path))
+        ).require_current()
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
             yield conn
             conn.commit()
@@ -784,14 +70,108 @@ class WebUIStore:
             conn.close()
 
     # ---------- 运行时配置（全局/按用户两级覆盖，.env 为兜底） ----------
+    def _resolve_existing_config_secret(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        scope: str,
+        key: str,
+        value: str,
+    ) -> tuple[str, object]:
+        """在写操作前完整验证旧 Ref 的身份与可解密性。"""
+
+        secret_id = parse_secret_ref(value)
+        row = conn.execute(
+            "SELECT ciphertext FROM runtime_config_secrets "
+            "WHERE secret_id=? AND owner_scope=? AND config_key=?",
+            (secret_id, scope, key),
+        ).fetchone()
+        if row is None:
+            raise SecretRefResolutionError("SecretRef 无法解析")
+        vault = load_vault(self.db_path)
+        try:
+            vault.decrypt(str(row["ciphertext"]))
+        except VaultDecryptionError as exc:
+            raise SecretRefResolutionError(
+                "运行时配置 Vault 无法解密 SecretRef"
+            ) from exc
+        return secret_id, vault
+
     def config_all(self, scope: str) -> Dict[str, str]:
         """取某作用域的全部覆盖：{key: value}。scope='global' 或 user_id。"""
         with self._conn() as conn:
             rows = conn.execute("SELECT key, value FROM runtime_config WHERE scope=?", (scope,)).fetchall()
-        return {r["key"]: r["value"] for r in rows}
+            result: Dict[str, str] = {}
+            vault = None
+            for row in rows:
+                key = str(row["key"])
+                value = str(row["value"])
+                if key not in RUNTIME_CONFIG_SECRET_KEYS:
+                    result[key] = value
+                    continue
+                secret_id = parse_secret_ref(value)
+                secret_row = conn.execute(
+                    "SELECT ciphertext FROM runtime_config_secrets "
+                    "WHERE secret_id=? AND owner_scope=? AND config_key=?",
+                    (secret_id, scope, key),
+                ).fetchone()
+                if secret_row is None:
+                    # Owner 与 key 都属于 SecretRef 身份；任一不匹配均失败关闭，
+                    # 且不能向调用者区分“不存在”和“越权”。
+                    raise SecretRefResolutionError("SecretRef 无法解析")
+                vault = vault or load_vault(self.db_path)
+                try:
+                    result[key] = vault.decrypt(str(secret_row["ciphertext"]))
+                except VaultDecryptionError as exc:
+                    raise SecretRefResolutionError(
+                        "运行时配置 Vault 无法解密 SecretRef"
+                    ) from exc
+        return result
 
     def config_set(self, scope: str, key: str, value: str, updated_by: str = "") -> None:
         with self._lock, self._conn() as conn:
+            if key in RUNTIME_CONFIG_SECRET_KEYS:
+                previous = conn.execute(
+                    "SELECT value FROM runtime_config WHERE scope=? AND key=?",
+                    (scope, key),
+                ).fetchone()
+                previous_id = None
+                if previous is not None:
+                    previous_id, vault = self._resolve_existing_config_secret(
+                        conn,
+                        scope=scope,
+                        key=key,
+                        value=str(previous["value"]),
+                    )
+                else:
+                    vault = load_or_create_vault(self.db_path)
+                secret_id = str(uuid.uuid4())
+                opaque_ref = secret_ref(secret_id)
+                ciphertext = vault.encrypt(value)
+                conn.execute(
+                    "INSERT INTO runtime_config_secrets "
+                    "(secret_id, owner_scope, config_key, ciphertext, created_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (secret_id, scope, key, ciphertext, _now()),
+                )
+                conn.execute(
+                    "INSERT INTO runtime_config "
+                    "(scope, key, value, updated_at, updated_by) VALUES (?, ?, ?, ?, ?) "
+                    "ON CONFLICT(scope, key) DO UPDATE SET value=excluded.value, "
+                    "updated_at=excluded.updated_at, updated_by=excluded.updated_by",
+                    (scope, key, opaque_ref, _now(), updated_by),
+                )
+                if previous_id is not None:
+                    deleted = conn.execute(
+                        "DELETE FROM runtime_config_secrets "
+                        "WHERE secret_id=? AND owner_scope=? AND config_key=?",
+                        (previous_id, scope, key),
+                    ).rowcount
+                    if deleted != 1:
+                        # 旧引用的 Owner/key 绑定不匹配时必须回滚整个替换事务，
+                        # 不能用新值覆盖来掩盖已有的越权或损坏状态。
+                        raise SecretRefResolutionError("SecretRef 无法解析")
+                return
             conn.execute(
                 "INSERT INTO runtime_config (scope, key, value, updated_at, updated_by) VALUES (?, ?, ?, ?, ?) "
                 "ON CONFLICT(scope, key) DO UPDATE SET value=excluded.value, "
@@ -801,7 +181,26 @@ class WebUIStore:
 
     def config_delete(self, scope: str, key: str) -> None:
         with self._lock, self._conn() as conn:
+            previous = conn.execute(
+                "SELECT value FROM runtime_config WHERE scope=? AND key=?",
+                (scope, key),
+            ).fetchone()
+            if key in RUNTIME_CONFIG_SECRET_KEYS and previous is not None:
+                secret_id, _vault = self._resolve_existing_config_secret(
+                    conn,
+                    scope=scope,
+                    key=key,
+                    value=str(previous["value"]),
+                )
             conn.execute("DELETE FROM runtime_config WHERE scope=? AND key=?", (scope, key))
+            if key in RUNTIME_CONFIG_SECRET_KEYS and previous is not None:
+                deleted = conn.execute(
+                    "DELETE FROM runtime_config_secrets "
+                    "WHERE secret_id=? AND owner_scope=? AND config_key=?",
+                    (secret_id, scope, key),
+                ).rowcount
+                if deleted != 1:
+                    raise SecretRefResolutionError("SecretRef 无法解析")
 
     # ---------- Cookie 健康状态（手动/定时验证结果落库，供配置中心展示） ----------
     def cookie_health_set(self, key: str, status: str, message: str, checked_by: str) -> None:

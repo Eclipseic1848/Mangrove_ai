@@ -15,6 +15,14 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.scheduler import cron
+from tests.database_migration_helpers import migrated_profile_database
+
+
+def _migrated_store(path: str | Path):
+    from src.scheduler.store import ScheduleStore
+
+    database = migrated_profile_database(path, profile="scheduler")
+    return ScheduleStore(str(database))
 
 
 def test_parse_cron_field():
@@ -96,11 +104,9 @@ def test_compute_next_run():
 
 
 def test_store_crud():
-    from src.scheduler.store import ScheduleStore
-
     with tempfile.TemporaryDirectory() as d:
         db = Path(d) / "sched.db"
-        store = ScheduleStore(str(db))
+        store = _migrated_store(db)
         # 新增一个 cron 任务
         tid = store.add(
             user_input="抓某招投标网标讯并提炼摘要",
@@ -169,10 +175,8 @@ def test_compute_next_run_date_range_clamp():
 
 def test_store_add_with_name_source_and_new_fields():
     """手动/模板创建需要落 name/source/interval_seconds/start_date/end_date。"""
-    from src.scheduler.store import ScheduleStore
-
     with tempfile.TemporaryDirectory() as d:
-        store = ScheduleStore(str(Path(d) / "s.db"))
+        store = _migrated_store(Path(d) / "s.db")
         tid = store.add(
             user_input="每2小时抓一次新闻", provider=None, model=None,
             trigger_type="interval", cron_expr=None, run_at=None,
@@ -197,10 +201,8 @@ def test_store_add_with_name_source_and_new_fields():
 
 def test_store_list_active_includes_paused():
     """暂停中的任务仍属于“进行中”，应出现在任务中心列表（前端靠 status 渲染开关）。"""
-    from src.scheduler.store import ScheduleStore
-
     with tempfile.TemporaryDirectory() as d:
-        store = ScheduleStore(str(Path(d) / "s.db"))
+        store = _migrated_store(Path(d) / "s.db")
         tid = store.add(user_input="任务A", provider=None, model=None,
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 14, 8, 0))
@@ -214,10 +216,8 @@ def test_store_list_active_includes_paused():
 
 def test_store_set_status_pause_resume():
     """暂停：只改 status，不动 next_run_at；恢复：改回 active 并可带新的 next_run_at。"""
-    from src.scheduler.store import ScheduleStore
-
     with tempfile.TemporaryDirectory() as d:
-        store = ScheduleStore(str(Path(d) / "s.db"))
+        store = _migrated_store(Path(d) / "s.db")
         tid = store.add(user_input="任务B", provider=None, model=None,
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 14, 8, 0))
@@ -235,10 +235,8 @@ def test_store_set_status_pause_resume():
 
 def test_store_edit_replaces_fields():
     """编辑：整体替换触发方式/文案/生效区间，重算的 next_run_at 一并写入。"""
-    from src.scheduler.store import ScheduleStore
-
     with tempfile.TemporaryDirectory() as d:
-        store = ScheduleStore(str(Path(d) / "s.db"))
+        store = _migrated_store(Path(d) / "s.db")
         tid = store.add(user_input="旧文案", provider=None, model=None,
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 14, 8, 0), name="旧名称")
@@ -261,10 +259,8 @@ def test_store_edit_replaces_fields():
 
 def test_store_list_recent_runs():
     """运行记录 Tab：跨任务聚合执行历史，新→旧，带任务名便于展示。"""
-    from src.scheduler.store import ScheduleStore
-
     with tempfile.TemporaryDirectory() as d:
-        store = ScheduleStore(str(Path(d) / "s.db"))
+        store = _migrated_store(Path(d) / "s.db")
         tid1 = store.add(user_input="任务A", provider=None, model=None,
                           trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                           next_run_at=datetime(2026, 7, 14, 8, 0), name="任务A",
@@ -286,10 +282,8 @@ def test_store_list_recent_runs():
 
 def test_list_recent_runs_filters_and_pagination():
     """运行记录筛选（按任务/按成败/按摘要关键词）+ 分页（limit/offset）+ 配套计数。"""
-    from src.scheduler.store import ScheduleStore
-
     with tempfile.TemporaryDirectory() as d:
-        store = ScheduleStore(str(Path(d) / "s.db"))
+        store = _migrated_store(Path(d) / "s.db")
         tid1 = store.add(user_input="任务A", provider=None, model=None,
                           trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                           next_run_at=datetime(2026, 7, 14, 8, 0), name="任务A",
@@ -353,10 +347,8 @@ def test_get_template():
 
 def test_store_mark_run_keep_schedule():
     """立即执行专用：只记 last_*/run_count，不动 next_run_at/status（供 run_task_now 使用）。"""
-    from src.scheduler.store import ScheduleStore
-
     with tempfile.TemporaryDirectory() as d:
-        store = ScheduleStore(str(Path(d) / "s.db"))
+        store = _migrated_store(Path(d) / "s.db")
         tid = store.add(user_input="任务C", provider=None, model=None,
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 14, 8, 0))
@@ -374,10 +366,8 @@ def test_run_one_interval_reschedule():
     import asyncio
 
     from src.scheduler.service import SchedulerService
-    from src.scheduler.store import ScheduleStore
-
     with tempfile.TemporaryDirectory() as d:
-        store = ScheduleStore(str(Path(d) / "s.db"))
+        store = _migrated_store(Path(d) / "s.db")
         tid = store.add(user_input="每2小时", provider=None, model=None,
                          trigger_type="interval", cron_expr=None, run_at=None,
                          next_run_at=datetime(2026, 7, 13, 10, 0), interval_seconds=7200)
@@ -397,10 +387,8 @@ def test_run_one_end_date_expiry():
     import asyncio
 
     from src.scheduler.service import SchedulerService
-    from src.scheduler.store import ScheduleStore
-
     with tempfile.TemporaryDirectory() as d:
-        store = ScheduleStore(str(Path(d) / "s.db"))
+        store = _migrated_store(Path(d) / "s.db")
         tid = store.add(user_input="限时监控", provider=None, model=None,
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 13, 8, 0), end_date="2026-07-13")
@@ -420,10 +408,8 @@ def test_run_task_now_keeps_schedule_and_returns_started():
     import asyncio
 
     from src.scheduler.service import SchedulerService
-    from src.scheduler.store import ScheduleStore
-
     with tempfile.TemporaryDirectory() as d:
-        store = ScheduleStore(str(Path(d) / "s.db"))
+        store = _migrated_store(Path(d) / "s.db")
         tid = store.add(user_input="任务D", provider=None, model=None,
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 20, 8, 0))
@@ -445,10 +431,8 @@ def test_run_task_now_not_found():
     import asyncio
 
     from src.scheduler.service import SchedulerService
-    from src.scheduler.store import ScheduleStore
-
     with tempfile.TemporaryDirectory() as d:
-        store = ScheduleStore(str(Path(d) / "s.db"))
+        store = _migrated_store(Path(d) / "s.db")
         svc = SchedulerService(store=store, poll_interval=1.0, runner=lambda *a, **k: None)
         assert asyncio.run(svc.run_task_now("no_such_id")) == "not_found"
 
@@ -458,10 +442,8 @@ def test_run_task_now_concurrent_guard():
     import asyncio
 
     from src.scheduler.service import SchedulerService
-    from src.scheduler.store import ScheduleStore
-
     with tempfile.TemporaryDirectory() as d:
-        store = ScheduleStore(str(Path(d) / "s.db"))
+        store = _migrated_store(Path(d) / "s.db")
         tid = store.add(user_input="任务E", provider=None, model=None,
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 20, 8, 0))
@@ -521,11 +503,10 @@ def test_run_one_marks_failure_and_catchup():
     from datetime import timedelta
 
     from src.scheduler.service import SchedulerService
-    from src.scheduler.store import ScheduleStore
 
     async def _case(runner_result, next_run_at, now):
         with tempfile.TemporaryDirectory() as d:
-            store = ScheduleStore(str(Path(d) / "s.db"))
+            store = _migrated_store(Path(d) / "s.db")
             tid = store.add(user_input="测试任务", provider=None, model=None,
                             trigger_type="cron", cron_expr="0 8 * * *",
                             run_at=None, next_run_at=next_run_at)
@@ -561,10 +542,8 @@ def test_run_history():
     import asyncio
 
     from src.scheduler.service import SchedulerService
-    from src.scheduler.store import ScheduleStore
-
     with tempfile.TemporaryDirectory() as d:
-        store = ScheduleStore(str(Path(d) / "s.db"))
+        store = _migrated_store(Path(d) / "s.db")
         tid = store.add(user_input="历史测试", provider=None, model=None,
                         trigger_type="cron", cron_expr="0 8 * * *",
                         run_at=None, next_run_at=datetime(2026, 7, 6, 8, 0))
@@ -588,34 +567,61 @@ def test_run_history():
 
 
 def test_run_history_backfill():
-    """runs 表上线前的老任务：初始化时把 last_* 那次回填为一条历史。"""
+    """runs 表上线前的老任务：显式迁移时回填 last_* 历史。"""
     import sqlite3
 
     from src.scheduler.store import ScheduleStore
 
     with tempfile.TemporaryDirectory() as d:
-        db = str(Path(d) / "s.db")
-        # 先建一个"老版本"库：只有主表 + 一条已执行过的任务
-        store = ScheduleStore(db)
-        tid = store.add(user_input="老任务", provider=None, model=None,
-                        trigger_type="cron", cron_expr="0 9 * * *",
-                        run_at=None, next_run_at=datetime(2026, 7, 7, 9, 0))
-        store.mark_run(tid, success=True,
-                       result="report=D:\\x\\report.md; json=D:\\x\\data.json",
-                       next_run_at=datetime(2026, 7, 8, 9, 0))
-        # 模拟旧库：清空 runs 表（相当于 runs 表上线前的状态）
+        db = Path(d) / "s.db"
+        tid = "legacy-task"
+        # 真实构造 runs 表上线前的旧 Schema，不借 Repository 代建表。
         conn = sqlite3.connect(db)
-        conn.execute("DELETE FROM scheduled_task_runs")
+        conn.execute(
+            """CREATE TABLE scheduled_tasks (
+                task_id TEXT PRIMARY KEY,
+                user_input TEXT NOT NULL,
+                provider TEXT,
+                model TEXT,
+                trigger_type TEXT NOT NULL,
+                run_at TEXT,
+                cron_expr TEXT,
+                next_run_at TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                last_run_at TEXT,
+                last_success INTEGER,
+                last_result TEXT,
+                last_error TEXT,
+                run_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        conn.execute(
+            """INSERT INTO scheduled_tasks (
+                task_id, user_input, trigger_type, cron_expr, next_run_at,
+                status, last_run_at, last_success, last_result, run_count, created_at
+            ) VALUES (?, ?, 'cron', '0 9 * * *', ?, 'active', ?, 1, ?, 1, ?)""",
+            (
+                tid,
+                "老任务",
+                "2026-07-08T09:00:00",
+                "2026-07-07T09:00:00",
+                "report=D:\\x\\report.md; json=D:\\x\\data.json",
+                "2026-07-01T09:00:00",
+            ),
+        )
         conn.commit()
         conn.close()
-        # 重新初始化（新版本启动）→ 回填
-        store2 = ScheduleStore(db)
+        # 只有显式迁移可以补齐 Schema 并回填历史。
+        migrated_profile_database(db, profile="scheduler")
+        store2 = ScheduleStore(str(db))
         runs = store2.list_runs(tid)
         assert len(runs) == 1, "应回填一条历史"
         assert runs[0]["report_path"] == "D:\\x\\report.md"
         assert runs[0]["json_path"] == "D:\\x\\data.json"
-        # 再次初始化不重复回填
-        ScheduleStore(db)
+        # 重放显式迁移不重复回填。
+        migrated_profile_database(db, profile="scheduler")
+        ScheduleStore(str(db))
         assert len(store2.list_runs(tid)) == 1, "回填应幂等"
 
 

@@ -1,0 +1,4 @@
+# 当前没有进程内 GPU workload；这是保留给未来显式设计的空 overlay。
+# Mangrove 当前通过远端 Provider/模型服务调用模型，远端模型连接不需要 torch、CUDA 或 Triton。
+# 只有新增真实本地 GPU workload、确定驱动/CUDA/Python 兼容矩阵并完成目标服务器验收后，
+# 才能在本文件加入依赖；不得从历史开发机环境复制孤儿 CUDA pin。

@@ -9,117 +9,9 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
+from src.database_migrations import DatabaseTarget, inspect_database
 
-_DDL = """
-CREATE TABLE IF NOT EXISTS model_connections (
-    connection_id   TEXT PRIMARY KEY,
-    owner_scope     TEXT NOT NULL,
-    owner_user_id   TEXT,
-    preset_id       TEXT,
-    preset_version  TEXT,
-    display_name    TEXT NOT NULL,
-    base_url        TEXT NOT NULL,
-    model           TEXT NOT NULL,
-    api_format      TEXT NOT NULL,
-    locality        TEXT NOT NULL,
-    secret_id       TEXT,
-    status          TEXT NOT NULL,
-    key_hint        TEXT NOT NULL DEFAULT '',
-    verified_at     TEXT,
-    compatibility_slot TEXT,
-    created_by      TEXT NOT NULL,
-    created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_model_connections_owner
-ON model_connections(owner_user_id, updated_at DESC);
 
-CREATE TABLE IF NOT EXISTS model_connection_secrets (
-    secret_id       TEXT PRIMARY KEY,
-    owner_user_id   TEXT,
-    ciphertext      TEXT NOT NULL,
-    created_at      TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS model_connection_models (
-    connection_id    TEXT NOT NULL,
-    model_id         TEXT NOT NULL,
-    display_name     TEXT NOT NULL,
-    catalog_role     TEXT NOT NULL,
-    catalog_version  TEXT NOT NULL,
-    catalog_order    INTEGER NOT NULL,
-    status           TEXT NOT NULL,
-    enabled          INTEGER NOT NULL DEFAULT 0,
-    verified_at      TEXT,
-    error_code       TEXT,
-    usage_status     TEXT NOT NULL DEFAULT 'unknown',
-    native_usage_json TEXT NOT NULL DEFAULT '{}',
-    updated_at       TEXT NOT NULL,
-    PRIMARY KEY (connection_id, model_id)
-);
-CREATE INDEX IF NOT EXISTS idx_model_connection_models_status
-ON model_connection_models(connection_id, status, enabled);
-
-CREATE TABLE IF NOT EXISTS model_connection_grants (
-    grant_id         TEXT PRIMARY KEY,
-    token_hash       TEXT NOT NULL UNIQUE,
-    owner_user_id    TEXT NOT NULL,
-    task_id          TEXT NOT NULL,
-    revision         INTEGER NOT NULL,
-    run_id           TEXT NOT NULL,
-    connection_id    TEXT NOT NULL,
-    secret_id        TEXT,
-    purpose          TEXT NOT NULL,
-    base_url         TEXT NOT NULL,
-    model            TEXT NOT NULL,
-    api_format       TEXT NOT NULL,
-    locality         TEXT NOT NULL,
-    expires_at       TEXT NOT NULL,
-    revoked_at       TEXT,
-    revoke_reason    TEXT,
-    created_at       TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_model_connection_grants_run
-ON model_connection_grants(
-    owner_user_id, task_id, revision, run_id, purpose
-);
-
-CREATE TABLE IF NOT EXISTS model_provider_usage (
-    usage_id         TEXT PRIMARY KEY,
-    grant_id         TEXT NOT NULL,
-    owner_user_id    TEXT NOT NULL,
-    task_id          TEXT NOT NULL,
-    revision         INTEGER NOT NULL,
-    run_id           TEXT NOT NULL,
-    connection_id    TEXT NOT NULL,
-    purpose          TEXT NOT NULL,
-    status           TEXT NOT NULL,
-    input_tokens     INTEGER,
-    output_tokens    INTEGER,
-    total_tokens     INTEGER,
-    request_count    INTEGER NOT NULL DEFAULT 1,
-    native_json      TEXT NOT NULL DEFAULT '{}',
-    created_at       TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_model_provider_usage_task
-ON model_provider_usage(owner_user_id, task_id, revision, created_at);
-
-CREATE TABLE IF NOT EXISTS model_usage_preferences (
-    owner_user_id TEXT PRIMARY KEY,
-    connection_id TEXT NOT NULL,
-    model_id TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS model_connection_imports (
-    source_scope TEXT NOT NULL,
-    source_key TEXT NOT NULL,
-    source_fingerprint TEXT NOT NULL,
-    connection_id TEXT NOT NULL UNIQUE,
-    created_at TEXT NOT NULL,
-    PRIMARY KEY (source_scope, source_key, source_fingerprint)
-);
-"""
 
 
 def _now() -> str:
@@ -182,64 +74,12 @@ class ModelConnectionRepository:
 
     def __init__(self, db_path: str) -> None:
         self.db_path = db_path
-        Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        with self._conn() as conn:
-            conn.executescript(_DDL)
-            self._migrate_personal_connection_cardinality(conn)
-            self._migrate_connection_models(conn)
+        inspect_database(
+            DatabaseTarget(profile="webui", path=Path(self.db_path))
+        ).require_current()
 
-    @staticmethod
-    def _migrate_personal_connection_cardinality(conn: sqlite3.Connection) -> None:
-        """把旧版每用户每 Provider 单槽约束迁移成兼容槽，不改变旧连接语义。"""
 
-        columns = {
-            row["name"]
-            for row in conn.execute("PRAGMA table_info(model_connections)").fetchall()
-        }
-        if "compatibility_slot" not in columns:
-            conn.execute(
-                "ALTER TABLE model_connections ADD COLUMN compatibility_slot TEXT"
-            )
-            # 升级前的个人连接来自旧 PUT；只把这些存量行归入可覆盖兼容槽。
-            conn.execute(
-                "UPDATE model_connections SET compatibility_slot='personal_preset_v1' "
-                "WHERE owner_scope='user_personal'"
-            )
-        conn.execute("DROP INDEX IF EXISTS idx_model_connections_personal_preset")
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS "
-            "idx_model_connections_personal_compatibility_slot "
-            "ON model_connections(owner_user_id, preset_id, compatibility_slot) "
-            "WHERE owner_scope='user_personal' AND compatibility_slot IS NOT NULL"
-        )
-        conn.commit()
-
-    @staticmethod
-    def _migrate_connection_models(conn: sqlite3.Connection) -> None:
-        """把旧连接的单模型字段补成一个可用 ConnectionModel，重复执行不新增。"""
-
-        conn.execute(
-            """
-            INSERT INTO model_connection_models (
-                connection_id, model_id, display_name, catalog_role,
-                catalog_version, catalog_order, status, enabled,
-                verified_at, error_code, usage_status, native_usage_json, updated_at
-            )
-            SELECT
-                c.connection_id, c.model, c.model, 'legacy',
-                COALESCE(c.preset_version, 'legacy'), 0,
-                CASE WHEN c.status='verified' THEN 'available' ELSE 'pending_validation' END,
-                CASE WHEN c.status='verified' THEN 1 ELSE 0 END,
-                c.verified_at, NULL, 'unknown', '{}', c.updated_at
-            FROM model_connections AS c
-            WHERE NOT EXISTS (
-                SELECT 1 FROM model_connection_models AS m
-                WHERE m.connection_id=c.connection_id
-            )
-            """
-        )
-        conn.commit()
 
     @staticmethod
     def _replace_connection_models(
@@ -293,6 +133,8 @@ class ModelConnectionRepository:
     def _conn(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
             yield conn
         finally:

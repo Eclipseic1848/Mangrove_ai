@@ -27,3 +27,11 @@ condition = "AND"
 regexTarget = "line"
 paths = ['''^evals/generalization-g1-independent/freeze\.json$''']
 regexes = ['''sources/ih_safe_35_forbidden_token\.pdf''']
+
+[[allowlists]]
+description = "Schema manifest 中 Secret 表的 64 位值是结构摘要"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''^src/database_migrations/schema_manifest\.json$''']
+regexes = ['''"(?:model_connection_secrets|runtime_config_secrets)"\s*:\s*"[0-9a-f]{64}"''']

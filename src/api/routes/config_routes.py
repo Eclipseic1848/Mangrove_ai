@@ -308,10 +308,12 @@ def _detect_local_browser() -> Optional[str]:
 
 def _record_cookie_health(key: str, status: str, message: str, checked_by: str) -> None:
     """验证结果顺带落库，供配置中心展示"最后一次验证状态"；旁路副作用，落库失败只记日志。"""
+    safe_message = rc.redact_sensitive_text(str(message))[:500]
     try:
-        get_store().cookie_health_set(key, status, message[:500], checked_by)
-    except Exception as e:  # noqa: BLE001 落库失败不该影响验证结果本身返回给前端
-        logger.warning("cookie_health 写入失败 key=%s: %s", key, e)
+        get_store().cookie_health_set(key, status, safe_message, checked_by)
+    except Exception:  # noqa: BLE001 落库失败不该影响验证结果本身返回给前端
+        # 持久化异常可能携带连接参数或 Cookie；旁路日志只保留目标标识。
+        logger.warning("cookie_health 写入失败 key=%s", key)
 
 
 async def _verify_target(target: str) -> str:
@@ -427,10 +429,15 @@ async def verify_config(body: VerifyIn, user=Depends(get_current_user)):
         if is_admin and body.target in _COOKIE_HEALTH_KEYS:
             _record_cookie_health(body.target, "valid", detail, checked_by="manual")
         return {"ok": True, "detail": detail}
-    except HTTPException:
-        raise
+    except HTTPException as exc:
+        detail = rc.redact_sensitive_text(str(exc.detail))[:300]
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=detail,
+            headers=exc.headers,
+        ) from exc
     except Exception as e:  # noqa: BLE001 验证失败把原因回前端
-        detail = str(e)[:300]
+        detail = rc.redact_sensitive_text(str(e))[:300]
         if is_admin and body.target in _COOKIE_HEALTH_KEYS:
             status = "unknown" if "无法判断" in detail else "invalid"
             _record_cookie_health(body.target, status, detail, checked_by="manual")

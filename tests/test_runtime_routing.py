@@ -17,9 +17,13 @@ from src.runtime_routing import (
 )
 from src.agentic_runtime import RuntimeVersion
 from pydantic import ValidationError
+from pathlib import Path
 import pytest
+import re
 import sqlite3
 import threading
+
+import src.runtime_routing.sqlite_repository as runtime_sqlite_repository
 
 
 def _actor() -> RolloutActor:
@@ -498,9 +502,12 @@ def _migrated_database(tmp_path):
             "INSERT INTO existing_delivery VALUES ('delivery-1', 'kept')"
         )
         connection.execute(
-            "CREATE TABLE runtime_config (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            "CREATE TABLE external_runtime_config "
+            "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
         )
-        connection.execute("INSERT INTO runtime_config VALUES ('mode', 'existing')")
+        connection.execute(
+            "INSERT INTO external_runtime_config VALUES ('mode', 'existing')"
+        )
     backup = tmp_path / "runtime-routing-before-g3.db"
     migrate_runtime_routing(database, backup)
     return database, backup
@@ -517,7 +524,7 @@ def test_explicit_sqlite_migration_preserves_recovery_point_and_existing_data(
             "SELECT payload FROM existing_delivery"
         ).fetchone() == ("kept",)
         assert connection.execute(
-            "SELECT value FROM runtime_config WHERE key='mode'"
+            "SELECT value FROM external_runtime_config WHERE key='mode'"
         ).fetchone() == ("existing",)
         assert connection.execute(
             "SELECT 1 FROM sqlite_master WHERE name='runtime_gate_snapshots'"
@@ -534,9 +541,90 @@ def test_sqlite_repository_refuses_implicit_schema_creation(tmp_path) -> None:
     with sqlite3.connect(database):
         pass
 
-    with pytest.raises(RuntimeError, match="尚未执行带备份迁移"):
+    with pytest.raises(RuntimeError, match="请先执行显式迁移"):
         SqliteRuntimeRoutingRepository(database)
     assert open_runtime_routing_repository(database) is None
+
+
+def test_sqlite_repository_connections_enforce_integrity_and_lock_timeout(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database, _backup = _migrated_database(tmp_path)
+    repository = SqliteRuntimeRoutingRepository(database)
+    real_connect = sqlite3.connect
+    connections: list[sqlite3.Connection] = []
+
+    def tracked_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(
+        "src.runtime_routing.sqlite_repository.sqlite3.connect",
+        tracked_connect,
+    )
+
+    repository.get_rollout()
+    connection = connections[-1]
+    try:
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        connection.close()
+
+
+def test_runtime_routing_product_sql_never_uses_positional_insert() -> None:
+    source = Path(runtime_sqlite_repository.__file__).read_text(encoding="utf-8")
+
+    positional_inserts = re.findall(
+        r"INSERT(?:\s+OR\s+IGNORE)?\s+INTO\s+runtime_[a-z_]+\s+VALUES",
+        source,
+        flags=re.IGNORECASE,
+    )
+
+    assert positional_inserts == []
+
+
+def test_all_runtime_routing_writes_tolerate_additive_schema_columns(
+    tmp_path,
+) -> None:
+    database, _backup = _migrated_database(tmp_path)
+    repository = SqliteRuntimeRoutingRepository(database)
+    with sqlite3.connect(database) as connection:
+        for table in (
+            "runtime_gate_snapshots",
+            "runtime_rollout_events",
+            "runtime_assignments",
+            "runtime_rollout_approvals",
+        ):
+            connection.execute(
+                f"ALTER TABLE {table} ADD COLUMN compatibility_note TEXT"
+            )
+
+    routing = RuntimeRouting(repository)
+    passed = _snapshot(passed=True)
+    routing.record_gate(passed, _actor())
+    comparison = routing.compare_gates(
+        passed.snapshot_id,
+        passed.snapshot_id,
+        _actor(),
+    )
+    assignment = routing.resolve(
+        RuntimeTaskRevisionRef(owner_id="owner-a", task_id="task-a", revision=1),
+        RolloutActor(actor_id="owner-a", role="user"),
+    )
+    approval = _approval(
+        routing,
+        approval_id="approval-additive-columns",
+        target_mode=RolloutMode.VNEXT_DEFAULT,
+        gate_snapshot_id=passed.snapshot_id,
+    )
+    rollout = routing.change_mode(RolloutMode.VNEXT_DEFAULT, approval, _actor())
+
+    assert comparison.baseline_snapshot_id == passed.snapshot_id
+    assert assignment.task_revision.task_id == "task-a"
+    assert rollout.mode is RolloutMode.VNEXT_DEFAULT
 
 
 def test_sqlite_repository_persists_rollback_without_rewriting_history(
@@ -655,9 +743,9 @@ def test_sqlite_repository_rejects_tampered_schema(tmp_path) -> None:
     with sqlite3.connect(database) as connection:
         connection.execute("DROP TRIGGER runtime_assignments_no_update")
 
-    with pytest.raises(RuntimeError, match="尚未执行带备份迁移"):
+    with pytest.raises(RuntimeError, match="请先执行显式迁移"):
         SqliteRuntimeRoutingRepository(database)
-    with pytest.raises(RuntimeError, match="尚未执行带备份迁移"):
+    with pytest.raises(RuntimeError, match="请先执行显式迁移"):
         open_runtime_routing_repository(database)
 
 

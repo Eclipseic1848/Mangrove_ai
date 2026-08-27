@@ -14,6 +14,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.api.store import WebUIStore
 from src.config.user_ctx import set_user_memories
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def test_lesson_for_analyze_logs_hit():
@@ -88,7 +89,7 @@ def test_lesson_for_analyze_no_candidates_logs_miss_none():
 def _tmp_store() -> WebUIStore:
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.close()
-    return WebUIStore(tmp.name)
+    return WebUIStore(str(migrated_webui_database(tmp.name)))
 
 
 def test_hit_log_add_and_recent():

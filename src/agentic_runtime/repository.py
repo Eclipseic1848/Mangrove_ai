@@ -15,6 +15,8 @@ from threading import RLock
 from typing import Any
 import uuid
 
+from src.database_migrations import DatabaseTarget, inspect_database
+
 from .models import (
     CandidateArtifact,
     PermissionProfile,
@@ -38,117 +40,17 @@ class AgenticRuntimeRepository:
 
     def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._ensure_schema()
+        inspect_database(
+            DatabaseTarget(profile="webui", path=self.db_path)
+        ).require_current()
 
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
-    def _ensure_schema(self) -> None:
-        with _LOCK, self._conn() as conn:
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS agentic_runtime_runs (
-                    user_id TEXT NOT NULL,
-                    task_id TEXT NOT NULL,
-                    revision INTEGER NOT NULL,
-                    runtime_version TEXT NOT NULL,
-                    permission_profile TEXT NOT NULL,
-                    model_connection_id TEXT,
-                    model_connection_version TEXT,
-                    model_connection_model TEXT,
-                    external_api_confirmed INTEGER NOT NULL DEFAULT 0,
-                    status TEXT NOT NULL,
-                    run_id TEXT,
-                    container_name TEXT,
-                    workspace_root TEXT,
-                    session_file TEXT,
-                    request_json TEXT,
-                    candidates_json TEXT NOT NULL DEFAULT '[]',
-                    verification_json TEXT,
-                    verified_candidate_set_hash TEXT,
-                    failure_json TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (user_id, task_id, revision)
-                );
-
-                CREATE TABLE IF NOT EXISTS agentic_runtime_events (
-                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_id TEXT NOT NULL UNIQUE,
-                    user_id TEXT NOT NULL,
-                    task_id TEXT NOT NULL,
-                    revision INTEGER NOT NULL,
-                    event_type TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    details_json TEXT NOT NULL DEFAULT '{}',
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_agentic_runtime_events_owner
-                ON agentic_runtime_events(user_id, task_id, revision, sequence);
-
-                CREATE TABLE IF NOT EXISTS agentic_runtime_idempotency (
-                    user_id TEXT NOT NULL,
-                    idempotency_key TEXT NOT NULL,
-                    request_hash TEXT NOT NULL,
-                    task_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (user_id, idempotency_key)
-                );
-
-                CREATE TABLE IF NOT EXISTS agentic_runtime_coverage (
-                    user_id TEXT NOT NULL,
-                    task_id TEXT NOT NULL,
-                    revision INTEGER NOT NULL,
-                    run_id TEXT NOT NULL,
-                    contract_json TEXT NOT NULL,
-                    ledger_json TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY (user_id, task_id, revision, run_id)
-                );
-                """
-            )
-            columns = {
-                row["name"]
-                for row in conn.execute(
-                    "PRAGMA table_info(agentic_runtime_runs)"
-                )
-            }
-            if "verification_json" not in columns:
-                conn.execute(
-                    "ALTER TABLE agentic_runtime_runs "
-                    "ADD COLUMN verification_json TEXT"
-                )
-            if "verified_candidate_set_hash" not in columns:
-                conn.execute(
-                    "ALTER TABLE agentic_runtime_runs "
-                    "ADD COLUMN verified_candidate_set_hash TEXT"
-                )
-            if "model_connection_id" not in columns:
-                conn.execute(
-                    "ALTER TABLE agentic_runtime_runs "
-                    "ADD COLUMN model_connection_id TEXT"
-                )
-            if "model_connection_version" not in columns:
-                conn.execute(
-                    "ALTER TABLE agentic_runtime_runs "
-                    "ADD COLUMN model_connection_version TEXT"
-                )
-            if "model_connection_model" not in columns:
-                conn.execute(
-                    "ALTER TABLE agentic_runtime_runs "
-                    "ADD COLUMN model_connection_model TEXT"
-                )
-            if "external_api_confirmed" not in columns:
-                conn.execute(
-                    "ALTER TABLE agentic_runtime_runs "
-                    "ADD COLUMN external_api_confirmed "
-                    "INTEGER NOT NULL DEFAULT 0"
-                )
 
     def save_coverage(
         self,

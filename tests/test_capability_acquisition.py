@@ -124,8 +124,36 @@ def test_sqlite_repository_refuses_database_without_explicit_migration(
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE existing_data (value TEXT NOT NULL)")
 
-    with pytest.raises(RuntimeError, match="尚未执行带备份迁移"):
+    with pytest.raises(RuntimeError, match="请先执行显式迁移"):
         SqliteAcquisitionRepository(database)
+
+
+def test_sqlite_repository_connections_enforce_integrity_and_lock_timeout(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = _migrate_test_database(tmp_path, "connection-policy.db")
+    repository = SqliteAcquisitionRepository(database)
+    real_connect = sqlite3.connect
+    connections: list[sqlite3.Connection] = []
+
+    def tracked_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(
+        "src.capability_acquisition.sqlite_repository.sqlite3.connect",
+        tracked_connect,
+    )
+
+    assert repository.get("missing-acquisition") is None
+    connection = connections[-1]
+    try:
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        connection.close()
 
 
 def test_sqlite_repository_rejects_malformed_acquisition_schema(
@@ -142,7 +170,7 @@ def test_sqlite_repository_rejects_malformed_acquisition_schema(
             "ON capability_acquisition_runs(acquisition_id)"
         )
 
-    with pytest.raises(RuntimeError, match="尚未执行带备份迁移"):
+    with pytest.raises(RuntimeError, match="请先执行显式迁移"):
         SqliteAcquisitionRepository(database)
 
 
@@ -162,7 +190,7 @@ def test_sqlite_repository_rejects_schema_with_changed_identity_collation(
             "ON capability_acquisition_runs(owner_id, status)"
         )
 
-    with pytest.raises(RuntimeError, match="尚未执行带备份迁移"):
+    with pytest.raises(RuntimeError, match="请先执行显式迁移"):
         SqliteAcquisitionRepository(database)
 
 
@@ -202,7 +230,7 @@ def test_migration_replay_allows_normal_business_writes_after_migration(
     assert backup.read_bytes() == backup_before_replay
 
 
-def test_migration_rejects_a_new_recovery_path_after_schema_exists(
+def test_current_database_can_create_a_new_explicit_recovery_point(
     tmp_path,
 ) -> None:
     database = tmp_path / "production.db"
@@ -211,11 +239,14 @@ def test_migration_rejects_a_new_recovery_path_after_schema_exists(
     with sqlite3.connect(database):
         pass
     migrate_capability_acquisition(database, first_backup)
+    first_before = first_backup.read_bytes()
 
-    with pytest.raises(RuntimeError, match="首次恢复点不匹配"):
-        migrate_capability_acquisition(database, different_backup)
+    migrated = migrate_capability_acquisition(database, different_backup)
 
-    assert not different_backup.exists()
+    assert migrated == different_backup.resolve()
+    assert different_backup.is_file()
+    assert first_backup.read_bytes() == first_before
+    assert SqliteAcquisitionRepository(database).get("missing") is None
 
 
 def test_migration_rejects_corrupt_source_without_creating_backup(
@@ -225,23 +256,24 @@ def test_migration_rejects_corrupt_source_without_creating_backup(
     backup = tmp_path / "corrupt-before-ac05.db"
     database.write_bytes(b"not-a-sqlite-database")
 
-    with pytest.raises(RuntimeError, match="源数据库完整性检查失败"):
+    with pytest.raises(RuntimeError, match="源数据库不可读取"):
         migrate_capability_acquisition(database, backup)
 
     assert not backup.exists()
 
 
-def test_migration_rejects_missing_source_without_creating_database(
+def test_migration_bootstraps_a_missing_database_explicitly(
     tmp_path,
 ) -> None:
     database = tmp_path / "missing.db"
     backup = tmp_path / "missing-before-ac05.db"
 
-    with pytest.raises(FileNotFoundError, match="源数据库不存在"):
-        migrate_capability_acquisition(database, backup)
+    migrated = migrate_capability_acquisition(database, backup)
 
-    assert not database.exists()
-    assert not backup.exists()
+    assert migrated == backup.resolve()
+    assert database.is_file()
+    assert backup.is_file()
+    assert SqliteAcquisitionRepository(database).get("missing") is None
 
 
 def test_migration_rejects_backup_that_overwrites_source(tmp_path) -> None:
@@ -264,7 +296,7 @@ def test_migration_rejects_unrelated_existing_backup_before_schema_exists(
         connection.execute("CREATE TABLE unrelated_data (value TEXT NOT NULL)")
     backup_before = backup.read_bytes()
 
-    with pytest.raises(RuntimeError, match="恢复点与源数据库不一致"):
+    with pytest.raises(FileExistsError, match="备份已存在"):
         migrate_capability_acquisition(database, backup)
 
     assert backup.read_bytes() == backup_before
@@ -284,11 +316,11 @@ def test_migration_replay_rejects_unrelated_healthy_database_as_backup(
         connection.execute("CREATE TABLE existing_data (value TEXT NOT NULL)")
         connection.execute("INSERT INTO existing_data VALUES ('unrelated')")
 
-    with pytest.raises(RuntimeError, match="恢复点与源数据库不一致"):
+    with pytest.raises(FileExistsError, match="备份已存在"):
         migrate_capability_acquisition(database, unrelated_backup)
 
 
-def test_migration_resumes_after_backup_completed_before_ddl(
+def test_migration_rejects_unbound_backup_completed_before_ddl(
     tmp_path,
 ) -> None:
     database = tmp_path / "production.db"
@@ -300,11 +332,12 @@ def test_migration_resumes_after_backup_completed_before_ddl(
         with sqlite3.connect(backup) as destination:
             connection.backup(destination)
 
-    migrated_backup = migrate_capability_acquisition(database, backup)
+    backup_before = backup.read_bytes()
 
-    assert migrated_backup == backup.resolve()
-    repository = SqliteAcquisitionRepository(database)
-    assert repository.get("missing") is None
+    with pytest.raises(FileExistsError, match="备份已存在"):
+        migrate_capability_acquisition(database, backup)
+
+    assert backup.read_bytes() == backup_before
     with sqlite3.connect(backup) as connection:
         assert connection.execute(
             "SELECT 1 FROM sqlite_master "

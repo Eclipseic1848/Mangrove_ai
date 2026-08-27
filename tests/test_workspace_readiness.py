@@ -9,6 +9,11 @@ from fastapi.testclient import TestClient
 from src.api.readiness import collect_workspace_readiness
 from src.api.semantic_workspace_runtime import SemanticWorkspaceManager
 from src.api.store import WebUIStore
+from tests.database_migration_helpers import migrated_webui_database
+
+
+def _store(tmp_path: Path) -> WebUIStore:
+    return WebUIStore(str(migrated_webui_database(tmp_path / "webui.db")))
 
 
 def _manager_with_workers(*, exited_worker: bool = False) -> SemanticWorkspaceManager:
@@ -36,7 +41,7 @@ def _check_map(report: object) -> dict[str, object]:
 def test_workspace_readiness_passes_with_real_sqlite_workers_and_roots(
     tmp_path: Path,
 ) -> None:
-    store = WebUIStore(str(tmp_path / "webui.db"))
+    store = _store(tmp_path)
     manager = _manager_with_workers()
     roots = [tmp_path / name for name in ("uploads", "executions", "artifacts")]
     for root in roots:
@@ -67,7 +72,7 @@ def test_workspace_readiness_passes_with_real_sqlite_workers_and_roots(
 
 
 def test_workspace_readiness_fails_closed_when_worker_exits(tmp_path: Path) -> None:
-    store = WebUIStore(str(tmp_path / "webui.db"))
+    store = _store(tmp_path)
     manager = _manager_with_workers(exited_worker=True)
     roots = [tmp_path / name for name in ("uploads", "executions", "artifacts")]
     for root in roots:
@@ -92,7 +97,7 @@ def test_workspace_readiness_fails_closed_when_worker_exits(tmp_path: Path) -> N
 def test_workspace_readiness_fails_without_creating_missing_root_or_leaking_path(
     tmp_path: Path,
 ) -> None:
-    store = WebUIStore(str(tmp_path / "webui.db"))
+    store = _store(tmp_path)
     manager = _manager_with_workers()
     upload_root = tmp_path / "private-user-name" / "uploads"
     execution_root = tmp_path / "executions"
@@ -128,7 +133,7 @@ def test_api_readiness_returns_200_then_503_without_sensitive_details(
     from src.api.main import app
     from src.config.settings import settings
 
-    store = WebUIStore(str(tmp_path / "webui.db"))
+    store = _store(tmp_path)
     manager = _manager_with_workers()
     roots = [tmp_path / name for name in ("uploads", "executions", "artifacts")]
     for root in roots:

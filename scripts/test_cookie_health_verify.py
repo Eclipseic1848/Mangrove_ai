@@ -17,12 +17,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.api.store import WebUIStore
 from src.api.routes import config_routes as cr
 from src.config import runtime_config as rc
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _tmp_store() -> WebUIStore:
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.close()
-    return WebUIStore(tmp.name)
+    return WebUIStore(str(migrated_webui_database(tmp.name)))
 
 
 def test_record_cookie_health_writes():

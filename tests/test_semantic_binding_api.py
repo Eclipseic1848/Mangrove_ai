@@ -10,11 +10,13 @@ from src.api.auth import get_current_user
 from src.api.routes import semantic_bindings, semantic_plans
 from src.config.settings import settings
 from src.services.upload_store import UploadStore
+from tests.database_migration_helpers import migrated_webui_database
 from tests.test_semantic_plan_api import ApiFakeGenerator
 
 
 def _make_client(tmp_path, monkeypatch, *, user_id: str):
-    monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "binding.db"))
+    database = migrated_webui_database(tmp_path / "binding.db")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
     monkeypatch.setattr(
         settings,
         "data_prep_upload_root",

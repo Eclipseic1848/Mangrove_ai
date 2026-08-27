@@ -15,19 +15,26 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.api.store import WebUIStore
 from src.api.routes import overview as ov
+from src.database_migrations import DatabaseTarget, apply_migrations
 from src.scheduler.store import ScheduleStore
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _tmp_store() -> WebUIStore:
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.close()
-    return WebUIStore(tmp.name)
+    return WebUIStore(str(migrated_webui_database(tmp.name)))
 
 
 def _call_overview(store: WebUIStore) -> dict:
     user = {"user_id": "u_test", "role": "admin"}
     with tempfile.TemporaryDirectory(prefix="mg_overview_schedule_") as d:
-        schedule_store = ScheduleStore(str(Path(d) / "schedule.db"))
+        schedule_database = Path(d) / "schedule.db"
+        apply_migrations(
+            DatabaseTarget(profile="scheduler", path=schedule_database),
+            schedule_database.with_name("schedule.before-migration.db"),
+        )
+        schedule_store = ScheduleStore(str(schedule_database))
         with patch.object(ov, "get_store", return_value=store), \
              patch.object(ov, "get_schedule_store", return_value=schedule_store):
             return ov.overview(user=user)

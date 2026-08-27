@@ -15,12 +15,13 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.api.store import WebUIStore
 from src.config.user_ctx import get_user_memories, set_user_memories
 from src.memory.loader import personal_context
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _tmp_store() -> WebUIStore:
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.close()
-    return WebUIStore(tmp.name)
+    return WebUIStore(str(migrated_webui_database(tmp.name)))
 
 
 def test_memory_add_and_list():

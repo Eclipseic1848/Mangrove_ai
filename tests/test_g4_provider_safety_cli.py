@@ -56,6 +56,20 @@ from src.model_connections.qualification_ledger import QualificationBatchLedger
 from src.model_connections.storage import ModelConnectionRepository
 from src.model_connections.pinned_transport import PinnedAsyncHTTPTransport
 from src.model_connections.vault import FernetCredentialVault
+from tests.database_migration_helpers import (
+    migrated_qualification_ledger_database,
+    migrated_webui_database,
+)
+
+
+def _model_repository(path: str | Path) -> ModelConnectionRepository:
+    return ModelConnectionRepository(str(migrated_webui_database(path)))
+
+
+def _qualification_ledger(path: str | Path) -> QualificationBatchLedger:
+    return QualificationBatchLedger(
+        migrated_qualification_ledger_database(path)
+    )
 
 
 def test_usage_summary_aggregates_multi_turn_provider_usage() -> None:
@@ -280,7 +294,7 @@ def _create_test_qualification_batch(
             )
             """
         )
-    ledger = QualificationBatchLedger(ledger_path)
+    ledger = _qualification_ledger(ledger_path)
     batch = ledger.create_batch(
         manifest_sha256=str(manifest["manifest_sha256"]),
         providers=[dict(provider) for provider in manifest["providers"]],
@@ -309,7 +323,7 @@ def _anchor_empty_test_qualification_ledger(
     database: Path,
     ledger_path: Path,
 ) -> None:
-    ledger = QualificationBatchLedger(ledger_path)
+    ledger = _qualification_ledger(ledger_path)
     _sync_qualification_ledger_anchor(
         db_path=database,
         ledger=ledger,
@@ -497,7 +511,7 @@ def test_provider_smoke_uses_http_relay_but_does_not_claim_g4_qualification(
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(database)),
+        repository=_model_repository(database),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -567,7 +581,7 @@ def test_provider_smoke_records_ambiguous_timeout_as_outcome_unknown(tmp_path):
     manifest_path = tmp_path / "manifest.json"
     report_path = tmp_path / "report.json"
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(database)),
+        repository=_model_repository(database),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -636,7 +650,7 @@ def test_provider_smoke_preserves_real_broker_timeout_as_outcome_unknown(
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(database)),
+        repository=_model_repository(database),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -688,7 +702,7 @@ def test_provider_smoke_writes_fail_report_when_grant_or_revoke_fails(
     manifest_path = tmp_path / "manifest.json"
     report_path = tmp_path / "report.json"
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(database)),
+        repository=_model_repository(database),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -771,7 +785,7 @@ def test_provider_smoke_lock_is_stable_across_different_output_names(tmp_path):
     entered = threading.Event()
     release = threading.Event()
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(database)),
+        repository=_model_repository(database),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -849,7 +863,7 @@ def test_provider_smoke_persists_attempt_before_egress_and_refuses_replay(
     database = tmp_path / "webui.db"
     manifest_path = tmp_path / "manifest.json"
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(database)),
+        repository=_model_repository(database),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
@@ -1122,7 +1136,7 @@ def test_pi_batch_ledger_refuses_replay_across_database_copies(
             previous_report_paths=(),
             git_identity=git_identity,
         )
-    replacement_ledger = QualificationBatchLedger(ledger_path)
+    replacement_ledger = _qualification_ledger(ledger_path)
     assert replacement_ledger.identity()["ledger_id"] != batch["ledger_id"]
     with pytest.raises(QualificationError, match="身份与外部锚点不一致"):
         create_qualification_batch(
@@ -1576,7 +1590,7 @@ def test_qualification_batch_retry_requires_user_decision_and_is_single_use(
         git_identity=git_identity,
     )
     provider = dict(manifest["providers"][0])
-    ledger = QualificationBatchLedger(ledger_path)
+    ledger = _qualification_ledger(ledger_path)
     ledger.begin_attempt(
         batch_id=str(batch["batch_id"]),
         provider=provider,
@@ -1726,7 +1740,7 @@ def test_qualification_anchor_recovery_preserves_egress_count(
         git_identity=git_identity,
     )
     provider = dict(manifest["providers"][0])
-    ledger = QualificationBatchLedger(authoritative_ledger_path)
+    ledger = _qualification_ledger(authoritative_ledger_path)
     ledger.begin_attempt(
         batch_id=str(batch["batch_id"]),
         provider=provider,
@@ -1839,7 +1853,7 @@ def test_ambiguous_retry_preserves_history_and_allows_only_one_retry(
     database = tmp_path / "webui.db"
     manifest_path = tmp_path / "manifest.json"
     execution_root = tmp_path / "execution"
-    repository = ModelConnectionRepository(str(database))
+    repository = _model_repository(database)
     broker = ConnectionBroker(
         repository=repository,
         vault=FernetCredentialVault.generate(),
@@ -2044,7 +2058,7 @@ def test_pi_provider_chain_uses_standard_ordinary_owner_and_never_claims_g4(
     report_path = tmp_path / "pi-report.json"
     execution_root = tmp_path / "execution"
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(database)),
+        repository=_model_repository(database),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -2230,7 +2244,7 @@ def test_pi_provider_chain_recovers_anchor_failure_before_runtime_call(
     assert runtime_calls == 0
     assert sync_calls == 2
     assert report["pi_provider_chain_passed"] is False
-    ledger = QualificationBatchLedger(authoritative_ledger_path)
+    ledger = _qualification_ledger(authoritative_ledger_path)
     with sqlite3.connect(authoritative_ledger_path) as connection:
         state, attempt_count = connection.execute(
             """
@@ -2271,7 +2285,7 @@ def test_pi_provider_chain_closes_attempt_when_runtime_raises_unexpected_error(
     report_path = tmp_path / "pi-report.json"
     execution_root = tmp_path / "execution"
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(database)),
+        repository=_model_repository(database),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(
             lambda _request: httpx.Response(
@@ -2508,7 +2522,7 @@ def test_g4_assessment_requires_pi_transport_and_scoped_rotation_evidence(
     pi_payload["manifest_sha256"] = manifest_sha
     provider = dict(unsigned["providers"][0])
     ledger_path = authoritative_ledger_path
-    ledger = QualificationBatchLedger(ledger_path)
+    ledger = _qualification_ledger(ledger_path)
     batch = ledger.create_batch(
         manifest_sha256=manifest_sha,
         providers=[provider],
@@ -2620,7 +2634,7 @@ def test_retained_vault_safety_report_preserves_production_key_and_database(
     key_path = tmp_path / "webui.db.model-connections.key"
     backup_root = tmp_path / "backups"
     backup_root.mkdir()
-    repository = ModelConnectionRepository(str(database))
+    repository = _model_repository(database)
     vault = FernetCredentialVault.from_key_file(key_path)
     repository.create_managed(
         created_by="super-admin",
@@ -2636,16 +2650,22 @@ def test_retained_vault_safety_report_preserves_production_key_and_database(
         preset_version="preset-v1",
     )
     with sqlite3.connect(database) as connection:
-        connection.executescript(
+        connection.execute(
             """
-            CREATE TABLE users (
-                user_id TEXT PRIMARY KEY,
-                role TEXT NOT NULL,
-                disabled INTEGER NOT NULL,
-                pending INTEGER NOT NULL
-            );
-            INSERT INTO users VALUES ('super-admin', 'super_admin', 0, 0);
-            """
+            INSERT INTO users (
+                user_id, username, password_hash, role,
+                disabled, pending, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "super-admin",
+                "super-admin",
+                "hash",
+                "super_admin",
+                0,
+                0,
+                "2026-08-23T00:00:00Z",
+            ),
         )
     shutil.copy2(database, backup_root / "webui-before.db")
     manifest_path = tmp_path / "manifest.json"
@@ -2663,7 +2683,7 @@ def test_retained_vault_safety_report_preserves_production_key_and_database(
         check=True,
     ).stdout.strip()
     provider_commit = subprocess.run(
-        ["git", "rev-parse", "a0560852^{commit}"],
+        ["git", "rev-parse", "HEAD^"],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
@@ -2952,7 +2972,7 @@ def test_g4_assessment_accepts_compatible_provider_report_with_retained_key(
     authoritative_ledger_path,
 ):
     provider_commit = subprocess.run(
-        ["git", "rev-parse", "a0560852^{commit}"],
+        ["git", "rev-parse", "HEAD^"],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
@@ -2967,6 +2987,11 @@ def test_g4_assessment_accepts_compatible_provider_report_with_retained_key(
         encoding="utf-8",
         check=True,
     ).stdout.strip()
+    provider_runtime_compatibility = _provider_runtime_compatibility(
+        provider_evidence_commit=provider_commit,
+        current_commit=current_commit,
+    )
+    assert provider_runtime_compatibility["compatible"] is True
     database = tmp_path / "webui.db"
     _create_inventory_database(database)
     provider = {
@@ -2991,7 +3016,7 @@ def test_g4_assessment_accepts_compatible_provider_report_with_retained_key(
         return path
 
     manifest = write("manifest-retained.json", manifest_payload)
-    ledger = QualificationBatchLedger(authoritative_ledger_path)
+    ledger = _qualification_ledger(authoritative_ledger_path)
     batch = ledger.create_batch(
         manifest_sha256=manifest_sha,
         providers=[provider],
@@ -3091,10 +3116,7 @@ def test_g4_assessment_accepts_compatible_provider_report_with_retained_key(
             "accepted_by": "super-admin",
             "acceptance_reason": "明确保留现有生产密钥并接受剩余风险",
             "provider_evidence_commit": provider_commit,
-            "provider_runtime_compatibility": _provider_runtime_compatibility(
-                provider_evidence_commit=provider_commit,
-                current_commit=current_commit,
-            ),
+            "provider_runtime_compatibility": provider_runtime_compatibility,
         },
     )
 
@@ -3165,7 +3187,7 @@ def test_g4_assessment_combines_independent_provider_batches(
     shared_provider_commit,
 ):
     old_commit = subprocess.run(
-        ["git", "rev-parse", "a0560852^{commit}"],
+        ["git", "rev-parse", "HEAD^"],
         cwd=PROJECT_ROOT,
         capture_output=True,
         text=True,
@@ -3193,7 +3215,7 @@ def test_g4_assessment_combines_independent_provider_batches(
         return path
 
     manifest_path = write("combined-manifest.json", combined_manifest)
-    ledger = QualificationBatchLedger(authoritative_ledger_path)
+    ledger = _qualification_ledger(authoritative_ledger_path)
     reports: list[Path] = []
     batch_ids: list[str] = []
     compatibility: list[dict[str, object]] = []
@@ -3284,6 +3306,7 @@ def test_g4_assessment_combines_independent_provider_batches(
                     current_commit=current_commit,
                 )
             )
+    assert all(item["compatible"] is True for item in compatibility)
 
     unique_evidence_commits = list(
         dict.fromkeys(evidence_commit for _, evidence_commit in provider_runs)
@@ -3409,7 +3432,7 @@ def test_provider_relay_pins_validated_ip_and_preserves_tls_identity(tmp_path):
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=_model_repository(tmp_path / "webui.db"),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -3483,7 +3506,7 @@ def test_provider_relay_does_not_follow_redirect_or_repeat_dns(tmp_path):
         return ["8.8.8.8"]
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=_model_repository(tmp_path / "webui.db"),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=resolver,
@@ -3712,7 +3735,7 @@ def test_two_phase_vault_rotation_keeps_live_secret_and_erases_database_backup(
         )
     )
     initial_broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(database)),
+        repository=_model_repository(database),
         vault=FernetCredentialVault.from_key_file(key_path),
         transport=transport,
         resolver=lambda _host: ["8.8.8.8"],
@@ -3768,13 +3791,13 @@ def test_two_phase_vault_rotation_keeps_live_secret_and_erases_database_backup(
     current_vault = FernetCredentialVault.from_key_file(key_path)
     assert current_vault.has_inactive_keys is False
     live_broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(database)),
+        repository=_model_repository(database),
         vault=current_vault,
         transport=transport,
         resolver=lambda _host: ["8.8.8.8"],
     )
     old_backup_broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(backup)),
+        repository=_model_repository(backup),
         vault=current_vault,
         transport=transport,
         resolver=lambda _host: ["8.8.8.8"],
@@ -3815,7 +3838,7 @@ def test_two_phase_vault_rotation_keeps_live_secret_and_erases_database_backup(
 def test_vault_rotation_rejects_concurrent_maintenance(tmp_path, monkeypatch):
     database = tmp_path / "webui.db"
     key_path = tmp_path / "webui.db.model-connections.key"
-    repository = ModelConnectionRepository(str(database))
+    repository = _model_repository(database)
     FernetCredentialVault.from_key_file(key_path)
     entered = threading.Event()
     release = threading.Event()
@@ -3869,7 +3892,7 @@ def test_vault_rotation_rejects_concurrent_maintenance(tmp_path, monkeypatch):
 def test_vault_rotation_prepare_refuses_while_backend_is_running(tmp_path):
     database = tmp_path / "webui.db"
     key_path = tmp_path / "webui.db.model-connections.key"
-    ModelConnectionRepository(str(database))
+    _model_repository(database)
     FernetCredentialVault.from_key_file(key_path)
     key_before = key_path.read_bytes()
 
@@ -3886,7 +3909,7 @@ def test_vault_rotation_prepare_refuses_while_backend_is_running(tmp_path):
 def test_vault_rotation_finalization_refuses_while_backend_is_running(tmp_path):
     database = tmp_path / "webui.db"
     key_path = tmp_path / "webui.db.model-connections.key"
-    ModelConnectionRepository(str(database))
+    _model_repository(database)
     FernetCredentialVault.from_key_file(key_path)
     prepare_vault_rotation(
         db_path=database,
@@ -3913,7 +3936,7 @@ def test_vault_rotation_finalization_rejects_old_keyring_backup(tmp_path):
     key_path = tmp_path / "webui.db.model-connections.key"
     key_backup_root = tmp_path / "backups"
     key_backup_root.mkdir()
-    ModelConnectionRepository(str(database))
+    _model_repository(database)
     FernetCredentialVault.from_key_file(key_path)
     prepare_vault_rotation(
         db_path=database,
@@ -3939,7 +3962,7 @@ def test_vault_rotation_streams_large_old_keyring_backup(tmp_path):
     key_path = tmp_path / "webui.db.model-connections.key"
     key_backup_root = tmp_path / "backups"
     key_backup_root.mkdir()
-    ModelConnectionRepository(str(database))
+    _model_repository(database)
     FernetCredentialVault.from_key_file(key_path)
     prepare_vault_rotation(
         db_path=database,
@@ -3991,7 +4014,7 @@ def test_rotate_vault_cli_requires_irreversible_maintenance_confirmation(
     database = tmp_path / "webui.db"
     key_path = tmp_path / "webui.db.model-connections.key"
     report = tmp_path / "rotation-report.json"
-    ModelConnectionRepository(str(database))
+    _model_repository(database)
     FernetCredentialVault.from_key_file(key_path)
     key_before = key_path.read_bytes()
 

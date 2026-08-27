@@ -53,6 +53,7 @@ from src.candidate_verification import (
     migrate_candidate_verification,
 )
 from src.delivery_publishing.repository import DeliveryPublishingRepository
+from src.database_migrations import SchemaNotCurrentError
 from src.model_connections import ConnectionBroker
 from src.model_connections.storage import ModelConnectionRepository
 from src.model_connections.vault import FernetCredentialVault
@@ -67,6 +68,7 @@ from src.runtime_routing import (
     SqliteRuntimeRoutingRepository,
     migrate_runtime_routing,
 )
+from tests.database_migration_helpers import migrated_webui_database
 
 
 class _FixedCandidateRulesetResolver:
@@ -554,6 +556,7 @@ def _client(
         | None
     ) = None,
     routing_mode: RolloutMode | None = RolloutMode.ADMIN_GRAY,
+    migrate_schema: bool = True,
 ) -> TestClient:
     monkeypatch.setattr(
         settings, "webui_db_path", str(tmp_path / "workspace.db")
@@ -566,14 +569,15 @@ def _client(
         "semantic_execution_root",
         str(tmp_path / "executions"),
     )
-    auth_mod._store = None
-    auth_mod.get_store()
     database = Path(settings.webui_db_path)
-    if routing_mode is not None:
+    if migrate_schema:
         migrate_runtime_routing(
             database,
             tmp_path / "workspace-before-runtime-routing.db",
         )
+    auth_mod._store = None
+    auth_mod.get_store()
+    if routing_mode is not None:
 
 
         routing = RuntimeRouting(SqliteRuntimeRoutingRepository(database))
@@ -722,41 +726,14 @@ def test_missing_routing_schema_fails_closed_for_explicit_pi(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(settings, "pi_runtime_enabled", True)
-    client = _client(
-        tmp_path,
-        monkeypatch,
-        role="admin",
-        routing_mode=None,
-    )
-    document, _ = _uploads(tmp_path)
-    request = {
-        "objective_text": "提取附件内容并输出 JSON",
-        "upload_ids": [document],
-        "output_formats": ["json"],
-        "provider": "local",
-    }
-
-    with client:
-        explicit_pi = client.post(
-            "/api/semantic-workspace/tasks",
-            json={**request, "runtime_version": "pi"},
+    with pytest.raises(SchemaNotCurrentError, match="显式迁移"):
+        _client(
+            tmp_path,
+            monkeypatch,
+            role="admin",
+            routing_mode=None,
+            migrate_schema=False,
         )
-        assert explicit_pi.status_code == 503, explicit_pi.text
-
-        tasks_after_rejection = client.get("/api/semantic-workspace/tasks")
-        assert tasks_after_rejection.status_code == 200
-        assert tasks_after_rejection.json() == []
-
-        platform_default = client.post(
-            "/api/semantic-workspace/tasks",
-            json=request,
-        )
-        assert platform_default.status_code == 202, platform_default.text
-        assert platform_default.json()["runtime_version"] == "legacy"
-        cancelled = client.post(
-            f"/api/semantic-workspace/tasks/{platform_default.json()['task_id']}/cancel"
-        )
-        assert cancelled.status_code in {200, 409}, cancelled.text
 
 
 def test_runtime_rollout_only_changes_new_tasks_and_p0_restores_legacy(
@@ -2336,6 +2313,18 @@ def test_historical_candidate_reverification_records_narrow_authority_before_wor
             ).fetchone()
             assert assignment_row is not None
             assignment_snapshot = dict(assignment_row)
+            assignment_trigger_sql = tuple(
+                row[0]
+                for row in database.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='trigger' "
+                    "AND name IN (?, ?) ORDER BY name",
+                    (
+                        "runtime_assignments_no_delete",
+                        "runtime_assignments_no_update",
+                    ),
+                ).fetchall()
+            )
+            assert len(assignment_trigger_sql) == 2
             database.execute("DROP TRIGGER runtime_assignments_no_update")
             database.execute("DROP TRIGGER runtime_assignments_no_delete")
             database.execute(
@@ -2414,6 +2403,8 @@ def test_historical_candidate_reverification_records_narrow_authority_before_wor
                     tuple(values[column] for column in columns),
                 )
                 previous_attempt_id = legacy_attempt_id
+            for trigger_sql in assignment_trigger_sql:
+                database.execute(trigger_sql)
 
         historical = client.get(
             f"/api/semantic-workspace/tasks/{task_id}"
@@ -3649,6 +3640,7 @@ def test_manager_restart_resumes_persisted_pi_run_instead_of_starting_again(
     )
     auth_mod._store = None
     document, _ = _uploads(tmp_path)
+    migrated_webui_database(settings.webui_db_path)
     store = auth_mod.get_store()
     task_id = "workspace_interrupted_pi"
     store.create_semantic_workspace_task(

@@ -1,0 +1,18 @@
+# Mangrove 可选采集层。生产 Phase 4B 明确选择该组；纯 API 核心环境可不安装。
+# 本文件是 runtime 的 overlay；验证与生产均同时安装 runtime + collectors。
+crawl4ai==0.9.1
+scrapling[fetchers]==0.4.9
+cssselect==1.4.0
+tld==0.13.2
+w3lib==2.4.1
+curl_cffi==0.15.0
+browserforge==1.2.4
+patchright==1.60.1
+apify-fingerprint-datapoints==0.13.0
+msgspec==0.21.1
+protego==0.6.1
+chardet==5.2.0
+firecrawl-py==4.30.2
+ddgs==9.14.4
+playwright==1.60.0
+yt-dlp==2026.7.4

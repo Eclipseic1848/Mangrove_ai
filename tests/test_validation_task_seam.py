@@ -31,6 +31,7 @@ from src.conversation_steering import (
     ProcedureScope,
 )
 from src.config.settings import settings
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _personal_pack(owner: str = "owner-a") -> CapabilityPack:
@@ -291,6 +292,7 @@ class TestD9CreateTaskApi:
             settings, "semantic_execution_root", str(tmp_path / "executions")
         )
         monkeypatch.setattr(settings, "pi_capability_host_enabled", True)
+        migrated_webui_database(settings.webui_db_path)
         monkeypatch.setattr(auth_mod, "_store", None)
         auth_mod.get_store()
         from tests.runtime_routing_test_support import (

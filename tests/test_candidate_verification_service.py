@@ -29,8 +29,8 @@ from src.candidate_verification import (
     CandidateVerificationService,
     SqliteCandidateVerificationRepository,
     VerifierRulesetBinding,
-    migrate_candidate_verification,
 )
+from tests.database_migration_helpers import migrated_webui_database
 
 
 _NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
@@ -171,11 +171,7 @@ class _P0FlippingRulesetResolver(_FixedRulesetResolver):
     def resolve(self, verifier) -> VerifierRulesetBinding:
         with sqlite3.connect(self._database) as connection:
             connection.execute(
-                "CREATE TABLE runtime_rollout_state ("
-                "state_id INTEGER PRIMARY KEY, p0_blocked INTEGER NOT NULL)"
-            )
-            connection.execute(
-                "INSERT INTO runtime_rollout_state VALUES (1, 1)"
+                "UPDATE runtime_rollout_state SET p0_blocked=1 WHERE state_id=1"
             )
         return super().resolve(verifier)
 
@@ -230,7 +226,7 @@ def _request(tmp_path: Path) -> PiRuntimeRequest:
 
 
 def _prepared_service(tmp_path: Path, *, p0_blocked: bool = False):
-    database = tmp_path / "workspace.db"
+    database = migrated_webui_database(tmp_path / "workspace.db")
     runtime_repository = AgenticRuntimeRepository(database)
     runtime_repository.register(
         RuntimeTaskConfig(
@@ -248,7 +244,6 @@ def _prepared_service(tmp_path: Path, *, p0_blocked: bool = False):
         1,
         request=request.model_dump(mode="json", exclude={"api_key"}),
     )
-    migrate_candidate_verification(database, tmp_path / "before-cv.db")
     repository = SqliteCandidateVerificationRepository(database)
     events = []
     service = CandidateVerificationService(
@@ -454,7 +449,7 @@ def test_semantic_retry_exception_projects_new_basis_for_followup_attempt(
 def test_initial_verification_persists_attempt_and_runtime_projection(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / "workspace.db"
+    database = migrated_webui_database(tmp_path / "workspace.db")
     runtime_repository = AgenticRuntimeRepository(database)
     runtime_repository.register(
         RuntimeTaskConfig(
@@ -472,7 +467,6 @@ def test_initial_verification_persists_attempt_and_runtime_projection(
         run_id="pi_run_0123456789abcdef",
         request=_request(tmp_path).model_dump(mode="json", exclude={"api_key"}),
     )
-    migrate_candidate_verification(database, tmp_path / "before-cv.db")
     attempt_repository = SqliteCandidateVerificationRepository(database)
     service = CandidateVerificationService(
         repository=attempt_repository,
@@ -512,7 +506,7 @@ def test_initial_verification_persists_attempt_and_runtime_projection(
 def test_runtime_projection_failure_rolls_back_attempt_terminal_state(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / "workspace.db"
+    database = migrated_webui_database(tmp_path / "workspace.db")
     runtime_repository = AgenticRuntimeRepository(database)
     runtime_repository.register(
         RuntimeTaskConfig(
@@ -530,7 +524,6 @@ def test_runtime_projection_failure_rolls_back_attempt_terminal_state(
         run_id="pi_run_0123456789abcdef",
         request=_request(tmp_path).model_dump(mode="json", exclude={"api_key"}),
     )
-    migrate_candidate_verification(database, tmp_path / "before-cv.db")
     attempt_repository = SqliteCandidateVerificationRepository(database)
     service = CandidateVerificationService(
         repository=attempt_repository,
@@ -580,7 +573,7 @@ def test_runtime_projection_failure_rolls_back_attempt_terminal_state(
 def test_semantic_retry_appends_attempt_and_preserves_inconclusive_history(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / "workspace.db"
+    database = migrated_webui_database(tmp_path / "workspace.db")
     runtime_repository = AgenticRuntimeRepository(database)
     runtime_repository.register(
         RuntimeTaskConfig(
@@ -599,7 +592,6 @@ def test_semantic_retry_appends_attempt_and_preserves_inconclusive_history(
         run_id="pi_run_0123456789abcdef",
         request=request.model_dump(mode="json", exclude={"api_key"}),
     )
-    migrate_candidate_verification(database, tmp_path / "before-cv.db")
     attempt_repository = SqliteCandidateVerificationRepository(database)
     service = CandidateVerificationService(
         repository=attempt_repository,
@@ -665,7 +657,7 @@ def test_semantic_retry_appends_attempt_and_preserves_inconclusive_history(
 def test_cross_wired_runtime_is_rejected_before_verifier_execution(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / "workspace.db"
+    database = migrated_webui_database(tmp_path / "workspace.db")
     runtime_repository = AgenticRuntimeRepository(database)
     runtime_repository.register(
         RuntimeTaskConfig(
@@ -682,7 +674,6 @@ def test_cross_wired_runtime_is_rejected_before_verifier_execution(
         1,
         run_id="pi_run_0123456789abcdef",
     )
-    migrate_candidate_verification(database, tmp_path / "before-cv.db")
     attempt_repository = SqliteCandidateVerificationRepository(database)
     service = CandidateVerificationService(
         repository=attempt_repository,
@@ -724,7 +715,7 @@ def test_cross_wired_runtime_is_rejected_before_verifier_execution(
 def test_failed_initial_verification_is_an_immutable_attempt(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / "workspace.db"
+    database = migrated_webui_database(tmp_path / "workspace.db")
     runtime_repository = AgenticRuntimeRepository(database)
     runtime_repository.register(
         RuntimeTaskConfig(
@@ -743,7 +734,6 @@ def test_failed_initial_verification_is_an_immutable_attempt(
         run_id="pi_run_0123456789abcdef",
         request=request.model_dump(mode="json", exclude={"api_key"}),
     )
-    migrate_candidate_verification(database, tmp_path / "before-cv.db")
     repository = SqliteCandidateVerificationRepository(database)
     service = CandidateVerificationService(
         repository=repository,
@@ -779,7 +769,7 @@ def test_failed_initial_verification_is_an_immutable_attempt(
 def test_same_idempotency_request_reuses_attempt_and_conflict_is_rejected(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / "workspace.db"
+    database = migrated_webui_database(tmp_path / "workspace.db")
     runtime_repository = AgenticRuntimeRepository(database)
     runtime_repository.register(
         RuntimeTaskConfig(
@@ -798,7 +788,6 @@ def test_same_idempotency_request_reuses_attempt_and_conflict_is_rejected(
         run_id="pi_run_0123456789abcdef",
         request=request.model_dump(mode="json", exclude={"api_key"}),
     )
-    migrate_candidate_verification(database, tmp_path / "before-cv.db")
     repository = SqliteCandidateVerificationRepository(database)
     service = CandidateVerificationService(
         repository=repository,
@@ -840,7 +829,7 @@ def test_same_idempotency_request_reuses_attempt_and_conflict_is_rejected(
 def test_attempt_terminal_failure_rolls_back_runtime_projection(
     tmp_path: Path,
 ) -> None:
-    database = tmp_path / "workspace.db"
+    database = migrated_webui_database(tmp_path / "workspace.db")
     runtime_repository = AgenticRuntimeRepository(database)
     runtime_repository.register(
         RuntimeTaskConfig(
@@ -859,7 +848,6 @@ def test_attempt_terminal_failure_rolls_back_runtime_projection(
         run_id="pi_run_0123456789abcdef",
         request=request.model_dump(mode="json", exclude={"api_key"}),
     )
-    migrate_candidate_verification(database, tmp_path / "before-cv.db")
     repository = SqliteCandidateVerificationRepository(database)
     service = CandidateVerificationService(
         repository=repository,
