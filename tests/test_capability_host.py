@@ -20,12 +20,20 @@ from src.agentic_runtime.egress_policy import (
 )
 from src.agentic_runtime.models import PiRuntimeCheckpoint, PiRuntimeRequest, SourceInput
 from src.agentic_runtime.pi_runtime import PiRuntime, build_docker_command
+from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.capability_host import (
     CapabilityHost,
     CapabilityHostLease,
     CapabilityHostRequest,
 )
 from src.config.settings import Settings
+from tests.database_migration_helpers import migrated_webui_database
+
+
+def _state_store(tmp_path: Path) -> AgenticRuntimeRepository:
+    return AgenticRuntimeRepository(
+        migrated_webui_database(tmp_path / "runtime-state.db")
+    )
 
 
 def test_capability_host_is_disabled_by_default() -> None:
@@ -254,6 +262,7 @@ async def test_pi_cancel_revokes_network_and_revision_when_host_cleanup_fails(
         ),
         connection_broker=broker,  # type: ignore[arg-type]
         capability_host=host,  # type: ignore[arg-type]
+        state_store=_state_store(tmp_path),
     )
     run_key = ("user-a", "task-cleanup", 1)
     host_dir = tmp_path / "host"
@@ -332,6 +341,7 @@ async def test_pi_runtime_uses_sidecar_only_for_native_capability(
         ),
         capability_mount_resolver=lambda *_args: (pack,),
         capability_host=host,
+        state_store=_state_store(tmp_path),
     )
     request = PiRuntimeRequest(
         user_id="user-a",
@@ -420,6 +430,7 @@ async def test_pi_runtime_uses_sidecar_only_for_native_capability(
 @pytest.mark.asyncio
 async def test_pi_runtime_cancel_revokes_host_before_return(tmp_path: Path) -> None:
     docker = RecordingDocker()
+    broker = RecordingBroker()
     pack = _native_pack(tmp_path / "pack", "prettier")
     source = tmp_path / "source.txt"
     source.write_text("source", encoding="utf-8")
@@ -436,6 +447,8 @@ async def test_pi_runtime_cancel_revokes_host_before_return(tmp_path: Path) -> N
         ),
         capability_mount_resolver=lambda *_args: (pack,),
         capability_host=host,
+        connection_broker=broker,  # type: ignore[arg-type]
+        state_store=_state_store(tmp_path),
     )
     request = PiRuntimeRequest(
         user_id="user-a",

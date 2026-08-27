@@ -22,12 +22,13 @@ import src.memory.templates as tpl
 import src.memory.lessons as lesson
 import src.memory.embeddings as emb
 from src.api.library_dedup_scanner import LibraryDedupScanner
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _tmp_store() -> WebUIStore:
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.close()
-    return WebUIStore(tmp.name)
+    return WebUIStore(str(migrated_webui_database(tmp.name)))
 
 
 def _setup_tpl_tmp():

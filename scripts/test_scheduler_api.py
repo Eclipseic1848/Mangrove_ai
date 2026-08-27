@@ -23,6 +23,7 @@ from src.api.schemas import ManualTaskIn, ScheduleIn, TaskPatchIn, TriggerIn  # 
 from src.api.session_store import pending_store  # noqa: E402
 from src.scheduler.service import SchedulerService  # noqa: E402
 from src.scheduler.store import ScheduleStore  # noqa: E402
+from tests.database_migration_helpers import migrated_profile_database  # noqa: E402
 
 USER = {"user_id": "u1", "username": "u1"}
 OTHER = {"user_id": "u2", "username": "u2"}
@@ -33,7 +34,10 @@ async def _stub_runner(user_input, **kw):
 
 
 def _fresh_store(tmp_dir: str) -> ScheduleStore:
-    store = ScheduleStore(str(Path(tmp_dir) / "s.db"))
+    database = migrated_profile_database(
+        Path(tmp_dir) / "s.db", profile="scheduler"
+    )
+    store = ScheduleStore(str(database))
     services_module._store = store
     services_module._service = SchedulerService(store, poll_interval=1.0, runner=_stub_runner)
     return store

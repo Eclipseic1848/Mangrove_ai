@@ -20,6 +20,7 @@ from src.semantic_harness.harness_adapters import (
     register_harness_adapter_for_test,
 )
 from src.services.upload_store import UploadStore
+from tests.database_migration_helpers import migrated_webui_database
 from tests.test_semantic_document_api import DocumentFakeGenerator
 from tests.test_semantic_plan_api import ApiFakeGenerator
 
@@ -31,8 +32,9 @@ def _client(
     user_id: str = "user-a",
     generator_factory=ApiFakeGenerator,
 ):
+    database = migrated_webui_database(tmp_path / "harness.db")
     monkeypatch.setattr(
-        settings, "webui_db_path", str(tmp_path / "harness.db")
+        settings, "webui_db_path", str(database)
     )
     monkeypatch.setattr(
         settings, "data_prep_upload_root", str(tmp_path / "uploads")

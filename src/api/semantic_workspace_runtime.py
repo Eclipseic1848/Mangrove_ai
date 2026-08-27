@@ -3171,8 +3171,12 @@ class SemanticWorkspaceManager:
         )
 
 
-_manager = SemanticWorkspaceManager()
+_manager: SemanticWorkspaceManager | None = None
 
 
 def get_semantic_workspace_manager() -> SemanticWorkspaceManager:
+    global _manager
+    if _manager is None:
+        # 模块导入只注册路由；真实应用 lifespan 首次取用时才验证 Schema 并失败关闭。
+        _manager = SemanticWorkspaceManager()
     return _manager

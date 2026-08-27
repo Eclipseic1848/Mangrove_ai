@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from pathlib import Path
 
 import pytest
@@ -29,6 +28,7 @@ from src.conversation_steering import (
     CapabilityPack,
     ProcedureScope,
 )
+from tests.database_migration_helpers import migrated_webui_database
 
 
 class _GateFakeRuntime:
@@ -51,25 +51,7 @@ def _db_with_selection(
     *,
     scope: ProcedureScope = ProcedureScope.PERSONAL,
 ) -> str:
-    db_path = str(tmp_path / "workspace.db")
-    # 治理事件表按迁移 0001+0004 形态建（含 event_type 列）。
-    with sqlite3.connect(db_path) as connection:
-        connection.execute(
-            "CREATE TABLE capability_governance_events ("
-            "event_id TEXT NOT NULL PRIMARY KEY,"
-            "owner_key TEXT NOT NULL,"
-            "scope TEXT NOT NULL,"
-            "pack_id TEXT NOT NULL,"
-            "version TEXT NOT NULL,"
-            "digest TEXT NOT NULL,"
-            "idempotency_key TEXT NOT NULL,"
-            "event_type TEXT NOT NULL,"
-            "payload_json TEXT NOT NULL,"
-            "occurred_at TEXT NOT NULL,"
-            "UNIQUE (owner_key, pack_id, version, digest, idempotency_key)"
-            ")"
-        )
-    # 目录表由 Repository 按真实迁移 DDL 自动初始化。
+    db_path = str(migrated_webui_database(tmp_path / "workspace.db"))
     catalog = CapabilityCatalog(SqliteCapabilityCatalogRepository(db_path))
     actor = CatalogActor(owner_id="user-a", role="user")
     digest = "sha256:" + "a" * 64

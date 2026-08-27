@@ -18,8 +18,8 @@ from src.candidate_verification import (
     HistoricalReverificationEvidence,
     HistoricalReverificationPurpose,
     SqliteCandidateVerificationRepository,
-    migrate_candidate_verification,
 )
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _evidence() -> HistoricalReverificationEvidence:
@@ -82,22 +82,6 @@ def _seed_runtime_boundary(
         )
     )
     with sqlite3.connect(database) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE runtime_routing_migrations (
-                migration_id TEXT PRIMARY KEY,
-                backup_sha256 TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            );
-            CREATE TABLE runtime_assignments (
-                owner_id TEXT NOT NULL,
-                task_id TEXT NOT NULL,
-                revision INTEGER NOT NULL,
-                payload_json TEXT NOT NULL,
-                PRIMARY KEY (owner_id, task_id, revision)
-            );
-            """
-        )
         connection.execute(
             "UPDATE agentic_runtime_runs SET run_id=?, created_at=? "
             "WHERE user_id=? AND task_id=? AND revision=?",
@@ -109,22 +93,33 @@ def _seed_runtime_boundary(
                 evidence.revision,
             ),
         )
+        connection.execute("DROP TRIGGER runtime_routing_migrations_no_update")
         connection.execute(
-            "INSERT INTO runtime_routing_migrations VALUES (?, ?, ?)",
+            "UPDATE runtime_routing_migrations "
+            "SET backup_sha256=?, applied_at=? WHERE migration_id=?",
             (
-                evidence.runtime_routing_migration_id,
                 evidence.runtime_routing_backup_sha256,
                 evidence.runtime_routing_applied_at.isoformat(),
+                evidence.runtime_routing_migration_id,
             ),
+        )
+        connection.execute(
+            "CREATE TRIGGER runtime_routing_migrations_no_update "
+            "BEFORE UPDATE ON runtime_routing_migrations BEGIN "
+            "SELECT RAISE(ABORT, 'RuntimeRoutingMigration 不可改写'); END"
         )
         if with_assignment:
             connection.execute(
-                "INSERT INTO runtime_assignments VALUES (?, ?, ?, ?)",
+                "INSERT INTO runtime_assignments VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     evidence.owner_id,
                     evidence.task_id,
                     evidence.revision,
                     "{}",
+                    "pi",
+                    "admin_gray",
+                    "0" * 64,
+                    evidence.legacy_runtime_created_at.isoformat(),
                 ),
             )
 
@@ -157,10 +152,8 @@ def test_repository_records_one_immutable_historical_authority(
     tmp_path,
     monkeypatch,
 ) -> None:
-    database = tmp_path / "authority.db"
-    sqlite3.connect(database).close()
+    database = migrated_webui_database(tmp_path / "authority.db")
     _seed_runtime_boundary(database)
-    migrate_candidate_verification(database, tmp_path / "before-authority.db")
     repository = SqliteCandidateVerificationRepository(database)
     monkeypatch.setattr(
         "src.candidate_verification.repository."
@@ -220,8 +213,7 @@ def test_repository_rechecks_time_boundary_and_assignment_before_recording(
     post_migration: bool,
     with_assignment: bool,
 ) -> None:
-    database = tmp_path / "authority-rejected.db"
-    sqlite3.connect(database).close()
+    database = migrated_webui_database(tmp_path / "authority-rejected.db")
     evidence = _evidence()
     _seed_runtime_boundary(
         database,
@@ -232,7 +224,6 @@ def test_repository_rechecks_time_boundary_and_assignment_before_recording(
         ),
         with_assignment=with_assignment,
     )
-    migrate_candidate_verification(database, tmp_path / "before-authority.db")
     repository = SqliteCandidateVerificationRepository(database)
     authority = HistoricalReverificationAuthority.build(
         evidence=evidence,

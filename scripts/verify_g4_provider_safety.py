@@ -32,6 +32,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.model_connections.broker import ConnectionBroker, ConnectionError
+from src.database_migrations import DatabaseTarget, apply_migrations
 from src.model_connections.storage import ModelConnectionRepository
 from src.model_connections.qualification_ledger import (
     QualificationBatchLedger,
@@ -817,6 +818,15 @@ def create_qualification_batch(
                 raise QualificationError(
                     "发现没有外部锚点的资格台账，拒绝自动接管"
                 )
+            apply_migrations(
+                DatabaseTarget(
+                    profile="qualification_ledger",
+                    path=ledger_path,
+                ),
+                ledger_path.with_name(
+                    f"{ledger_path.name}.before-schema-{uuid.uuid4().hex}.db"
+                ),
+            )
             ledger = QualificationBatchLedger(ledger_path)
         else:
             ledger = _anchored_qualification_ledger(
@@ -1726,6 +1736,10 @@ def _run_synthetic_vault_rotation_drill() -> bool:
         key_path = root / "synthetic.key"
         backup_root = root / "backups"
         backup_root.mkdir()
+        apply_migrations(
+            DatabaseTarget(profile="webui", path=database),
+            root / "synthetic-before-schema.db",
+        )
         repository = ModelConnectionRepository(str(database))
         vault = FernetCredentialVault.from_key_file(key_path)
         repository.create_managed(

@@ -58,8 +58,35 @@ def test_repository_refuses_database_without_explicit_migration(tmp_path) -> Non
     with sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE existing_data (value TEXT NOT NULL)")
 
-    with pytest.raises(RuntimeError, match="尚未执行带备份迁移"):
+    with pytest.raises(RuntimeError, match="请先执行显式迁移"):
         SqliteCandidateVerificationRepository(database)
+
+
+def test_repository_connections_enforce_integrity_and_lock_timeout(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    repository = _migrated_repository(tmp_path)
+    real_connect = sqlite3.connect
+    connections: list[sqlite3.Connection] = []
+
+    def tracked_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(
+        "src.candidate_verification.repository.sqlite3.connect",
+        tracked_connect,
+    )
+
+    assert repository.get("owner-a", "missing-attempt") is None
+    connection = connections[-1]
+    try:
+        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
+    finally:
+        connection.close()
 
 
 def test_repository_rejects_malformed_candidate_verification_schema(
@@ -72,7 +99,7 @@ def test_repository_rejects_malformed_candidate_verification_schema(
             "(attempt_id TEXT PRIMARY KEY)"
         )
 
-    with pytest.raises(RuntimeError, match="尚未执行带备份迁移"):
+    with pytest.raises(RuntimeError, match="请先执行显式迁移"):
         SqliteCandidateVerificationRepository(database)
 
 

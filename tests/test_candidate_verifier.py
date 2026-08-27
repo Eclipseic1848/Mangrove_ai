@@ -29,6 +29,7 @@ from src.agentic_runtime.models import (
 from src.model_connections import ConnectionBroker
 from src.model_connections.storage import ModelConnectionRepository
 from src.model_connections.vault import FernetCredentialVault
+from tests.database_migration_helpers import migrated_webui_database
 
 
 class PassingSemanticJudge:
@@ -353,7 +354,9 @@ async def test_external_verifier_uses_separate_grant_and_records_usage(
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(
+            str(migrated_webui_database(tmp_path / "webui.db"))
+        ),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],
@@ -489,7 +492,9 @@ async def test_external_verifier_retries_one_empty_semantic_response(
         )
 
     broker = ConnectionBroker(
-        repository=ModelConnectionRepository(str(tmp_path / "webui.db")),
+        repository=ModelConnectionRepository(
+            str(migrated_webui_database(tmp_path / "webui.db"))
+        ),
         vault=FernetCredentialVault.generate(),
         transport=httpx.MockTransport(provider),
         resolver=lambda _host: ["8.8.8.8"],

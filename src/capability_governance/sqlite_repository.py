@@ -18,36 +18,6 @@ from .models import (
 )
 
 
-_MIGRATIONS = Path(__file__).parent / "migrations"
-_DDL = "\n".join(
-    path.read_text(encoding="utf-8")
-    for path in sorted(_MIGRATIONS.glob("*.sql"))
-    # 0004 依赖迁移入口先幂等补充 event_type 列，因此单独执行，不参与基础拼接。
-    if path.name != "0004_promotion_gate.sql"
-)
-_PROMOTION_GATE_DDL = (
-    _MIGRATIONS / "0004_promotion_gate.sql"
-).read_text(encoding="utf-8")
-
-
-def _ensure_promotion_gate(connection: sqlite3.Connection) -> None:
-    """幂等补充晋级门列与部分唯一索引；旧库升级与全量重放均可安全执行。"""
-
-    columns = {
-        row[1]
-        for row in connection.execute(
-            "PRAGMA table_info(capability_governance_events)"
-        )
-    }
-    if "event_type" not in columns:
-        # 默认值保证旧行自动视为 registered，历史事实零改写。
-        connection.execute(
-            "ALTER TABLE capability_governance_events "
-            "ADD COLUMN event_type TEXT NOT NULL DEFAULT 'registered'"
-        )
-    connection.executescript(_PROMOTION_GATE_DDL)
-
-
 def _validation_request_hash(run: CapabilityValidationRun) -> str:
     payload = json.dumps(
         {
@@ -65,69 +35,32 @@ def _owner_key(target: CapabilityGovernanceTarget) -> str:
     return target.owner_id or "__platform__"
 
 
-def _governance_schema_exists(database: Path) -> bool:
-    if not database.is_file():
-        return False
-    with sqlite3.connect(
-        f"file:{database.as_posix()}?mode=ro",
-        uri=True,
-        timeout=30,
-    ) as connection:
-        rows = connection.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' "
-            "AND name IN ('capability_governance_events', "
-            "'capability_validation_runs', 'capability_validation_leases', "
-            "'capability_validation_idempotency', "
-            "'capability_supply_chain_evidence', "
-            "'capability_platform_validation_runs', "
-            "'capability_platform_validation_leases')"
-        ).fetchall()
-    return {row[0] for row in rows} == {
-        "capability_governance_events",
-        "capability_validation_runs",
-        "capability_validation_leases",
-        "capability_validation_idempotency",
-        "capability_supply_chain_evidence",
-        "capability_platform_validation_runs",
-        "capability_platform_validation_leases",
-    }
-
-
 def migrate_capability_governance(
     db_path: str | Path,
     backup_path: str | Path,
 ) -> Path:
-    """先创建一致性备份，再执行纯新增、可重复的治理迁移。"""
+    """兼容旧调用方；所有写入统一委托中央 webui 迁移 Seam。"""
 
-    database = Path(db_path).expanduser().resolve()
-    backup = Path(backup_path).expanduser().resolve()
-    if database == backup:
-        raise ValueError("能力治理迁移备份不能覆盖源数据库")
-    if backup.exists():
-        if _governance_schema_exists(database):
-            # 同一路径重放只确认迁移已完成并返回原备份，绝不覆盖首次迁移前的恢复点。
-            return backup
-        raise FileExistsError("能力治理迁移备份已存在，拒绝覆盖")
-    database.parent.mkdir(parents=True, exist_ok=True)
-    backup.parent.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(database, timeout=30) as source:
-        with sqlite3.connect(backup, timeout=30) as destination:
-            source.backup(destination)
-        # 只有备份完整关闭后才触碰源库，迁移脚本本身仅包含新增 DDL。
-        source.executescript(_DDL)
-        _ensure_promotion_gate(source)
-    return backup
+    from src.database_migrations import _apply_compatibility_adapter
+
+    return _apply_compatibility_adapter(db_path, backup_path)
 
 
 class SqliteCapabilityGovernanceRepository:
     """读取不隐式写库；真实迁移必须先调用显式备份入口。"""
 
     def __init__(self, db_path: str) -> None:
-        self._db_path = db_path
+        database = Path(db_path).expanduser().resolve()
+        from src.database_migrations import DatabaseTarget, inspect_database
+
+        inspect_database(DatabaseTarget("webui", database)).require_current()
+        self._db_path = str(database)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._db_path, timeout=30)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=5000")
         return connection
 
     @staticmethod

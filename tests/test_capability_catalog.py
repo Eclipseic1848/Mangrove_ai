@@ -33,6 +33,7 @@ from src.conversation_steering import (
     ProcedureScope,
 )
 from src.semantic_harness.capabilities import TABLE_DUCKDB_MANIFEST
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _pack(
@@ -401,10 +402,10 @@ def test_workspace_default_runtime_wires_capability_mounts(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from src.api.semantic_workspace_runtime import SemanticWorkspaceManager
     from src.config.settings import settings
 
-    monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "webui.db"))
+    database = migrated_webui_database(tmp_path / "webui.db")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
     monkeypatch.setattr(
         settings,
         "semantic_execution_root",
@@ -420,6 +421,7 @@ def test_workspace_default_runtime_wires_capability_mounts(
         "capability_mount_cache_path",
         str(tmp_path / "mounts"),
     )
+    from src.api.semantic_workspace_runtime import SemanticWorkspaceManager
 
     manager = SemanticWorkspaceManager()
 
@@ -650,6 +652,7 @@ def test_sqlite_catalog_is_concurrent_idempotent_and_does_not_rewrite_legacy_dat
     tmp_path,
 ) -> None:
     db_path = tmp_path / "catalog.db"
+    migrated_webui_database(db_path)
     with sqlite3.connect(db_path) as connection:
         connection.execute("CREATE TABLE legacy_state (value TEXT NOT NULL)")
         connection.execute("INSERT INTO legacy_state VALUES ('keep-me')")
@@ -663,7 +666,7 @@ def test_sqlite_catalog_is_concurrent_idempotent_and_does_not_rewrite_legacy_dat
 
     def register_once() -> str:
         catalog = CapabilityCatalog(
-            SqliteCapabilityCatalogRepository(str(db_path))
+            SqliteCapabilityCatalogRepository(str(migrated_webui_database(db_path)))
         )
         return catalog.register_pack(
             CatalogActor(owner_id="user-a", role="user"),
@@ -674,7 +677,7 @@ def test_sqlite_catalog_is_concurrent_idempotent_and_does_not_rewrite_legacy_dat
         digests = list(executor.map(lambda _index: register_once(), range(8)))
 
     assert digests == [pack.digest] * 8
-    catalog = CapabilityCatalog(SqliteCapabilityCatalogRepository(str(db_path)))
+    catalog = CapabilityCatalog(SqliteCapabilityCatalogRepository(str(migrated_webui_database(db_path))))
     assert len(
         catalog.list_visible_packs(CatalogActor(owner_id="user-a", role="user"))
     ) == 1
@@ -691,7 +694,7 @@ def test_sqlite_catalog_is_concurrent_idempotent_and_does_not_rewrite_legacy_dat
         procedure,
     )
     reopened = CapabilityCatalog(
-        SqliteCapabilityCatalogRepository(str(db_path))
+        SqliteCapabilityCatalogRepository(str(migrated_webui_database(db_path)))
     )
     assert reopened.resolve_procedure(
         CatalogActor(owner_id="user-a", role="user"),

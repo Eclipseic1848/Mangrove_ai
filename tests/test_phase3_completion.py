@@ -18,6 +18,7 @@ from src.config.settings import settings
 from src.connectors.database_connector import DatabaseConnector
 from src.data_prep.artifact_store import ArtifactStore
 from src.data_prep.models import SourceLimits, SourceSpec, SourceType
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _database(path: Path, ddl: str, rows: list[tuple]) -> None:
@@ -103,6 +104,7 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     db_root.mkdir()
     monkeypatch.setattr(settings, "data_prep_db_sqlite_root", str(db_root))
     monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "webui.db"))
+    migrated_webui_database(settings.webui_db_path)
     monkeypatch.setattr(artifact_mod, "_DEFAULT_ROOT", str(tmp_path / "downloads"))
     auth_mod._store = None
     app = FastAPI()

@@ -26,9 +26,9 @@ from src.runtime_routing import (
     RolloutActor,
     RuntimeRouting,
     SqliteRuntimeRoutingRepository,
-    migrate_runtime_routing,
     runtime_routing_is_p0_blocked,
 )
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _sha256(path: Path) -> str:
@@ -112,7 +112,9 @@ def candidate(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def repository(tmp_path: Path) -> DeliveryPublishingRepository:
-    return DeliveryPublishingRepository(tmp_path / "webui.db")
+    return DeliveryPublishingRepository(
+        migrated_webui_database(tmp_path / "webui.db")
+    )
 
 
 def _publisher(
@@ -234,7 +236,6 @@ def test_central_p0_rollback_blocks_new_vnext_publication(
     files_before = {
         path.name: path.read_bytes() for path in output_dir.iterdir() if path.is_file()
     }
-    migrate_runtime_routing(database, tmp_path / "webui-before-g3.db")
     routing = RuntimeRouting(SqliteRuntimeRoutingRepository(database))
     routing.record_gate(
         GateSnapshot.build(
@@ -308,7 +309,7 @@ def test_formal_delivery_paths_survive_execution_root_move(
     tmp_path: Path,
     candidate: Path,
 ) -> None:
-    db_path = tmp_path / "webui.db"
+    db_path = migrated_webui_database(tmp_path / "webui.db")
     old_root = tmp_path / "old" / "semantic-executions"
     repository = DeliveryPublishingRepository(
         db_path,

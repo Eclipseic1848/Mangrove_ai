@@ -17,6 +17,7 @@ from src.agentic_runtime.document_tools import (
 )
 from src.agentic_runtime.models import SourceInput
 from src.agentic_runtime.repository import AgenticRuntimeRepository
+from tests.database_migration_helpers import migrated_webui_database
 from src.api.routes import document_tools as document_tool_routes
 
 
@@ -768,7 +769,9 @@ async def test_coverage_contract_and_ledger_resume_in_same_owner_run(
 ) -> None:
     source = tmp_path / "source.pdf"
     source.write_bytes(b"fixture")
-    repository = AgenticRuntimeRepository(tmp_path / "runtime.db")
+    repository = AgenticRuntimeRepository(
+        migrated_webui_database(tmp_path / "runtime.db")
+    )
     broker = DocumentToolBroker(
         retriever=InspectAdapter(),
         state_store=repository,

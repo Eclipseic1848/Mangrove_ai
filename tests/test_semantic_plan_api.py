@@ -22,6 +22,7 @@ from src.semantic_harness.models import (
     ProjectionField,
     TaskFamily,
 )
+from tests.database_migration_helpers import migrated_webui_database
 
 
 class ApiFakeGenerator:
@@ -81,7 +82,8 @@ def _make_client(
     *,
     user_id: str = "user-a",
 ) -> TestClient:
-    monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "semantic.db"))
+    database = migrated_webui_database(tmp_path / "semantic.db")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
     auth_mod._store = None
     monkeypatch.setattr(
         semantic_plans,

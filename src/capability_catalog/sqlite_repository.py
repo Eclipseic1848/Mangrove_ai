@@ -17,10 +17,7 @@ from .models import (
     CapabilitySelection,
     CapabilityValidation,
 )
-
-
-_DDL_PATH = Path(__file__).parent / "migrations" / "0001_capability_catalog.sql"
-_DDL = _DDL_PATH.read_text(encoding="utf-8")
+from src.database_migrations import DatabaseTarget, inspect_database
 
 
 def _owner_key(pack: CapabilityPack) -> str:
@@ -34,14 +31,15 @@ def _owner_key(pack: CapabilityPack) -> str:
 class SqliteCapabilityCatalogRepository:
     def __init__(self, db_path: str, *, initialize_schema: bool = True) -> None:
         self._db_path = db_path
-        if initialize_schema:
-            Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
-            with self._connect() as connection:
-                connection.executescript(_DDL)
+        inspect_database(
+            DatabaseTarget(profile="webui", path=Path(self._db_path))
+        ).require_current()
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._db_path, timeout=30)
         connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys=ON")
+        connection.execute("PRAGMA busy_timeout=5000")
         return connection
 
     def save_pack(self, pack: CapabilityPack) -> CapabilityPack:

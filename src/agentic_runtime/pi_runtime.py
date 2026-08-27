@@ -431,6 +431,7 @@ class PiRuntime:
         capability_mount_resolver: CapabilityMountResolverFn | None = None,
         capability_host: CapabilityHost | None = None,
         candidate_verification: CandidateVerificationService | None = None,
+        state_store: AgenticRuntimeRepository | None = None,
         configure_as_default_document_broker: bool = True,
     ) -> None:
         self.image = image or settings.pi_runtime_image
@@ -476,8 +477,9 @@ class PiRuntime:
             or DocumentToolBroker(
                 retriever=DocumentRetrievalModule(),
                 ttl_seconds=self.timeout_seconds,
-                state_store=AgenticRuntimeRepository(
-                    settings.webui_db_path
+                state_store=(
+                    state_store
+                    or AgenticRuntimeRepository(settings.webui_db_path)
                 ),
             )
         )

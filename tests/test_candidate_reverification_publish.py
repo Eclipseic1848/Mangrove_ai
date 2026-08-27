@@ -9,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
-from src.candidate_verification import migrate_candidate_verification
+from src.database_migrations import DatabaseTarget, apply_migrations
+from tests.database_migration_helpers import migrated_webui_database
 
 from src.delivery_publishing.models import (
     CandidateRef,
@@ -64,36 +65,26 @@ def _install_explicit_cas_state(
     command: PublishCommand,
 ) -> None:
     with sqlite3.connect(database) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE semantic_workspace_tasks (
-                user_id TEXT NOT NULL,
-                task_id TEXT NOT NULL,
-                active_revision INTEGER NOT NULL,
-                cancel_requested INTEGER NOT NULL,
-                PRIMARY KEY (user_id, task_id)
-            );
-            CREATE TABLE candidate_verification_attempts (
-                owner_id TEXT NOT NULL,
-                attempt_id TEXT NOT NULL,
-                task_id TEXT NOT NULL,
-                revision INTEGER NOT NULL,
-                run_id TEXT NOT NULL,
-                candidate_set_hash TEXT NOT NULL,
-                status TEXT NOT NULL,
-                report_hash TEXT,
-                created_at TEXT NOT NULL,
-                PRIMARY KEY (owner_id, attempt_id)
-            );
-            """
+        connection.execute(
+            "INSERT INTO semantic_workspace_tasks "
+            "(task_id, user_id, title, objective_text, active_revision, "
+            "cancel_requested, created_at, updated_at) "
+            "VALUES (?, ?, '测试任务', '测试交付', ?, 0, ?, ?)",
+            (
+                command.task_id,
+                command.owner_id,
+                command.task_revision,
+                "2026-08-24T12:00:00+00:00",
+                "2026-08-24T12:00:00+00:00",
+            ),
         )
         connection.execute(
-            "INSERT INTO semantic_workspace_tasks VALUES (?, ?, ?, 0)",
-            (command.owner_id, command.task_id, command.task_revision),
-        )
-        connection.execute(
-            "INSERT INTO candidate_verification_attempts VALUES "
-            "(?, ?, ?, ?, ?, ?, 'passed', ?, ?)",
+            "INSERT INTO candidate_verification_attempts ("
+            "owner_id, attempt_id, task_id, revision, run_id, reason_code, "
+            "candidate_set_hash, ruleset_identity_status, actor_id, "
+            "idempotency_key, request_hash, status, report_hash, created_at"
+            ") VALUES (?, ?, ?, ?, ?, 'initial', ?, 'legacy_unversioned', "
+            "?, ?, ?, 'passed', ?, ?)",
             (
                 command.owner_id,
                 command.verification_attempt_id,
@@ -101,6 +92,9 @@ def _install_explicit_cas_state(
                 command.task_revision,
                 command.run_id,
                 command.candidate_set_hash,
+                command.owner_id,
+                "seed-" + command.verification_attempt_id,
+                "0" * 64,
                 command.verification_report_hash,
                 "2026-08-24T12:00:00+00:00",
             ),
@@ -144,7 +138,7 @@ def test_existing_publish_intent_schema_adds_hashed_http_idempotency_binding(
         DeliveryPublishingRepository(database)
 
     backup = tmp_path / "legacy-publisher.backup.db"
-    migrate_candidate_verification(database, backup)
+    apply_migrations(DatabaseTarget(profile="webui", path=database), backup)
     DeliveryPublishingRepository(database)
 
     with sqlite3.connect(database) as connection:
@@ -177,7 +171,9 @@ def test_exact_attempt_and_idempotency_key_bind_explicit_publication(
         json.dumps({"items": [{"name": "张三"}]}, ensure_ascii=False),
         encoding="utf-8",
     )
-    repository = DeliveryPublishingRepository(tmp_path / "webui.db")
+    repository = DeliveryPublishingRepository(
+        migrated_webui_database(tmp_path / "webui.db")
+    )
     publisher = DeliveryPublisher(
         repository=repository,
         output_root=tmp_path / "deliveries",
@@ -209,7 +205,9 @@ def test_same_http_idempotency_key_cannot_bind_another_attempt(
 ) -> None:
     candidate = tmp_path / "candidate.json"
     candidate.write_text('{"ok":true}', encoding="utf-8")
-    repository = DeliveryPublishingRepository(tmp_path / "webui.db")
+    repository = DeliveryPublishingRepository(
+        migrated_webui_database(tmp_path / "webui.db")
+    )
     publisher = DeliveryPublisher(
         repository=repository,
         output_root=tmp_path / "deliveries",
@@ -240,7 +238,7 @@ def test_concurrent_same_explicit_publication_returns_one_delivery(
     candidate = tmp_path / "candidate.json"
     candidate.write_text('{"ok":true}', encoding="utf-8")
     database = tmp_path / "webui.db"
-    repository = DeliveryPublishingRepository(database)
+    repository = DeliveryPublishingRepository(migrated_webui_database(database))
     publisher = DeliveryPublisher(
         repository=repository,
         output_root=tmp_path / "deliveries",
@@ -274,7 +272,7 @@ def test_explicit_publication_qa_failure_has_zero_formal_output(
     candidate = tmp_path / "candidate.json"
     candidate.write_text('{"broken":', encoding="utf-8")
     database = tmp_path / "webui.db"
-    repository = DeliveryPublishingRepository(database)
+    repository = DeliveryPublishingRepository(migrated_webui_database(database))
     command = _command(candidate, idempotency_key="qa-failure")
     _install_explicit_cas_state(database, command)
     publisher = DeliveryPublisher(
@@ -301,7 +299,7 @@ def test_atomic_commit_cas_blocks_stale_revision_or_p0(
     candidate = tmp_path / f"{blocker}.json"
     candidate.write_text('{"ok":true}', encoding="utf-8")
     database = tmp_path / f"{blocker}.db"
-    repository = DeliveryPublishingRepository(database)
+    repository = DeliveryPublishingRepository(migrated_webui_database(database))
     command = _command(candidate, idempotency_key=f"atomic-{blocker}")
     _install_explicit_cas_state(database, command)
     with sqlite3.connect(database) as connection:
@@ -311,11 +309,8 @@ def test_atomic_commit_cas_blocks_stale_revision_or_p0(
             )
         else:
             connection.execute(
-                "CREATE TABLE runtime_rollout_state "
-                "(state_id INTEGER PRIMARY KEY, p0_blocked INTEGER NOT NULL)"
-            )
-            connection.execute(
-                "INSERT INTO runtime_rollout_state VALUES (1, 1)"
+                "UPDATE runtime_rollout_state SET p0_blocked=1 "
+                "WHERE state_id=1"
             )
     publisher = DeliveryPublisher(
         repository=repository,
@@ -336,7 +331,7 @@ def test_crash_after_commit_point_recovers_only_from_frozen_staging(
     candidate = tmp_path / "candidate.json"
     candidate.write_text('{"ok":true}', encoding="utf-8")
     database = tmp_path / "webui.db"
-    repository = DeliveryPublishingRepository(database)
+    repository = DeliveryPublishingRepository(migrated_webui_database(database))
     command = _command(candidate, idempotency_key="commit-window-crash")
     _install_explicit_cas_state(database, command)
     original_begin_commit = repository.begin_commit
@@ -382,7 +377,9 @@ def test_explicit_publication_cancel_or_candidate_drift_has_zero_delivery(
     candidate.write_text('{"ok":true}', encoding="utf-8")
     command = _command(candidate, idempotency_key="publish-cancelled")
 
-    cancelled_repository = DeliveryPublishingRepository(tmp_path / "cancel.db")
+    cancelled_repository = DeliveryPublishingRepository(
+        migrated_webui_database(tmp_path / "cancel.db")
+    )
     cancelled = DeliveryPublisher(
         repository=cancelled_repository,
         output_root=tmp_path / "cancel-deliveries",
@@ -393,7 +390,9 @@ def test_explicit_publication_cancel_or_candidate_drift_has_zero_delivery(
         cancelled.publish(command, actor_id="owner-a")
     assert cancelled_repository.latest_delivery("owner-a", "pi-run-a") is None
 
-    drift_repository = DeliveryPublishingRepository(tmp_path / "drift.db")
+    drift_repository = DeliveryPublishingRepository(
+        migrated_webui_database(tmp_path / "drift.db")
+    )
     drifted = DeliveryPublisher(
         repository=drift_repository,
         output_root=tmp_path / "drift-deliveries",

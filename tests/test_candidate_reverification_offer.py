@@ -36,10 +36,12 @@ from src.candidate_verification import (
     ReverificationBlocker,
     ReverificationContractError,
     ReverificationUnavailableError,
+    RulesetIdentityStatus,
     SqliteCandidateVerificationRepository,
+    VerificationAttempt,
     VerifierRulesetBinding,
-    migrate_candidate_verification,
 )
+from tests.database_migration_helpers import migrated_webui_database
 
 
 _NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
@@ -286,7 +288,7 @@ def _prepare_candidate(
     provider: bool = False,
     valid_manifest: bool = True,
 ):
-    database = tmp_path / "workspace.db"
+    database = migrated_webui_database(tmp_path / "workspace.db")
     runtime_repository = AgenticRuntimeRepository(database)
     runtime_repository.register(
         RuntimeTaskConfig(
@@ -343,7 +345,6 @@ def _prepare_candidate(
         1,
         request=request.model_dump(mode="json", exclude={"api_key"}),
     )
-    migrate_candidate_verification(database, tmp_path / "before-cv.db")
     repository = SqliteCandidateVerificationRepository(database)
     workspace = tmp_path / "runtime-workspace"
     output = workspace / "output"
@@ -517,7 +518,7 @@ def _prepare_legacy_candidate(
     inconclusive: bool = False,
     omit_external_confirmation: bool = False,
 ):
-    database = tmp_path / "workspace.db"
+    database = migrated_webui_database(tmp_path / "workspace.db")
     runtime_repository = AgenticRuntimeRepository(database)
     runtime_repository.register(
         RuntimeTaskConfig(
@@ -635,8 +636,42 @@ def _prepare_legacy_candidate(
         candidates=(candidate,),
         verification=report,
     )
-    migrate_candidate_verification(database, tmp_path / "before-cv.db")
-    return SqliteCandidateVerificationRepository(database)
+    repository = SqliteCandidateVerificationRepository(database)
+    with sqlite3.connect(database) as connection:
+        candidate_set_hash = connection.execute(
+            "SELECT verified_candidate_set_hash FROM agentic_runtime_runs "
+            "WHERE user_id='owner-a' AND task_id='task-a' AND revision=1"
+        ).fetchone()[0]
+    report_json = report.model_dump_json()
+    attempt = VerificationAttempt(
+        attempt_id="legacy-attempt-a",
+        owner_id="owner-a",
+        task_id="task-a",
+        revision=1,
+        run_id="pi_run_0123456789abcdef",
+        reason_code=AttemptReason.INITIAL,
+        candidate_set_hash=candidate_set_hash,
+        ruleset_identity_status=RulesetIdentityStatus.LEGACY_UNVERSIONED,
+        actor_id="system:legacy-migration",
+        connection_id=("connection-a" if provider else None),
+        connection_version=("version-a" if provider else None),
+        model_id=("provider-model-a" if provider else None),
+        idempotency_key="legacy-import-a",
+        request_hash="1" * 64,
+        status=AttemptStatus.REQUESTED,
+        created_at=_NOW,
+    )
+    repository.create(attempt)
+    repository.start("owner-a", attempt.attempt_id, started_at=_NOW)
+    repository.finish(
+        "owner-a",
+        attempt.attempt_id,
+        status=AttemptStatus(report.status.value),
+        report_json=report_json,
+        report_hash=hashlib.sha256(report_json.encode("utf-8")).hexdigest(),
+        finished_at=_NOW,
+    )
+    return repository
 
 
 def test_failed_candidate_is_eligible_when_ruleset_changed(tmp_path: Path) -> None:
@@ -705,61 +740,23 @@ def test_historical_assignment_gap_requires_exact_owner_recovery_confirmation(
         provider=True,
     )
     with sqlite3.connect(tmp_path / "workspace.db") as connection:
-        connection.executescript(
-            """
-            CREATE TABLE runtime_routing_migrations (
-                migration_id TEXT PRIMARY KEY,
-                backup_sha256 TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            );
-            CREATE TABLE runtime_assignments (
-                owner_id TEXT NOT NULL,
-                task_id TEXT NOT NULL,
-                revision INTEGER NOT NULL,
-                payload_json TEXT NOT NULL,
-                PRIMARY KEY (owner_id, task_id, revision)
-            );
-            CREATE TABLE runtime_rollout_state (
-                state_id INTEGER PRIMARY KEY,
-                p0_blocked INTEGER NOT NULL
-            );
-            CREATE TABLE semantic_workspace_tasks (
-                user_id TEXT NOT NULL,
-                task_id TEXT NOT NULL,
-                active_revision INTEGER NOT NULL,
-                cancel_requested INTEGER NOT NULL,
-                PRIMARY KEY (user_id, task_id)
-            );
-            CREATE TABLE semantic_delivery_runs (
-                user_id TEXT NOT NULL,
-                run_id TEXT NOT NULL
-            );
-            CREATE TABLE formal_delivery_runs (
-                owner_id TEXT NOT NULL,
-                run_id TEXT NOT NULL,
-                status TEXT NOT NULL
-            );
-            """
-        )
         connection.execute(
-            "INSERT INTO runtime_rollout_state VALUES (1, 0)"
-        )
-        connection.execute(
-            "INSERT INTO semantic_workspace_tasks VALUES (?, ?, 1, 0)",
-            ("owner-a", "task-a"),
+            "INSERT INTO semantic_workspace_tasks ("
+            "task_id, user_id, title, objective_text, created_at, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "task-a",
+                "owner-a",
+                "历史重验测试",
+                "读取来源并输出 JSON",
+                (_NOW - timedelta(days=2)).isoformat(),
+                _NOW.isoformat(),
+            ),
         )
         connection.execute(
             "UPDATE agentic_runtime_runs SET created_at=? "
             "WHERE user_id='owner-a' AND task_id='task-a' AND revision=1",
             ((_NOW - timedelta(days=2)).isoformat(),),
-        )
-        connection.execute(
-            "INSERT INTO runtime_routing_migrations VALUES (?, ?, ?)",
-            (
-                "0001_runtime_routing",
-                "1" * 64,
-                (_NOW - timedelta(days=1)).isoformat(),
-            ),
         )
     service = _service(
         repository,
@@ -1211,12 +1208,27 @@ def test_existing_delivery_blocks_reverification(tmp_path: Path) -> None:
     repository, _previous = _prepare_candidate(tmp_path)
     with sqlite3.connect(tmp_path / "workspace.db") as connection:
         connection.execute(
-            "CREATE TABLE formal_delivery_runs ("
-            "owner_id TEXT NOT NULL, run_id TEXT NOT NULL, status TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO formal_delivery_runs VALUES (?, ?, 'succeeded')",
-            ("owner-a", "pi_run_0123456789abcdef"),
+            "INSERT INTO formal_delivery_runs ("
+            "delivery_id, publication_key, run_id, owner_id, task_id, "
+            "task_revision, candidate_set_hash, verification_report_id, "
+            "verification_report_hash, delivery_spec_hash, status, "
+            "manifest_json, output_dir, created_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'succeeded', ?, ?, ?)",
+            (
+                "delivery-a",
+                "publication-a",
+                "pi_run_0123456789abcdef",
+                "owner-a",
+                "task-a",
+                1,
+                "1" * 64,
+                "verification-a",
+                "2" * 64,
+                "3" * 64,
+                "{}",
+                "deliveries/delivery-a",
+                _NOW.isoformat(),
+            ),
         )
 
     offer = asyncio.run(
@@ -1235,12 +1247,17 @@ def test_legacy_delivery_also_blocks_reverification(tmp_path: Path) -> None:
     repository, _previous = _prepare_candidate(tmp_path)
     with sqlite3.connect(tmp_path / "workspace.db") as connection:
         connection.execute(
-            "CREATE TABLE semantic_delivery_runs ("
-            "user_id TEXT NOT NULL, run_id TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO semantic_delivery_runs VALUES (?, ?)",
-            ("owner-a", "pi_run_0123456789abcdef"),
+            "INSERT INTO semantic_delivery_runs ("
+            "delivery_id, run_id, user_id, status, manifest_json, output_dir, "
+            "created_at) VALUES (?, ?, ?, 'succeeded', ?, ?, ?)",
+            (
+                "semantic-delivery-a",
+                "pi_run_0123456789abcdef",
+                "owner-a",
+                "{}",
+                "deliveries/semantic-a",
+                _NOW.isoformat(),
+            ),
         )
 
     offer = asyncio.run(

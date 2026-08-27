@@ -2,10 +2,10 @@
 """生产门快照与 Rollout 的不可变领域契约。"""
 from __future__ import annotations
 
-from enum import StrEnum
 import hashlib
 import json
 from datetime import datetime
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator

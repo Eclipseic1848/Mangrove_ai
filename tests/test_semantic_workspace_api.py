@@ -48,11 +48,13 @@ from src.semantic_harness.models import (
     TaskFamily,
 )
 from src.services.upload_store import UploadStore
+from tests.database_migration_helpers import migrated_webui_database
 from tests.test_semantic_plan_api import ApiFakeGenerator
 
 
 def test_workspace_revision_freezes_table_output_contract(tmp_path: Path) -> None:
-    store = WebUIStore(str(tmp_path / "workspace-contract.db"))
+    database = migrated_webui_database(tmp_path / "workspace-contract.db")
+    store = WebUIStore(str(database))
     contract = [{
         "format": "json",
         "exact_columns": ["name", "amount"],
@@ -93,7 +95,8 @@ def test_workspace_revision_freezes_table_output_contract(tmp_path: Path) -> Non
 def test_concurrent_revision_uses_transactional_expected_revision(
     tmp_path: Path,
 ) -> None:
-    store = WebUIStore(str(tmp_path / "workspace-revision-race.db"))
+    database = migrated_webui_database(tmp_path / "workspace-revision-race.db")
+    store = WebUIStore(str(database))
     store.create_semantic_workspace_task(
         "user-a",
         task_id="workspace-race",
@@ -143,8 +146,9 @@ def test_concurrent_revision_uses_transactional_expected_revision(
 
 
 def _client(tmp_path, monkeypatch, *, generator=None):
+    database = migrated_webui_database(tmp_path / "workspace.db")
     monkeypatch.setattr(
-        settings, "webui_db_path", str(tmp_path / "workspace.db")
+        settings, "webui_db_path", str(database)
     )
     monkeypatch.setattr(
         settings, "data_prep_upload_root", str(tmp_path / "uploads")
@@ -1159,8 +1163,9 @@ async def test_workspace_serializes_heavy_jobs(
     tmp_path,
     monkeypatch,
 ):
+    database = migrated_webui_database(tmp_path / "workspace.db")
     monkeypatch.setattr(
-        settings, "webui_db_path", str(tmp_path / "workspace.db")
+        settings, "webui_db_path", str(database)
     )
     monkeypatch.setattr(
         settings, "data_prep_upload_root", str(tmp_path / "uploads")

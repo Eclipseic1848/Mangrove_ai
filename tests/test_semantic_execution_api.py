@@ -15,10 +15,12 @@ from src.api.routes import (
 from src.config.settings import settings
 from src.services.upload_store import UploadStore
 from tests.test_semantic_plan_api import ApiFakeGenerator
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _client(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "runs.db"))
+    database = migrated_webui_database(tmp_path / "runs.db")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
     monkeypatch.setattr(
         settings, "data_prep_upload_root", str(tmp_path / "uploads")
     )

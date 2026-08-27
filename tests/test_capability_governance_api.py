@@ -32,10 +32,13 @@ from src.conversation_steering import (
     CapabilityPack,
     ProcedureScope,
 )
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _seed_catalog(db_path: str) -> None:
-    repository = SqliteCapabilityCatalogRepository(db_path)
+    repository = SqliteCapabilityCatalogRepository(
+        migrated_webui_database(db_path)
+    )
     catalog = CapabilityCatalog(repository)
     for owner_id, version, digest_char in (
         ("owner-a", "1.0.0", "a"),
@@ -105,8 +108,12 @@ def test_governance_api_projects_user_and_admin_fields(
 
 
 def test_owner_starts_and_reads_validation_without_supplying_hashes(
+    tmp_path,
     monkeypatch,
 ) -> None:
+    db_path = migrated_webui_database(tmp_path / "webui.db")
+    monkeypatch.setattr(settings, "webui_db_path", str(db_path))
+
     class FrozenTaskResolver:
         def resolve(self, actor, target, *, task_id: str, revision: int):
             if task_id != "workspace-owner-a":

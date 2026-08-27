@@ -17,6 +17,7 @@ from src.model_connections import (
     ProviderOutcomeUnknownError,
 )
 from src.model_connections.storage import ModelConnectionRepository
+from tests.database_migration_helpers import migrated_webui_database
 from tests.test_candidate_reverification_offer import (
     _InconclusiveVerifier,
     _PassingVerifier,
@@ -84,33 +85,24 @@ class _UnknownBroker:
 
 
 def _enable_execution_claim(database: Path) -> None:
-    """补齐产品原子认领依赖的最小现有表，不绕过认领 Interface。"""
+    """在显式迁移后的产品表中补齐原子认领所需测试状态。"""
 
     with sqlite3.connect(database) as connection:
-        connection.executescript(
-            """
-            CREATE TABLE runtime_rollout_state (
-                state_id INTEGER PRIMARY KEY,
-                p0_blocked INTEGER NOT NULL
-            );
-            INSERT INTO runtime_rollout_state VALUES (1, 0);
-            CREATE TABLE semantic_workspace_tasks (
-                task_id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                active_revision INTEGER NOT NULL,
-                cancel_requested INTEGER NOT NULL
-            );
-            INSERT INTO semantic_workspace_tasks VALUES ('task-a', 'owner-a', 1, 0);
-            CREATE TABLE formal_delivery_runs (
-                owner_id TEXT NOT NULL,
-                run_id TEXT NOT NULL,
-                status TEXT NOT NULL
-            );
-            CREATE TABLE semantic_delivery_runs (
-                user_id TEXT NOT NULL,
-                run_id TEXT NOT NULL
-            );
-            """
+        connection.execute(
+            "UPDATE runtime_rollout_state SET p0_blocked=0 WHERE state_id=1"
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO semantic_workspace_tasks ("
+            "task_id, user_id, title, objective_text, created_at, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "task-a",
+                "owner-a",
+                "候选重验测试",
+                "读取来源并输出 JSON",
+                datetime.now(timezone.utc).isoformat(),
+                datetime.now(timezone.utc).isoformat(),
+            ),
         )
 
 
@@ -941,7 +933,9 @@ def test_provider_result_cannot_commit_passed_after_p0_flip(
 def test_provider_usage_is_bound_to_attempt_and_unknown_cost_is_not_zero(
     tmp_path: Path,
 ) -> None:
-    repository = ModelConnectionRepository(str(tmp_path / "connections.db"))
+    repository = ModelConnectionRepository(
+        str(migrated_webui_database(tmp_path / "connections.db"))
+    )
     provider_attempt_id = "grant_cv_1234567890abcdef"
     repository.record_usage(
         grant={

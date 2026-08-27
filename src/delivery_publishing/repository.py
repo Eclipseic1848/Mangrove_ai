@@ -10,6 +10,7 @@ from threading import RLock
 from typing import Any
 
 from src.semantic_harness.delivery.models import DeliveryManifest
+from src.database_migrations import DatabaseTarget, inspect_database
 from src.services.managed_paths import ManagedPathCodec
 
 from .models import PublishCommand
@@ -33,8 +34,9 @@ class DeliveryPublishingRepository:
     ) -> None:
         self.db_path = Path(db_path)
         self.semantic_paths = semantic_paths
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._ensure_schema()
+        inspect_database(
+            DatabaseTarget(profile="webui", path=self.db_path)
+        ).require_current()
 
     def _persist_output_path(self, path: Path) -> str:
         if self.semantic_paths is None:
@@ -51,101 +53,10 @@ class DeliveryPublishingRepository:
     def _conn(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self.db_path), timeout=30)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
-    def _ensure_schema(self) -> None:
-        with _LOCK, self._conn() as conn:
-            existing_intents = conn.execute(
-                "SELECT 1 FROM sqlite_master "
-                "WHERE type='table' AND name='delivery_publish_intents'"
-            ).fetchone()
-            if existing_intents is not None:
-                columns = {
-                    str(row[1])
-                    for row in conn.execute(
-                        "PRAGMA table_info(delivery_publish_intents)"
-                    ).fetchall()
-                }
-                indexes = {
-                    str(row[1])
-                    for row in conn.execute(
-                        "PRAGMA index_list(delivery_publish_intents)"
-                    ).fetchall()
-                }
-                if (
-                    "request_idempotency_hash" not in columns
-                    or "idx_dpi_owner_request_idempotency" not in indexes
-                ):
-                    # 生产旧表只能经带恢复点的显式迁移升级，Repository 初始化不得静默 DDL。
-                    raise RuntimeError("Delivery 发布 Schema 需要先执行显式迁移")
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS delivery_publish_intents (
-                    publication_key TEXT PRIMARY KEY,
-                    command_hash TEXT NOT NULL,
-                    request_idempotency_hash TEXT,
-                    owner_id TEXT NOT NULL,
-                    task_id TEXT NOT NULL,
-                    task_revision INTEGER NOT NULL,
-                    run_id TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    commit_token TEXT,
-                    staging_dir TEXT,
-                    final_dir TEXT,
-                    delivery_id TEXT,
-                    manifest_json TEXT,
-                    error_json TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_dpi_owner_run
-                ON delivery_publish_intents(owner_id, run_id, updated_at DESC);
-
-                CREATE TABLE IF NOT EXISTS formal_delivery_runs (
-                    delivery_id TEXT PRIMARY KEY,
-                    publication_key TEXT NOT NULL UNIQUE,
-                    run_id TEXT NOT NULL,
-                    owner_id TEXT NOT NULL,
-                    task_id TEXT NOT NULL,
-                    task_revision INTEGER NOT NULL,
-                    candidate_set_hash TEXT NOT NULL,
-                    verification_report_id TEXT NOT NULL,
-                    verification_report_hash TEXT NOT NULL,
-                    delivery_spec_hash TEXT NOT NULL,
-                    status TEXT NOT NULL,
-                    manifest_json TEXT NOT NULL,
-                    output_dir TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_fdr_owner_run
-                ON formal_delivery_runs(owner_id, run_id, created_at DESC);
-
-                CREATE TABLE IF NOT EXISTS formal_delivery_outputs (
-                    output_id TEXT PRIMARY KEY,
-                    delivery_id TEXT NOT NULL,
-                    run_id TEXT NOT NULL,
-                    owner_id TEXT NOT NULL,
-                    format TEXT NOT NULL,
-                    filename TEXT NOT NULL,
-                    media_type TEXT NOT NULL,
-                    sha256 TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    file_path TEXT NOT NULL,
-                    qa_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY (delivery_id) REFERENCES formal_delivery_runs(delivery_id)
-                );
-                CREATE INDEX IF NOT EXISTS idx_fdo_owner_run
-                ON formal_delivery_outputs(owner_id, run_id, created_at DESC);
-                """
-            )
-            if existing_intents is None:
-                # 新库随基础表一次创建；已有生产表只允许由显式迁移安装该索引。
-                conn.execute(
-                    "CREATE UNIQUE INDEX idx_dpi_owner_request_idempotency "
-                    "ON delivery_publish_intents(owner_id, request_idempotency_hash) "
-                    "WHERE request_idempotency_hash IS NOT NULL"
-                )
 
     def claim_intent(
         self,

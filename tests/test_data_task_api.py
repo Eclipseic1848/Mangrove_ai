@@ -22,13 +22,15 @@ from src.services.document_extraction import (
     IntentFieldDraft,
     IntentSpecDraft,
 )
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _make_client(tmp_path: Path, monkeypatch, *, user_id: str = "user-a") -> TestClient:
     monkeypatch.setattr(settings, "data_prep_upload_root", str(tmp_path / "uploads"))
     monkeypatch.setattr(settings, "data_prep_max_upload_bytes", 10 * 1024 * 1024)
     monkeypatch.setattr(settings, "data_prep_max_task_bytes", 500 * 1024 * 1024)
-    monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "test.db"))
+    database = migrated_webui_database(tmp_path / "test.db")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
     auth_mod._store = None  # 重置 WebUIStore 单例，使其用新 db_path
     monkeypatch.setattr(as_mod, "_DEFAULT_ROOT", str(tmp_path / "downloads"))
     app = FastAPI()

@@ -5,9 +5,14 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime, timezone
+from pathlib import Path
 import sqlite3
 
+from alembic import command
+from alembic.config import Config
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.engine import URL
 
 from src.candidate_verification import (
     AttemptReason,
@@ -16,6 +21,57 @@ from src.candidate_verification import (
     VerificationAttempt,
     migrate_candidate_verification,
 )
+from src.database_migrations import SchemaNotCurrentError
+import src.database_migrations as database_migrations
+
+
+def _upgrade_to_supported_legacy_webui(database) -> None:
+    """建立中央版本链明确支持的 webui_0002 历史 Schema。"""
+    config = Config()
+    config.set_main_option(
+        "script_location",
+        str(Path(database_migrations.__file__).with_name("alembic")),
+    )
+    engine = create_engine(URL.create("sqlite", database=str(database)))
+    try:
+        with engine.connect() as connection:
+            config.attributes["connection"] = connection
+            config.attributes["backup_sha256"] = "a" * 64
+            command.upgrade(config, "webui_0002")
+            connection.commit()
+    finally:
+        engine.dispose()
+
+
+def _insert_legacy_runtime(
+    database,
+    *,
+    report_json: str | None,
+    candidate_set_hash: str | None,
+    candidates_json: str,
+) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO agentic_runtime_runs ("
+            "user_id, task_id, revision, runtime_version, permission_profile, "
+            "status, run_id, candidates_json, verification_json, "
+            "verified_candidate_set_hash, created_at, updated_at"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "owner-a",
+                "task-a",
+                1,
+                "legacy",
+                "legacy",
+                "succeeded",
+                "run-a",
+                candidates_json,
+                report_json,
+                candidate_set_hash,
+                "2026-08-24T00:00:00+00:00",
+                "2026-08-24T01:00:00+00:00",
+            ),
+        )
 
 
 def _versioned_requested_attempt() -> VerificationAttempt:
@@ -154,33 +210,16 @@ def test_migration_imports_legacy_report_without_guessing_ruleset_identity(
         '{"status":"' + legacy_status + '", "summary":"旧规则结论", "checks":[], '
         '"evidence_count":0, "formal_delivery_eligible":false}'
     )
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "CREATE TABLE agentic_runtime_runs ("
-            "user_id TEXT NOT NULL, task_id TEXT NOT NULL, revision INTEGER NOT NULL, "
-            "run_id TEXT, candidates_json TEXT NOT NULL, verification_json TEXT, "
-            "verified_candidate_set_hash TEXT, model_connection_id TEXT, "
-            "model_connection_version TEXT, model_connection_model TEXT, "
-            "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO agentic_runtime_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "owner-a",
-                "task-a",
-                1,
-                "run-a",
-                '[{"artifact_id":"a","filename":"out.csv","format":"csv",'
-                '"sha256":"' + "b" * 64 + '","size_bytes":1}]',
-                report_json,
-                "c" * 64,
-                None,
-                None,
-                None,
-                "2026-08-24T00:00:00+00:00",
-                "2026-08-24T01:00:00+00:00",
-            ),
-        )
+    _upgrade_to_supported_legacy_webui(database)
+    _insert_legacy_runtime(
+        database,
+        report_json=report_json,
+        candidate_set_hash="c" * 64,
+        candidates_json=(
+            '[{"artifact_id":"a","filename":"out.csv","format":"csv",'
+            '"sha256":"' + "b" * 64 + '","size_bytes":1}]'
+        ),
+    )
 
     migrate_candidate_verification(database, backup)
     attempts = SqliteCandidateVerificationRepository(database).list_for_candidate(
@@ -201,21 +240,13 @@ def test_migration_imports_legacy_report_without_guessing_ruleset_identity(
 
 def test_migration_does_not_invent_attempt_for_empty_legacy_report(tmp_path) -> None:
     database = tmp_path / "legacy-empty.db"
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "CREATE TABLE agentic_runtime_runs ("
-            "user_id TEXT NOT NULL, task_id TEXT NOT NULL, revision INTEGER NOT NULL, "
-            "run_id TEXT, candidates_json TEXT NOT NULL, verification_json TEXT, "
-            "verified_candidate_set_hash TEXT, model_connection_id TEXT, "
-            "model_connection_version TEXT, model_connection_model TEXT, "
-            "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO agentic_runtime_runs VALUES "
-            "('owner-a', 'task-a', 1, 'run-a', '[]', NULL, NULL, "
-            "NULL, NULL, NULL, '2026-08-24T00:00:00+00:00', "
-            "'2026-08-24T01:00:00+00:00')"
-        )
+    _upgrade_to_supported_legacy_webui(database)
+    _insert_legacy_runtime(
+        database,
+        report_json=None,
+        candidate_set_hash=None,
+        candidates_json="[]",
+    )
 
     migrate_candidate_verification(database, tmp_path / "before.db")
     attempts = SqliteCandidateVerificationRepository(database).list_for_candidate(
@@ -235,33 +266,16 @@ def test_migration_rebuilds_malformed_legacy_candidate_set_hash(tmp_path) -> Non
         '{"status":"passed","summary":"旧规则结论","checks":[],'
         '"evidence_count":0,"formal_delivery_eligible":false}'
     )
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "CREATE TABLE agentic_runtime_runs ("
-            "user_id TEXT NOT NULL, task_id TEXT NOT NULL, revision INTEGER NOT NULL, "
-            "run_id TEXT, candidates_json TEXT NOT NULL, verification_json TEXT, "
-            "verified_candidate_set_hash TEXT, model_connection_id TEXT, "
-            "model_connection_version TEXT, model_connection_model TEXT, "
-            "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO agentic_runtime_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                "owner-a",
-                "task-a",
-                1,
-                "run-a",
-                '[{"artifact_id":"a","filename":"out.csv","format":"csv",'
-                '"sha256":"' + "b" * 64 + '","size_bytes":1}]',
-                report_json,
-                "z" * 64,
-                None,
-                None,
-                None,
-                "2026-08-24T00:00:00+00:00",
-                "2026-08-24T01:00:00+00:00",
-            ),
-        )
+    _upgrade_to_supported_legacy_webui(database)
+    _insert_legacy_runtime(
+        database,
+        report_json=report_json,
+        candidate_set_hash="z" * 64,
+        candidates_json=(
+            '[{"artifact_id":"a","filename":"out.csv","format":"csv",'
+            '"sha256":"' + "b" * 64 + '","size_bytes":1}]'
+        ),
+    )
 
     migrate_candidate_verification(database, tmp_path / "before.db")
     attempts = SqliteCandidateVerificationRepository(database).list_for_candidate(
@@ -275,6 +289,29 @@ def test_migration_rebuilds_malformed_legacy_candidate_set_hash(tmp_path) -> Non
     )
 
     assert len(attempts) == 1
+
+
+def test_adapter_rejects_unknown_partial_legacy_runtime_schema(tmp_path) -> None:
+    database = tmp_path / "partial-legacy.db"
+    backup = tmp_path / "partial-legacy-before.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE agentic_runtime_runs ("
+            "user_id TEXT NOT NULL, task_id TEXT NOT NULL, revision INTEGER NOT NULL, "
+            "run_id TEXT, candidates_json TEXT NOT NULL, verification_json TEXT, "
+            "verified_candidate_set_hash TEXT, model_connection_id TEXT, "
+            "model_connection_version TEXT, model_connection_model TEXT, "
+            "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+
+    with pytest.raises(SchemaNotCurrentError):
+        migrate_candidate_verification(database, backup)
+
+    assert backup.is_file()
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='alembic_version'"
+        ).fetchone() is None
 
 
 def test_migration_replay_preserves_first_recovery_point(tmp_path) -> None:
@@ -343,11 +380,11 @@ def test_repository_rejects_tampered_authority_migration_digest(tmp_path) -> Non
             """
         )
 
-    with pytest.raises(RuntimeError, match="尚未执行带备份迁移"):
+    with pytest.raises(RuntimeError, match="请先执行显式迁移"):
         SqliteCandidateVerificationRepository(database)
 
 
-def test_migration_repairs_missing_publication_step_with_separate_recovery_point(
+def test_adapter_rejects_current_schema_drift_instead_of_repairing_in_place(
     tmp_path,
 ) -> None:
     database = tmp_path / "production.db"
@@ -414,41 +451,10 @@ def test_migration_repairs_missing_publication_step_with_separate_recovery_point
             "DROP COLUMN request_idempotency_hash"
         )
 
-    migrated = migrate_candidate_verification(database, publication_backup)
+    with pytest.raises(SchemaNotCurrentError, match="Schema 漂移"):
+        migrate_candidate_verification(database, publication_backup)
 
-    assert migrated == publication_backup.resolve()
-    with sqlite3.connect(database) as connection:
-        migrations = {
-            row[0]
-            for row in connection.execute(
-                "SELECT migration_id FROM candidate_verification_migrations"
-            )
-        }
-        columns = {
-            row[1]
-            for row in connection.execute(
-                "PRAGMA table_info(delivery_publish_intents)"
-            )
-        }
-        indexes = {
-            row[1]
-            for row in connection.execute(
-                "PRAGMA index_list(delivery_publish_intents)"
-            )
-        }
-        legacy = connection.execute(
-            "SELECT publication_key, request_idempotency_hash "
-            "FROM delivery_publish_intents"
-        ).fetchone()
-    assert migrations == {
-        "0001_candidate_verification_attempts",
-        "0002_delivery_publication_idempotency",
-        "0003_historical_reverification_authorities",
-        "0004_legacy_candidate_rebaseline",
-    }
-    assert "request_idempotency_hash" in columns
-    assert "idx_dpi_owner_request_idempotency" in indexes
-    assert legacy == ("legacy-key", None)
+    assert not publication_backup.exists()
 
 
 def test_migration_replay_releases_database_file_handle(tmp_path) -> None:
@@ -466,7 +472,7 @@ def test_migration_replay_releases_database_file_handle(tmp_path) -> None:
     assert moved.is_file()
 
 
-def test_migration_resumes_after_backup_completed_before_schema(tmp_path) -> None:
+def test_adapter_rejects_unbound_existing_recovery_point(tmp_path) -> None:
     database = tmp_path / "production.db"
     backup = tmp_path / "production-before-candidate-verification.db"
     with sqlite3.connect(database) as source:
@@ -475,13 +481,12 @@ def test_migration_resumes_after_backup_completed_before_schema(tmp_path) -> Non
         source.commit()
         with sqlite3.connect(backup) as destination:
             source.backup(destination)
-    backup_before_resume = backup.read_bytes()
+    backup_before = backup.read_bytes()
 
-    resumed = migrate_candidate_verification(database, backup)
+    with pytest.raises(FileExistsError, match="备份已存在"):
+        migrate_candidate_verification(database, backup)
 
-    assert resumed == backup.resolve()
-    assert backup.read_bytes() == backup_before_resume
-    SqliteCandidateVerificationRepository(database)
+    assert backup.read_bytes() == backup_before
 
 
 def test_migration_rejects_corrupt_source_without_creating_backup(tmp_path) -> None:
@@ -489,7 +494,7 @@ def test_migration_rejects_corrupt_source_without_creating_backup(tmp_path) -> N
     backup = tmp_path / "corrupt-before-candidate-verification.db"
     database.write_bytes(b"not-a-sqlite-database")
 
-    with pytest.raises(RuntimeError, match="源数据库完整性检查失败"):
+    with pytest.raises(RuntimeError, match="源数据库不可读取"):
         migrate_candidate_verification(database, backup)
 
     assert not backup.exists()
@@ -506,7 +511,7 @@ def test_migration_rejects_unrelated_existing_backup(tmp_path) -> None:
         connection.execute("INSERT INTO other_data VALUES ('other')")
     backup_before = backup.read_bytes()
 
-    with pytest.raises(RuntimeError, match="恢复点与源数据库不一致"):
+    with pytest.raises(FileExistsError, match="备份已存在"):
         migrate_candidate_verification(database, backup)
 
     assert backup.read_bytes() == backup_before
@@ -521,7 +526,7 @@ def test_migration_replay_rejects_modified_first_backup(tmp_path) -> None:
     with sqlite3.connect(backup) as connection:
         connection.execute("INSERT INTO existing_data VALUES ('tampered')")
 
-    with pytest.raises(RuntimeError, match="首次恢复点不匹配"):
+    with pytest.raises(RuntimeError, match="中央收据或恢复点无效"):
         migrate_candidate_verification(database, backup)
 
 

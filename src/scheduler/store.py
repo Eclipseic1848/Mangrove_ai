@@ -17,45 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
-_DDL = """
-CREATE TABLE IF NOT EXISTS scheduled_tasks (
-    task_id       TEXT PRIMARY KEY,
-    user_input    TEXT NOT NULL,
-    owner_user_id TEXT,                    -- 归属用户（Web UI 多用户隔离）；旧记录为 NULL
-    provider      TEXT,
-    model         TEXT,
-    trigger_type  TEXT NOT NULL,          -- once | cron | interval
-    run_at        TEXT,                   -- once 的执行时刻（ISO）
-    cron_expr     TEXT,                   -- cron 表达式
-    next_run_at   TEXT,                   -- 下次执行时刻（ISO）；NULL 表示无后续
-    status        TEXT NOT NULL DEFAULT 'active',  -- active | paused | done | cancelled
-    last_run_at   TEXT,
-    last_success  INTEGER,
-    last_result   TEXT,
-    last_error    TEXT,
-    run_count     INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL
-);
-
--- 执行历史（每次执行一行）：周期任务会积累多份报告，last_* 只留最近一次，
--- 历史报告的查看/下载靠本表关联（report_path/json_path 指向 downloads/<执行id>/ 产物）
-CREATE TABLE IF NOT EXISTS scheduled_task_runs (
-    run_id      INTEGER PRIMARY KEY AUTOINCREMENT,
-    task_id     TEXT NOT NULL,
-    run_at      TEXT NOT NULL,
-    success     INTEGER NOT NULL,
-    summary     TEXT,
-    report_path TEXT,
-    json_path   TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_runs_task ON scheduled_task_runs(task_id, run_id);
-"""
-
-# 从 last_result 里提取产物路径（历史回填用，如 "report=D:\...\report.md; json=..."）
-import re as _re
-
-_REPORT_RE = _re.compile(r"report=([^;]+)")
-_JSON_RE = _re.compile(r"json=([^;]+)")
+from src.database_migrations import DatabaseTarget, inspect_database
 
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
@@ -69,50 +31,17 @@ class ScheduleStore:
         self.db_path = db_path
         Path(db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        with self._conn() as conn:
-            conn.executescript(_DDL)
-            # 向后兼容：旧库无 owner_user_id 列则补加（已存在则忽略）
-            cols = {r["name"] for r in conn.execute("PRAGMA table_info(scheduled_tasks)").fetchall()}
-            if "owner_user_id" not in cols:
-                conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN owner_user_id TEXT")
-            # 向后兼容：手动创建/模板/暂停/按间隔/生效区间（任务中心重构，v1.2.0）
-            if "name" not in cols:
-                conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN name TEXT")
-            if "source" not in cols:
-                conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'auto'")
-            if "interval_seconds" not in cols:
-                conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN interval_seconds INTEGER")
-            if "start_date" not in cols:
-                conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN start_date TEXT")
-            if "end_date" not in cols:
-                conn.execute("ALTER TABLE scheduled_tasks ADD COLUMN end_date TEXT")
-            # 历史回填（一次性）：runs 表上线前已跑过的任务，把 last_* 那一次补成历史行，
-            # 老任务的最近一份报告在历史列表里不至于消失
-            rows = conn.execute(
-                """SELECT task_id, last_run_at, last_success, last_result, last_error
-                   FROM scheduled_tasks WHERE last_run_at IS NOT NULL
-                   AND task_id NOT IN (SELECT DISTINCT task_id FROM scheduled_task_runs)"""
-            ).fetchall()
-            for r in rows:
-                res = r["last_result"] or ""
-                rep = _REPORT_RE.search(res)
-                js = _JSON_RE.search(res)
-                conn.execute(
-                    """INSERT INTO scheduled_task_runs
-                       (task_id, run_at, success, summary, report_path, json_path)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    (
-                        r["task_id"], r["last_run_at"], r["last_success"] or 0,
-                        res or (r["last_error"] or ""),
-                        rep.group(1).strip() if rep else "", js.group(1).strip() if js else "",
-                    ),
-                )
+        inspect_database(
+            DatabaseTarget(profile="scheduler", path=Path(self.db_path))
+        ).require_current()
 
     @contextmanager
     def _conn(self) -> Iterator[sqlite3.Connection]:
         """打开连接：正常退出时提交，异常时回滚，最终始终关闭（避免 Windows 文件占用）。"""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
         try:
             yield conn
             conn.commit()

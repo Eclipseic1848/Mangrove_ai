@@ -9,12 +9,13 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.api.store import WebUIStore
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _tmp_store() -> WebUIStore:
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.close()
-    return WebUIStore(tmp.name)
+    return WebUIStore(str(migrated_webui_database(tmp.name)))
 
 
 def test_set_and_get():

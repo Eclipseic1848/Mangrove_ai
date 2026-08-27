@@ -17,12 +17,13 @@ from src.api.cookie_health_scanner import CookieHealthScanner
 from src.api.routes import config_routes as cr
 from src.api.store import WebUIStore
 from src.config.settings import settings
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _tmp_store() -> WebUIStore:
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.close()
-    return WebUIStore(tmp.name)
+    return WebUIStore(str(migrated_webui_database(tmp.name)))
 
 
 def test_disabled_does_not_scan():
@@ -70,6 +71,31 @@ def test_run_one_scan_records_all_keys():
     assert all_health["mc_cookie_xhs"]["status"] == "valid"
 
 
+def test_scheduled_failure_redacts_secret_before_persisting():
+    store = _tmp_store()
+    scanner = CookieHealthScanner()
+    synthetic_secret = "scheduled-cookie-secret-7788"
+
+    async def fail_with_secret(_key):
+        raise RuntimeError(f"验证失败：{synthetic_secret}")
+
+    async def run():
+        with patch.object(cr, "get_store", return_value=store), \
+             patch.object(cr, "_verify_target", side_effect=fail_with_secret), \
+             patch.object(
+                 cr.rc,
+                 "redact_sensitive_text",
+                 side_effect=lambda value: value.replace(synthetic_secret, "***"),
+             ):
+            scanner._sleep = lambda seconds: asyncio.sleep(0)
+            await scanner._run_one_scan()
+
+    asyncio.run(run())
+    for health in store.cookie_health_all().values():
+        assert synthetic_secret not in health["message"]
+        assert "***" in health["message"]
+
+
 def test_start_is_idempotent():
     async def run():
         scanner = CookieHealthScanner()
@@ -83,7 +109,12 @@ def test_start_is_idempotent():
 
 
 def main():
-    tests = [test_disabled_does_not_scan, test_run_one_scan_records_all_keys, test_start_is_idempotent]
+    tests = [
+        test_disabled_does_not_scan,
+        test_run_one_scan_records_all_keys,
+        test_scheduled_failure_redacts_secret_before_persisting,
+        test_start_is_idempotent,
+    ]
     failed = 0
     for t in tests:
         try:
