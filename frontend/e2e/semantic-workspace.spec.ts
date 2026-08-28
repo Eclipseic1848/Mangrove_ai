@@ -1947,6 +1947,60 @@ test.describe("统一数据工作台", () => {
           { ...waiting, status },
           {
             question: status === "needs_input" ? question : null,
+            work_session: {
+              task_id: "task-waiting",
+              revision: 1,
+              run_id: "run-waiting",
+              status,
+              started_at: waiting.created_at,
+              ended_at: status === "cancelled" ? waiting.updated_at : null,
+              work_duration_ms: 1000,
+              waiting_duration_ms: 1000,
+              action_count: status === "cancelled" ? 2 : 1,
+              tool_call_count: 0,
+              handled_retry_count: 0,
+              usage: {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_tokens: null,
+                total_tokens: 0,
+                call_count: 1,
+                unknown_call_count: 1,
+              },
+              provider_usage: [],
+              entries: [
+                {
+                  event_id: "q-event",
+                  sequence: 1,
+                  created_at: waiting.updated_at,
+                  event_type: "question_required",
+                  summary: question.prompt,
+                  purpose: question.reason,
+                  input_summary: null,
+                  duration_ms: null,
+                  result_summary: question.affected_scope,
+                  evidence_refs: [],
+                  recovery_status: "pending",
+                  tool_name: null,
+                  action_id: question.question_id,
+                },
+                ...(status === "cancelled" ? [{
+                  event_id: "cancel-event",
+                  sequence: 2,
+                  created_at: waiting.updated_at,
+                  event_type: "task_cancelled",
+                  summary: "任务已取消",
+                  purpose: null,
+                  input_summary: null,
+                  duration_ms: null,
+                  result_summary: null,
+                  evidence_refs: [],
+                  recovery_status: "handled",
+                  tool_name: null,
+                  action_id: question.question_id,
+                }] : []),
+              ],
+            },
             events: status === "needs_input"
               ? [{
                 event_id: "q-event",
@@ -1979,10 +2033,15 @@ test.describe("统一数据工作台", () => {
 
     await page.goto("/data-prep");
     await page.getByRole("button", { name: /待确认任务/ }).click();
+    const ownerAction = page.getByLabel("需要你处理后才能继续");
+    await expect(ownerAction).toContainText(`原因：${question.reason}`);
+    await expect(ownerAction).toContainText(`影响：${question.affected_scope}`);
     await expect(
       page.getByRole("heading", { name: "需要确认一项信息" }),
     ).toBeVisible();
     await page.getByRole("button", { name: "稍后回答" }).click();
+    await ownerAction.focus();
+    await expect(ownerAction).toBeFocused();
     await expect(page.getByRole("button", { name: /继续回答/ })).toBeVisible();
     await page.getByRole("button", { name: /继续回答/ }).click();
     await expect(
@@ -1992,6 +2051,7 @@ test.describe("统一数据工作台", () => {
     await page.getByRole("button", { name: "取消任务" }).click();
     await page.getByRole("button", { name: "确认取消" }).click();
     await expect(page.getByText("任务已取消，未发布新的正式交付。")).toBeVisible();
+    await expect(page.getByLabel("需要你处理后才能继续")).toHaveCount(0);
     await expect(page.getByText("已取消", { exact: true }).first()).toBeVisible();
   });
 
@@ -2102,6 +2162,7 @@ test.describe("统一数据工作台", () => {
   });
 
   test("完成任务按阶段归并进度且没有遗留转圈", async ({ page }) => {
+    await page.emulateMedia({ reducedMotion: "reduce" });
     await mockWorkspace(page);
     const summary = {
       task_id: "task-completed",
@@ -2198,6 +2259,74 @@ test.describe("统一数据工作台", () => {
           uploads: [],
           plan: null,
           run: { repair_rounds: 0 },
+          work_session: {
+            task_id: "task-completed",
+            revision: 1,
+            run_id: "run-1",
+            status: "completed",
+            started_at: "2026-07-27T00:00:01Z",
+            ended_at: "2026-07-27T00:00:09Z",
+            work_duration_ms: 7000,
+            waiting_duration_ms: 1000,
+            action_count: 9,
+            tool_call_count: 2,
+            handled_retry_count: 1,
+            usage: {
+              input_tokens: 7000,
+              output_tokens: 1420,
+              cache_tokens: null,
+              total_tokens: 8420,
+              call_count: 4,
+              unknown_call_count: 1,
+            },
+            entries: [
+              {
+                event_id: "owner-action-1",
+                sequence: 1,
+                created_at: "2026-07-27T00:00:03Z",
+                event_type: "owner_action.requested",
+                summary: "需要确认下一步",
+                purpose: "确认范围",
+                input_summary: "当前候选共 9 项",
+                duration_ms: null,
+                result_summary: null,
+                evidence_refs: ["evidence-1"],
+                recovery_status: "pending",
+                tool_name: null,
+                action_id: "accept-gap-1",
+              },
+              {
+                event_id: "unrelated-action-resumed",
+                sequence: 2,
+                created_at: "2026-07-27T00:00:03.500Z",
+                event_type: "resumed",
+                summary: "另一个动作已处理",
+                purpose: null,
+                input_summary: null,
+                duration_ms: null,
+                result_summary: null,
+                evidence_refs: [],
+                recovery_status: "handled",
+                tool_name: null,
+                action_id: "another-action",
+              },
+              {
+                event_id: "owner-action-resumed",
+                sequence: 3,
+                created_at: "2026-07-27T00:00:04Z",
+                event_type: "resumed",
+                summary: "已确认并继续",
+                purpose: null,
+                input_summary: null,
+                duration_ms: 1000,
+                result_summary: "继续执行",
+                evidence_refs: [],
+                recovery_status: "handled",
+                tool_name: null,
+                action_id: "accept-gap-1",
+              },
+            ],
+          },
           attempts: [],
           delivery: null,
         },
@@ -2207,15 +2336,32 @@ test.describe("统一数据工作台", () => {
     await page.getByRole("button", { name: /工作量筛选/ }).click();
     await expect(page.getByRole("heading", { name: "工作量筛选" })).toBeVisible();
 
-    const progressToggle = page.getByRole("button", { name: /执行进度/ });
-    await expect(progressToggle).toContainText("8/8 已完成");
+    const progressToggle = page.getByRole("button", { name: /工作记录/ });
+    await expect(progressToggle).toContainText("工作 7.0 秒");
+    await expect(progressToggle).toContainText("等待 1.0 秒");
+    await expect(progressToggle).toContainText("开始");
+    await expect(progressToggle).toContainText("完成");
+    await expect(progressToggle).toContainText("9 个行动");
+    await expect(progressToggle).toContainText("2 次工具");
+    await expect(progressToggle).toContainText("至少 8,420 Tokens · 4 次调用 · 1 次未知");
+    await expect(progressToggle).toContainText("已处理 1 次重试");
     await expect(page.locator('[data-testid="progress-stage"]')).toHaveCount(0);
     if (process.env.MANGROVE_VISUAL_CAPTURE === "1") {
       await page.screenshot({
         path: "../.pytest-tmp/workspace-completed-collapsed.png",
       });
     }
-    await progressToggle.click();
+    await expect(progressToggle).toHaveAttribute("aria-expanded", "false");
+    await progressToggle.focus();
+    await progressToggle.press("Enter");
+    await expect(progressToggle).toHaveAttribute("aria-expanded", "true");
+    await expect(page.locator('[data-testid="progress-stage"]')).toHaveCount(8);
+    await expect(page.getByText("输入：当前候选共 9 项")).toBeVisible();
+    await expect(page.getByText("需要你处理后才能继续")).toHaveCount(0);
+    await progressToggle.press("Space");
+    await expect(progressToggle).toHaveAttribute("aria-expanded", "false");
+    await progressToggle.press("Space");
+    await expect(progressToggle).toHaveAttribute("aria-expanded", "true");
     const stages = page.locator('[data-testid="progress-stage"]');
     await expect(stages).toHaveCount(8);
     await expect(stages.filter({ hasText: "理解要求" })).toHaveCount(1);
@@ -2346,6 +2492,9 @@ test.describe("统一数据工作台", () => {
 
     await page.goto("/data-prep");
     await page.getByRole("button", { name: /运行逻辑检查/ }).click();
+    const workRecord = page.getByRole("button", { name: /工作记录/ });
+    await expect(workRecord).toHaveAttribute("aria-expanded", "false");
+    await workRecord.click();
     const active = page.locator(
       '[data-testid="progress-stage"][data-state="active"]',
     );
@@ -2359,6 +2508,7 @@ test.describe("统一数据工作台", () => {
     failed = true;
     await page.reload();
     await page.getByRole("button", { name: /运行逻辑检查/ }).click();
+    await page.getByRole("button", { name: /工作记录/ }).click();
     await expect(
       page.locator('[data-testid="progress-stage"][data-state="active"]'),
     ).toHaveCount(0);
@@ -2535,6 +2685,7 @@ test.describe("统一数据工作台", () => {
 
     await page.goto("/data-prep");
     await page.getByRole("button", { name: /阶段状态检查/ }).click();
+    await page.getByRole("button", { name: /工作记录/ }).click();
     await expect(
       page.locator('[data-testid="progress-stage"][data-state="active"]'),
     ).toHaveCount(0);
@@ -2622,6 +2773,7 @@ test.describe("统一数据工作台", () => {
 
     await page.goto("/data-prep");
     await page.getByRole("button", { name: /全部报销记录/ }).click();
+    await page.getByRole("button", { name: /工作记录/ }).click();
 
     const coverage = page.getByRole("region", { name: "文档覆盖范围" });
     await expect(coverage).toContainText("返回整份文件中的全部报销记录");
@@ -2638,6 +2790,7 @@ test.describe("统一数据工作台", () => {
 
     await page.reload();
     await page.getByRole("button", { name: /全部报销记录/ }).click();
+    await page.getByRole("button", { name: /工作记录/ }).click();
     await expect(
       page.getByRole("region", { name: "文档覆盖范围" }),
     ).toContainText("已发现 57/109");
@@ -2706,10 +2859,11 @@ test.describe("统一数据工作台", () => {
 
     await page.goto("/data-prep");
     await page.getByRole("button", { name: /解析合同并提取条款/ }).click();
-    await page.getByRole("button", { name: /执行进度/ }).click();
+    await page.getByRole("button", { name: /工作记录/ }).click();
     await expect(page.getByText("Mangrove 已准备 1 项能力：MinerU 文档解析（Tool）").first())
       .toBeVisible();
-    await page.getByRole("button", { name: /行动记录/ }).click();
+    await expect(page.getByRole("button", { name: /行动记录/ }))
+      .toHaveAttribute("aria-expanded", "true");
     await expect(page.getByText("Mangrove 已准备 1 项能力：MinerU 文档解析（Tool）").last())
       .toBeVisible();
     await expect(page.getByText("Pi 已准备 1 项能力：MinerU 文档解析（Tool）"))

@@ -322,10 +322,24 @@ class StructuredProgressEvent(BaseModel):
     run_id: str | None = None
     stage: ProgressStage
     event_type: str
+    runtime_event_type: str | None = None
     summary: str = Field(min_length=1, max_length=500)
     progress: ProgressValue | None = None
     refs: dict[str, Any] = Field(default_factory=dict)
     action: dict[str, Any] | None = None
+    turn_id: str | None = None
+    tool_call_id: str | None = None
+    purpose: str | None = None
+    input_summary: str | None = None
+    duration_ms: int | None = Field(default=None, ge=0)
+    result_summary: str | None = None
+    evidence_refs: tuple[str, ...] = ()
+    recovery_status: str | None = None
+    model_name: str | None = None
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    cache_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
     audience: ProgressAudience = ProgressAudience.ALL
     created_at: datetime = Field(default_factory=_now)
 

@@ -1720,9 +1720,15 @@ def test_broker_relay_uses_scoped_grant_and_records_native_stream_usage(
             task_id="workspace_grant_relay",
             revision=1,
         )
-        return grant, relayed, body, usage
+        trace_usage = broker.list_usage(
+            "user-a",
+            task_id="workspace_grant_relay",
+            revision=1,
+            include_identity=True,
+        )
+        return grant, relayed, body, usage, trace_usage
 
-    grant, relayed, body, usage = asyncio.run(scenario())
+    grant, relayed, body, usage, trace_usage = asyncio.run(scenario())
 
     assert seen["url"] == "https://8.8.8.8/chat/completions"
     assert seen["host"] == "api.deepseek.com"
@@ -1744,6 +1750,25 @@ def test_broker_relay_uses_scoped_grant_and_records_native_stream_usage(
             "request_count": 1,
         }
     ]
+    assert len(trace_usage) == 1
+    assert trace_usage[0] == {
+        "owner_user_id": "user-a",
+        "task_id": "workspace_grant_relay",
+        "revision": 1,
+        "run_id": "pi_run_grant_relay",
+        "connection_id": str(grant.connection_id),
+        "model": "deepseek-v4-pro",
+        "purpose": "agent_inference",
+        "status": "recorded",
+        "input_tokens": 7,
+        "output_tokens": 2,
+        "total_tokens": 9,
+        "request_count": 1,
+        "created_at": trace_usage[0]["created_at"],
+        "cache_tokens": None,
+    }
+    assert isinstance(trace_usage[0]["created_at"], str)
+    assert "native_json" not in trace_usage[0]
 
 
 @pytest.mark.parametrize(

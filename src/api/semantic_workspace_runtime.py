@@ -1581,6 +1581,10 @@ class SemanticWorkspaceManager:
             stage="needs_input",
             event_type="question_answered",
             summary="已收到补充信息，继续执行",
+            details={
+                "action": {"action_id": str(question["question_id"])},
+                "recovery_status": "handled",
+            },
         )
         self.enqueue(user_id, task_id)
         return saved
@@ -1917,6 +1921,8 @@ class SemanticWorkspaceManager:
                 "decision_id": decision.decision_id,
                 "safe_point": safe_point,
                 "base_revision": revision,
+                "action": {"action_id": decision.decision_id},
+                "recovery_status": "handled",
             },
         )
         self._deferred_requeue.add(task_id)
@@ -3031,6 +3037,9 @@ class SemanticWorkspaceManager:
         question: dict[str, Any],
     ) -> None:
         store = get_store()
+        affected_scope = question.get("affected_scope")
+        if isinstance(affected_scope, list):
+            affected_scope = "、".join(str(item) for item in affected_scope)
         task = store.update_semantic_workspace_task(
             user_id,
             task_id,
@@ -3053,6 +3062,10 @@ class SemanticWorkspaceManager:
             details={
                 "reason": question.get("reason"),
                 "affected_scope": question.get("affected_scope"),
+                "purpose": question.get("reason"),
+                "result_summary": affected_scope,
+                "action": {"action_id": str(question["question_id"])},
+                "recovery_status": "pending",
             },
         )
 
@@ -3066,6 +3079,11 @@ class SemanticWorkspaceManager:
         task = store.get_semantic_workspace_task(user_id, task_id)
         if task is None:
             return
+        pending_action_id = (
+            str(task["question"]["question_id"])
+            if task.get("question") and task["question"].get("question_id")
+            else None
+        )
         runtime_repository = AgenticRuntimeRepository(
             settings.webui_db_path
         )
@@ -3123,6 +3141,14 @@ class SemanticWorkspaceManager:
             stage="cancelled",
             event_type="task_cancelled",
             summary="任务已取消，未发布新的正式交付",
+            details=(
+                {
+                    "action": {"action_id": pending_action_id},
+                    "recovery_status": "handled",
+                }
+                if pending_action_id
+                else {}
+            ),
         )
 
     def _mark_compile_failed(

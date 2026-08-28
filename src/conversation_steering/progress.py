@@ -13,7 +13,7 @@ from .models import (
 
 
 _STAGE_ORDER = tuple(ProgressStage)
-_USER_ACTION_FIELDS = {"action_id", "disabled", "kind", "label"}
+_USER_ACTION_FIELDS = {"action_id", "disabled", "kind", "label", "tool"}
 _USER_CAPABILITY_FIELDS = {"name", "kind", "version", "purpose"}
 _USER_CAPABILITY_KINDS = {
     "tool",

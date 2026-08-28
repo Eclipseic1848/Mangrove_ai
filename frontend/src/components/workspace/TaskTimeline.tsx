@@ -512,10 +512,8 @@ export function TaskTimeline({
   onRevisionChange: (revision: number) => void;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const [progressOpen, setProgressOpen] = useState(
-    !["completed", "candidate_ready"].includes(task.status),
-  );
-  const [eventsOpen, setEventsOpen] = useState(false);
+  const [progressOpen, setProgressOpen] = useState(false);
+  const [eventsOpen, setEventsOpen] = useState(true);
   const [retryingUnknown, setRetryingUnknown] = useState(false);
   const [refreshingSource, setRefreshingSource] = useState(false);
   const [gapAction, setGapAction] = useState<string | null>(null);
@@ -551,10 +549,41 @@ export function TaskTimeline({
   ).length;
 
   useEffect(() => {
-    setProgressOpen(
-      !["completed", "candidate_ready"].includes(task.status),
-    );
+    setProgressOpen(false);
+    setEventsOpen(true);
   }, [task.task_id, task.status, task.viewing_revision]);
+
+  const workSession = task.work_session;
+  const ownerActionIndex = workSession?.entries.reduce(
+    (latest, entry, index) => [
+      "owner_action.requested",
+      "question.requested",
+      "question_required",
+      "revision.waiting_safe_point",
+    ].includes(entry.event_type) ? index : latest,
+    -1,
+  ) ?? -1;
+  const ownerActionResolved = ownerActionIndex >= 0 && (
+    ["cancelled", "completed", "failed"].includes(task.status)
+    || workSession?.entries
+      .slice(ownerActionIndex + 1)
+      .some((entry) => Boolean(
+        workSession.entries[ownerActionIndex]?.action_id
+        && entry.action_id === workSession.entries[ownerActionIndex]?.action_id
+        && (entry.recovery_status === "handled"
+          || entry.recovery_status === "resumed"
+          || ["resumed", "question_answered", "question.answered", "revision.safe_point_applied", "task_cancelled"].includes(entry.event_type)),
+      ))
+  );
+  const pendingOwnerAction = ownerActionIndex >= 0 && !ownerActionResolved
+    ? workSession?.entries[ownerActionIndex]
+    : undefined;
+  const usageLabel = workSession
+    ? `${workSession.usage.unknown_call_count > 0 ? "至少 " : ""}${workSession.usage.total_tokens.toLocaleString("zh-CN")} Tokens · ${workSession.usage.call_count} 次调用${workSession.usage.unknown_call_count > 0 ? ` · ${workSession.usage.unknown_call_count} 次未知` : ""}`
+    : "0 Tokens · 0 次调用";
+  const detailEventCount = workSession?.entries.length
+    || task.progress?.events.length
+    || 0;
 
   return (
     <section className="mx-auto w-full max-w-4xl px-6 py-6">
@@ -958,6 +987,30 @@ export function TaskTimeline({
           </section>
         )}
 
+      {pendingOwnerAction && (
+        <div
+          className="mt-5 border-l-2 border-amber-500 bg-amber-500/[0.06] px-4 py-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          role="status"
+          tabIndex={0}
+          aria-label="需要你处理后才能继续"
+        >
+          <p className="font-medium">需要你处理后才能继续</p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            {productText(pendingOwnerAction.summary)}
+          </p>
+          {pendingOwnerAction.purpose && (
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              原因：{productText(pendingOwnerAction.purpose)}
+            </p>
+          )}
+          {pendingOwnerAction.result_summary && (
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              影响：{productText(pendingOwnerAction.result_summary)}
+            </p>
+          )}
+        </div>
+      )}
+
       <Collapsible.Root
         open={progressOpen}
         onOpenChange={setProgressOpen}
@@ -966,21 +1019,22 @@ export function TaskTimeline({
         <Collapsible.Trigger asChild>
           <button
             type="button"
-            className="mb-4 flex w-full items-center justify-between rounded-lg text-left"
+            className="mb-4 flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-2 text-left hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           >
-            <h2 className="text-sm font-semibold">执行进度</h2>
-            <span className="flex items-center gap-2 text-xs text-muted-foreground">
-              {task.run && (
-                <span>已修复 {Number(task.run.repair_rounds || 0)} 次</span>
-              )}
-              {events.length > 0 && (
-                <span>
-                  {completedMilestones}/{milestones.length} 已完成
-                </span>
-              )}
+            <h2 className="text-sm font-semibold">工作记录</h2>
+            <span className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-xs text-muted-foreground">
+              <span>{workSession?.ended_at ? "已完成" : "进行中"}</span>
+              {workSession?.started_at && <span>开始 {formatTime(workSession.started_at)}</span>}
+              {workSession?.ended_at && <span>完成 {formatTime(workSession.ended_at)}</span>}
+              <span>工作 {formatElapsed(workSession?.work_duration_ms || 0)}</span>
+              <span>等待 {formatElapsed(workSession?.waiting_duration_ms || 0)}</span>
+              <span>{workSession?.action_count || 0} 个行动</span>
+              <span>{workSession?.tool_call_count || 0} 次工具</span>
+              <span>{usageLabel}</span>
+              <span>已处理 {workSession?.handled_retry_count || 0} 次重试</span>
               <ChevronDown
                 className={cn(
-                  "h-4 w-4 transition-transform",
+                  "h-4 w-4 transition-transform motion-reduce:transition-none",
                   progressOpen && "rotate-180",
                 )}
               />
@@ -1002,25 +1056,70 @@ export function TaskTimeline({
               等待第一个执行事件
             </div>
           )}
-          {(task.progress?.events.length || 0) > 0 && (
+          {(detailEventCount > 0 || (workSession?.provider_usage?.length || 0) > 0) && (
             <Collapsible.Root
               open={eventsOpen}
               onOpenChange={setEventsOpen}
               className="mt-1 border-t pt-3"
             >
-              <Collapsible.Trigger className="flex w-full items-center justify-between rounded-lg px-2 py-2 text-left text-xs font-medium text-muted-foreground hover:bg-muted">
-                <span>行动记录（{task.progress?.events.length}）</span>
+              <Collapsible.Trigger className="flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-2 text-left text-xs font-medium text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <span>行动记录（{detailEventCount}）</span>
                 <ChevronDown
                   className={cn(
-                    "h-3.5 w-3.5 transition-transform",
+                    "h-3.5 w-3.5 transition-transform motion-reduce:transition-none",
                     eventsOpen && "rotate-180",
                   )}
                 />
               </Collapsible.Trigger>
               <Collapsible.Content>
+                {(workSession?.provider_usage?.length || 0) > 0 && (
+                  <div className="mb-3 border-b pb-3 text-xs leading-5">
+                    <p className="font-medium">模型调用</p>
+                    {workSession?.provider_usage?.map((usage, index) => (
+                      <p
+                        key={`${usage.run_id}:${usage.purpose}:${index}`}
+                        className="mt-1 text-muted-foreground"
+                      >
+                        {usage.model} · {usage.purpose} · {usage.total_tokens === null
+                          ? "Token 未知"
+                          : `${usage.total_tokens.toLocaleString("zh-CN")} Tokens`}
+                        {usage.cache_tokens === null
+                          ? " · 缓存用量未知"
+                          : ` · 缓存 ${usage.cache_tokens.toLocaleString("zh-CN")}`}
+                      </p>
+                    ))}
+                  </div>
+                )}
+                {workSession?.entries.length ? (
+                  <ol className="mb-3 space-y-2 border-b pb-3">
+                    {workSession.entries.map((entry) => (
+                      <li key={entry.event_id} className="grid gap-1 text-xs leading-5 sm:grid-cols-[72px_1fr]">
+                        <time className="text-muted-foreground">{formatTime(entry.created_at)}</time>
+                        <div>
+                          <p>{productText(entry.summary)}</p>
+                          <p className="text-muted-foreground">
+                            {[entry.tool_name, entry.purpose, entry.duration_ms !== null ? formatElapsed(entry.duration_ms) : null, entry.result_summary]
+                              .filter(Boolean).join(" · ")}
+                          </p>
+                          {entry.input_summary && (
+                            <p className="text-muted-foreground">输入：{productText(entry.input_summary)}</p>
+                          )}
+                          {entry.evidence_refs.length > 0 && (
+                            <p className="text-muted-foreground">证据：{entry.evidence_refs.join("、")}</p>
+                          )}
+                          {entry.recovery_status && (
+                            <p className="text-muted-foreground">恢复状态：{entry.recovery_status}</p>
+                          )}
+                        </div>
+                      </li>
+                    ))}
+                  </ol>
+                ) : null}
                 <ol className="mt-2 space-y-2 pl-2">
                   {task.progress?.events.map((event) => {
                     const capabilities = capabilityReferences(event);
+                    const showLegacyEvent = !workSession?.entries.length;
+                    if (!showLegacyEvent && capabilities.length === 0) return null;
                     return (
                       <li
                         key={event.event_id}
@@ -1030,8 +1129,8 @@ export function TaskTimeline({
                           {formatTime(event.created_at)}
                         </time>
                         <div>
-                          <p>{productText(event.summary)}</p>
-                          {event.progress && (
+                          {showLegacyEvent && <p>{productText(event.summary)}</p>}
+                          {showLegacyEvent && event.progress && (
                             <p className="text-muted-foreground">
                               已处理 {event.progress.current}
                               {event.progress.total !== null

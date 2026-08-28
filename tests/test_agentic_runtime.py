@@ -2144,6 +2144,42 @@ def test_rpc_trace_compacts_repeated_message_snapshot_without_losing_audit_field
     assert event["assistantMessageEvent"]["partial"]
 
 
+def test_pi_runtime_normalizes_model_usage_without_message_content() -> None:
+    event = PiRuntime._translate_event({
+        "type": "message_end",
+        "message": {
+            "role": "assistant",
+            "model": "local-model",
+            "content": [{"type": "text", "text": "不得进入工作记录"}],
+            "usage": {"input": 100, "output": 20, "cacheRead": 30},
+        },
+    })
+
+    assert event is not None
+    assert event.event_type == "provider.usage"
+    assert event.details == {
+        "trace_normalized": True,
+        "purpose": "执行任务",
+        "model_name": "local-model",
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cache_tokens": 30,
+        "total_tokens": 120,
+    }
+    assert "不得进入工作记录" not in event.model_dump_json()
+
+
+def test_pi_runtime_keeps_missing_model_usage_unknown() -> None:
+    event = PiRuntime._translate_event({
+        "type": "message_end",
+        "message": {"role": "assistant", "model": "local-model"},
+    })
+
+    assert event is not None
+    assert event.summary == "模型调用已完成，用量未知"
+    assert event.details["total_tokens"] is None
+
+
 def test_pi_runtime_installs_official_extension_based_context_gate(
     tmp_path: Path,
 ) -> None:
