@@ -224,6 +224,7 @@ def test_known_usage_does_not_hide_a_later_retry_with_unknown_usage() -> None:
         ),
         provider_usage=[{
             "run_id": "run-2",
+            "purpose": "agent_inference",
             "input_tokens": 100,
             "output_tokens": 20,
             "cache_tokens": None,
@@ -234,6 +235,41 @@ def test_known_usage_does_not_hide_a_later_retry_with_unknown_usage() -> None:
 
     assert view.usage.total_tokens == 120
     assert view.usage.call_count == 2
+    assert view.usage.unknown_call_count == 1
+
+
+def test_other_usage_purpose_does_not_hide_unknown_agent_retry() -> None:
+    view = WorkTraceProjection().project(
+        task_id="task-1",
+        revision=2,
+        run_id="run-2",
+        status="running",
+        events=(
+            _event(1, 0, "action_progress", runtime_event_type="agent.started"),
+            _event(2, 1, "action_progress", runtime_event_type="agent.retrying"),
+        ),
+        provider_usage=[
+            {
+                "run_id": "run-2",
+                "purpose": "agent_inference",
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "total_tokens": 120,
+                "request_count": 1,
+            },
+            {
+                "run_id": "run-2",
+                "purpose": "candidate_verify",
+                "input_tokens": 40,
+                "output_tokens": 10,
+                "total_tokens": 50,
+                "request_count": 1,
+            },
+        ],
+    )
+
+    assert view.usage.total_tokens == 170
+    assert view.usage.call_count == 3
     assert view.usage.unknown_call_count == 1
 
 

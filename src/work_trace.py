@@ -191,8 +191,10 @@ class WorkTraceProjection:
                 for event in selected
                 if _trace_type(event) == "provider.usage"
             ]
-        recorded_call_count = sum(
-            int(item.get("request_count") or 0) for item in usage_rows
+        recorded_agent_call_count = sum(
+            int(item.get("request_count") or 0)
+            for item in usage_rows
+            if not selected_usage or item.get("purpose") == "agent_inference"
         )
         usage_rows.extend(
             {
@@ -202,7 +204,9 @@ class WorkTraceProjection:
                 "total_tokens": None,
                 "request_count": 1,
             }
-            for _ in range(max(0, observed_call_count - recorded_call_count))
+            for _ in range(
+                max(0, observed_call_count - recorded_agent_call_count)
+            )
         )
         known = [item for item in usage_rows if item.get("total_tokens") is not None]
         calls = sum(int(item.get("request_count") or 0) for item in usage_rows)
