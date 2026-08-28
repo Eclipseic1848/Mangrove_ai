@@ -265,14 +265,16 @@ export function WebSourceIntake({
   }, [attempt?.status]);
 
   const contextSelection = useMemo(() => {
-    const [templateId, versionText] = selectedTemplate.split("@");
+    const template = contextOptions.templates.find(
+      (item) => item.template_id === selectedTemplate,
+    );
     return {
-      template: templateId
-        ? { template_id: templateId, version: Number(versionText) }
+      template: template
+        ? { template_id: template.template_id, version: template.version }
         : null,
       memories: selectedMemoryIds.map((memoryId) => ({ memory_id: memoryId })),
     };
-  }, [selectedMemoryIds, selectedTemplate]);
+  }, [contextOptions.templates, selectedMemoryIds, selectedTemplate]);
 
   const contextDraftFingerprint = useMemo(() => JSON.stringify({
     objective: objective.trim(),
@@ -1055,7 +1057,7 @@ export function WebSourceIntake({
                   {contextOptions.templates.map((template) => (
                     <option
                       key={`${template.template_id}@${template.version}`}
-                      value={`${template.template_id}@${template.version}`}
+                      value={template.template_id}
                     >
                       {template.title} · V{template.version}
                     </option>

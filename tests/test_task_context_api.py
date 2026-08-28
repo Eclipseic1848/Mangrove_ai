@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from src.api.auth import get_store
+from src.api.routes import semantic_workspace
+from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.config.settings import settings
 from src.task_context import TaskContextRepository, TaskTemplateDraft
 from tests.test_web_source_delivery_api import (
@@ -13,6 +15,7 @@ from tests.test_web_source_delivery_api import (
     _seed_snapshot,
 )
 from tests.test_pi_runtime_workspace_api import _wait_for_delivery
+from tests.test_conversation_steering_api import _ApiManager, _ApiMaterialRewriter
 
 
 def _seed_context_options() -> tuple[int, int]:
@@ -164,3 +167,166 @@ def test_web_task_rejects_context_hash_not_shown_to_user(tmp_path, monkeypatch) 
         )
         assert response.status_code == 409
         assert "重新检查" in response.json()["detail"]
+
+
+def test_material_web_revision_keeps_frozen_source_contract_and_context(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = CoverageAwareWebPiRuntime()
+    client = _client(tmp_path, monkeypatch, role="admin", pi_runtime=runtime)
+    memory_id, _other_memory_id = _seed_context_options()
+    snapshot_id, _content = _seed_snapshot(Path(settings.webui_db_path))
+    selection = {
+        "template": {"template_id": "public-company-summary", "version": 1},
+        "memories": [{"memory_id": memory_id}],
+    }
+    manager = _ApiManager()
+    manager.prepare_runtime_binding = (  # type: ignore[attr-defined]
+        semantic_workspace.get_semantic_workspace_manager().prepare_runtime_binding
+    )
+
+    with client:
+        preview = client.post(
+            "/api/semantic-workspace/context-preview",
+            json={
+                "objective_text": "总结当前公开网页",
+                "output_formats": ["json"],
+                "selection": selection,
+            },
+        ).json()
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "总结当前公开网页",
+                "source_snapshot_id": snapshot_id,
+                "quantity_requirement": "当前页面中有证据的全部内容",
+                "completeness_requirement": "仅对当前精确页面负责",
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "provider": "local",
+                "context_selection": selection,
+                "context_preview_sha256": preview["preview_sha256"],
+            },
+        )
+        task_id = created.json()["task_id"]
+        _wait_for_delivery(client, task_id)
+        monkeypatch.setattr(
+            semantic_workspace,
+            "build_context_rewriter",
+            lambda _request: _ApiMaterialRewriter(),
+        )
+        monkeypatch.setattr(
+            semantic_workspace,
+            "get_semantic_workspace_manager",
+            lambda: manager,
+        )
+
+        proposal_id = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/turns",
+            json={"text": "改成 CSV"},
+        ).json()["proposal_id"]
+        switched = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/"
+            f"revision-proposals/{proposal_id}/decision",
+            json={"mode": "cancel_now"},
+        )
+        assert switched.status_code == 202, switched.text
+        detail = client.get(
+            f"/api/semantic-workspace/tasks/{task_id}"
+        ).json()
+        assert detail["active_revision"] == 2
+        assert detail["web_source"]["source_snapshot_id"] == snapshot_id
+        assert detail["web_source"]["delivery_spec"]["formats"] == ["csv"]
+        assert detail["task_context"]["compiled_context"]["revision"] == 2
+        assert detail["task_context"]["memories"][0]["memory_id"] == memory_id
+        runtime_repository = AgenticRuntimeRepository(settings.webui_db_path)
+        old_runtime = runtime_repository.get("user-a", task_id, 1)
+        new_runtime = runtime_repository.get("user-a", task_id, 2)
+        assert old_runtime is not None and new_runtime is not None
+        assert new_runtime["run_id"] != old_runtime["run_id"]
+        assert detail["web_source"]["runtime_binding"]["external_run_id"] == (
+            new_runtime["run_id"]
+        )
+
+
+def test_new_web_task_keeps_source_refs_contract_and_context(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = CoverageAwareWebPiRuntime()
+    client = _client(tmp_path, monkeypatch, role="admin", pi_runtime=runtime)
+    memory_id, _other_memory_id = _seed_context_options()
+    snapshot_id, _content = _seed_snapshot(Path(settings.webui_db_path))
+    selection = {
+        "template": {"template_id": "public-company-summary", "version": 1},
+        "memories": [{"memory_id": memory_id}],
+    }
+    manager = _ApiManager()
+    manager.prepare_runtime_binding = (  # type: ignore[attr-defined]
+        semantic_workspace.get_semantic_workspace_manager().prepare_runtime_binding
+    )
+
+    with client:
+        preview = client.post(
+            "/api/semantic-workspace/context-preview",
+            json={
+                "objective_text": "总结当前公开网页",
+                "output_formats": ["json"],
+                "selection": selection,
+            },
+        ).json()
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "总结当前公开网页",
+                "source_snapshot_id": snapshot_id,
+                "quantity_requirement": "当前页面中有证据的全部内容",
+                "completeness_requirement": "仅对当前精确页面负责",
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "provider": "local",
+                "context_selection": selection,
+                "context_preview_sha256": preview["preview_sha256"],
+            },
+        )
+        task_id = created.json()["task_id"]
+        original = _wait_for_delivery(client, task_id)
+        monkeypatch.setattr(
+            semantic_workspace,
+            "build_context_rewriter",
+            lambda _request: _ApiMaterialRewriter(),
+        )
+        monkeypatch.setattr(
+            semantic_workspace,
+            "get_semantic_workspace_manager",
+            lambda: manager,
+        )
+
+        proposal_id = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/turns",
+            json={"text": "改成 CSV"},
+        ).json()["proposal_id"]
+        response = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/"
+            f"revision-proposals/{proposal_id}/decision",
+            json={"mode": "new_task"},
+        )
+        assert response.status_code == 202, response.text
+        new_task_id = response.json()["new_task"]["task_id"]
+        detail = client.get(
+            f"/api/semantic-workspace/tasks/{new_task_id}"
+        ).json()
+        assert detail["source_refs"] == original["source_refs"]
+        assert detail["web_source"]["source_snapshot_id"] == snapshot_id
+        assert detail["web_source"]["delivery_spec"]["formats"] == ["csv"]
+        assert detail["task_context"]["compiled_context"]["task_id"] == new_task_id
+        assert detail["task_context"]["compiled_context"]["revision"] == 1
+        runtime_repository = AgenticRuntimeRepository(settings.webui_db_path)
+        old_runtime = runtime_repository.get("user-a", task_id, 1)
+        new_runtime = runtime_repository.get("user-a", new_task_id, 1)
+        assert old_runtime is not None and new_runtime is not None
+        assert new_runtime["run_id"] != old_runtime["run_id"]
+        assert detail["web_source"]["runtime_binding"]["external_run_id"] == (
+            new_runtime["run_id"]
+        )

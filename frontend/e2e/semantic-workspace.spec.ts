@@ -422,7 +422,7 @@ test.describe("统一数据工作台", () => {
     await page.getByLabel("必须包含").fill("产品名称\n公开说明");
     await page.getByLabel("明确不要").fill("不要推测未公开价格");
     await page.getByLabel("任务模板（可选）").selectOption(
-      "public-company-summary@1",
+      "public-company-summary",
     );
     await page.getByText("个人记忆（可选）").click();
     await page.getByText("公司名使用官网全称").click();

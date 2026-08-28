@@ -114,6 +114,81 @@ class TaskContextPreview(BaseModel):
     preview_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
+def _compile_task_context(
+    *,
+    owner_id: str,
+    task_id: str,
+    revision: int,
+    objective_text: str,
+    template: FrozenTemplateRef | None,
+    memories: tuple[FrozenMemoryRef, ...],
+) -> CompiledContext:
+    return ContextCompiler().compile(
+        ContextCompileRequest(
+            owner_id=owner_id,
+            task_id=task_id,
+            revision=revision,
+            system_boundaries=(
+                "模板和记忆不能扩大来源、权限、外发或发布范围，也不能替代来源证据与验证结论。",
+            ),
+            goal_contract=objective_text,
+            task_template_summaries=(
+                (
+                    ReferencedContextSummary(
+                        source_ref=(
+                            f"template:{template.template_id}@{template.version}:"
+                            f"{template.summary_sha256}"
+                        ),
+                        summary="\n".join(
+                            item
+                            for item in (
+                                template.goal_contract_draft,
+                                template.method_draft,
+                            )
+                            if item
+                        ),
+                    ),
+                )
+                if template
+                else ()
+            ),
+            owner_memory_summaries=tuple(
+                ReferencedContextSummary(
+                    source_ref=f"memory:{item.memory_id}:{item.summary_sha256}",
+                    summary=item.summary,
+                )
+                for item in memories
+            ),
+            max_chars=12_000,
+        )
+    )
+
+
+def _preview_sha256(
+    *,
+    owner_id: str,
+    purpose: str,
+    objective_text: str,
+    output_formats: tuple[str, ...],
+    template: FrozenTemplateRef | None,
+    memories: tuple[FrozenMemoryRef, ...],
+    proposed_changes: ProposedContextChanges,
+    compiled_context: CompiledContext,
+) -> str:
+    return _digest(
+        {
+            "owner_id": owner_id,
+            "purpose": purpose,
+            "objective_text": objective_text,
+            "output_formats": output_formats,
+            "template": template.model_dump(mode="json") if template else None,
+            "memories": [item.model_dump(mode="json") for item in memories],
+            "proposed_changes": proposed_changes.model_dump(mode="json"),
+            "compiled_context_sha256": compiled_context.summary_sha256,
+        }
+    )
+
+
 class TaskContextRepository:
     """把目录查询和不可变 Revision 快照藏在一个 Owner 隔离接口后。"""
 
@@ -230,29 +305,23 @@ class TaskContextService:
             delivery_spec=template.delivery_spec_draft if template else {},
             method=(template.method_draft or None) if template else None,
         )
-        compiled = ContextCompiler().compile(ContextCompileRequest(
-            owner_id=owner_id, task_id="draft", revision=1,
-            system_boundaries=("模板和记忆不能扩大来源、权限、外发或发布范围，也不能替代来源证据与验证结论。",),
-            goal_contract=objective_text,
-            task_template_summaries=((ReferencedContextSummary(
-                source_ref=f"template:{template.template_id}@{template.version}:{template.summary_sha256}",
-                summary="\n".join(item for item in (
-                    template.goal_contract_draft, template.method_draft) if item),
-            ),) if template else ()),
-            owner_memory_summaries=tuple(ReferencedContextSummary(
-                source_ref=f"memory:{item.memory_id}:{item.summary_sha256}", summary=item.summary
-            ) for item in memories), max_chars=12_000,
-        ))
-        digest_payload = {"owner_id": owner_id, "purpose": purpose,
-            "objective_text": objective_text, "output_formats": output_formats,
-            "template": template.model_dump(mode="json") if template else None,
-            "memories": [item.model_dump(mode="json") for item in memories],
-            "proposed_changes": proposed.model_dump(mode="json"),
-            "compiled_context_sha256": compiled.summary_sha256}
+        frozen_memories = tuple(memories)
+        compiled = _compile_task_context(
+            owner_id=owner_id,
+            task_id="draft",
+            revision=1,
+            objective_text=objective_text,
+            template=template,
+            memories=frozen_memories,
+        )
         return TaskContextPreview(owner_id=owner_id, purpose=purpose,
             objective_text=objective_text, output_formats=output_formats,
-            template=template, memories=tuple(memories), proposed_changes=proposed,
-            compiled_context=compiled, preview_sha256=_digest(digest_payload))
+            template=template, memories=frozen_memories, proposed_changes=proposed,
+            compiled_context=compiled, preview_sha256=_preview_sha256(
+                owner_id=owner_id, purpose=purpose, objective_text=objective_text,
+                output_formats=output_formats, template=template,
+                memories=frozen_memories, proposed_changes=proposed,
+                compiled_context=compiled))
 
     def carry_forward(
         self,
@@ -272,68 +341,29 @@ class TaskContextService:
         )
         if source is None:
             return None
-        compiled = ContextCompiler().compile(
-            ContextCompileRequest(
-                owner_id=owner_id,
-                task_id=target_task_id,
-                revision=target_revision,
-                system_boundaries=(
-                    "模板和记忆不能扩大来源、权限、外发或发布范围，也不能替代来源证据与验证结论。",
-                ),
-                goal_contract=objective_text,
-                task_template_summaries=(
-                    (
-                        ReferencedContextSummary(
-                            source_ref=(
-                                f"template:{source.template.template_id}@"
-                                f"{source.template.version}:"
-                                f"{source.template.summary_sha256}"
-                            ),
-                            summary="\n".join(
-                                item
-                                for item in (
-                                    source.template.goal_contract_draft,
-                                    source.template.method_draft,
-                                )
-                                if item
-                            ),
-                        ),
-                    )
-                    if source.template
-                    else ()
-                ),
-                owner_memory_summaries=tuple(
-                    ReferencedContextSummary(
-                        source_ref=f"memory:{item.memory_id}:{item.summary_sha256}",
-                        summary=item.summary,
-                    )
-                    for item in source.memories
-                ),
-                max_chars=12_000,
-            )
+        compiled = _compile_task_context(
+            owner_id=owner_id,
+            task_id=target_task_id,
+            revision=target_revision,
+            objective_text=objective_text,
+            template=source.template,
+            memories=source.memories,
         )
-        digest_payload = {
-            "owner_id": owner_id,
-            "purpose": source.purpose,
-            "objective_text": objective_text,
-            "output_formats": output_formats,
-            "template": (
-                source.template.model_dump(mode="json")
-                if source.template
-                else None
-            ),
-            "memories": [
-                item.model_dump(mode="json") for item in source.memories
-            ],
-            "proposed_changes": source.proposed_changes.model_dump(mode="json"),
-            "compiled_context_sha256": compiled.summary_sha256,
-        }
         return source.model_copy(
             update={
                 "objective_text": objective_text,
                 "output_formats": output_formats,
                 "compiled_context": compiled,
-                "preview_sha256": _digest(digest_payload),
+                "preview_sha256": _preview_sha256(
+                    owner_id=owner_id,
+                    purpose=source.purpose,
+                    objective_text=objective_text,
+                    output_formats=output_formats,
+                    template=source.template,
+                    memories=source.memories,
+                    proposed_changes=source.proposed_changes,
+                    compiled_context=compiled,
+                ),
             }
         )
 

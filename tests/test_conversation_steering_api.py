@@ -2,6 +2,8 @@
 """AC-01/03：通过工作台 HTTP Interface 验证追问与进度。"""
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -356,8 +358,10 @@ def test_after_safe_point_is_persisted_then_applied_by_worker(
         ] == 1
 
         manager = SemanticWorkspaceManager()
-        assert manager._apply_waiting_revision_at_safe_point(
-            "user-a", "workspace-4", 1, "sources_bound"
+        assert asyncio.run(
+            manager._apply_waiting_revision_at_safe_point(
+                "user-a", "workspace-4", 1, "sources_bound"
+            )
         )
         switched = store.get_semantic_workspace_task("user-a", "workspace-4")
         assert switched["active_revision"] == 2
