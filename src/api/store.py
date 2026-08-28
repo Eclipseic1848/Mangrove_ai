@@ -223,28 +223,45 @@ class WebUIStore:
         return {r["key"]: dict(r) for r in rows}
 
     # ---------- 个人记忆（按用户隔离，区别于全局共享的 memory/user-preferences.md） ----------
-    def memory_add(self, user_id: str, text: str) -> Dict[str, Any]:
+    def memory_add(
+        self,
+        user_id: str,
+        text: str,
+        *,
+        purpose: str = "general",
+        source: str = "user_entered",
+    ) -> Dict[str, Any]:
         with self._lock, self._conn() as conn:
             cur = conn.execute(
-                "INSERT INTO user_memory (user_id, text, created_at) VALUES (?, ?, ?)",
-                (user_id, text, _now()),
+                "INSERT INTO user_memory "
+                "(user_id, text, purpose, source, created_at) VALUES (?, ?, ?, ?, ?)",
+                (user_id, text, purpose, source, _now()),
             )
             row_id = cur.lastrowid
-        return {"id": row_id, "user_id": user_id, "text": text}
+        return {
+            "id": row_id,
+            "user_id": user_id,
+            "text": text,
+            "purpose": purpose,
+            "source": source,
+        }
 
     def memory_list(self, user_id: str) -> List[Dict[str, Any]]:
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT id, text, created_at FROM user_memory WHERE user_id=? ORDER BY id DESC",
+                "SELECT id, text, purpose, source, created_at FROM user_memory "
+                "WHERE user_id=? AND deleted_at IS NULL ORDER BY id DESC",
                 (user_id,),
             ).fetchall()
         return [dict(r) for r in rows]
 
     def memory_delete(self, user_id: str, memory_id: int) -> bool:
-        """按 user_id + id 一起匹配删除，防止越权删除他人的记忆。"""
+        """按 Owner 软删除；已冻结 TaskRevision 仍保留当时的脱敏摘要。"""
         with self._lock, self._conn() as conn:
             cur = conn.execute(
-                "DELETE FROM user_memory WHERE id=? AND user_id=?", (memory_id, user_id),
+                "UPDATE user_memory SET deleted_at=? "
+                "WHERE id=? AND user_id=? AND deleted_at IS NULL",
+                (_now(), memory_id, user_id),
             )
         return cur.rowcount > 0
 

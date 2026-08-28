@@ -104,7 +104,7 @@ class RestoreVerification:
 
 
 _PROFILE_HEADS = {
-    "webui": "webui_0008",
+    "webui": "webui_0009",
     "scheduler": "scheduler_0001",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
@@ -113,6 +113,14 @@ _PROFILE_REQUIRED_COLUMNS = {
     "webui": {
         "users": ("role", "disabled", "pending"),
         "messages": ("task_id", "meta_json"),
+        "user_memory": ("purpose", "source", "deleted_at"),
+        "task_templates": (
+            "owner_id", "template_id", "version", "purpose", "summary_sha256",
+        ),
+        "task_revision_contexts": (
+            "owner_id", "task_id", "revision", "preview_sha256",
+            "snapshot_json", "compiled_context_json",
+        ),
         "memory_hit_log": ("hit",),
         "library_dedup_scan_log": ("details",),
         "message_feedback": ("status", "admin_note"),

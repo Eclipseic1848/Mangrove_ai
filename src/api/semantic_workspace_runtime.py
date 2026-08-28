@@ -79,6 +79,7 @@ from src.observability.workspace_telemetry import (
 )
 from src.services.managed_paths import ManagedPathCodec
 from src.source_acquisition import SourceAcquisitionRepository
+from src.task_context import TaskContextRepository
 from src.services.upload_store import UploadStore
 from src.model_connections import get_default_broker
 
@@ -2262,6 +2263,9 @@ class SemanticWorkspaceManager:
             task_id,
             revision,
         )
+        frozen_context = TaskContextRepository(
+            settings.webui_db_path
+        ).get_frozen(user_id, task_id, revision)
         web_snapshot = (
             web_repository.get_snapshot(
                 user_id,
@@ -2283,6 +2287,11 @@ class SemanticWorkspaceManager:
             "goal_contract": (
                 web_contract["goal_contract"]
                 if web_contract is not None
+                else None
+            ),
+            "compiled_context": (
+                frozen_context.compiled_context
+                if frozen_context is not None
                 else None
             ),
             "source_coverage": (

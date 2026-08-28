@@ -3,6 +3,7 @@ import {
   AlertCircle,
   ArrowRight,
   Check,
+  ChevronDown,
   Clock3,
   ExternalLink,
   Globe2,
@@ -16,7 +17,14 @@ import {
   cancelSourceAcquisition,
   createWorkspaceTask,
   createSourceAcquisition,
+  getTaskContextOptions,
   getSourceAcquisition,
+  previewTaskContext,
+} from "@/lib/semanticWorkspaceApi";
+import type {
+  OwnerMemoryOption,
+  TaskContextPreview,
+  TaskTemplateOption,
 } from "@/lib/semanticWorkspaceApi";
 import type {
   SourceAcquisitionAttempt,
@@ -219,11 +227,63 @@ export function WebSourceIntake({
     defaultLocalModel ?? localModels[0]?.model ?? "",
   );
   const [egressConfirmed, setEgressConfirmed] = useState(false);
+  const [contextOptions, setContextOptions] = useState<{
+    templates: TaskTemplateOption[];
+    memories: OwnerMemoryOption[];
+  }>({ templates: [], memories: [] });
+  const [contextOptionsLoading, setContextOptionsLoading] = useState(false);
+  const [selectedTemplate, setSelectedTemplate] = useState("");
+  const [selectedMemoryIds, setSelectedMemoryIds] = useState<number[]>([]);
+  const [contextPreview, setContextPreview] = useState<TaskContextPreview | null>(null);
+  const [contextReviewing, setContextReviewing] = useState(false);
+  const [contextError, setContextError] = useState("");
   const keyRef = useRef<{ fingerprint: string; key: string } | null>(null);
   const taskKeyRef = useRef<{ fingerprint: string; key: string } | null>(null);
   const taskReplayPromiseRef = useRef<Promise<WorkspaceTask> | null>(null);
   const onTaskCreatedRef = useRef(onTaskCreated);
   const normalized = useMemo(() => normalizedUrl(url), [url]);
+
+  useEffect(() => {
+    if (attempt?.status !== "succeeded") return;
+    let active = true;
+    setContextOptionsLoading(true);
+    void getTaskContextOptions("web_research")
+      .then((options) => {
+        if (active) setContextOptions(options);
+      })
+      .catch((error) => {
+        if (active) {
+          setContextError(error instanceof Error ? error.message : "上下文选项加载失败");
+        }
+      })
+      .finally(() => {
+        if (active) setContextOptionsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [attempt?.status]);
+
+  const contextSelection = useMemo(() => {
+    const [templateId, versionText] = selectedTemplate.split("@");
+    return {
+      template: templateId
+        ? { template_id: templateId, version: Number(versionText) }
+        : null,
+      memories: selectedMemoryIds.map((memoryId) => ({ memory_id: memoryId })),
+    };
+  }, [selectedMemoryIds, selectedTemplate]);
+
+  const contextDraftFingerprint = useMemo(() => JSON.stringify({
+    objective: objective.trim(),
+    format,
+    selection: contextSelection,
+  }), [contextSelection, format, objective]);
+
+  useEffect(() => {
+    setContextPreview(null);
+    setContextError("");
+  }, [contextDraftFingerprint]);
 
   useEffect(() => {
     onTaskCreatedRef.current = onTaskCreated;
@@ -467,14 +527,34 @@ export function WebSourceIntake({
     && objective.trim()
     && quantity.trim()
     && completeness.trim()
+    && contextPreview
     && (
       (allowLocalRuntime && !connectionId && localModel)
       || (connectionId && connectionModel && egressConfirmed)
     ),
   );
 
+  const reviewContext = async () => {
+    if (!objective.trim() || contextReviewing) return;
+    setContextReviewing(true);
+    setContextError("");
+    try {
+      const preview = await previewTaskContext({
+        purpose: "web_research",
+        objective_text: objective.trim(),
+        output_formats: [format],
+        selection: contextSelection,
+      });
+      setContextPreview(preview);
+    } catch (error) {
+      setContextError(error instanceof Error ? error.message : "上下文草案生成失败");
+    } finally {
+      setContextReviewing(false);
+    }
+  };
+
   const startTask = async () => {
-    if (!attempt?.snapshot_id || !canStart || starting) return;
+    if (!attempt?.snapshot_id || !contextPreview || !canStart || starting) return;
     const payload = {
       objective_text: objective.trim(),
       upload_ids: [],
@@ -491,6 +571,9 @@ export function WebSourceIntake({
       model_connection_id: connectionId || null,
       model_connection_model: connectionId ? connectionModel : null,
       external_api_confirmed: Boolean(connectionId && egressConfirmed),
+      context_purpose: "web_research",
+      context_selection: contextSelection,
+      context_preview_sha256: contextPreview.preview_sha256,
     };
     const fingerprint = JSON.stringify(payload);
     if (taskKeyRef.current?.fingerprint !== fingerprint) {
@@ -942,6 +1025,157 @@ export function WebSourceIntake({
                 </select>
               </label>
             )}
+            <section className="mt-5 border-y py-4" aria-labelledby="context-review-title">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h4 id="context-review-title" className="text-xs font-semibold">
+                    本次会参考什么
+                  </h4>
+                  <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
+                    只使用你明确选择的模板和个人记忆；它们不能改变来源、权限、模型或发布范围。
+                  </p>
+                </div>
+                {contextOptionsLoading && (
+                  <span className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+                    正在读取
+                  </span>
+                )}
+              </div>
+
+              <label className="mt-3 block text-xs font-medium">
+                任务模板（可选）
+                <select
+                  value={selectedTemplate}
+                  onChange={(event) => setSelectedTemplate(event.target.value)}
+                  disabled={contextOptionsLoading}
+                  className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 disabled:opacity-60"
+                >
+                  <option value="">不应用模板</option>
+                  {contextOptions.templates.map((template) => (
+                    <option
+                      key={`${template.template_id}@${template.version}`}
+                      value={`${template.template_id}@${template.version}`}
+                    >
+                      {template.title} · V{template.version}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <details className="group mt-3 border-t pt-3">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-lg py-1 text-xs font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  <span>
+                    个人记忆（可选）
+                    <span className="ml-2 font-normal text-muted-foreground">
+                      已选 {selectedMemoryIds.length} 条
+                    </span>
+                  </span>
+                  <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-open:rotate-180 motion-reduce:transition-none" />
+                </summary>
+                <div className="mt-2 space-y-2">
+                  {contextOptions.memories.length ? contextOptions.memories.map((memory) => (
+                    <label
+                      key={memory.memory_id}
+                      className="flex items-start gap-2 border-l-2 border-border py-1 pl-3 text-xs leading-5"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={selectedMemoryIds.includes(memory.memory_id)}
+                        onChange={(event) => setSelectedMemoryIds((current) =>
+                          event.target.checked
+                            ? [...current, memory.memory_id]
+                            : current.filter((item) => item !== memory.memory_id)
+                        )}
+                        className="mt-0.5 h-4 w-4 rounded border"
+                      />
+                      <span>
+                        <span className="text-foreground">{memory.summary}</span>
+                        <span className="mt-0.5 block text-[10px] text-muted-foreground">
+                          用途：{memory.purpose} · 来源：{memory.source}
+                        </span>
+                      </span>
+                    </label>
+                  )) : (
+                    <p className="text-[11px] leading-5 text-muted-foreground">
+                      当前用途没有可用的个人记忆。系统不会把其他记忆自动带入任务。
+                    </p>
+                  )}
+                </div>
+              </details>
+
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t pt-3">
+                <p className="text-[11px] leading-5 text-muted-foreground">
+                  修改目标、格式或选择后，需要重新检查草案。
+                </p>
+                <button
+                  type="button"
+                  disabled={!objective.trim() || contextReviewing}
+                  onClick={() => void reviewContext()}
+                  className="inline-flex h-9 items-center gap-2 rounded-lg border px-3 text-xs font-medium hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-45"
+                >
+                  {contextReviewing && (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+                  )}
+                  {contextPreview ? "重新检查草案" : "检查上下文草案"}
+                </button>
+              </div>
+
+              {contextError && (
+                <p role="alert" className="mt-3 text-xs leading-5 text-destructive">
+                  {contextError}
+                </p>
+              )}
+              {contextPreview && (
+                <div className="mt-3 border-l-2 border-primary/50 pl-3 text-xs leading-5">
+                  <p className="font-medium text-foreground">已检查，可以启动</p>
+                  <dl className="mt-1 space-y-1 text-muted-foreground">
+                    <div>
+                      <dt className="inline">模板：</dt>
+                      <dd className="inline">
+                        {contextPreview.template
+                          ? `${contextPreview.template.title} · V${contextPreview.template.version} · ${contextPreview.template.source}`
+                          : "未应用"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="inline">记忆：</dt>
+                      <dd className="inline">
+                        {contextPreview.memories.length
+                          ? contextPreview.memories.map((item) => item.summary).join("；")
+                          : "未引用"}
+                      </dd>
+                    </div>
+                    {contextPreview.proposed_changes.goal_contract && (
+                      <div>
+                        <dt className="inline">模板建议目标：</dt>
+                        <dd className="inline text-foreground">
+                          {contextPreview.proposed_changes.goal_contract}
+                        </dd>
+                      </div>
+                    )}
+                    {Object.keys(contextPreview.proposed_changes.delivery_spec).length > 0 && (
+                      <div>
+                        <dt className="inline">模板建议交付结构：</dt>
+                        <dd className="inline text-foreground">
+                          {Object.entries(contextPreview.proposed_changes.delivery_spec)
+                            .map(([key, value]) => `${key}：${Array.isArray(value) ? value.join("、") : String(value)}`)
+                            .join("；")}
+                        </dd>
+                      </div>
+                    )}
+                    {contextPreview.proposed_changes.method && (
+                      <div>
+                        <dt className="inline">方法建议：</dt>
+                        <dd className="inline text-foreground">
+                          {contextPreview.proposed_changes.method}
+                        </dd>
+                      </div>
+                    )}
+                  </dl>
+                </div>
+              )}
+            </section>
             <div className="mt-4 flex items-center justify-between gap-3 border-t pt-4">
               <p className="text-[11px] leading-5 text-muted-foreground">
                 智能体结果先作为 Candidate；独立验证通过后才会成为正式 Delivery。

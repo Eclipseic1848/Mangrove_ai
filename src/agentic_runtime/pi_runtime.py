@@ -2052,6 +2052,11 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
         )
         goal = {
             "objective": request.objective_text,
+            "compiled_context": (
+                request.compiled_context.content
+                if request.compiled_context is not None
+                else None
+            ),
             "must_include": ["用户目标中明确要求的全部内容"],
             "must_exclude": ["用户目标中明确表示不要的内容"],
             "source_scope": [

@@ -16,6 +16,7 @@ from pydantic import (
 
 from src.delivery_publishing.models import TableOutputContract
 from src.agentic_runtime.coverage import PartialCandidateAssessment
+from src.conversation_steering import CompiledContext
 
 
 class RuntimeVersion(str, Enum):
@@ -120,6 +121,7 @@ class PiRuntimeRequest(BaseModel):
     )
     sources: tuple[SourceInput, ...] = Field(min_length=1)
     goal_contract: dict[str, Any] | None = None
+    compiled_context: CompiledContext | None = None
     source_coverage: dict[str, Any] | None = None
     permission_profile: PermissionProfile = PermissionProfile.STANDARD
     external_api_confirmed: bool = False
