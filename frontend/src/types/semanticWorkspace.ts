@@ -52,6 +52,7 @@ export type ProgressStage =
 export interface StructuredProgressEvent extends WorkspaceEvent {
   revision: number;
   run_id: string | null;
+  runtime_event_type?: string | null;
   progress: { current: number; total: number | null; unit: string } | null;
   refs: Record<string, unknown>;
   action: Record<string, unknown> | null;
@@ -89,6 +90,9 @@ export interface WorkSessionView {
     unknown_call_count: number;
   };
   provider_usage?: Array<{
+    owner_user_id: string;
+    task_id: string;
+    revision: number;
     run_id: string;
     connection_id: string;
     model: string;
@@ -108,6 +112,7 @@ export interface WorkSessionView {
     event_type: string;
     summary: string;
     purpose: string | null;
+    input_summary: string | null;
     duration_ms: number | null;
     result_summary: string | null;
     evidence_refs: string[];

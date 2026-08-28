@@ -30,6 +30,7 @@ class WorkTraceEntry(BaseModel):
     event_type: str
     summary: str
     purpose: str | None = None
+    input_summary: str | None = None
     duration_ms: int | None = Field(default=None, ge=0)
     result_summary: str | None = None
     evidence_refs: tuple[str, ...] = ()
@@ -40,6 +41,9 @@ class WorkTraceEntry(BaseModel):
 class ProviderUsageView(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
+    owner_user_id: str
+    task_id: str
+    revision: int = Field(ge=1)
     run_id: str
     connection_id: str
     model: str
@@ -74,10 +78,31 @@ class WorkSessionView(BaseModel):
 
 _WAIT_START = {
     "question.requested",
+    "question_required",
     "owner_action.requested",
     "revision.waiting_safe_point",
+    "stage_waiting",
 }
-_WAIT_END = {"resumed", "question.answered", "revision.safe_point_applied"}
+_WAIT_END = {
+    "resumed",
+    "runtime.resuming",
+    "question.answered",
+    "question_answered",
+    "revision.safe_point_applied",
+}
+_START_EVENTS = {"runtime.preparing", "runtime.resuming", "run.started"}
+_END_EVENTS = {
+    "candidate.ready",
+    "run.completed",
+    "run.failed",
+    "task_completed",
+    "task_cancelled",
+    "candidate_verification_failed",
+}
+
+
+def _trace_type(event: StructuredProgressEvent) -> str:
+    return event.runtime_event_type or event.event_type
 
 
 def _milliseconds(start: datetime, end: datetime) -> int:
@@ -108,18 +133,29 @@ class WorkTraceProjection:
             (event for event in events if event.run_id == run_id),
             key=lambda event: (event.sequence, event.event_id),
         )
-        started_at = selected[0].created_at if selected else None
-        ended_at = (
-            selected[-1].created_at
-            if selected and status in {"completed", "failed", "cancelled", "candidate_ready"}
-            else None
+        started_at = next(
+            (
+                event.created_at
+                for event in selected
+                if _trace_type(event) in _START_EVENTS
+            ),
+            None,
+        )
+        ended_at = next(
+            (
+                event.created_at
+                for event in reversed(selected)
+                if _trace_type(event) in _END_EVENTS
+            ),
+            None,
         )
         waiting_ms = 0
         waiting_since: datetime | None = None
         for event in selected:
-            if event.event_type in _WAIT_START and waiting_since is None:
+            event_type = _trace_type(event)
+            if event_type in _WAIT_START and waiting_since is None:
                 waiting_since = event.created_at
-            elif event.event_type in _WAIT_END and waiting_since is not None:
+            elif event_type in _WAIT_END and waiting_since is not None:
                 waiting_ms += _milliseconds(waiting_since, event.created_at)
                 waiting_since = None
         calculation_end = ended_at or observed_at or datetime.now(timezone.utc)
@@ -127,7 +163,7 @@ class WorkTraceProjection:
             waiting_ms += _milliseconds(waiting_since, calculation_end)
         span_ms = _milliseconds(started_at, calculation_end) if started_at else 0
 
-        selected_usage = [item for item in provider_usage if item.get("run_id") in {None, run_id}]
+        selected_usage = [item for item in provider_usage if item.get("run_id") == run_id]
         if selected_usage:
             usage_rows = selected_usage
         else:
@@ -142,7 +178,7 @@ class WorkTraceProjection:
                     "request_count": 1,
                 }
                 for event in selected
-                if event.event_type == "provider.usage"
+                if _trace_type(event) == "provider.usage"
             ]
         known = [item for item in usage_rows if item.get("total_tokens") is not None]
         calls = sum(int(item.get("request_count") or 0) for item in usage_rows)
@@ -156,9 +192,10 @@ class WorkTraceProjection:
                 event_id=event.event_id,
                 sequence=event.sequence,
                 created_at=event.created_at,
-                event_type=event.event_type,
+                event_type=_trace_type(event),
                 summary=event.summary,
                 purpose=event.purpose,
+                input_summary=event.input_summary,
                 duration_ms=event.duration_ms,
                 result_summary=event.result_summary,
                 evidence_refs=event.evidence_refs,
@@ -182,7 +219,7 @@ class WorkTraceProjection:
             waiting_duration_ms=waiting_ms,
             action_count=len(entries),
             tool_call_count=sum(
-                1 for event in selected if event.event_type == "tool.started"
+                1 for event in selected if _trace_type(event) == "tool.started"
             ),
             handled_retry_count=sum(
                 1

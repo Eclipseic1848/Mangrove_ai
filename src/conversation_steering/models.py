@@ -322,6 +322,7 @@ class StructuredProgressEvent(BaseModel):
     run_id: str | None = None
     stage: ProgressStage
     event_type: str
+    runtime_event_type: str | None = None
     summary: str = Field(min_length=1, max_length=500)
     progress: ProgressValue | None = None
     refs: dict[str, Any] = Field(default_factory=dict)

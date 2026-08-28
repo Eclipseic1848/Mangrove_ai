@@ -1325,6 +1325,22 @@ _SAFE_PI_TRACE_EVENT_TYPES = {
     "verification.completed",
     "candidate.ready",
     "plan.updated",
+    "provider.usage",
+    "runtime.preparing",
+    "runtime.replay_required",
+    "runtime.resuming",
+    "tool.started",
+    "tool.completed",
+    "tool.failed",
+}
+_RUN_BOUND_WORKSPACE_EVENT_TYPES = {
+    "question_required",
+    "question_answered",
+    "revision.waiting_safe_point",
+    "revision.safe_point_applied",
+    "task_completed",
+    "task_cancelled",
+    "candidate_verification_failed",
 }
 
 
@@ -1362,9 +1378,6 @@ def _progress_summary(event: dict[str, Any], details: dict[str, Any]) -> str:
         details.get("source") == "pi-runtime"
         and runtime_event_type
         and runtime_event_type not in _SAFE_PI_TRACE_EVENT_TYPES
-        and not runtime_event_type.startswith(
-            ("run.", "tool.", "provider.", "checkpoint.", "runtime.")
-        )
     ):
         return "智能体完成一项内部操作"
     return _safe_trace_text(summary, limit=500) or "正在处理"
@@ -1382,6 +1395,18 @@ def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgres
     )
     for index, event in enumerate(raw_events, start=1):
         details = event.get("details") or {}
+        outer_event_type = str(event.get("event_type") or event.get("type") or "progress")
+        runtime_event_type = (
+            str(details["runtime_event_type"])
+            if isinstance(details.get("runtime_event_type"), str)
+            else None
+        )
+        event_run_id = event.get("run_id") or details.get("run_id")
+        if event_run_id is None and (
+            details.get("source") == "pi-runtime"
+            or outer_event_type in _RUN_BOUND_WORKSPACE_EVENT_TYPES
+        ):
+            event_run_id = task.get("run_id")
         raw_action = details.get("action")
         action = dict(raw_action) if isinstance(raw_action, dict) else None
         if action is not None and isinstance(action.get("tool"), str):
@@ -1407,9 +1432,10 @@ def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgres
                 sequence=index,
                 task_id=task["task_id"],
                 revision=int(task["viewing_revision"]),
-                run_id=event.get("run_id") or task.get("run_id"),
+                run_id=(str(event_run_id) if event_run_id else None),
                 stage=_progress_stage(str(event.get("stage") or "execute")),
-                event_type=str(event.get("event_type") or event.get("type") or "progress"),
+                event_type=outer_event_type,
+                runtime_event_type=runtime_event_type,
                 # 主时间线对新旧任务统一使用业务语言；原始事件仍供管理员诊断。
                 summary=_progress_summary(event, details),
                 progress=progress,

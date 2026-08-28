@@ -2219,7 +2219,36 @@ test.describe("统一数据工作台", () => {
               call_count: 4,
               unknown_call_count: 1,
             },
-            entries: [],
+            entries: [
+              {
+                event_id: "owner-action-1",
+                sequence: 1,
+                created_at: "2026-07-27T00:00:03Z",
+                event_type: "owner_action.requested",
+                summary: "需要确认下一步",
+                purpose: "确认范围",
+                input_summary: "当前候选共 9 项",
+                duration_ms: null,
+                result_summary: null,
+                evidence_refs: ["evidence-1"],
+                recovery_status: "pending",
+                tool_name: null,
+              },
+              {
+                event_id: "owner-action-resumed",
+                sequence: 2,
+                created_at: "2026-07-27T00:00:04Z",
+                event_type: "resumed",
+                summary: "已确认并继续",
+                purpose: null,
+                input_summary: null,
+                duration_ms: 1000,
+                result_summary: "继续执行",
+                evidence_refs: [],
+                recovery_status: "handled",
+                tool_name: null,
+              },
+            ],
           },
           attempts: [],
           delivery: null,
@@ -2233,6 +2262,8 @@ test.describe("统一数据工作台", () => {
     const progressToggle = page.getByRole("button", { name: /工作记录/ });
     await expect(progressToggle).toContainText("工作 7.0 秒");
     await expect(progressToggle).toContainText("等待 1.0 秒");
+    await expect(progressToggle).toContainText("开始");
+    await expect(progressToggle).toContainText("完成");
     await expect(progressToggle).toContainText("9 个行动");
     await expect(progressToggle).toContainText("2 次工具");
     await expect(progressToggle).toContainText("至少 8,420 Tokens · 4 次调用 · 1 次未知");
@@ -2248,6 +2279,8 @@ test.describe("统一数据工作台", () => {
     await progressToggle.press("Enter");
     await expect(progressToggle).toHaveAttribute("aria-expanded", "true");
     await expect(page.locator('[data-testid="progress-stage"]')).toHaveCount(8);
+    await expect(page.getByText("输入：当前候选共 9 项")).toBeVisible();
+    await expect(page.getByText("需要你处理后才能继续")).toHaveCount(0);
     await progressToggle.press("Space");
     await expect(progressToggle).toHaveAttribute("aria-expanded", "false");
     await progressToggle.press("Space");

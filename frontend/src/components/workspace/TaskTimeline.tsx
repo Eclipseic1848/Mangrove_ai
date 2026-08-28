@@ -554,13 +554,24 @@ export function TaskTimeline({
   }, [task.task_id, task.status, task.viewing_revision]);
 
   const workSession = task.work_session;
-  const pendingOwnerAction = workSession?.entries.find(
-    (entry) => entry.event_type === "owner_action.requested"
-      && entry.recovery_status !== "handled",
-  );
+  const ownerActionIndex = workSession?.entries.reduce(
+    (latest, entry, index) => entry.event_type === "owner_action.requested" ? index : latest,
+    -1,
+  ) ?? -1;
+  const ownerActionResolved = ownerActionIndex >= 0 && workSession?.entries
+    .slice(ownerActionIndex + 1)
+    .some((entry) => entry.recovery_status === "handled"
+      || entry.recovery_status === "resumed"
+      || ["resumed", "runtime.resuming", "question_answered", "question.answered", "revision.safe_point_applied"].includes(entry.event_type));
+  const pendingOwnerAction = ownerActionIndex >= 0 && !ownerActionResolved
+    ? workSession?.entries[ownerActionIndex]
+    : undefined;
   const usageLabel = workSession
     ? `${workSession.usage.unknown_call_count > 0 ? "至少 " : ""}${workSession.usage.total_tokens.toLocaleString("zh-CN")} Tokens · ${workSession.usage.call_count} 次调用${workSession.usage.unknown_call_count > 0 ? ` · ${workSession.usage.unknown_call_count} 次未知` : ""}`
     : "0 Tokens · 0 次调用";
+  const detailEventCount = workSession?.entries.length
+    || task.progress?.events.length
+    || 0;
 
   return (
     <section className="mx-auto w-full max-w-4xl px-6 py-6">
@@ -986,6 +997,8 @@ export function TaskTimeline({
             <h2 className="text-sm font-semibold">工作记录</h2>
             <span className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-xs text-muted-foreground">
               <span>{workSession?.ended_at ? "已完成" : "进行中"}</span>
+              {workSession?.started_at && <span>开始 {formatTime(workSession.started_at)}</span>}
+              {workSession?.ended_at && <span>完成 {formatTime(workSession.ended_at)}</span>}
               <span>工作 {formatElapsed(workSession?.work_duration_ms || 0)}</span>
               <span>等待 {formatElapsed(workSession?.waiting_duration_ms || 0)}</span>
               <span>{workSession?.action_count || 0} 个行动</span>
@@ -1016,14 +1029,14 @@ export function TaskTimeline({
               等待第一个执行事件
             </div>
           )}
-          {(task.progress?.events.length || 0) > 0 && (
+          {(detailEventCount > 0 || (workSession?.provider_usage?.length || 0) > 0) && (
             <Collapsible.Root
               open={eventsOpen}
               onOpenChange={setEventsOpen}
               className="mt-1 border-t pt-3"
             >
               <Collapsible.Trigger className="flex w-full cursor-pointer items-center justify-between rounded-lg px-2 py-2 text-left text-xs font-medium text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-                <span>行动记录（{task.progress?.events.length}）</span>
+                <span>行动记录（{detailEventCount}）</span>
                 <ChevronDown
                   className={cn(
                     "h-3.5 w-3.5 transition-transform motion-reduce:transition-none",
@@ -1061,6 +1074,9 @@ export function TaskTimeline({
                             {[entry.tool_name, entry.purpose, entry.duration_ms !== null ? formatElapsed(entry.duration_ms) : null, entry.result_summary]
                               .filter(Boolean).join(" · ")}
                           </p>
+                          {entry.input_summary && (
+                            <p className="text-muted-foreground">输入：{productText(entry.input_summary)}</p>
+                          )}
                           {entry.evidence_refs.length > 0 && (
                             <p className="text-muted-foreground">证据：{entry.evidence_refs.join("、")}</p>
                           )}
@@ -1075,6 +1091,8 @@ export function TaskTimeline({
                 <ol className="mt-2 space-y-2 pl-2">
                   {task.progress?.events.map((event) => {
                     const capabilities = capabilityReferences(event);
+                    const showLegacyEvent = !workSession?.entries.length;
+                    if (!showLegacyEvent && capabilities.length === 0) return null;
                     return (
                       <li
                         key={event.event_id}
@@ -1084,8 +1102,8 @@ export function TaskTimeline({
                           {formatTime(event.created_at)}
                         </time>
                         <div>
-                          <p>{productText(event.summary)}</p>
-                          {event.progress && (
+                          {showLegacyEvent && <p>{productText(event.summary)}</p>}
+                          {showLegacyEvent && event.progress && (
                             <p className="text-muted-foreground">
                               已处理 {event.progress.current}
                               {event.progress.total !== null

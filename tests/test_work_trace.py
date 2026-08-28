@@ -29,11 +29,11 @@ def test_work_session_is_one_run_and_separates_waiting_time() -> None:
         run_id="run-2",
         status="completed",
         events=(
-            _event(1, 0, "run.started"),
+            _event(1, 0, "run.started", runtime_event_type="run.started"),
             _event(2, 2, "source.acquired", run_id=None),
             _event(3, 10, "owner_action.requested"),
             _event(4, 40, "resumed"),
-            _event(5, 50, "run.completed"),
+            _event(5, 50, "run.completed", runtime_event_type="run.completed"),
         ),
         provider_usage=[],
     )
@@ -56,16 +56,48 @@ def test_usage_keeps_unknown_calls_and_never_counts_tools_as_tokens() -> None:
             _event(3, 2, "tool.completed", duration_ms=1_000),
         ),
         provider_usage=[
-            {"input_tokens": 2_000, "output_tokens": 420, "total_tokens": 2_420, "request_count": 1},
-            {"input_tokens": 3_000, "output_tokens": 1_000, "total_tokens": 4_000, "request_count": 1},
-            {"input_tokens": 1_500, "output_tokens": 500, "total_tokens": 2_000, "request_count": 1},
-            {"input_tokens": None, "output_tokens": None, "total_tokens": None, "request_count": 1},
+            {"run_id": "run-2", "input_tokens": 2_000, "output_tokens": 420, "total_tokens": 2_420, "request_count": 1},
+            {"run_id": "run-2", "input_tokens": 3_000, "output_tokens": 1_000, "total_tokens": 4_000, "request_count": 1},
+            {"run_id": "run-2", "input_tokens": 1_500, "output_tokens": 500, "total_tokens": 2_000, "request_count": 1},
+            {"run_id": "run-2", "input_tokens": None, "output_tokens": None, "total_tokens": None, "request_count": 1},
+            {"run_id": None, "input_tokens": 99_999, "output_tokens": 1, "total_tokens": 100_000, "request_count": 1},
         ],
     )
     assert view.usage.total_tokens == 8_420
     assert view.usage.call_count == 4
     assert view.usage.unknown_call_count == 1
     assert view.tool_call_count == 1
+
+
+def test_provider_usage_view_keeps_frozen_identity_without_validation_error() -> None:
+    view = WorkTraceProjection().project(
+        task_id="task-1",
+        revision=2,
+        run_id="run-2",
+        status="running",
+        events=(_event(1, 0, "run.started"),),
+        provider_usage=[{
+            "owner_user_id": "owner-1",
+            "task_id": "task-1",
+            "revision": 2,
+            "run_id": "run-2",
+            "connection_id": "connection-1",
+            "model": "provider/model-1",
+            "purpose": "agent_inference",
+            "status": "recorded",
+            "input_tokens": 10,
+            "output_tokens": 2,
+            "cache_tokens": 3,
+            "total_tokens": 12,
+            "request_count": 1,
+            "created_at": "2026-08-28T00:00:01Z",
+        }],
+    )
+
+    assert view.provider_usage[0].owner_user_id == "owner-1"
+    assert view.provider_usage[0].task_id == "task-1"
+    assert view.provider_usage[0].revision == 2
+    assert view.provider_usage[0].run_id == "run-2"
 
 
 def test_running_session_uses_observation_time_and_local_usage_fallback() -> None:
@@ -81,6 +113,7 @@ def test_running_session_uses_observation_time_and_local_usage_fallback() -> Non
                 2,
                 5,
                 "provider.usage",
+                runtime_event_type="provider.usage",
                 input_tokens=100,
                 output_tokens=20,
                 total_tokens=120,
@@ -105,7 +138,7 @@ def test_local_model_call_without_usage_is_unknown_not_zero() -> None:
         status="completed",
         events=(
             _event(1, 0, "run.started"),
-            _event(2, 1, "provider.usage"),
+            _event(2, 1, "provider.usage", runtime_event_type="provider.usage"),
             _event(3, 2, "run.completed"),
         ),
         provider_usage=[],
@@ -145,6 +178,7 @@ def test_runtime_event_projection_redacts_sensitive_details_and_paths() -> None:
             "summary": "读取 C:\\private\\客户.xlsx token=secret-value",
             "created_at": "2026-08-28T00:00:00Z",
             "details": {
+                "run_id": "run-1",
                 "runtime_event_type": "tool.completed",
                 "input_summary": "cookie=abc C:\\private\\客户.xlsx",
                 "result_summary": "保存到 /srv/private/output.json",
@@ -157,6 +191,16 @@ def test_runtime_event_projection_redacts_sensitive_details_and_paths() -> None:
     assert "private" not in encoded
     assert "abc" not in encoded
     assert events[0].evidence_refs == ("evidence-1",)
+    work_session = WorkTraceProjection().project(
+        task_id="task-1",
+        revision=1,
+        run_id="run-1",
+        status="running",
+        events=events,
+        provider_usage=[],
+        observed_at=datetime(2026, 8, 28, 0, 0, 1, tzinfo=timezone.utc),
+    )
+    assert work_session.entries[0].input_summary == "cookie=[已隐藏] [路径已隐藏]"
 
 
 def test_unknown_required_runtime_event_fails_closed() -> None:
@@ -201,13 +245,13 @@ def test_known_pi_event_keeps_safe_summary_but_unknown_optional_does_not() -> No
             },
             {
                 "event_id": "future",
-                "event_type": "future.optional",
+                "event_type": "tool.future_optional",
                 "stage": "execute",
                 "summary": "原始事件正文不得展示",
                 "created_at": "2026-08-28T00:00:01Z",
                 "details": {
                     "source": "pi-runtime",
-                    "runtime_event_type": "future.optional",
+                    "runtime_event_type": "tool.future_optional",
                 },
             },
         ],
@@ -215,3 +259,78 @@ def test_known_pi_event_keeps_safe_summary_but_unknown_optional_does_not() -> No
 
     assert events[0].summary == "已准备 1 项能力：文档解析"
     assert events[1].summary == "智能体完成一项内部操作"
+
+
+def test_persisted_runtime_lifecycle_excludes_source_time_and_restores_waiting() -> None:
+    events = _structured_progress_events({
+        "task_id": "task-1",
+        "viewing_revision": 1,
+        "run_id": "run-1",
+        "harness_events": [],
+        "events": [
+            {
+                "event_id": "source",
+                "event_type": "source.observed",
+                "stage": "inspect_sources",
+                "summary": "来源读取完成",
+                "created_at": "2026-08-28T00:00:00Z",
+                "details": {},
+            },
+            {
+                "event_id": "start",
+                "event_type": "action_progress",
+                "stage": "execute",
+                "summary": "运行开始",
+                "created_at": "2026-08-28T00:00:10Z",
+                "details": {
+                    "source": "pi-runtime",
+                    "runtime_event_type": "runtime.preparing",
+                    "run_id": "run-1",
+                },
+            },
+            {
+                "event_id": "pause",
+                "event_type": "question_required",
+                "stage": "execute",
+                "summary": "等待确认",
+                "created_at": "2026-08-28T00:00:20Z",
+                "details": {},
+            },
+            {
+                "event_id": "resume",
+                "event_type": "question_answered",
+                "stage": "execute",
+                "summary": "继续执行",
+                "created_at": "2026-08-28T00:00:50Z",
+                "details": {},
+            },
+            {
+                "event_id": "end",
+                "event_type": "action_progress",
+                "stage": "verify",
+                "summary": "候选就绪",
+                "created_at": "2026-08-28T00:01:10Z",
+                "details": {
+                    "source": "pi-runtime",
+                    "runtime_event_type": "candidate.ready",
+                    "run_id": "run-1",
+                },
+            },
+        ],
+    })
+    view = WorkTraceProjection().project(
+        task_id="task-1",
+        revision=1,
+        run_id="run-1",
+        status="candidate_ready",
+        events=events,
+        provider_usage=[],
+    )
+
+    assert [entry.event_id for entry in view.entries] == [
+        "start", "pause", "resume", "end"
+    ]
+    assert view.started_at == datetime(2026, 8, 28, 0, 0, 10, tzinfo=timezone.utc)
+    assert view.ended_at == datetime(2026, 8, 28, 0, 1, 10, tzinfo=timezone.utc)
+    assert view.waiting_duration_ms == 30_000
+    assert view.work_duration_ms == 30_000
