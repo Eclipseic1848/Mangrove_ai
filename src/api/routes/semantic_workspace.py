@@ -79,7 +79,13 @@ from src.conversation_steering import (
 from src.model_connections import GrantError, get_default_broker
 from src.delivery_publishing.models import TableOutputContract
 from src.services.upload_store import UploadStore
-from src.source_acquisition import SourceAcquisitionRepository
+from src.source_acquisition import (
+    AcquisitionConflictError,
+    AnonymousWebFetcher,
+    SourceAcquisitionRepository,
+    SourceAcquisitionRequest,
+    SourceAcquisitionService,
+)
 from src.runtime_routing import (
     RolloutActor,
     RolloutSnapshot,
@@ -115,6 +121,9 @@ _OUTPUT_FORMAT_PATTERN = re.compile(
     r"(?:输出|导出|生成)(?:为|成)?\s*"
     r"(JSONL|JSON|CSV|XLSX|DOCX|PDF|HTML|MARKDOWN|MD|TXT|PPTX)",
     re.IGNORECASE,
+)
+_HARD_SOURCE_REQUIREMENT_PATTERN = re.compile(
+    r"全部|所有|完整覆盖|不得遗漏|必须\s*(?:至少\s*)?\d+"
 )
 _TERMINAL = {
     "completed",
@@ -450,6 +459,7 @@ class WorkspaceRevisionIn(BaseModel):
     table_output_contracts: tuple[TableOutputContract, ...] | None = None
     external_api_confirmed: bool = False
     expected_active_revision: int = Field(ge=1)
+    source_snapshot_id: str | None = Field(default=None, min_length=1, max_length=160)
 
     @field_validator("instruction")
     @classmethod
@@ -488,6 +498,14 @@ class WorkspaceRevisionIn(BaseModel):
         return self
 
 
+class SourceRefreshIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_active_revision: int = Field(ge=1)
+    external_api_confirmed: bool = False
+    resume_unknown: bool = False
+
+
 def _uploads() -> UploadStore:
     return UploadStore(
         root=settings.data_prep_upload_root,
@@ -497,6 +515,13 @@ def _uploads() -> UploadStore:
 
 def _runtime_repository() -> AgenticRuntimeRepository:
     return AgenticRuntimeRepository(settings.webui_db_path)
+
+
+def _source_acquisition_service() -> SourceAcquisitionService:
+    return SourceAcquisitionService(
+        SourceAcquisitionRepository(settings.webui_db_path),
+        AnonymousWebFetcher(),
+    )
 
 
 def _rollout_actor(user: dict[str, Any]) -> RolloutActor:
@@ -1371,6 +1396,30 @@ async def create_task(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="网页来源快照没有可执行的有效页面",
             )
+        if source_snapshot.get("coverage", {}).get("status") == "hard_insufficient":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="网页来源未达到启动前冻结的硬性有效页数；可刷新来源或调整要求",
+            )
+        if (
+            source_snapshot.get("coverage", {}).get("status")
+            == "coverage_unknown"
+            and _HARD_SOURCE_REQUIREMENT_PATTERN.search(
+                "\n".join((
+                    payload.objective_text,
+                    *payload.must_include,
+                    payload.quantity_requirement or "",
+                    payload.completeness_requirement or "",
+                ))
+            )
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "当前来源仍有失败、截断或未覆盖页面，不能承诺‘全部/所有/"
+                    "必须 N 项’；请改为探索性要求，或重新获取完整授权范围"
+                ),
+            )
         source_refs = [
             {
                 "kind": "web_artifact",
@@ -2179,6 +2228,7 @@ async def decide_steering_revision(
     user=Depends(get_current_user),
 ):
     user_id = user["user_id"]
+    store = get_store()
     task = _task_or_404(user_id, task_id)
     repository = _steering_repository()
     proposal = repository.get_proposal(user_id, proposal_id)
@@ -2544,6 +2594,7 @@ async def create_revision(
     user=Depends(get_current_user),
 ):
     user_id = user["user_id"]
+    store = get_store()
     task = _task_or_404(user_id, task_id)
     if int(task["active_revision"]) != payload.expected_active_revision:
         # 风险确认只对用户刚看到的失败版本有效，不能被旧页面重复使用。
@@ -2551,6 +2602,54 @@ async def create_revision(
             status_code=status.HTTP_409_CONFLICT,
             detail="活动版本已变化，请查看最新结果后再决定是否重新执行",
         )
+    current_web_contract = store.get_web_task_contract(
+        user_id,
+        task_id,
+        int(task["active_revision"]),
+    )
+    if payload.source_snapshot_id is not None and current_web_contract is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="只有网页来源任务可以刷新来源快照",
+        )
+    effective_snapshot_id = (
+        payload.source_snapshot_id
+        or (
+            current_web_contract["source_snapshot_id"]
+            if current_web_contract is not None
+            else None
+        )
+    )
+    effective_source_refs = list(task.get("source_refs", []))
+    effective_snapshot = None
+    if effective_snapshot_id is not None:
+        effective_snapshot = SourceAcquisitionRepository(
+            settings.webui_db_path
+        ).get_snapshot(user_id, effective_snapshot_id)
+        if effective_snapshot is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="网页来源快照不存在或无权访问",
+            )
+        if int(effective_snapshot["valid_page_count"]) < 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="网页来源快照没有可执行的有效页面",
+            )
+        if effective_snapshot.get("coverage", {}).get("status") == "hard_insufficient":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="网页来源未达到启动前冻结的硬性有效页数",
+            )
+        effective_source_refs = [
+            {
+                "kind": "web_artifact",
+                "snapshot_id": effective_snapshot_id,
+                "artifact_id": artifact["artifact_id"],
+                "sha256": artifact["content_sha256"],
+            }
+            for artifact in effective_snapshot["artifacts"]
+        ]
     previous_runtime = _runtime_repository().get(
         user_id,
         task_id,
@@ -2632,7 +2731,9 @@ async def create_revision(
             detail="活动版本已变化，请重新提交 Revision",
         )
     objective = (
-        f"{task['objective_text']}\n用户修改要求：{payload.instruction}"
+        task["objective_text"]
+        if payload.source_snapshot_id is not None
+        else f"{task['objective_text']}\n用户修改要求：{payload.instruction}"
     )
     # 取消旧 Run 和全部输入校验完成后，再用 Rollout CAS 冻结本版本。
     runtime_config = RuntimeTaskConfig(
@@ -2660,17 +2761,79 @@ async def create_revision(
         ),
         external_api_confirmed=bool(connection_binding),
     )
+    prepared_binding = None
+    prepared_manifest = None
+    if effective_snapshot_id is not None:
+        prepared_binding, prepared_manifest = (
+            await get_semantic_workspace_manager().prepare_runtime_binding(
+                model_connection_id=runtime_config.model_connection_id,
+                model_connection_version=runtime_config.model_connection_version,
+                model=(
+                    runtime_config.model_connection_model
+                    or task.get("model")
+                    or settings.llm_model_name
+                ),
+            )
+        )
+        runtime_config = runtime_config.model_copy(
+            update={"run_id": prepared_binding.external_run_id}
+        )
     selected_runtime, transaction_hook = _prepare_runtime_binding(
         routing_plan,
         runtime_config,
     )
+    if effective_snapshot_id is not None:
+        assert prepared_binding is not None
+        assert prepared_manifest is not None
+        base_transaction_hook = transaction_hook
+        previous_goal = (
+            current_web_contract["goal_contract"]
+            if current_web_contract is not None
+            else {"objective": task["objective_text"]}
+        )
+        delivery_spec = {"formats": formats}
+        runtime_binding = prepared_binding.model_dump(mode="json")
+
+        def bind_web_revision(connection: sqlite3.Connection) -> None:
+            if base_transaction_hook is not None:
+                base_transaction_hook(connection)
+            _runtime_repository().freeze_runtime_binding(
+                user_id,
+                task_id,
+                expected_revision,
+                run_id=prepared_binding.external_run_id,
+                binding=runtime_binding,
+                capability_manifest=prepared_manifest.model_dump(mode="json"),
+                adopted_existing_run=False,
+                preallocated_run=True,
+                connection=connection,
+            )
+            connection.execute(
+                "INSERT INTO web_task_contracts "
+                "(owner_id, task_id, revision, source_snapshot_id, "
+                "goal_contract_json, delivery_spec_json, runtime_binding_json, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    user_id,
+                    task_id,
+                    expected_revision,
+                    effective_snapshot_id,
+                    json.dumps(previous_goal, ensure_ascii=False),
+                    json.dumps(delivery_spec, ensure_ascii=False),
+                    json.dumps(runtime_binding, ensure_ascii=False),
+                    datetime.now(timezone.utc).isoformat(),
+                ),
+            )
+
+        transaction_hook = bind_web_revision
     try:
-        revision = get_store().create_semantic_workspace_revision(
+        revision = store.create_semantic_workspace_revision(
             user_id,
             task_id,
             objective_text=objective,
             output_formats=formats,
             change_summary=payload.instruction,
+            source_refs=effective_source_refs,
             table_output_contracts=(
                 [
                     item.model_dump(mode="json")
@@ -2695,7 +2858,7 @@ async def create_revision(
             target_task_id=task_id,
             target_revision=int(revision["revision"]),
         )
-    get_store().append_semantic_workspace_event(
+    store.append_semantic_workspace_event(
         user_id,
         task_id,
         stage="queued",
@@ -2704,6 +2867,226 @@ async def create_revision(
     )
     get_semantic_workspace_manager().enqueue(user_id, task_id)
     return revision
+
+
+@router.post(
+    "/tasks/{task_id}/source-refresh",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def refresh_task_source(
+    task_id: str,
+    payload: SourceRefreshIn,
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=200,
+        alias="Idempotency-Key",
+    ),
+    user=Depends(get_current_user),
+):
+    """按旧版本冻结范围获取新快照，成功后才切换到新 Revision。"""
+
+    user_id = user["user_id"]
+    store = get_store()
+    task = _task_or_404(user_id, task_id)
+    contract = store.get_web_task_contract(
+        user_id,
+        task_id,
+        payload.expected_active_revision,
+    )
+    if contract is None:
+        raise HTTPException(status_code=404, detail="当前版本没有可刷新的网页来源")
+    repository = SourceAcquisitionRepository(settings.webui_db_path)
+    old_snapshot = repository.get_snapshot(
+        user_id,
+        contract["source_snapshot_id"],
+    )
+    if old_snapshot is None:
+        raise HTTPException(status_code=409, detail="当前版本的冻结来源快照已缺失")
+    old_attempt = repository.get_attempt(
+        user_id,
+        old_snapshot["attempt_id"],
+        include_snapshot=False,
+    )
+    if old_attempt is None:
+        raise HTTPException(status_code=409, detail="当前版本的来源获取事实已缺失")
+    scope = old_snapshot["allowed_scope"]
+    completeness = scope.get("completeness", {})
+    refresh_key = (
+        f"refresh-{task_id}-"
+        f"{hashlib.sha256(idempotency_key.encode('utf-8')).hexdigest()}"
+    )
+    existing_attempt = repository.get_by_idempotency_key(user_id, refresh_key)
+    if (
+        existing_attempt is None
+        and int(task["active_revision"]) != payload.expected_active_revision
+    ):
+        # 新请求不能在过期页面背后读取外部站点；已有请求仍可用同一键恢复结果。
+        raise HTTPException(
+            status_code=409,
+            detail="活动版本已变化，请查看最新版本后再刷新来源",
+        )
+    try:
+        attempt = await _source_acquisition_service().acquire(
+            owner_id=user_id,
+            idempotency_key=refresh_key,
+            request=SourceAcquisitionRequest(
+                url=scope.get("normalized_url", old_attempt["normalized_url"]),
+                purpose=old_attempt["purpose"],
+                scope_kind=scope.get("kind", "current_page"),
+                page_limit=int(scope.get("page_limit", 1)),
+                completeness_mode=completeness.get("mode", "exploratory"),
+                required_valid_pages=completeness.get("required_valid_pages"),
+                request_context=(
+                    f"source-refresh:{task_id}:revision:"
+                    f"{payload.expected_active_revision}"
+                ),
+            ),
+            resume_unknown=payload.resume_unknown,
+        )
+    except AcquisitionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if attempt["status"] == "acquiring":
+        # 结果未知时不切换版本；调用方用相同幂等键恢复该 Attempt。
+        return {"status": "acquiring", "attempt": attempt, "revision": None}
+    if attempt["status"] != "succeeded" or attempt.get("snapshot") is None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "来源刷新未形成有效快照，任务仍使用旧版本",
+                "attempt": attempt,
+            },
+        )
+    snapshot = attempt["snapshot"]
+    if snapshot.get("coverage", {}).get("status") == "hard_insufficient":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "刷新结果未达到原版本冻结的硬性有效页数，任务仍使用旧版本",
+                "attempt": attempt,
+            },
+        )
+    existing_revision = store.find_web_task_revision_by_snapshot(
+        user_id,
+        task_id,
+        snapshot["snapshot_id"],
+    )
+    if existing_revision is not None:
+        return {
+            "status": "revision_created",
+            "attempt": attempt,
+            "revision": store.get_semantic_workspace_revision(
+                user_id,
+                task_id,
+                existing_revision,
+            ),
+        }
+    refresh_request_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "task_id": task_id,
+                "expected_revision": payload.expected_active_revision,
+                "attempt_id": attempt["attempt_id"],
+                "snapshot_id": snapshot["snapshot_id"],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    try:
+        refresh_intent, claimed_binding = store.claim_source_refresh_intent(
+            user_id,
+            task_id,
+            idempotency_key,
+            request_hash=refresh_request_hash,
+            expected_revision=payload.expected_active_revision,
+            attempt_id=attempt["attempt_id"],
+            snapshot_id=snapshot["snapshot_id"],
+            resume_unknown=payload.resume_unknown,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not claimed_binding:
+        bound_revision = (
+            int(refresh_intent["created_revision"])
+            if refresh_intent.get("created_revision") is not None
+            else store.find_web_task_revision_by_snapshot(
+                user_id,
+                task_id,
+                snapshot["snapshot_id"],
+            )
+        )
+        if bound_revision is None:
+            return {"status": "acquiring", "attempt": attempt, "revision": None}
+        return {
+            "status": "revision_created",
+            "attempt": attempt,
+            "revision": store.get_semantic_workspace_revision(
+                user_id,
+                task_id,
+                bound_revision,
+            ),
+        }
+    if int(task["active_revision"]) != payload.expected_active_revision:
+        store.finish_source_refresh_intent(
+            user_id,
+            task_id,
+            idempotency_key,
+            revision=None,
+        )
+        raise HTTPException(
+            status_code=409,
+            detail="来源已刷新但活动版本发生变化；请保留幂等键并重新确认",
+        )
+    try:
+        revision = await create_revision(
+            task_id,
+            WorkspaceRevisionIn(
+                instruction="按原授权范围刷新网页来源",
+                external_api_confirmed=payload.external_api_confirmed,
+                expected_active_revision=payload.expected_active_revision,
+                source_snapshot_id=snapshot["snapshot_id"],
+            ),
+            user,
+        )
+    except HTTPException as exc:
+        existing_revision = store.find_web_task_revision_by_snapshot(
+            user_id,
+            task_id,
+            snapshot["snapshot_id"],
+        )
+        if exc.status_code != 409 or existing_revision is None:
+            store.finish_source_refresh_intent(
+                user_id,
+                task_id,
+                idempotency_key,
+                revision=None,
+            )
+            raise
+        revision = store.get_semantic_workspace_revision(
+            user_id,
+            task_id,
+            existing_revision,
+        )
+    except Exception:
+        store.finish_source_refresh_intent(
+            user_id,
+            task_id,
+            idempotency_key,
+            revision=None,
+        )
+        raise
+    assert revision is not None
+    store.finish_source_refresh_intent(
+        user_id,
+        task_id,
+        idempotency_key,
+        revision=int(revision["revision"]),
+    )
+    return {
+        "status": "revision_created",
+        "attempt": attempt,
+        "revision": revision,
+    }
 
 
 @router.get("/tasks/{task_id}/candidates/{artifact_id}")

@@ -45,6 +45,7 @@ import {
   recycleWorkspaceTask,
   requestCandidateReverification,
   publishCandidateVerification,
+  refreshWorkspaceSource,
   restoreWorkspaceTask,
   sendWorkspaceTurn,
   streamWorkspaceTask,
@@ -328,6 +329,10 @@ export function SemanticWorkspacePage() {
     key: string;
   } | null>(null);
   const publicationAttemptRef = useRef<{
+    fingerprint: string;
+    key: string;
+  } | null>(null);
+  const sourceRefreshAttemptRef = useRef<{
     fingerprint: string;
     key: string;
   } | null>(null);
@@ -1140,6 +1145,91 @@ export function SemanticWorkspacePage() {
                                   ? error.message
                                   : "重新执行失败",
                               );
+                            }
+                          }}
+                          onRefreshSource={async (externalApiConfirmed) => {
+                            const expectedRevision = task.current_revision
+                              ?? task.active_revision;
+                            const fingerprint = `${task.task_id}:${expectedRevision}`;
+                            const storageKey = `mangrove_source_refresh_${user?.user_id ?? "unknown"}_${task.task_id}`;
+                            let resumeUnknown = sourceRefreshAttemptRef.current?.fingerprint
+                              === fingerprint;
+                            if (
+                              sourceRefreshAttemptRef.current?.fingerprint
+                              !== fingerprint
+                            ) {
+                              let restoredKey: string | null = null;
+                              try {
+                                const stored = JSON.parse(
+                                  localStorage.getItem(storageKey) ?? "null",
+                                ) as { fingerprint?: string; key?: string } | null;
+                                if (
+                                  stored?.fingerprint === fingerprint
+                                  && typeof stored.key === "string"
+                                ) {
+                                  restoredKey = stored.key;
+                                  resumeUnknown = true;
+                                }
+                              } catch {
+                                try {
+                                  localStorage.removeItem(storageKey);
+                                } catch {
+                                  // 存储不可用时仅失去跨刷新恢复，不阻断当前操作。
+                                }
+                              }
+                              sourceRefreshAttemptRef.current = {
+                                fingerprint,
+                                key: restoredKey ?? `source-refresh-${nanoid()}`,
+                              };
+                              try {
+                                localStorage.setItem(
+                                  storageKey,
+                                  JSON.stringify(sourceRefreshAttemptRef.current),
+                                );
+                              } catch {
+                                // 当前页面仍通过 ref 保持幂等键。
+                              }
+                            }
+                            try {
+                              const result = await refreshWorkspaceSource(
+                                task.task_id,
+                                expectedRevision,
+                                externalApiConfirmed,
+                                sourceRefreshAttemptRef.current.key,
+                                resumeUnknown,
+                              );
+                              if (result.status === "acquiring") {
+                                toast.info(
+                                  "刷新请求结果仍未知；旧版本保持不变。请稍后再次点击并恢复同一请求。",
+                                );
+                                return;
+                              }
+                              sourceRefreshAttemptRef.current = null;
+                              try {
+                                localStorage.removeItem(storageKey);
+                              } catch {
+                                // 存储不可用时无需额外清理。
+                              }
+                              setSelectedRevision(null);
+                              await Promise.all([
+                                queryClient.invalidateQueries({
+                                  queryKey: [
+                                    "semantic-workspace-task",
+                                    task.task_id,
+                                  ],
+                                }),
+                                queryClient.invalidateQueries({
+                                  queryKey: ["semantic-workspace-tasks"],
+                                }),
+                              ]);
+                              toast.success("最新网页已冻结，并创建了新版本");
+                            } catch (error) {
+                              toast.error(
+                                error instanceof Error
+                                  ? error.message
+                                  : "网页来源刷新失败；旧版本保持不变",
+                              );
+                              throw error;
                             }
                           }}
                           onRevisionChange={(revision) =>

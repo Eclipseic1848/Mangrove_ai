@@ -28,7 +28,14 @@ class SourceAcquisitionIn(BaseModel):
 
     url: str = Field(min_length=1, max_length=4096)
     purpose: str = Field(min_length=1, max_length=500)
-    allowed_scope: Literal["current_page"] = "current_page"
+    allowed_scope: Literal["current_page", "same_site"] = "current_page"
+    page_limit: int = Field(default=1, ge=1, le=50)
+    completeness_mode: Literal[
+        "exploratory",
+        "hard_min_pages",
+        "hard_scope_complete",
+    ] = "exploratory"
+    required_valid_pages: int | None = Field(default=None, ge=1, le=50)
 
 
 def get_source_acquisition_service() -> SourceAcquisitionService:
@@ -60,6 +67,10 @@ async def acquire_source(
             request=SourceAcquisitionRequest(
                 url=payload.url,
                 purpose=payload.purpose,
+                scope_kind=payload.allowed_scope,
+                page_limit=payload.page_limit,
+                completeness_mode=payload.completeness_mode,
+                required_valid_pages=payload.required_valid_pages,
             ),
         )
     except AcquisitionConflictError as exc:

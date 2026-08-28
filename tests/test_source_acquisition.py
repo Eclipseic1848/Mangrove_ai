@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 from pathlib import Path
 import sqlite3
 import threading
@@ -95,6 +98,12 @@ async def test_one_exact_html_page_creates_one_snapshot_and_artifact(
     assert result["allowed_scope"] == {
         "kind": "current_page",
         "normalized_url": "https://example.com/article",
+        "site": "example.com",
+        "page_limit": 1,
+        "completeness": {
+            "mode": "exploratory",
+            "required_valid_pages": None,
+        },
     }
     assert result["snapshot"]["valid_page_count"] == 1
     artifact = result["snapshot"]["artifacts"][0]
@@ -339,6 +348,15 @@ async def test_cancelled_and_stale_attempts_become_terminal_failures(
         CancelingFetcher(),
         stale_after_seconds=0,
     )
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE source_acquisition_attempts SET started_at=? "
+            "WHERE attempt_id=?",
+            (
+                (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(),
+                stale["attempt_id"],
+            ),
+        )
     restored = await stale_service.acquire(
         owner_id="owner-a",
         idempotency_key="stale",
@@ -347,6 +365,115 @@ async def test_cancelled_and_stale_attempts_become_terminal_failures(
     assert restored["attempt_id"] == stale["attempt_id"]
     assert restored["status"] == "failed"
     assert restored["error_code"] == "network_error"
+
+
+@pytest.mark.asyncio
+async def test_explicit_resume_reclaims_stale_acquiring_attempt(
+    tmp_path: Path,
+) -> None:
+    database = migrated_webui_database(tmp_path / "source-resume-stale.db")
+    repository = SourceAcquisitionRepository(database)
+    request = SourceAcquisitionRequest(
+        url="https://example.com/page",
+        purpose="恢复结果未知的网页获取",
+    )
+    stale, created = repository.claim_attempt(
+        owner_id="owner-a",
+        idempotency_key="resume-stale",
+        request=request,
+    )
+    assert created is True
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE source_acquisition_attempts SET started_at=? "
+            "WHERE attempt_id=?",
+            (
+                (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(),
+                stale["attempt_id"],
+            ),
+        )
+
+    calls = 0
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text="<html><body>恢复后的页面</body></html>",
+            request=http_request,
+        )
+
+    resumed = await _service(database, handler).acquire(
+        owner_id="owner-a",
+        idempotency_key="resume-stale",
+        request=request,
+        resume_unknown=True,
+    )
+
+    assert resumed["attempt_id"] == stale["attempt_id"]
+    assert resumed["status"] == "succeeded"
+    assert resumed["snapshot"] is not None
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_explicit_resume_accepts_pre_scope_upgrade_exact_page_hash(
+    tmp_path: Path,
+) -> None:
+    database = migrated_webui_database(tmp_path / "source-legacy-hash.db")
+    repository = SourceAcquisitionRepository(database)
+    request = SourceAcquisitionRequest(
+        url="https://example.com/page",
+        purpose="恢复升级前的精确页获取",
+    )
+    attempt, created = repository.claim_attempt(
+        owner_id="owner-a",
+        idempotency_key="legacy-hash",
+        request=request,
+    )
+    assert created is True
+    legacy_hash = hashlib.sha256(json.dumps(
+        {
+            "allowed_scope": {
+                "kind": "current_page",
+                "normalized_url": "https://example.com/page",
+            },
+            "purpose": "恢复升级前的精确页获取",
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE source_acquisition_attempts SET request_hash=?, started_at=? "
+            "WHERE attempt_id=?",
+            (
+                legacy_hash,
+                (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat(),
+                attempt["attempt_id"],
+            ),
+        )
+
+    def handler(http_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text="<html><body>兼容恢复</body></html>",
+            request=http_request,
+        )
+
+    resumed = await _service(database, handler).acquire(
+        owner_id="owner-a",
+        idempotency_key="legacy-hash",
+        request=request,
+        resume_unknown=True,
+    )
+
+    assert resumed["attempt_id"] == attempt["attempt_id"]
+    assert resumed["status"] == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -433,3 +560,318 @@ def test_repository_claim_is_thread_safe_and_owner_isolated(tmp_path: Path) -> N
     canceled = repository.cancel_attempt("owner-a", attempt_id)
     assert canceled is not None
     assert canceled["status"] == "canceled"
+
+
+@pytest.mark.asyncio
+async def test_same_site_batch_freezes_pages_failures_and_scope_boundary(
+    tmp_path: Path,
+) -> None:
+    database = migrated_webui_database(tmp_path / "source-same-site.db")
+    visited: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        visited.append(path)
+        pages = {
+            "/": (
+                "首页<a href='/a'>A</a><a href='/bad'>坏页</a>"
+                "<a href='https://other.example/private'>站外</a>"
+            ),
+            "/a": "A页<a href='/'>循环</a><a href='/c'>C</a>",
+            "/c": "C页",
+        }
+        if path == "/bad":
+            return httpx.Response(503, request=request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text=f"<html><body>{pages[path]}</body></html>",
+            request=request,
+        )
+
+    service = _service(database, handler)
+    result = await service.acquire(
+        owner_id="owner-a",
+        idempotency_key="same-site-batch",
+        request=SourceAcquisitionRequest(
+            url="https://example.com/",
+            purpose="读取同站公开说明",
+            scope_kind="same_site",
+            page_limit=4,
+        ),
+    )
+
+    snapshot = result["snapshot"]
+    assert visited == ["/", "/a", "/bad", "/c"]
+    assert snapshot["valid_page_count"] == 3
+    assert snapshot["failed_page_count"] == 2
+    assert snapshot["coverage"]["status"] == "coverage_unknown"
+    assert {item["error_code"] for item in snapshot["failures"]} == {
+        "scope_denied",
+        "site_refused",
+    }
+    assert any(
+        item["request_url"] == "https://other.example/private"
+        for item in snapshot["failures"]
+    )
+    assert service.repository.count_snapshots("owner-a") == 1
+
+
+@pytest.mark.asyncio
+async def test_hard_completeness_distinguishes_insufficient_from_zero_valid(
+    tmp_path: Path,
+) -> None:
+    database = migrated_webui_database(tmp_path / "source-hard-min.db")
+
+    def partial(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                text="<html><body>首页<a href='/missing'>下一页</a></body></html>",
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    service = _service(database, partial)
+    insufficient = await service.acquire(
+        owner_id="owner-a",
+        idempotency_key="hard-insufficient",
+        request=SourceAcquisitionRequest(
+            url="https://example.com/",
+            purpose="至少需要两页",
+            scope_kind="same_site",
+            page_limit=2,
+            completeness_mode="hard_min_pages",
+            required_valid_pages=2,
+        ),
+    )
+    assert insufficient["status"] == "succeeded"
+    assert insufficient["snapshot"]["valid_page_count"] == 1
+    assert insufficient["snapshot"]["coverage"]["status"] == "hard_insufficient"
+
+    scope_complete = await service.acquire(
+        owner_id="owner-a",
+        idempotency_key="hard-scope-complete",
+        request=SourceAcquisitionRequest(
+            url="https://example.com/",
+            purpose="授权范围必须全部成功",
+            scope_kind="same_site",
+            page_limit=2,
+            completeness_mode="hard_scope_complete",
+        ),
+    )
+    assert scope_complete["snapshot"]["coverage"]["status"] == "hard_insufficient"
+
+    def all_failed(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, request=request)
+
+    zero_service = _service(database, all_failed)
+    zero = await zero_service.acquire(
+        owner_id="owner-a",
+        idempotency_key="zero-valid",
+        request=SourceAcquisitionRequest(
+            url="https://example.com/none",
+            purpose="验证零有效页",
+            scope_kind="same_site",
+            page_limit=2,
+        ),
+    )
+    assert zero["status"] == "failed"
+    assert zero["snapshot"] is None
+    assert zero["error_code"] == "site_refused"
+
+
+@pytest.mark.asyncio
+async def test_cross_site_redirect_records_final_url_without_fetching_target(
+    tmp_path: Path,
+) -> None:
+    database = migrated_webui_database(tmp_path / "source-cross-redirect.db")
+    visited: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        visited.append(request.headers["host"] + request.url.path)
+        if request.url.path == "/":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                text="<html><body>首页<a href='/jump'>跳转</a></body></html>",
+                request=request,
+            )
+        return httpx.Response(
+            302,
+            headers={"location": "https://other.example/final"},
+            request=request,
+        )
+
+    service = _service(database, handler)
+    result = await service.acquire(
+        owner_id="owner-a",
+        idempotency_key="cross-redirect",
+        request=SourceAcquisitionRequest(
+            url="https://example.com/",
+            purpose="验证跳转边界",
+            scope_kind="same_site",
+            page_limit=2,
+        ),
+    )
+
+    assert visited == ["example.com/", "example.com/jump"]
+    failure = result["snapshot"]["failures"][0]
+    assert failure["error_code"] == "scope_denied"
+    assert failure["final_url"] == "https://other.example/final"
+
+
+@pytest.mark.asyncio
+async def test_requested_failure_records_same_origin_redirect_final_url(
+    tmp_path: Path,
+) -> None:
+    database = migrated_webui_database(tmp_path / "source-failure-final-url.db")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/":
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/html"},
+                text="<html><body>首页<a href='/old'>旧页</a></body></html>",
+                request=request,
+            )
+        if request.url.path == "/old":
+            return httpx.Response(
+                302,
+                headers={"location": "/missing"},
+                request=request,
+            )
+        return httpx.Response(404, request=request)
+
+    result = await _service(database, handler).acquire(
+        owner_id="owner-a",
+        idempotency_key="failure-final-url",
+        request=SourceAcquisitionRequest(
+            url="https://example.com/",
+            purpose="记录失败最终地址",
+            scope_kind="same_site",
+            page_limit=2,
+        ),
+    )
+
+    failure = result["snapshot"]["failures"][0]
+    assert failure["request_url"] == "https://example.com/old"
+    assert failure["final_url"] == "https://example.com/missing"
+
+
+@pytest.mark.asyncio
+async def test_high_cardinality_links_are_bounded_and_not_counted_as_requests(
+    tmp_path: Path,
+) -> None:
+    database = migrated_webui_database(tmp_path / "source-link-bound.db")
+    links = "".join(
+        f"<a href='https://other.example/{index}'>x</a>"
+        for index in range(1000)
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text=f"<html><body>正文{links}</body></html>",
+            request=request,
+        )
+
+    service = _service(database, handler, max_bytes=200_000)
+    result = await service.acquire(
+        owner_id="owner-a",
+        idempotency_key="bounded-links",
+        request=SourceAcquisitionRequest(
+            url="https://example.com/",
+            purpose="验证高基数链接边界",
+            scope_kind="same_site",
+            page_limit=1,
+        ),
+    )
+
+    snapshot = result["snapshot"]
+    assert snapshot["coverage"]["attempted_page_count"] == 1
+    assert snapshot["coverage"]["scope_denied_count"] == 500
+    assert snapshot["coverage"]["failure_sample_count"] == 100
+    assert snapshot["coverage"]["truncated_discovery_count"] == 500
+    assert len(snapshot["failures"]) == 100
+    assert snapshot["coverage"]["status"] == "coverage_unknown"
+
+
+@pytest.mark.asyncio
+async def test_outside_links_do_not_fail_hard_authorized_scope_completeness(
+    tmp_path: Path,
+) -> None:
+    database = migrated_webui_database(tmp_path / "source-outside-links.db")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text=(
+                "<html><body>授权站点正文"
+                "<a href='https://outside.example/page'>站外参考</a>"
+                "</body></html>"
+            ),
+            request=request,
+        )
+
+    result = await _service(database, handler).acquire(
+        owner_id="owner-a",
+        idempotency_key="outside-links",
+        request=SourceAcquisitionRequest(
+            url="https://example.com/",
+            purpose="完整读取授权站内范围",
+            scope_kind="same_site",
+            page_limit=2,
+            completeness_mode="hard_scope_complete",
+        ),
+    )
+
+    snapshot = result["snapshot"]
+    assert snapshot["failed_page_count"] == 1
+    assert snapshot["coverage"]["scope_denied_count"] == 1
+    assert snapshot["coverage"]["failed_request_count"] == 0
+    assert snapshot["coverage"]["status"] == "scope_complete"
+
+
+@pytest.mark.asyncio
+async def test_replay_does_not_expire_batch_within_enforced_deadline(
+    tmp_path: Path,
+) -> None:
+    database = migrated_webui_database(tmp_path / "source-batch-lease.db")
+    service = _service(
+        database,
+        lambda request: httpx.Response(500, request=request),
+    )
+    service.stale_after_seconds = 0
+    request = SourceAcquisitionRequest(
+        url="https://example.com/",
+        purpose="验证批次恢复门槛",
+        scope_kind="same_site",
+        page_limit=2,
+    )
+    attempt, created = service.repository.claim_attempt(
+        owner_id="owner-a",
+        idempotency_key="batch-lease",
+        request=request,
+    )
+    assert created
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE source_acquisition_attempts SET started_at=? "
+            "WHERE attempt_id=?",
+            (
+                (datetime.now(timezone.utc) - timedelta(seconds=10)).isoformat(),
+                attempt["attempt_id"],
+            ),
+        )
+
+    replay = await service.acquire(
+        owner_id="owner-a",
+        idempotency_key="batch-lease",
+        request=request,
+    )
+
+    assert replay["status"] == "acquiring"

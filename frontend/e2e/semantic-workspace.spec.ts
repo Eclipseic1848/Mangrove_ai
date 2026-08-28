@@ -209,6 +209,12 @@ function sourceAttempt(
     allowed_scope: {
       kind: "current_page",
       normalized_url: "https://example.com/article",
+      site: "example.com",
+      page_limit: 1,
+      completeness: {
+        mode: "exploratory",
+        required_valid_pages: null,
+      },
     },
     purpose: "读取公开网页内容，供当前数据任务分析",
     status,
@@ -223,10 +229,23 @@ function sourceAttempt(
       allowed_scope: {
         kind: "current_page",
         normalized_url: "https://example.com/article",
+        site: "example.com",
+        page_limit: 1,
+        completeness: {
+          mode: "exploratory",
+          required_valid_pages: null,
+        },
       },
       valid_page_count: 1,
       failed_page_count: 0,
       created_at: "2026-08-27T10:00:01Z",
+      coverage: {
+        status: "scope_complete",
+        limit_reached: false,
+        attempted_page_count: 1,
+        required_valid_pages: null,
+      },
+      failures: [],
       artifacts: [{
         artifact_id: "artifact-1",
         request_url: "https://example.com/article",
@@ -331,6 +350,9 @@ test.describe("统一数据工作台", () => {
       url: "https://example.com/article",
       purpose: "读取公开网页内容，供当前数据任务分析",
       allowed_scope: "current_page",
+      page_limit: 1,
+      completeness_mode: "exploratory",
+      required_valid_pages: null,
     });
     expect(idempotencyKey.length).toBeGreaterThan(5);
 
@@ -353,6 +375,8 @@ test.describe("统一数据工作台", () => {
       external_api_confirmed: false,
     });
     expect(taskIdempotencyKey.length).toBeGreaterThan(5);
+    await expect(page.getByRole("heading", { name: "公开网页产品摘要" }))
+      .toBeVisible();
 
     await page.reload();
     await page.getByText("公开网页", { exact: true }).click();
@@ -362,6 +386,253 @@ test.describe("统一数据工作台", () => {
     ).toBeVisible();
     await expect(page.getByText("这是页面中冻结的公开产品说明。"))
       .toBeVisible();
+  });
+
+  test("同站探索范围会披露未覆盖页面并允许继续", async ({ page }) => {
+    await mockWorkspace(page);
+    const base = sourceAttempt("succeeded");
+    const scope = {
+      kind: "same_site",
+      normalized_url: "https://example.com/",
+      site: "example.com",
+      page_limit: 3,
+      completeness: {
+        mode: "exploratory",
+        required_valid_pages: null,
+      },
+    };
+    const saved = {
+      ...base,
+      normalized_url: "https://example.com/",
+      allowed_scope: scope,
+      snapshot: {
+        ...base.snapshot!,
+        allowed_scope: scope,
+        valid_page_count: 2,
+        failed_page_count: 1,
+        coverage: {
+          status: "coverage_unknown",
+          limit_reached: false,
+          attempted_page_count: 3,
+          required_valid_pages: 2,
+        },
+        artifacts: [
+          base.snapshot!.artifacts[0],
+          {
+            ...base.snapshot!.artifacts[0],
+            artifact_id: "artifact-2",
+            request_url: "https://example.com/details",
+            final_url: "https://example.com/details",
+            title: "详细说明",
+          },
+        ],
+        failures: [{
+          failure_id: "failure-1",
+          request_url: "https://example.com/missing",
+          final_url: "https://example.com/missing",
+          error_code: "site_refused",
+          error_message: "站点拒绝读取",
+          failed_at: "2026-08-27T10:00:01Z",
+        }],
+      },
+    };
+    let submitted: Record<string, unknown> | null = null;
+    let taskSubmitted: Record<string, unknown> | null = null;
+    await page.route("**/api/semantic-workspace/source-acquisitions", async (route) => {
+      submitted = route.request().postDataJSON();
+      await route.fulfill({ status: 202, json: saved });
+    });
+    const createdTask = workspaceTask("web-task-exploratory", "queued", "探索式网页摘要");
+    await page.route("**/api/semantic-workspace/tasks", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      taskSubmitted = route.request().postDataJSON();
+      await route.fulfill({ status: 202, json: createdTask });
+    });
+    await page.route("**/api/semantic-workspace/tasks/web-task-exploratory", (route) =>
+      route.fulfill({ json: workspaceDetail(createdTask) }));
+    await page.goto("/data-prep");
+    await page.getByText("公开网页", { exact: true }).click();
+    await page.getByLabel("精确网址").fill("https://example.com/");
+    await page.getByRole("button", { name: "同站有限扩展" }).click();
+    await page.getByLabel("最多读取页数").fill("3");
+    await expect(page.getByText("允许范围：example.com 内最多 3 页"))
+      .toBeVisible();
+    await page.getByRole("button", { name: "获取网页" }).click();
+
+    await expect(page.getByText("已冻结 2 个有效页面，另有 1 个失败或越界记录"))
+      .toBeVisible();
+    await expect(page.getByText("不能声称覆盖了整个站点", { exact: false }))
+      .toBeVisible();
+    await page.getByText("查看页面清单与失败原因").click();
+    await expect(page.getByText("https://example.com/missing", { exact: false }))
+      .toBeVisible();
+    expect(submitted).toEqual({
+      url: "https://example.com/",
+      purpose: "读取公开网页内容，供当前数据任务分析",
+      allowed_scope: "same_site",
+      page_limit: 3,
+      completeness_mode: "exploratory",
+      required_valid_pages: null,
+    });
+
+    await page.getByLabel("想得到什么结果").fill("汇总已成功读取的页面并披露缺口");
+    await page.getByRole("button", { name: "启动任务" }).click();
+    await expect.poll(() => taskSubmitted).not.toBeNull();
+    expect(taskSubmitted).toMatchObject({
+      source_snapshot_id: "snapshot-1",
+      quantity_requirement: "当前已成功读取页面中有证据的内容",
+      completeness_requirement: "披露失败、截断和未覆盖页面，不承诺完整覆盖",
+    });
+  });
+
+  test("同站完整硬门槛不满足时只展示结果且不允许启动任务", async ({ page }) => {
+    await mockWorkspace(page);
+    const base = sourceAttempt("succeeded");
+    const scope = {
+      kind: "same_site",
+      normalized_url: "https://example.com/",
+      site: "example.com",
+      page_limit: 3,
+      completeness: {
+        mode: "hard_scope_complete",
+        required_valid_pages: null,
+      },
+    };
+    await page.route("**/api/semantic-workspace/source-acquisitions", (route) =>
+      route.fulfill({
+        status: 202,
+        json: {
+          ...base,
+          allowed_scope: scope,
+          snapshot: {
+            ...base.snapshot!,
+            allowed_scope: scope,
+            valid_page_count: 1,
+            failed_page_count: 1,
+            coverage: {
+              status: "hard_insufficient",
+              limit_reached: false,
+              attempted_page_count: 2,
+              required_valid_pages: null,
+            },
+            failures: [{
+              failure_id: "failure-hard-scope",
+              request_url: "https://example.com/missing",
+              final_url: "https://example.com/missing",
+              error_code: "site_refused",
+              error_message: "站点拒绝读取",
+              failed_at: "2026-08-27T10:00:01Z",
+            }],
+          },
+        },
+      }));
+
+    await page.goto("/data-prep");
+    await page.getByText("公开网页", { exact: true }).click();
+    await page.getByLabel("精确网址").fill("https://example.com/");
+    await page.getByRole("button", { name: "同站有限扩展" }).click();
+    await page.getByLabel("最多读取页数").fill("3");
+    await page.getByLabel("结果要求").selectOption("hard_scope_complete");
+    await page.getByRole("button", { name: "获取网页" }).click();
+
+    await expect(page.getByText("当前结果仅供查看，不能启动任务", { exact: false }))
+      .toBeVisible();
+    await expect(page.getByText("授权站内范围仍有未读取页面", { exact: false }))
+      .toBeVisible();
+    await expect(page.getByText("有效页面不足 0 个", { exact: false }))
+      .toHaveCount(0);
+    await expect(page.getByText("下一步：清除本次来源后降低硬性要求", { exact: false }))
+      .toBeVisible();
+    await expect(page.getByRole("button", { name: "启动任务" })).toBeDisabled();
+  });
+
+  test("来源刷新结果未知时由用户恢复同一请求并创建一个新版本", async ({ page }) => {
+    await mockWorkspace(page);
+    const task = {
+      ...workspaceTask("task-source-refresh", "completed", "公开网页摘要"),
+      runtime_version: "pi",
+      model_connection_id: null,
+    };
+    const snapshot = sourceAttempt("succeeded").snapshot!;
+    const detail = workspaceDetail(task, {
+      web_source: {
+        source_snapshot_id: snapshot.snapshot_id,
+        goal_contract: {
+          objective: task.objective_text,
+          must_include: [],
+          explicit_exclusions: [],
+          quantity_requirement: "当前页面中有证据的内容",
+          completeness_requirement: "仅对当前精确页面负责",
+        },
+        delivery_spec: { formats: ["markdown"] },
+        runtime_binding: {
+          adapter_id: "pi",
+          adapter_version: "1",
+          runtime_artifact: "fixture",
+          protocol_version: "1",
+          event_schema_version: "1",
+          capability_digest: "a".repeat(64),
+          external_run_id: "run-source-refresh",
+          model_connection_id: null,
+          model_connection_version: null,
+          model: "Qwen3.6-35B-A3B",
+        },
+        created_at: snapshot.created_at,
+        snapshot,
+      },
+    });
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [task] }));
+    await page.route("**/api/semantic-workspace/tasks/task-source-refresh", (route) =>
+      route.fulfill({ json: detail }));
+    await page.route("**/api/semantic-workspace/tasks/task-source-refresh/preview?*", (route) =>
+      route.fulfill({
+        json: {
+          kind: "document",
+          items: [],
+          total: 0,
+          offset: 0,
+          limit: 100,
+        },
+      }));
+    const receivedKeys: string[] = [];
+    const receivedPayloads: Array<Record<string, unknown>> = [];
+    let calls = 0;
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-source-refresh/source-refresh",
+      (route) => {
+        calls += 1;
+        receivedKeys.push(route.request().headers()["idempotency-key"] ?? "");
+        receivedPayloads.push(route.request().postDataJSON());
+        return route.fulfill({
+          status: 202,
+          json: calls === 1
+            ? { status: "acquiring", attempt: sourceAttempt("succeeded"), revision: null }
+            : {
+              status: "revision_created",
+              attempt: sourceAttempt("succeeded"),
+              revision: { ...detail.revisions[0], revision: 2 },
+            },
+        });
+      },
+    );
+
+    await page.goto("/data-prep");
+    await page.getByText("公开网页摘要", { exact: true }).click();
+    await page.getByRole("button", { name: "获取最新网页" }).click();
+    await expect(page.getByText("刷新请求结果仍未知", { exact: false })).toBeVisible();
+
+    await page.reload();
+    await page.getByText("公开网页摘要", { exact: true }).click();
+    await page.getByRole("button", { name: "获取最新网页" }).click();
+    await expect(page.getByText("最新网页已冻结，并创建了新版本")).toBeVisible();
+    expect(receivedKeys).toHaveLength(2);
+    expect(new Set(receivedKeys).size).toBe(1);
+    expect(receivedPayloads[0]).toMatchObject({ resume_unknown: false });
+    expect(receivedPayloads[1]).toMatchObject({ resume_unknown: true });
+    expect(await page.evaluate(() => (
+      localStorage.getItem("mangrove_source_refresh_u1_task-source-refresh")
+    ))).toBeNull();
   });
 
   test("网页来源在收到 Attempt ID 前刷新仍复用同一幂等请求", async ({ page }) => {

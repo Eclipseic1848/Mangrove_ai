@@ -423,13 +423,33 @@ export interface SourceSnapshot {
   snapshot_id: string;
   attempt_id: string;
   allowed_scope: {
-    kind: "current_page";
+    kind: "current_page" | "same_site";
     normalized_url: string;
+    site: string;
+    page_limit: number;
+    completeness: {
+      mode: "exploratory" | "hard_min_pages" | "hard_scope_complete";
+      required_valid_pages: number | null;
+    };
   };
   valid_page_count: number;
   failed_page_count: number;
   created_at: string;
+  coverage: {
+    status: "scope_complete" | "coverage_unknown" | "hard_insufficient";
+    limit_reached: boolean;
+    attempted_page_count: number;
+    required_valid_pages: number | null;
+  };
   artifacts: SourceArtifact[];
+  failures: Array<{
+    failure_id: string;
+    request_url: string;
+    final_url: string | null;
+    error_code: string;
+    error_message: string;
+    failed_at: string;
+  }>;
 }
 
 export interface SourceAcquisitionAttempt {
@@ -438,8 +458,14 @@ export interface SourceAcquisitionAttempt {
   request_url: string;
   normalized_url: string;
   allowed_scope: {
-    kind: "current_page";
+    kind: "current_page" | "same_site";
     normalized_url: string;
+    site: string;
+    page_limit: number;
+    completeness: {
+      mode: "exploratory" | "hard_min_pages" | "hard_scope_complete";
+      required_valid_pages: number | null;
+    };
   };
   purpose: string;
   status: SourceAcquisitionStatus;

@@ -62,6 +62,10 @@ type StoredSourceAcquisition = {
   idempotency_key: string;
   url: string;
   purpose: string;
+  scope_kind: "current_page" | "same_site";
+  page_limit: number;
+  completeness_mode: "exploratory" | "hard_min_pages" | "hard_scope_complete";
+  required_valid_pages: number | null;
 };
 
 type WorkspaceTaskPayload = Parameters<typeof createWorkspaceTask>[0];
@@ -85,6 +89,15 @@ function readStoredAcquisition(value: string): StoredSourceAcquisition | null {
         idempotency_key: parsed.idempotency_key,
         url: parsed.url,
         purpose: parsed.purpose,
+        scope_kind: parsed.scope_kind === "same_site" ? "same_site" : "current_page",
+        page_limit: typeof parsed.page_limit === "number" ? parsed.page_limit : 1,
+        completeness_mode: parsed.completeness_mode === "hard_min_pages"
+          || parsed.completeness_mode === "hard_scope_complete"
+          ? parsed.completeness_mode
+          : "exploratory",
+        required_valid_pages: typeof parsed.required_valid_pages === "number"
+          ? parsed.required_valid_pages
+          : null,
       };
     }
   } catch {
@@ -94,6 +107,10 @@ function readStoredAcquisition(value: string): StoredSourceAcquisition | null {
       idempotency_key: "",
       url: "",
       purpose: "",
+      scope_kind: "current_page",
+      page_limit: 1,
+      completeness_mode: "exploratory",
+      required_valid_pages: null,
     };
   }
   return null;
@@ -103,12 +120,40 @@ function storeAcquisition(
   storageKey: string,
   attempt: SourceAcquisitionAttempt,
 ) {
-  localStorage.setItem(storageKey, JSON.stringify({
+  writeStoredValue(storageKey, {
     attempt_id: attempt.attempt_id,
     idempotency_key: attempt.idempotency_key,
     url: attempt.normalized_url,
     purpose: attempt.purpose,
-  } satisfies StoredSourceAcquisition));
+    scope_kind: attempt.allowed_scope.kind,
+    page_limit: attempt.allowed_scope.page_limit ?? 1,
+    completeness_mode: attempt.allowed_scope.completeness?.mode ?? "exploratory",
+    required_valid_pages: attempt.allowed_scope.completeness?.required_valid_pages ?? null,
+  } satisfies StoredSourceAcquisition);
+}
+
+function readStoredValue(storageKey: string) {
+  try {
+    return localStorage.getItem(storageKey);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredValue(storageKey: string, value: unknown) {
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(value));
+  } catch {
+    // 存储不可用时仍允许当前页面完成任务，刷新恢复能力降级为本次会话内存。
+  }
+}
+
+function removeStoredValue(storageKey: string) {
+  try {
+    localStorage.removeItem(storageKey);
+  } catch {
+    // 存储不可用时没有可清理的持久状态。
+  }
 }
 
 function normalizedUrl(value: string) {
@@ -153,6 +198,12 @@ export function WebSourceIntake({
   const taskStorageKey = `mangrove_web_task_attempt_${ownerId}`;
   const [url, setUrl] = useState("");
   const [purpose, setPurpose] = useState("读取公开网页内容，供当前数据任务分析");
+  const [scopeKind, setScopeKind] = useState<"current_page" | "same_site">("current_page");
+  const [pageLimit, setPageLimit] = useState(5);
+  const [completenessMode, setCompletenessMode] = useState<
+    "exploratory" | "hard_min_pages" | "hard_scope_complete"
+  >("exploratory");
+  const [requiredValidPages, setRequiredValidPages] = useState(3);
   const [attempt, setAttempt] = useState<SourceAcquisitionAttempt | null>(null);
   const [loading, setLoading] = useState(false);
   const [starting, setStarting] = useState(false);
@@ -179,19 +230,30 @@ export function WebSourceIntake({
   }, [onTaskCreated]);
 
   useEffect(() => {
-    const raw = localStorage.getItem(storageKey);
+    const raw = readStoredValue(storageKey);
     if (!raw) return;
     const stored = readStoredAcquisition(raw);
     if (!stored) {
-      localStorage.removeItem(storageKey);
+      removeStoredValue(storageKey);
       return;
     }
     let active = true;
     if (stored.url) setUrl(stored.url);
     if (stored.purpose) setPurpose(stored.purpose);
+    setScopeKind(stored.scope_kind);
+    setPageLimit(stored.page_limit);
+    setCompletenessMode(stored.completeness_mode);
+    if (stored.required_valid_pages) setRequiredValidPages(stored.required_valid_pages);
     if (stored.idempotency_key) {
       keyRef.current = {
-        fingerprint: JSON.stringify({ url: stored.url, purpose: stored.purpose }),
+        fingerprint: JSON.stringify({
+          url: stored.url,
+          purpose: stored.purpose,
+          scopeKind: stored.scope_kind,
+          pageLimit: stored.page_limit,
+          completenessMode: stored.completeness_mode,
+          requiredValidPages: stored.required_valid_pages,
+        }),
         key: stored.idempotency_key,
       };
     }
@@ -201,7 +263,10 @@ export function WebSourceIntake({
       : createSourceAcquisition({
           url: stored.url,
           purpose: stored.purpose,
-          allowed_scope: "current_page",
+          allowed_scope: stored.scope_kind,
+          page_limit: stored.page_limit,
+          completeness_mode: stored.completeness_mode,
+          required_valid_pages: stored.required_valid_pages,
         }, stored.idempotency_key);
     void restored
       .then((saved) => {
@@ -223,7 +288,7 @@ export function WebSourceIntake({
   }, [storageKey]);
 
   useEffect(() => {
-    const raw = localStorage.getItem(taskStorageKey);
+    const raw = readStoredValue(taskStorageKey);
     if (!raw) return;
     let active = true;
     try {
@@ -233,7 +298,7 @@ export function WebSourceIntake({
         || typeof stored.idempotency_key !== "string"
         || !stored.payload
       ) {
-        localStorage.removeItem(taskStorageKey);
+        removeStoredValue(taskStorageKey);
         return;
       }
       taskKeyRef.current = {
@@ -248,7 +313,7 @@ export function WebSourceIntake({
       void taskReplayPromiseRef.current
         .then(async (created) => {
           if (!active) return;
-          localStorage.removeItem(taskStorageKey);
+          removeStoredValue(taskStorageKey);
           taskKeyRef.current = null;
           toast.success("已恢复上次网页任务");
           await onTaskCreatedRef.current(created);
@@ -260,7 +325,7 @@ export function WebSourceIntake({
           if (active) setStarting(false);
         });
     } catch {
-      localStorage.removeItem(taskStorageKey);
+      removeStoredValue(taskStorageKey);
     }
     return () => {
       active = false;
@@ -276,7 +341,10 @@ export function WebSourceIntake({
       void createSourceAcquisition({
         url: attempt.normalized_url,
         purpose: attempt.purpose,
-        allowed_scope: "current_page",
+        allowed_scope: attempt.allowed_scope.kind,
+        page_limit: attempt.allowed_scope.page_limit ?? 1,
+        completeness_mode: attempt.allowed_scope.completeness?.mode ?? "exploratory",
+        required_valid_pages: attempt.allowed_scope.completeness?.required_valid_pages ?? null,
       }, attempt.idempotency_key).then((saved) => {
         if (!active) return;
         setAttempt(saved);
@@ -293,23 +361,47 @@ export function WebSourceIntake({
 
   const submit = async () => {
     if (!normalized || !purpose.trim() || loading) return;
-    const fingerprint = JSON.stringify({ url: normalized, purpose: purpose.trim() });
+    const effectivePageLimit = scopeKind === "current_page" ? 1 : pageLimit;
+    const effectiveRequired = completenessMode === "hard_min_pages"
+      ? requiredValidPages
+      : null;
+    const fingerprint = JSON.stringify({
+      url: normalized,
+      purpose: purpose.trim(),
+      scopeKind,
+      pageLimit: effectivePageLimit,
+      completenessMode,
+      requiredValidPages: effectiveRequired,
+    });
     if (keyRef.current?.fingerprint !== fingerprint) {
       keyRef.current = { fingerprint, key: nanoid() };
     }
-    localStorage.setItem(storageKey, JSON.stringify({
+    writeStoredValue(storageKey, {
       attempt_id: null,
       idempotency_key: keyRef.current.key,
       url: normalized,
       purpose: purpose.trim(),
-    } satisfies StoredSourceAcquisition));
+      scope_kind: scopeKind,
+      page_limit: effectivePageLimit,
+      completeness_mode: completenessMode,
+      required_valid_pages: effectiveRequired,
+    } satisfies StoredSourceAcquisition);
     setLoading(true);
     setAttempt({
       attempt_id: "pending",
       idempotency_key: keyRef.current.key,
       request_url: url,
       normalized_url: normalized,
-      allowed_scope: { kind: "current_page", normalized_url: normalized },
+      allowed_scope: {
+        kind: scopeKind,
+        normalized_url: normalized,
+        site: new URL(normalized).host,
+        page_limit: effectivePageLimit,
+        completeness: {
+          mode: completenessMode,
+          required_valid_pages: effectiveRequired,
+        },
+      },
       purpose: purpose.trim(),
       status: "acquiring",
       started_at: new Date().toISOString(),
@@ -323,7 +415,10 @@ export function WebSourceIntake({
       const saved = await createSourceAcquisition({
         url: normalized,
         purpose: purpose.trim(),
-        allowed_scope: "current_page",
+        allowed_scope: scopeKind,
+        page_limit: effectivePageLimit,
+        completeness_mode: completenessMode,
+        required_valid_pages: effectiveRequired,
       }, keyRef.current.key);
       setAttempt(saved);
       storeAcquisition(storageKey, saved);
@@ -348,13 +443,14 @@ export function WebSourceIntake({
   };
 
   const clear = () => {
-    localStorage.removeItem(storageKey);
+    removeStoredValue(storageKey);
     keyRef.current = null;
     setAttempt(null);
     setUrl("");
   };
 
   const artifact = attempt?.snapshot?.artifacts[0];
+  const snapshot = attempt?.snapshot;
   const selectedConnection = modelConnections.find(
     (connection) => connection.connection_id === connectionId,
   );
@@ -367,6 +463,7 @@ export function WebSourceIntake({
     .filter(Boolean);
   const canStart = Boolean(
     attempt?.snapshot_id
+    && attempt.snapshot?.coverage.status !== "hard_insufficient"
     && objective.trim()
     && quantity.trim()
     && completeness.trim()
@@ -399,15 +496,15 @@ export function WebSourceIntake({
     if (taskKeyRef.current?.fingerprint !== fingerprint) {
       taskKeyRef.current = { fingerprint, key: nanoid() };
     }
-    localStorage.setItem(taskStorageKey, JSON.stringify({
+    writeStoredValue(taskStorageKey, {
       fingerprint,
       idempotency_key: taskKeyRef.current.key,
       payload,
-    } satisfies StoredTaskAttempt));
+    } satisfies StoredTaskAttempt);
     setStarting(true);
     try {
       const created = await createWorkspaceTask(payload, taskKeyRef.current.key);
-      localStorage.removeItem(taskStorageKey);
+      removeStoredValue(taskStorageKey);
       taskKeyRef.current = null;
       toast.success("网页任务已启动");
       await onTaskCreated(created);
@@ -486,13 +583,102 @@ export function WebSourceIntake({
             className="mt-2 w-full resize-none rounded-xl border bg-background px-3 py-2 text-sm leading-6 outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-primary/15 disabled:opacity-60"
           />
 
+          <fieldset className="mt-4">
+            <legend className="text-xs font-medium">读取范围</legend>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <button
+                type="button"
+                disabled={loading}
+                aria-pressed={scopeKind === "current_page"}
+                onClick={() => {
+                  setScopeKind("current_page");
+                  setCompletenessMode("exploratory");
+                  setQuantity("当前页面中有证据的全部内容");
+                  setCompleteness("仅对当前精确页面负责");
+                }}
+                className={`rounded-lg border px-3 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60 ${scopeKind === "current_page" ? "border-primary bg-primary/10 text-foreground" : "text-muted-foreground hover:bg-muted"}`}
+              >
+                仅当前页面
+              </button>
+              <button
+                type="button"
+                disabled={loading}
+                aria-pressed={scopeKind === "same_site"}
+                onClick={() => {
+                  setScopeKind("same_site");
+                  setQuantity("当前已成功读取页面中有证据的内容");
+                  setCompleteness("披露失败、截断和未覆盖页面，不承诺完整覆盖");
+                }}
+                className={`rounded-lg border px-3 py-2 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-60 ${scopeKind === "same_site" ? "border-primary bg-primary/10 text-foreground" : "text-muted-foreground hover:bg-muted"}`}
+              >
+                同站有限扩展
+              </button>
+            </div>
+          </fieldset>
+
+          {scopeKind === "same_site" && (
+            <div className="mt-3 grid gap-3 sm:grid-cols-2">
+              <label className="text-xs font-medium">
+                最多读取页数
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={pageLimit}
+                  disabled={loading}
+                  onChange={(event) => {
+                    const next = Math.max(1, Math.min(50, Number(event.target.value) || 1));
+                    setPageLimit(next);
+                    setRequiredValidPages((current) => Math.min(current, next));
+                  }}
+                  className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 disabled:cursor-not-allowed disabled:opacity-60"
+                />
+              </label>
+              <label className="text-xs font-medium">
+                结果要求
+                <select
+                  value={completenessMode}
+                  disabled={loading}
+                  onChange={(event) => setCompletenessMode(event.target.value as "exploratory" | "hard_min_pages" | "hard_scope_complete")}
+                  className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  <option value="exploratory">能读多少展示多少</option>
+                  <option value="hard_min_pages">不足指定页数不启动任务</option>
+                  <option value="hard_scope_complete">授权范围内必须全部读取成功</option>
+                </select>
+              </label>
+              {completenessMode === "hard_min_pages" && (
+                <label className="text-xs font-medium sm:col-start-2">
+                  至少有效页数
+                  <input
+                    type="number"
+                    min={1}
+                    max={pageLimit}
+                    value={requiredValidPages}
+                    disabled={loading}
+                    onChange={(event) => setRequiredValidPages(
+                      Math.max(1, Math.min(pageLimit, Number(event.target.value) || 1)),
+                    )}
+                    className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 disabled:cursor-not-allowed disabled:opacity-60"
+                  />
+                </label>
+              )}
+            </div>
+          )}
+
           <div className="mt-4 grid gap-3 border-y py-3 text-xs sm:grid-cols-2">
             <div className="flex gap-2.5">
               <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
               <div>
-                <p className="font-medium">允许范围：仅当前页面</p>
+                <p className="font-medium">
+                  {scopeKind === "current_page"
+                    ? "允许范围：仅当前页面"
+                    : `允许范围：${normalized ? new URL(normalized).host : "当前站点"} 内最多 ${pageLimit} 页`}
+                </p>
                 <p className="mt-1 leading-5 text-muted-foreground">
-                  不跟随页面链接；跨域跳转会直接失败。
+                  {scopeKind === "current_page"
+                    ? "不跟随页面链接；跨站跳转会直接失败。"
+                    : "只跟随同站链接；站外链接只记录、不访问，也不会静默扩大页数。"}
                 </p>
               </div>
             </div>
@@ -537,7 +723,7 @@ export function WebSourceIntake({
             )}
           </div>
         </div>
-      ) : attempt.status === "succeeded" && artifact ? (
+      ) : attempt.status === "succeeded" && artifact && snapshot ? (
         <div className="p-4" aria-live="polite">
           <div className="flex items-start gap-3">
             <span className="mt-0.5 rounded-full bg-emerald-500/10 p-1.5 text-emerald-700 dark:text-emerald-300">
@@ -555,6 +741,48 @@ export function WebSourceIntake({
                 <ExternalLink className="h-3 w-3 shrink-0" />
               </a>
             </div>
+          </div>
+          <div className="mt-4 border-y py-4 text-xs">
+            <p className="font-medium">
+              已冻结 {snapshot.valid_page_count} 个有效页面
+              {snapshot.failed_page_count > 0 ? `，另有 ${snapshot.failed_page_count} 个失败或越界记录` : ""}
+            </p>
+            <p className={`mt-1 leading-5 ${snapshot.coverage.status === "hard_insufficient" ? "text-destructive" : "text-muted-foreground"}`}>
+              {snapshot.coverage.status === "scope_complete"
+                ? "本次授权范围已读取完成。"
+                : snapshot.coverage.status === "hard_insufficient"
+                  ? snapshot.allowed_scope.completeness?.mode === "hard_scope_complete"
+                    ? "授权站内范围仍有未读取页面，当前结果仅供查看，不能启动任务。"
+                    : `有效页面不足 ${snapshot.coverage.required_valid_pages ?? 0} 个，当前结果仅供查看，不能启动任务。`
+                  : "已展示当前取得的全部结果；因为达到页数上限或部分页面失败，不能声称覆盖了整个站点。"}
+            </p>
+            {snapshot.coverage.status === "hard_insufficient" && (
+              <p className="mt-2 leading-5 text-muted-foreground">
+                下一步：清除本次来源后降低硬性要求、缩小范围，或稍后按原要求重新获取。
+              </p>
+            )}
+            {(snapshot.artifacts.length > 1 || snapshot.failures.length > 0) && (
+              <details className="mt-3 rounded-xl border px-3 py-2">
+                <summary className="cursor-pointer font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  查看页面清单与失败原因
+                </summary>
+                <ul className="mt-3 space-y-2 text-muted-foreground">
+                  {snapshot.artifacts.map((item) => (
+                    <li key={item.artifact_id} className="break-all">
+                      <span className="text-emerald-700 dark:text-emerald-300">成功</span>
+                      {" · "}{item.final_url}{" · "}{new Date(item.read_at).toLocaleString("zh-CN")}
+                    </li>
+                  ))}
+                  {snapshot.failures.map((item) => (
+                    <li key={item.failure_id} className="break-all">
+                      <span className="text-destructive">未读取</span>
+                      {" · "}{item.final_url ?? item.request_url}{" · "}
+                      {ERROR_LABELS[item.error_code] ?? item.error_message}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
           </div>
           <dl className="mt-4 grid gap-x-6 gap-y-3 border-y py-4 text-xs sm:grid-cols-3">
             <div>
@@ -597,7 +825,7 @@ export function WebSourceIntake({
               value={objective}
               onChange={(event) => setObjective(event.target.value)}
               placeholder="例如：根据当前页面生成一份产品能力摘要，并标注每条结论的来源证据"
-              className="mt-2 w-full resize-y rounded-xl border bg-background px-3 py-2 text-sm leading-6 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
+              className="mt-2 w-full resize-none rounded-xl border bg-background px-3 py-2 text-sm leading-6 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
             />
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               <label className="text-xs font-medium">
@@ -607,7 +835,7 @@ export function WebSourceIntake({
                   value={mustInclude}
                   onChange={(event) => setMustInclude(event.target.value)}
                   placeholder="每行一项；可留空"
-                  className="mt-2 w-full resize-y rounded-xl border bg-background px-3 py-2 text-sm font-normal leading-6 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
+                  className="mt-2 w-full resize-none rounded-xl border bg-background px-3 py-2 text-sm font-normal leading-6 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
                 />
               </label>
               <label className="text-xs font-medium">
@@ -617,7 +845,7 @@ export function WebSourceIntake({
                   value={exclusions}
                   onChange={(event) => setExclusions(event.target.value)}
                   placeholder="例如：不要推测页面未公开的信息"
-                  className="mt-2 w-full resize-y rounded-xl border bg-background px-3 py-2 text-sm font-normal leading-6 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
+                  className="mt-2 w-full resize-none rounded-xl border bg-background px-3 py-2 text-sm font-normal leading-6 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
                 />
               </label>
             </div>
