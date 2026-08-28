@@ -148,6 +148,26 @@ def test_local_model_call_without_usage_is_unknown_not_zero() -> None:
     assert view.usage.unknown_call_count == 1
 
 
+def test_historical_pi_run_without_usage_event_is_at_least_one_unknown_call() -> None:
+    view = WorkTraceProjection().project(
+        task_id="task-1",
+        revision=2,
+        run_id="run-2",
+        status="completed",
+        events=(
+            _event(1, 0, "action_progress", runtime_event_type="runtime.preparing"),
+            _event(2, 1, "action_progress", runtime_event_type="agent.started"),
+            _event(3, 2, "action_progress", runtime_event_type="agent.settled"),
+            _event(4, 3, "action_progress", runtime_event_type="candidate.ready"),
+        ),
+        provider_usage=[],
+    )
+
+    assert view.usage.total_tokens == 0
+    assert view.usage.call_count == 1
+    assert view.usage.unknown_call_count == 1
+
+
 def test_legacy_naive_timestamp_can_be_compared_with_aware_observation() -> None:
     event = _event(1, 0, "run.started").model_copy(
         update={"created_at": datetime(2026, 8, 28, 12, 0, 0)}
@@ -183,6 +203,10 @@ def test_runtime_event_projection_redacts_sensitive_details_and_paths() -> None:
                 "input_summary": "cookie=abc C:\\private\\客户.xlsx",
                 "result_summary": "保存到 /srv/private/output.json",
                 "evidence_refs": ["evidence-1", "C:\\private\\raw.log"],
+                "action": {
+                    "tool": "document.preview",
+                    "action_id": "preview-1",
+                },
             },
         }],
     })
@@ -201,6 +225,8 @@ def test_runtime_event_projection_redacts_sensitive_details_and_paths() -> None:
         observed_at=datetime(2026, 8, 28, 0, 0, 1, tzinfo=timezone.utc),
     )
     assert work_session.entries[0].input_summary == "cookie=[已隐藏] [路径已隐藏]"
+    assert work_session.entries[0].tool_name == "document.preview"
+    assert work_session.entries[0].action_id == "preview-1"
 
 
 def test_unknown_required_runtime_event_fails_closed() -> None:

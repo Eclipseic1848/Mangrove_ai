@@ -2233,6 +2233,7 @@ test.describe("统一数据工作台", () => {
                 evidence_refs: ["evidence-1"],
                 recovery_status: "pending",
                 tool_name: null,
+                action_id: "accept-gap-1",
               },
               {
                 event_id: "owner-action-resumed",
@@ -2247,6 +2248,7 @@ test.describe("统一数据工作台", () => {
                 evidence_refs: [],
                 recovery_status: "handled",
                 tool_name: null,
+                action_id: "accept-gap-1",
               },
             ],
           },

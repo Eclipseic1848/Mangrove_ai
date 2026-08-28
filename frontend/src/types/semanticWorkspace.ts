@@ -118,6 +118,7 @@ export interface WorkSessionView {
     evidence_refs: string[];
     recovery_status: string | null;
     tool_name: string | null;
+    action_id: string | null;
   }>;
 }
 

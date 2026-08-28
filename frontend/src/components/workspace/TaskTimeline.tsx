@@ -560,9 +560,13 @@ export function TaskTimeline({
   ) ?? -1;
   const ownerActionResolved = ownerActionIndex >= 0 && workSession?.entries
     .slice(ownerActionIndex + 1)
-    .some((entry) => entry.recovery_status === "handled"
-      || entry.recovery_status === "resumed"
-      || ["resumed", "runtime.resuming", "question_answered", "question.answered", "revision.safe_point_applied"].includes(entry.event_type));
+    .some((entry) => Boolean(
+      workSession.entries[ownerActionIndex]?.action_id
+      && entry.action_id === workSession.entries[ownerActionIndex]?.action_id
+      && (entry.recovery_status === "handled"
+        || entry.recovery_status === "resumed"
+        || ["resumed", "runtime.resuming", "question_answered", "question.answered", "revision.safe_point_applied"].includes(entry.event_type)),
+    ));
   const pendingOwnerAction = ownerActionIndex >= 0 && !ownerActionResolved
     ? workSession?.entries[ownerActionIndex]
     : undefined;

@@ -36,6 +36,7 @@ class WorkTraceEntry(BaseModel):
     evidence_refs: tuple[str, ...] = ()
     recovery_status: str | None = None
     tool_name: str | None = None
+    action_id: str | None = None
 
 
 class ProviderUsageView(BaseModel):
@@ -180,6 +181,25 @@ class WorkTraceProjection:
                 for event in selected
                 if _trace_type(event) == "provider.usage"
             ]
+            if not usage_rows:
+                historical_call_count = sum(
+                    1 for event in selected if _trace_type(event) == "agent.started"
+                )
+                if historical_call_count == 0 and any(
+                    _trace_type(event) in {"agent.settled", "candidate.ready"}
+                    for event in selected
+                ):
+                    historical_call_count = 1
+                usage_rows = [
+                    {
+                        "input_tokens": None,
+                        "output_tokens": None,
+                        "cache_tokens": None,
+                        "total_tokens": None,
+                        "request_count": 1,
+                    }
+                    for _ in range(historical_call_count)
+                ]
         known = [item for item in usage_rows if item.get("total_tokens") is not None]
         calls = sum(int(item.get("request_count") or 0) for item in usage_rows)
         unknown_calls = sum(
@@ -203,6 +223,11 @@ class WorkTraceProjection:
                 tool_name=(
                     str(event.action.get("tool"))
                     if event.action and event.action.get("tool")
+                    else None
+                ),
+                action_id=(
+                    str(event.action.get("action_id"))
+                    if event.action and event.action.get("action_id")
                     else None
                 ),
             )
