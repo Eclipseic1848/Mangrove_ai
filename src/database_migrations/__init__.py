@@ -104,7 +104,7 @@ class RestoreVerification:
 
 
 _PROFILE_HEADS = {
-    "webui": "webui_0006",
+    "webui": "webui_0007",
     "scheduler": "scheduler_0001",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
@@ -127,7 +127,10 @@ _PROFILE_REQUIRED_COLUMNS = {
             "source_refs_json",
             "table_output_contracts_json",
         ),
-        "semantic_workspace_revisions": ("table_output_contracts_json",),
+        "semantic_workspace_revisions": (
+            "table_output_contracts_json",
+            "source_refs_json",
+        ),
         "document_task_units": ("archived_at",),
         "agentic_runtime_runs": (
             "verification_json",
@@ -156,12 +159,21 @@ _PROFILE_REQUIRED_COLUMNS = {
         ),
         "source_snapshots": (
             "snapshot_id", "owner_id", "attempt_id", "allowed_scope_json",
-            "valid_page_count", "failed_page_count", "created_at",
+            "valid_page_count", "failed_page_count", "coverage_json", "created_at",
         ),
         "source_artifacts": (
             "artifact_id", "owner_id", "snapshot_id", "request_url",
             "final_url", "read_at", "content_sha256", "media_type",
             "size_bytes", "content_blob",
+        ),
+        "source_page_failures": (
+            "failure_id", "owner_id", "attempt_id", "snapshot_id",
+            "request_url", "error_code", "failed_at",
+        ),
+        "source_refresh_intents": (
+            "owner_id", "task_id", "idempotency_key", "request_hash",
+            "expected_revision", "attempt_id", "snapshot_id", "status",
+            "created_revision", "started_at", "updated_at",
         ),
         "web_task_contracts": (
             "owner_id", "task_id", "revision", "source_snapshot_id",

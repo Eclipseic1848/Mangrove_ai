@@ -2164,7 +2164,7 @@ class SemanticWorkspaceManager:
                 )
             )
         web_repository = SourceAcquisitionRepository(settings.webui_db_path)
-        for source_ref in task.get("source_refs", []):
+        for source_ref in task_revision.get("source_refs", []):
             if source_ref.get("kind") != "web_artifact":
                 continue
             artifact = web_repository.get_artifact(

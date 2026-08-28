@@ -2571,8 +2571,9 @@ class WebUIStore:
                     "INSERT INTO semantic_workspace_revisions "
                     "(task_id, revision, user_id, objective_text, "
                     "output_formats_json, table_output_contracts_json, "
+                    "source_refs_json, "
                     "status, created_at, updated_at) "
-                    "VALUES (?, 1, ?, ?, ?, ?, 'queued', ?, ?)",
+                    "VALUES (?, 1, ?, ?, ?, ?, ?, 'queued', ?, ?)",
                     (
                         task_id,
                         user_id,
@@ -2582,6 +2583,7 @@ class WebUIStore:
                             table_output_contracts or [],
                             ensure_ascii=False,
                         ),
+                        json.dumps(source_refs or [], ensure_ascii=False),
                         now,
                         now,
                     ),
@@ -2634,6 +2636,141 @@ class WebUIStore:
             "runtime_binding": json.loads(row["runtime_binding_json"]),
             "created_at": row["created_at"],
         }
+
+    def find_web_task_revision_by_snapshot(
+        self,
+        user_id: str,
+        task_id: str,
+        snapshot_id: str,
+    ) -> int | None:
+        """查找已绑定该快照的版本，供刷新请求安全恢复。"""
+
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT revision FROM web_task_contracts "
+                "WHERE owner_id=? AND task_id=? AND source_snapshot_id=? "
+                "ORDER BY revision DESC LIMIT 1",
+                (user_id, task_id, snapshot_id),
+            ).fetchone()
+        return int(row["revision"]) if row is not None else None
+
+    def claim_source_refresh_intent(
+        self,
+        user_id: str,
+        task_id: str,
+        idempotency_key: str,
+        *,
+        request_hash: str,
+        expected_revision: int,
+        attempt_id: str,
+        snapshot_id: str,
+        resume_unknown: bool = False,
+    ) -> tuple[Dict[str, Any], bool]:
+        """串行化同一刷新请求，避免并发预分配两个 RuntimeBinding。"""
+
+        now = _now()
+        with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM source_refresh_intents WHERE owner_id=? "
+                "AND task_id=? AND idempotency_key=?",
+                (user_id, task_id, idempotency_key),
+            ).fetchone()
+            if row is not None:
+                saved = dict(row)
+                if (
+                    saved["request_hash"] != request_hash
+                    or int(saved["expected_revision"]) != expected_revision
+                    or saved["attempt_id"] != attempt_id
+                    or saved["snapshot_id"] != snapshot_id
+                ):
+                    raise ValueError("该刷新幂等键已绑定另一份来源请求")
+                if saved["status"] == "failed":
+                    conn.execute(
+                        "UPDATE source_refresh_intents SET status='binding', "
+                        "updated_at=? WHERE owner_id=? AND task_id=? "
+                        "AND idempotency_key=? AND status='failed'",
+                        (now, user_id, task_id, idempotency_key),
+                    )
+                    saved["status"] = "binding"
+                    saved["updated_at"] = now
+                    return saved, True
+                if saved["status"] == "binding" and resume_unknown:
+                    updated_at = datetime.fromisoformat(str(saved["updated_at"]))
+                    if updated_at <= datetime.now() - timedelta(seconds=30):
+                        cursor = conn.execute(
+                            "UPDATE source_refresh_intents SET updated_at=? "
+                            "WHERE owner_id=? AND task_id=? AND idempotency_key=? "
+                            "AND status='binding' AND updated_at=?",
+                            (
+                                now,
+                                user_id,
+                                task_id,
+                                idempotency_key,
+                                saved["updated_at"],
+                            ),
+                        )
+                        if cursor.rowcount == 1:
+                            saved["updated_at"] = now
+                            return saved, True
+                return saved, False
+            conn.execute(
+                "INSERT INTO source_refresh_intents "
+                "(owner_id, task_id, idempotency_key, request_hash, "
+                "expected_revision, attempt_id, snapshot_id, status, "
+                "started_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, "
+                "'binding', ?, ?)",
+                (
+                    user_id,
+                    task_id,
+                    idempotency_key,
+                    request_hash,
+                    expected_revision,
+                    attempt_id,
+                    snapshot_id,
+                    now,
+                    now,
+                ),
+            )
+        return {
+            "owner_id": user_id,
+            "task_id": task_id,
+            "idempotency_key": idempotency_key,
+            "request_hash": request_hash,
+            "expected_revision": expected_revision,
+            "attempt_id": attempt_id,
+            "snapshot_id": snapshot_id,
+            "status": "binding",
+            "created_revision": None,
+            "started_at": now,
+            "updated_at": now,
+        }, True
+
+    def finish_source_refresh_intent(
+        self,
+        user_id: str,
+        task_id: str,
+        idempotency_key: str,
+        *,
+        revision: int | None,
+    ) -> None:
+        status_value = "completed" if revision is not None else "failed"
+        with self._lock, self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE source_refresh_intents SET status=?, "
+                "created_revision=?, updated_at=? WHERE owner_id=? "
+                "AND task_id=? AND idempotency_key=? AND status='binding'",
+                (
+                    status_value,
+                    revision,
+                    _now(),
+                    user_id,
+                    task_id,
+                    idempotency_key,
+                ),
+            )
+        if cursor.rowcount != 1:
+            raise RuntimeError("来源刷新幂等状态已变化")
 
     def list_semantic_workspace_tasks(
         self,
@@ -2786,6 +2923,7 @@ class WebUIStore:
         objective_text: str,
         output_formats: List[str],
         change_summary: str,
+        source_refs: List[Dict[str, str]] | None = None,
         table_output_contracts: List[Dict[str, Any]] | None = None,
         expected_revision: int | None = None,
         transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
@@ -2829,14 +2967,20 @@ class WebUIStore:
                     for item in task.get("table_output_contracts", [])
                     if item.get("format") in output_formats
                 ]
+            frozen_source_refs = (
+                source_refs
+                if source_refs is not None
+                else task.get("source_refs", [])
+            )
             try:
                 conn.execute(
                     "INSERT INTO semantic_workspace_revisions "
                     "(task_id, revision, user_id, objective_text, "
                     "output_formats_json, table_output_contracts_json, "
+                    "source_refs_json, "
                     "status, change_summary, "
                     "created_at, updated_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
                     (
                         task_id,
                         revision,
@@ -2844,6 +2988,7 @@ class WebUIStore:
                         objective_text,
                         json.dumps(output_formats, ensure_ascii=False),
                         json.dumps(frozen_contracts or [], ensure_ascii=False),
+                        json.dumps(frozen_source_refs, ensure_ascii=False),
                         change_summary,
                         now,
                         now,
@@ -2853,6 +2998,7 @@ class WebUIStore:
                 cursor = conn.execute(
                     "UPDATE semantic_workspace_tasks SET objective_text=?, "
                     "output_formats_json=?, table_output_contracts_json=?, "
+                    "source_refs_json=?, "
                     "active_revision=?, status='queued', "
                     "plan_id=?, logical_revision=NULL, binding_revision=NULL, "
                     "run_id=NULL, summary='', error=NULL, failure_json=NULL, "
@@ -2863,6 +3009,7 @@ class WebUIStore:
                         objective_text,
                         json.dumps(output_formats, ensure_ascii=False),
                         json.dumps(frozen_contracts or [], ensure_ascii=False),
+                        json.dumps(frozen_source_refs, ensure_ascii=False),
                         revision,
                         task["plan_id"],
                         now,
@@ -2899,6 +3046,7 @@ class WebUIStore:
             "table_output_contracts": json.loads(
                 row["table_output_contracts_json"] or "[]"
             ),
+            "source_refs": json.loads(row["source_refs_json"] or "[]"),
             "plan_id": row["plan_id"],
             "logical_revision": row["logical_revision"],
             "binding_revision": row["binding_revision"],

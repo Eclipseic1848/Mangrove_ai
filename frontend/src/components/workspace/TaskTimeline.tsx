@@ -495,6 +495,7 @@ export function TaskTimeline({
   onCancel,
   onRecycle,
   onRetry,
+  onRefreshSource,
   onRevisionChange,
 }: {
   task: WorkspaceTask;
@@ -503,6 +504,7 @@ export function TaskTimeline({
   onCancel: () => Promise<void>;
   onRecycle: () => Promise<void>;
   onRetry: (unchanged?: boolean) => void | Promise<void>;
+  onRefreshSource: (externalApiConfirmed: boolean) => Promise<void>;
   onRevisionChange: (revision: number) => void;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -511,6 +513,7 @@ export function TaskTimeline({
   );
   const [eventsOpen, setEventsOpen] = useState(false);
   const [retryingUnknown, setRetryingUnknown] = useState(false);
+  const [refreshingSource, setRefreshingSource] = useState(false);
   const events = useMemo(() => {
     const map = new Map<string, WorkspaceEvent>();
     [...(task.events || []), ...(task.harness_events || []), ...liveEvents].forEach(
@@ -554,18 +557,78 @@ export function TaskTimeline({
         <QuestionDialog question={task.question} onAnswer={onAnswer} />
       )}
       {task.web_source && (
-        <div className="mb-4 flex items-start gap-3 border-b pb-4 text-sm">
+        <div className="mb-4 flex flex-wrap items-start gap-3 border-b pb-4 text-sm">
           <Globe2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <p className="font-medium">来源快照已冻结</p>
             <p className="mt-1 break-all text-xs leading-5 text-muted-foreground">
               {task.web_source.snapshot.artifacts[0]?.final_url}
               {" · "}
               {new Date(task.web_source.snapshot.created_at).toLocaleString("zh-CN")}
               {" · "}
-              运行时不会重新读取网页
+              {task.web_source.snapshot.valid_page_count} 个有效页面
+              {" · "}
+              {task.web_source.snapshot.allowed_scope.kind === "same_site"
+                ? `${task.web_source.snapshot.allowed_scope.site} 内最多 ${task.web_source.snapshot.allowed_scope.page_limit} 页`
+                : "仅当前页"}
+              {" · "}
+              重试不会重新读取网页
             </p>
           </div>
+          {task.viewing_revision === task.current_revision && (
+            task.model_connection_id ? (
+              <AlertDialog.Root>
+                <AlertDialog.Trigger asChild>
+                  <button
+                    type="button"
+                    disabled={refreshingSource}
+                    className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {refreshingSource
+                      ? <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+                      : <RotateCcw className="h-3.5 w-3.5" />}
+                    获取最新网页
+                  </button>
+                </AlertDialog.Trigger>
+                <AlertDialog.Portal>
+                  <AlertDialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
+                  <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(90vw,440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl">
+                    <AlertDialog.Title className="font-semibold">获取最新网页并创建新版本？</AlertDialog.Title>
+                    <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">
+                      系统会沿用原来的站点和页数边界。只有新快照满足原完整性要求后，才会创建新版本，并把公开网页内容发送给当前模型连接；旧版本和旧 Run 保持不变。
+                    </AlertDialog.Description>
+                    <div className="mt-5 flex justify-end gap-2">
+                      <AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm">取消</AlertDialog.Cancel>
+                      <AlertDialog.Action
+                        onClick={() => {
+                          setRefreshingSource(true);
+                          void onRefreshSource(true).finally(() => setRefreshingSource(false));
+                        }}
+                        className="rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground"
+                      >
+                        确认获取并创建新版本
+                      </AlertDialog.Action>
+                    </div>
+                  </AlertDialog.Content>
+                </AlertDialog.Portal>
+              </AlertDialog.Root>
+            ) : (
+              <button
+                type="button"
+                disabled={refreshingSource}
+                onClick={() => {
+                  setRefreshingSource(true);
+                  void onRefreshSource(false).finally(() => setRefreshingSource(false));
+                }}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {refreshingSource
+                  ? <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
+                  : <RotateCcw className="h-3.5 w-3.5" />}
+                获取最新网页
+              </button>
+            )
+          )}
         </div>
       )}
       <div className="flex items-start justify-between gap-4">

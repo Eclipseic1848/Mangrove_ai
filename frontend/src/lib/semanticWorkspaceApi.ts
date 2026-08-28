@@ -101,7 +101,10 @@ export function createSourceAcquisition(
   payload: {
     url: string;
     purpose: string;
-    allowed_scope: "current_page";
+    allowed_scope: "current_page" | "same_site";
+    page_limit?: number;
+    completeness_mode?: "exploratory" | "hard_min_pages" | "hard_scope_complete";
+    required_valid_pages?: number | null;
   },
   idempotencyKey: string,
 ): Promise<SourceAcquisitionAttempt> {
@@ -122,6 +125,28 @@ export function cancelSourceAcquisition(
   attemptId: string,
 ): Promise<SourceAcquisitionAttempt> {
   return api.post(`${BASE}/source-acquisitions/${attemptId}/cancel`);
+}
+
+export function refreshWorkspaceSource(
+  taskId: string,
+  expectedActiveRevision: number,
+  externalApiConfirmed: boolean,
+  idempotencyKey: string,
+  resumeUnknown: boolean,
+): Promise<{
+  status: "acquiring" | "revision_created";
+  attempt: SourceAcquisitionAttempt;
+  revision: WorkspaceRevision | null;
+}> {
+  return api.post(
+    `${BASE}/tasks/${taskId}/source-refresh`,
+    {
+      expected_active_revision: expectedActiveRevision,
+      external_api_confirmed: externalApiConfirmed,
+      resume_unknown: resumeUnknown,
+    },
+    { "Idempotency-Key": idempotencyKey },
+  );
 }
 
 export function requestCandidateReverification(
