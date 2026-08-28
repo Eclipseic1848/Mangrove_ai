@@ -125,6 +125,34 @@ _OUTPUT_FORMAT_PATTERN = re.compile(
 _HARD_SOURCE_REQUIREMENT_PATTERN = re.compile(
     r"全部|所有|完整覆盖|不得遗漏|必须\s*(?:至少\s*)?\d+"
 )
+_COUNT_TOKEN = r"(?:\d{1,6}|[零〇一二两三四五六七八九十百千万]+)"
+_RESULT_UNIT_TOKEN = (
+    r"(?:家公司|家|项结果|条结果|个结果|个对象|个公司|项|条|份|篇|款|种|名)"
+)
+_RESULT_COUNT_WITH_UNIT_PATTERN = re.compile(
+    rf"(?<!\d)({_COUNT_TOKEN})(?!\d)\s*{_RESULT_UNIT_TOKEN}"
+)
+_RESULT_COUNT_ONLY_PATTERN = re.compile(
+    r"^(?:至少|最多|正好|约|大约|不少于|不超过|目标(?:为)?|需要)?\s*"
+    rf"(?<!\d)({_COUNT_TOKEN})(?!\d)\s*$"
+)
+_HARD_QUANTITY_PATTERN = re.compile(r"至少|必须|不少于|不得少于|正好|恰好")
+_UNSUPPORTED_COUNT_OPERATOR_PATTERN = re.compile(
+    rf"(?:最多|至多|不超过|正好|恰好|大约|约)\s*"
+    rf"(?<!\d){_COUNT_TOKEN}(?!\d)\s*{_RESULT_UNIT_TOKEN}|"
+    rf"^(?:最多|至多|不超过|正好|恰好|大约|约)\s*"
+    rf"(?<!\d){_COUNT_TOKEN}(?!\d)\s*$|"
+    rf"(?<!\d){_COUNT_TOKEN}(?!\d)\s*{_RESULT_UNIT_TOKEN}\s*"
+    r"(?:以内|以下|左右)|"
+    rf"(?<!\d){_COUNT_TOKEN}(?!\d)\s*{_RESULT_UNIT_TOKEN}\s*"
+    r"(?:上下|前后|整)"
+    r"(?=$|[\s，。；、,;：:]|即可|就好|就行|完成|为准|足够|吧|为宜|"
+    r"的(?:结果|范围|数量))"
+)
+_NEGATED_COMPLETENESS_PATTERN = re.compile(
+    r"不(?:要求|需要)\s*(?:全部|所有|完整|全量)|无需\s*(?:全部|所有|完整|全量)|"
+    r"允许遗漏|可以遗漏"
+)
 _TERMINAL = {
     "completed",
     "candidate_ready",
@@ -460,6 +488,11 @@ class WorkspaceRevisionIn(BaseModel):
     external_api_confirmed: bool = False
     expected_active_revision: int = Field(ge=1)
     source_snapshot_id: str | None = Field(default=None, min_length=1, max_length=160)
+    accepted_candidate_set_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    accepted_result_count: int | None = Field(default=None, ge=1)
 
     @field_validator("instruction")
     @classmethod
@@ -483,6 +516,8 @@ class WorkspaceRevisionIn(BaseModel):
 
     @model_validator(mode="after")
     def validate_table_output_contracts(self) -> "WorkspaceRevisionIn":
+        if bool(self.accepted_candidate_set_hash) != bool(self.accepted_result_count):
+            raise ValueError("接受缺口必须同时绑定 Candidate 身份和实际结果数")
         if self.table_output_contracts is None:
             return self
         contract_formats = [
@@ -496,6 +531,20 @@ class WorkspaceRevisionIn(BaseModel):
         ):
             raise ValueError("表格输出契约必须绑定正式输出格式")
         return self
+
+
+class CandidateGapActionIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal[
+        "accept_gap",
+        "reject_gap",
+        "supplement_source",
+        "refresh_source",
+    ]
+    expected_revision: int = Field(ge=1)
+    expected_candidate_set_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    external_api_confirmed: bool = False
 
 
 class SourceRefreshIn(BaseModel):
@@ -618,7 +667,8 @@ def _public_runtime(
     task_id: str,
     revision: int,
 ) -> dict[str, Any]:
-    row = _runtime_repository().get(user_id, task_id, revision)
+    repository = _runtime_repository()
+    row = repository.get(user_id, task_id, revision)
     if row is None:
         return {
             "runtime_version": RuntimeVersion.LEGACY.value,
@@ -631,7 +681,7 @@ def _public_runtime(
             "events": [],
         }
     coverage = (
-        _runtime_repository().get_coverage(
+        repository.get_coverage(
             user_id=user_id,
             task_id=task_id,
             revision=revision,
@@ -644,6 +694,16 @@ def _public_runtime(
     verification = (
         row["verification"].model_dump(mode="json")
         if candidate_visible and row["verification"]
+        else None
+    )
+    candidate_coverage = (
+        repository.get_candidate_coverage(
+            user_id=user_id,
+            task_id=task_id,
+            revision=revision,
+            candidate_set_hash=str(row["verified_candidate_set_hash"]),
+        )
+        if row.get("verified_candidate_set_hash")
         else None
     )
     if verification and verification.get("status") == "inconclusive":
@@ -678,6 +738,16 @@ def _public_runtime(
             for item in (row["candidates"] if candidate_visible else ())
         ],
         "verification": verification,
+        "candidate_coverage": (
+            candidate_coverage.model_dump(mode="json")
+            if candidate_coverage is not None
+            else None
+        ),
+        "gap_actions": repository.list_gap_actions(
+            user_id=user_id,
+            task_id=task_id,
+            source_revision=revision,
+        ),
         "failure": row["failure"],
         "provider_usage": (
             get_default_broker().list_usage(
@@ -688,7 +758,7 @@ def _public_runtime(
             if row["model_connection_id"]
             else []
         ),
-        "events": _runtime_repository().list_events(
+        "events": repository.list_events(
             user_id, task_id, revision
         ),
         "coverage": (
@@ -777,7 +847,13 @@ def _public_runtime(
                 else None
             ),
         }
-        payload["awaiting_publication"] = offer.awaiting_publication
+        payload["awaiting_publication"] = bool(
+            offer.awaiting_publication
+            and not (
+                candidate_coverage is not None
+                and candidate_coverage.is_partial
+            )
+        )
     return payload
 
 
@@ -803,6 +879,86 @@ def _candidate_download_allowed(
         not check.passed and check.code in blocked_codes
         for check in verification.checks
     )
+
+
+def _freeze_goal_contract(
+    payload: WorkspaceTaskCreateIn,
+    *,
+    objective: str,
+    source_snapshot: dict[str, Any],
+) -> dict[str, Any]:
+    """把用户确认的结果门槛和获准来源范围写成显式 GoalContract。"""
+
+    quantity = payload.quantity_requirement or ""
+    completeness = payload.completeness_requirement or ""
+    confirmed_requirements = f"{quantity}\n{completeness}"
+    if _UNSUPPORTED_COUNT_OPERATOR_PATTERN.search(quantity):
+        # 当前覆盖契约只表达最低目标，不能丢掉“最多/正好/约”等运算符后
+        # 全部按“至少 N 项”执行。在运算符进入领域模型前必须失败关闭。
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "当前暂不支持结果数量上限、精确值或约数，请改为"
+                "“至少 10 家”或“尽可能多”"
+            ),
+        )
+    # 数量只从用户单独确认的数量字段提取，并要求结果单位或纯数量表达；
+    # “最近 30 天”等时间窗口不能悄悄变成 30 项硬门槛。
+    count_match = _RESULT_COUNT_WITH_UNIT_PATTERN.search(quantity)
+    if count_match is None:
+        count_match = _RESULT_COUNT_ONLY_PATTERN.fullmatch(quantity.strip())
+    require_all = bool(
+        re.search(r"全部|所有|不得遗漏|完整|必须全量", confirmed_requirements)
+    ) and not bool(_NEGATED_COMPLETENESS_PATTERN.search(confirmed_requirements))
+    target_count = _parse_result_count(count_match.group(1)) if count_match else None
+    if target_count is None and _HARD_QUANTITY_PATTERN.search(quantity):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="无法确定硬性结果数量，请使用“至少 10 家公司”等明确数量重新确认",
+        )
+    strict = bool(require_all or target_count is not None)
+    return {
+        "objective": objective,
+        "must_include": list(payload.must_include),
+        "explicit_exclusions": list(payload.explicit_exclusions),
+        "quantity_requirement": payload.quantity_requirement,
+        "completeness_requirement": payload.completeness_requirement,
+        "coverage": {
+            "strictness": "strict" if strict else "exploratory",
+            "target_result_count": target_count,
+            "require_all": require_all,
+            "exploratory_target": None if strict else confirmed_requirements.strip(),
+            "authorized_source_scope": source_snapshot["allowed_scope"],
+        },
+    }
+
+
+def _parse_result_count(value: str) -> int | None:
+    """解析已绑定结果单位的阿拉伯或常用中文整数；越界时失败关闭。"""
+
+    if value.isdigit():
+        parsed = int(value)
+        return parsed if 1 <= parsed <= 1_000_000 else None
+    digits = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3,
+              "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+    units = {"十": 10, "百": 100, "千": 1000}
+    total = 0
+    section = 0
+    number = 0
+    for char in value:
+        if char in digits:
+            number = digits[char]
+        elif char in units:
+            section += (number or 1) * units[char]
+            number = 0
+        elif char == "万":
+            total += (section + number or 1) * 10_000
+            section = 0
+            number = 0
+        else:
+            return None
+    parsed = total + section + number
+    return parsed if 1 <= parsed <= 1_000_000 else None
 
 
 @router.get("/guidance")
@@ -1603,13 +1759,12 @@ async def create_task(
         assert prepared_binding is not None
         assert prepared_manifest is not None
         base_transaction_hook = transaction_hook
-        goal_contract = {
-            "objective": user_objective,
-            "must_include": list(payload.must_include),
-            "explicit_exclusions": list(payload.explicit_exclusions),
-            "quantity_requirement": payload.quantity_requirement,
-            "completeness_requirement": payload.completeness_requirement,
-        }
+        assert source_snapshot is not None
+        goal_contract = _freeze_goal_contract(
+            payload,
+            objective=user_objective,
+            source_snapshot=source_snapshot,
+        )
         delivery_spec = {"formats": list(payload.output_formats)}
         runtime_binding = prepared_binding.model_dump(mode="json")
 
@@ -2655,6 +2810,33 @@ async def create_revision(
         task_id,
         int(task["active_revision"]),
     )
+    accepted_assessment = None
+    if payload.accepted_candidate_set_hash is not None:
+        if (
+            previous_runtime is None
+            or previous_runtime.get("verified_candidate_set_hash")
+            != payload.accepted_candidate_set_hash
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Candidate 已变化，请查看最新部分结果后再确认",
+            )
+        accepted_assessment = _runtime_repository().get_candidate_coverage(
+            user_id=user_id,
+            task_id=task_id,
+            revision=int(task["active_revision"]),
+            candidate_set_hash=payload.accepted_candidate_set_hash,
+        )
+        if (
+            accepted_assessment is None
+            or not accepted_assessment.is_partial
+            or accepted_assessment.actual_result_count
+            != payload.accepted_result_count
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="当前 Candidate 没有可接受的冻结缺口结论",
+            )
     expected_revision = int(task["active_revision"]) + 1
     formats = (
         list(payload.output_formats)
@@ -2791,6 +2973,27 @@ async def create_revision(
             if current_web_contract is not None
             else {"objective": task["objective_text"]}
         )
+        if accepted_assessment is not None:
+            previous_goal = json.loads(
+                json.dumps(previous_goal, ensure_ascii=False)
+            )
+            coverage_goal = previous_goal.setdefault("coverage", {})
+            coverage_goal["target_result_count"] = (
+                accepted_assessment.actual_result_count
+            )
+            coverage_goal["accepted_gap_from"] = {
+                "revision": int(task["active_revision"]),
+                "candidate_set_hash": payload.accepted_candidate_set_hash,
+                "previous_target_result_count": (
+                    accepted_assessment.target_result_count
+                ),
+                "accepted_result_count": (
+                    accepted_assessment.actual_result_count
+                ),
+            }
+            previous_goal["quantity_requirement"] = (
+                f"接受当前有证据的 {accepted_assessment.actual_result_count} 项"
+            )
         delivery_spec = {"formats": formats}
         runtime_binding = prepared_binding.model_dump(mode="json")
 
@@ -2867,6 +3070,189 @@ async def create_revision(
     )
     get_semantic_workspace_manager().enqueue(user_id, task_id)
     return revision
+
+
+@router.post(
+    "/tasks/{task_id}/candidate-gap-actions",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def decide_candidate_gap(
+    task_id: str,
+    payload: CandidateGapActionIn,
+    idempotency_key: str = Header(
+        min_length=1,
+        max_length=200,
+        alias="Idempotency-Key",
+    ),
+    user=Depends(get_current_user),
+):
+    """记录 Owner 的单一缺口动作；只有接受缺口会创建新 Revision。"""
+
+    user_id = user["user_id"]
+    task = _task_or_404(user_id, task_id)
+    repository = _runtime_repository()
+    runtime = repository.get(user_id, task_id, payload.expected_revision)
+    if (
+        runtime is None
+        or runtime.get("verified_candidate_set_hash")
+        != payload.expected_candidate_set_hash
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Candidate 已变化，请查看最新部分结果后再决定",
+        )
+    assessment = repository.get_candidate_coverage(
+        user_id=user_id,
+        task_id=task_id,
+        revision=payload.expected_revision,
+        candidate_set_hash=payload.expected_candidate_set_hash,
+    )
+    if assessment is None or not assessment.is_partial:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="当前 Candidate 没有待处理的冻结缺口",
+        )
+    if assessment.same_run_repair_allowed and payload.action == "accept_gap":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="确认漏提只能在当前 Run 内修复，不能通过降低目标接受",
+        )
+    if payload.action == "accept_gap" and assessment.actual_result_count < 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="当前没有可接受的有证据结果，请补充或刷新来源",
+        )
+    request_hash = hashlib.sha256(
+        json.dumps(
+            payload.model_dump(mode="json"),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    try:
+        action, claimed = repository.claim_gap_action(
+            user_id=user_id,
+            task_id=task_id,
+            idempotency_key=idempotency_key,
+            request_hash=request_hash,
+            source_revision=payload.expected_revision,
+            candidate_set_hash=payload.expected_candidate_set_hash,
+            action=payload.action,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not claimed and action["status"] == "completed":
+        return {
+            "action": payload.action,
+            "status": "completed",
+            "source_revision": payload.expected_revision,
+            "target_revision": action["target_revision"],
+        }
+    if (
+        not claimed
+        and action["status"] == "pending"
+        and payload.action == "accept_gap"
+    ):
+        # 新 Revision 已写入、动作终态尚未来得及回写时，从冻结合同恢复同一幂等结果。
+        recovery_revision = payload.expected_revision + 1
+        recovery_contract = get_store().get_web_task_contract(
+            user_id,
+            task_id,
+            recovery_revision,
+        )
+        accepted_from = (
+            (recovery_contract or {}).get("goal_contract", {})
+            .get("coverage", {})
+            .get("accepted_gap_from", {})
+        )
+        if (
+            accepted_from.get("revision") == payload.expected_revision
+            and accepted_from.get("candidate_set_hash")
+            == payload.expected_candidate_set_hash
+        ):
+            completed = repository.complete_gap_action(
+                user_id=user_id,
+                task_id=task_id,
+                idempotency_key=idempotency_key,
+                target_revision=recovery_revision,
+            )
+            return {
+                "action": payload.action,
+                "status": completed["status"],
+                "source_revision": payload.expected_revision,
+                "target_revision": recovery_revision,
+            }
+    if int(task["active_revision"]) != payload.expected_revision:
+        if claimed:
+            repository.complete_gap_action(
+                user_id=user_id,
+                task_id=task_id,
+                idempotency_key=idempotency_key,
+                status="rejected",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="活动版本已变化，请查看最新结果后再决定",
+        )
+
+    if payload.action == "accept_gap":
+        revision = await create_revision(
+            task_id,
+            WorkspaceRevisionIn(
+                instruction=(
+                    f"接受当前 {assessment.actual_result_count} 项有证据结果，"
+                    "并据此调整本版本目标"
+                ),
+                external_api_confirmed=payload.external_api_confirmed,
+                expected_active_revision=payload.expected_revision,
+                accepted_candidate_set_hash=payload.expected_candidate_set_hash,
+                accepted_result_count=assessment.actual_result_count,
+            ),
+            user=user,
+        )
+        completed = repository.complete_gap_action(
+            user_id=user_id,
+            task_id=task_id,
+            idempotency_key=idempotency_key,
+            target_revision=int(revision["revision"]),
+        )
+        return {
+            "action": payload.action,
+            "status": completed["status"],
+            "source_revision": payload.expected_revision,
+            "target_revision": int(revision["revision"]),
+        }
+
+    repository.complete_gap_action(
+        user_id=user_id,
+        task_id=task_id,
+        idempotency_key=idempotency_key,
+    )
+    next_actions = {
+        "reject_gap": "保留当前版本，不创建正式交付",
+        "supplement_source": "请添加或选择新的获准来源后创建新版本",
+        "refresh_source": "请使用获取最新网页动作重新读取原获准范围",
+    }
+    get_store().append_semantic_workspace_event(
+        user_id,
+        task_id,
+        stage="verify",
+        event_type=f"candidate_gap.{payload.action}",
+        summary=next_actions[payload.action],
+        details={
+            "source_revision": payload.expected_revision,
+            "candidate_set_hash": payload.expected_candidate_set_hash,
+            "formal_delivery": False,
+        },
+    )
+    return {
+        "action": payload.action,
+        "status": "completed",
+        "source_revision": payload.expected_revision,
+        "target_revision": None,
+        "next_action": next_actions[payload.action],
+    }
 
 
 @router.post(

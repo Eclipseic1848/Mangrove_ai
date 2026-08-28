@@ -35,6 +35,7 @@ import {
   cancelWorkspaceTask,
   createWorkspaceRevision,
   createWorkspaceTask,
+  decideCandidateGap,
   decideWorkspaceRevision,
   getWorkspaceGuidance,
   getWorkspaceStorage,
@@ -333,6 +334,10 @@ export function SemanticWorkspacePage() {
     key: string;
   } | null>(null);
   const sourceRefreshAttemptRef = useRef<{
+    fingerprint: string;
+    key: string;
+  } | null>(null);
+  const gapActionAttemptRef = useRef<{
     fingerprint: string;
     key: string;
   } | null>(null);
@@ -1228,6 +1233,57 @@ export function SemanticWorkspacePage() {
                                 error instanceof Error
                                   ? error.message
                                   : "网页来源刷新失败；旧版本保持不变",
+                              );
+                              throw error;
+                            }
+                          }}
+                          onGapAction={async (action) => {
+                            const revision = task.current_revision ?? task.active_revision;
+                            const candidateHash = task.agentic_runtime
+                              ?.reverification_offer?.candidate_set_hash;
+                            if (!candidateHash) {
+                              throw new Error("缺少冻结 Candidate 身份，请刷新任务后重试");
+                            }
+                            const fingerprint = `${task.task_id}:${revision}:${candidateHash}:${action}`;
+                            if (gapActionAttemptRef.current?.fingerprint !== fingerprint) {
+                              gapActionAttemptRef.current = {
+                                fingerprint,
+                                key: `candidate-gap-${nanoid()}`,
+                              };
+                            }
+                            try {
+                              const result = await decideCandidateGap(
+                                task.task_id,
+                                {
+                                  action,
+                                  expected_revision: revision,
+                                  expected_candidate_set_hash: candidateHash,
+                                  external_api_confirmed: Boolean(task.model_connection_id),
+                                },
+                                gapActionAttemptRef.current.key,
+                              );
+                              gapActionAttemptRef.current = null;
+                              if (action === "accept_gap") {
+                                setSelectedRevision(null);
+                                toast.success(`已创建结果版本 V${result.target_revision}`);
+                              } else if (action === "reject_gap") {
+                                toast.info("已保留原目标，当前部分结果不会正式发布");
+                              } else if (action === "supplement_source") {
+                                toast.info("已记录补充来源，请从新任务区选择新增来源");
+                              } else {
+                                toast.info("已记录刷新来源，请使用上方“获取最新网页”继续");
+                              }
+                              await Promise.all([
+                                queryClient.invalidateQueries({
+                                  queryKey: ["semantic-workspace-task", task.task_id],
+                                }),
+                                queryClient.invalidateQueries({
+                                  queryKey: ["semantic-workspace-tasks"],
+                                }),
+                              ]);
+                            } catch (error) {
+                              toast.error(
+                                error instanceof Error ? error.message : "缺口决定提交失败",
                               );
                               throw error;
                             }

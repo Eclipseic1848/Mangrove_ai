@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 from src.agentic_runtime.repository import AgenticRuntimeRepository
+from src.agentic_runtime.coverage import ResultItem, assess_web_candidate
 from src.api.auth import get_store
 from src.api import semantic_workspace_runtime as runtime_mod
 from src.api.routes import semantic_workspace as semantic_routes
@@ -27,10 +28,135 @@ from src.source_acquisition import (
 )
 from tests.test_pi_runtime_workspace_api import (
     FakePiRuntime,
-    _client,
+    _client as _base_client,
     _wait_for_delivery,
     _wait_for_status,
 )
+
+
+class CoverageAwareWebPiRuntime(FakePiRuntime):
+    """网页测试替身遵守新 Runtime 覆盖契约，不绕过发布失败关闭门。"""
+
+    def __init__(self, *, result_search_complete: bool = True) -> None:
+        super().__init__()
+        self.result_search_complete = result_search_complete
+
+    async def _complete(self, request, *, on_event, run_id=None):
+        result = await super()._complete(
+            request,
+            on_event=on_event,
+            run_id=run_id,
+        )
+        if request.goal_contract is None or request.source_coverage is None:
+            return result
+        coverage_goal = request.goal_contract.get("coverage") or {}
+        source_coverage = request.source_coverage
+        assessment = assess_web_candidate(
+            result_items=(
+                ResultItem(
+                    result_id="web-result-1",
+                    label="网页证据结果",
+                    evidence_refs=("evidence-1",),
+                ),
+            ),
+            target_result_count=coverage_goal.get("target_result_count"),
+            strict=coverage_goal.get("strictness") == "strict",
+            require_all=bool(coverage_goal.get("require_all")),
+            scope_complete=source_coverage.get("status") == "scope_complete",
+            failed_page_count=int(source_coverage.get("failed_page_count") or 0),
+            coverage_unknown=(
+                source_coverage.get("status") == "coverage_unknown"
+                or bool(source_coverage.get("limit_reached"))
+            ),
+            result_search_complete=self.result_search_complete,
+            observed_page_count=int(
+                source_coverage.get("valid_page_count") or 0
+            ),
+        )
+        return result.model_copy(update={"candidate_coverage": assessment})
+
+
+def _client(tmp_path, monkeypatch, **kwargs):
+    kwargs.setdefault("pi_runtime", CoverageAwareWebPiRuntime())
+    return _base_client(tmp_path, monkeypatch, **kwargs)
+
+
+class PartialWebPiRuntime(CoverageAwareWebPiRuntime):
+    """形成九项有证据结果，让工作台验证严格目标缺口。"""
+
+    def __init__(
+        self,
+        *,
+        failed_page_count: int = 0,
+        coverage_unknown: bool = False,
+    ) -> None:
+        super().__init__()
+        self.failed_page_count = failed_page_count
+        self.coverage_unknown = coverage_unknown
+
+    async def _complete(self, request, *, on_event, run_id=None):
+        result = await super()._complete(
+            request,
+            on_event=on_event,
+            run_id=run_id,
+        )
+        coverage_goal = (request.goal_contract or {}).get("coverage") or {}
+        items = tuple(
+            ResultItem(
+                result_id=f"company-{index}",
+                evidence_refs=(f"evidence-{index}",),
+            )
+            for index in range(1, 10)
+        )
+        assessment = assess_web_candidate(
+            result_items=items,
+            target_result_count=coverage_goal.get("target_result_count"),
+            strict=coverage_goal.get("strictness") == "strict",
+            require_all=bool(coverage_goal.get("require_all")),
+            scope_complete=True,
+            failed_page_count=self.failed_page_count,
+            coverage_unknown=self.coverage_unknown,
+            result_search_complete=True,
+            observed_page_count=int(
+                (request.source_coverage or {}).get("valid_page_count") or 0
+            ),
+        )
+        return result.model_copy(update={"candidate_coverage": assessment})
+
+
+class OmissionWebPiRuntime(CoverageAwareWebPiRuntime):
+    """模拟 Verifier 已确认第十项有证据但未进入候选。"""
+
+    async def _complete(self, request, *, on_event, run_id=None):
+        result = await super()._complete(
+            request,
+            on_event=on_event,
+            run_id=run_id,
+        )
+        items = tuple(
+            ResultItem(
+                result_id=f"company-{index}",
+                evidence_refs=(f"evidence-{index}",),
+            )
+            for index in range(1, 10)
+        )
+        assessment = assess_web_candidate(
+            result_items=items,
+            qualified_omissions=(
+                ResultItem(
+                    result_id="company-10",
+                    evidence_refs=("evidence-10",),
+                ),
+            ),
+            target_result_count=10,
+            strict=True,
+            scope_complete=True,
+            failed_page_count=0,
+            coverage_unknown=False,
+            result_search_complete=True,
+            observed_page_count=1,
+        )
+        return result.model_copy(update={"candidate_coverage": assessment})
 
 
 def _seed_snapshot(
@@ -112,7 +238,7 @@ def test_exact_web_snapshot_reaches_formal_delivery_without_refetch(
     tmp_path,
     monkeypatch,
 ) -> None:
-    runtime = FakePiRuntime()
+    runtime = CoverageAwareWebPiRuntime()
     client = _client(
         tmp_path,
         monkeypatch,
@@ -199,7 +325,7 @@ def test_source_refresh_creates_new_snapshot_and_revision_idempotently(
     tmp_path,
     monkeypatch,
 ) -> None:
-    runtime = FakePiRuntime()
+    runtime = CoverageAwareWebPiRuntime()
     client = _client(
         tmp_path,
         monkeypatch,
@@ -307,7 +433,7 @@ def test_failed_source_refresh_keeps_old_revision_and_run(
     tmp_path,
     monkeypatch,
 ) -> None:
-    runtime = FakePiRuntime()
+    runtime = CoverageAwareWebPiRuntime()
     client = _client(
         tmp_path,
         monkeypatch,
@@ -688,7 +814,7 @@ def test_publisher_failure_recovers_same_candidate_without_rerunning_agent(
     tmp_path,
     monkeypatch,
 ) -> None:
-    runtime = FakePiRuntime()
+    runtime = CoverageAwareWebPiRuntime()
     original = DeliveryPublisher.publish
     publish_calls = 0
 
@@ -735,7 +861,7 @@ def test_permanent_publisher_rejection_fails_closed_without_hot_retry(
     tmp_path,
     monkeypatch,
 ) -> None:
-    runtime = FakePiRuntime()
+    runtime = CoverageAwareWebPiRuntime()
     publish_calls = 0
 
     def reject_contract(_self, _command, *, actor_id):
@@ -809,3 +935,457 @@ def test_web_task_rejects_unbounded_goal_contract(
     with client:
         rejected = client.post("/api/semantic-workspace/tasks", json=payload)
     assert rejected.status_code == 422, rejected.text
+
+
+def test_goal_contract_does_not_treat_time_window_as_result_count() -> None:
+    payload = semantic_routes.WorkspaceTaskCreateIn.model_construct(
+        quantity_requirement="最近 30 天内至少 10 家公司",
+        completeness_requirement="仅检查最近 30 天的公开内容",
+        must_include=(),
+        explicit_exclusions=(),
+    )
+
+    contract = semantic_routes._freeze_goal_contract(
+        payload,
+        objective="列出最近一个月的公司",
+        source_snapshot={"allowed_scope": {"mode": "exact_page"}},
+    )
+
+    assert contract["coverage"]["target_result_count"] == 10
+
+    time_only = payload.model_copy(
+        update={"quantity_requirement": "最近 30 个工作日内尽可能多"}
+    )
+    time_contract = semantic_routes._freeze_goal_contract(
+        time_only,
+        objective="尽可能列出公司",
+        source_snapshot={"allowed_scope": {"mode": "exact_page"}},
+    )
+    assert time_contract["coverage"]["target_result_count"] is None
+
+    chinese_count = payload.model_copy(
+        update={"quantity_requirement": "至少十家公司"}
+    )
+    chinese_contract = semantic_routes._freeze_goal_contract(
+        chinese_count,
+        objective="列出公司",
+        source_snapshot={"allowed_scope": {"mode": "exact_page"}},
+    )
+    assert chinese_contract["coverage"]["target_result_count"] == 10
+    assert chinese_contract["coverage"]["strictness"] == "strict"
+
+    ambiguous_hard_count = payload.model_copy(
+        update={"quantity_requirement": "至少若干家公司"}
+    )
+    with pytest.raises(semantic_routes.HTTPException) as error:
+        semantic_routes._freeze_goal_contract(
+            ambiguous_hard_count,
+            objective="列出公司",
+            source_snapshot={"allowed_scope": {"mode": "exact_page"}},
+        )
+    assert getattr(error.value, "status_code", None) == 422
+
+
+def test_goal_contract_rejects_unsupported_maximum_and_respects_negated_all() -> None:
+    upper_bound = semantic_routes.WorkspaceTaskCreateIn.model_construct(
+        quantity_requirement="最多 10 家公司",
+        completeness_requirement="不要求全部",
+        must_include=(),
+        explicit_exclusions=(),
+    )
+
+    with pytest.raises(semantic_routes.HTTPException) as error:
+        semantic_routes._freeze_goal_contract(
+            upper_bound,
+            objective="列出公司",
+            source_snapshot={"allowed_scope": {"mode": "exact_page"}},
+        )
+    assert getattr(error.value, "status_code", None) == 422
+    assert "上限" in str(getattr(error.value, "detail", ""))
+
+    for unsupported in (
+        "正好 10 家公司",
+        "约 10 家公司",
+        "最多 10",
+        "正好10",
+        "约10",
+        "10 家公司以内",
+        "10 家公司以下",
+        "10 家公司左右",
+        "10 家公司上下",
+        "10 家公司前后",
+        "10 家公司整",
+        "10 家公司左右即可",
+        "10 家公司以内完成",
+        "10 家公司整即可",
+        "10 家公司左右就行",
+        "10 家公司以内吧",
+        "10 家公司整为宜",
+    ):
+        with pytest.raises(semantic_routes.HTTPException) as operator_error:
+            semantic_routes._freeze_goal_contract(
+                upper_bound.model_copy(
+                    update={"quantity_requirement": unsupported}
+                ),
+                objective="列出公司",
+                source_snapshot={"allowed_scope": {"mode": "exact_page"}},
+            )
+        assert getattr(operator_error.value, "status_code", None) == 422
+
+    for supported_description in (
+        "10 家公司整合分析",
+        "10 家公司整体分析",
+        "10 家公司上下游数据",
+        "10 家公司上下文数据",
+        "10 家公司前后端技术栈",
+        "10 家公司前后期数据",
+        "10 家公司整车销量",
+        "10 家公司整装方案",
+        "10 家公司上下半年数据",
+    ):
+        description_contract = semantic_routes._freeze_goal_contract(
+            upper_bound.model_copy(
+                update={"quantity_requirement": supported_description}
+            ),
+            objective="列出公司",
+            source_snapshot={"allowed_scope": {"mode": "exact_page"}},
+        )
+        assert description_contract["coverage"]["target_result_count"] == 10
+
+    exploratory = upper_bound.model_copy(
+        update={"quantity_requirement": "尽可能多"}
+    )
+    contract = semantic_routes._freeze_goal_contract(
+        exploratory,
+        objective="尽可能列出公司",
+        source_snapshot={"allowed_scope": {"mode": "exact_page"}},
+    )
+    assert contract["coverage"]["target_result_count"] is None
+    assert contract["coverage"]["require_all"] is False
+    assert contract["coverage"]["strictness"] == "exploratory"
+
+    unrelated_operator = upper_bound.model_copy(
+        update={
+            "quantity_requirement": "无数量约束，尽可能多",
+            "completeness_requirement": "最近不超过 30 个工作日，不要求全部",
+        }
+    )
+    unrelated_contract = semantic_routes._freeze_goal_contract(
+        unrelated_operator,
+        objective="尽可能列出公司",
+        source_snapshot={"allowed_scope": {"mode": "exact_page"}},
+    )
+    assert unrelated_contract["coverage"]["strictness"] == "exploratory"
+
+    negated_in_quantity = upper_bound.model_copy(
+        update={
+            "quantity_requirement": "不要求全部，至少 10 家公司",
+            "completeness_requirement": "仅对当前获准范围负责",
+        }
+    )
+    negated_contract = semantic_routes._freeze_goal_contract(
+        negated_in_quantity,
+        objective="列出公司",
+        source_snapshot={"allowed_scope": {"mode": "exact_page"}},
+    )
+    assert negated_contract["coverage"]["target_result_count"] == 10
+    assert negated_contract["coverage"]["require_all"] is False
+
+
+def test_partial_candidate_stays_visible_and_gap_acceptance_creates_new_revision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = PartialWebPiRuntime()
+    client = _client(tmp_path, monkeypatch, role="admin", pi_runtime=runtime)
+    snapshot_id, _ = _seed_snapshot(
+        Path(settings.webui_db_path),
+        coverage={
+            "status": "scope_complete",
+            "limit_reached": False,
+            "attempted_page_count": 1,
+        },
+    )
+    payload = {
+        "objective_text": "列出获准目录中的 10 家公司",
+        "upload_ids": [],
+        "source_snapshot_id": snapshot_id,
+        "must_include": ["公司名称"],
+        "explicit_exclusions": ["不要猜测未出现的公司"],
+        "quantity_requirement": "10 家公司",
+        "completeness_requirement": "只对本次获准有限范围负责",
+        "output_formats": ["json"],
+        "runtime_version": "pi",
+        "permission_profile": "standard",
+        "provider": "local",
+    }
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            headers={"Idempotency-Key": "partial-ten-to-nine"},
+            json=payload,
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        partial = _wait_for_status(client, task_id, "candidate_ready")
+
+        assert partial["delivery"] is None
+        assert partial["agentic_runtime"]["candidates"]
+        assessment = partial["agentic_runtime"]["candidate_coverage"]
+        assert assessment["is_partial"] is True
+        assert assessment["actual_result_count"] == 9
+        assert assessment["target_result_count"] == 10
+        assert assessment["conclusion"]["kind"] == "confirmed_scope_insufficient"
+        candidate_hash = partial["agentic_runtime"]["reverification_offer"][
+            "candidate_set_hash"
+        ]
+
+        attempt_id = partial["agentic_runtime"]["latest_verification_attempt"][
+            "attempt_id"
+        ]
+        blocked_publish = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications/"
+            f"{attempt_id}/publish",
+            headers={"Idempotency-Key": "publish-partial"},
+            json={"expected_revision": 1},
+        )
+        assert blocked_publish.status_code == 409, blocked_publish.text
+        assert "PartialCandidate" in blocked_publish.text
+
+        for action in ("reject_gap", "supplement_source", "refresh_source"):
+            decided = client.post(
+                f"/api/semantic-workspace/tasks/{task_id}/candidate-gap-actions",
+                headers={"Idempotency-Key": f"partial-{action}"},
+                json={
+                    "action": action,
+                    "expected_revision": 1,
+                    "expected_candidate_set_hash": candidate_hash,
+                    "external_api_confirmed": False,
+                },
+            )
+            assert decided.status_code == 202, decided.text
+            assert decided.json()["target_revision"] is None
+        still_partial = client.get(
+            f"/api/semantic-workspace/tasks/{task_id}"
+        ).json()
+        assert still_partial["active_revision"] == 1
+        assert {item["action"] for item in still_partial["agentic_runtime"]["gap_actions"]} == {
+            "reject_gap",
+            "supplement_source",
+            "refresh_source",
+        }
+
+        action_payload = {
+            "action": "accept_gap",
+            "expected_revision": 1,
+            "expected_candidate_set_hash": candidate_hash,
+            "external_api_confirmed": False,
+        }
+        accepted = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-gap-actions",
+            headers={"Idempotency-Key": "accept-nine"},
+            json=action_payload,
+        )
+        assert accepted.status_code == 202, accepted.text
+        assert accepted.json()["target_revision"] == 2
+
+        # 模拟 Revision 已落库而动作终态回写前进程退出；同一请求必须恢复原结果。
+        with sqlite3.connect(settings.webui_db_path) as connection:
+            connection.execute(
+                "UPDATE candidate_gap_actions SET status='pending', "
+                "target_revision=NULL WHERE owner_id=? AND task_id=? "
+                "AND idempotency_key=?",
+                ("user-a", task_id, "accept-nine"),
+            )
+        replay = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-gap-actions",
+            headers={"Idempotency-Key": "accept-nine"},
+            json=action_payload,
+        )
+        assert replay.status_code == 202, replay.text
+        assert replay.json()["target_revision"] == 2
+
+        old_revision = client.get(
+            f"/api/semantic-workspace/tasks/{task_id}?revision=1"
+        ).json()
+        assert old_revision["agentic_runtime"]["candidate_coverage"][
+            "target_result_count"
+        ] == 10
+        with sqlite3.connect(settings.webui_db_path) as connection:
+            rows = connection.execute(
+                "SELECT revision, goal_contract_json FROM web_task_contracts "
+                "WHERE owner_id=? AND task_id=? ORDER BY revision",
+                ("user-a", task_id),
+            ).fetchall()
+        assert len(rows) == 2
+        assert json.loads(rows[0][1])["coverage"]["target_result_count"] == 10
+        accepted_goal = json.loads(rows[1][1])["coverage"]
+        assert accepted_goal["target_result_count"] == 9
+        assert accepted_goal["accepted_gap_from"]["revision"] == 1
+
+
+def test_exploratory_candidate_publishes_with_coverage_disclosure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    runtime = PartialWebPiRuntime(
+        failed_page_count=1,
+        coverage_unknown=True,
+    )
+    client = _client(tmp_path, monkeypatch, role="admin", pi_runtime=runtime)
+    snapshot_id, _ = _seed_snapshot(
+        Path(settings.webui_db_path),
+        coverage={
+            "status": "coverage_unknown",
+            "limit_reached": False,
+            "attempted_page_count": 2,
+        },
+    )
+    payload = {
+        "objective_text": "尽可能列出获准目录中的公司",
+        "upload_ids": [],
+        "source_snapshot_id": snapshot_id,
+        "must_include": ["公司名称"],
+        "explicit_exclusions": ["不要猜测未出现的公司"],
+        "quantity_requirement": "尽可能多",
+        "completeness_requirement": "允许披露缺口后交付",
+        "output_formats": ["json"],
+        "runtime_version": "pi",
+        "permission_profile": "standard",
+        "provider": "local",
+    }
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            headers={"Idempotency-Key": "exploratory-nine"},
+            json=payload,
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        completed = _wait_for_delivery(client, task_id)
+
+    assert completed["delivery"] is not None
+    assessment = completed["agentic_runtime"]["candidate_coverage"]
+    assert assessment["is_partial"] is False
+    assert assessment["formal_delivery_eligible"] is True
+    assert assessment["actual_result_count"] == 9
+    assert assessment["disclosure"]["failed_unit_count"] == 1
+    assert assessment["disclosure"]["unknown_unit_count"] == 1
+
+
+def test_completeness_requirement_freezes_hard_all_gate_and_unread_is_unknown(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=CoverageAwareWebPiRuntime(result_search_complete=False),
+    )
+    snapshot_id, _ = _seed_snapshot(
+        Path(settings.webui_db_path),
+        coverage={
+            "status": "scope_complete",
+            "limit_reached": False,
+            "attempted_page_count": 1,
+        },
+    )
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "列出获准范围内的公司",
+                "upload_ids": [],
+                "source_snapshot_id": snapshot_id,
+                "must_include": ["公司名称"],
+                "explicit_exclusions": [],
+                "quantity_requirement": "尽可能多",
+                "completeness_requirement": "必须完整，不得遗漏",
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        partial = _wait_for_status(client, task_id, "candidate_ready")
+
+    assert partial["delivery"] is None
+    assessment = partial["agentic_runtime"]["candidate_coverage"]
+    assert assessment["is_partial"] is True
+    assert assessment["conclusion"]["kind"] == "unknown"
+    with sqlite3.connect(settings.webui_db_path) as connection:
+        goal = json.loads(
+            connection.execute(
+                "SELECT goal_contract_json FROM web_task_contracts "
+                "WHERE owner_id=? AND task_id=? AND revision=1",
+                ("user-a", task_id),
+            ).fetchone()[0]
+        )
+    assert goal["coverage"]["strictness"] == "strict"
+    assert goal["coverage"]["require_all"] is True
+
+
+def test_confirmed_omission_cannot_be_accepted_as_a_lower_target(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=OmissionWebPiRuntime(),
+    )
+    snapshot_id, _ = _seed_snapshot(
+        Path(settings.webui_db_path),
+        coverage={"status": "scope_complete", "limit_reached": False},
+    )
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "列出 10 家公司",
+                "upload_ids": [],
+                "source_snapshot_id": snapshot_id,
+                "must_include": ["公司名称"],
+                "explicit_exclusions": [],
+                "quantity_requirement": "10 家公司",
+                "completeness_requirement": "必须达到数量",
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "provider": "local",
+            },
+        )
+        task_id = created.json()["task_id"]
+        partial = _wait_for_status(client, task_id, "candidate_ready")
+        candidate_hash = partial["agentic_runtime"]["reverification_offer"][
+            "candidate_set_hash"
+        ]
+        rejected = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-gap-actions",
+            headers={"Idempotency-Key": "do-not-lower-omission"},
+            json={
+                "action": "accept_gap",
+                "expected_revision": 1,
+                "expected_candidate_set_hash": candidate_hash,
+                "external_api_confirmed": False,
+            },
+        )
+        supplemented = client.post(
+            f"/api/semantic-workspace/tasks/{task_id}/candidate-gap-actions",
+            headers={"Idempotency-Key": "supplement-after-omission-repair"},
+            json={
+                "action": "supplement_source",
+                "expected_revision": 1,
+                "expected_candidate_set_hash": candidate_hash,
+                "external_api_confirmed": False,
+            },
+        )
+
+    assert rejected.status_code == 409, rejected.text
+    assert "当前 Run 内修复" in rejected.json()["detail"]
+    assert supplemented.status_code == 202, supplemented.text
+    assert supplemented.json()["status"] == "completed"

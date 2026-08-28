@@ -25,7 +25,11 @@ from .models import (
     RuntimeVersion,
     VerificationReport,
 )
-from .coverage import CoverageContract, CoverageLedger
+from .coverage import (
+    CoverageContract,
+    CoverageLedger,
+    PartialCandidateAssessment,
+)
 
 
 _LOCK = RLock()
@@ -122,6 +126,189 @@ class AgenticRuntimeRepository:
             CoverageContract.model_validate_json(row["contract_json"]),
             CoverageLedger.model_validate_json(row["ledger_json"]),
         )
+
+    def save_candidate_coverage(
+        self,
+        *,
+        user_id: str,
+        task_id: str,
+        revision: int,
+        run_id: str,
+        candidate_set_hash: str,
+        assessment: PartialCandidateAssessment,
+    ) -> None:
+        """冻结 Candidate 对应的覆盖结论；同一身份只允许完全一致的重放。"""
+
+        encoded = assessment.model_dump_json()
+        with _LOCK, self._conn() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO candidate_coverage_assessments (
+                    owner_id, task_id, revision, run_id,
+                    candidate_set_hash, assessment_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    task_id,
+                    revision,
+                    run_id,
+                    candidate_set_hash,
+                    encoded,
+                    _now(),
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT run_id, assessment_json
+                FROM candidate_coverage_assessments
+                WHERE owner_id=? AND task_id=? AND revision=?
+                  AND candidate_set_hash=?
+                """,
+                (user_id, task_id, revision, candidate_set_hash),
+            ).fetchone()
+        assert row is not None
+        if row["run_id"] != run_id or row["assessment_json"] != encoded:
+            raise ValueError("同一 Candidate 的覆盖结论不可修改")
+
+    def get_candidate_coverage(
+        self,
+        *,
+        user_id: str,
+        task_id: str,
+        revision: int,
+        candidate_set_hash: str,
+    ) -> PartialCandidateAssessment | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT assessment_json
+                FROM candidate_coverage_assessments
+                WHERE owner_id=? AND task_id=? AND revision=?
+                  AND candidate_set_hash=?
+                """,
+                (user_id, task_id, revision, candidate_set_hash),
+            ).fetchone()
+        if row is None:
+            return None
+        return PartialCandidateAssessment.model_validate_json(
+            row["assessment_json"]
+        )
+
+    def claim_gap_action(
+        self,
+        *,
+        user_id: str,
+        task_id: str,
+        idempotency_key: str,
+        request_hash: str,
+        source_revision: int,
+        candidate_set_hash: str,
+        action: str,
+    ) -> tuple[dict[str, Any], bool]:
+        """原子占用 Owner 动作；同一幂等键不能表达另一个决定。"""
+
+        now = _now()
+        with _LOCK, self._conn() as conn:
+            cursor = conn.execute(
+                """
+                INSERT OR IGNORE INTO candidate_gap_actions (
+                    owner_id, task_id, idempotency_key, request_hash,
+                    source_revision, candidate_set_hash, action, status,
+                    target_revision, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, ?)
+                """,
+                (
+                    user_id,
+                    task_id,
+                    idempotency_key,
+                    request_hash,
+                    source_revision,
+                    candidate_set_hash,
+                    action,
+                    now,
+                    now,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM candidate_gap_actions
+                WHERE owner_id=? AND task_id=? AND idempotency_key=?
+                """,
+                (user_id, task_id, idempotency_key),
+            ).fetchone()
+        assert row is not None
+        saved = dict(row)
+        if any(
+            (
+                saved["request_hash"] != request_hash,
+                int(saved["source_revision"]) != source_revision,
+                saved["candidate_set_hash"] != candidate_set_hash,
+                saved["action"] != action,
+            )
+        ):
+            raise ValueError("该幂等键已用于另一个缺口决定")
+        return saved, cursor.rowcount == 1
+
+    def complete_gap_action(
+        self,
+        *,
+        user_id: str,
+        task_id: str,
+        idempotency_key: str,
+        target_revision: int | None = None,
+        status: str = "completed",
+    ) -> dict[str, Any]:
+        if status not in {"completed", "rejected"}:
+            raise ValueError("缺口动作只能完成或拒绝")
+        with _LOCK, self._conn() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE candidate_gap_actions
+                SET status=?, target_revision=?, updated_at=?
+                WHERE owner_id=? AND task_id=? AND idempotency_key=?
+                  AND status='pending'
+                """,
+                (
+                    status,
+                    target_revision,
+                    _now(),
+                    user_id,
+                    task_id,
+                    idempotency_key,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM candidate_gap_actions
+                WHERE owner_id=? AND task_id=? AND idempotency_key=?
+                """,
+                (user_id, task_id, idempotency_key),
+            ).fetchone()
+        if row is None:
+            raise KeyError("缺口动作不存在或无权访问")
+        if cursor.rowcount != 1 and row["status"] != status:
+            raise ValueError("缺口动作已经进入其他终态")
+        return dict(row)
+
+    def list_gap_actions(
+        self,
+        *,
+        user_id: str,
+        task_id: str,
+        source_revision: int,
+    ) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT action, status, target_revision, created_at, updated_at
+                FROM candidate_gap_actions
+                WHERE owner_id=? AND task_id=? AND source_revision=?
+                ORDER BY created_at, idempotency_key
+                """,
+                (user_id, task_id, source_revision),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def claim_idempotency(
         self,

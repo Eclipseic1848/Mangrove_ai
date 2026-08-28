@@ -792,6 +792,42 @@ class SemanticWorkspaceManager:
             )
         return attempt
 
+    @staticmethod
+    def _require_candidate_delivery_eligible(
+        *,
+        repository: AgenticRuntimeRepository,
+        user_id: str,
+        task_id: str,
+        revision: int,
+    ) -> None:
+        """所有发布入口共用 PartialCandidate 失败关闭门。"""
+
+        runtime = repository.get(user_id, task_id, revision)
+        if runtime is None or not runtime.get("verified_candidate_set_hash"):
+            return
+        assessment = repository.get_candidate_coverage(
+            user_id=user_id,
+            task_id=task_id,
+            revision=revision,
+            candidate_set_hash=str(runtime["verified_candidate_set_hash"]),
+        )
+        if assessment is None:
+            web_contract = get_store().get_web_task_contract(
+                user_id,
+                task_id,
+                revision,
+            )
+            if web_contract is not None and (
+                web_contract.get("goal_contract", {}).get("coverage")
+            ):
+                raise ValueError(
+                    "网页 Candidate 缺少冻结覆盖结论，禁止正式发布"
+                )
+        if assessment is not None and not assessment.formal_delivery_eligible:
+            raise ValueError(
+                "当前结果是 PartialCandidate；原版本覆盖缺口未解决，禁止正式发布"
+            )
+
     async def publish_candidate_verification(
         self,
         *,
@@ -810,15 +846,21 @@ class SemanticWorkspaceManager:
         if int(task["active_revision"]) != expected_revision:
             raise ValueError("活动版本已变化，请查看最新结果后再发布")
 
+        runtime_repository = AgenticRuntimeRepository(settings.webui_db_path)
+        self._require_candidate_delivery_eligible(
+            repository=runtime_repository,
+            user_id=owner_id,
+            task_id=task_id,
+            revision=expected_revision,
+        )
+
         module = self._candidate_verification_module()
         attempt = module.get_attempt(
             owner_id=owner_id,
             attempt_id=attempt_id,
         )
         adapter = PiCandidateAdapter(
-            runtime_repository=AgenticRuntimeRepository(
-                settings.webui_db_path
-            ),
+            runtime_repository=runtime_repository,
             workspace_store=store,
             upload_store=_upload_store(),
         )
@@ -1672,6 +1714,12 @@ class SemanticWorkspaceManager:
         repository: AgenticRuntimeRepository,
         upload_store: UploadStore,
     ) -> None:
+        self._require_candidate_delivery_eligible(
+            repository=repository,
+            user_id=user_id,
+            task_id=task_id,
+            revision=revision,
+        )
         store = get_store()
         store.append_semantic_workspace_event(
             user_id,
@@ -2209,6 +2257,19 @@ class SemanticWorkspaceManager:
                     media_type=artifact["media_type"],
                 )
             )
+        web_contract = get_store().get_web_task_contract(
+            user_id,
+            task_id,
+            revision,
+        )
+        web_snapshot = (
+            web_repository.get_snapshot(
+                user_id,
+                web_contract["source_snapshot_id"],
+            )
+            if web_contract is not None
+            else None
+        )
         request_values: dict[str, Any] = {
             "user_id": user_id,
             "task_id": task_id,
@@ -2219,6 +2280,20 @@ class SemanticWorkspaceManager:
                 task_revision["table_output_contracts"]
             ),
             "sources": tuple(sources),
+            "goal_contract": (
+                web_contract["goal_contract"]
+                if web_contract is not None
+                else None
+            ),
+            "source_coverage": (
+                {
+                    **(web_snapshot.get("coverage") or {}),
+                    "valid_page_count": int(web_snapshot["valid_page_count"]),
+                    "failed_page_count": int(web_snapshot["failed_page_count"]),
+                }
+                if web_snapshot is not None
+                else None
+            ),
             "permission_profile": runtime["permission_profile"],
             # 外部 Provider 只能使用创建运行记录时已经冻结的用户确认，不能在执行时推断。
             "external_api_confirmed": bool(
@@ -2457,14 +2532,33 @@ class SemanticWorkspaceManager:
             session_file=result.session_file,
         )
         verification = result.verification
-        repository.update(
+        saved_runtime = repository.update(
             user_id,
             task_id,
             revision,
             status=result.status,
+            candidates=result.candidates,
+            verification=verification,
         )
+        candidate_coverage = result.candidate_coverage
+        candidate_set_hash = saved_runtime.get("verified_candidate_set_hash")
+        if candidate_coverage is not None:
+            if not candidate_set_hash:
+                raise ValueError("Candidate 覆盖结论缺少冻结候选集合身份")
+            repository.save_candidate_coverage(
+                user_id=user_id,
+                task_id=task_id,
+                revision=revision,
+                run_id=result.run_id,
+                candidate_set_hash=str(candidate_set_hash),
+                assessment=candidate_coverage,
+            )
         verification_passed = bool(
             verification and verification.status.value == "passed"
+            and (
+                candidate_coverage is None
+                or candidate_coverage.formal_delivery_eligible
+            )
         )
         # Task 的 run_id 指向真实 Pi Run，公共 Delivery 查询不再依赖伪造 Legacy Harness。
         store.update_semantic_workspace_task(
@@ -2506,8 +2600,11 @@ class SemanticWorkspaceManager:
             task_id,
             status="candidate_ready",
             summary=(
-                verification.summary
-                if verification
+                candidate_coverage.conclusion.reason
+                if candidate_coverage is not None
+                and candidate_coverage.conclusion is not None
+                else verification.summary
+                if verification is not None
                 else "候选尚未形成独立验证结论"
             ),
             error=None,
@@ -2528,8 +2625,11 @@ class SemanticWorkspaceManager:
             stage="verify",
             event_type="candidate_verification_failed",
             summary=(
-                verification.summary
-                if verification
+                candidate_coverage.conclusion.reason
+                if candidate_coverage is not None
+                and candidate_coverage.conclusion is not None
+                else verification.summary
+                if verification is not None
                 else "候选没有独立验证结论"
             ),
             details={
@@ -2541,6 +2641,12 @@ class SemanticWorkspaceManager:
                 ),
                 "next_actions": ["查看失败原因", "创建新版本修改目标", "停止"],
                 "formal_delivery": False,
+                "candidate_kind": (
+                    "partial_candidate"
+                    if candidate_coverage is not None
+                    and candidate_coverage.is_partial
+                    else "candidate"
+                ),
             },
         )
 

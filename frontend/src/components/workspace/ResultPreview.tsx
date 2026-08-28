@@ -159,7 +159,9 @@ export function CandidatePreview({
   const attempt = task.agentic_runtime?.latest_verification_attempt;
   const attemptActive = attempt?.status === "requested" || attempt?.status === "running";
   const awaitingPublication = Boolean(
-    task.agentic_runtime?.awaiting_publication && attempt?.status === "passed",
+    task.agentic_runtime?.awaiting_publication
+      && attempt?.status === "passed"
+      && !task.agentic_runtime?.candidate_coverage?.is_partial,
   );
   const semanticRetry = offer?.reason === "semantic_inconclusive"
     || historicalRecovery?.purpose === "semantic_inconclusive_reverification";

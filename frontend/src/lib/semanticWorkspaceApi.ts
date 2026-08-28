@@ -149,6 +149,29 @@ export function refreshWorkspaceSource(
   );
 }
 
+export function decideCandidateGap(
+  taskId: string,
+  payload: {
+    action: "accept_gap" | "reject_gap" | "supplement_source" | "refresh_source";
+    expected_revision: number;
+    expected_candidate_set_hash: string;
+    external_api_confirmed: boolean;
+  },
+  idempotencyKey: string,
+): Promise<{
+  action: string;
+  status: string;
+  source_revision: number;
+  target_revision: number | null;
+  next_action?: string;
+}> {
+  return api.post(
+    `${BASE}/tasks/${taskId}/candidate-gap-actions`,
+    payload,
+    { "Idempotency-Key": idempotencyKey },
+  );
+}
+
 export function requestCandidateReverification(
   taskId: string,
   payload: {

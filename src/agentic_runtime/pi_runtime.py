@@ -35,6 +35,8 @@ from .candidate_verifier import (
     BrokerSemanticJudge,
     CandidateVerifier,
     LocalModelSemanticJudge,
+    load_qualified_omissions,
+    load_result_items,
 )
 from .egress_policy import (
     EgressLease,
@@ -59,7 +61,11 @@ from .models import (
     VerificationStatus,
 )
 from .repository import AgenticRuntimeRepository
-from .coverage import verify_coverage
+from .coverage import (
+    assess_partial_candidate,
+    assess_web_candidate,
+    verify_coverage,
+)
 
 
 EventSink = Callable[[RuntimeEvent], Awaitable[None]]
@@ -90,6 +96,13 @@ class PiRuntimeError(RuntimeError):
 def _settled_repair_prompt(issue: str) -> str:
     """把独立门禁缺口转换为有界修复动作，避免模型继续泛化游走。"""
 
+    if "合格结果尚未进入候选" in issue:
+        return (
+            f"逐项结果门发现：{issue}。保持当前 Snapshot、模型和 RuntimeBinding 不变，"
+            "只把 qualified_omissions 中已有证据的对象补入候选文件，并对每项执行 "
+            "add-result；add-result 会移除同 ID 的漏提记录。不要扩大来源范围、猜测新对象"
+            "或降低用户目标。修复后再次执行 complete-results。"
+        )
     if issue.startswith("覆盖完成门未通过："):
         return (
             f"覆盖完成门发现：{issue}。不要使用 bash 翻查会话、扩展配置或自行做整份 "
@@ -110,6 +123,34 @@ def _settled_repair_prompt(issue: str) -> str:
         f"候选预检发现：{issue}。请重新检查 /workspace/output，修正该问题，并确保候选"
         "文件和 candidate-manifest.json 完整一致。不要重写已经正确的用户结果，也不要"
         f"添加用户未要求的内容。{evidence_hint}"
+    )
+
+
+def _verification_request_for_coverage(
+    request: PiRuntimeRequest,
+    coverage: Any,
+) -> PiRuntimeRequest:
+    """部分候选只核验真实性；数量缺口由覆盖门单独失败关闭。"""
+
+    if coverage is None or not coverage.is_partial:
+        return request
+    return request.model_copy(
+        update={
+            "objective_text": (
+                "独立核验当前部分候选是否忠实呈现已有证据，是否明确保留缺口，"
+                "以及是否混入用户明确不要的内容；不要求补造缺失项，也不能把部分"
+                f"结果表述为完整结果。\n原冻结目标：{request.objective_text}"
+            )
+        }
+    )
+
+
+def _result_search_independently_verified(report: VerificationReport) -> bool:
+    """只有专门的全范围复核检查可以把 Agent 完成声明升级为确认事实。"""
+
+    return any(
+        check.code == "coverage_scope_review" and check.passed
+        for check in report.checks
     )
 
 
@@ -809,6 +850,57 @@ class PiRuntime:
             return "停止提议中的结果页面没有全部进入候选证据清单"
         return None
 
+    def _candidate_coverage_assessment(
+        self,
+        request: PiRuntimeRequest,
+        manifest_path: Path,
+        *,
+        result_search_verified: bool = False,
+    ):
+        """把 Runtime 结果投影为可审计覆盖结论，不授予发布权限。"""
+
+        run_key = (request.user_id, request.task_id, request.revision)
+        grant = self._document_grants.get(run_key)
+        if grant is not None:
+            state = self._document_tool_broker.completion_state(grant.grant_id)
+            if state is not None:
+                return assess_partial_candidate(*state)
+        if request.goal_contract is None or request.source_coverage is None:
+            return None
+        coverage = request.goal_contract.get("coverage") or {}
+        source_coverage = request.source_coverage
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return assess_web_candidate(
+            result_items=load_result_items(
+                manifest_path,
+                require_explicit=True,
+            ),
+            qualified_omissions=(
+                load_qualified_omissions(
+                    manifest_path,
+                    require_explicit=True,
+                )
+                if result_search_verified
+                else ()
+            ),
+            target_result_count=coverage.get("target_result_count"),
+            strict=coverage.get("strictness") == "strict",
+            require_all=bool(coverage.get("require_all")),
+            scope_complete=source_coverage.get("status") == "scope_complete",
+            failed_page_count=int(source_coverage.get("failed_page_count") or 0),
+            coverage_unknown=(
+                source_coverage.get("status") == "coverage_unknown"
+                or bool(source_coverage.get("limit_reached"))
+            ),
+            result_search_complete=bool(
+                manifest.get("result_search_complete")
+            )
+            and result_search_verified,
+            observed_page_count=int(
+                source_coverage.get("valid_page_count") or 0
+            ),
+        )
+
     def _document_clarification(
         self,
         request: PiRuntimeRequest,
@@ -1372,14 +1464,19 @@ class PiRuntime:
         )
         validated_candidates = None
         validated_verification = None
+        validated_coverage = None
 
         async def verify_candidates(
             current_candidates: tuple[CandidateArtifact, ...],
+            current_coverage=None,
         ) -> VerificationReport:
             if self._candidate_verification is None:
                 raise PiRuntimeError("CandidateVerification Module 尚未绑定")
             attempt = await self._candidate_verification.verify_initial_current(
-                request=request,
+                request=_verification_request_for_coverage(
+                    request,
+                    current_coverage,
+                ),
                 run_id=run_id,
                 candidates=current_candidates,
                 manifest_path=output_dir / "candidate-manifest.json",
@@ -1390,7 +1487,7 @@ class PiRuntime:
             return VerificationReport.model_validate_json(attempt.report_json)
 
         async def check_settled_output() -> str | None:
-            nonlocal validated_candidates, validated_verification
+            nonlocal validated_candidates, validated_verification, validated_coverage
             if self._document_clarification(request) is not None:
                 return None
             issue = _output_contract_issue(
@@ -1415,10 +1512,38 @@ class PiRuntime:
                 )
             except Exception as exc:
                 return f"候选文件无法通过完整性检查：{str(exc)[:300]}"
-            current_verification = await verify_candidates(current_candidates)
+            try:
+                preliminary_coverage = self._candidate_coverage_assessment(
+                    request,
+                    output_dir / "candidate-manifest.json",
+                )
+            except Exception as exc:
+                return f"候选逐项覆盖清单无效：{str(exc)[:300]}"
+            current_verification = await verify_candidates(
+                current_candidates,
+                preliminary_coverage,
+            )
             validated_candidates = current_candidates
             validated_verification = current_verification
             if current_verification.status is VerificationStatus.PASSED:
+                try:
+                    current_coverage = self._candidate_coverage_assessment(
+                        request,
+                        output_dir / "candidate-manifest.json",
+                        result_search_verified=(
+                            _result_search_independently_verified(
+                                current_verification
+                            )
+                        ),
+                    )
+                except Exception as exc:
+                    return f"候选逐项覆盖清单无效：{str(exc)[:300]}"
+                validated_coverage = current_coverage
+                if (
+                    current_coverage is not None
+                    and current_coverage.same_run_repair_allowed
+                ):
+                    return current_coverage.conclusion.reason
                 return None
             failed_summaries = [
                 check.summary
@@ -1466,8 +1591,20 @@ class PiRuntime:
                 output_dir,
                 request.requested_output_formats,
             )
+            preliminary_coverage = self._candidate_coverage_assessment(
+                request,
+                output_dir / "candidate-manifest.json",
+            )
             verification = validated_verification or await verify_candidates(
-                candidates
+                candidates,
+                preliminary_coverage,
+            )
+            candidate_coverage = validated_coverage or self._candidate_coverage_assessment(
+                request,
+                output_dir / "candidate-manifest.json",
+                result_search_verified=(
+                    _result_search_independently_verified(verification)
+                ),
             )
             session_files = sorted(session_dir.rglob("*.jsonl"))
             session_file = (
@@ -1505,6 +1642,7 @@ class PiRuntime:
                 summary=final_text[-1000:],
                 candidates=candidates,
                 verification=verification,
+                candidate_coverage=candidate_coverage,
             )
         except asyncio.CancelledError:
             await self.cancel(
@@ -1887,14 +2025,23 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
 本地模型容易在长字符串工具参数中丢字段。必须使用已提供的通用清单 CLI 逐步登记：
 `python /workspace/work/candidate_manifest_tool.py init --filename "结果.csv" --format csv --description "结果如何满足目标"`
 `python /workspace/work/candidate_manifest_tool.py add-evidence --filename "结果.csv" --source "原文件名" --locator "page:17" --quote "从原件逐字复制的短原句或一行数据"`
+当结果存在可计数的顶层对象（例如 9 家公司、10 条记录）时，每一项都必须继续登记：
+`python /workspace/work/candidate_manifest_tool.py add-result --result-id "稳定结果ID" --label "用户可读名称" --source "原文件名" --locator "page:17" --quote "直接支持该项的原文"`
+如果已经确认某个合格对象被候选遗漏，必须登记它并让当前 Run 修复，不能交给用户降低目标：
+`python /workspace/work/candidate_manifest_tool.py add-omission --result-id "遗漏对象ID" --label "遗漏对象名称" --source "原文件名" --locator "page:17" --quote "证明它合格的原文"`
+检查完获准范围内的结果候选后必须执行：
+`python /workspace/work/candidate_manifest_tool.py complete-results`
 验证器指出某条 locator 不精确时，可用
 `python /workspace/work/candidate_manifest_tool.py remove-evidence --filename "结果.csv" --locator "page:17"`
 删除后重新添加准确短证据。
 多个候选分别执行 init；同一候选可多次执行 add-evidence。清单结构固定为：
-{"version":1,"artifacts":[{"filename":"结果文件名","format":"csv",
+{"version":2,"artifacts":[{"filename":"结果文件名","format":"csv",
 "description":"该文件如何满足目标","evidence":[{"source":"输入目录中的原文件名",
 "locator":"page:17 或 sheet:工作表名 或 paragraph:段落线索",
-"quote":"从该位置逐字复制、足以支持结果的原文或数据"}]}]}。
+"quote":"从该位置逐字复制、足以支持结果的原文或数据"}]}],
+"result_items":[{"result_id":"稳定结果ID","label":"结果名称",
+"evidence":[{"source":"原文件名","locator":"精确位置","quote":"支持该项的原文"}]}],
+"qualified_omissions":[],"result_search_complete":true}。
 每个候选都必须登记且至少提供一条证据。quote 必须逐字来自原件，不能改写或编造；
 验证器会脱离 Pi 重新打开原件核对。每条 quote 应是原件中的一条短原句或一行原始
 表格数据，不要把多个段落拼接成一句，不要在 quote 中概括、编号或改写；需要覆盖

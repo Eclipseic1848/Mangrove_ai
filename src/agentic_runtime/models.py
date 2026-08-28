@@ -15,6 +15,7 @@ from pydantic import (
 )
 
 from src.delivery_publishing.models import TableOutputContract
+from src.agentic_runtime.coverage import PartialCandidateAssessment
 
 
 class RuntimeVersion(str, Enum):
@@ -118,6 +119,8 @@ class PiRuntimeRequest(BaseModel):
         exclude_if=lambda value: not value,
     )
     sources: tuple[SourceInput, ...] = Field(min_length=1)
+    goal_contract: dict[str, Any] | None = None
+    source_coverage: dict[str, Any] | None = None
     permission_profile: PermissionProfile = PermissionProfile.STANDARD
     external_api_confirmed: bool = False
     model_connection_id: str | None = Field(
@@ -249,6 +252,8 @@ class SemanticDecision(BaseModel):
     passed: bool
     contains_unrequested_content: bool
     reason: str = Field(min_length=1, max_length=1000)
+    coverage_complete: bool | None = None
+    coverage_reason: str | None = Field(default=None, max_length=1000)
     # list 而非 tuple：instructor v2 JSON 模式 strict 解析下，LLM 输出
     # JSON 数组无法转 tuple，会造成「候选语义验证未形成结论」的既有缺陷
     # （#15 纵切面真实暴露）。
@@ -290,5 +295,6 @@ class PiRuntimeResult(BaseModel):
     summary: str = ""
     candidates: tuple[CandidateArtifact, ...] = ()
     verification: VerificationReport | None = None
+    candidate_coverage: PartialCandidateAssessment | None = None
     failure: dict[str, Any] | None = None
     clarification: dict[str, str] | None = None

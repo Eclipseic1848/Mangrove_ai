@@ -104,7 +104,7 @@ class RestoreVerification:
 
 
 _PROFILE_HEADS = {
-    "webui": "webui_0007",
+    "webui": "webui_0008",
     "scheduler": "scheduler_0001",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
@@ -143,6 +143,15 @@ _PROFILE_REQUIRED_COLUMNS = {
         "agentic_runtime_events": ("event_id", "event_type", "details_json"),
         "agentic_runtime_idempotency": ("idempotency_key", "request_hash"),
         "agentic_runtime_coverage": ("contract_json", "ledger_json"),
+        "candidate_coverage_assessments": (
+            "owner_id", "task_id", "revision", "run_id",
+            "candidate_set_hash", "assessment_json", "created_at",
+        ),
+        "candidate_gap_actions": (
+            "owner_id", "task_id", "idempotency_key", "request_hash",
+            "source_revision", "candidate_set_hash", "action", "status",
+            "target_revision", "created_at", "updated_at",
+        ),
         "model_connections": ("connection_id", "compatibility_slot"),
         "model_connection_models": ("connection_id", "model_id", "status"),
         "model_connection_grants": ("grant_id", "token_hash", "expires_at"),

@@ -496,6 +496,7 @@ export function TaskTimeline({
   onRecycle,
   onRetry,
   onRefreshSource,
+  onGapAction,
   onRevisionChange,
 }: {
   task: WorkspaceTask;
@@ -505,6 +506,9 @@ export function TaskTimeline({
   onRecycle: () => Promise<void>;
   onRetry: (unchanged?: boolean) => void | Promise<void>;
   onRefreshSource: (externalApiConfirmed: boolean) => Promise<void>;
+  onGapAction: (
+    action: "accept_gap" | "reject_gap" | "supplement_source" | "refresh_source",
+  ) => Promise<void>;
   onRevisionChange: (revision: number) => void;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -514,6 +518,7 @@ export function TaskTimeline({
   const [eventsOpen, setEventsOpen] = useState(false);
   const [retryingUnknown, setRetryingUnknown] = useState(false);
   const [refreshingSource, setRefreshingSource] = useState(false);
+  const [gapAction, setGapAction] = useState<string | null>(null);
   const events = useMemo(() => {
     const map = new Map<string, WorkspaceEvent>();
     [...(task.events || []), ...(task.harness_events || []), ...liveEvents].forEach(
@@ -823,6 +828,135 @@ export function TaskTimeline({
           </p>
         </section>
       )}
+
+      {task.agentic_runtime?.candidate_coverage?.is_partial && (
+        <section
+          aria-labelledby="partial-candidate-heading"
+          data-testid="partial-candidate-panel"
+          className="mt-4 border-l-2 border-amber-500 bg-amber-500/[0.04] px-4 py-4"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-xs font-medium uppercase tracking-[0.12em] text-amber-700 dark:text-amber-300">
+                部分结果 · 尚非正式交付
+              </p>
+              <h2 id="partial-candidate-heading" className="mt-1 text-base font-semibold">
+                {`已找到 ${task.agentic_runtime.candidate_coverage.actual_result_count} 项，目标是 ${task.agentic_runtime.candidate_coverage.target_result_count ?? "全部"} 项`}
+              </h2>
+              <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
+                {productText(task.agentic_runtime.candidate_coverage.conclusion?.reason
+                  || "现有结果都有来源证据，但当前版本仍有未解决的覆盖缺口。")}
+              </p>
+            </div>
+            <span className="rounded-full border border-amber-500/30 bg-background px-2.5 py-1 text-xs text-amber-700 dark:text-amber-300">
+              {task.agentic_runtime.candidate_coverage.conclusion?.kind === "confirmed_omission"
+                ? "确认漏提"
+                : task.agentic_runtime.candidate_coverage.conclusion?.kind === "confirmed_scope_insufficient"
+                  ? "确认本次范围不足"
+                  : "覆盖无法判断"}
+            </span>
+          </div>
+          <p className="mt-3 text-xs leading-5 text-muted-foreground">
+            这 {task.agentic_runtime.candidate_coverage.actual_result_count} 项仍可在下方检查；
+            原版本不会发布 Delivery。接受较少结果会创建新版本，旧要求和旧 Candidate 保持不变。
+          </p>
+          <ul className="mt-3 grid gap-x-5 gap-y-1 border-y py-3 text-xs sm:grid-cols-2">
+            {task.agentic_runtime.candidate_coverage.result_items.map((item) => (
+              <li key={item.result_id} className="flex min-w-0 items-center justify-between gap-3 py-1">
+                <span className="truncate">{item.label || item.result_id}</span>
+                <span className="shrink-0 text-muted-foreground">
+                  {item.evidence_refs.length} 条证据
+                </span>
+              </li>
+            ))}
+          </ul>
+          <div className="mt-4 flex flex-wrap gap-2">
+            {task.agentic_runtime.candidate_coverage.actual_result_count > 0 ? <AlertDialog.Root>
+              <AlertDialog.Trigger asChild>
+                <button
+                  type="button"
+                  disabled={gapAction !== null}
+                  className="inline-flex items-center rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  接受 {task.agentic_runtime.candidate_coverage.actual_result_count} 项并调整目标
+                </button>
+              </AlertDialog.Trigger>
+              <AlertDialog.Portal>
+                <AlertDialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
+                <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(90vw,440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl">
+                  <AlertDialog.Title className="font-semibold">
+                    接受当前部分结果并创建新版本？
+                  </AlertDialog.Title>
+                  <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">
+                    新版本会把目标调整为当前 {task.agentic_runtime.candidate_coverage.actual_result_count} 项并重新验证。
+                    原版本、Candidate 和缺口结论不会被修改。
+                    {task.model_connection_id
+                      ? " 新版本会继续使用当前模型连接并再次发送冻结内容，可能产生 Token 消耗。"
+                      : ""}
+                  </AlertDialog.Description>
+                  <div className="mt-5 flex justify-end gap-2">
+                    <AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                      返回检查
+                    </AlertDialog.Cancel>
+                    <AlertDialog.Action
+                      disabled={gapAction !== null}
+                      onClick={() => {
+                        setGapAction("accept_gap");
+                        void onGapAction("accept_gap").finally(() => setGapAction(null));
+                      }}
+                      className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      确认创建新版本
+                    </AlertDialog.Action>
+                  </div>
+                </AlertDialog.Content>
+              </AlertDialog.Portal>
+            </AlertDialog.Root> : (
+              <p role="status" className="rounded-lg border border-amber-500/30 bg-background px-3 py-2 text-xs text-muted-foreground">
+                当前没有可接受的有证据结果，请补充或刷新来源。
+              </p>
+            )}
+            {([
+              ["reject_gap", "不接受本次缺口"],
+              ["supplement_source", "补充来源"],
+              ["refresh_source", "刷新原来源"],
+            ] as const).map(([action, label]) => (
+              <button
+                key={action}
+                type="button"
+                disabled={gapAction !== null}
+                onClick={() => {
+                  setGapAction(action);
+                  void onGapAction(action).finally(() => setGapAction(null));
+                }}
+                className="rounded-lg border bg-background px-3 py-2 text-xs font-medium hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {gapAction === action ? "处理中…" : label}
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {task.agentic_runtime?.candidate_coverage &&
+        !task.agentic_runtime.candidate_coverage.is_partial &&
+        (task.agentic_runtime.candidate_coverage.disclosure.failed_unit_count > 0 ||
+          task.agentic_runtime.candidate_coverage.disclosure.unknown_unit_count > 0) && (
+          <section className="mt-5 border-l-2 border-slate-300 pl-4 dark:border-slate-700">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+              本次交付覆盖说明
+            </p>
+            <p className="mt-1 text-sm leading-6">
+              实际形成 {task.agentic_runtime.candidate_coverage.actual_result_count} 项有证据结果；
+              {task.agentic_runtime.candidate_coverage.disclosure.failed_unit_count > 0
+                ? ` ${task.agentic_runtime.candidate_coverage.disclosure.failed_unit_count} 个获准页面读取失败；`
+                : ""}
+              {task.agentic_runtime.candidate_coverage.disclosure.unknown_unit_count > 0
+                ? " 覆盖范围仍有无法判断的部分。"
+                : ""}
+            </p>
+          </section>
+        )}
 
       <Collapsible.Root
         open={progressOpen}

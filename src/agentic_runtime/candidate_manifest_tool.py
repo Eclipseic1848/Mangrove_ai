@@ -53,7 +53,13 @@ def initialize_manifest(
         except Exception as exc:
             raise ManifestToolError("现有候选清单不是有效 JSON") from exc
     else:
-        payload = {"version": 1, "artifacts": []}
+        payload = {
+            "version": 2,
+            "artifacts": [],
+            "result_items": [],
+            "qualified_omissions": [],
+            "result_search_complete": False,
+        }
     artifact = {
         "filename": safe_name,
         "format": output_format.lower().lstrip("."),
@@ -142,6 +148,110 @@ def remove_evidence(
     _write_atomic(manifest_path, payload)
 
 
+def add_result_item(
+    *,
+    output_dir: Path,
+    result_id: str,
+    label: str,
+    source: str,
+    locator: str,
+    quote: str,
+) -> None:
+    """登记一项业务结果及其 EvidenceRef 原料，避免文件级证据冒充逐项证据。"""
+
+    manifest_path = output_dir / "candidate-manifest.json"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ManifestToolError("请先使用 init 初始化候选清单") from exc
+    values = (result_id, label, source, locator, quote)
+    if any(not value.strip() for value in values):
+        raise ManifestToolError(
+            "result_id、label、source、locator、quote 均不能为空"
+        )
+    if len(result_id) > 200 or len(label) > 500:
+        raise ManifestToolError("结果项身份或名称过长")
+    item = {
+        "result_id": result_id,
+        "label": label,
+        "evidence": [
+            {
+                "source": source,
+                "locator": locator,
+                "quote": quote,
+            }
+        ],
+    }
+    result_items = payload.setdefault("result_items", [])
+    result_items[:] = [
+        existing
+        for existing in result_items
+        if existing.get("result_id") != result_id
+    ]
+    result_items.append(item)
+    payload.setdefault("qualified_omissions", [])[:] = [
+        existing
+        for existing in payload.get("qualified_omissions") or []
+        if existing.get("result_id") != result_id
+    ]
+    _write_atomic(manifest_path, payload)
+
+
+def add_qualified_omission(
+    *,
+    output_dir: Path,
+    result_id: str,
+    label: str,
+    source: str,
+    locator: str,
+    quote: str,
+) -> None:
+    """登记已确认合格但尚未进入候选的结果，供同 Run 修复门使用。"""
+
+    manifest_path = output_dir / "candidate-manifest.json"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ManifestToolError("请先使用 init 初始化候选清单") from exc
+    values = (result_id, label, source, locator, quote)
+    if any(not value.strip() for value in values):
+        raise ManifestToolError(
+            "result_id、label、source、locator、quote 均不能为空"
+        )
+    item = {
+        "result_id": result_id,
+        "label": label,
+        "evidence": [
+            {"source": source, "locator": locator, "quote": quote}
+        ],
+    }
+    omissions = payload.setdefault("qualified_omissions", [])
+    omissions[:] = [
+        existing
+        for existing in omissions
+        if existing.get("result_id") != result_id
+    ]
+    omissions.append(item)
+    payload.setdefault("result_items", [])[:] = [
+        existing
+        for existing in payload.get("result_items") or []
+        if existing.get("result_id") != result_id
+    ]
+    _write_atomic(manifest_path, payload)
+
+
+def mark_result_search_complete(*, output_dir: Path) -> None:
+    """显式声明本 Run 已检查完获准范围中的业务结果候选。"""
+
+    manifest_path = output_dir / "candidate-manifest.json"
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ManifestToolError("请先使用 init 初始化候选清单") from exc
+    payload["result_search_complete"] = True
+    _write_atomic(manifest_path, payload)
+
+
 def _main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -166,6 +276,22 @@ def _main() -> None:
     remove_parser.add_argument("--filename", required=True)
     remove_parser.add_argument("--locator", required=True)
 
+    result_parser = subparsers.add_parser("add-result")
+    result_parser.add_argument("--result-id", required=True)
+    result_parser.add_argument("--label", required=True)
+    result_parser.add_argument("--source", required=True)
+    result_parser.add_argument("--locator", required=True)
+    result_parser.add_argument("--quote", required=True)
+
+    omission_parser = subparsers.add_parser("add-omission")
+    omission_parser.add_argument("--result-id", required=True)
+    omission_parser.add_argument("--label", required=True)
+    omission_parser.add_argument("--source", required=True)
+    omission_parser.add_argument("--locator", required=True)
+    omission_parser.add_argument("--quote", required=True)
+
+    subparsers.add_parser("complete-results")
+
     args = parser.parse_args()
     if args.command == "init":
         initialize_manifest(
@@ -182,12 +308,32 @@ def _main() -> None:
             locator=args.locator,
             quote=args.quote,
         )
-    else:
+    elif args.command == "remove-evidence":
         remove_evidence(
             output_dir=args.output_dir,
             filename=args.filename,
             locator=args.locator,
         )
+    elif args.command == "add-result":
+        add_result_item(
+            output_dir=args.output_dir,
+            result_id=args.result_id,
+            label=args.label,
+            source=args.source,
+            locator=args.locator,
+            quote=args.quote,
+        )
+    elif args.command == "add-omission":
+        add_qualified_omission(
+            output_dir=args.output_dir,
+            result_id=args.result_id,
+            label=args.label,
+            source=args.source,
+            locator=args.locator,
+            quote=args.quote,
+        )
+    else:
+        mark_result_search_complete(output_dir=args.output_dir)
 
 
 if __name__ == "__main__":
