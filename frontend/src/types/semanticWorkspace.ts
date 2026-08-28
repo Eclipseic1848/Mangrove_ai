@@ -68,6 +68,54 @@ export interface TaskProgressView {
   events: StructuredProgressEvent[];
 }
 
+export interface WorkSessionView {
+  task_id: string;
+  revision: number;
+  run_id: string;
+  status: string;
+  started_at: string | null;
+  ended_at: string | null;
+  work_duration_ms: number;
+  waiting_duration_ms: number;
+  action_count: number;
+  tool_call_count: number;
+  handled_retry_count: number;
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_tokens: number | null;
+    total_tokens: number;
+    call_count: number;
+    unknown_call_count: number;
+  };
+  provider_usage?: Array<{
+    run_id: string;
+    connection_id: string;
+    model: string;
+    purpose: string;
+    status: string;
+    input_tokens: number | null;
+    output_tokens: number | null;
+    cache_tokens: number | null;
+    total_tokens: number | null;
+    request_count: number;
+    created_at: string;
+  }>;
+  entries: Array<{
+    event_id: string;
+    sequence: number;
+    created_at: string;
+    event_type: string;
+    summary: string;
+    purpose: string | null;
+    duration_ms: number | null;
+    result_summary: string | null;
+    evidence_refs: string[];
+    recovery_status: string | null;
+    tool_name: string | null;
+  }>;
+}
+
 export interface SteeringResult {
   result_id: string;
   task_id: string;
@@ -320,6 +368,7 @@ export interface WorkspaceTask {
   error: string | null;
   failure: WorkspaceFailure | null;
   question: WorkspaceQuestion | null;
+  work_session?: WorkSessionView | null;
   cancel_requested: boolean;
   deleted_at: string | null;
   purge_after: string | null;

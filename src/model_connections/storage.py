@@ -1,6 +1,7 @@
 """模型连接与密文的 SQLite Adapter。"""
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 import uuid
@@ -1220,21 +1221,55 @@ class ModelConnectionRepository:
         *,
         task_id: str,
         revision: int,
+        include_identity: bool = False,
     ) -> list[dict[str, object]]:
         """按任务 Owner 返回最小用量摘要，不暴露 Provider 响应正文。"""
 
         with self._conn() as conn:
             rows = conn.execute(
                 """
-                SELECT purpose, status, input_tokens, output_tokens,
-                       total_tokens, request_count
-                FROM model_provider_usage
-                WHERE owner_user_id=? AND task_id=? AND revision=?
-                ORDER BY created_at, usage_id
+                SELECT u.owner_user_id, u.task_id, u.revision, u.run_id,
+                       u.connection_id, g.model, u.purpose, u.status,
+                       u.input_tokens, u.output_tokens, u.total_tokens,
+                       u.request_count, u.native_json, u.created_at
+                FROM model_provider_usage AS u
+                JOIN model_connection_grants AS g ON g.grant_id=u.grant_id
+                WHERE u.owner_user_id=? AND u.task_id=? AND u.revision=?
+                ORDER BY u.created_at, u.usage_id
                 """,
                 (owner_user_id, task_id, revision),
             ).fetchall()
-        return [dict(row) for row in rows]
+        items = []
+        for row in rows:
+            item = dict(row)
+            native = json.loads(str(item.pop("native_json") or "{}"))
+            cache_tokens = None
+            if isinstance(native, dict):
+                for key in (
+                    "cache_tokens",
+                    "cached_tokens",
+                    "cache_read_input_tokens",
+                    "cachedContentTokenCount",
+                ):
+                    value = native.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        cache_tokens = value
+                        break
+            item["cache_tokens"] = cache_tokens
+            if not include_identity:
+                item = {
+                    key: item[key]
+                    for key in (
+                        "purpose",
+                        "status",
+                        "input_tokens",
+                        "output_tokens",
+                        "total_tokens",
+                        "request_count",
+                    )
+                }
+            items.append(item)
+        return items
 
     def get_usage_for_grant(
         self,

@@ -2256,6 +2256,47 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
         """只暴露行动摘要，不把模型思维链或完整命令参数发给普通用户。"""
 
         event_type = str(event.get("type") or "")
+        if event_type == "message_end":
+            message = event.get("message")
+            if not isinstance(message, dict) or message.get("role") != "assistant":
+                return None
+            usage = message.get("usage")
+            usage = usage if isinstance(usage, dict) else {}
+
+            def safe_count(*keys: str) -> int | None:
+                for key in keys:
+                    value = usage.get(key)
+                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                        return value
+                return None
+
+            input_tokens = safe_count("input", "input_tokens", "prompt_tokens")
+            output_tokens = safe_count("output", "output_tokens", "completion_tokens")
+            cache_tokens = safe_count(
+                "cacheRead",
+                "cache_read_input_tokens",
+                "cached_tokens",
+            )
+            total_tokens = safe_count("totalTokens", "total_tokens")
+            if total_tokens is None and input_tokens is not None and output_tokens is not None:
+                total_tokens = input_tokens + output_tokens
+            return RuntimeEvent(
+                event_type="provider.usage",
+                summary=(
+                    "模型调用已完成并返回用量"
+                    if total_tokens is not None
+                    else "模型调用已完成，用量未知"
+                ),
+                details={
+                    "trace_normalized": True,
+                    "purpose": "执行任务",
+                    "model_name": str(message.get("model") or "未知模型")[:160],
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "cache_tokens": cache_tokens,
+                    "total_tokens": total_tokens,
+                },
+            )
         if event_type == "agent_start":
             return RuntimeEvent(
                 event_type="agent.started",

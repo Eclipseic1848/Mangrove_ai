@@ -100,6 +100,7 @@ from src.task_context import (
     TaskContextSelection,
     TaskContextService,
 )
+from src.work_trace import WorkTraceProjection
 
 
 router = APIRouter(
@@ -942,6 +943,7 @@ def _public_runtime(
                 user_id,
                 task_id=task_id,
                 revision=revision,
+                include_identity=True,
             )
             if row["model_connection_id"]
             else []
@@ -1310,6 +1312,32 @@ _PROGRESS_TOOL_SUMMARIES = {
     },
 }
 
+_TRACE_SECRET_PATTERN = re.compile(
+    r"(?i)(api[_-]?key|secret|token|cookie|password|authorization)\s*[:=]\s*[^\s,;，；]+"
+)
+_TRACE_PATH_PATTERN = re.compile(r"(?:[A-Za-z]:\\|/)[^\s,;，；]+")
+_SAFE_PI_TRACE_EVENT_TYPES = {
+    "agent.started",
+    "agent.retrying",
+    "agent.settled",
+    "capability.completed",
+    "context.compacting",
+    "verification.completed",
+    "candidate.ready",
+    "plan.updated",
+}
+
+
+def _safe_trace_text(value: Any, *, limit: int = 300) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = " ".join(value.split())
+    normalized = _TRACE_SECRET_PATTERN.sub(
+        lambda match: f"{match.group(1)}=[已隐藏]", normalized
+    )
+    normalized = _TRACE_PATH_PATTERN.sub("[路径已隐藏]", normalized)
+    return normalized[:limit]
+
 
 def _progress_stage(value: str) -> ProgressStage:
     normalized = value.strip().lower()
@@ -1324,10 +1352,22 @@ def _progress_summary(event: dict[str, Any], details: dict[str, Any]) -> str:
         or event.get("type")
         or ""
     )
-    return _PROGRESS_TOOL_SUMMARIES.get(tool, {}).get(
+    summary = _PROGRESS_TOOL_SUMMARIES.get(tool, {}).get(
         runtime_event_type,
         str(event.get("summary") or "正在处理"),
     )
+    if details.get("trace_required") is True and not details.get("trace_normalized"):
+        raise RuntimeError("必需 Runtime 事件未完成安全归一化")
+    if (
+        details.get("source") == "pi-runtime"
+        and runtime_event_type
+        and runtime_event_type not in _SAFE_PI_TRACE_EVENT_TYPES
+        and not runtime_event_type.startswith(
+            ("run.", "tool.", "provider.", "checkpoint.", "runtime.")
+        )
+    ):
+        return "智能体完成一项内部操作"
+    return _safe_trace_text(summary, limit=500) or "正在处理"
 
 
 def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgressEvent, ...]:
@@ -1342,6 +1382,12 @@ def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgres
     )
     for index, event in enumerate(raw_events, start=1):
         details = event.get("details") or {}
+        raw_action = details.get("action")
+        action = dict(raw_action) if isinstance(raw_action, dict) else None
+        if action is not None and isinstance(action.get("tool"), str):
+            action["tool"] = _safe_trace_text(action["tool"], limit=120) or "工具"
+        if action is None and isinstance(details.get("tool"), str):
+            action = {"tool": _safe_trace_text(details["tool"], limit=120) or "工具"}
         raw_progress = details.get("progress")
         progress = None
         if isinstance(raw_progress, dict):
@@ -1368,7 +1414,24 @@ def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgres
                 summary=_progress_summary(event, details),
                 progress=progress,
                 refs=(details.get("refs") if isinstance(details.get("refs"), dict) else {}),
-                action=(details.get("action") if isinstance(details.get("action"), dict) else None),
+                action=action,
+                turn_id=(details.get("turn_id") if isinstance(details.get("turn_id"), str) else None),
+                tool_call_id=(details.get("tool_call_id") if isinstance(details.get("tool_call_id"), str) else None),
+                purpose=_safe_trace_text(details.get("purpose"), limit=120),
+                input_summary=_safe_trace_text(details.get("input_summary")),
+                duration_ms=(details.get("duration_ms") if isinstance(details.get("duration_ms"), int) and details.get("duration_ms") >= 0 else None),
+                result_summary=_safe_trace_text(details.get("result_summary")),
+                evidence_refs=tuple(
+                    item[:160]
+                    for item in details.get("evidence_refs", [])
+                    if isinstance(item, str) and not _TRACE_PATH_PATTERN.search(item)
+                ) if isinstance(details.get("evidence_refs"), list) else (),
+                recovery_status=(details.get("recovery_status") if details.get("recovery_status") in {"pending", "resumed", "handled", "failed"} else None),
+                model_name=_safe_trace_text(details.get("model_name"), limit=160),
+                input_tokens=(details.get("input_tokens") if isinstance(details.get("input_tokens"), int) and not isinstance(details.get("input_tokens"), bool) and details.get("input_tokens") >= 0 else None),
+                output_tokens=(details.get("output_tokens") if isinstance(details.get("output_tokens"), int) and not isinstance(details.get("output_tokens"), bool) and details.get("output_tokens") >= 0 else None),
+                cache_tokens=(details.get("cache_tokens") if isinstance(details.get("cache_tokens"), int) and not isinstance(details.get("cache_tokens"), bool) and details.get("cache_tokens") >= 0 else None),
+                total_tokens=(details.get("total_tokens") if isinstance(details.get("total_tokens"), int) and not isinstance(details.get("total_tokens"), bool) and details.get("total_tokens") >= 0 else None),
                 audience=audience,
                 created_at=event.get("created_at") or datetime.now().astimezone(),
             )
@@ -1498,11 +1561,26 @@ def _task_detail(
                 detail="冻结网页来源快照已缺失",
             )
         task["web_source"] = {**web_contract, "snapshot": snapshot}
-    task["progress"] = ProgressProjection().project(
-        _structured_progress_events(task),
+    structured_events = _structured_progress_events(task)
+    progress_view = ProgressProjection().project(
+        structured_events,
         audience=audience,
         task_status=task["status"],
-    ).model_dump(mode="json")
+    )
+    task["progress"] = progress_view.model_dump(mode="json")
+    runtime_run_id = task["agentic_runtime"].get("run_id")
+    task["work_session"] = (
+        WorkTraceProjection().project(
+            task_id=task_id,
+            revision=int(selected_revision["revision"]),
+            run_id=str(runtime_run_id),
+            status=task["status"],
+            events=progress_view.events,
+            provider_usage=task["agentic_runtime"].get("provider_usage", []),
+        ).model_dump(mode="json")
+        if runtime_run_id
+        else None
+    )
     return task
 
 

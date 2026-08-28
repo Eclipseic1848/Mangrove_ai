@@ -517,6 +517,7 @@ class ConnectionBroker:
         *,
         task_id: str,
         revision: int,
+        include_identity: bool = False,
     ) -> list[dict[str, object]]:
         """返回 Owner 可见的最小原生用量摘要。"""
 
@@ -524,6 +525,7 @@ class ConnectionBroker:
             owner_user_id,
             task_id=task_id,
             revision=revision,
+            include_identity=include_identity,
         )
 
     def get_usage_for_grant(
