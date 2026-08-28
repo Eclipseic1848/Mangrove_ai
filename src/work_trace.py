@@ -235,6 +235,20 @@ class WorkTraceProjection:
             )
             for event in selected
         )
+        handled_retry_count = sum(
+            1
+            for index, event in enumerate(selected)
+            if _trace_type(event) == "agent.retrying"
+            and any(
+                _trace_type(later) in {
+                    "agent.settled",
+                    "candidate.ready",
+                    "run.completed",
+                    "task_completed",
+                }
+                for later in selected[index + 1:]
+            )
+        )
         return WorkSessionView(
             task_id=task_id,
             revision=revision,
@@ -248,12 +262,7 @@ class WorkTraceProjection:
             tool_call_count=sum(
                 1 for event in selected if _trace_type(event) == "tool.started"
             ),
-            handled_retry_count=sum(
-                1
-                for event in selected
-                if event.recovery_status == "handled"
-                or _trace_type(event) == "agent.retrying"
-            ),
+            handled_retry_count=handled_retry_count,
             usage=UsageSummary(
                 input_tokens=sum(int(item.get("input_tokens") or 0) for item in known),
                 output_tokens=sum(int(item.get("output_tokens") or 0) for item in known),

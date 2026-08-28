@@ -3079,6 +3079,11 @@ class SemanticWorkspaceManager:
         task = store.get_semantic_workspace_task(user_id, task_id)
         if task is None:
             return
+        pending_action_id = (
+            str(task["question"]["question_id"])
+            if task.get("question") and task["question"].get("question_id")
+            else None
+        )
         runtime_repository = AgenticRuntimeRepository(
             settings.webui_db_path
         )
@@ -3136,6 +3141,14 @@ class SemanticWorkspaceManager:
             stage="cancelled",
             event_type="task_cancelled",
             summary="任务已取消，未发布新的正式交付",
+            details=(
+                {
+                    "action": {"action_id": pending_action_id},
+                    "recovery_status": "handled",
+                }
+                if pending_action_id
+                else {}
+            ),
         )
 
     def _mark_compile_failed(

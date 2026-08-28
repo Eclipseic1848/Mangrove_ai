@@ -1947,16 +1947,16 @@ test.describe("统一数据工作台", () => {
           { ...waiting, status },
           {
             question: status === "needs_input" ? question : null,
-            work_session: status === "needs_input" ? {
+            work_session: {
               task_id: "task-waiting",
               revision: 1,
               run_id: "run-waiting",
-              status: "needs_input",
+              status,
               started_at: waiting.created_at,
-              ended_at: null,
+              ended_at: status === "cancelled" ? waiting.updated_at : null,
               work_duration_ms: 1000,
               waiting_duration_ms: 1000,
-              action_count: 1,
+              action_count: status === "cancelled" ? 2 : 1,
               tool_call_count: 0,
               handled_retry_count: 0,
               usage: {
@@ -1968,22 +1968,39 @@ test.describe("统一数据工作台", () => {
                 unknown_call_count: 1,
               },
               provider_usage: [],
-              entries: [{
-                event_id: "q-event",
-                sequence: 1,
-                created_at: waiting.updated_at,
-                event_type: "question_required",
-                summary: question.prompt,
-                purpose: question.reason,
-                input_summary: null,
-                duration_ms: null,
-                result_summary: question.affected_scope,
-                evidence_refs: [],
-                recovery_status: "pending",
-                tool_name: null,
-                action_id: question.question_id,
-              }],
-            } : null,
+              entries: [
+                {
+                  event_id: "q-event",
+                  sequence: 1,
+                  created_at: waiting.updated_at,
+                  event_type: "question_required",
+                  summary: question.prompt,
+                  purpose: question.reason,
+                  input_summary: null,
+                  duration_ms: null,
+                  result_summary: question.affected_scope,
+                  evidence_refs: [],
+                  recovery_status: "pending",
+                  tool_name: null,
+                  action_id: question.question_id,
+                },
+                ...(status === "cancelled" ? [{
+                  event_id: "cancel-event",
+                  sequence: 2,
+                  created_at: waiting.updated_at,
+                  event_type: "task_cancelled",
+                  summary: "任务已取消",
+                  purpose: null,
+                  input_summary: null,
+                  duration_ms: null,
+                  result_summary: null,
+                  evidence_refs: [],
+                  recovery_status: "handled",
+                  tool_name: null,
+                  action_id: question.question_id,
+                }] : []),
+              ],
+            },
             events: status === "needs_input"
               ? [{
                 event_id: "q-event",
@@ -2034,6 +2051,7 @@ test.describe("统一数据工作台", () => {
     await page.getByRole("button", { name: "取消任务" }).click();
     await page.getByRole("button", { name: "确认取消" }).click();
     await expect(page.getByText("任务已取消，未发布新的正式交付。")).toBeVisible();
+    await expect(page.getByLabel("需要你处理后才能继续")).toHaveCount(0);
     await expect(page.getByText("已取消", { exact: true }).first()).toBeVisible();
   });
 

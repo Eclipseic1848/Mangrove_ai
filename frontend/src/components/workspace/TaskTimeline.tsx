@@ -563,15 +563,18 @@ export function TaskTimeline({
     ].includes(entry.event_type) ? index : latest,
     -1,
   ) ?? -1;
-  const ownerActionResolved = ownerActionIndex >= 0 && workSession?.entries
-    .slice(ownerActionIndex + 1)
-    .some((entry) => Boolean(
-      workSession.entries[ownerActionIndex]?.action_id
-      && entry.action_id === workSession.entries[ownerActionIndex]?.action_id
-      && (entry.recovery_status === "handled"
-        || entry.recovery_status === "resumed"
-        || ["resumed", "question_answered", "question.answered", "revision.safe_point_applied"].includes(entry.event_type)),
-    ));
+  const ownerActionResolved = ownerActionIndex >= 0 && (
+    ["cancelled", "completed", "failed"].includes(task.status)
+    || workSession?.entries
+      .slice(ownerActionIndex + 1)
+      .some((entry) => Boolean(
+        workSession.entries[ownerActionIndex]?.action_id
+        && entry.action_id === workSession.entries[ownerActionIndex]?.action_id
+        && (entry.recovery_status === "handled"
+          || entry.recovery_status === "resumed"
+          || ["resumed", "question_answered", "question.answered", "revision.safe_point_applied", "task_cancelled"].includes(entry.event_type)),
+      ))
+  );
   const pendingOwnerAction = ownerActionIndex >= 0 && !ownerActionResolved
     ? workSession?.entries[ownerActionIndex]
     : undefined;

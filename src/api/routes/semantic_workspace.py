@@ -1412,7 +1412,10 @@ def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgres
             details.get("source") == "pi-runtime"
             or outer_event_type in _RUN_BOUND_WORKSPACE_EVENT_TYPES
         ):
-            event_run_id = task.get("run_id")
+            event_run_id = (
+                task.get("run_id")
+                or (task.get("agentic_runtime") or {}).get("run_id")
+            )
         raw_action = trace_details.get("action")
         action = dict(raw_action) if isinstance(raw_action, dict) else None
         if action is not None and isinstance(action.get("tool"), str):

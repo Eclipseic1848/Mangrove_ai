@@ -1237,6 +1237,57 @@ def test_pi_material_ambiguity_becomes_one_reopenable_question(
     assert len(binding_events) == 1
 
 
+def test_cancelling_pi_question_closes_the_same_owner_action(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client = _client(
+        tmp_path,
+        monkeypatch,
+        role="admin",
+        pi_runtime=ClarifyingPiRuntime(),
+    )
+    document, _ = _uploads(tmp_path)
+
+    with client:
+        created = client.post(
+            "/api/semantic-workspace/tasks",
+            json={
+                "objective_text": "查一下张三的数据",
+                "upload_ids": [document],
+                "output_formats": ["json"],
+                "runtime_version": "pi",
+                "permission_profile": "standard",
+                "provider": "local",
+            },
+        )
+        assert created.status_code == 202, created.text
+        waiting = _wait_for_status(
+            client,
+            created.json()["task_id"],
+            "needs_input",
+        )
+        cancelled = client.post(
+            f"/api/semantic-workspace/tasks/{waiting['task_id']}/cancel"
+        )
+        assert cancelled.status_code == 200, cancelled.text
+        detail = client.get(
+            f"/api/semantic-workspace/tasks/{waiting['task_id']}"
+        )
+        assert detail.status_code == 200, detail.text
+
+    entries = [
+        entry
+        for entry in detail.json()["work_session"]["entries"]
+        if entry["event_type"] in {"question_required", "task_cancelled"}
+    ]
+    assert [entry["action_id"] for entry in entries] == [
+        waiting["question"]["question_id"],
+        waiting["question"]["question_id"],
+    ]
+    assert entries[1]["recovery_status"] == "handled"
+
+
 def test_empty_pi_workspace_is_not_reported_as_intermediate_result(
     tmp_path,
     monkeypatch,
