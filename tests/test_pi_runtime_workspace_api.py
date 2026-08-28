@@ -1217,6 +1217,18 @@ def test_pi_material_ambiguity_becomes_one_reopenable_question(
     assert runtime.start_calls == 1
     assert len(runtime.resume_calls) == 1
     assert completed["status"] == "completed"
+    owner_action_entries = [
+        entry
+        for entry in completed["work_session"]["entries"]
+        if entry["event_type"] in {"question_required", "question_answered"}
+    ]
+    assert [entry["action_id"] for entry in owner_action_entries] == [
+        task["question"]["question_id"],
+        task["question"]["question_id"],
+    ]
+    assert owner_action_entries[0]["purpose"] == task["question"]["reason"]
+    assert owner_action_entries[0]["result_summary"] == "覆盖范围、结果数量"
+    assert owner_action_entries[1]["recovery_status"] == "handled"
     binding_events = [
         event
         for event in completed["agentic_runtime"]["events"]

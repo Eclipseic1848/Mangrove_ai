@@ -3018,7 +3018,11 @@ async def decide_steering_revision(
             stage="execute",
             event_type="revision.waiting_safe_point",
             summary="已确认修改，将在当前原子步骤结束后切换版本",
-            details={"decision_id": decision.decision_id},
+            details={
+                "decision_id": decision.decision_id,
+                "action": {"action_id": decision.decision_id},
+                "recovery_status": "pending",
+            },
         )
         return {"decision": decision.model_dump(mode="json"), "revision": None}
 

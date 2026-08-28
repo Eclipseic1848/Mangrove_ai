@@ -1947,6 +1947,43 @@ test.describe("统一数据工作台", () => {
           { ...waiting, status },
           {
             question: status === "needs_input" ? question : null,
+            work_session: status === "needs_input" ? {
+              task_id: "task-waiting",
+              revision: 1,
+              run_id: "run-waiting",
+              status: "needs_input",
+              started_at: waiting.created_at,
+              ended_at: null,
+              work_duration_ms: 1000,
+              waiting_duration_ms: 1000,
+              action_count: 1,
+              tool_call_count: 0,
+              handled_retry_count: 0,
+              usage: {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_tokens: null,
+                total_tokens: 0,
+                call_count: 1,
+                unknown_call_count: 1,
+              },
+              provider_usage: [],
+              entries: [{
+                event_id: "q-event",
+                sequence: 1,
+                created_at: waiting.updated_at,
+                event_type: "question_required",
+                summary: question.prompt,
+                purpose: question.reason,
+                input_summary: null,
+                duration_ms: null,
+                result_summary: question.affected_scope,
+                evidence_refs: [],
+                recovery_status: "pending",
+                tool_name: null,
+                action_id: question.question_id,
+              }],
+            } : null,
             events: status === "needs_input"
               ? [{
                 event_id: "q-event",
@@ -1979,10 +2016,15 @@ test.describe("统一数据工作台", () => {
 
     await page.goto("/data-prep");
     await page.getByRole("button", { name: /待确认任务/ }).click();
+    const ownerAction = page.getByLabel("需要你处理后才能继续");
+    await expect(ownerAction).toContainText(`原因：${question.reason}`);
+    await expect(ownerAction).toContainText(`影响：${question.affected_scope}`);
     await expect(
       page.getByRole("heading", { name: "需要确认一项信息" }),
     ).toBeVisible();
     await page.getByRole("button", { name: "稍后回答" }).click();
+    await ownerAction.focus();
+    await expect(ownerAction).toBeFocused();
     await expect(page.getByRole("button", { name: /继续回答/ })).toBeVisible();
     await page.getByRole("button", { name: /继续回答/ }).click();
     await expect(
@@ -2236,8 +2278,23 @@ test.describe("统一数据工作台", () => {
                 action_id: "accept-gap-1",
               },
               {
-                event_id: "owner-action-resumed",
+                event_id: "unrelated-action-resumed",
                 sequence: 2,
+                created_at: "2026-07-27T00:00:03.500Z",
+                event_type: "resumed",
+                summary: "另一个动作已处理",
+                purpose: null,
+                input_summary: null,
+                duration_ms: null,
+                result_summary: null,
+                evidence_refs: [],
+                recovery_status: "handled",
+                tool_name: null,
+                action_id: "another-action",
+              },
+              {
+                event_id: "owner-action-resumed",
+                sequence: 3,
                 created_at: "2026-07-27T00:00:04Z",
                 event_type: "resumed",
                 summary: "已确认并继续",

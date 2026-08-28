@@ -555,7 +555,12 @@ export function TaskTimeline({
 
   const workSession = task.work_session;
   const ownerActionIndex = workSession?.entries.reduce(
-    (latest, entry, index) => entry.event_type === "owner_action.requested" ? index : latest,
+    (latest, entry, index) => [
+      "owner_action.requested",
+      "question.requested",
+      "question_required",
+      "revision.waiting_safe_point",
+    ].includes(entry.event_type) ? index : latest,
     -1,
   ) ?? -1;
   const ownerActionResolved = ownerActionIndex >= 0 && workSession?.entries
@@ -565,7 +570,7 @@ export function TaskTimeline({
       && entry.action_id === workSession.entries[ownerActionIndex]?.action_id
       && (entry.recovery_status === "handled"
         || entry.recovery_status === "resumed"
-        || ["resumed", "runtime.resuming", "question_answered", "question.answered", "revision.safe_point_applied"].includes(entry.event_type)),
+        || ["resumed", "question_answered", "question.answered", "revision.safe_point_applied"].includes(entry.event_type)),
     ));
   const pendingOwnerAction = ownerActionIndex >= 0 && !ownerActionResolved
     ? workSession?.entries[ownerActionIndex]
@@ -980,11 +985,26 @@ export function TaskTimeline({
         )}
 
       {pendingOwnerAction && (
-        <div className="mt-5 border-l-2 border-amber-500 bg-amber-500/[0.06] px-4 py-3 text-sm" role="status">
+        <div
+          className="mt-5 border-l-2 border-amber-500 bg-amber-500/[0.06] px-4 py-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+          role="status"
+          tabIndex={0}
+          aria-label="需要你处理后才能继续"
+        >
           <p className="font-medium">需要你处理后才能继续</p>
           <p className="mt-1 text-xs leading-5 text-muted-foreground">
             {productText(pendingOwnerAction.summary)}
           </p>
+          {pendingOwnerAction.purpose && (
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              原因：{productText(pendingOwnerAction.purpose)}
+            </p>
+          )}
+          {pendingOwnerAction.result_summary && (
+            <p className="mt-1 text-xs leading-5 text-muted-foreground">
+              影响：{productText(pendingOwnerAction.result_summary)}
+            </p>
+          )}
         </div>
       )}
 

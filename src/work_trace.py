@@ -183,7 +183,9 @@ class WorkTraceProjection:
             ]
             if not usage_rows:
                 historical_call_count = sum(
-                    1 for event in selected if _trace_type(event) == "agent.started"
+                    1
+                    for event in selected
+                    if _trace_type(event) in {"agent.started", "agent.retrying"}
                 )
                 if historical_call_count == 0 and any(
                     _trace_type(event) in {"agent.settled", "candidate.ready"}
@@ -250,6 +252,7 @@ class WorkTraceProjection:
                 1
                 for event in selected
                 if event.recovery_status == "handled"
+                or _trace_type(event) == "agent.retrying"
             ),
             usage=UsageSummary(
                 input_tokens=sum(int(item.get("input_tokens") or 0) for item in known),

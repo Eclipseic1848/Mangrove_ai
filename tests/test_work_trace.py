@@ -168,6 +168,25 @@ def test_historical_pi_run_without_usage_event_is_at_least_one_unknown_call() ->
     assert view.usage.unknown_call_count == 1
 
 
+def test_pi_retry_counts_as_handled_retry_and_unknown_model_call() -> None:
+    view = WorkTraceProjection().project(
+        task_id="task-1",
+        revision=2,
+        run_id="run-2",
+        status="completed",
+        events=(
+            _event(1, 0, "action_progress", runtime_event_type="agent.started"),
+            _event(2, 1, "action_progress", runtime_event_type="agent.retrying"),
+            _event(3, 2, "action_progress", runtime_event_type="agent.settled"),
+        ),
+        provider_usage=[],
+    )
+
+    assert view.handled_retry_count == 1
+    assert view.usage.call_count == 2
+    assert view.usage.unknown_call_count == 2
+
+
 def test_legacy_naive_timestamp_can_be_compared_with_aware_observation() -> None:
     event = _event(1, 0, "run.started").model_copy(
         update={"created_at": datetime(2026, 8, 28, 12, 0, 0)}
