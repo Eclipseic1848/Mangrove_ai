@@ -165,8 +165,18 @@ class WorkTraceProjection:
         span_ms = _milliseconds(started_at, calculation_end) if started_at else 0
 
         selected_usage = [item for item in provider_usage if item.get("run_id") == run_id]
+        observed_call_count = sum(
+            1
+            for event in selected
+            if _trace_type(event) in {"agent.started", "agent.retrying"}
+        )
+        if observed_call_count == 0 and any(
+            _trace_type(event) in {"agent.settled", "candidate.ready"}
+            for event in selected
+        ):
+            observed_call_count = 1
         if selected_usage:
-            usage_rows = selected_usage
+            usage_rows = list(selected_usage)
         else:
             # 本地 Pi 不一定经过 Broker；此时只使用 Adapter 已归一化的数值，
             # 不读取原始消息，也绝不把缺失用量估算为 0。
@@ -181,27 +191,19 @@ class WorkTraceProjection:
                 for event in selected
                 if _trace_type(event) == "provider.usage"
             ]
-            if not usage_rows:
-                historical_call_count = sum(
-                    1
-                    for event in selected
-                    if _trace_type(event) in {"agent.started", "agent.retrying"}
-                )
-                if historical_call_count == 0 and any(
-                    _trace_type(event) in {"agent.settled", "candidate.ready"}
-                    for event in selected
-                ):
-                    historical_call_count = 1
-                usage_rows = [
-                    {
-                        "input_tokens": None,
-                        "output_tokens": None,
-                        "cache_tokens": None,
-                        "total_tokens": None,
-                        "request_count": 1,
-                    }
-                    for _ in range(historical_call_count)
-                ]
+        recorded_call_count = sum(
+            int(item.get("request_count") or 0) for item in usage_rows
+        )
+        usage_rows.extend(
+            {
+                "input_tokens": None,
+                "output_tokens": None,
+                "cache_tokens": None,
+                "total_tokens": None,
+                "request_count": 1,
+            }
+            for _ in range(max(0, observed_call_count - recorded_call_count))
+        )
         known = [item for item in usage_rows if item.get("total_tokens") is not None]
         calls = sum(int(item.get("request_count") or 0) for item in usage_rows)
         unknown_calls = sum(
