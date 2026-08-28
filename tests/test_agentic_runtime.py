@@ -48,10 +48,15 @@ from src.agentic_runtime.pi_runtime import (
     _container_base_url,
     _file_sha256,
     _output_contract_issue,
+    _verification_request_for_coverage,
     build_docker_command,
 )
 from src.agentic_runtime.document_tools import DocumentToolGrant
-from src.agentic_runtime.coverage import CoverageLedger, ProposedResult
+from src.agentic_runtime.coverage import (
+    CoverageConclusionKind,
+    CoverageLedger,
+    ProposedResult,
+)
 from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.capability_host.models import CapabilityHostLease
 from src.model_connections import (
@@ -1829,6 +1834,113 @@ async def test_pi_runtime_stops_after_ambiguous_provider_error(
     assert len(fake_process.stdin.writes) == 1
 
 
+@pytest.mark.asyncio
+async def test_pi_rpc_repairs_confirmed_omission_in_same_bounded_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MemoryStdin:
+        def __init__(self) -> None:
+            self.writes: list[bytes] = []
+
+        def write(self, value: bytes) -> None:
+            self.writes.append(value)
+
+        async def drain(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+        async def wait_closed(self) -> None:
+            return None
+
+    stdout = asyncio.StreamReader()
+    for _ in range(4):
+        stdout.feed_data(b'{"type":"agent_settled"}\n')
+    stdout.feed_eof()
+    stderr = asyncio.StreamReader()
+    stderr.feed_eof()
+    process = SimpleNamespace(
+        stdin=MemoryStdin(),
+        stdout=stdout,
+        stderr=stderr,
+        returncode=0,
+        wait=lambda: asyncio.sleep(0),
+    )
+    runtime = PiRuntime(
+        execution_root=tmp_path,
+        state_store=AgenticRuntimeRepository(
+            migrated_webui_database(tmp_path / "pi-runtime-state.db")
+        ),
+    )
+
+    async def fake_spawn(_command: tuple[str, ...]) -> object:
+        return process
+
+    checks = 0
+
+    async def settled_check() -> str | None:
+        nonlocal checks
+        checks += 1
+        if checks <= 3:
+            return "已发现 1 项有证据的合格结果尚未进入候选，只能在当前 Run 内补齐。"
+        return None
+
+    monkeypatch.setattr(runtime, "_spawn_rpc_process", fake_spawn)
+    (tmp_path / "trace").mkdir()
+    source = tmp_path / "source.json"
+    source.write_text('{"company":"甲"}', encoding="utf-8")
+    request = PiRuntimeRequest(
+        user_id="owner-a",
+        task_id="task-a",
+        revision=1,
+        objective_text="列出 10 家公司",
+        sources=(
+            SourceInput(
+                upload_id="snapshot-artifact-a",
+                original_name=source.name,
+                host_path=source,
+                sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+            ),
+        ),
+        requested_output_formats=("json",),
+        permission_profile=PermissionProfile.STANDARD,
+        model="model-frozen",
+        base_url="http://127.0.0.1:6012/v1",
+        api_key="local-runtime",
+    )
+
+    await runtime._run_rpc(
+        request,
+        command=("docker", "run", "same-container"),
+        container_name="pi-same-run",
+        output_dir=tmp_path,
+        trace_dir=tmp_path / "trace",
+        on_event=lambda _event: asyncio.sleep(0),
+        settled_check=settled_check,
+    )
+
+    messages = [
+        json.loads(item.decode("utf-8"))
+        for item in process.stdin.writes
+    ]
+    assert checks == 4
+    assert [item["id"] for item in messages] == [
+        "start",
+        "repair-1",
+        "repair-2",
+        "repair-3",
+    ]
+    assert all(
+        "当前 Snapshot、模型和 RuntimeBinding 不变" in item["message"]
+        for item in messages[1:]
+    )
+    assert request.task_id == "task-a"
+    assert request.revision == 1
+    assert request.model == "model-frozen"
+
+
 def test_pi_output_contract_requests_repair_until_manifest_is_complete(
     tmp_path: Path,
 ) -> None:
@@ -2384,3 +2496,103 @@ def test_pi_coverage_repair_directs_agent_back_to_completion_tool() -> None:
     assert "propose_completion" in prompt
     assert "read_evidence" in prompt
     assert "不要使用 bash 翻查会话" in prompt
+
+
+def test_pi_confirmed_omission_repair_keeps_the_same_frozen_run() -> None:
+    prompt = pi_runtime_module._settled_repair_prompt(
+        "已发现 1 项有证据的合格结果尚未进入候选，只能在当前 Run 内补齐。"
+    )
+
+    assert "当前 Snapshot、模型和 RuntimeBinding 不变" in prompt
+    assert "add-result" in prompt
+    assert "不要扩大来源范围" in prompt
+
+
+def test_partial_candidate_uses_truthfulness_objective_for_independent_verification() -> None:
+    request = PiRuntimeRequest.model_construct(objective_text="列出 10 家公司")
+    coverage = SimpleNamespace(is_partial=True)
+
+    verification_request = _verification_request_for_coverage(request, coverage)
+
+    assert verification_request is not request
+    assert "部分候选" in verification_request.objective_text
+    assert "不要求补造缺失项" in verification_request.objective_text
+    assert "列出 10 家公司" in verification_request.objective_text
+
+
+def test_web_scope_insufficient_requires_independent_result_verification(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "candidate-manifest.json"
+    evidence = {
+        "source": "page.html",
+        "locator": "line:1",
+        "quote": "公司甲",
+    }
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "artifacts": [
+                    {
+                        "filename": "result.json",
+                        "format": "json",
+                        "description": "部分结果",
+                        "evidence": [evidence],
+                    }
+                ],
+                "result_items": [
+                    {
+                        "result_id": "company-a",
+                        "label": "公司甲",
+                        "evidence": [evidence],
+                    }
+                ],
+                "qualified_omissions": [
+                    {
+                        "result_id": "company-b",
+                        "label": "公司乙",
+                        "evidence": [evidence],
+                    }
+                ],
+                "result_search_complete": True,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    runtime = object.__new__(PiRuntime)
+    runtime._document_grants = {}
+    request = PiRuntimeRequest.model_construct(
+        user_id="user-a",
+        task_id="task-a",
+        revision=1,
+        goal_contract={
+            "coverage": {
+                "target_result_count": 2,
+                "strictness": "strict",
+                "require_all": False,
+            }
+        },
+        source_coverage={
+            "status": "scope_complete",
+            "failed_page_count": 0,
+            "limit_reached": False,
+            "valid_page_count": 1,
+        },
+    )
+
+    self_declared = runtime._candidate_coverage_assessment(request, manifest_path)
+    independently_verified = runtime._candidate_coverage_assessment(
+        request,
+        manifest_path,
+        result_search_verified=True,
+    )
+
+    assert self_declared.conclusion.kind is CoverageConclusionKind.UNKNOWN
+    assert self_declared.same_run_repair_allowed is False
+    assert (
+        independently_verified.conclusion.kind
+        is CoverageConclusionKind.CONFIRMED_OMISSION
+    )
+    assert independently_verified.same_run_repair_allowed is True

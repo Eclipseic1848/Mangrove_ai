@@ -237,6 +237,39 @@ export interface AgenticRuntimeInfo {
   summary?: string | null;
   candidates: RuntimeCandidate[];
   verification?: RuntimeVerification | null;
+  candidate_coverage?: {
+    result_items: Array<{
+      result_id: string;
+      label?: string | null;
+      evidence_refs: string[];
+    }>;
+    actual_result_count: number;
+    target_result_count: number | null;
+    is_partial: boolean;
+    formal_delivery_eligible: boolean;
+    conclusion: {
+      kind: "confirmed_omission" | "confirmed_scope_insufficient" | "unknown";
+      reason: string;
+      evidence_refs: string[];
+    } | null;
+    same_run_repair_allowed: boolean;
+    repair_unit_ids: string[];
+    disclosure: {
+      authorized_unit_count: number;
+      observed_unit_count: number;
+      failed_unit_count: number;
+      unknown_unit_count: number;
+      low_quality_unit_count: number;
+      actual_result_count: number;
+    };
+  } | null;
+  gap_actions?: Array<{
+    action: "accept_gap" | "reject_gap" | "supplement_source" | "refresh_source";
+    status: "pending" | "completed" | "rejected";
+    target_revision: number | null;
+    created_at: string;
+    updated_at: string;
+  }>;
   failure?: Record<string, unknown> | null;
   events?: Array<Record<string, unknown>>;
   coverage?: {
@@ -317,6 +350,19 @@ export interface WorkspaceTask {
       explicit_exclusions: string[];
       quantity_requirement: string;
       completeness_requirement: string;
+      coverage?: {
+        strictness: "strict" | "exploratory";
+        target_result_count: number | null;
+        require_all: boolean;
+        exploratory_target: string | null;
+        authorized_source_scope: Record<string, unknown>;
+        accepted_gap_from?: {
+          revision: number;
+          candidate_set_hash: string;
+          previous_target_result_count: number | null;
+          accepted_result_count: number;
+        };
+      };
     };
     delivery_spec: { formats: string[] };
     runtime_binding: {

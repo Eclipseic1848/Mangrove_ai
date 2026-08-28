@@ -1263,6 +1263,213 @@ test.describe("统一数据工作台", () => {
       .toHaveCount(0);
   });
 
+  test("严格目标缺口展示部分结果并由用户键盘确认新版本", async ({ page }) => {
+    await mockWorkspace(page);
+    const candidateTask = {
+      ...workspaceTask("task-partial", "candidate_ready", "10 家公司查找"),
+      runtime_version: "pi",
+      permission_profile: "standard",
+    };
+    const candidateHash = "b".repeat(64);
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [candidateTask] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-partial",
+      (route) => route.fulfill({
+        json: workspaceDetail(candidateTask, {
+          runtime_version: "pi",
+          permission_profile: "standard",
+          agentic_runtime: {
+            runtime_version: "pi",
+            permission_profile: "standard",
+            status: "candidate_ready",
+            candidates: [{
+              artifact_id: "candidate-partial",
+              filename: "公司名单.json",
+              format: "json",
+              sha256: "a".repeat(64),
+              size_bytes: 256,
+              openable: true,
+              qa_checks: ["non_empty", "reopened"],
+              download_allowed: true,
+              download_url: "/api/semantic-workspace/tasks/task-partial/candidates/candidate-partial",
+            }],
+            verification: {
+              status: "failed",
+              summary: "严格数量目标未满足",
+              checks: [],
+              evidence_count: 9,
+              formal_delivery_eligible: false,
+            },
+            candidate_coverage: {
+              result_items: Array.from({ length: 9 }, (_, index) => ({
+                result_id: `company-${index + 1}`,
+                label: `公司 ${index + 1}`,
+                evidence_refs: [`evidence-${index + 1}`],
+              })),
+              actual_result_count: 9,
+              target_result_count: 10,
+              is_partial: true,
+              formal_delivery_eligible: false,
+              conclusion: {
+                kind: "confirmed_scope_insufficient",
+                reason: "本次获准有限范围已完整检查，确认只有 9 项有证据结果；这不代表范围之外不存在更多结果。",
+                evidence_refs: Array.from({ length: 9 }, (_, index) => `evidence-${index + 1}`),
+              },
+              same_run_repair_allowed: false,
+              repair_unit_ids: [],
+              disclosure: {
+                authorized_unit_count: 9,
+                observed_unit_count: 9,
+                failed_unit_count: 0,
+                unknown_unit_count: 0,
+                low_quality_unit_count: 0,
+                actual_result_count: 9,
+              },
+            },
+            gap_actions: [],
+            events: [],
+            awaiting_publication: true,
+            reverification_offer: {
+              eligible: false,
+              candidate_set_hash: candidateHash,
+              blockers: ["coverage_gap"],
+              ruleset_changed: false,
+              requires_provider: false,
+              candidate_count: 1,
+              candidate_formats: ["json"],
+              egress_categories: [],
+              egress_summary: "",
+            },
+          },
+        }),
+      }),
+    );
+    let gapPayload: Record<string, unknown> | null = null;
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-partial/candidate-gap-actions",
+      async (route) => {
+        gapPayload = await route.request().postDataJSON();
+        await route.fulfill({
+          status: 202,
+          json: {
+            action: "accept_gap",
+            status: "completed",
+            source_revision: 1,
+            target_revision: 2,
+          },
+        });
+      },
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: "待确认" }).click();
+    await page.getByText("10 家公司查找").first().click();
+    const panel = page.getByTestId("partial-candidate-panel");
+    await expect(panel).toContainText("已找到 9 项，目标是 10 项");
+    await expect(panel).toContainText("公司 1");
+    await expect(panel).toContainText("1 条证据");
+    await expect(page.getByRole("button", { name: "发布正式结果" })).toHaveCount(0);
+    await expect(panel).toContainText("确认本次范围不足");
+    await expect(panel).toContainText("原版本不会发布 Delivery");
+    await expect(panel.getByRole("button", { name: "不接受本次缺口" })).toBeVisible();
+    await expect(panel.getByRole("button", { name: "补充来源" })).toBeVisible();
+    await expect(panel.getByRole("button", { name: "刷新原来源" })).toBeVisible();
+
+    const accept = panel.getByRole("button", { name: "接受 9 项并调整目标" });
+    await accept.focus();
+    await accept.press("Enter");
+    const dialog = page.getByRole("alertdialog");
+    await expect(dialog).toContainText("原版本、Candidate 和缺口结论不会被修改");
+    const confirm = dialog.getByRole("button", { name: "确认创建新版本" });
+    await confirm.focus();
+    await confirm.press("Enter");
+    await expect.poll(() => gapPayload).not.toBeNull();
+    expect(gapPayload).toEqual({
+      action: "accept_gap",
+      expected_revision: 1,
+      expected_candidate_set_hash: candidateHash,
+      external_api_confirmed: false,
+    });
+    await expect(page.getByText("已创建结果版本 V2")).toBeVisible();
+
+    const accessibility = await new AxeBuilder({ page })
+      .include("[data-testid='partial-candidate-panel']")
+      .analyze();
+    expect(accessibility.violations).toEqual([]);
+  });
+
+  test("零条有证据结果时不提供接受零项动作", async ({ page }) => {
+    await mockWorkspace(page);
+    const candidateTask = {
+      ...workspaceTask("task-zero-results", "candidate_ready", "10 家公司查找"),
+      runtime_version: "pi",
+      permission_profile: "standard",
+    };
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [candidateTask] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-zero-results",
+      (route) => route.fulfill({
+        json: workspaceDetail(candidateTask, {
+          runtime_version: "pi",
+          permission_profile: "standard",
+          agentic_runtime: {
+            runtime_version: "pi",
+            permission_profile: "standard",
+            status: "candidate_ready",
+            candidates: [],
+            candidate_coverage: {
+              result_items: [],
+              actual_result_count: 0,
+              target_result_count: 10,
+              is_partial: true,
+              formal_delivery_eligible: false,
+              conclusion: {
+                kind: "unknown",
+                reason: "当前没有有证据结果，不能判断是否还有更多结果。",
+                evidence_refs: [],
+              },
+              same_run_repair_allowed: false,
+              repair_unit_ids: [],
+              disclosure: {
+                authorized_unit_count: 1,
+                observed_unit_count: 1,
+                failed_unit_count: 0,
+                unknown_unit_count: 1,
+                low_quality_unit_count: 0,
+                actual_result_count: 0,
+              },
+            },
+            gap_actions: [],
+            events: [],
+            awaiting_publication: true,
+            reverification_offer: {
+              eligible: false,
+              candidate_set_hash: "c".repeat(64),
+              blockers: ["coverage_gap"],
+              ruleset_changed: false,
+              requires_provider: false,
+              candidate_count: 0,
+              candidate_formats: [],
+              egress_categories: [],
+              egress_summary: "",
+            },
+          },
+        }),
+      }),
+    );
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: "待确认" }).click();
+    await page.getByText("10 家公司查找").first().click();
+    const panel = page.getByTestId("partial-candidate-panel");
+    await expect(panel.getByRole("button", { name: /接受 0 项/ })).toHaveCount(0);
+    await expect(panel.getByRole("status")).toContainText("补充或刷新来源");
+    await expect(panel.getByRole("button", { name: "补充来源" })).toBeVisible();
+    await expect(panel.getByRole("button", { name: "刷新原来源" })).toBeVisible();
+  });
+
   test("语义验证无结论时可只重新验证现有候选", async ({ page }) => {
     await mockWorkspace(page);
     const candidateTask = {

@@ -26,6 +26,14 @@ class Confidence(str, Enum):
     LOW = "low"
 
 
+class CoverageConclusionKind(str, Enum):
+    """严格目标存在缺口时，独立验证者允许形成的三种结论。"""
+
+    CONFIRMED_OMISSION = "confirmed_omission"
+    CONFIRMED_SCOPE_INSUFFICIENT = "confirmed_scope_insufficient"
+    UNKNOWN = "unknown"
+
+
 class AuthorizedScope(BaseModel):
     """Pi 只能在用户本次任务已经授权的来源和内容单元内收窄范围。"""
 
@@ -149,6 +157,292 @@ class CoverageDecision(BaseModel):
     passed: bool
     decision: str
     gaps: tuple[str, ...] = ()
+
+
+class ResultItem(BaseModel):
+    """面向用户展示的一项结果；没有 EvidenceRef 就不能成为结果。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    result_id: str = Field(min_length=1, max_length=200)
+    label: str | None = Field(default=None, min_length=1, max_length=500)
+    evidence_refs: tuple[str, ...] = Field(min_length=1)
+
+
+class SourceCoverageConclusion(BaseModel):
+    """覆盖缺口结论只描述证据能够支持的范围，不推断全网事实。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: CoverageConclusionKind
+    reason: str = Field(min_length=1, max_length=1000)
+    evidence_refs: tuple[str, ...] = ()
+
+
+class CoverageDisclosure(BaseModel):
+    """探索性交付或部分候选必须携带的实际覆盖说明。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    authorized_unit_count: int = Field(ge=0)
+    observed_unit_count: int = Field(ge=0)
+    failed_unit_count: int = Field(ge=0)
+    unknown_unit_count: int = Field(ge=0)
+    low_quality_unit_count: int = Field(ge=0)
+    actual_result_count: int = Field(ge=0)
+
+
+class PartialCandidateAssessment(BaseModel):
+    """Candidate 的覆盖投影；它不具有正式发布权限。"""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    result_items: tuple[ResultItem, ...]
+    actual_result_count: int = Field(ge=0)
+    target_result_count: int | None = Field(default=None, ge=1)
+    is_partial: bool
+    formal_delivery_eligible: bool
+    conclusion: SourceCoverageConclusion | None = None
+    same_run_repair_allowed: bool = False
+    repair_unit_ids: tuple[str, ...] = ()
+    disclosure: CoverageDisclosure
+
+    @model_validator(mode="after")
+    def validate_partial_state(self) -> "PartialCandidateAssessment":
+        if self.is_partial and self.conclusion is None:
+            raise ValueError("PartialCandidate 必须绑定覆盖结论")
+        if self.is_partial and self.formal_delivery_eligible:
+            raise ValueError("PartialCandidate 不得具有正式发布资格")
+        if self.same_run_repair_allowed and (
+            self.conclusion is None
+            or self.conclusion.kind is not CoverageConclusionKind.CONFIRMED_OMISSION
+        ):
+            raise ValueError("只有确认漏提允许同 Run 有界修复")
+        return self
+
+
+def assess_partial_candidate(
+    contract: CoverageContract,
+    ledger: CoverageLedger,
+) -> PartialCandidateAssessment:
+    """基于冻结契约和账本形成部分结果结论，不替 Owner 调整目标。"""
+
+    evidence_by_ref = {
+        binding.evidence_ref: binding.unit_id
+        for binding in ledger.evidence_bindings
+    }
+    result_items = tuple(
+        ResultItem(
+            result_id=result.result_id,
+            evidence_refs=result.evidence_refs,
+        )
+        for result in ledger.proposed_results
+        if result.evidence_refs
+        and all(ref in evidence_by_ref for ref in result.evidence_refs)
+    )
+    actual_count = len(result_items)
+    target_count = (
+        contract.result_count
+        if contract.result_cardinality is ResultCardinality.COUNT
+        else None
+    )
+    target_unmet = (
+        target_count is not None and actual_count < target_count
+    )
+    if contract.result_cardinality is ResultCardinality.ALL:
+        target_unmet = bool(
+            set(ledger.authorized_unit_ids)
+            - {
+                unit_id
+                for result in ledger.proposed_results
+                for unit_id in result.unit_ids
+            }
+            - {
+                rejection.unit_id
+                for rejection in ledger.proposed_candidate_rejections
+            }
+        )
+
+    result_units = {
+        unit_id
+        for result in ledger.proposed_results
+        for unit_id in result.unit_ids
+    }
+    rejected_units = {
+        rejection.unit_id
+        for rejection in ledger.proposed_candidate_rejections
+    }
+    qualified_omissions = (
+        set(ledger.discovered_candidate_unit_ids)
+        - result_units
+        - rejected_units
+    ) & set(ledger.authoritatively_read_unit_ids)
+    qualified_omissions -= set(ledger.low_quality_units)
+    unresolved = bool(ledger.unknown_units or ledger.low_quality_units)
+    fully_observed = (
+        set(ledger.authorized_unit_ids) <= set(ledger.observed_unit_ids)
+        and set(ledger.authorized_unit_ids)
+        <= set(ledger.authoritatively_read_unit_ids)
+    )
+
+    conclusion: SourceCoverageConclusion | None = None
+    repair_units: tuple[str, ...] = ()
+    if target_unmet and qualified_omissions:
+        repair_units = tuple(
+            unit_id
+            for unit_id in ledger.authorized_unit_ids
+            if unit_id in qualified_omissions
+        )
+        conclusion = SourceCoverageConclusion(
+            kind=CoverageConclusionKind.CONFIRMED_OMISSION,
+            reason=(
+                f"已确认 {len(repair_units)} 个合格来源单元未进入当前结果；"
+                "只允许在同一 Run 和原冻结输入上有界修复。"
+            ),
+            evidence_refs=tuple(
+                ref
+                for ref, unit_id in evidence_by_ref.items()
+                if unit_id in qualified_omissions
+            ),
+        )
+    elif target_unmet and fully_observed and not unresolved:
+        conclusion = SourceCoverageConclusion(
+            kind=CoverageConclusionKind.CONFIRMED_SCOPE_INSUFFICIENT,
+            reason=(
+                f"本次获准有限范围已完整检查，确认只有 {actual_count} 项有证据结果；"
+                "这不代表获准范围之外不存在更多结果。"
+            ),
+            evidence_refs=tuple(
+                ref for item in result_items for ref in item.evidence_refs
+            ),
+        )
+    elif target_unmet:
+        conclusion = SourceCoverageConclusion(
+            kind=CoverageConclusionKind.UNKNOWN,
+            reason=(
+                f"当前观察到 {actual_count} 项有证据结果，但仍有未读、失败、"
+                "低质量或开放范围，不能判断是否还有更多结果。"
+            ),
+            evidence_refs=tuple(
+                ref for item in result_items for ref in item.evidence_refs
+            ),
+        )
+
+    strict_partial = (
+        contract.completeness is Completeness.STRICT and target_unmet
+    )
+    failed_units = (
+        set(ledger.authorized_unit_ids)
+        - set(ledger.observed_unit_ids)
+        - set(ledger.unknown_units)
+    )
+    return PartialCandidateAssessment(
+        result_items=result_items,
+        actual_result_count=actual_count,
+        target_result_count=target_count,
+        is_partial=strict_partial,
+        formal_delivery_eligible=not strict_partial,
+        conclusion=conclusion,
+        same_run_repair_allowed=(
+            conclusion is not None
+            and conclusion.kind is CoverageConclusionKind.CONFIRMED_OMISSION
+        ),
+        repair_unit_ids=repair_units,
+        disclosure=CoverageDisclosure(
+            authorized_unit_count=len(ledger.authorized_unit_ids),
+            observed_unit_count=len(ledger.observed_unit_ids),
+            failed_unit_count=len(failed_units),
+            unknown_unit_count=len(ledger.unknown_units),
+            low_quality_unit_count=len(ledger.low_quality_units),
+            actual_result_count=actual_count,
+        ),
+    )
+
+
+def assess_web_candidate(
+    *,
+    result_items: tuple[ResultItem, ...],
+    qualified_omissions: tuple[ResultItem, ...] = (),
+    target_result_count: int | None,
+    strict: bool,
+    require_all: bool = False,
+    scope_complete: bool,
+    failed_page_count: int,
+    coverage_unknown: bool,
+    result_search_complete: bool = False,
+    observed_page_count: int | None = None,
+) -> PartialCandidateAssessment:
+    """用已验证结果项和冻结网页范围事实形成覆盖结论。"""
+
+    actual_count = len(result_items)
+    target_unmet = (
+        target_result_count is not None
+        and actual_count < target_result_count
+    )
+    conclusion: SourceCoverageConclusion | None = None
+    evidence_refs = tuple(
+        ref for item in result_items for ref in item.evidence_refs
+    )
+    scope_proven = (
+        scope_complete
+        and failed_page_count == 0
+        and not coverage_unknown
+        and result_search_complete
+    )
+    if target_unmet and qualified_omissions:
+        conclusion = SourceCoverageConclusion(
+            kind=CoverageConclusionKind.CONFIRMED_OMISSION,
+            reason=(
+                f"已发现 {len(qualified_omissions)} 项有证据的合格结果尚未进入候选，"
+                "只能在当前 Run 内补齐。"
+            ),
+            evidence_refs=tuple(
+                ref for item in qualified_omissions for ref in item.evidence_refs
+            ),
+        )
+    elif target_unmet and scope_proven:
+        conclusion = SourceCoverageConclusion(
+            kind=CoverageConclusionKind.CONFIRMED_SCOPE_INSUFFICIENT,
+            reason=(
+                f"本次获准有限范围已完整检查，确认只有 {actual_count} 项有证据结果；"
+                "这不代表获准范围之外不存在更多结果。"
+            ),
+            evidence_refs=evidence_refs,
+        )
+    elif target_unmet or (require_all and not scope_proven):
+        conclusion = SourceCoverageConclusion(
+            kind=CoverageConclusionKind.UNKNOWN,
+            reason=(
+                f"当前观察到 {actual_count} 项有证据结果，但仍有未读、失败、"
+                "低质量或开放范围，不能判断是否还有更多结果。"
+            ),
+            evidence_refs=evidence_refs,
+        )
+    partial = strict and (target_unmet or (require_all and not scope_proven))
+    observed_pages = (
+        actual_count if observed_page_count is None else observed_page_count
+    )
+    return PartialCandidateAssessment(
+        result_items=result_items,
+        actual_result_count=actual_count,
+        target_result_count=target_result_count,
+        is_partial=partial,
+        formal_delivery_eligible=not partial,
+        conclusion=conclusion,
+        same_run_repair_allowed=(
+            conclusion is not None
+            and conclusion.kind is CoverageConclusionKind.CONFIRMED_OMISSION
+        ),
+        repair_unit_ids=tuple(item.result_id for item in qualified_omissions),
+        disclosure=CoverageDisclosure(
+            authorized_unit_count=observed_pages + failed_page_count,
+            observed_unit_count=observed_pages,
+            failed_unit_count=failed_page_count,
+            unknown_unit_count=(1 if coverage_unknown else 0),
+            low_quality_unit_count=0,
+            actual_result_count=actual_count,
+        ),
+    )
 
 
 def freeze_contract(

@@ -15,8 +15,11 @@ from reportlab.pdfgen import canvas
 from src.agentic_runtime.candidate_qa import inspect_candidates
 from src.agentic_runtime.candidate_verifier import (
     BrokerSemanticJudge,
+    CandidateManifest,
     CandidateVerifier,
     _SEMANTIC_JUDGE_MAX_RETRIES,
+    _complete_scope_review_evidence,
+    _source_text,
 )
 from src.agentic_runtime.models import (
     PermissionProfile,
@@ -46,6 +49,28 @@ class PassingSemanticJudge:
         )
 
 
+def test_frozen_web_source_is_reopened_as_visible_html_text(tmp_path: Path) -> None:
+    source = tmp_path / "frozen-page.html"
+    source.write_text(
+        "<html><head><style>.hidden{display:none}</style></head>"
+        "<body><h1>公司甲</h1><script>secret()</script><p>公开说明</p></body></html>",
+        encoding="utf-8",
+    )
+
+    text = _source_text(source, "all", filename_hint="https://example.com/")
+
+    assert "公司甲" in text
+    assert "公开说明" in text
+    assert "secret()" not in text
+
+    title_looks_like_pdf = _source_text(
+        source,
+        "all",
+        filename_hint="Annual Report.pdf",
+    )
+    assert "公司甲" in title_looks_like_pdf
+
+
 class JudgeMustNotRun:
     async def judge(self, **_kwargs):
         raise AssertionError("来源证据未通过时不得调用语义模型")
@@ -58,6 +83,178 @@ class AlwaysPassingSemanticJudge:
             contains_unrequested_content=False,
             reason="候选满足目标",
         )
+
+
+class CapturingScopeJudge:
+    def __init__(self) -> None:
+        self.objective = ""
+        self.evidence: tuple[str, ...] = ()
+
+    async def judge(self, *, objective, candidate_previews, evidence):
+        assert candidate_previews
+        self.objective = objective
+        self.evidence = evidence
+        return SemanticDecision(
+            passed=True,
+            contains_unrequested_content=False,
+            reason="全部获准页面只包含公司甲，部分候选忠实",
+            coverage_complete=True,
+            coverage_reason="全部获准页面已逐页复核，没有其他合格公司",
+        )
+
+
+@pytest.mark.asyncio
+async def test_web_scope_review_uses_all_untruncated_frozen_pages(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "frozen-page.html"
+    source.write_text(
+        "<html><body><h1>公司甲</h1><p>公开说明</p></body></html>",
+        encoding="utf-8",
+    )
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "result.json").write_text(
+        '{"companies":["公司甲"],"coverage":"partial"}',
+        encoding="utf-8",
+    )
+    evidence = {
+        "source": "https://example.com/",
+        "locator": "all",
+        "quote": "公司甲",
+    }
+    (output / "candidate-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "artifacts": [
+                    {
+                        "filename": "result.json",
+                        "format": "json",
+                        "description": "当前有证据结果",
+                        "evidence": [evidence],
+                    }
+                ],
+                "result_items": [
+                    {
+                        "result_id": "company-a",
+                        "label": "公司甲",
+                        "evidence": [evidence],
+                    }
+                ],
+                "qualified_omissions": [
+                    {
+                        "result_id": "company-b",
+                        "label": "公司乙",
+                        "evidence": [evidence],
+                    }
+                ],
+                "result_search_complete": True,
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    request = PiRuntimeRequest(
+        user_id="user-a",
+        task_id="task-web",
+        revision=1,
+        objective_text="核验 2 家公司的部分候选",
+        requested_output_formats=("json",),
+        sources=(
+            SourceInput(
+                upload_id="source-a",
+                original_name="https://example.com/",
+                host_path=source,
+                sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                media_type="text/html",
+            ),
+        ),
+        permission_profile=PermissionProfile.STANDARD,
+        model="local-model",
+        base_url="http://127.0.0.1:6012/v1",
+        api_key="local-runtime",
+        goal_contract={
+            "coverage": {
+                "strictness": "strict",
+                "target_result_count": 2,
+            }
+        },
+        source_coverage={
+            "status": "scope_complete",
+            "failed_page_count": 0,
+            "limit_reached": False,
+            "valid_page_count": 1,
+        },
+    )
+    judge = CapturingScopeJudge()
+
+    report = await CandidateVerifier(semantic_judge=judge).verify(
+        request=request,
+        candidates=inspect_candidates(output, ("json",)),
+        manifest_path=output / "candidate-manifest.json",
+    )
+
+    assert report.status is VerificationStatus.PASSED
+    assert any(
+        check.code == "coverage_scope_review" and check.passed
+        for check in report.checks
+    )
+    assert any("FULL_SCOPE_SOURCE=" in item for item in judge.evidence)
+    assert "不能依据 Agent 的完成声明" in judge.objective
+    assert any("公司乙" in item for item in judge.evidence)
+
+
+def test_web_scope_review_refuses_evidence_over_broker_total_limit(
+    tmp_path: Path,
+) -> None:
+    sources: list[SourceInput] = []
+    for index in range(4):
+        source = tmp_path / f"frozen-page-{index}.html"
+        source.write_text(
+            f"<html><body><p>{'甲' * 3_500}</p></body></html>",
+            encoding="utf-8",
+        )
+        sources.append(
+            SourceInput(
+                upload_id=f"source-{index}",
+                original_name=f"https://example.com/{index}",
+                host_path=source,
+                sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
+                media_type="text/html",
+            )
+        )
+    request = PiRuntimeRequest(
+        user_id="user-a",
+        task_id="task-scope-limit",
+        revision=1,
+        objective_text="寻找两家公司",
+        requested_output_formats=("json",),
+        sources=tuple(sources),
+        permission_profile=PermissionProfile.STANDARD,
+        model="local-model",
+        base_url="http://127.0.0.1:6012/v1",
+        api_key="local-runtime",
+        source_coverage={
+            "status": "scope_complete",
+            "failed_page_count": 0,
+            "limit_reached": False,
+            "valid_page_count": 4,
+        },
+    )
+    manifest = CandidateManifest.model_construct(
+        version=2,
+        artifacts=(),
+        result_search_complete=True,
+    )
+
+    evidence = _complete_scope_review_evidence(
+        request,
+        manifest,
+        ("GROUNDED=" + "乙" * 2_500,),
+    )
+
+    assert evidence is None
 
 
 class UnavailableSemanticJudge:
