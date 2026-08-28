@@ -1875,7 +1875,7 @@ class SemanticWorkspaceManager:
                 self._deferred_requeue.discard(task_id)
                 self.enqueue(user_id, task_id)
 
-    def _apply_waiting_revision_at_safe_point(
+    async def _apply_waiting_revision_at_safe_point(
         self,
         user_id: str,
         task_id: str,
@@ -1900,7 +1900,7 @@ class SemanticWorkspaceManager:
             _apply_confirmed_steering_revision,
         )
 
-        _apply_confirmed_steering_revision(
+        await _apply_confirmed_steering_revision(
             get_store().get_user(user_id)
             or {"user_id": user_id, "role": "user"},
             task_id,
@@ -2041,7 +2041,7 @@ class SemanticWorkspaceManager:
                     raise ValueError(
                         f"未知语义计划状态：{plan_row['status']}"
                     )
-                if self._apply_waiting_revision_at_safe_point(
+                if await self._apply_waiting_revision_at_safe_point(
                     user_id,
                     task_id,
                     revision,
@@ -2066,7 +2066,7 @@ class SemanticWorkspaceManager:
                 return
             if binding_row["status"] != "ready":
                 raise ValueError("来源检查未形成可执行绑定")
-            if self._apply_waiting_revision_at_safe_point(
+            if await self._apply_waiting_revision_at_safe_point(
                 user_id,
                 task_id,
                 revision,
@@ -2454,7 +2454,7 @@ class SemanticWorkspaceManager:
             )
             if (
                 event.event_type == "tool.completed"
-                and self._apply_waiting_revision_at_safe_point(
+                and await self._apply_waiting_revision_at_safe_point(
                     user_id,
                     task_id,
                     revision,
