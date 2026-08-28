@@ -1401,19 +1401,25 @@ def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgres
             if isinstance(details.get("runtime_event_type"), str)
             else None
         )
+        trace_details = (
+            details
+            if details.get("source") != "pi-runtime"
+            or runtime_event_type in _SAFE_PI_TRACE_EVENT_TYPES
+            else {}
+        )
         event_run_id = event.get("run_id") or details.get("run_id")
         if event_run_id is None and (
             details.get("source") == "pi-runtime"
             or outer_event_type in _RUN_BOUND_WORKSPACE_EVENT_TYPES
         ):
             event_run_id = task.get("run_id")
-        raw_action = details.get("action")
+        raw_action = trace_details.get("action")
         action = dict(raw_action) if isinstance(raw_action, dict) else None
         if action is not None and isinstance(action.get("tool"), str):
             action["tool"] = _safe_trace_text(action["tool"], limit=120) or "工具"
-        if action is None and isinstance(details.get("tool"), str):
-            action = {"tool": _safe_trace_text(details["tool"], limit=120) or "工具"}
-        raw_progress = details.get("progress")
+        if action is None and isinstance(trace_details.get("tool"), str):
+            action = {"tool": _safe_trace_text(trace_details["tool"], limit=120) or "工具"}
+        raw_progress = trace_details.get("progress")
         progress = None
         if isinstance(raw_progress, dict):
             try:
@@ -1439,25 +1445,25 @@ def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgres
                 # 主时间线对新旧任务统一使用业务语言；原始事件仍供管理员诊断。
                 summary=_progress_summary(event, details),
                 progress=progress,
-                refs=(details.get("refs") if isinstance(details.get("refs"), dict) else {}),
+                refs=(trace_details.get("refs") if isinstance(trace_details.get("refs"), dict) else {}),
                 action=action,
-                turn_id=(details.get("turn_id") if isinstance(details.get("turn_id"), str) else None),
-                tool_call_id=(details.get("tool_call_id") if isinstance(details.get("tool_call_id"), str) else None),
-                purpose=_safe_trace_text(details.get("purpose"), limit=120),
-                input_summary=_safe_trace_text(details.get("input_summary")),
-                duration_ms=(details.get("duration_ms") if isinstance(details.get("duration_ms"), int) and details.get("duration_ms") >= 0 else None),
-                result_summary=_safe_trace_text(details.get("result_summary")),
+                turn_id=(trace_details.get("turn_id") if isinstance(trace_details.get("turn_id"), str) else None),
+                tool_call_id=(trace_details.get("tool_call_id") if isinstance(trace_details.get("tool_call_id"), str) else None),
+                purpose=_safe_trace_text(trace_details.get("purpose"), limit=120),
+                input_summary=_safe_trace_text(trace_details.get("input_summary")),
+                duration_ms=(trace_details.get("duration_ms") if isinstance(trace_details.get("duration_ms"), int) and trace_details.get("duration_ms") >= 0 else None),
+                result_summary=_safe_trace_text(trace_details.get("result_summary")),
                 evidence_refs=tuple(
                     item[:160]
-                    for item in details.get("evidence_refs", [])
+                    for item in trace_details.get("evidence_refs", [])
                     if isinstance(item, str) and not _TRACE_PATH_PATTERN.search(item)
-                ) if isinstance(details.get("evidence_refs"), list) else (),
-                recovery_status=(details.get("recovery_status") if details.get("recovery_status") in {"pending", "resumed", "handled", "failed"} else None),
-                model_name=_safe_trace_text(details.get("model_name"), limit=160),
-                input_tokens=(details.get("input_tokens") if isinstance(details.get("input_tokens"), int) and not isinstance(details.get("input_tokens"), bool) and details.get("input_tokens") >= 0 else None),
-                output_tokens=(details.get("output_tokens") if isinstance(details.get("output_tokens"), int) and not isinstance(details.get("output_tokens"), bool) and details.get("output_tokens") >= 0 else None),
-                cache_tokens=(details.get("cache_tokens") if isinstance(details.get("cache_tokens"), int) and not isinstance(details.get("cache_tokens"), bool) and details.get("cache_tokens") >= 0 else None),
-                total_tokens=(details.get("total_tokens") if isinstance(details.get("total_tokens"), int) and not isinstance(details.get("total_tokens"), bool) and details.get("total_tokens") >= 0 else None),
+                ) if isinstance(trace_details.get("evidence_refs"), list) else (),
+                recovery_status=(trace_details.get("recovery_status") if trace_details.get("recovery_status") in {"pending", "resumed", "handled", "failed"} else None),
+                model_name=_safe_trace_text(trace_details.get("model_name"), limit=160),
+                input_tokens=(trace_details.get("input_tokens") if isinstance(trace_details.get("input_tokens"), int) and not isinstance(trace_details.get("input_tokens"), bool) and trace_details.get("input_tokens") >= 0 else None),
+                output_tokens=(trace_details.get("output_tokens") if isinstance(trace_details.get("output_tokens"), int) and not isinstance(trace_details.get("output_tokens"), bool) and trace_details.get("output_tokens") >= 0 else None),
+                cache_tokens=(trace_details.get("cache_tokens") if isinstance(trace_details.get("cache_tokens"), int) and not isinstance(trace_details.get("cache_tokens"), bool) and trace_details.get("cache_tokens") >= 0 else None),
+                total_tokens=(trace_details.get("total_tokens") if isinstance(trace_details.get("total_tokens"), int) and not isinstance(trace_details.get("total_tokens"), bool) and trace_details.get("total_tokens") >= 0 else None),
                 audience=audience,
                 created_at=event.get("created_at") or datetime.now().astimezone(),
             )

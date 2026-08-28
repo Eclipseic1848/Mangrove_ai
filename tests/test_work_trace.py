@@ -252,6 +252,12 @@ def test_known_pi_event_keeps_safe_summary_but_unknown_optional_does_not() -> No
                 "details": {
                     "source": "pi-runtime",
                     "runtime_event_type": "tool.future_optional",
+                    "purpose": "system prompt 原文",
+                    "input_summary": "cookie=raw-secret",
+                    "result_summary": "完整命令和原始日志",
+                    "evidence_refs": ["raw-log"],
+                    "action": {"tool": "raw-command"},
+                    "recovery_status": "handled",
                 },
             },
         ],
@@ -259,6 +265,12 @@ def test_known_pi_event_keeps_safe_summary_but_unknown_optional_does_not() -> No
 
     assert events[0].summary == "已准备 1 项能力：文档解析"
     assert events[1].summary == "智能体完成一项内部操作"
+    assert events[1].purpose is None
+    assert events[1].input_summary is None
+    assert events[1].result_summary is None
+    assert events[1].evidence_refs == ()
+    assert events[1].action is None
+    assert events[1].recovery_status is None
 
 
 def test_persisted_runtime_lifecycle_excludes_source_time_and_restores_waiting() -> None:
