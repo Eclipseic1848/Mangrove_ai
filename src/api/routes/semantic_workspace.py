@@ -95,6 +95,11 @@ from src.runtime_routing import (
     SqliteRuntimeRoutingRepository,
     open_runtime_routing_repository,
 )
+from src.task_context import (
+    TaskContextRepository,
+    TaskContextSelection,
+    TaskContextService,
+)
 
 
 router = APIRouter(
@@ -321,6 +326,12 @@ class WorkspaceTaskCreateIn(BaseModel):
     # #15 D9 验证任务标记：本任务是为验证该个人 draft 能力而创建；
     # 仅在 create_task 校验后随冻结 selection 落库。
     validation_target: CapabilityPackRef | None = None
+    context_purpose: str = Field(default="web_research", min_length=1, max_length=80)
+    context_selection: TaskContextSelection | None = None
+    context_preview_sha256: str | None = Field(
+        default=None,
+        pattern=r"^sha256:[0-9a-f]{64}$",
+    )
 
     @field_validator("objective_text", "provider")
     @classmethod
@@ -374,6 +385,10 @@ class WorkspaceTaskCreateIn(BaseModel):
 
     @model_validator(mode="after")
     def validate_validation_target(self) -> "WorkspaceTaskCreateIn":
+        if bool(self.context_selection) != bool(self.context_preview_sha256):
+            raise ValueError("上下文选择和已确认预览哈希必须同时提供")
+        if self.context_selection is not None and self.source_snapshot_id is None:
+            raise ValueError("P1-01 上下文复用当前只开放给网页任务")
         if bool(self.upload_ids) == bool(self.source_snapshot_id):
             raise ValueError("任务必须且只能选择上传文件或一个网页来源快照")
         web_contract_values = (
@@ -533,6 +548,29 @@ class WorkspaceRevisionIn(BaseModel):
         return self
 
 
+class WorkspaceContextPreviewIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    purpose: str = Field(default="web_research", min_length=1, max_length=80)
+    objective_text: str = Field(min_length=1, max_length=20_000)
+    output_formats: tuple[str, ...] = Field(min_length=1)
+    selection: TaskContextSelection = Field(default_factory=TaskContextSelection)
+
+    @field_validator("objective_text")
+    @classmethod
+    def strip_objective(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("output_formats")
+    @classmethod
+    def valid_context_formats(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(item.strip().lower() for item in value)
+        invalid = set(normalized) - _FORMATS
+        if invalid:
+            raise ValueError(f"不支持的正式输出格式：{sorted(invalid)}")
+        return normalized
+
+
 class CandidateGapActionIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -571,6 +609,156 @@ def _source_acquisition_service() -> SourceAcquisitionService:
         SourceAcquisitionRepository(settings.webui_db_path),
         AnonymousWebFetcher(),
     )
+
+
+def _task_context_service() -> TaskContextService:
+    return TaskContextService(TaskContextRepository(settings.webui_db_path))
+
+
+def _inherit_task_context_hook(
+    base_hook: Callable[[sqlite3.Connection], None] | None,
+    *,
+    owner_id: str,
+    source_task_id: str,
+    source_revision: int,
+    target_task_id: str,
+    target_revision: int,
+    objective_text: str,
+    output_formats: tuple[str, ...],
+) -> Callable[[sqlite3.Connection], None] | None:
+    """把既有精确引用带到已确认的新 Revision，不重新读取浮动目录。"""
+
+    service = _task_context_service()
+    preview = service.carry_forward(
+        owner_id=owner_id,
+        source_task_id=source_task_id,
+        source_revision=source_revision,
+        target_task_id=target_task_id,
+        target_revision=target_revision,
+        objective_text=objective_text,
+        output_formats=output_formats,
+    )
+    if preview is None:
+        return base_hook
+
+    def bind_context(connection: sqlite3.Connection) -> None:
+        if base_hook is not None:
+            base_hook(connection)
+        service.freeze(
+            connection,
+            owner_id=owner_id,
+            task_id=target_task_id,
+            revision=target_revision,
+            preview=preview,
+            expected_preview_sha256=preview.preview_sha256,
+        )
+
+    return bind_context
+
+
+def _inherit_web_contract_hook(
+    base_hook: Callable[[sqlite3.Connection], None] | None,
+    *,
+    owner_id: str,
+    source_task_id: str,
+    source_revision: int,
+    target_task_id: str,
+    target_revision: int,
+    objective_text: str,
+    output_formats: tuple[str, ...],
+    runtime_binding: Any,
+    capability_manifest: Any,
+) -> Callable[[sqlite3.Connection], None] | None:
+    """网页修订沿用冻结来源边界，并只更新用户确认的目标与格式。"""
+
+    contract = get_store().get_web_task_contract(
+        owner_id,
+        source_task_id,
+        source_revision,
+    )
+    if contract is None:
+        return base_hook
+    goal_contract = json.loads(
+        json.dumps(contract["goal_contract"], ensure_ascii=False)
+    )
+    goal_contract["objective"] = objective_text
+    delivery_spec = json.loads(
+        json.dumps(contract["delivery_spec"], ensure_ascii=False)
+    )
+    delivery_spec["formats"] = list(output_formats)
+    runtime_payload = runtime_binding.model_dump(mode="json")
+
+    def bind_web_contract(connection: sqlite3.Connection) -> None:
+        if base_hook is not None:
+            base_hook(connection)
+        _runtime_repository().freeze_runtime_binding(
+            owner_id,
+            target_task_id,
+            target_revision,
+            run_id=runtime_binding.external_run_id,
+            binding=runtime_payload,
+            capability_manifest=capability_manifest.model_dump(mode="json"),
+            adopted_existing_run=False,
+            preallocated_run=True,
+            connection=connection,
+        )
+        connection.execute(
+            "INSERT INTO web_task_contracts "
+            "(owner_id, task_id, revision, source_snapshot_id, "
+            "goal_contract_json, delivery_spec_json, runtime_binding_json, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                owner_id,
+                target_task_id,
+                target_revision,
+                contract["source_snapshot_id"],
+                json.dumps(goal_contract, ensure_ascii=False),
+                json.dumps(delivery_spec, ensure_ascii=False),
+                json.dumps(runtime_payload, ensure_ascii=False),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+
+    return bind_web_contract
+
+
+@router.get("/context-options")
+def list_context_options(
+    purpose: str = Query(default="web_research", min_length=1, max_length=80),
+    user=Depends(get_current_user),
+):
+    """只列出当前 Owner、当前用途可显式选择的模板与记忆摘要。"""
+
+    options = _task_context_service().options(user["user_id"], purpose)
+    return {
+        key: [item.model_dump(mode="json") for item in items]
+        for key, items in options.items()
+    }
+
+
+@router.post("/context-preview")
+def preview_task_context(
+    payload: WorkspaceContextPreviewIn,
+    user=Depends(get_current_user),
+):
+    """启动前生成可检查草案；本接口不创建或修改 TaskRevision。"""
+
+    try:
+        preview = _task_context_service().preview(
+            owner_id=user["user_id"],
+            purpose=payload.purpose,
+            objective_text=payload.objective_text,
+            output_formats=payload.output_formats,
+            selection=payload.selection,
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+    return preview.model_dump(mode="json")
 
 
 def _rollout_actor(user: dict[str, Any]) -> RolloutActor:
@@ -1287,6 +1475,14 @@ def _task_detail(
         "model_connection_id"
     ]
     task["web_source"] = None
+    frozen_context = TaskContextRepository(
+        settings.webui_db_path
+    ).get_frozen(user_id, task_id, int(selected_revision["revision"]))
+    task["task_context"] = (
+        frozen_context.model_dump(mode="json")
+        if frozen_context is not None
+        else None
+    )
     web_contract = store.get_web_task_contract(
         user_id,
         task_id,
@@ -1596,6 +1792,31 @@ async def create_task(
         payload.objective_text = "\n".join(
             (user_objective, "", "执行约束：", *constraint_lines)
         )
+    context_preview = None
+    if payload.context_selection is not None:
+        try:
+            context_preview = _task_context_service().preview(
+                owner_id=user_id,
+                purpose=payload.context_purpose,
+                objective_text=user_objective,
+                output_formats=payload.output_formats,
+                selection=payload.context_selection,
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(exc),
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
+        if context_preview.preview_sha256 != payload.context_preview_sha256:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="模板或记忆已变化，请重新检查并确认上下文草案",
+            )
     if (
         payload.runtime_version is RuntimeVersion.LEGACY
         and input_suffixes & _DOCUMENT_INPUTS
@@ -1797,6 +2018,15 @@ async def create_task(
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
+            if context_preview is not None:
+                _task_context_service().freeze(
+                    connection,
+                    owner_id=user_id,
+                    task_id=task_id,
+                    revision=1,
+                    preview=context_preview,
+                    expected_preview_sha256=payload.context_preview_sha256 or "",
+                )
 
         transaction_hook = bind_web_contract
     first_line = payload.objective_text.splitlines()[0].strip()
@@ -2207,7 +2437,7 @@ def reject_steering_revision(
     return rejected.model_dump(mode="json")
 
 
-def _apply_confirmed_steering_revision(
+async def _apply_confirmed_steering_revision(
     user: dict[str, Any],
     task_id: str,
     decision_id: str,
@@ -2318,9 +2548,62 @@ def _apply_confirmed_steering_revision(
         ),
         external_api_confirmed=bool(connection_binding),
     )
+    source_web_contract = get_store().get_web_task_contract(
+        user_id,
+        task_id,
+        decision.base_revision,
+    )
+    prepared_binding = None
+    prepared_manifest = None
+    if source_web_contract is not None:
+        if selected_runtime is not RuntimeVersion.PI:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="网页来源任务只能由 Pi Runtime 执行",
+            )
+        prepared_binding, prepared_manifest = (
+            await get_semantic_workspace_manager().prepare_runtime_binding(
+                model_connection_id=runtime_config.model_connection_id,
+                model_connection_version=runtime_config.model_connection_version,
+                model=(
+                    runtime_config.model_connection_model
+                    or source_web_contract["runtime_binding"].get("model")
+                    or task["model"]
+                    or settings.llm_model_name
+                ),
+            )
+        )
+        runtime_config = runtime_config.model_copy(
+            update={"run_id": prepared_binding.external_run_id}
+        )
     selected_runtime, transaction_hook = _prepare_runtime_binding(
         routing_plan,
         runtime_config,
+    )
+    if source_web_contract is not None:
+        assert prepared_binding is not None
+        assert prepared_manifest is not None
+        transaction_hook = _inherit_web_contract_hook(
+            transaction_hook,
+            owner_id=user_id,
+            source_task_id=task_id,
+            source_revision=decision.base_revision,
+            target_task_id=task_id,
+            target_revision=decision.base_revision + 1,
+            objective_text=objective,
+            output_formats=tuple(formats),
+            runtime_binding=prepared_binding,
+            capability_manifest=prepared_manifest,
+        )
+    transaction_hook = _inherit_task_context_hook(
+        transaction_hook,
+        owner_id=user_id,
+        source_task_id=task_id,
+        source_revision=decision.base_revision,
+        target_task_id=task_id,
+        target_revision=decision.base_revision + 1,
+        objective_text=objective,
+        output_formats=tuple(formats),
     )
     try:
         revision = get_store().create_semantic_workspace_revision(
@@ -2503,25 +2786,80 @@ async def decide_steering_revision(
             ),
             external_api_confirmed=bool(connection_binding),
         )
+        new_objective = (
+            f"{task['objective_text']}\n\n"
+            "已确认的独立任务差异：\n"
+            f"{delta.normalized_text}"
+        )
+        source_web_contract = get_store().get_web_task_contract(
+            user_id,
+            task_id,
+            proposal.base_revision,
+        )
+        prepared_binding = None
+        prepared_manifest = None
+        if source_web_contract is not None:
+            if selected_runtime is not RuntimeVersion.PI:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail="网页来源任务只能由 Pi Runtime 执行",
+                )
+            prepared_binding, prepared_manifest = (
+                await get_semantic_workspace_manager().prepare_runtime_binding(
+                    model_connection_id=runtime_config.model_connection_id,
+                    model_connection_version=runtime_config.model_connection_version,
+                    model=(
+                        runtime_config.model_connection_model
+                        or source_web_contract["runtime_binding"].get("model")
+                        or task["model"]
+                        or settings.llm_model_name
+                    ),
+                )
+            )
+            runtime_config = runtime_config.model_copy(
+                update={"run_id": prepared_binding.external_run_id}
+            )
         selected_runtime, transaction_hook = _prepare_runtime_binding(
             routing_plan,
             runtime_config,
+        )
+        if source_web_contract is not None:
+            assert prepared_binding is not None
+            assert prepared_manifest is not None
+            transaction_hook = _inherit_web_contract_hook(
+                transaction_hook,
+                owner_id=user_id,
+                source_task_id=task_id,
+                source_revision=proposal.base_revision,
+                target_task_id=new_task_id,
+                target_revision=1,
+                objective_text=new_objective,
+                output_formats=tuple(formats),
+                runtime_binding=prepared_binding,
+                capability_manifest=prepared_manifest,
+            )
+        transaction_hook = _inherit_task_context_hook(
+            transaction_hook,
+            owner_id=user_id,
+            source_task_id=task_id,
+            source_revision=proposal.base_revision,
+            target_task_id=new_task_id,
+            target_revision=1,
+            objective_text=new_objective,
+            output_formats=tuple(formats),
         )
         try:
             new_task = get_store().create_semantic_workspace_task(
                 user_id,
                 task_id=new_task_id,
                 title=f"{task['title']}（独立任务）",
-                objective_text=(
-                    f"{task['objective_text']}\n\n"
-                    "已确认的独立任务差异：\n"
-                    f"{delta.normalized_text}"
-                ),
+                objective_text=new_objective,
                 upload_ids=task["upload_ids"],
                 output_formats=formats,
                 provider=task["provider"],
                 model=task["model"],
                 external_api_confirmed=bool(connection_binding),
+                source_refs=task.get("source_refs", []),
                 table_output_contracts=inherited_contracts,
                 transaction_hook=transaction_hook,
             )
@@ -2576,7 +2914,7 @@ async def decide_steering_revision(
 
     if task["status"] not in _TERMINAL:
         await get_semantic_workspace_manager().cancel(user_id, task_id)
-    response = _apply_confirmed_steering_revision(
+    response = await _apply_confirmed_steering_revision(
         user,
         task_id,
         decision.decision_id,
@@ -3029,6 +3367,16 @@ async def create_revision(
             )
 
         transaction_hook = bind_web_revision
+    transaction_hook = _inherit_task_context_hook(
+        transaction_hook,
+        owner_id=user_id,
+        source_task_id=task_id,
+        source_revision=int(task["active_revision"]),
+        target_task_id=task_id,
+        target_revision=expected_revision,
+        objective_text=objective,
+        output_formats=tuple(formats),
+    )
     try:
         revision = store.create_semantic_workspace_revision(
             user_id,

@@ -17,6 +17,59 @@ import type {
 
 const BASE = "/api/semantic-workspace";
 
+export type TaskTemplateOption = {
+  template_id: string;
+  version: number;
+  title: string;
+  source: string;
+  purpose: string;
+  goal_contract_draft: string;
+  delivery_spec_draft: Record<string, unknown>;
+  method_draft: string;
+  summary_sha256: string;
+};
+
+export type OwnerMemoryOption = {
+  memory_id: number;
+  purpose: string;
+  source: string;
+  summary: string;
+  summary_sha256: string;
+};
+
+export type TaskContextSelection = {
+  template?: { template_id: string; version: number } | null;
+  memories: Array<{ memory_id: number }>;
+};
+
+export type TaskContextPreview = {
+  purpose: string;
+  template: TaskTemplateOption | null;
+  memories: OwnerMemoryOption[];
+  proposed_changes: {
+    goal_contract: string | null;
+    delivery_spec: Record<string, unknown>;
+    method: string | null;
+  };
+  preview_sha256: string;
+};
+
+export function getTaskContextOptions(purpose = "web_research"): Promise<{
+  templates: TaskTemplateOption[];
+  memories: OwnerMemoryOption[];
+}> {
+  return api.get(`${BASE}/context-options?purpose=${encodeURIComponent(purpose)}`);
+}
+
+export function previewTaskContext(payload: {
+  purpose: string;
+  objective_text: string;
+  output_formats: string[];
+  selection: TaskContextSelection;
+}): Promise<TaskContextPreview> {
+  return api.post(`${BASE}/context-preview`, payload);
+}
+
 export type GrayCapability = {
   pack_id: string;
   version: string;
@@ -73,6 +126,9 @@ export function createWorkspaceTask(payload: {
     version: string;
     digest: string;
   }>;
+  context_purpose?: string;
+  context_selection?: TaskContextSelection;
+  context_preview_sha256?: string;
 }, idempotencyKey?: string): Promise<WorkspaceTask> {
   return api.post(`${BASE}/tasks`, {
     provider: "local",

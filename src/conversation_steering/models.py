@@ -221,6 +221,15 @@ class SteeringResult(BaseModel):
     created_at: datetime = Field(default_factory=_now)
 
 
+class ReferencedContextSummary(BaseModel):
+    """进入有界上下文的摘要及其不可混淆来源引用。"""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source_ref: str = Field(min_length=1, max_length=300)
+    summary: str = Field(min_length=1, max_length=4_000)
+
+
 class ContextCompileRequest(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -232,6 +241,8 @@ class ContextCompileRequest(BaseModel):
     confirmed_semantics: tuple[str, ...] = ()
     run_summary: str = ""
     procedure_summaries: tuple[str, ...] = ()
+    task_template_summaries: tuple[ReferencedContextSummary, ...] = ()
+    owner_memory_summaries: tuple[ReferencedContextSummary, ...] = ()
     relevant_turns: tuple[RawUserTurn, ...] = ()
     evidence_snippets: tuple[str, ...] = ()
     max_chars: int = Field(ge=256, le=200_000)

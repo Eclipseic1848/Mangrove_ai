@@ -88,6 +88,68 @@ async function mockWorkspace(
   }));
   await page.route("**/api/semantic-workspace/capabilities", (route) =>
     route.fulfill({ json: { enabled: true, items: [] } }));
+  await page.route("**/api/semantic-workspace/context-options?*", (route) =>
+    route.fulfill({
+      json: {
+        templates: [{
+          template_id: "public-company-summary",
+          version: 1,
+          title: "公开公司摘要",
+          source: "owner_created",
+          purpose: "web_research",
+          goal_contract_draft: "按公司提取名称和来源证据",
+          delivery_spec_draft: { formats: ["markdown"] },
+          method_draft: "逐页读取并按公司去重",
+          summary_sha256: `sha256:${"1".repeat(64)}`,
+        }],
+        memories: [{
+          memory_id: 7,
+          purpose: "web_research",
+          source: "user_entered",
+          summary: "公司名使用官网全称",
+          summary_sha256: `sha256:${"2".repeat(64)}`,
+        }],
+      },
+    }));
+  await page.route("**/api/semantic-workspace/context-preview", async (route) => {
+    const payload = route.request().postDataJSON() as {
+      selection: {
+        template?: { template_id: string; version: number } | null;
+        memories: Array<{ memory_id: number }>;
+      };
+    };
+    const hasTemplate = Boolean(payload.selection.template);
+    const hasMemory = payload.selection.memories.some((item) => item.memory_id === 7);
+    await route.fulfill({
+      json: {
+        purpose: "web_research",
+        template: hasTemplate ? {
+          template_id: "public-company-summary",
+          version: 1,
+          title: "公开公司摘要",
+          source: "owner_created",
+          purpose: "web_research",
+          goal_contract_draft: "按公司提取名称和来源证据",
+          delivery_spec_draft: { formats: ["markdown"] },
+          method_draft: "逐页读取并按公司去重",
+          summary_sha256: `sha256:${"1".repeat(64)}`,
+        } : null,
+        memories: hasMemory ? [{
+          memory_id: 7,
+          purpose: "web_research",
+          source: "user_entered",
+          summary: "公司名使用官网全称",
+          summary_sha256: `sha256:${"2".repeat(64)}`,
+        }] : [],
+        proposed_changes: {
+          goal_contract: hasTemplate ? "按公司提取名称和来源证据" : null,
+          delivery_spec: hasTemplate ? { formats: ["markdown"] } : {},
+          method: hasTemplate ? "逐页读取并按公司去重" : null,
+        },
+        preview_sha256: `sha256:${"3".repeat(64)}`,
+      },
+    });
+  });
   await page.route("**/api/model-connections", (route) =>
     route.fulfill({ json: { items: [] } }));
   await page.route("**/api/model-connections/preferences/default", (route) =>
@@ -359,6 +421,15 @@ test.describe("统一数据工作台", () => {
     await page.getByLabel("想得到什么结果").fill("生成产品摘要并保留来源证据");
     await page.getByLabel("必须包含").fill("产品名称\n公开说明");
     await page.getByLabel("明确不要").fill("不要推测未公开价格");
+    await page.getByLabel("任务模板（可选）").selectOption(
+      "public-company-summary",
+    );
+    await page.getByText("个人记忆（可选）").click();
+    await page.getByText("公司名使用官网全称").click();
+    await page.getByRole("button", { name: "检查上下文草案" }).click();
+    await expect(page.getByText("已检查，可以启动")).toBeVisible();
+    await expect(page.getByText("按公司提取名称和来源证据", { exact: true }))
+      .toBeVisible();
     await page.getByRole("button", { name: "启动任务" }).click();
     await expect.poll(() => taskSubmitted).not.toBeNull();
     expect(taskSubmitted).toMatchObject({
@@ -373,6 +444,11 @@ test.describe("统一数据工作台", () => {
       runtime_version: "pi",
       model_connection_id: null,
       external_api_confirmed: false,
+      context_selection: {
+        template: { template_id: "public-company-summary", version: 1 },
+        memories: [{ memory_id: 7 }],
+      },
+      context_preview_sha256: `sha256:${"3".repeat(64)}`,
     });
     expect(taskIdempotencyKey.length).toBeGreaterThan(5);
     await expect(page.getByRole("heading", { name: "公开网页产品摘要" }))
@@ -476,6 +552,8 @@ test.describe("统一数据工作台", () => {
     });
 
     await page.getByLabel("想得到什么结果").fill("汇总已成功读取的页面并披露缺口");
+    await page.getByRole("button", { name: "检查上下文草案" }).click();
+    await expect(page.getByText("已检查，可以启动")).toBeVisible();
     await page.getByRole("button", { name: "启动任务" }).click();
     await expect.poll(() => taskSubmitted).not.toBeNull();
     expect(taskSubmitted).toMatchObject({

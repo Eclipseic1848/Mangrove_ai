@@ -33,6 +33,14 @@ class ContextCompiler:
             for index, text in enumerate(request.procedure_summaries)
         )
         optional.extend(
+            ("task_template", item.source_ref, item.summary)
+            for item in request.task_template_summaries
+        )
+        optional.extend(
+            ("owner_memory", item.source_ref, item.summary)
+            for item in request.owner_memory_summaries
+        )
+        optional.extend(
             ("turn", turn.turn_id, turn.text)
             for turn in request.relevant_turns
         )
