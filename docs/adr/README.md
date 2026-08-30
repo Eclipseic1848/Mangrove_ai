@@ -39,6 +39,10 @@
 | [0029](0029-capability-validation-lifecycle-and-platform-publication.md) | 能力验证、生命周期与平台发布采用三轴治理 | 已采纳；新仓库 #9-#17 全部完成并关闭（两条真实纵切面 + 兼容切换，PR #30/#33/#34） | 2026-08-06 |
 | [0030](0030-direct-vnext-default-cutover.md) | 合格后直接切换全用户 vNext 默认 | 已采纳 | 2026-08-23 |
 | [0031](0031-durable-provider-qualification-batches.md) | Provider 资格外发采用独立持久批次台账 | 已采纳 | 2026-08-23 |
+| [0035](0035-unified-data-workbench-and-coremind-runtime-adapter.md) | 统一数据工作台复用共享产品能力与 CoreMind Runtime | 已采纳 | 2026-08-27 |
+| [0036](0036-single-workspace-with-verified-runtime-inheritance.md) | 单一工作台继承已验证 Runtime 与 Harness 能力 | 已采纳；部分取代 0018/0019/0035 的 Legacy 兼容要求 | 2026-08-30 |
+| [0037](0037-private-multi-user-auth-observability-and-slo.md) | 私有多人部署的认证、可观测性与 P1 服务目标 | 已采纳 | 2026-08-30 |
+| [0038](0038-confirmed-open-source-tool-installation-and-reuse.md) | 开源工具采用确认安装与持久复用 | 已采纳；产品层简化 0026/0029 的能力晋级呈现 | 2026-08-30 |
 
 ## 产品决策汇总（plan 第 3 节 + 本次确认）
 
@@ -66,3 +70,7 @@
 | 能力验证与平台发布 | 成熟度、生命周期、运行资格三轴分离；平台快照独立签名并默认管理员灰度 | 0029 |
 | vNext 默认切换 | 不建立普通用户显式试用资格；硬门合格并独立授权后从管理员灰度直接切换全用户默认 | 0030 |
 | Provider 资格外发 | 独立持久批次台账先记 Attempt；每批只有一次初始执行和一次经用户确认的恢复重试 | 0031 |
+| 统一工作台与 Runtime 复用 | 数据工作台是唯一主工作区；CoreMind 经 AgentKernel Adapter 复用，逐 Run 冻结版本与能力清单 | 0035 |
+| 新平台收口 | 不迁移未上线历史资产；单一任务生命周期继承 CoreMind、Pi/coding-agent、Harness 的已验证能力 | 0036 |
+| P1 远程多人运行 | 单组织私有部署；设备会话可撤销；最小内容日志；99.5% 月可用性与 2 秒交互目标 | 0037 |
+| 开源工具获取与复用 | 缺失时发现、确认后安装；个人或平台范围持久复用；只统计模型 Token 与可选官方参考费用 | 0038 |
