@@ -1,6 +1,6 @@
 # Mangrove 当前状态台账
 
-> status: `P1_01_ENGINEERING_VERIFIED / ISSUE_98_REMOTE_CLOSEOUT_PENDING`
+> status: `P1_01_COMPLETE / OPEN_ISSUES_ZERO`
 >
 > last_verified: 2026-09-04（P1-01 工程闭环；P0 历史治理证据未重跑）
 >
@@ -16,15 +16,16 @@
 
 ## 0. 当前 P1 状态
 
-- P1-01 的决策、规格与实现工单 #83～#98 已完成到远端收口前最后一步；#89～#97 已关闭，
-  #98 的工程实现位于本文件所在分支，待受保护 PR 合入后关闭 #98、#83 与 #81。
+- P1-01 的决策、规格、原型与实现工单 #83～#98 已全部关闭；2026-09-04 现场查询 GitHub Open
+  Issues 为 0。关闭 #81 只表示 P1 决策地图与首个纵切片完成，不代表 P1-02～P1-05 已实现。
 - CoreMind 0.7.1 已通过锁定制品接入。PR #107 合入
   `main@12170eebf1d2f4bad5c86c2a6c38d0bef0a4f998`，Issue #97 已关闭；精确源码、协议、Worker、
-  wheel 与 digest 见
-  [恢复核验报告](../plans/2026-09-03-coremind-0.7.1-resumption-preflight.md)。本任务没有修改本机
+  wheel 与 digest 见 [PR #107](https://github.com/Eclipseic1848/Mangrove_ai/pull/107)，架构原型见
+  [原型报告](../plans/2026-08-27-p1-coremind-agentkernel-prototype-report.md)。本任务没有修改本机
   CoreMind 仓库，也没有发布制品。
-- #98 新增统一收口测试、启动前数据库迁移只读预检与缺失的 PDF 开发测试依赖；同时删除两条
-  已经过期的测试假设：固定旧局域网 IP、直接访问已被 AgentKernel 取代的 `_pi_runtime`。
+- #98 由 PR #110 合入 `main@5adeacf3aecbd55bd5fe771a35d25a4caa195af3` 并关闭。它新增统一
+  收口测试、启动前数据库迁移只读预检与缺失的 PDF 开发测试依赖，并移除固定旧局域网 IP、
+  直接访问已被 AgentKernel 取代的 `_pi_runtime` 两条过期测试假设。
 - 后端固定种子全量回归为 `2352 passed, 13 skipped, 1 deselected`；唯一 deselect 是被其他任务
   修改且受保护的 G1 freeze 自校验。Issue #98 相关后端组合为 `235 passed, 1 skipped`。
 - 前端正式构建通过；完整 Playwright 为 `77 passed`，其中统一数据工作台 40 项，含 light/dark
@@ -33,14 +34,17 @@
 - `start_all.bat --no-pause` 实际返回 0；8088、5173、8080、3002、1200 均监听，8088 与 5173
   返回 HTTP 200，`/api/health` 返回后端健康。脚本继续是本机忽略文件；可提交的只读迁移预检
   位于 `scripts/check_dev_database_migrations.py`。
-- UTF-8 检查通过 1248 个文件，`git diff --check` 通过；Standards 审查无问题。Spec 审查指出的
-  唯一阻断是本台账与 `handoff.md` 仍为旧状态，本次已按实证修正，待复审。
+- UTF-8 检查通过 1249 个文件，`git diff --check` 通过；Standards + Spec 双轴终审均无问题。
+  PR #110 的 minimum-ci run `33925622082` 中 `backend-fast`、`frontend-build`、`secret-scan`
+  全部成功。
 - 上述结论仅为 `ENGINEERING_VERIFIED`。Issue #98 没有执行真实外部网页/Provider 用户旅程、
   新的本机生产迁移、用户验收、部署、Tag、GitHub Release 或包发布；2026-08-26 的历史本机
   生产迁移已完成，本工单未授权的是新增迁移、恢复覆盖、备份处置与 Key/Secret 轮换。
   这些证据等级不得互相替代。
 - Agent-Reach 调研继续作为有效候选知识源；不整包安装，不自动启用 OpenCLI/xiaohongshu-mcp。
   认证来源未来仍须按 Owner 隔离 Cookie/SecretRef，明确失效时暂停同一 Run 并由该 Owner 扫码。
+- 已清理可再生旧产物：`.scratch/**`、`test-results/**`、`frontend/premium-audit.json`，共约
+  118 MB，进入 Windows 回收站；源代码、测试、ADR、规格、正式证据、数据库、备份与他人改动未删。
 
 ### 0.1 本轮可复现命令
 
@@ -50,7 +54,10 @@
 ```powershell
 .\.artifacts\ci-clean-venv\Scripts\python.exe -X utf8 -m pytest -q tests/test_source_acquisition.py tests/test_source_acquisition_api.py tests/test_web_source_delivery_api.py tests/test_work_trace.py tests/test_agent_kernel.py tests/test_coremind_agent_kernel_adapter.py tests/test_pi_runtime_workspace_api.py tests/test_semantic_workspace_api.py tests/test_database_migrations.py tests/test_dev_database_preflight.py tests/test_issue98_workbench_closeout.py
 .\.artifacts\ci-clean-venv\Scripts\python.exe -X utf8 -m pytest -q --randomly-seed=0 --deselect tests/test_g1_independent_runner.py::test_independent_g1_dry_run_verifies_frozen_blind_set
-Push-Location frontend; npm run build; npx playwright test --workers=1; Pop-Location
+Push-Location frontend
+npm run build
+npx playwright test --workers=1
+Pop-Location
 $env:MANGROVE_RUNTIME_ADAPTER_GOLDEN_TEST='1'; $env:PYTHONPATH=(Resolve-Path '.\.venv-coremind-host-verification\Lib\site-packages').Path; .\.artifacts\ci-clean-venv\Scripts\python.exe -X utf8 -m pytest -q tests\test_runtime_adapter_golden.py
 .\.artifacts\ci-clean-venv\Scripts\python.exe -X utf8 scripts\ci\check_utf8.py
 git diff --check 12170eebf1d2f4bad5c86c2a6c38d0bef0a4f998..HEAD
@@ -63,16 +70,16 @@ cmd.exe /d /c start_all.bat --no-pause
 ## 1. 当前公开身份
 
 - 公开仓库：`Eclipseic1848/Mangrove_ai`；默认分支：`main`；当前访问权限：管理员。
-- 2026-09-04 现场读取远端 `main@12170eebf1d2f4bad5c86c2a6c38d0bef0a4f998`；当前检出分支
+- 2026-09-04 现场读取远端 `main@5adeacf3aecbd55bd5fe771a35d25a4caa195af3`；当前检出分支
   见第 0 节，不依据本地 `main` 名称判断公开身份。P0 #56～#60 的历史基线保留在第 4 节。
 - 远端当前没有 Tag 或 GitHub Release；本地 `v0.0.4` 只保留历史版本语义，不是远端当前
   Tag、Release 或本轮发布事实。不得把路线图版本名、本地标签或工程验证结果表述为已发布版本。
 - GitHub About 当前描述为“面向在线/离线与公域/私域数据的智能数据任务平台”，无主页；Topics
   为 `ai-agent`、`data-engineering`、`data-pipeline`、`document-processing`、`fastapi`、
-  `mcp`、`react`。P0 公共入口复核确认 About 无需语义变化。
-- #56～#58 已由 PR #76 合入工程基线；#59 已完成远端强制；#60 收口只包含公共/权威文档。
-  工作树仍有用户持有的 G1 文件改动与本地产物，均不属于 P0 提交。最终公开 SHA 和 Issue 状态
-  以 GitHub `main`、PR 与 Issues 现场读取为准，本文不复制会因自身合并而变化的未来 SHA。
+  `mcp`、`react`。P1-01 收口再次检查 README、Code of Conduct、Contributing、MIT License、
+  Security 与 GitHub About，均无需语义变化。
+- 当前没有 Open Issues。仍有 Dependabot PR #27、#77、#104、#108、#109；它们不是本轮 Issue
+  目标，也未经过依赖与安全评估，后续应逐项分诊，不能因自动生成而直接合并。
 
 ## 2. 产品与稳定边界
 
@@ -99,7 +106,7 @@ Mangrove 是统一数据任务平台。用户从文件或其他来源创建不�
 |---|---|---|
 | 公域采集与 Conductor | 可用 | 企业 API、业务系统、对象存储和统一生产 Adapter 尚未完成 |
 | 数据工作台 `/data-prep` | 可用 | 历史任务与 Legacy Delivery 仍保留兼容路径 |
-| P1-01 匿名网页统一工作台 | `ENGINEERING_VERIFIED` | 受控工程闭环已验；真实外部网页、Provider 与用户体验未验收 |
+| P1-01 匿名网页统一工作台 | `ENGINEERING_VERIFIED / CLOSED` | 受控工程闭环已验；真实外部网页、Provider 与用户体验未验收 |
 | vNext 默认正式 Delivery | `LIVE_ACCEPTED` | 默认/Pi/Legacy、P0 回滚与 Owner 隔离已验收；不代表稳定 Release |
 | Candidate 同 Run 重验 | `LIVE_ACCEPTED` | 追加式 Attempt、独立 Provider 授权、精确 Attempt 发布；未知结果不自动重试 |
 | 11 种交付预览 | `ENGINEERING_VERIFIED` | 不等于每种格式均有生产用户验收 |
@@ -128,7 +135,7 @@ Mangrove 是统一数据任务平台。用户从文件或其他来源创建不�
 
 ### 5.1 数据库与 Secret
 
-- 以下为 2026-08-26 P0 历史迁移证据；当前 Schema/启动修复以第 0 节和恢复核验报告第 11 节为准。
+- 以下为 2026-08-26 P0 历史迁移证据；当前 Schema 与启动修复以第 0 节、0.1 节和 PR #110 为准。
 - #56 已在生产 `data/webui.db` 的只读一致性副本上应用 `webui_0001..0003`：原 74 张表、
   10,216 行历史数据无意外改写，重放零 revision 且字节不变，恢复副本与备份逐字节一致；真实
   合法 `vnext_default` 缺口已修复并回归。生产原库 SHA、大小和 mtime 全程未变。
@@ -164,8 +171,8 @@ Mangrove 是统一数据任务平台。用户从文件或其他来源创建不�
 ### 5.3 工作树与提交安全
 
 - 用户持有的 10 个 G1 freeze/fixture 修改和 `docker/phase4b/entrypoint.sh` 不属于本轮提交范围，
-  禁止覆盖、清理或暂存。`.scratch/**`、`test-results/**` 与 `frontend/premium-audit.json` 仅在
-  确认属于可再生生成物后按用户本轮清理授权删除。
+  禁止覆盖、清理或暂存。已确认可再生的 `.scratch/**`、`test-results/**` 与
+  `frontend/premium-audit.json` 已按用户授权移入回收站。
 - 只允许按审计过的文件 allowlist 逐文件暂存；禁止 `git add .`、`git add -A`、
   `git commit -a`、`git reset --hard` 和 `git clean`。
 - #56～#58 已按同一可构建边界由 PR #76 合入；当前后续提交仍必须排除用户 G1 与本地产物。
@@ -203,8 +210,8 @@ Mangrove 是统一数据任务平台。用户从文件或其他来源创建不�
 
 ### P1 与 P2
 
-- P1-01：按网页 → HTTP → 数据库纵切片统一 `Source → TaskRevision → Delivery`；匿名网页首片
-  的当前实现进度见第 0 节，未上线历史兼容负担按 ADR-0036 退出。
+- P1-01：匿名网页首片已完成 `Source → TaskRevision → Delivery` 工程闭环；HTTP、数据库和认证
+  来源继续作为独立纵切片，未上线历史兼容负担按 ADR-0036 退出。
 - P1-02：深化 Semantic Workspace 生命周期模块，收窄路由、持久化和执行接缝，不做全量重写。
 - P1-03：生产可观测性、SLO、认证、TLS/CSP 与远程多人使用安全。
 - P1-04：在受众、配额、成本、外发、审计和回滚齐备后，分批开放已验证平台能力给普通用户。
@@ -212,12 +219,21 @@ Mangrove 是统一数据任务平台。用户从文件或其他来源创建不�
 - P2 仅在真实条件满足时启动：目标 Linux/GPU 服务器验收、远程 MCP/Registry/SecretRef、
   多媒体、多节点、对象存储/PostgreSQL 或新增正式输出格式。
 
-P1-01 已完成规格、拆票与 #89～#97，#98 工程闭环已通过并待远端收口。HTTP、数据库、认证来源
-和其余 P1 产品能力仍须按各自规格及完成证据处理，不得自动并入匿名网页首片。
+P1-01 已完成并关闭。下一步应从 P1-02～P1-05 或 HTTP/数据库/认证来源中选择一个明确纵切片，
+重新规格化后再实现；不得把本次工程验证自动扩大为整个 P1、真实用户验收或发布完成。
 
 ## 8. 历史证据索引
 
-### 当前 P0
+### 当前 P1
+
+- P1-01 规格：`docs/plans/2026-08-27-p1-01-anonymous-web-source-unified-workbench-spec.md`
+- Runtime 决策：`docs/adr/0035-unified-data-workbench-and-coremind-runtime-adapter.md`
+- 未上线迁移边界：`docs/adr/0036-single-workspace-with-verified-runtime-inheritance.md`
+- CoreMind 0.7.1：`docs/plans/2026-08-27-p1-coremind-agentkernel-prototype-report.md`、PR #107。
+- 工程收口：PR #110、CI run `33925622082`、已关闭 Issues #98/#83/#81。
+- Agent-Reach：`docs/research/2026-08-31-agent-reach-mangrove-assessment.md`
+
+### 历史 P0
 
 - 路线图与 DoD：`docs/plans/2026-08-23-post-issues-productization-roadmap.md`
 - P0-01/Candidate：`docs/plans/2026-08-23-p0-01-vnext-default-user-delivery-spec.md`、
