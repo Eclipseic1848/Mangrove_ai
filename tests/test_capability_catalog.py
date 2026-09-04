@@ -426,7 +426,7 @@ def test_workspace_default_runtime_wires_capability_mounts(
     manager = SemanticWorkspaceManager()
 
     assert isinstance(
-        manager._pi_runtime._capability_mount_resolver,
+        manager._kernel("pi-runtime")._adapter._runtime._capability_mount_resolver,
         DefaultCapabilityMounts,
     )
 

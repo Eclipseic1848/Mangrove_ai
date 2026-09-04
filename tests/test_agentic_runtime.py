@@ -112,7 +112,8 @@ def test_unified_scripts_manage_pi_egress_runtime() -> None:
     assert start_script.index('call "%NPM_CMD%" run build') < start_script.index(
         "run_backend_supervisor.bat"
     )
-    assert "http://192.168.50.123:8088" in start_script
+    assert "局域网访问：使用本机当前 IPv4 地址和端口 8088" in start_script
+    assert "http://192.168.50.123:8088" not in start_script
     assert "STARTUP_LOG" in start_script
     assert start_bytes.count(b"\n") == start_bytes.count(b"\r\n")
     assert 'http://127.0.0.1:8088' in health_script
