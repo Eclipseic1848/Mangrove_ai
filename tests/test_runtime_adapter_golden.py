@@ -275,6 +275,19 @@ def _docker_exists(reference: str) -> bool:
     ).returncode == 0
 
 
+async def _cancelled_outcome(task: asyncio.Task) -> RuntimeStatus:
+    try:
+        result = await task
+    except AgentKernelResultUnknownError:
+        return RuntimeStatus.CANCELLED
+    except Exception as exc:
+        if exc.__class__.__name__ == "CoreMindError" and "关闭" in str(exc):
+            return RuntimeStatus.CANCELLED
+        raise
+    assert result.status is RuntimeStatus.CANCELLED
+    return result.status
+
+
 @pytest.mark.skipif(
     os.environ.get("MANGROVE_RUNTIME_ADAPTER_GOLDEN_TEST") != "1",
     reason="需显式启用固定 Runtime 黄金对照",
@@ -393,6 +406,69 @@ async def test_fixed_pi_and_coremind_have_the_same_golden_contract(
             "event_stages": {"agent": True, "tool": True, "provider": True},
         }
 
+        pi_cancel_runtime = PiRuntime(
+            image=PI_IMAGE,
+            execution_root=tmp_path / "pi-cancel",
+            timeout_seconds=60,
+            egress_controller=SmokescreenEgressController(image=EGRESS_IMAGE),
+            configure_as_default_document_broker=False,
+        )
+        pi_cancel_adapter = PiAgentKernelAdapter(pi_cancel_runtime)
+        pi_cancel_adapter.bind_candidate_verification(verification)
+        await pi_cancel_adapter.prepare_manifest()
+        pi_cancel_request = pi_request.model_copy(
+            update={"task_id": "golden-pi-cancel"},
+        )
+        pi_cancel_binding = _binding(
+            pi_cancel_adapter,
+            "pi_run_3333333333333333",
+        )
+        pi_cancel_events = []
+
+        async def collect_pi_cancel(event):
+            pi_cancel_events.append(event)
+
+        _Provider.started = threading.Event()
+        _Provider.release = threading.Event()
+        _Provider.block = True
+        pi_cancel_task = asyncio.create_task(
+            pi_cancel_adapter.start(
+                pi_cancel_request,
+                binding=pi_cancel_binding,
+                on_event=collect_pi_cancel,
+            )
+        )
+        assert await asyncio.to_thread(_Provider.started.wait, 20)
+        pi_key = (
+            pi_cancel_request.user_id,
+            pi_cancel_request.task_id,
+            pi_cancel_request.revision,
+        )
+        pi_container = pi_cancel_runtime._containers[pi_key]
+        pi_lease = pi_cancel_runtime._egress_leases[pi_key]
+        await asyncio.wait_for(
+            pi_cancel_adapter.cancel(*pi_key),
+            timeout=10,
+        )
+        pi_events_after_cancel = len(pi_cancel_events)
+        _Provider.release.set()
+        pi_cancel_outcome = await _cancelled_outcome(pi_cancel_task)
+        assert len(pi_cancel_events) == pi_events_after_cancel
+        assert not pi_cancel_runtime._containers
+        assert not pi_cancel_runtime._egress_leases
+        assert not pi_cancel_runtime._grants
+        assert not pi_cancel_runtime._document_grants
+        for kind, identity in (
+            ("container", pi_container),
+            ("container", pi_lease.proxy_container_name),
+            ("network", pi_lease.network_name),
+        ):
+            assert subprocess.run(
+                ("docker", kind, "inspect", identity),
+                check=False,
+                capture_output=True,
+            ).returncode != 0
+
         cancel_adapter = CoreMindAgentKernelAdapter(
             execution_root=tmp_path / "coremind-cancel",
             candidate_verifier_factory=lambda _request, _run_id: object(),
@@ -403,13 +479,20 @@ async def test_fixed_pi_and_coremind_have_the_same_golden_contract(
         cancel_request = coremind_request.model_copy(
             update={"task_id": "golden-coremind-cancel"},
         )
-        cancel_binding = _binding(cancel_adapter, "cm_run_3333333333333333")
+        cancel_binding = _binding(cancel_adapter, "cm_run_4444444444444444")
+        coremind_cancel_events = []
+
+        async def collect_coremind_cancel(event):
+            coremind_cancel_events.append(event)
+
+        _Provider.started = threading.Event()
+        _Provider.release = threading.Event()
         _Provider.block = True
         cancel_task = asyncio.create_task(
             cancel_adapter.start(
                 cancel_request,
                 binding=cancel_binding,
-                on_event=lambda _event: asyncio.sleep(0),
+                on_event=collect_coremind_cancel,
             )
         )
         assert await asyncio.to_thread(_Provider.started.wait, 10)
@@ -421,16 +504,16 @@ async def test_fixed_pi_and_coremind_have_the_same_golden_contract(
             ),
             timeout=10,
         )
+        coremind_events_after_cancel = len(coremind_cancel_events)
         _Provider.release.set()
-        try:
-            cancelled = await cancel_task
-        except Exception as exc:
-            assert isinstance(exc, AgentKernelResultUnknownError) or (
-                exc.__class__.__name__ == "CoreMindError" and "关闭" in str(exc)
-            )
-        else:
-            assert cancelled.status is RuntimeStatus.CANCELLED
+        coremind_cancel_outcome = await _cancelled_outcome(cancel_task)
+        assert pi_cancel_outcome is coremind_cancel_outcome is RuntimeStatus.CANCELLED
+        assert len(coremind_cancel_events) == coremind_events_after_cancel
         assert all(client._process.poll() is not None for client in clients)
+        assert not any(
+            key.startswith("MANGROVE_COREMIND_RUN_GRANT_")
+            for key in os.environ
+        )
         _Provider.block = False
 
         pi_resume_events, coremind_resume_events = [], []
