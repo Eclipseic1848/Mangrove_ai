@@ -2578,7 +2578,7 @@ test.describe("统一数据工作台", () => {
   test("模型结果不确定时由用户确认后创建新版本", async ({ page }) => {
     await mockWorkspace(page);
     const failedTask = {
-      ...workspaceTask("task-model-unknown", "failed", "模型结果待确认"),
+      ...workspaceTask("task-model-unknown", "needs_input", "模型结果待确认"),
       model_connection_id: "connection-a",
       external_api_confirmed: true,
       error: "模型请求结果不确定",

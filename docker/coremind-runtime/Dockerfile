@@ -4,7 +4,7 @@ FROM ${TOOLCHAIN_IMAGE}
 
 # 构建上下文仅为已校验的 wheel 目录，不包含仓库、业务来源或宿主凭据。
 COPY coremind_ai-0.7.1-py3-none-any.whl /tmp/coremind_ai-0.7.1-py3-none-any.whl
-RUN python -c "import hashlib,pathlib,sys; p=pathlib.Path('/tmp/coremind_ai-0.7.1-py3-none-any.whl'); sys.exit(0 if hashlib.sha256(p.read_bytes()).hexdigest() == '68adf6d68d60384ae9878918d3b6fa7088a4446f484063fc241f26e318e5b6cf' else 'CoreMind wheel digest mismatch')" \
+RUN python -c "import hashlib,pathlib,sys; p=pathlib.Path('/tmp/coremind_ai-0.7.1-py3-none-any.whl'); sys.exit(0 if hashlib.sha256(p.read_bytes()).hexdigest() == '3fa5301c444da2e3bdaca51bd4800b1bdbcb6dc68e3abef4b39197bde3625e74' else 'CoreMind wheel digest mismatch')" \
     && python -m pip --isolated install --disable-pip-version-check --no-index --no-deps --no-compile --target /opt/coremind-sdk /tmp/coremind_ai-0.7.1-py3-none-any.whl \
     && rm /tmp/coremind_ai-0.7.1-py3-none-any.whl
 

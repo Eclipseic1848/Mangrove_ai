@@ -60,6 +60,9 @@ class AgentKernelCapabilityManifest(BaseModel):
     runtime_artifact: str = Field(min_length=1)
     protocol_version: str = Field(min_length=1)
     event_schema_version: str = Field(min_length=1)
+    runtime_version: str | None = Field(default=None, min_length=1)
+    runtime_protocol_version: str | None = Field(default=None, min_length=1)
+    runtime_event_schema_version: str | None = Field(default=None, min_length=1)
     required_capabilities: tuple[str, ...]
     optional_capabilities: tuple[str, ...] = ()
     available_capabilities: tuple[str, ...]
@@ -110,6 +113,9 @@ class RuntimeBinding(BaseModel):
     runtime_artifact: str = Field(min_length=1)
     protocol_version: str = Field(min_length=1)
     event_schema_version: str = Field(min_length=1)
+    runtime_version: str | None = Field(default=None, min_length=1)
+    runtime_protocol_version: str | None = Field(default=None, min_length=1)
+    runtime_event_schema_version: str | None = Field(default=None, min_length=1)
     capability_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     external_run_id: str = Field(min_length=1)
     model_connection_id: str | None = None
@@ -260,7 +266,15 @@ class PiAgentKernelAdapter:
 
     @staticmethod
     def _raise_unknown(exc: Exception) -> None:
-        if "模型请求结果不确定" in str(exc):
+        message = str(exc)
+        if any(
+            marker in message
+            for marker in (
+                "模型请求结果不确定",
+                "Pi 执行超过",
+                "Pi RPC 在任务稳定结束前退出",
+            )
+        ):
             raise AgentKernelResultUnknownError(str(exc)) from exc
 
     async def _assert_binding_artifact(self, binding: RuntimeBinding) -> None:
@@ -413,6 +427,7 @@ class AgentKernel:
                     request,
                     error_code="MODEL_OUTCOME_UNKNOWN",
                     cause=exc,
+                    status=RuntimeStatus.NEEDS_INPUT,
                 )
             raise
         except asyncio.CancelledError:
@@ -475,6 +490,7 @@ class AgentKernel:
                     request,
                     error_code="MODEL_OUTCOME_UNKNOWN",
                     cause=exc,
+                    status=RuntimeStatus.NEEDS_INPUT,
                 )
             raise
         except asyncio.CancelledError:
@@ -548,6 +564,20 @@ class AgentKernel:
 
         return self._repo().list_events(user_id, task_id, revision)
 
+    @property
+    def adapter_id(self) -> str:
+        return self._adapter.manifest.adapter_id
+
+    def frozen_binding(
+        self,
+        user_id: str,
+        task_id: str,
+        revision: int,
+    ) -> RuntimeBinding | None:
+        """只读返回已冻结身份，供宿主选择原 Adapter 恢复。"""
+
+        return self._find_binding(user_id, task_id, revision)
+
     def query(
         self,
         user_id: str,
@@ -598,6 +628,9 @@ class AgentKernel:
                 runtime_artifact=manifest.runtime_artifact,
                 protocol_version=manifest.protocol_version,
                 event_schema_version=manifest.event_schema_version,
+                runtime_version=manifest.runtime_version,
+                runtime_protocol_version=manifest.runtime_protocol_version,
+                runtime_event_schema_version=manifest.runtime_event_schema_version,
                 capability_digest=manifest.digest,
                 external_run_id=self._adapter.new_external_run_id(),
                 model_connection_id=model_connection_id,
@@ -621,20 +654,29 @@ class AgentKernel:
                 or key in self._cancelled
             ):
                 return
+            current = self._repo().get(*key)
+            if current is not None and current["status"] in _QUIESCENT_RESULT_STATUSES:
+                return
             public_details = {
                 name: value
                 for name, value in event.details.items()
                 if not name.startswith("_")
             }
-            self._repo().append_event(
+            saved = self._repo().append_event(
                 request.user_id,
                 request.task_id,
                 request.revision,
                 event_type=event.event_type,
                 summary=event.summary,
                 details=public_details,
+                event_id=(
+                    str(public_details["runtime_event_id"])
+                    if public_details.get("runtime_event_id")
+                    else None
+                ),
             )
-            await downstream(event)
+            if saved["inserted"]:
+                await downstream(event)
 
         return persist
 
@@ -679,13 +721,14 @@ class AgentKernel:
         *,
         error_code: str,
         cause: Exception,
+        status: RuntimeStatus = RuntimeStatus.FAILED,
     ) -> None:
         key = (request.user_id, request.task_id, request.revision)
         self._repo().update(
             request.user_id,
             request.task_id,
             request.revision,
-            status=RuntimeStatus.FAILED,
+            status=status,
             failure={
                 "error_code": error_code,
                 "cause_summary": str(cause)[:500],
@@ -735,6 +778,9 @@ class AgentKernel:
             runtime_artifact=manifest.runtime_artifact,
             protocol_version=manifest.protocol_version,
             event_schema_version=manifest.event_schema_version,
+            runtime_version=manifest.runtime_version,
+            runtime_protocol_version=manifest.runtime_protocol_version,
+            runtime_event_schema_version=manifest.runtime_event_schema_version,
             capability_digest=manifest.digest,
             external_run_id=external_run_id,
             model_connection_id=request.model_connection_id,
@@ -754,8 +800,10 @@ class AgentKernel:
             request.task_id,
             request.revision,
             run_id=binding.external_run_id,
-            binding=binding.model_dump(mode="json"),
-            capability_manifest=self._adapter.manifest.model_dump(mode="json"),
+            binding=binding.model_dump(mode="json", exclude_none=True),
+            capability_manifest=self._adapter.manifest.model_dump(
+                mode="json", exclude_none=True
+            ),
             adopted_existing_run=adopted_existing_run,
         )
 
@@ -788,6 +836,9 @@ class AgentKernel:
             manifest.runtime_artifact,
             manifest.protocol_version,
             manifest.event_schema_version,
+            manifest.runtime_version,
+            manifest.runtime_protocol_version,
+            manifest.runtime_event_schema_version,
             manifest.digest,
         )
         actual = (
@@ -798,6 +849,9 @@ class AgentKernel:
             binding.runtime_artifact,
             binding.protocol_version,
             binding.event_schema_version,
+            binding.runtime_version,
+            binding.runtime_protocol_version,
+            binding.runtime_event_schema_version,
             binding.capability_digest,
         )
         if actual != expected:

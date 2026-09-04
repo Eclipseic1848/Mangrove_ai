@@ -2,6 +2,7 @@
 """锁定 SDK 的显式离线契约检查；默认回归不启动外部 Worker。"""
 from __future__ import annotations
 
+import hashlib
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import os
@@ -67,7 +68,11 @@ class CoreMindWorkerContractTests(unittest.TestCase):
     def test_missing_native_usage_becomes_synthetic_zero_in_locked_worker(self):
         self._run_local_model(include_usage=False)
 
-    def _run_local_model(self, *, include_usage):
+    @unittest.skipUnless(os.environ.get("MANGROVE_COREMIND_HOST_VERIFICATION_TEST") == "1", "需固定宿主验收开发制品")
+    def test_host_rejects_then_accepts_repair_in_same_run(self):
+        self._run_local_model(include_usage=True, host_gate=True)
+
+    def _run_local_model(self, *, include_usage, host_gate=False):
         import coremind
 
         requests = []
@@ -82,8 +87,12 @@ class CoreMindWorkerContractTests(unittest.TestCase):
                     self.send_error(400)
                     return
                 requests.append(json.loads(self.rfile.read(length)))
+                if len(requests) > (2 if host_gate else 1):
+                    self.send_error(500, "unexpected model request")
+                    return
+                candidate = ("初稿" if len(requests) == 1 else "修正稿") if host_gate else "离线测试完成。"
                 chunks = [
-                    {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "离线测试完成。"}, "finish_reason": None}]},
+                    {"choices": [{"index": 0, "delta": {"role": "assistant", "content": candidate}, "finish_reason": None}]},
                     {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
                 ]
                 if include_usage:
@@ -113,6 +122,12 @@ class CoreMindWorkerContractTests(unittest.TestCase):
                         },
                         "agents": {"main": {"systemPrompt": "仅用于离线契约检查。", "tools": []}},
                         "runtime": {"maxTurns": 2, "maxRetries": 0, "runTimeoutMs": 10000},
+                        **({"loop": {
+                            "execute": {"agent": "main", "input": "{{prompt}}"},
+                            "verify": {"mode": "host", "timeoutMs": 5000},
+                            "repair": {"agent": "main", "input": "按宿主反馈修正：{{verification.text}}"},
+                            "maxIterations": 2, "maxRepairs": 1,
+                        }} if host_gate else {}),
                     },
                     config_dir=directory, cwd=directory, protocol_version="2.0", request_timeout=10,
                 )
@@ -121,6 +136,34 @@ class CoreMindWorkerContractTests(unittest.TestCase):
                         client.start()
                     handle = client.run("仅返回合成测试结果。", run_id="fixture-run-a")
                     self.assertEqual(handle["runId"], "fixture-run-a")
+                    if host_gate:
+                        self.assertIn("verification", handle["availableControls"])
+                        for index, candidate in enumerate(("初稿", "修正稿")):
+                            deadline = time.monotonic() + 10
+                            while len(client.received_verification_requests) <= index:
+                                if time.monotonic() >= deadline:
+                                    self.fail("未收到持久宿主验收请求")
+                                time.sleep(0.02)
+                            verification = client.received_verification_requests[index]
+                            self.assertEqual(verification["runId"], handle["runId"])
+                            self.assertEqual(verification["candidate"], candidate)
+                            self.assertEqual(verification["candidateSha256"], hashlib.sha256(candidate.encode("utf-8")).hexdigest())
+                            self.assertEqual(verification["iteration"], index + 1)
+                            self.assertNotEqual(client.query(handle["runId"])["projection"]["status"], "finished")
+                            reply = {
+                                "run_id": handle["runId"], "request_id": verification["requestId"],
+                                "candidate_sha256": verification["candidateSha256"],
+                                "decision": "reject" if index == 0 else "accept",
+                                "feedback": "补充独立证据" if index == 0 else "",
+                                "control_id": f"fixture-verification-{index}",
+                            }
+                            # 摘要不符不能放行；固定控制身份让未知结果可以幂等查询/重试。
+                            invalid = client.submit_verification(**{**reply, "candidate_sha256": "0" * 64, "control_id": f"invalid-{index}"})
+                            self.assertEqual(invalid["status"], "rejected")
+                            self.assertEqual(client.submit_verification(**reply)["status"], "applied")
+                            if index == 0:
+                                self.assertEqual(client.submit_verification(**reply)["status"], "duplicate")
+                                self.assertEqual(client.submit_verification(**{**reply, "decision": "accept"})["status"], "conflict")
                     deadline = time.monotonic() + 10
                     while True:
                         projection = None
@@ -138,12 +181,14 @@ class CoreMindWorkerContractTests(unittest.TestCase):
                     self.assertEqual(projection["projection"]["outcome"]["status"], "succeeded")
                     page = client.events("fixture-run-a", after_sequence=0, limit=1000)
                     usage = [event for event in page["events"] if event["eventType"] == "turn_end"]
-                    self.assertEqual(len(usage), 1)
+                    self.assertEqual(len(usage), 2 if host_gate else 1)
                     # 锁定 Worker 的兼容事实，不是计费权威；Mangrove 投影另测缺失用量保持未知。
                     self.assertEqual(usage[0]["payload"]["inputTokens"], 12 if include_usage else 0)
                     self.assertEqual(usage[0]["payload"]["outputTokens"], 3 if include_usage else 0)
                     self.assertEqual(usage[0]["payload"]["tokens"], 15 if include_usage else 0)
-                    self.assertEqual([request["model"] for request in requests], ["fixture-model"])
+                    self.assertEqual([request["model"] for request in requests], ["fixture-model"] * (2 if host_gate else 1))
+                    if host_gate:
+                        self.assertIn("补充独立证据", json.dumps(requests[1], ensure_ascii=False))
                     self.assertEqual([event["sequence"] for event in page["events"]], list(range(1, page["nextCursor"] + 1)))
                     self.assertEqual(client.events("fixture-run-a", after_sequence=page["nextCursor"])["events"], [])
                 finally:

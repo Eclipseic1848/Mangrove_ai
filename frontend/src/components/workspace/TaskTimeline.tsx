@@ -1174,7 +1174,8 @@ export function TaskTimeline({
         </Collapsible.Content>
       </Collapsible.Root>
 
-      {task.status === "failed" && (
+      {(task.status === "failed"
+        || task.failure?.error_code === "MODEL_OUTCOME_UNKNOWN") && (
         <div
           data-testid="task-failure-explanation"
           className="mt-3 rounded-2xl border border-destructive/20 bg-destructive/[0.04] p-4"
@@ -1182,7 +1183,11 @@ export function TaskTimeline({
           <div className="flex items-start gap-3">
             <AlertCircle className="mt-0.5 h-5 w-5 text-destructive" />
             <div className="min-w-0 flex-1">
-              <h3 className="text-sm font-semibold">任务未完成</h3>
+              <h3 className="text-sm font-semibold">
+                {task.failure?.error_code === "MODEL_OUTCOME_UNKNOWN"
+                  ? "等待你的决定"
+                  : "任务未完成"}
+              </h3>
               <p className="mt-1 text-sm leading-6 text-muted-foreground">
                 {productText(task.failure?.cause_summary
                   || task.error

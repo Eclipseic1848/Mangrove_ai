@@ -1316,7 +1316,7 @@ _TRACE_SECRET_PATTERN = re.compile(
     r"(?i)(api[_-]?key|secret|token|cookie|password|authorization)\s*[:=]\s*[^\s,;，；]+"
 )
 _TRACE_PATH_PATTERN = re.compile(r"(?:[A-Za-z]:\\|/)[^\s,;，；]+")
-_SAFE_PI_TRACE_EVENT_TYPES = {
+_SAFE_AGENT_TRACE_EVENT_TYPES = {
     "agent.started",
     "agent.retrying",
     "agent.settled",
@@ -1333,6 +1333,7 @@ _SAFE_PI_TRACE_EVENT_TYPES = {
     "tool.completed",
     "tool.failed",
 }
+_AGENT_KERNEL_TRACE_SOURCES = {"pi-runtime", "coremind-runtime"}
 _RUN_BOUND_WORKSPACE_EVENT_TYPES = {
     "question_required",
     "question_answered",
@@ -1375,9 +1376,9 @@ def _progress_summary(event: dict[str, Any], details: dict[str, Any]) -> str:
     if details.get("trace_required") is True and not details.get("trace_normalized"):
         raise RuntimeError("必需 Runtime 事件未完成安全归一化")
     if (
-        details.get("source") == "pi-runtime"
+        details.get("source") in _AGENT_KERNEL_TRACE_SOURCES
         and runtime_event_type
-        and runtime_event_type not in _SAFE_PI_TRACE_EVENT_TYPES
+        and runtime_event_type not in _SAFE_AGENT_TRACE_EVENT_TYPES
     ):
         return "智能体完成一项内部操作"
     return _safe_trace_text(summary, limit=500) or "正在处理"
@@ -1403,13 +1404,13 @@ def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgres
         )
         trace_details = (
             details
-            if details.get("source") != "pi-runtime"
-            or runtime_event_type in _SAFE_PI_TRACE_EVENT_TYPES
+            if details.get("source") not in _AGENT_KERNEL_TRACE_SOURCES
+            or runtime_event_type in _SAFE_AGENT_TRACE_EVENT_TYPES
             else {}
         )
         event_run_id = event.get("run_id") or details.get("run_id")
         if event_run_id is None and (
-            details.get("source") == "pi-runtime"
+            details.get("source") in _AGENT_KERNEL_TRACE_SOURCES
             or outer_event_type in _RUN_BOUND_WORKSPACE_EVENT_TYPES
         ):
             event_run_id = (

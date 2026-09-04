@@ -472,6 +472,9 @@ class TestS6Supervision:
                     "table_output_contracts": [],
                 }
 
+            def get_web_task_contract(self, user_id, task_id, revision):
+                return None
+
             def append_semantic_workspace_event(
                 self, user_id, task_id, **kwargs
             ): ...

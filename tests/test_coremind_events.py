@@ -242,3 +242,57 @@ def test_protocol_identifiers_keep_public_correlation_without_exposing_paths():
         assert "/private" not in result.model_dump_json()
         assert "owner-secret" not in result.model_dump_json()
         assert re.fullmatch(r"cm_call_[a-f0-9]{64}", result.details["tool_call_id"])
+
+
+def test_known_internal_fact_is_ignored_without_copying_payload():
+    event = {
+        "protocolVersion": "2.0",
+        "eventSchemaVersion": 1,
+        "runId": "run-owner-a",
+        "sequence": 1,
+        "eventId": "event-start",
+        "timestamp": "2026-09-04T05:00:00.000Z",
+        "ignorable": False,
+        "sensitivity": "local",
+        "eventType": "fact.start",
+        "payload": {"api_key": "must-not-leak"},
+    }
+
+    assert project_coremind_event(
+        event,
+        run_id="run-owner-a",
+        model="chosen-model",
+    ) is None
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        "tool_lifecycle",
+        "capability_resolved",
+        "effect_receipt",
+        "tool_execution_evidence",
+        "workspace_lease",
+        "checkpoint_created",
+        "input_discarded",
+    ],
+)
+def test_known_tool_metadata_is_ignored_without_copying_payload(event_type):
+    event = {
+        "protocolVersion": "2.0",
+        "eventSchemaVersion": 1,
+        "runId": "run-owner-a",
+        "sequence": 2,
+        "eventId": "event-tool-metadata",
+        "timestamp": "2026-09-04T05:00:00.000Z",
+        "ignorable": False,
+        "sensitivity": "local",
+        "eventType": event_type,
+        "payload": {"type": event_type, "secret": "must-not-leak"},
+    }
+
+    assert project_coremind_event(
+        event,
+        run_id="run-owner-a",
+        model="chosen-model",
+    ) is None

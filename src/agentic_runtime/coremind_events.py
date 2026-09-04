@@ -12,6 +12,37 @@ from .kernel import AgentKernelCapabilityError
 from .models import RuntimeEvent
 
 
+_IGNORED_EVENT_TYPES = {
+    "fact.start",
+    "fact.operation",
+    "input_receipt",
+    "input_claimed",
+    "context_prefix",
+    "context_budget_resolved",
+    "provider_request",
+    "text_delta",
+    "capability_resolved",
+    "effect_receipt",
+    "tool_execution_evidence",
+    "workspace_lease",
+    "checkpoint_created",
+    "tool_lifecycle",
+    "agent_end",
+    "input_completed",
+    "input_discarded",
+    "step_start",
+    "step_output",
+    "step_end",
+    "loop_state",
+    "fact.loop",
+    "fact.verification",
+    "fact.control",
+    "fact.checkpoint",
+    "fact.checkpoint_restore",
+    "fact.finish",
+}
+
+
 def _valid_id(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[^\s\x00-\x1f\x7f]{1,256}", value) is not None
 
@@ -64,11 +95,15 @@ def project_coremind_event(
     ):
         raise AgentKernelCapabilityError("CoreMind 事件身份或协议不兼容")
     event_type = event.get("eventType")
-    if event_type not in {"turn_end", "tool_call", "tool_result"}:
+    if event_type in _IGNORED_EVENT_TYPES:
+        return None
+    if event_type not in {"agent_start", "turn_end", "tool_call", "tool_result"}:
         # 未知必需事件可能改变任务状态，不能跳过后继续声称执行成功。
         if event["ignorable"] and re.fullmatch(r"fact\.[a-z][a-z0-9_]*", event_type):
             return None
-        raise AgentKernelCapabilityError("CoreMind 必需事件尚无安全映射")
+        raise AgentKernelCapabilityError(
+            f"CoreMind 必需事件尚无安全映射：{event_type}"
+        )
     if not isinstance(payload, Mapping) or payload.get("type") != event_type:
         raise AgentKernelCapabilityError("CoreMind 事件类型与载荷不一致")
     identity = {
@@ -77,6 +112,12 @@ def project_coremind_event(
         "runtime_timestamp": timestamp,
         **({"turn_id": _public_id("turn", run_id, event["turnId"])} if "turnId" in event else {}),
     }
+    if event_type == "agent_start":
+        return RuntimeEvent(
+            event_type="agent.started",
+            summary="智能体已开始执行冻结任务",
+            details={**identity, "trace_normalized": True, "purpose": "执行任务"},
+        )
     if event_type == "turn_end":
         return RuntimeEvent(
             event_type="provider.usage",
