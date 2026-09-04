@@ -171,7 +171,7 @@ xlsxwriter==3.2.9
 pdfplumber==0.11.10
 pypdfium2==5.12.1
 rapidocr==3.9.2
-pypdf==6.15.0
+pypdf==6.16.1
 beautifulsoup4==4.14.2
 ffmpeg-python==0.2.0
 pyasn1==0.6.4
