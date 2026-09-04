@@ -1,5 +1,6 @@
 # 本地开发与自动化测试专用，不得进入生产镜像。
 hypothesis==6.159.0
+fpdf2==2.8.7
 pytest==9.1.1
 pytest-asyncio==1.4.0
 pytest-randomly==4.1.0
