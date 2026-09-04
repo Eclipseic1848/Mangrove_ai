@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from src.conversation_steering import ProgressStage, StructuredProgressEvent
 from src.work_trace import WorkTraceProjection
 from src.api.routes.semantic_workspace import _structured_progress_events
@@ -356,7 +358,10 @@ def test_unknown_required_runtime_event_fails_closed() -> None:
         raise AssertionError("未知必需 Runtime 事件必须失败关闭")
 
 
-def test_known_pi_event_keeps_safe_summary_but_unknown_optional_does_not() -> None:
+@pytest.mark.parametrize("source", ["pi-runtime", "coremind-runtime"])
+def test_known_agent_event_keeps_safe_summary_but_unknown_optional_does_not(
+    source: str,
+) -> None:
     events = _structured_progress_events({
         "task_id": "task-1",
         "viewing_revision": 1,
@@ -370,7 +375,7 @@ def test_known_pi_event_keeps_safe_summary_but_unknown_optional_does_not() -> No
                 "summary": "已准备 1 项能力：文档解析",
                 "created_at": "2026-08-28T00:00:00Z",
                 "details": {
-                    "source": "pi-runtime",
+                    "source": source,
                     "runtime_event_type": "capability.completed",
                 },
             },
@@ -381,7 +386,7 @@ def test_known_pi_event_keeps_safe_summary_but_unknown_optional_does_not() -> No
                 "summary": "原始事件正文不得展示",
                 "created_at": "2026-08-28T00:00:01Z",
                 "details": {
-                    "source": "pi-runtime",
+                    "source": source,
                     "runtime_event_type": "tool.future_optional",
                     "purpose": "system prompt 原文",
                     "input_summary": "cookie=raw-secret",

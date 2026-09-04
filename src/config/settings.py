@@ -2,7 +2,7 @@
 环境配置和设置模块
 包含所有应用程序配置项的集中管理
 """
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from pydantic import Field
@@ -386,6 +386,18 @@ class Settings(BaseSettings):
         default=8192,
         ge=1024,
         description="Pi 单次本地模型最大输出 token",
+    )
+    coremind_runtime_enabled: bool = Field(
+        default=False,
+        description="是否装载固定 CoreMind Adapter；关闭时 Pi 路径零变化",
+    )
+    agent_kernel_primary_adapter: Literal["pi-runtime", "coremind-runtime"] = Field(
+        default="pi-runtime",
+        description="新 vNext Run 使用的 AgentKernel Adapter；历史 Run 仍按冻结绑定恢复",
+    )
+    coremind_runtime_relay_base_url: str = Field(
+        default="",
+        description="CoreMind Worker 访问内部模型 Relay 的根地址",
     )
     semantic_compiler_timeout_seconds: int = Field(
         default=120,

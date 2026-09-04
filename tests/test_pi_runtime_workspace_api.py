@@ -1356,7 +1356,7 @@ def test_ambiguous_provider_outcome_requires_user_retry_decision(
         task = _wait_for_status(
             client,
             created.json()["task_id"],
-            "failed",
+            "needs_input",
         )
         missing_revision = client.post(
             f"/api/semantic-workspace/tasks/{task['task_id']}/revisions",
@@ -1381,6 +1381,11 @@ def test_ambiguous_provider_outcome_requires_user_retry_decision(
         )
 
     assert task["failure"]["error_code"] == "MODEL_OUTCOME_UNKNOWN"
+    assert task["status"] == "needs_input"
+    assert any(
+        event["event_type"] == "owner_action.requested"
+        for event in task["events"]
+    )
     assert missing_revision.status_code == 422
     assert task["failure"]["attempt_count"] == 1
     assert task["failure"]["next_actions"] == [
@@ -1444,9 +1449,14 @@ def test_external_provider_timeout_requires_user_retry_decision(
             },
         )
         assert created.status_code == 202, created.text
-        task = _wait_for_status(client, created.json()["task_id"], "failed")
+        task = _wait_for_status(
+            client,
+            created.json()["task_id"],
+            "needs_input",
+        )
 
     assert task["failure"]["error_code"] == "MODEL_OUTCOME_UNKNOWN"
+    assert task["status"] == "needs_input"
     assert task["failure"]["attempt_count"] == 1
 
 

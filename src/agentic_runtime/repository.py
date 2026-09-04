@@ -580,36 +580,69 @@ class AgenticRuntimeRepository:
         event_type: str,
         summary: str,
         details: dict[str, Any] | None = None,
+        event_id: str | None = None,
     ) -> dict[str, Any]:
-        event_id = f"agent_event_{uuid.uuid4().hex[:16]}"
+        resolved_event_id = event_id or f"agent_event_{uuid.uuid4().hex[:16]}"
+        payload = details or {}
         created_at = _now()
         with _LOCK, self._conn() as conn:
             cursor = conn.execute(
-                """
-                INSERT INTO agentic_runtime_events (
+                f"""
+                {"INSERT OR IGNORE" if event_id is not None else "INSERT"}
+                INTO agentic_runtime_events (
                     event_id, user_id, task_id, revision, event_type,
                     summary, details_json, created_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    event_id,
+                    resolved_event_id,
                     user_id,
                     task_id,
                     revision,
                     event_type,
                     summary,
-                    json.dumps(details or {}, ensure_ascii=False),
+                    json.dumps(payload, ensure_ascii=False),
                     created_at,
                 ),
             )
-            sequence = int(cursor.lastrowid)
+            inserted = cursor.rowcount == 1
+            if inserted:
+                sequence = int(cursor.lastrowid)
+            else:
+                existing = conn.execute(
+                    """
+                    SELECT sequence, user_id, task_id, revision, event_type,
+                           summary, details_json, created_at
+                    FROM agentic_runtime_events WHERE event_id=?
+                    """,
+                    (resolved_event_id,),
+                ).fetchone()
+                if existing is None or (
+                    existing["user_id"],
+                    existing["task_id"],
+                    existing["revision"],
+                    existing["event_type"],
+                    existing["summary"],
+                    json.loads(existing["details_json"] or "{}"),
+                ) != (
+                    user_id,
+                    task_id,
+                    revision,
+                    event_type,
+                    summary,
+                    payload,
+                ):
+                    raise ValueError("Runtime 事件身份发生冲突")
+                sequence = int(existing["sequence"])
+                created_at = str(existing["created_at"])
         return {
             "sequence": sequence,
-            "event_id": event_id,
+            "event_id": resolved_event_id,
             "event_type": event_type,
             "summary": summary,
-            "details": details or {},
+            "details": payload,
             "created_at": created_at,
+            "inserted": inserted,
         }
 
     def freeze_runtime_binding(

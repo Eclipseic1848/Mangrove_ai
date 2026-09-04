@@ -11,7 +11,7 @@ import logging
 from pathlib import Path
 import sqlite3
 import time
-from typing import Any
+from typing import Any, Mapping
 
 from filelock import FileLock, Timeout
 
@@ -30,7 +30,12 @@ from src.agentic_runtime.candidate_verifier import (
     CandidateVerifier,
     LocalModelSemanticJudge,
 )
-from src.agentic_runtime.kernel import AgentKernel, PiAgentKernelAdapter
+from src.agentic_runtime.kernel import (
+    AgentKernel,
+    AgentKernelResultUnknownError,
+    PiAgentKernelAdapter,
+)
+from src.agentic_runtime.coremind_runtime import CoreMindAgentKernelAdapter
 from src.agentic_runtime.pi_runtime import PiRuntime
 from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.api.auth import get_store
@@ -624,6 +629,8 @@ class SemanticWorkspaceManager:
         self,
         *,
         agent_kernel: AgentKernel | None = None,
+        agent_kernels: Mapping[str, AgentKernel] | None = None,
+        primary_adapter_id: str | None = None,
         pi_runtime: PiRuntime | None = None,
         candidate_verification: CandidateVerificationService | None = None,
     ) -> None:
@@ -642,8 +649,14 @@ class SemanticWorkspaceManager:
         self._delivery_retry_after: dict[str, float] = {}
         self._heavy = asyncio.Semaphore(1)
         self._candidate_verification = candidate_verification
-        self._agent_kernel = agent_kernel
-        if agent_kernel is None:
+        self._agent_kernels = dict(agent_kernels or {})
+        self._primary_adapter_id = primary_adapter_id
+        if agent_kernel is not None:
+            if self._agent_kernels:
+                raise ValueError("agent_kernel 与 agent_kernels 不能同时提供")
+            self._agent_kernels[agent_kernel.adapter_id] = agent_kernel
+            self._primary_adapter_id = agent_kernel.adapter_id
+        if not self._agent_kernels:
             runtime = pi_runtime or PiRuntime(
                 capability_mount_resolver=DefaultCapabilityMounts(
                     db_path=settings.webui_db_path,
@@ -672,18 +685,61 @@ class SemanticWorkspaceManager:
                 ),
                 candidate_verification=candidate_verification,
             )
-            self._agent_kernel = AgentKernel(
-                adapter=PiAgentKernelAdapter(runtime),
-                repository=lambda: AgenticRuntimeRepository(
-                    settings.webui_db_path
-                ),
+            repository_factory = lambda: AgenticRuntimeRepository(
+                settings.webui_db_path
             )
+            pi_kernel = AgentKernel(
+                adapter=PiAgentKernelAdapter(runtime),
+                repository=repository_factory,
+            )
+            self._agent_kernels[pi_kernel.adapter_id] = pi_kernel
+            if settings.coremind_runtime_enabled:
+                coremind_kernel = AgentKernel(
+                    adapter=CoreMindAgentKernelAdapter(
+                        execution_root=(
+                            Path(settings.semantic_execution_root)
+                            / "coremind-runs"
+                        ),
+                        candidate_verifier_factory=(
+                            self._build_full_candidate_verifier
+                        ),
+                        relay_base_url=(
+                            settings.coremind_runtime_relay_base_url
+                            or f"http://127.0.0.1:{settings.api_port}/internal/model-relay"
+                        ),
+                        timeout_seconds=settings.pi_runtime_timeout_seconds,
+                    ),
+                    repository=repository_factory,
+                )
+                self._agent_kernels[coremind_kernel.adapter_id] = coremind_kernel
+            self._primary_adapter_id = (
+                self._primary_adapter_id
+                or settings.agent_kernel_primary_adapter
+            )
+        if self._primary_adapter_id not in self._agent_kernels:
+            raise ValueError("主 AgentKernel Adapter 未启用或不存在")
+        self._agent_kernel = self._agent_kernels[self._primary_adapter_id]
 
-    def _kernel(self) -> AgentKernel:
+    def _kernel(self, adapter_id: str | None = None) -> AgentKernel:
         """首次需要 Runtime 时才验证数据库 Schema 并建立 Kernel。"""
 
-        assert self._agent_kernel is not None
-        return self._agent_kernel
+        resolved = adapter_id or self._primary_adapter_id
+        assert resolved is not None
+        try:
+            return self._agent_kernels[resolved]
+        except KeyError as exc:
+            raise RuntimeError("冻结的 AgentKernel Adapter 当前不可用") from exc
+
+    def _kernel_for_run(
+        self,
+        user_id: str,
+        task_id: str,
+        revision: int,
+    ) -> AgentKernel:
+        if len(self._agent_kernels) == 1:
+            return self._agent_kernel
+        binding = self._agent_kernel.frozen_binding(user_id, task_id, revision)
+        return self._kernel(binding.adapter_id if binding is not None else None)
 
     async def prepare_runtime_binding(
         self,
@@ -719,14 +775,8 @@ class SemanticWorkspaceManager:
                     get_default_broker().revoke_grant(provider_attempt_id, reason)
                 ),
             )
-        bind_candidate_verification = getattr(
-            self._kernel(),
-            "bind_candidate_verification",
-            None,
-        )
-        if bind_candidate_verification is None:
-            raise RuntimeError("Pi Runtime 未提供 CandidateVerification 绑定接缝")
-        bind_candidate_verification(self._candidate_verification)
+        for kernel in self._agent_kernels.values():
+            kernel.bind_candidate_verification(self._candidate_verification)
         return self._candidate_verification
 
     def inspect_candidate_reverification(
@@ -1179,11 +1229,36 @@ class SemanticWorkspaceManager:
         # 恢复必须由 Web 服务进程接管，确保 Runtime 与文档 Relay 共享同一 Grant 域。
         for task in store.list_pending_semantic_workspace_tasks():
             if task["status"] == "cancelling":
-                store.update_semantic_workspace_task(
+                runtime = AgenticRuntimeRepository(
+                    settings.webui_db_path
+                ).get(
                     task["user_id"],
                     task["task_id"],
-                    status="cancelled",
-                    cancel_requested=True,
+                    task["active_revision"],
+                )
+                try:
+                    if runtime is not None and runtime.get("run_id"):
+                        get_default_broker().revoke_run_grants(
+                            task["user_id"],
+                            task["task_id"],
+                            task["active_revision"],
+                            runtime["run_id"],
+                            reason="host_restart_cancel",
+                        )
+                except Exception:  # noqa: BLE001
+                    store.append_semantic_workspace_event(
+                        task["user_id"],
+                        task["task_id"],
+                        stage="cancelling",
+                        event_type="runtime_cleanup_pending",
+                        summary="服务恢复后临时模型授权仍未清理，保持取消中",
+                        details={"recovery_status": "pending"},
+                    )
+                    continue
+                self._mark_cancelled(
+                    task["user_id"],
+                    task["task_id"],
+                    task["active_revision"],
                 )
                 continue
             store.update_semantic_workspace_task(
@@ -1383,7 +1458,9 @@ class SemanticWorkspaceManager:
             # 硬门命中：先停容器与 Sidecar（阻断后续能力调用），
             # 再标记取消，最后取消执行协程并等待其清理收尾。
             try:
-                await self._kernel().cancel(user_id, task_id, revision)
+                await self._kernel_for_run(user_id, task_id, revision).cancel(
+                    user_id, task_id, revision
+                )
             except Exception as error:
                 # 容器清理失败不能掩盖治理取消事实；留痕供审计。
                 get_store().append_semantic_workspace_event(
@@ -1492,7 +1569,9 @@ class SemanticWorkspaceManager:
         ):
             # 先显式终止容器，再取消编排协程；不能依赖 CancelledError
             # 恰好传播到底层，否则第三方 Adapter 可能留下继续运行的子进程。
-            await self._kernel().cancel(
+            await self._kernel_for_run(
+                user_id, task_id, task["active_revision"]
+            ).cancel(
                 user_id,
                 task_id,
                 task["active_revision"],
@@ -2136,6 +2215,23 @@ class SemanticWorkspaceManager:
             )
         except asyncio.CancelledError:
             self._mark_cancelled(user_id, task_id, revision)
+        except AgentKernelResultUnknownError as exc:
+            failure = self._runtime_failure(
+                user_id,
+                task_id,
+                str(exc) or exc.__class__.__name__,
+                elapsed_ms=max(
+                    0,
+                    int((time.monotonic() - started) * 1000),
+                ),
+            )
+            self._mark_result_unknown(
+                user_id,
+                task_id,
+                revision,
+                str(exc) or exc.__class__.__name__,
+                failure,
+            )
         except Exception as exc:  # noqa: BLE001
             failure = self._runtime_failure(
                 user_id,
@@ -2336,6 +2432,7 @@ class SemanticWorkspaceManager:
             )
         request = PiRuntimeRequest(**request_values)
         self._candidate_verification_module()
+        kernel = self._kernel_for_run(user_id, task_id, revision)
         repository.update(
             user_id,
             task_id,
@@ -2362,9 +2459,10 @@ class SemanticWorkspaceManager:
             task_id,
             stage="source_probe",
             event_type="source.observed",
-            summary=f"Pi 将按任务需要检查 {len(sources)} 个真实来源",
+            summary=f"智能体将按任务需要检查 {len(sources)} 个真实来源",
             details={
                 "runtime_version": "pi",
+                "runtime_adapter": kernel.adapter_id,
                 "source_count": len(sources),
             },
         )
@@ -2454,7 +2552,7 @@ class SemanticWorkspaceManager:
                 summary=event.summary,
                 details={
                     **public_details,
-                    "source": "pi-runtime",
+                    "source": kernel.adapter_id,
                     "runtime_event_type": event.event_type,
                 },
             )
@@ -2478,7 +2576,7 @@ class SemanticWorkspaceManager:
         try:
             if checkpoint is not None:
                 execution: asyncio.Future = asyncio.ensure_future(
-                    self._kernel().resume(
+                    kernel.resume(
                         request,
                         checkpoint=checkpoint,
                         on_event=on_event,
@@ -2486,7 +2584,7 @@ class SemanticWorkspaceManager:
                 )
             else:
                 execution = asyncio.ensure_future(
-                    self._kernel().start(
+                    kernel.start(
                         request,
                         on_event=on_event,
                     )
@@ -2500,7 +2598,7 @@ class SemanticWorkspaceManager:
         except _RevisionSwitchAtSafePoint:
             # 新 revision 已冻结后，显式终止旧版本容器；旧工作区仍保留为
             # 审计证据，但不会被登记成新版本候选或正式交付。
-            await self._kernel().cancel(user_id, task_id, revision)
+            await kernel.cancel(user_id, task_id, revision)
             return
         except _GateViolationAbort:
             # 治理门命中：状态已由监督标记为 cancelled，静默退出；
@@ -2534,9 +2632,9 @@ class SemanticWorkspaceManager:
             )
             return
         if result.status is not RuntimeStatus.CANDIDATE_READY:
-            raise ValueError("Pi Runtime 未形成候选结果")
+            raise ValueError("Agent Runtime 未形成候选结果")
         if result.verification is None:
-            raise ValueError("Pi Runtime 未形成独立验证结论")
+            raise ValueError("Agent Runtime 未形成独立验证结论")
         repository.update(
             user_id,
             task_id,
@@ -2575,7 +2673,7 @@ class SemanticWorkspaceManager:
                 or candidate_coverage.formal_delivery_eligible
             )
         )
-        # Task 的 run_id 指向真实 Pi Run，公共 Delivery 查询不再依赖伪造 Legacy Harness。
+        # Task 的 run_id 指向真实 Agent Run，公共 Delivery 查询不再依赖伪造 Legacy Harness。
         store.update_semantic_workspace_task(
             user_id,
             task_id,
@@ -2632,7 +2730,7 @@ class SemanticWorkspaceManager:
             task_id,
             revision,
             status="candidate_ready",
-            summary="Pi 候选未通过独立验证",
+            summary="智能体候选未通过独立验证",
         )
         store.append_semantic_workspace_event(
             user_id,
@@ -3342,7 +3440,11 @@ class SemanticWorkspaceManager:
                 user_id,
                 task_id,
                 task["active_revision"],
-                status=RuntimeStatus.FAILED,
+                status=(
+                    RuntimeStatus.NEEDS_INPUT
+                    if outcome_unknown
+                    else RuntimeStatus.FAILED
+                ),
                 failure=failure,
             )
             return failure
@@ -3458,6 +3560,46 @@ class SemanticWorkspaceManager:
                 "error_code": (
                     failure.get("error_code") if failure else None
                 ),
+            },
+        )
+
+    def _mark_result_unknown(
+        self,
+        user_id: str,
+        task_id: str,
+        revision: int,
+        message: str,
+        failure: dict[str, Any],
+    ) -> None:
+        """暂停未知结果；只有用户创建新版本后才允许再次请求模型。"""
+
+        store = get_store()
+        store.update_semantic_workspace_task(
+            user_id,
+            task_id,
+            status="needs_input",
+            error=message[:1000],
+            failure=failure,
+            question=None,
+        )
+        store.update_semantic_workspace_revision(
+            user_id,
+            task_id,
+            revision,
+            status="needs_input",
+        )
+        store.append_semantic_workspace_event(
+            user_id,
+            task_id,
+            stage="needs_input",
+            event_type="owner_action.requested",
+            summary="模型结果无法确认，等待你决定是否创建新版本重新执行",
+            details={
+                "reason": "平台不会自动重试、切换模型或发布不确定结果",
+                "affected_scope": ["模型调用", "可能的重复费用"],
+                "action": {"action_id": f"runtime-unknown:{task_id}:{revision}"},
+                "recovery_status": "pending",
+                "error_code": "MODEL_OUTCOME_UNKNOWN",
             },
         )
 

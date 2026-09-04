@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import asyncio
+import hashlib
 import re
 
 import pytest
@@ -18,6 +19,7 @@ from src.agentic_runtime.kernel import (
     AgentKernelResultUnknownError,
     PiAgentKernelAdapter,
 )
+from src.agentic_runtime.coremind_runtime import CoreMindAgentKernelAdapter
 from src.agentic_runtime.models import (
     PiRuntimeCheckpoint,
     PiRuntimeRequest,
@@ -32,6 +34,11 @@ from src.agentic_runtime.models import (
 from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.agentic_runtime.pi_runtime import PiRuntime
 from tests.database_migration_helpers import migrated_webui_database
+from tests.test_coremind_agent_kernel_adapter import (
+    _FakeCoreMindClient,
+    _InteractiveCoreMindClient,
+    _PassingCandidateService,
+)
 
 
 class _NeverStartedAdapter:
@@ -233,10 +240,234 @@ class _CancelFailingAdapter(_BlockingAdapter):
         raise RuntimeError("底层 Runtime 取消失败")
 
 
+class _ReplayEventAdapter(_ContractAdapter):
+    async def start(self, request, *, binding, on_event):
+        del request
+        self.start_calls += 1
+        await on_event(
+            RuntimeEvent(
+                event_type="tool.completed",
+                summary="完成一次读取",
+                details={"runtime_event_id": "runtime-event-1"},
+            )
+        )
+        return PiRuntimeResult(
+            status=RuntimeStatus.CANDIDATE_READY,
+            run_id=binding.external_run_id,
+            workspace_root=Path.cwd(),
+        )
+
+    async def resume(self, request, *, binding, checkpoint, on_event):
+        del request, checkpoint
+        self.resume_calls += 1
+        await on_event(
+            RuntimeEvent(
+                event_type="tool.completed",
+                summary="完成一次读取",
+                details={"runtime_event_id": "runtime-event-1"},
+            )
+        )
+        return PiRuntimeResult(
+            status=RuntimeStatus.CANDIDATE_READY,
+            run_id=binding.external_run_id,
+            workspace_root=Path.cwd(),
+        )
+
+
 class _UnknownAdapter(_ContractAdapter):
     async def start(self, request, *, binding, on_event):
         del request, binding, on_event
+        self.start_calls += 1
         raise AgentKernelResultUnknownError("模型请求结果不确定")
+
+
+class WorkerExitedError(RuntimeError):
+    pass
+
+
+class _CoreMindContractClient(_InteractiveCoreMindClient):
+    """用 Protocol v2 假客户端驱动真实 CoreMind Adapter 公共合同。"""
+
+    def __init__(self, contract: _ContractAdapter) -> None:
+        super().__init__()
+        self.contract = contract
+        self.cancelled = False
+
+    def run(self, prompt: str, *, run_id: str):
+        self.contract.start_calls += 1
+        self.contract.started.set()
+        if isinstance(self.contract, (_BlockingAdapter, _UnknownAdapter)):
+            return _FakeCoreMindClient.run(self, prompt, run_id=run_id)
+        return super().run(prompt, run_id=run_id)
+
+    def resume_run(self, run_id: str, *, input: str | None = None):
+        self.contract.resume_calls += 1
+        result = _FakeCoreMindClient.resume_run(self, run_id, input=input)
+        read = self.registered[0]
+        self.received_tool_calls.append({
+            "schemaVersion": 1,
+            "runId": run_id,
+            "callId": "call-read",
+            "registrationId": read["registrationId"],
+            "toolId": read["toolId"],
+            "name": read["name"],
+            "argumentsFingerprint": "sha256:" + "b" * 64,
+            "args": {"source_id": "upload-a"},
+        })
+        return result
+
+    def query(self, run_id: str):
+        if isinstance(self.contract, _UnknownAdapter):
+            raise WorkerExitedError("敏感 stderr 不得进入状态")
+        if isinstance(self.contract, _BlockingAdapter):
+            return {
+                "runId": run_id,
+                "projection": {
+                    "status": "finished" if self.cancelled else "running",
+                    "outcome": {"status": "cancelled"} if self.cancelled else None,
+                },
+            }
+        return super().query(run_id)
+
+    def cancel(self, run_id: str) -> None:
+        self.contract.cancel_calls += 1
+        self.cancelled = True
+        super().cancel(run_id)
+
+    def control(self, command):
+        self.contract.steer_calls += 1
+        return {
+            "schemaVersion": 1,
+            "runId": command["runId"],
+            "controlId": command["controlId"],
+            "status": "applied",
+        }
+
+    def events(self, run_id: str, *, after_sequence: int, limit: int = 1000):
+        del limit
+        if isinstance(self.contract, (_BlockingAdapter, _UnknownAdapter)):
+            return {"events": [], "nextCursor": after_sequence}
+        base = {
+            "protocolVersion": "2.0",
+            "eventSchemaVersion": 1,
+            "runId": run_id,
+            "turnId": "turn-contract",
+            "timestamp": "2026-09-04T18:00:00.000Z",
+            "ignorable": False,
+            "sensitivity": "local",
+        }
+        if after_sequence == 0:
+            effect_events = []
+            if any(item["call_id"] == "call-submit" for item in self.tool_results):
+                effect_events = [
+                    {
+                        **base,
+                        "sequence": 3,
+                        "eventId": "event-checkpoint",
+                        "eventType": "checkpoint_created",
+                        "payload": {
+                            "type": "checkpoint_created",
+                            "checkpointId": "checkpoint-submit",
+                            "tool": "mangrove_submit_candidate",
+                            "callId": "call-submit",
+                            "reversible": True,
+                        },
+                    },
+                    {
+                        **base,
+                        "sequence": 4,
+                        "eventId": "event-effect",
+                        "eventType": "effect_receipt",
+                        "payload": {
+                            "type": "effect_receipt",
+                            "idempotencyKey": "effect-submit",
+                            "tool": "mangrove_submit_candidate",
+                            "status": "committed",
+                            "callId": "call-submit",
+                        },
+                    },
+                ]
+            return {
+                "events": [
+                    {
+                        **base,
+                        "sequence": 1,
+                        "eventId": "event-agent-start",
+                        "eventType": "agent_start",
+                        "payload": {"type": "agent_start"},
+                    },
+                    {
+                        **base,
+                        "sequence": 2,
+                        "eventId": "event-tool-result",
+                        "callId": "call-read",
+                        "eventType": "tool_result",
+                        "payload": {
+                            "type": "tool_result",
+                            "callId": "call-read",
+                            "tool": "mangrove_read_source",
+                            "isError": False,
+                        },
+                    },
+                    *effect_events,
+                ],
+                "nextCursor": 4 if effect_events else 2,
+            }
+        if (
+            after_sequence < 4
+            and any(item["call_id"] == "call-submit" for item in self.tool_results)
+        ):
+            return {
+                "events": [
+                    {
+                        **base,
+                        "sequence": 3,
+                        "eventId": "event-checkpoint",
+                        "eventType": "checkpoint_created",
+                        "payload": {
+                            "type": "checkpoint_created",
+                            "checkpointId": "checkpoint-submit",
+                            "tool": "mangrove_submit_candidate",
+                            "callId": "call-submit",
+                            "reversible": True,
+                        },
+                    },
+                    {
+                        **base,
+                        "sequence": 4,
+                        "eventId": "event-effect",
+                        "eventType": "effect_receipt",
+                        "payload": {
+                            "type": "effect_receipt",
+                            "idempotencyKey": "effect-submit",
+                            "tool": "mangrove_submit_candidate",
+                            "status": "committed",
+                            "callId": "call-submit",
+                        },
+                    },
+                ],
+                "nextCursor": 4,
+            }
+        return {"events": [], "nextCursor": after_sequence}
+
+
+class _ContractCoreMindAdapter(CoreMindAgentKernelAdapter):
+    def __init__(self, contract: _ContractAdapter, *, execution_root: Path) -> None:
+        self.contract = contract
+        super().__init__(
+            execution_root=execution_root,
+            client_factory=lambda **_values: _CoreMindContractClient(contract),
+            candidate_verifier_factory=lambda _request, _run_id: object(),
+            poll_interval_seconds=0,
+        )
+
+    async def start(self, request, *, binding, on_event):
+        self.contract.on_event = on_event
+        return await super().start(
+            request,
+            binding=binding,
+            on_event=on_event,
+        )
 
 
 class _FailingAdapter(_ContractAdapter):
@@ -270,7 +501,7 @@ def _request(tmp_path: Path) -> PiRuntimeRequest:
                 "upload_id": "upload-a",
                 "original_name": source.name,
                 "host_path": source,
-                "sha256": "0" * 64,
+                "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
                 "media_type": "text/plain",
             },
         ),
@@ -283,10 +514,17 @@ def _request(tmp_path: Path) -> PiRuntimeRequest:
 def _contract_adapter(
     adapter_kind: str,
     contract: _ContractAdapter,
+    tmp_path: Path | None = None,
 ):
     if adapter_kind == "fake":
         return contract
-    return PiAgentKernelAdapter(_FakePiRuntimeEngine(contract))
+    if adapter_kind == "pi":
+        return PiAgentKernelAdapter(_FakePiRuntimeEngine(contract))
+    if tmp_path is None:
+        raise AssertionError("CoreMind 合同测试缺少隔离工作区")
+    adapter = _ContractCoreMindAdapter(contract, execution_root=tmp_path / "coremind")
+    adapter.bind_candidate_verification(_PassingCandidateService())
+    return adapter
 
 
 @pytest.mark.asyncio
@@ -424,17 +662,14 @@ async def test_kernel_freezes_exact_binding_before_adapter_start(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("adapter_kind", ["fake", "pi"])
-async def test_fake_and_pi_adapters_share_kernel_event_contract(
+@pytest.mark.parametrize("adapter_kind", ["fake", "pi", "coremind"])
+async def test_adapters_share_kernel_event_contract(
     tmp_path: Path,
     adapter_kind: str,
 ) -> None:
     repository = _registered_repository(tmp_path)
-    adapter = (
-        _ContractAdapter()
-        if adapter_kind == "fake"
-        else PiAgentKernelAdapter(_FakePiRuntimeEngine())
-    )
+    contract = _ContractAdapter()
+    adapter = _contract_adapter(adapter_kind, contract, tmp_path)
     kernel = AgentKernel(adapter=adapter, repository=repository)
 
     async def sink(_event) -> None:
@@ -455,14 +690,14 @@ async def test_fake_and_pi_adapters_share_kernel_event_contract(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("adapter_kind", ["fake", "pi"])
+@pytest.mark.parametrize("adapter_kind", ["fake", "pi", "coremind"])
 async def test_resume_reuses_binding_without_duplicate_start_input(
     tmp_path: Path,
     adapter_kind: str,
 ) -> None:
     repository = _registered_repository(tmp_path)
     contract = _ContractAdapter()
-    adapter = _contract_adapter(adapter_kind, contract)
+    adapter = _contract_adapter(adapter_kind, contract, tmp_path)
     kernel = AgentKernel(adapter=adapter, repository=repository)
 
     async def sink(_event) -> None:
@@ -471,7 +706,7 @@ async def test_resume_reuses_binding_without_duplicate_start_input(
     first = await kernel.start(_request(tmp_path), on_event=sink)
     checkpoint = PiRuntimeCheckpoint(
         run_id=first.run_id,
-        workspace_root=tmp_path,
+        workspace_root=first.workspace_root,
     )
     await kernel.resume(
         _request(tmp_path),
@@ -538,14 +773,14 @@ async def test_repository_rejects_run_id_rebinding_after_freeze(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("adapter_kind", ["fake", "pi"])
+@pytest.mark.parametrize("adapter_kind", ["fake", "pi", "coremind"])
 async def test_cancel_is_quiescent_and_discards_late_adapter_events(
     tmp_path: Path,
     adapter_kind: str,
 ) -> None:
     repository = _registered_repository(tmp_path)
     contract = _BlockingAdapter()
-    adapter = _contract_adapter(adapter_kind, contract)
+    adapter = _contract_adapter(adapter_kind, contract, tmp_path)
     kernel = AgentKernel(adapter=adapter, repository=repository)
 
     async def sink(_event) -> None:
@@ -570,14 +805,44 @@ async def test_cancel_is_quiescent_and_discards_late_adapter_events(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("adapter_kind", ["fake", "pi"])
+@pytest.mark.parametrize("adapter_kind", ["fake", "pi", "coremind"])
+async def test_steer_follows_each_adapter_capability_contract(
+    tmp_path: Path,
+    adapter_kind: str,
+) -> None:
+    repository = _registered_repository(tmp_path)
+    contract = _BlockingAdapter()
+    contract.steer_calls = 0
+    adapter = _contract_adapter(adapter_kind, contract, tmp_path)
+    kernel = AgentKernel(adapter=adapter, repository=repository)
+
+    async def sink(_event) -> None:
+        return None
+
+    execution = asyncio.create_task(kernel.start(_request(tmp_path), on_event=sink))
+    await asyncio.wait_for(contract.started.wait(), timeout=2)
+    if adapter_kind == "coremind":
+        receipt = await kernel.steer("user-a", "task-a", 1, "继续当前任务")
+        assert receipt["status"] == "applied"
+        assert contract.steer_calls == 1
+    else:
+        with pytest.raises(AgentKernelCapabilityError, match="steer"):
+            await kernel.steer("user-a", "task-a", 1, "继续当前任务")
+        assert contract.steer_calls == 0
+    await kernel.cancel("user-a", "task-a", 1)
+    contract.release.set()
+    await execution
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter_kind", ["fake", "pi", "coremind"])
 async def test_query_exposes_unknown_result_without_retrying(
     tmp_path: Path,
     adapter_kind: str,
 ) -> None:
     repository = _registered_repository(tmp_path)
     contract = _UnknownAdapter()
-    adapter = _contract_adapter(adapter_kind, contract)
+    adapter = _contract_adapter(adapter_kind, contract, tmp_path)
     kernel = AgentKernel(adapter=adapter, repository=repository)
 
     async def sink(_event) -> None:
@@ -587,10 +852,10 @@ async def test_query_exposes_unknown_result_without_retrying(
         await kernel.start(_request(tmp_path), on_event=sink)
 
     snapshot = kernel.query("user-a", "task-a", 1)
-    assert snapshot.status is RuntimeStatus.FAILED
+    assert snapshot.status is RuntimeStatus.NEEDS_INPUT
     assert snapshot.result_known is False
     assert snapshot.quiescent is True
-    assert contract.start_calls == 0
+    assert contract.start_calls == 1
 
 
 @pytest.mark.asyncio
@@ -641,6 +906,34 @@ async def test_query_survives_kernel_restart(tmp_path: Path) -> None:
     assert snapshot.status is RuntimeStatus.CANDIDATE_READY
     assert snapshot.result_known is True
     assert snapshot.quiescent is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_event_replay_is_idempotent_after_kernel_restart(
+    tmp_path: Path,
+) -> None:
+    repository = _registered_repository(tmp_path)
+    adapter = _ReplayEventAdapter()
+
+    async def sink(_event) -> None:
+        return None
+
+    first = await AgentKernel(adapter=adapter, repository=repository).start(
+        _request(tmp_path),
+        on_event=sink,
+    )
+    repository.update("user-a", "task-a", 1, status=RuntimeStatus.RUNNING)
+    await AgentKernel(adapter=adapter, repository=repository).resume(
+        _request(tmp_path),
+        checkpoint=PiRuntimeCheckpoint(
+            run_id=first.run_id,
+            workspace_root=tmp_path,
+        ),
+        on_event=sink,
+    )
+
+    events = repository.list_events("user-a", "task-a", 1)
+    assert sum(event["event_id"] == "runtime-event-1" for event in events) == 1
 
 
 @pytest.mark.asyncio
