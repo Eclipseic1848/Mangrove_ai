@@ -70,8 +70,9 @@ cmd.exe /d /c start_all.bat --no-pause
 ## 1. 当前公开身份
 
 - 公开仓库：`Eclipseic1848/Mangrove_ai`；默认分支：`main`；当前访问权限：管理员。
-- 2026-09-04 现场读取远端 `main@5adeacf3aecbd55bd5fe771a35d25a4caa195af3`；当前检出分支
-  见第 0 节，不依据本地 `main` 名称判断公开身份。P0 #56～#60 的历史基线保留在第 4 节。
+- P1-01 实现基线为 `main@5adeacf3aecbd55bd5fe771a35d25a4caa195af3`，随后只有状态/交接收口；
+  当前公开 SHA 按顶部 identity rule 现场查询，不依据本地 `main` 名称判断。P0 #56～#60 的历史
+  基线保留在第 4 节。
 - 远端当前没有 Tag 或 GitHub Release；本地 `v0.0.4` 只保留历史版本语义，不是远端当前
   Tag、Release 或本轮发布事实。不得把路线图版本名、本地标签或工程验证结果表述为已发布版本。
 - GitHub About 当前描述为“面向在线/离线与公域/私域数据的智能数据任务平台”，无主页；Topics
