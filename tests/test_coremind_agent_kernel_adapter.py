@@ -18,6 +18,7 @@ from src.agentic_runtime.coremind_runtime import (
     COREMIND_PROVENANCE_SHA256,
     COREMIND_PROTOCOL_FINGERPRINT,
     COREMIND_REVIEWED_COMMIT,
+    COREMIND_SDK_TREE_SHA256,
     COREMIND_SOURCE_COMMIT,
     COREMIND_WHEEL_SHA256,
     COREMIND_WORKER_MANIFEST_SHA256,
@@ -526,8 +527,100 @@ def test_manifest_freezes_the_approved_coremind_artifact_without_importing_sdk(
     assert COREMIND_WORKER_MANIFEST_SHA256 in adapter.manifest.runtime_artifact
     assert COREMIND_PROVENANCE_SHA256 in adapter.manifest.runtime_artifact
     assert "execution-contract=sha256:" in adapter.manifest.runtime_artifact
+    assert COREMIND_SDK_TREE_SHA256 == (
+        "812258edd429587ba01a31101c64fc74ed110b5d91d1d0330044eae9039a2488"
+    )
     assert adapter.manifest.runtime_protocol_version == "2.0"
     assert adapter.manifest.runtime_event_schema_version == COREMIND_PROTOCOL_FINGERPRINT
+
+
+def test_sdk_tree_digest_changes_when_imported_client_changes(tmp_path: Path) -> None:
+    package = tmp_path / "coremind"
+    package.mkdir()
+    client = package / "client.py"
+    client.write_text("VALUE = 1\n", encoding="utf-8")
+    before = CoreMindAgentKernelAdapter._sdk_tree_sha256(package)
+
+    client.write_text("VALUE = 2\n", encoding="utf-8")
+
+    assert CoreMindAgentKernelAdapter._sdk_tree_sha256(package) != before
+
+
+def test_approval_only_allows_frozen_tool_semantics_for_current_run() -> None:
+    definition = {
+        "type": "approval_required",
+        "runId": "cm_run_a",
+        "tool": "mangrove_read_source",
+        "args": {"source_id": "upload-a"},
+        "effect": {"operations": ["read"], "reversible": True},
+        "capability": {
+            "effect": "none",
+            "replay": "safe",
+            "concurrency": "parallel",
+            "checkpoint": "none",
+            "durability": "ordinary",
+        },
+    }
+
+    assert CoreMindAgentKernelAdapter._approval_decision(definition, "cm_run_a") == "allow"
+    assert CoreMindAgentKernelAdapter._approval_decision(
+        {**definition, "runId": "cm_run_b"},
+        "cm_run_a",
+    ) == "deny"
+    assert CoreMindAgentKernelAdapter._approval_decision(
+        {**definition, "tool": "bash"},
+        "cm_run_a",
+    ) == "deny"
+
+
+@pytest.mark.asyncio
+async def test_tool_failure_does_not_expose_host_path_to_worker(
+    tmp_path: Path,
+) -> None:
+    secret_path = tmp_path / "不得外发的本机目录"
+    secret_path.mkdir()
+    request = _request(tmp_path)
+    request = request.model_copy(
+        update={
+            "sources": (
+                request.sources[0].model_copy(
+                    update={"host_path": secret_path, "sha256": "0" * 64}
+                ),
+            )
+        }
+    )
+    client = _InteractiveCoreMindClient()
+    adapter = CoreMindAgentKernelAdapter(
+        execution_root=tmp_path / "runs",
+        client_factory=lambda **_kwargs: client,
+        candidate_verifier_factory=lambda _request, _run_id: object(),
+    )
+    adapter.bind_candidate_verification(_PassingCandidateService())
+    adapter._register_tools(client)
+    definition = client.registered[0]
+    run_root = tmp_path / "run"
+    (run_root / "output").mkdir(parents=True)
+
+    await adapter._answer_tool_call(
+        client,
+        request=request,
+        binding=_binding(adapter, "cm_run_safe_error"),
+        run_root=run_root,
+        call={
+            "runId": "cm_run_safe_error",
+            "callId": "call-secret",
+            "registrationId": definition["registrationId"],
+            "toolId": definition["toolId"],
+            "name": definition["name"],
+            "args": {"source_id": "upload-a"},
+        },
+    )
+
+    assert client.tool_results[0]["error"] == "Mangrove 隔离来源或候选参数无效"
+    assert str(secret_path) not in json.dumps(
+        client.tool_results[0],
+        ensure_ascii=False,
+    )
 
 
 def test_execution_contract_changes_the_frozen_binding_identity(tmp_path: Path) -> None:
@@ -840,6 +933,44 @@ async def test_coremind_tools_form_a_verified_candidate_without_taking_delivery_
     assert len(service.calls) == 1
     assert client.verification_results[0]["decision"] == "accept"
     assert client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_resume_reverifies_persisted_candidate_without_runtime_request(
+    tmp_path: Path,
+) -> None:
+    client = _InteractiveCoreMindClient()
+    service = _PassingCandidateService()
+    adapter = CoreMindAgentKernelAdapter(
+        execution_root=tmp_path / "runs",
+        client_factory=lambda **_kwargs: client,
+        candidate_verifier_factory=lambda _request, _run_id: object(),
+        poll_interval_seconds=0,
+    )
+    adapter.bind_candidate_verification(service)
+    request = _request(tmp_path)
+    binding = _binding(adapter, "cm_run_reverify")
+    first = await adapter.start(
+        request,
+        binding=binding,
+        on_event=lambda _event: asyncio.sleep(0),
+    )
+    client.received_tool_calls.clear()
+    client.received_verification_requests.clear()
+
+    resumed = await adapter.resume(
+        request,
+        binding=binding,
+        checkpoint=PiRuntimeCheckpoint(
+            run_id=first.run_id,
+            workspace_root=first.workspace_root,
+        ),
+        on_event=lambda _event: asyncio.sleep(0),
+    )
+
+    assert resumed.status is RuntimeStatus.CANDIDATE_READY
+    assert len(service.calls) == 2
+    assert client.resume_calls == ["cm_run_reverify"]
 
 
 @pytest.mark.asyncio

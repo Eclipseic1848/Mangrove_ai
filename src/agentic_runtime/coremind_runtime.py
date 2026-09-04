@@ -62,6 +62,7 @@ COREMIND_WHEEL_SHA256 = "3fa5301c444da2e3bdaca51bd4800b1bdbcb6dc68e3abef4b39197b
 COREMIND_WORKER_SHA256 = "ba4590a68841e520dcd3a91e206ca9e346d10fd9a23b3ed4c560f59707cfa71e"
 COREMIND_WORKER_MANIFEST_SHA256 = "fcc625cc41d7960a55f63af1eb862e1634b9844f3b922c4774d73c77f9a70190"
 COREMIND_PROVENANCE_SHA256 = "7e081c66858f1edddc7daa176b0839a1e7b8858798f7214ff99ed034fd3e0f03"
+COREMIND_SDK_TREE_SHA256 = "812258edd429587ba01a31101c64fc74ed110b5d91d1d0330044eae9039a2488"
 COREMIND_PROTOCOL_FINGERPRINT = "sha256:94c8e093979be73a13ecc1090167454567d0602a70b065ceffeed4cb1eca4ce3"
 _BASE_RUNTIME_ARTIFACT = (
     f"source-commit={COREMIND_SOURCE_COMMIT};"
@@ -290,6 +291,7 @@ class CoreMindAgentKernelAdapter:
             worker_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             worker_sha256 = hashlib.sha256(worker.read_bytes()).hexdigest()
             manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+            sdk_tree_sha256 = self._sdk_tree_sha256(package_root)
         except (OSError, ValueError) as exc:
             raise AgentKernelCapabilityError("CoreMind Worker 身份无法核验") from exc
         archive_info = (
@@ -303,6 +305,7 @@ class CoreMindAgentKernelAdapter:
             installed_wheel_sha256 != COREMIND_WHEEL_SHA256
             or worker_sha256 != COREMIND_WORKER_SHA256
             or manifest_sha256 != COREMIND_WORKER_MANIFEST_SHA256
+            or sdk_tree_sha256 != COREMIND_SDK_TREE_SHA256
             or worker_manifest.get("bundleSha256") != COREMIND_WORKER_SHA256
             or worker_manifest.get("protocolV2Version") != "2.0"
             or worker_manifest.get("protocolV2SchemaFingerprint")
@@ -310,6 +313,27 @@ class CoreMindAgentKernelAdapter:
         ):
             raise AgentKernelCapabilityError("CoreMind Worker 或 Protocol 身份漂移")
         return self.manifest
+
+    @staticmethod
+    def _sdk_tree_sha256(package_root: Path) -> str:
+        """核对实际导入包，而不是只信可被篡改的安装来源记录。"""
+
+        root = package_root.parent
+        files = sorted(
+            path
+            for path in package_root.rglob("*")
+            if path.is_file()
+            and "__pycache__" not in path.parts
+            and path.suffix != ".pyc"
+        )
+        digest = hashlib.sha256()
+        for path in files:
+            name = path.relative_to(root).as_posix()
+            digest.update(name.encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(hashlib.sha256(path.read_bytes()).hexdigest().encode("ascii"))
+            digest.update(b"\n")
+        return digest.hexdigest()
 
     def new_external_run_id(self) -> str:
         return f"cm_run_{uuid.uuid4().hex[:16]}"
@@ -400,6 +424,7 @@ class CoreMindAgentKernelAdapter:
                 binding=binding,
                 run_root=run_root,
                 on_event=on_event,
+                recover_persisted_candidate=True,
             )
         except asyncio.CancelledError:
             raise
@@ -623,10 +648,17 @@ class CoreMindAgentKernelAdapter:
         reason: str,
     ) -> None:
         stopped = False
+        cancelled = False
         try:
-            await asyncio.to_thread(client.close)
+            close_task = asyncio.create_task(asyncio.to_thread(client.close))
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError:
+                # 取消不能跳过 Worker 清理；清理完成后仍保留原取消语义。
+                cancelled = True
+                await close_task
             stopped = True
-        except BaseException:
+        except Exception:
             stopped = await asyncio.to_thread(self._force_stop_process, client)
         state_saved = False
         if stopped:
@@ -650,6 +682,8 @@ class CoreMindAgentKernelAdapter:
             raise AgentKernelResultUnknownError(
                 "CoreMind Worker 或临时模型授权未能证明已清理"
             )
+        if cancelled:
+            raise asyncio.CancelledError()
 
     @staticmethod
     def _force_stop_process(client: Any) -> bool:
@@ -744,6 +778,23 @@ class CoreMindAgentKernelAdapter:
             raise AgentKernelCapabilityError(
                 f"权限档位 {request.permission_profile.value} 尚未配置 CoreMind 授权范围"
             )
+
+    @staticmethod
+    def _approval_decision(event: Mapping[str, Any], run_id: str) -> str:
+        """只批准当前 Run 冻结目录内、语义未漂移的工具。"""
+
+        definitions = {item["name"]: item for item in _tool_definitions()}
+        definition = definitions.get(str(event.get("tool") or ""))
+        if (
+            event.get("type") != "approval_required"
+            or event.get("runId") != run_id
+            or definition is None
+            or not isinstance(event.get("args"), Mapping)
+            or event.get("effect") != definition["effect"]
+            or event.get("capability") != definition["capability"]
+        ):
+            return "deny"
+        return "allow"
 
     def _register_tools(self, client: Any) -> None:
         if self._candidate_verification is None:
@@ -843,6 +894,10 @@ class CoreMindAgentKernelAdapter:
             config_dir=run_root,
             cwd=run_root,
             worker_command=(str(Path(node).resolve()), str(worker)),
+            approval_handler=lambda event: self._approval_decision(
+                event,
+                binding.external_run_id,
+            ),
             request_timeout=self._timeout_seconds,
             protocol_version="2.0",
         )
@@ -874,6 +929,7 @@ class CoreMindAgentKernelAdapter:
         binding: RuntimeBinding,
         run_root: Path,
         on_event: EventSink,
+        recover_persisted_candidate: bool = False,
     ) -> PiRuntimeResult:
         cursor = 0
         tool_cursor = 0
@@ -980,10 +1036,29 @@ class CoreMindAgentKernelAdapter:
                     raise
                 projection = snapshot.get("projection") or {}
                 if projection.get("status") in {"finished", "paused"}:
-                    if (
+                    succeeded = (
                         (projection.get("outcome") or {}).get("status") == "succeeded"
-                        and verified_result is not None
-                    ):
+                    )
+                    if succeeded and verified_result is None and recover_persisted_candidate:
+                        verified_result, decision, _feedback = (
+                            await self._verify_current_candidate(
+                                request=request,
+                                binding=binding,
+                                run_root=run_root,
+                            )
+                        )
+                        if decision != "accept":
+                            verified_result = None
+                    if succeeded and verified_result is not None:
+                        if (
+                            recover_persisted_candidate
+                            and not checkpointed_calls.intersection(
+                                committed_effect_calls
+                            )
+                        ):
+                            raise AgentKernelResultUnknownError(
+                                "CoreMind 恢复缺少已提交副作用的成对证据"
+                            )
                         if not required_effect_calls.issubset(checkpointed_calls):
                             raise AgentKernelResultUnknownError(
                                 "CoreMind 工作区副作用缺少 Checkpoint 证据"
@@ -1027,9 +1102,9 @@ class CoreMindAgentKernelAdapter:
             else:
                 result = self._submit_candidate(request, run_root, call["args"])
             error = None
-        except (OSError, UnicodeError, ValueError) as exc:
+        except (OSError, UnicodeError, ValueError):
             result = None
-            error = str(exc)[:500] or exc.__class__.__name__
+            error = "Mangrove 隔离来源或候选参数无效"
         result_id = self._stable_id(
             "tool-result",
             binding.external_run_id,
@@ -1170,6 +1245,21 @@ class CoreMindAgentKernelAdapter:
             != verification.get("candidateSha256")
         ):
             raise AgentKernelCapabilityError("CoreMind 宿主验证请求身份无效")
+        return await self._verify_current_candidate(
+            request=request,
+            binding=binding,
+            run_root=run_root,
+        )
+
+    async def _verify_current_candidate(
+        self,
+        *,
+        request: PiRuntimeRequest,
+        binding: RuntimeBinding,
+        run_root: Path,
+    ) -> tuple[PiRuntimeResult | None, str, str]:
+        """只按当前冻结来源复验落盘候选，不信任 Runtime 的成功状态。"""
+
         if (
             self._candidate_verification is None
             or self._candidate_verifier_factory is None
@@ -1202,8 +1292,8 @@ class CoreMindAgentKernelAdapter:
             raise AgentKernelResultUnknownError(
                 "CoreMind 候选验证结果不确定，禁止自动重试"
             ) from exc
-        except Exception as exc:
-            return None, "reject", (str(exc)[:500] or exc.__class__.__name__)
+        except Exception:
+            return None, "reject", "Mangrove 独立候选验证未通过"
         if report.status is not VerificationStatus.PASSED:
             return None, "reject", report.summary[:500]
         coverage = self._candidate_coverage(

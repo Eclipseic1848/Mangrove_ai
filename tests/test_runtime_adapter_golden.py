@@ -19,6 +19,7 @@ from src.agentic_runtime.coremind_runtime import CoreMindAgentKernelAdapter
 from src.agentic_runtime.egress_policy import SmokescreenEgressController
 from src.agentic_runtime.kernel import (
     AgentKernelError,
+    AgentKernelResultUnknownError,
     PiAgentKernelAdapter,
     RuntimeBinding,
 )
@@ -80,6 +81,9 @@ def _pi_command() -> str:
 
 class _Provider(BaseHTTPRequestHandler):
     requests: list[dict] = []
+    block = False
+    started = threading.Event()
+    release = threading.Event()
 
     def log_message(self, *_args) -> None:
         return None
@@ -88,6 +92,9 @@ class _Provider(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", "0"))
         request = json.loads(self.rfile.read(length))
         self.requests.append(request)
+        if self.block:
+            self.started.set()
+            self.release.wait(timeout=30)
         tools = request.get("tools") or []
         names = {
             item.get("function", {}).get("name")
@@ -181,7 +188,12 @@ class _Provider(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except OSError:
+            # 运行中取消会主动断开正在等待 Provider 的 Worker 请求。
+            if not self.block:
+                raise
 
 
 class _PassingVerification:
@@ -235,6 +247,26 @@ def _canonical(result, events: list) -> dict:
     }
 
 
+def _assert_events_bounded(events: list) -> None:
+    assert {event.event_type for event in events} <= {
+        "runtime.resuming",
+        "agent.started",
+        "agent.settled",
+        "tool.started",
+        "tool.completed",
+        "tool.failed",
+        "provider.usage",
+        "verification.completed",
+        "candidate.ready",
+    }
+    projection = json.dumps(
+        [event.model_dump(mode="json") for event in events],
+        ensure_ascii=False,
+    )
+    assert "local-runtime" not in projection
+    assert "逐字返回来源中的测试内容" not in projection
+
+
 def _docker_exists(reference: str) -> bool:
     return shutil.which("docker") is not None and subprocess.run(
         ("docker", "image", "inspect", reference),
@@ -276,6 +308,9 @@ async def test_fixed_pi_and_coremind_have_the_same_golden_contract(
 
     monkeypatch.setattr(coremind, "CoreMindClient", RecordingClient)
     _Provider.requests = []
+    _Provider.block = False
+    _Provider.started.clear()
+    _Provider.release.clear()
     server = ThreadingHTTPServer(("0.0.0.0", 0), _Provider)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -358,6 +393,89 @@ async def test_fixed_pi_and_coremind_have_the_same_golden_contract(
             "event_stages": {"agent": True, "tool": True, "provider": True},
         }
 
+        cancel_adapter = CoreMindAgentKernelAdapter(
+            execution_root=tmp_path / "coremind-cancel",
+            candidate_verifier_factory=lambda _request, _run_id: object(),
+            poll_interval_seconds=0.01,
+            timeout_seconds=30,
+        )
+        cancel_adapter.bind_candidate_verification(verification)
+        cancel_request = coremind_request.model_copy(
+            update={"task_id": "golden-coremind-cancel"},
+        )
+        cancel_binding = _binding(cancel_adapter, "cm_run_3333333333333333")
+        _Provider.block = True
+        cancel_task = asyncio.create_task(
+            cancel_adapter.start(
+                cancel_request,
+                binding=cancel_binding,
+                on_event=lambda _event: asyncio.sleep(0),
+            )
+        )
+        assert await asyncio.to_thread(_Provider.started.wait, 10)
+        await asyncio.wait_for(
+            cancel_adapter.cancel(
+                cancel_request.user_id,
+                cancel_request.task_id,
+                cancel_request.revision,
+            ),
+            timeout=10,
+        )
+        _Provider.release.set()
+        try:
+            cancelled = await cancel_task
+        except Exception as exc:
+            assert isinstance(exc, AgentKernelResultUnknownError) or (
+                exc.__class__.__name__ == "CoreMindError" and "关闭" in str(exc)
+            )
+        else:
+            assert cancelled.status is RuntimeStatus.CANCELLED
+        assert all(client._process.poll() is not None for client in clients)
+        _Provider.block = False
+
+        pi_resume_events, coremind_resume_events = [], []
+
+        async def collect_pi_resume(event):
+            pi_resume_events.append(event)
+
+        async def collect_coremind_resume(event):
+            coremind_resume_events.append(event)
+
+        pi_resumed = await pi.resume(
+            pi_request,
+            binding=pi_binding,
+            checkpoint=PiRuntimeCheckpoint(
+                run_id=pi_result.run_id,
+                workspace_root=pi_result.workspace_root,
+                container_name=pi_result.container_name,
+                session_file=pi_result.session_file,
+            ),
+            on_event=collect_pi_resume,
+        )
+        coremind_resumed = await coremind_adapter.resume(
+            coremind_request,
+            binding=coremind_binding,
+            checkpoint=PiRuntimeCheckpoint(
+                run_id=coremind_result.run_id,
+                workspace_root=coremind_result.workspace_root,
+            ),
+            on_event=collect_coremind_resume,
+        )
+        assert pi_resumed.status is RuntimeStatus.CANDIDATE_READY
+        assert coremind_resumed.status is RuntimeStatus.CANDIDATE_READY, (
+            coremind_resumed.model_dump(mode="json")
+        )
+        pi_resume_contract = _canonical(pi_resumed, pi_resume_events)
+        coremind_resume_contract = _canonical(
+            coremind_resumed,
+            coremind_resume_events,
+        )
+        pi_resume_contract.pop("event_stages")
+        coremind_resume_contract.pop("event_stages")
+        assert pi_resume_contract == coremind_resume_contract
+        _assert_events_bounded(pi_resume_events)
+        _assert_events_bounded(coremind_resume_events)
+
         for adapter, request, binding, result in (
             (pi, pi_request, pi_binding, pi_result),
             (coremind_adapter, coremind_request, coremind_binding, coremind_result),
@@ -383,6 +501,7 @@ async def test_fixed_pi_and_coremind_have_the_same_golden_contract(
             capture_output=True,
         ).returncode != 0
     finally:
+        _Provider.release.set()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)

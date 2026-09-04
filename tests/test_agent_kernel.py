@@ -334,6 +334,15 @@ class _CoreMindContractClient(_InteractiveCoreMindClient):
         self.cancelled = True
         super().cancel(run_id)
 
+    def control(self, command):
+        self.contract.steer_calls += 1
+        return {
+            "schemaVersion": 1,
+            "runId": command["runId"],
+            "controlId": command["controlId"],
+            "status": "applied",
+        }
+
     def events(self, run_id: str, *, after_sequence: int, limit: int = 1000):
         del limit
         if isinstance(self.contract, (_BlockingAdapter, _UnknownAdapter)):
@@ -793,6 +802,36 @@ async def test_cancel_is_quiescent_and_discards_late_adapter_events(
         for event in kernel.events("user-a", "task-a", 1)
     )
     assert kernel.query("user-a", "task-a", 1).quiescent is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter_kind", ["fake", "pi", "coremind"])
+async def test_steer_follows_each_adapter_capability_contract(
+    tmp_path: Path,
+    adapter_kind: str,
+) -> None:
+    repository = _registered_repository(tmp_path)
+    contract = _BlockingAdapter()
+    contract.steer_calls = 0
+    adapter = _contract_adapter(adapter_kind, contract, tmp_path)
+    kernel = AgentKernel(adapter=adapter, repository=repository)
+
+    async def sink(_event) -> None:
+        return None
+
+    execution = asyncio.create_task(kernel.start(_request(tmp_path), on_event=sink))
+    await asyncio.wait_for(contract.started.wait(), timeout=2)
+    if adapter_kind == "coremind":
+        receipt = await kernel.steer("user-a", "task-a", 1, "继续当前任务")
+        assert receipt["status"] == "applied"
+        assert contract.steer_calls == 1
+    else:
+        with pytest.raises(AgentKernelCapabilityError, match="steer"):
+            await kernel.steer("user-a", "task-a", 1, "继续当前任务")
+        assert contract.steer_calls == 0
+    await kernel.cancel("user-a", "task-a", 1)
+    contract.release.set()
+    await execution
 
 
 @pytest.mark.asyncio
