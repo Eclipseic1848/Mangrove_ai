@@ -10,7 +10,7 @@ browserforge==1.2.4
 patchright==1.60.1
 apify-fingerprint-datapoints==0.13.0
 msgspec==0.21.1
-protego==0.6.1
+protego==0.6.2
 chardet==5.2.0
 firecrawl-py==4.30.2
 ddgs==9.14.4
