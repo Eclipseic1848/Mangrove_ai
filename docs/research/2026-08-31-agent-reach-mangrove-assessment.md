@@ -440,6 +440,6 @@ Run 恢复、写工具拒绝和证据冻结。Agent-Reach 只提供后端选择�
 ### 尚未验证的建议
 
 - 先做阶段 A 的渠道健康投影，再做一个公共来源 PoC；
-- CoreMind ready 后，再把认证来源纵切面接入统一 WorkSession/AgentWorkTrace；
+- 认证来源进入独立规格后，再接入统一 WorkSession/AgentWorkTrace；
 - 在真实账号授权前，不运行小红书、Twitter、Reddit 等登录态平台测试；
 - 不为同步 Agent-Reach 建新插件市场、自动更新器或第二套能力目录。
