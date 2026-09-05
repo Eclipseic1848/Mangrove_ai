@@ -17,6 +17,7 @@ import { cn } from "@/lib/utils";
 
 interface FileRef { name: string; url: string; mime: string }
 interface Msg {
+  viewKey: number;
   role: "user" | "assistant";
   content: string;
   createdAt?: string;
@@ -84,6 +85,8 @@ export function Chat() {
   const [convs, setConvs] = useState<Conv[]>([]);
   const [convId, setConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Msg[]>([]);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
   const [input, setInput] = useState("");
   const [running, setRunning] = useState(false);
   const [bgRunning, setBgRunning] = useState(false); // 会话有任务在后台执行（断开 SSE 后仍继续）
@@ -96,16 +99,38 @@ export function Chat() {
   const [dialog, setDialog] = useState<{ type: "delete" | "rename"; conv: Conv } | null>(null);
   const [renameVal, setRenameVal] = useState("");
   const cancelRef = useRef<(() => void) | null>(null);
+  const currentConv = useRef<string | null>(null);
+  const sessionRun = useRef(0);
+  const activityRun = useRef(0);
+  const messageKey = useRef(0);
+  const listRun = useRef(0);
+  const feedbackRun = useRef(new Map<number, number>());
+  const dialogRef = useRef(dialog);
+  dialogRef.current = dialog;
   const scrollRef = useRef<HTMLDivElement>(null);
   const [dislikeTarget, setDislikeTarget] = useState<number | null>(null);
+  const dislikeRef = useRef(dislikeTarget);
+  dislikeRef.current = dislikeTarget;
   const [dislikeReasons, setDislikeReasons] = useState<string[]>([]);
   const [dislikeComment, setDislikeComment] = useState("");
   // 数据准备 / 旧分析 模式切换（6B：默认 data_prep，可回退 legacy_analysis）
   const [mode, setMode] = useState<"data_prep" | "legacy_analysis">("data_prep");
 
   // 初始化：会话列表 + 模型目录
+  const refreshConvs = () => {
+    const run = ++listRun.current;
+    api.get("/api/conversations").then((rows) => {
+      if (listRun.current === run) setConvs(rows);
+    }).catch(() => {});
+  };
   useEffect(() => {
-    api.get("/api/conversations").then(setConvs).catch(() => {});
+    refreshConvs();
+    return () => {
+      sessionRun.current += 1;
+      activityRun.current += 1;
+      listRun.current += 1;
+      cancelRef.current?.();
+    };
   }, []);
 
   // 模型列表：初载 + 配置变更后自动刷新（无需手动刷新页面）
@@ -126,14 +151,16 @@ export function Chat() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, running]);
 
-  const fetchMessages = async (id: string) => {
+  const fetchMessages = async (id: string, run: number) => {
     const [msgs, fbRes] = await Promise.all([
       api.get(`/api/conversations/${id}/messages`),
       api.get(`/api/chat/feedback?conv_id=${encodeURIComponent(id)}`).catch(() => ({ feedback: {} })),
     ]);
+    if (activityRun.current !== run || currentConv.current !== id) return false;
     const fbMap = fbRes.feedback || {};
     setMessages(
       msgs.map((m: any) => ({
+        viewKey: ++messageKey.current,
         id: m.id,
         role: m.role,
         content: m.content,
@@ -150,80 +177,115 @@ export function Chat() {
         // 注意：HITL 动作(actions/schedule)为一次性、不持久化，重载后不再出现
       })),
     );
+    return true;
+  };
+
+  // 切换同步清掉正文、动作和运行状态；先失效旧回调，再断开旧流。
+  const selectConversation = (id: string | null) => {
+    sessionRun.current += 1;
+    activityRun.current += 1;
+    currentConv.current = id;
+    cancelRef.current?.();
+    cancelRef.current = null;
+    feedbackRun.current.clear();
+    setConvId(id);
+    setMessages([]);
+    setRunning(false);
+    setBgRunning(false);
+    setDoneNodes(new Set());
+    setNodeEntries([]);
+    setActiveNode(null);
+    setDislikeTarget(null);
+    setDislikeReasons([]);
+    setDislikeComment("");
+    setDialog(null);
+    return activityRun.current;
   };
 
   const loadConv = async (id: string) => {
-    setConvId(id);
-    cancelRef.current?.();
-    setRunning(false);
-    setBgRunning(false);
+    const run = selectConversation(id);
     try {
-      await fetchMessages(id);
+      if (!await fetchMessages(id, run)) return;
       // 该会话若有任务仍在后台执行（切页面/刷新后任务不中断），亮提示并轮询等结果
-      api.get(`/api/chat/running/${id}`).then((r) => setBgRunning(!!r.running)).catch(() => {});
+      const r = await api.get(`/api/chat/running/${id}`);
+      if (activityRun.current === run) setBgRunning(!!r.running);
     } catch {
-      toast.error("加载会话失败");
+      if (activityRun.current === run) toast.error("加载会话失败");
     }
   };
 
   // 后台任务轮询：执行完自动刷新会话消息（结果由后端落库，无需保持 SSE 连接）
   useEffect(() => {
     if (!bgRunning || !convId) return;
+    const run = activityRun.current;
+    let pending = false;
+    let disposed = false;
     const timer = setInterval(async () => {
+      if (pending || disposed || activityRun.current !== run) return;
+      pending = true;
       try {
         const r = await api.get(`/api/chat/running/${convId}`);
+        if (disposed || activityRun.current !== run) return;
         if (!r.running) {
-          setBgRunning(false);
-          await fetchMessages(convId);
-          toast.success("后台任务已完成，结果已更新");
+          if (await fetchMessages(convId, run)) {
+            setBgRunning(false);
+            toast.success("后台任务已完成，结果已更新");
+          }
         }
       } catch { /* 瞬时失败忽略，下轮再查 */ }
+      finally { pending = false; }
     }, 4000);
-    return () => clearInterval(timer);
+    return () => { disposed = true; clearInterval(timer); };
   }, [bgRunning, convId]);
 
   const newChat = () => {
-    cancelRef.current?.();
-    setRunning(false);
-    setBgRunning(false);
-    setConvId(null);
-    setMessages([]);
-    setDoneNodes(new Set());
+    selectConversation(null);
   };
 
   const doDelete = async () => {
     if (!dialog) return;
+    const target = dialog;
+    const session = sessionRun.current;
     const id = dialog.conv.conv_id;
     try {
       await api.del(`/api/conversations/${id}`);
+      refreshConvs();
       setConvs((cs) => cs.filter((c) => c.conv_id !== id));
-      if (convId === id) newChat(); // 删除的是当前会话则清空视图
-      toast.success("会话已删除");
+      const isCurrent = sessionRun.current === session;
+      if (currentConv.current === id) newChat(); // 按响应时的选择判断，不能清空后来切换的会话。
+      if (isCurrent) toast.success("会话已删除");
     } catch (err: any) {
-      toast.error(err.message || "删除失败");
+      if (sessionRun.current === session) toast.error(err.message || "删除失败");
     }
-    setDialog(null);
+    if (dialogRef.current === target) setDialog(null);
   };
 
   const doRename = async () => {
     if (!dialog) return;
+    const target = dialog;
+    const session = sessionRun.current;
     const id = dialog.conv.conv_id;
     const title = renameVal.trim() || "新会话";
     try {
       await api.patch(`/api/conversations/${id}`, { title });
+      refreshConvs();
       setConvs((cs) => cs.map((c) => (c.conv_id === id ? { ...c, title } : c)));
-      toast.success("已重命名");
+      if (sessionRun.current === session) toast.success("已重命名");
     } catch (err: any) {
-      toast.error(err.message || "重命名失败");
+      if (sessionRun.current === session) toast.error(err.message || "重命名失败");
     }
-    setDialog(null);
+    if (dialogRef.current === target) setDialog(null);
   };
 
   const send = () => {
     const content = input.trim();
     if (!content || running) return;
+    const run = ++activityRun.current;
+    const isCurrent = () => activityRun.current === run;
+    setBgRunning(false);
     setInput("");
-    setMessages((m) => [...m, { role: "user", content, createdAt: new Date().toISOString() }]);
+    const viewKey = ++messageKey.current;
+    setMessages((m) => [...m, { viewKey, role: "user", content, createdAt: new Date().toISOString() }]);
     setDoneNodes(new Set());
     setNodeEntries([]);
     setActiveNode(null);
@@ -235,12 +297,15 @@ export function Chat() {
       { conv_id: convId, content, provider, model, mode },
       {
         onMeta: (d) => {
-          if (!convId) {
+          if (!isCurrent()) return;
+          if (!currentConv.current) {
+            currentConv.current = d.conv_id;
             setConvId(d.conv_id);
-            api.get("/api/conversations").then(setConvs).catch(() => {});
+            refreshConvs();
           }
         },
         onNode: (d) => {
+          if (!isCurrent()) return;
           setDoneNodes((prev) => new Set(prev).add(d.node));
           setNodeEntries((prev) =>
             prev.some((e) => e.node === d.node)
@@ -250,9 +315,12 @@ export function Chat() {
           setActiveNode(d.node);
         },
         onResult: (r) => {
+          if (!isCurrent()) return;
+          const viewKey = ++messageKey.current;
           setMessages((m) => [
             ...m,
             {
+              viewKey,
               role: "assistant",
               content: r.analysis ? `${r.reply}\n\n---\n\n${r.analysis}` : r.reply,
               createdAt: new Date().toISOString(),
@@ -269,91 +337,118 @@ export function Chat() {
           ]);
         },
         onError: (e) => {
+          if (!isCurrent()) return;
           toast.error(e.message);
+          const viewKey = ++messageKey.current;
           setMessages((m) => [
             ...m,
-            { role: "assistant", content: `❌ ${e.message}`, kind: "error", createdAt: new Date().toISOString() },
+            { viewKey, role: "assistant", content: `❌ ${e.message}`, kind: "error", createdAt: new Date().toISOString() },
           ]);
         },
-        onDone: () => { setRunning(false); setActiveNode(null); },
+        onDone: () => {
+          if (!isCurrent()) return;
+          cancelRef.current = null;
+          setRunning(false);
+          setActiveNode(null);
+        },
       },
     );
   };
 
   /** 取消当前正在执行的任务。 */
   const cancel = async () => {
+    const id = currentConv.current;
+    activityRun.current += 1;
     cancelRef.current?.();                    // 断 SSE 流（停止接收事件）
-    if (convId) {                             // 通知后端取消 pipeline
-      try { await api.post(`/api/chat/${convId}/cancel`); } catch { /* 静默 */ }
-    }
+    cancelRef.current = null;
     setRunning(false);
     setActiveNode(null);
+    if (id) {                                // 取消请求只指向发起时的会话，迟到响应不改新流。
+      try { await api.post(`/api/chat/${id}/cancel`); } catch { /* 静默 */ }
+    }
   };
 
   /** 点赞/点踩：已选中同一反馈则取消，否则提交。 */
-  const submitFeedback = async (msgIdx: number, rating: "up" | "down") => {
-    const msg = messages[msgIdx];
+  const feedbackScope = (msg: Msg) => {
+    const session = sessionRun.current;
+    const request = (feedbackRun.current.get(msg.viewKey) || 0) + 1;
+    feedbackRun.current.set(msg.viewKey, request);
+    return () => sessionRun.current === session && feedbackRun.current.get(msg.viewKey) === request
+      && messagesRef.current.some((m) => m.viewKey === msg.viewKey);
+  };
+  const submitFeedback = async (msg: Msg, rating: "up" | "down") => {
     if (!msg?.id || !convId) return;
+    const isCurrent = feedbackScope(msg);
     if (msg.feedback?.rating === rating) {
       // 已是同一反馈 -> 取消
       try {
         await api.del(`/api/chat/feedback/${msg.id}`);
-        setMessages((m) => m.map((mm, i) => (i === msgIdx ? { ...mm, feedback: undefined } : mm)));
+        if (!isCurrent()) return;
+        setMessages((m) => m.map((mm) => (mm.viewKey === msg.viewKey ? { ...mm, feedback: undefined } : mm)));
       } catch (e: any) {
-        toast.error(e.message || "取消失败");
+        if (isCurrent()) toast.error(e.message || "取消失败");
       }
       return;
     }
     try {
       await api.post("/api/chat/feedback", { message_id: msg.id, conv_id: convId, rating });
-      setMessages((m) => m.map((mm, i) => (i === msgIdx ? { ...mm, feedback: { rating } } : mm)));
+      if (!isCurrent()) return;
+      setMessages((m) => m.map((mm) => (mm.viewKey === msg.viewKey ? { ...mm, feedback: { rating } } : mm)));
     } catch (e: any) {
-      toast.error(e.message || "反馈失败");
+      if (isCurrent()) toast.error(e.message || "反馈失败");
     }
   };
 
   /** 点踩：提交带原因与描述的负面反馈。 */
   const submitDislike = async () => {
     if (dislikeTarget === null) return;
-    const idx = dislikeTarget;
-    const msg = messages[idx];
+    const msg = messages.find((m) => m.viewKey === dislikeTarget);
     if (!msg?.id || !convId) return;
+    const isCurrent = feedbackScope(msg);
     try {
       const reasons = dislikeReasons.length ? dislikeReasons : undefined;
       const comment = dislikeComment.trim() || undefined;
       await api.post("/api/chat/feedback", {
         message_id: msg.id, conv_id: convId, rating: "down", reasons, comment,
       });
+      if (!isCurrent()) return;
       setMessages((m) =>
-        m.map((mm, i) => (i === idx ? { ...mm, feedback: { rating: "down" as const, reasons, comment } } : mm)),
+        m.map((mm) => (mm.viewKey === msg.viewKey ? { ...mm, feedback: { rating: "down" as const, reasons, comment } } : mm)),
       );
-      setDislikeTarget(null);
-      setDislikeReasons([]);
-      setDislikeComment("");
+      if (dislikeRef.current === msg.viewKey) {
+        setDislikeTarget(null);
+        setDislikeReasons([]);
+        setDislikeComment("");
+      }
       toast.success("已提交反馈");
     } catch (e: any) {
-      toast.error(e.message || "提交失败");
+      if (isCurrent()) toast.error(e.message || "提交失败");
     }
   };
 
   // HITL / 定时任务确认
-  const runAction = async (msgIdx: number, action: string, taskId?: string) => {
+  const runAction = async (target: Msg, action: string) => {
+    const taskId = target.taskId;
     if (!taskId) return;
+    const session = sessionRun.current;
+    const isCurrent = () => sessionRun.current === session
+      && messagesRef.current.some((m) => m.viewKey === target.viewKey);
     try {
       let res: any;
       if (action === "schedule") res = await api.post("/api/tasks", { task_id: taskId });
       else res = await api.post(ACTION_LABELS[action].path, { task_id: taskId });
+      if (!isCurrent()) return;
       toast.success(res.message || (action === "schedule" ? `已创建定时任务（下次 ${res.next_run_at}）` : "已完成"));
       // 移除已消费的动作按钮
       setMessages((m) =>
-        m.map((msg, i) =>
-          i === msgIdx
+        m.map((msg) =>
+          msg.viewKey === target.viewKey
             ? { ...msg, actions: msg.actions?.filter((a) => a !== action), schedule: action === "schedule" ? undefined : msg.schedule }
             : msg,
         ),
       );
     } catch (e: any) {
-      toast.error(e.message || "操作失败");
+      if (isCurrent()) toast.error(e.message || "操作失败");
     }
   };
 
@@ -434,17 +529,17 @@ export function Chat() {
         <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-6">
           <div className="mx-auto max-w-3xl space-y-5">
             {!messages.length && <Welcome onPick={(t) => setInput(t)} />}
-            {messages.map((m, i) => (
+            {messages.map((m) => (
               <MessageBubble
-                key={i}
+                key={m.viewKey}
                 msg={m}
-                onAction={(a) => runAction(i, a, m.taskId)}
-                onLike={() => submitFeedback(i, "up")}
+                onAction={(a) => runAction(m, a)}
+                onLike={() => submitFeedback(m, "up")}
                 onDislike={() => {
                   if (m.feedback?.rating === "down") {
-                    submitFeedback(i, "down");
+                    submitFeedback(m, "down");
                   } else {
-                    setDislikeTarget(i);
+                    setDislikeTarget(m.viewKey);
                     setDislikeReasons(m.feedback?.reasons || []);
                     setDislikeComment(m.feedback?.comment || "");
                   }
