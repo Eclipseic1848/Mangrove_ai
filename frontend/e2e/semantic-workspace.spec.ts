@@ -258,6 +258,289 @@ function workspaceDetail(
   };
 }
 
+// 不同版本、账号使用可辨认的正文与交付，避免只检查版本标签。
+function previewIdentityFixture(owner: string, revision: number) {
+  const identity = `${owner}-V${revision}`;
+  const task = {
+    ...workspaceTask("identity-task", "completed", `${owner}的结果任务`),
+    current_revision: 2, active_revision: 2, viewing_revision: revision,
+    upload_ids: [`V${revision}-upload`],
+  };
+  const detail = workspaceDetail(task, {
+    revisions: [1, 2].map((value) => ({ ...task, revision: value })),
+    uploads: [{ upload_id: `V${revision}-upload`, original_name: `${identity}-原件.csv`,
+      media_type: "text/csv", size_bytes: 64, sha256: "0".repeat(64) }],
+    delivery: {
+      delivery_id: `${identity}-delivery`, run_id: `${identity}-run`, plan_id: `${identity}-plan`,
+      status: "published", requested_formats: ["xlsx"], created_at: task.created_at,
+      outputs: [{ output_id: `${identity}-output`, format: "xlsx", filename: `${identity}.xlsx`,
+        media_type: "application/octet-stream", sha256: "1".repeat(64), size_bytes: 64,
+        qa: { openable: true, checks: [`${identity}-QA`], warnings: revision === 1 ? ["旧版警告"] : [] },
+        download_url: `/api/semantic-delivery/outputs/${identity}-output` }],
+    },
+  });
+  const preview = {
+    kind: "table", columns: ["结果"], total: 201, offset: 0, limit: 100,
+    rows: [{ 结果: `${identity}-正文`, __lineage: [{ artifact_id: `V${revision}-upload`,
+      row_number: revision + 1, values: { 结果: `${identity}-来源证据` } }] }],
+  };
+  return { task, detail, preview };
+}
+
+function responseBarrier() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => { release = resolve; });
+  return { promise, release };
+}
+
+async function loginAsB(page: Page) {
+  await page.getByPlaceholder("至少 2 位").fill("owner-b");
+  await page.getByPlaceholder("至少 6 位").fill("synthetic-password");
+  await page.locator('button[type="submit"]').click();
+}
+
+test.describe("结果缓存身份隔离", () => {
+  test("修订切换加载与迟到正文不混用来源 QA 和下载", async ({ page }, testInfo) => {
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await page.route("**/api/**", (route) => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    const v1 = previewIdentityFixture("A", 1);
+    const v2 = previewIdentityFixture("A", 2);
+    const delayed = responseBarrier();
+    const requested = responseBarrier();
+    const delivered = responseBarrier();
+    await page.route("**/api/semantic-workspace/tasks?*", (route) => route.fulfill({ json: [v2.task] }));
+    await page.route(/\/api\/semantic-workspace\/tasks\/identity-task(?:\?.*)?$/, (route) =>
+      route.fulfill({ json: new URL(route.request().url()).searchParams.get("revision") === "1" ? v1.detail : v2.detail }));
+    await page.route("**/identity-task/preview?*", async (route) => {
+      const old = new URL(route.request().url()).searchParams.get("revision") === "1";
+      if (old) { requested.release(); await delayed.promise; }
+      await route.fulfill({ json: old ? v1.preview : v2.preview });
+      if (old) delivered.release();
+    });
+    const downloads: string[] = [];
+    await page.route("**/api/semantic-delivery/outputs/*", (route) => {
+      downloads.push(route.request().url());
+      return route.fulfill({ contentType: "application/octet-stream", body: "synthetic-output" });
+    });
+    await page.route("**/identity-task/bundle?*", (route) => {
+      downloads.push(route.request().url());
+      return route.fulfill({ contentType: "application/zip", body: "synthetic-zip" });
+    });
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /A的结果任务/ }).click();
+    await expect(page.getByText("A-V2-正文", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "查看来源", exact: true }).click();
+    await expect(page.getByText("A-V2-来源证据", { exact: true })).toBeVisible();
+    await page.getByLabel("结果版本").selectOption("1");
+    await expect(page.getByRole("button", { name: "下载 A-V1.xlsx", exact: true })).toBeVisible();
+    await expect(page.getByText("A-V2-正文", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("A-V2-来源证据", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("正在读取结果预览", { exact: true })).toBeVisible();
+    await page.screenshot({ path: testInfo.outputPath("revision-loading.png") });
+    await requested.promise;
+    await page.getByLabel("结果版本").selectOption("2");
+    await expect(page.getByText("A-V2-正文", { exact: true })).toBeVisible();
+    delayed.release();
+    await delivered.promise;
+    await expect(page.getByText("A-V1-正文", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("可交付", { exact: true })).toBeVisible();
+    for (const revision of [2, 1]) {
+      await page.getByLabel("结果版本").selectOption(String(revision));
+      await expect(page.getByText(`A-V${revision}-正文`, { exact: true })).toBeVisible();
+      await expect(page.getByText(revision === 1 ? "有警告" : "可交付", { exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "查看来源", exact: true }).click();
+      await expect(page.getByText(`A-V${revision}-来源证据`, { exact: true })).toBeVisible();
+      if (revision === 1) await page.screenshot({ path: testInfo.outputPath("revision-source.png") });
+      await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+      const file = page.waitForEvent("download");
+      await page.getByRole("button", { name: `下载 A-V${revision}.xlsx`, exact: true }).click();
+      expect((await file).suggestedFilename()).toBe(`A-V${revision}.xlsx`);
+      expect(downloads.at(-1)).toContain(`/A-V${revision}-output`);
+      await page.getByRole("checkbox", { name: "ZIP 包含原始文件" }).setChecked(revision === 1);
+      const zip = page.waitForEvent("download");
+      await page.getByRole("button", { name: "下载全部", exact: true }).click();
+      await zip;
+      expect(new URL(downloads.at(-1)!).searchParams.get("revision")).toBe(String(revision));
+      expect(new URL(downloads.at(-1)!).searchParams.get("include_sources")).toBe(String(revision === 1));
+    }
+  });
+
+  test("修订切换重置筛选排序页码", async ({ page }) => {
+    await page.route("**/api/**", (route) => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    const v2 = previewIdentityFixture("A", 2);
+    const queries: URL[] = [];
+    await page.route("**/api/semantic-workspace/tasks?*", (route) => route.fulfill({ json: [v2.task] }));
+    await page.route(/\/api\/semantic-workspace\/tasks\/identity-task(?:\?.*)?$/, (route) =>
+      route.fulfill({ json: previewIdentityFixture("A", Number(new URL(route.request().url()).searchParams.get("revision") || 2)).detail }));
+    await page.route("**/identity-task/preview?*", (route) => {
+      const url = new URL(route.request().url()); queries.push(url);
+      return route.fulfill({ json: { ...v2.preview, offset: Number(url.searchParams.get("offset")) } });
+    });
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /A的结果任务/ }).click();
+    await page.getByPlaceholder("在全部结果中搜索").fill("旧版条件");
+    await page.getByRole("button", { name: "搜索", exact: true }).click();
+    await page.getByRole("button", { name: "结果", exact: true }).click();
+    await page.locator("button:has(svg.lucide-chevron-right)").click();
+    await expect.poll(() => queries.at(-1)?.searchParams.get("offset")).toBe("100");
+    await page.getByLabel("结果版本").selectOption("1");
+    await expect(page.getByRole("button", { name: "下载 A-V1.xlsx", exact: true })).toBeVisible();
+    await expect(page.getByPlaceholder("在全部结果中搜索")).toHaveValue("");
+    await expect.poll(() => queries.at(-1)?.searchParams.get("revision")).toBe("1");
+    expect(queries.at(-1)?.searchParams.get("offset")).toBe("0");
+    expect(queries.at(-1)?.searchParams.get("search") || "").toBe("");
+    expect(queries.at(-1)?.searchParams.get("sort_by")).toBeNull();
+  });
+
+  test("同浏览器换账号等待列表详情正文时不显示前账号缓存", async ({ page }) => {
+    await page.route("**/api/**", (route) => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    let owner = "A";
+    const list = responseBarrier(), detail = responseBarrier(), body = responseBarrier(), source = responseBarrier();
+    const listRequested = responseBarrier(), detailRequested = responseBarrier(), bodyRequested = responseBarrier(), sourceRequested = responseBarrier();
+    await page.route("**/api/data-tasks/preview", async (route) => {
+      const requestedOwner = owner;
+      if (requestedOwner === "B") { sourceRequested.release(); await source.promise; }
+      await route.fulfill({ json: {
+        schema: { fields: [{ name: "原件", dtype: "string", nullable: false }] },
+        sample: [{ 原件: `${requestedOwner}-原件私有内容` }], estimated_records: 1,
+      } });
+    });
+    await page.route("**/api/auth/login", (route) => {
+      owner = "B";
+      return route.fulfill({ json: { user_id: "owner-b", username: "owner-b", display_name: "账号乙", role: "admin", access_token: "synthetic-b" } });
+    });
+    await page.route("**/api/semantic-workspace/tasks?*", async (route) => {
+      const requestedOwner = owner;
+      if (requestedOwner === "B") { listRequested.release(); await list.promise; }
+      await route.fulfill({ json: [previewIdentityFixture(requestedOwner, 2).task] });
+    });
+    await page.route(/\/api\/semantic-workspace\/tasks\/identity-task(?:\?.*)?$/, async (route) => {
+      const requestedOwner = owner;
+      if (requestedOwner === "B") { detailRequested.release(); await detail.promise; }
+      await route.fulfill({ json: previewIdentityFixture(requestedOwner, 2).detail });
+    });
+    await page.route("**/identity-task/preview?*", async (route) => {
+      const requestedOwner = owner;
+      if (requestedOwner === "B") { bodyRequested.release(); await body.promise; }
+      await route.fulfill({ json: previewIdentityFixture(requestedOwner, 2).preview });
+    });
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /A的结果任务/ }).click();
+    await expect(page.getByText("A-V2-正文", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "查看来源", exact: true }).click();
+    await expect(page.getByText("A-V2-来源证据", { exact: true })).toBeVisible();
+    await expect(page.getByText("A-原件私有内容", { exact: true })).toBeVisible();
+    await page.getByTitle("退出登录").click();
+    await loginAsB(page);
+    await page.getByRole("link", { name: "数据工作台", exact: true }).click();
+    await listRequested.promise;
+    await expect.soft(page.getByRole("button", { name: /A的结果任务/ })).toHaveCount(0);
+    list.release();
+    await page.getByRole("button", { name: /B的结果任务/ }).click();
+    await detailRequested.promise;
+    await expect.soft(page.getByText("A-V2.xlsx", { exact: true })).toHaveCount(0);
+    await expect.soft(page.getByText("A-V2-正文", { exact: true })).toHaveCount(0);
+    detail.release();
+    await bodyRequested.promise;
+    await expect.soft(page.getByText("A-V2-正文", { exact: true })).toHaveCount(0);
+    await expect.soft(page.getByText("A-V2-来源证据", { exact: true })).toHaveCount(0);
+    body.release();
+    await expect(page.getByText("B-V2-正文", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "查看来源", exact: true }).click();
+    await sourceRequested.promise;
+    await expect.soft(page.getByText("A-原件私有内容", { exact: true })).toHaveCount(0);
+    source.release();
+    await expect(page.getByText("B-原件私有内容", { exact: true })).toBeVisible();
+  });
+
+  test("缓存命中的修订切换首帧也重置共享多来源选择", async ({ page }) => {
+    await page.route("**/api/**", (route) => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    const uploads = ["first", "second"].map((id) => ({
+      upload_id: id, original_name: `${id}.csv`, media_type: "text/csv",
+      size_bytes: 64, sha256: "0".repeat(64),
+    }));
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [previewIdentityFixture("A", 2).task] }));
+    await page.route(/\/api\/semantic-workspace\/tasks\/identity-task(?:\?.*)?$/, (route) => {
+      const revision = Number(new URL(route.request().url()).searchParams.get("revision") || 2);
+      return route.fulfill({ json: { ...previewIdentityFixture("A", revision).detail,
+        uploads, upload_ids: ["first", "second"] } });
+    });
+    await page.route("**/identity-task/preview?*", (route) => {
+      const revision = Number(new URL(route.request().url()).searchParams.get("revision") || 2);
+      return route.fulfill({ json: previewIdentityFixture("A", revision).preview });
+    });
+    await page.route("**/api/data-tasks/preview", (route) => route.fulfill({ json: {
+      schema: { fields: [{ name: "原件", dtype: "string", nullable: false }] },
+      sample: [{ 原件: `${route.request().postDataJSON().source.upload_id}-共享原件正文` }], estimated_records: 1,
+    } }));
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /A的结果任务/ }).click();
+    await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+    await expect(page.getByText("first-共享原件正文", { exact: true })).toBeVisible();
+    await page.getByLabel("结果版本").selectOption("1");
+    await expect(page.getByRole("button", { name: "下载 A-V1.xlsx", exact: true })).toBeVisible();
+    await page.getByTestId("source").getByRole("combobox").selectOption("second");
+    await expect(page.getByText("second-共享原件正文", { exact: true })).toBeVisible();
+    await page.evaluate(async () => {
+      const seen: string[] = [];
+      const observer = new MutationObserver((records) => {
+        for (const record of records) for (const node of record.addedNodes) {
+          const inSource = record.target instanceof Element && record.target.closest('[data-testid="source"]');
+          const containsSource = node instanceof Element && (node.matches('[data-testid="source"]') || node.querySelector('[data-testid="source"]'));
+          if ((inSource || containsSource) && node.textContent?.includes("second-共享原件正文")) seen.push(node.textContent);
+        }
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+      // 校验同一轮挂载又删除的节点仍被记录，避免漏掉 effect 前的短暂内容。
+      const probe = document.createElement("span");
+      probe.textContent = "second-共享原件正文";
+      document.querySelector('[data-testid="source"]')!.append(probe);
+      probe.remove();
+      await Promise.resolve();
+      if (seen.length !== 1) throw new Error("来源瞬时 DOM 观察器未记录阳性对照");
+      seen.length = 0;
+      Object.assign(window, { sourceSwitchEvidence: { seen, observer } });
+    });
+    await page.getByLabel("结果版本").selectOption("2");
+    await expect(page.getByRole("button", { name: "下载 A-V2.xlsx", exact: true })).toBeVisible();
+    await expect(page.getByText("first-共享原件正文", { exact: true })).toBeVisible();
+    expect(await page.evaluate(() => {
+      const evidence = (window as unknown as { sourceSwitchEvidence: { seen: string[]; observer: MutationObserver } }).sourceSwitchEvidence;
+      evidence.observer.disconnect();
+      return evidence.seen;
+    })).toEqual([]);
+  });
+
+  for (const status of [200, 401]) {
+  test(`启动鉴权迟到 ${status} 不得覆盖已显式登录的新账号`, async ({ page }) => {
+    await page.route("**/api/**", (route) => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    const started = responseBarrier(), release = responseBarrier();
+    await page.route("**/api/auth/me", async (route) => {
+      started.release(); await release.promise;
+      await route.fulfill({ status, json: status === 401 ? { detail: "旧会话已过期" } : { user_id: "owner-a", username: "owner-a", display_name: "账号甲", role: "admin", access_token: "synthetic-a" } });
+    });
+    await page.route("**/api/auth/login", (route) => route.fulfill({ json: {
+      user_id: "owner-b", username: "owner-b", display_name: "账号乙", role: "admin", access_token: "synthetic-b",
+    } }));
+    await page.goto("/login");
+    await started.promise;
+    await loginAsB(page);
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("mangrove_token"))).toBe("synthetic-b");
+    const restored = page.waitForResponse("**/api/auth/me");
+    release.release(); await restored;
+    await expect(page.getByText("账号乙", { exact: true })).toBeVisible();
+    await expect(page.getByText("账号甲", { exact: true })).toHaveCount(0);
+    expect(await page.evaluate(() => localStorage.getItem("mangrove_token"))).toBe("synthetic-b");
+  });
+  }
+});
+
 function sourceAttempt(
   status: "succeeded" | "failed",
   extra: Record<string, unknown> = {},
