@@ -1636,25 +1636,5 @@ async def rerun_task(task_id: str, user=Depends(get_current_user)):
     # 清理旧产物后重跑（parsed/clean 的 part 文件用独占写，必须先清）
     shutil.rmtree(ArtifactStore().task_dir(task_id), ignore_errors=True)
     store.update_data_prep_task(task_id, status="RUNNING", error=None)
-    is_database = bool(spec.sources and spec.sources[0].source_type == SourceType.DATABASE)
-    checkpoint_data = store.get_task_checkpoint(task_id) if is_database else None
-    checkpoint = None
-    if checkpoint_data:
-        checkpoint = Checkpoint(
-            cursor=checkpoint_data.get("cursor"),
-            watermark=checkpoint_data.get("watermark"),
-            processed_artifact_ids=set(checkpoint_data.get("processed_artifact_ids") or []),
-            processed_record_keys=set(checkpoint_data.get("processed_record_keys") or []),
-            page=int(checkpoint_data.get("page") or 0),
-            completed_batch_ids=list(checkpoint_data.get("completed_batch_ids") or []),
-            next_part_no=int(checkpoint_data.get("next_part_no") or 0),
-            is_final=False,
-        )
-        if checkpoint.cursor:
-            try:
-                cursor_data = json.loads(checkpoint.cursor)
-                cursor_data["done"] = False
-                checkpoint.cursor = json.dumps(cursor_data, ensure_ascii=False)
-            except (TypeError, ValueError, json.JSONDecodeError):
-                checkpoint = None
-    return await _execute_task(spec, task_id, checkpoint=checkpoint)
+    # 旧产物已移除，必须按冻结规格重新获取；旧 checkpoint 会跳过已删除的前半段数据。
+    return await _execute_task(spec, task_id)
