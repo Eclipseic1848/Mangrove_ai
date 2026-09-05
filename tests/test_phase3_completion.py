@@ -149,3 +149,66 @@ def test_database_api_preview_pipeline_and_secret_hygiene(tmp_path: Path, monkey
     assert manifest.status_code == 200
     all_bytes = b"".join(path.read_bytes() for path in (tmp_path / "downloads").rglob("*") if path.is_file())
     assert b"phase3-canary-password" not in all_bytes
+
+
+def test_database_rerun_reloads_frozen_range_without_losing_prior_rows(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.setattr(settings, "data_prep_db_batch_size", 2)
+    source_db = Path(settings.data_prep_db_sqlite_root) / "rerun.db"
+    _database(source_db, "CREATE TABLE t(id INTEGER PRIMARY KEY, name TEXT)",
+              [(i, f"n{i}") for i in range(1, 8)])
+    before = source_db.read_bytes()
+    connection = client.post("/api/data-sources/connections", json={
+        "name": "复跑测试", "dialect": "sqlite", "sqlite_relpath": "rerun.db",
+    })
+    assert connection.status_code == 200, connection.text
+    source = {"source_type": "database", "connection_id": connection.json()["connection_id"],
+              "table": "t", "incremental": {"strategy": "watermark", "cursor_field": "id", "last_value": 2}}
+    created = client.post("/api/data-tasks", json={"source": source, "outputs": ["jsonl"]})
+    assert created.status_code == 200, created.text
+    task_id = created.json()["task_id"]
+    assert created.json()["status"] in {"SUCCEEDED", "SUCCEEDED_WITH_WARNINGS"}, created.text
+
+    for rerun in (False, True):
+        if rerun:
+            response = client.post(f"/api/data-tasks/{task_id}/rerun")
+            assert response.status_code == 200, response.text
+            assert response.json()["status"] in {"SUCCEEDED", "SUCCEEDED_WITH_WARNINGS"}, response.text
+        output = client.get(f"/api/downloads/{task_id}/clean/data.jsonl")
+        assert output.status_code == 200, output.text
+        rows = [json.loads(line) for line in output.text.splitlines()]
+        assert [row["id"] for row in rows] == [3, 4, 5, 6, 7]
+        assert source_db.read_bytes() == before
+
+    client.app.dependency_overrides[get_current_user] = lambda: {"user_id": "other-user"}
+    assert client.post(f"/api/data-tasks/{task_id}/rerun").status_code == 404
+    assert client.get(f"/api/downloads/{task_id}/clean/data.jsonl").status_code == 404
+    assert source_db.read_bytes() == before
+
+
+def test_database_api_null_preview_and_invalid_key_return_correct_status(tmp_path: Path, monkeypatch):
+    client = _client(tmp_path, monkeypatch)
+    source_db = Path(settings.data_prep_db_sqlite_root) / "nullable.db"
+    _database(source_db, "CREATE TABLE t(id INTEGER PRIMARY KEY, stamp INTEGER, body TEXT)",
+              [(1, None, None), (2, 1, "第二行"), (3, 2, None)])
+    before = source_db.read_bytes()
+    created = client.post("/api/data-sources/connections", json={
+        "name": "空值测试", "dialect": "sqlite", "sqlite_relpath": "nullable.db",
+    })
+    assert created.status_code == 200, created.text
+    source = {"source_type": "database", "connection_id": created.json()["connection_id"],
+              "table": "t", "filters": [{"field": "body", "op": "is_null"}]}
+    preview = client.post("/api/data-tasks/preview", json={"source": source})
+    assert preview.status_code == 200, preview.text
+    assert [row["id"] for row in preview.json()["sample"]] == [1, 3]
+    source["incremental"] = {"strategy": "watermark", "cursor_field": "stamp"}
+    rejected = client.post("/api/data-tasks/preview", json={"source": source})
+    assert rejected.status_code == 400, rejected.text
+    assert "NULL" in rejected.json()["detail"]
+    source["filters"] = [{"field": "stamp", "op": "not_null"}]
+    preview = client.post("/api/data-tasks/preview", json={"source": source})
+    assert preview.status_code == 200, preview.text
+    assert [row["id"] for row in preview.json()["sample"]] == [2, 3]
+    client.app.dependency_overrides[get_current_user] = lambda: {"user_id": "other-user"}
+    assert client.post("/api/data-tasks/preview", json={"source": source}).status_code == 404
+    assert source_db.read_bytes() == before

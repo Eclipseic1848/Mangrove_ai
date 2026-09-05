@@ -7,6 +7,7 @@ import base64
 import inspect as pyinspect
 import json
 import logging
+import math
 import sqlite3
 import threading
 import time
@@ -16,7 +17,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
 
-from sqlalchemy import MetaData, Table, and_, select, tuple_
+from sqlalchemy import MetaData, Table, and_, func, or_, select, tuple_
 from sqlalchemy.pool import NullPool
 
 from src.config.settings import settings
@@ -148,33 +149,53 @@ class DatabaseConnector(SourceConnector):
         bytes_read = 0
         part_no = 0
         last_key: Optional[Tuple[Any, ...]] = None
-        saved_done = False
-        if checkpoint and checkpoint.cursor:
-            try:
-                saved = json.loads(checkpoint.cursor)
-                rows_read = int(saved.get("rows_read", 0))
-                bytes_read = int(saved.get("bytes_read", 0))
-                part_no = int(saved.get("part_no", 0))
-                last_key = tuple(saved.get("last_key") or []) or None
-                saved_done = bool(saved.get("done", False))
-            except (TypeError, ValueError, json.JSONDecodeError):
-                logger.warning("数据库 checkpoint 无法解析，将从头读取")
-        if saved_done:
-            yield RecordBatch(checkpoint=checkpoint or Checkpoint(is_final=True))
-            await asyncio.to_thread(eng.dispose)
-            return
-
         try:
+            saved = {}
+            if checkpoint and (checkpoint.cursor is not None or checkpoint.is_final):
+                saved = json.loads(checkpoint.cursor)
+                required = {"mode", "table", "key_cols", "last_key", "rows_read", "bytes_read", "part_no", "done"}
+                if (not isinstance(saved, dict) or not required.issubset(saved)
+                    or not isinstance(saved["key_cols"], list)
+                    or not isinstance(saved["last_key"], list)
+                    or type(saved["done"]) is not bool):
+                    raise ValueError("数据库 checkpoint 格式错误，请重新读取")
+                if any(type(saved[key]) is not int or saved[key] < 0
+                       for key in ("rows_read", "bytes_read", "part_no")):
+                    raise ValueError("数据库 checkpoint 计数错误，请重新读取")
+                rows_read, bytes_read, part_no = saved["rows_read"], saved["bytes_read"], saved["part_no"]
+                last_key = tuple(saved["last_key"]) or None
+                expected_table = cfg.table if cfg.mode == "table" else "custom_sql"
+                if saved["mode"] != "table" or saved["table"] != expected_table:
+                    raise ValueError("数据库 checkpoint 表不匹配，请重新读取")
             if cfg.mode == "table":
                 table = await asyncio.to_thread(self._reflect_table, eng, cfg)
                 key_cols = list(table.primary_key.columns.keys())
                 cursor_field = (cfg.incremental or {}).get("cursor_field")
                 if cursor_field:
                     _require_columns(table, [cursor_field])
-                    key_cols = [cursor_field]
-                    if last_key is None and (cfg.incremental or {}).get("last_value") is not None:
-                        last_key = (_coerce_cursor((cfg.incremental or {}).get("last_value"), table.c[cursor_field]),)
+                    # 水位可能重复，完整主键负责区分同一水位内的每一行。
+                    key_cols = list(dict.fromkeys([cursor_field, *key_cols]))
                 _validate_config_columns(table, cfg, key_cols)
+                check_unique = bool(cursor_field and not table.primary_key.columns)
+                if saved:
+                    if saved.get("key_cols") != key_cols:
+                        if cursor_field and saved.get("key_cols") == [cursor_field]:
+                            # 旧单水位只有确实唯一时才能继续，不能补空主键跳过并列行。
+                            key_cols = [cursor_field]
+                            check_unique = True
+                        else:
+                            raise ValueError("数据库 checkpoint 排序键不匹配，请重新读取")
+                    if last_key is not None:
+                        if len(last_key) != len(key_cols) or any(value is None for value in last_key):
+                            raise ValueError("数据库 checkpoint 水位不完整，请重新读取")
+                        last_key = tuple(_coerce_cursor(value, table.c[name])
+                                         for name, value in zip(key_cols, last_key))
+                    elif rows_read and key_cols:
+                        raise ValueError("数据库 checkpoint 缺少水位，请重新读取")
+                await asyncio.to_thread(self._validate_keyset, eng, table, cfg, key_cols, check_unique)
+                if saved.get("done"):
+                    yield RecordBatch(checkpoint=checkpoint)
+                    return
                 if not key_cols:
                     no_key_warning = "表无主键且未指定水位线，使用 OFFSET 全量读取；源表变化时不保证断点一致性"
                 else:
@@ -250,8 +271,14 @@ class DatabaseConnector(SourceConnector):
                     if done:
                         break
             else:
+                if saved.get("done"):
+                    yield RecordBatch(checkpoint=checkpoint)
+                    return
                 async for batch in self._read_sql(spec, cfg, creds, eng, started, rows_read, bytes_read, part_no):
                     yield batch
+        except Exception as exc:
+            # 预览和任务图都消费 fatal_error；预检或恢复错误也必须走同一脱敏失败路径。
+            yield RecordBatch(fatal_error=_sanitize_error(exc, creds))
         finally:
             await asyncio.to_thread(eng.dispose)
 
@@ -319,21 +346,31 @@ class DatabaseConnector(SourceConnector):
         with _CONNECTION_GATE:
             return Table(cfg.table, MetaData(), schema=cfg.schema or None, autoload_with=eng)
 
+    def _validate_keyset(self, eng, table, cfg, key_cols, check_unique):
+        nullable = [table.c[name] for name in key_cols if table.c[name].nullable]
+        if not nullable and not check_unique:
+            return
+        # 检查原读取范围；续页谓词会提前排除 NULL，不能用于证明水位完整。
+        predicates = _table_predicates(table, cfg)
+        dialect = get_dialect(eng.url.get_backend_name())
+        with _CONNECTION_GATE, eng.connect() as conn:
+            dialect.apply_readonly(conn)
+            dialect.apply_statement_timeout(conn, settings.data_prep_db_query_timeout_seconds)
+            if nullable and conn.execute(select(1).select_from(table).where(
+                *predicates, or_(*(col.is_(None) for col in nullable)),
+            ).limit(1)).first():
+                raise ValueError("读取范围内的排序键含 NULL，请过滤空水位或选择非空排序键")
+            if check_unique:
+                # ponytail: 无主键/旧单水位做一次只读唯一性扫描；大表应使用完整主键分页。
+                cols = [table.c[name] for name in key_cols]
+                if conn.execute(select(*cols).where(*predicates).group_by(*cols).having(
+                    func.count() > 1,
+                ).limit(1)).first():
+                    raise ValueError("水位不唯一，无法安全续读，请使用完整主键重新读取")
+
     def _fetch_table_batch(self, eng, table, cfg, key_cols, last_key, offset, limit):
         stmt = select(*table.c)
-        predicates = []
-        for item in cfg.filters:
-            col = table.c[item["field"]]
-            op, value = item.get("op", "eq"), item.get("value")
-            predicates.append({
-                "eq": col == value, "ne": col != value, "gt": col > value, "ge": col >= value,
-                "lt": col < value, "le": col <= value,
-                "is_null": col.is_(None), "not_null": col.is_not(None),
-                "contains": col.contains(value),
-            }.get(op, col.in_(value if isinstance(value, list) else [])))
-        if cfg.time_range and cfg.time_field:
-            col = table.c[cfg.time_field]
-            predicates.extend((col >= cfg.time_range[0], col < cfg.time_range[1]))
+        predicates = _table_predicates(table, cfg)
         if key_cols and last_key is not None:
             cols = [table.c[name] for name in key_cols]
             predicates.append(cols[0] > last_key[0] if len(cols) == 1 else tuple_(*cols) > tuple(last_key))
@@ -386,6 +423,44 @@ class DatabaseConnector(SourceConnector):
             await asyncio.to_thread(eng.dispose)
 
 
+
+def _table_predicates(table, cfg):
+    predicates = []
+    for item in cfg.filters:
+        col = table.c[item["field"]]
+        op, value = item.get("op", "eq"), item.get("value")
+        # 只构造当前操作，NULL 过滤不应触发无关的大小比较或 contains。
+        if op == "eq":
+            predicate = col == value
+        elif op == "ne":
+            predicate = col != value
+        elif op == "gt":
+            predicate = col > value
+        elif op == "ge":
+            predicate = col >= value
+        elif op == "lt":
+            predicate = col < value
+        elif op == "le":
+            predicate = col <= value
+        elif op == "is_null":
+            predicate = col.is_(None)
+        elif op == "not_null":
+            predicate = col.is_not(None)
+        elif op == "contains":
+            predicate = col.contains(value)
+        else:
+            predicate = col.in_(value if isinstance(value, list) else [])
+        predicates.append(predicate)
+    if cfg.time_range and cfg.time_field:
+        col = table.c[cfg.time_field]
+        predicates.extend((col >= cfg.time_range[0], col < cfg.time_range[1]))
+    incremental = cfg.incremental or {}
+    if incremental.get("cursor_field") and incremental.get("last_value") is not None:
+        col = table.c[incremental["cursor_field"]]
+        predicates.append(col > _coerce_cursor(incremental["last_value"], col))
+    return predicates
+
+
 def _validate_config_columns(table, cfg, key_cols):
     names = set(table.c.keys())
     requested = set(cfg.fields) | set(key_cols)
@@ -406,13 +481,27 @@ def _require_columns(table, names):
 def _coerce_cursor(value, column):
     try:
         pytype = column.type.python_type
-        if pytype is datetime:
-            return datetime.fromisoformat(str(value))
-        if pytype is date:
-            return date.fromisoformat(str(value))
-        return pytype(value)
-    except (AttributeError, TypeError, ValueError, NotImplementedError):
-        return value
+        # 只恢复明确编码；截断浮点、字符串真值或把对象转文本都会改变续读边界。
+        if type(value) is pytype:
+            restored = value
+        elif pytype in (datetime, date, dt_time) and isinstance(value, str):
+            restored = pytype.fromisoformat(value)
+        elif pytype is int and isinstance(value, str):
+            restored = int(value)
+        elif pytype in (float, Decimal) and type(value) in (int, str):
+            restored = pytype(value)
+            if type(value) is int and restored != value:
+                raise ValueError("水位转换丢失精度")
+        elif pytype is bytes and isinstance(value, dict) and set(value) == {"base64"}:
+            restored = base64.b64decode(value["base64"], validate=True)
+        else:
+            raise ValueError("水位编码不匹配")
+        if ((isinstance(restored, float) and not math.isfinite(restored))
+            or (isinstance(restored, Decimal) and not restored.is_finite())):
+            raise ValueError("水位必须为有限值")
+        return restored
+    except (AttributeError, TypeError, ValueError, NotImplementedError) as exc:
+        raise ValueError(f"水位值与字段 {column.name} 类型不匹配") from exc
 
 
 def _normalize_cell(value, field, warnings):
@@ -484,7 +573,10 @@ def _checkpoint(table, key_cols, last_key, part_no, rows_read, bytes_read, done)
 def _serializable_key(key):
     if not key:
         return []
-    return [value.isoformat() if isinstance(value, (datetime, date, dt_time)) else value for value in key]
+    return [value.isoformat() if isinstance(value, (datetime, date, dt_time))
+            else str(value) if isinstance(value, Decimal)
+            else {"base64": base64.b64encode(value).decode("ascii")} if isinstance(value, bytes)
+            else value for value in key]
 
 
 def _safe_uri(creds, table, part_no):
