@@ -178,35 +178,39 @@ class SchedulerService:
         return "started"
 
     async def _invoke_runner(self, task: Dict[str, Any]) -> Dict[str, Any]:
-        runner = self._runner
-        if runner is None:
-            # 懒加载真正的 Conductor，避免模块循环依赖与测试时的重依赖
-            from src.conductor.graph import run_conductor
+        from src.api.auth import get_store
+        from src.config.runtime_config import USER_KEYS
+        from src.config.user_ctx import user_memories_context, user_overrides_context
 
-            runner = run_conductor
-        # 任务属主的按用户凭证覆盖（自配 API Key/Cookie）注入执行上下文，与聊天链路同规则
-        owner = (task.get("user_id") or "").strip()
-        if owner:
-            try:
-                from src.api.auth import get_store
-                from src.config.runtime_config import USER_KEYS
-                from src.config.user_ctx import set_user_memories, set_user_overrides
-                store = get_store()
-                set_user_overrides({k: v for k, v in (store.config_all(owner) or {}).items()
-                                    if k in USER_KEYS})
-                set_user_memories([m["text"] for m in store.memory_list(owner)])
-            except Exception:  # noqa: BLE001 覆盖加载失败回落全局配置，不阻断定时任务
-                logger.warning("定时任务加载用户凭证覆盖失败，回落全局配置 task_id=%s", task.get("task_id"))
-        # 定时任务不静默入库（敏感动作需人工确认）：approved_db_write 固定 False
-        # ignore_schedule=True：到点触发时跑完整采集流程，而非再次短路为"安排定时任务"
-        return await runner(
-            task["user_input"],
-            provider=task.get("provider"),
-            model=task.get("model"),
-            session_id=f"scheduler:{task['task_id']}",
-            approved_db_write=False,
-            ignore_schedule=True,
-        )
+        owner = task.get("owner_user_id")
+        if not isinstance(owner, str) or not owner.strip():
+            raise ValueError("定时任务缺少有效的所属用户，无法执行")
+        try:
+            store = get_store()
+            user = store.get_user(owner)
+            if user is None or user.get("pending") or user.get("disabled"):
+                raise ValueError("所属用户不可用")
+            overrides = {key: value for key, value in store.config_all(owner).items() if key in USER_KEYS}
+            memories = [memory["text"] for memory in store.memory_list(owner)]
+        except Exception:
+            # 身份或本人上下文无法加载时停止，且不把底层凭证错误写入任务历史。
+            raise RuntimeError("定时任务无法加载有效的本人执行上下文") from None
+
+        with user_overrides_context(overrides), user_memories_context(memories):
+            runner = self._runner
+            if runner is None:
+                # 有效 Owner 确认后才装载执行器；注入的执行器也遵守同一授权边界。
+                from src.conductor.graph import run_conductor
+                runner = run_conductor
+            # 定时任务不自动业务入库，也不再次生成相同的定时计划。
+            return await runner(
+                task["user_input"],
+                provider=task.get("provider"),
+                model=task.get("model"),
+                session_id=f"scheduler:{task['task_id']}",
+                approved_db_write=False,
+                ignore_schedule=True,
+            )
 
     @staticmethod
     def _assess(result: Dict[str, Any]) -> tuple[bool, str]:

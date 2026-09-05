@@ -253,7 +253,8 @@ def test_heavy_ci_is_manual_only_and_never_receives_secrets() -> None:
     assert "docker build" in workflow
     assert "npm run test:e2e" in workflow
     assert "secrets." not in workflow
-    assert "provider" not in workflow.lower()
+    # 该离线测试只解析配置与 ContextVar，不创建客户端或请求；其余 Provider 接线仍拒绝。
+    assert "provider" not in workflow.lower().replace("tests/test_llm_provider.py", "")
     assert "if: always()" in workflow
 
 

@@ -16,6 +16,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.scheduler import cron
 from tests.database_migration_helpers import migrated_profile_database
+from tests.scheduler_helpers import scheduler_owner
 
 
 def _migrated_store(path: str | Path):
@@ -366,17 +367,21 @@ def test_run_one_interval_reschedule():
     import asyncio
 
     from src.scheduler.service import SchedulerService
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         store = _migrated_store(Path(d) / "s.db")
-        tid = store.add(user_input="每2小时", provider=None, model=None,
+        tid = store.add(owner_user_id=owner["user_id"], user_input="每2小时", provider=None, model=None,
                          trigger_type="interval", cron_expr=None, run_at=None,
                          next_run_at=datetime(2026, 7, 13, 10, 0), interval_seconds=7200)
 
+        calls = []
+
         async def stub_runner(user_input, **kw):
+            calls.append(user_input)
             return {"reply": "done"}
 
         svc = SchedulerService(store=store, poll_interval=1.0, runner=stub_runner)
         asyncio.run(svc._run_one(store.get(tid), datetime(2026, 7, 13, 10, 0, 5)))
+        assert len(calls) == 1
         row = store.get(tid)
         assert row["status"] == "active"
         assert row["next_run_at"] == "2026-07-13T12:00:05", row["next_run_at"]
@@ -387,17 +392,21 @@ def test_run_one_end_date_expiry():
     import asyncio
 
     from src.scheduler.service import SchedulerService
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         store = _migrated_store(Path(d) / "s.db")
-        tid = store.add(user_input="限时监控", provider=None, model=None,
+        tid = store.add(owner_user_id=owner["user_id"], user_input="限时监控", provider=None, model=None,
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 13, 8, 0), end_date="2026-07-13")
 
+        calls = []
+
         async def stub_runner(user_input, **kw):
+            calls.append(user_input)
             return {"reply": "done"}
 
         svc = SchedulerService(store=store, poll_interval=1.0, runner=stub_runner)
         asyncio.run(svc._run_one(store.get(tid), datetime(2026, 7, 13, 8, 0, 5)))
+        assert len(calls) == 1
         row = store.get(tid)
         assert row["status"] == "done", row["status"]
         assert row["next_run_at"] is None
@@ -408,18 +417,22 @@ def test_run_task_now_keeps_schedule_and_returns_started():
     import asyncio
 
     from src.scheduler.service import SchedulerService
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         store = _migrated_store(Path(d) / "s.db")
-        tid = store.add(user_input="任务D", provider=None, model=None,
+        tid = store.add(owner_user_id=owner["user_id"], user_input="任务D", provider=None, model=None,
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 20, 8, 0))
 
+        calls = []
+
         async def stub_runner(user_input, **kw):
+            calls.append(user_input)
             return {"outputs": {"report_md": "r.md"}}
 
         svc = SchedulerService(store=store, poll_interval=1.0, runner=stub_runner)
         outcome = asyncio.run(svc.run_task_now(tid))
         assert outcome == "started", outcome
+        assert len(calls) == 1
         row = store.get(tid)
         assert row["next_run_at"] == "2026-07-20T08:00:00", "立即执行不应改动原定下次时刻"
         assert row["run_count"] == 1
@@ -505,18 +518,22 @@ def test_run_one_marks_failure_and_catchup():
     from src.scheduler.service import SchedulerService
 
     async def _case(runner_result, next_run_at, now):
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
             store = _migrated_store(Path(d) / "s.db")
-            tid = store.add(user_input="测试任务", provider=None, model=None,
+            tid = store.add(owner_user_id=owner["user_id"], user_input="测试任务", provider=None, model=None,
                             trigger_type="cron", cron_expr="0 8 * * *",
                             run_at=None, next_run_at=next_run_at)
 
+            calls = []
+
             async def stub_runner(user_input, **kw):
+                calls.append(user_input)
                 return runner_result
 
             svc = SchedulerService(store=store, poll_interval=1.0, runner=stub_runner)
             task = store.get(tid)
             await svc._run_one(task, now)
+            assert len(calls) == 1
             return store.get(tid)
 
     # 场景1：按时执行但流程内报错 → last_success=0、错误入 last_error
@@ -542,19 +559,23 @@ def test_run_history():
     import asyncio
 
     from src.scheduler.service import SchedulerService
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         store = _migrated_store(Path(d) / "s.db")
-        tid = store.add(user_input="历史测试", provider=None, model=None,
+        tid = store.add(owner_user_id=owner["user_id"], user_input="历史测试", provider=None, model=None,
                         trigger_type="cron", cron_expr="0 8 * * *",
                         run_at=None, next_run_at=datetime(2026, 7, 6, 8, 0))
 
+        calls = []
+
         async def stub_runner(user_input, **kw):
+            calls.append(user_input)
             return {"outputs": {"report_md": "downloads/x/report.md", "json": "downloads/x/data.json"}}
 
         svc = SchedulerService(store=store, poll_interval=1.0, runner=stub_runner)
         asyncio.run(svc._run_one(store.get(tid), datetime(2026, 7, 6, 8, 0, 30)))
         asyncio.run(svc._run_one(store.get(tid), datetime(2026, 7, 7, 8, 0, 30)))
 
+        assert len(calls) == 2
         runs = store.list_runs(tid)
         assert len(runs) == 2, f"两次执行应有两条历史，实际 {len(runs)}"
         assert runs[0]["run_id"] > runs[1]["run_id"], "应按新→旧排序"
