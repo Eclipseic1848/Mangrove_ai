@@ -2197,11 +2197,16 @@ test.describe("统一数据工作台", () => {
       .toBeVisible();
     await expect(page.getByText("张三工作量.xlsx")).toBeVisible();
     await expect(page.getByText("可交付", { exact: true })).toBeVisible();
-    const filenameBounds = await page.getByText("张三工作量.xlsx").boundingBox();
-    const bundleBounds = await page.getByRole("button", { name: "下载全部" })
-      .boundingBox();
-    expect(filenameBounds?.width).toBeGreaterThan(100);
-    expect(bundleBounds?.width).toBeGreaterThan(80);
+    const filename = page.getByText("张三工作量.xlsx");
+    const bundle = page.getByRole("button", { name: "下载全部" });
+    // 系统字体宽度不同；验证内容未裁切且按钮可操作，不固定汉字像素宽度。
+    for (const element of [filename, bundle]) {
+      expect(await element.evaluate((node) => (
+        node.scrollWidth <= node.clientWidth && node.scrollHeight <= node.clientHeight
+      ))).toBe(true);
+    }
+    await expect(bundle).toBeInViewport();
+    await bundle.click({ trial: true });
     await page.getByRole("button", { name: "查看来源" }).click();
     await expect(page.getByText("已定位来源", { exact: false })).toBeVisible();
     await expect(page.getByText("原文件第 2 行", { exact: false })).toBeVisible();

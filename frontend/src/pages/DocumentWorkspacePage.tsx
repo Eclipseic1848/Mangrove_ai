@@ -244,9 +244,11 @@ export function DocumentWorkspacePage() {
   const [modelOptions, setModelOptions] = useState<ModelOption[]>([]);
   const [modelSelection, setModelSelection] = useState<DocumentModelSelection | null>(null);
   const objectUrls = useRef(new Set<string>());
+  const uploadedIds = useRef(new Set<string>());
   const previewRef = useRef<HTMLDivElement | null>(null);
   const restoreRun = useRef(0);
   const workspaceRestored = useRef(false);
+  const selectionRun = useRef(0);
   const taskViewRun = useRef(0);
 
   const unitsQuery = useQuery({
@@ -260,7 +262,8 @@ export function DocumentWorkspacePage() {
     enabled: Boolean(activeUnitId),
   });
 
-  const selected = documents.find((item) => item.id === selectedId) ?? documents[0];
+  const selected = documents.find((item) => item.id === selectedId)
+    ?? (selectedId ? undefined : documents[0]);
   const checkedDocuments = documents.filter((item) => checkedIds.includes(item.id));
   const selectedIsPdf = Boolean(selected && isPdf(selected.file));
   const pendingReviewCount = result?.review_tasks.filter(
@@ -333,10 +336,12 @@ export function DocumentWorkspacePage() {
     return Array.from(new Set(units.flatMap((unit) => unit.upload_ids)));
   }
 
-  async function restoreUpload(uploadId: string): Promise<LocalDocument> {
+  async function restoreUpload(uploadId: string, run: number): Promise<LocalDocument> {
     const upload = await getUpload(uploadId);
     const file = await getUploadFile(upload);
+    if (run !== restoreRun.current) throw new Error("历史恢复已失效");
     const url = URL.createObjectURL(file);
+    objectUrls.current.add(url);
     let preview: DocumentPreview | undefined;
     let previewError: string | undefined;
     if (isDocx(file)) {
@@ -359,6 +364,9 @@ export function DocumentWorkspacePage() {
   }
 
   useEffect(() => () => {
+    // 退出或切换 Owner 后，迟到恢复不能再创建页面持有的 URL。
+    restoreRun.current += 1;
+    workspaceRestored.current = false;
     objectUrls.current.forEach((url) => URL.revokeObjectURL(url));
     objectUrls.current.clear();
   }, []);
@@ -394,15 +402,29 @@ export function DocumentWorkspacePage() {
     async function restoreTask() {
       try {
         const workspace = await getDocumentWorkspace();
+        if (run !== restoreRun.current) return;
         const units = unitsQuery.data ?? [];
         const uploadIds = allWorkspaceUploadIds(units);
-        const restoredDocuments = await Promise.all(uploadIds.map(restoreUpload));
+        const restoredDocuments = await Promise.all(uploadIds.map((id) => restoreUpload(id, run)));
         if (run !== restoreRun.current) {
           restoredDocuments.forEach((item) => URL.revokeObjectURL(item.url));
           return;
         }
-        restoredDocuments.forEach((item) => objectUrls.current.add(item.url));
-        setDocuments(restoredDocuments);
+        const retainedIds = new Set(allWorkspaceUploadIds(
+          queryClient.getQueryData<DocumentTaskUnit[]>(["document-units"]) ?? units,
+        ));
+        const retainedDocuments = restoredDocuments.filter((item) => {
+          if (retainedIds.has(item.upload!.upload_id)
+            && !uploadedIds.current.has(item.upload!.upload_id)) {
+            return true;
+          }
+          URL.revokeObjectURL(item.url);
+          objectUrls.current.delete(item.url);
+          return false;
+        });
+        // 初始列表也可能已包含本页的新上传；补齐历史文件，保留新文件的预览和本地身份。
+        setDocuments((current) => [...retainedDocuments, ...current]);
+        if (selectionRun.current !== 0) return;
         setCheckedIds(
           restoredDocuments
             .filter((item) => workspace.checked_upload_ids.includes(
@@ -452,6 +474,7 @@ export function DocumentWorkspacePage() {
 
   async function addFiles(files: File[]) {
     if (files.length === 0) return;
+    const selection = ++selectionRun.current;
     setUploadError("");
     clearTaskView();
     const additions = files.map((file) => {
@@ -469,6 +492,7 @@ export function DocumentWorkspacePage() {
     const completedUploads = await Promise.all(additions.map(async (item) => {
       try {
         const upload = await uploadFile(item.file);
+        uploadedIds.current.add(upload.upload_id);
         setDocuments((current) => current.map((doc) => (
           doc.id === item.id
             ? {
@@ -510,7 +534,9 @@ export function DocumentWorkspacePage() {
       (item): item is { id: string; upload: UploadItem } => item !== null,
     );
     if (succeeded.length === 0) return;
-    setCheckedIds(succeeded.map((item) => item.id));
+    if (selection === selectionRun.current) {
+      setCheckedIds(succeeded.map((item) => item.id));
+    }
     try {
       const createdUnits = await Promise.all(succeeded.map((item) => (
         createDocumentUnit({
@@ -520,6 +546,8 @@ export function DocumentWorkspacePage() {
         })
       )));
       await queryClient.invalidateQueries({ queryKey: ["document-units"] });
+      // 文件仍会保存；只有最新操作可以改变当前预览和持久化选择。
+      if (selection !== selectionRun.current) return;
       const firstUnit = createdUnits[0];
       setActiveUnitId(firstUnit.unit_id);
       setSelectedId(succeeded[0].id);
@@ -560,7 +588,9 @@ export function DocumentWorkspacePage() {
   });
 
   async function selectUnit(unit: DocumentTaskUnit, uploadId?: string) {
-    const target = documentForUpload(uploadId ?? unit.upload_ids[0]);
+    selectionRun.current += 1;
+    const targetUploadId = uploadId ?? unit.upload_ids[0];
+    const target = documentForUpload(targetUploadId);
     clearTaskView();
     setActiveUnitId(unit.unit_id);
     if (unit.unit_type === "file_set") {
@@ -568,7 +598,7 @@ export function DocumentWorkspacePage() {
         current.includes(unit.unit_id) ? current : [...current, unit.unit_id]
       ));
     }
-    if (target) setSelectedId(target.id);
+    setSelectedId(target?.id ?? (targetUploadId ? `restored-${targetUploadId}` : ""));
     setPageNumber(1);
     setSelectedEvidence(null);
     setIntentError("");
@@ -580,7 +610,7 @@ export function DocumentWorkspacePage() {
         )),
         active_task_id: unit.latest_task?.task_id ?? null,
         active_unit_id: unit.unit_id,
-        selected_upload_id: target?.upload?.upload_id ?? unit.upload_ids[0] ?? null,
+        selected_upload_id: targetUploadId ?? null,
       });
     } catch (error) {
       setIntentError(error instanceof Error ? error.message : "任务历史读取失败");
@@ -588,6 +618,7 @@ export function DocumentWorkspacePage() {
   }
 
   async function selectDocument(id: string) {
+    selectionRun.current += 1;
     const target = documents.find((item) => item.id === id);
     setSelectedId(id);
     setPageNumber(1);
@@ -609,6 +640,7 @@ export function DocumentWorkspacePage() {
   }
 
   async function toggleDocumentScope(id: string, checked: boolean) {
+    selectionRun.current += 1;
     const nextCheckedIds = checked
       ? [...checkedIds, id].filter((item, index, all) => all.indexOf(item) === index)
       : checkedIds.filter((item) => item !== id);
@@ -711,6 +743,7 @@ export function DocumentWorkspacePage() {
       + "原文件、抽取结果和历史版本都会保留；刷新后不会重新出现。",
     );
     if (!confirmedRemove) return;
+    selectionRun.current += 1;
     setIntentBusy(true);
     setIntentError("");
     try {
