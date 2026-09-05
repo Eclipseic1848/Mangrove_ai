@@ -15,6 +15,7 @@ asyncio.create_subprocess_exec，会导致 MediaCrawler 社媒采集/Cookie 验�
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -61,29 +62,38 @@ async def lifespan(app: FastAPI):
     )
     apply_global_overrides(get_store())
     if settings.workspace_telemetry_enabled:
-        configure_workspace_telemetry(
-            endpoint=settings.workspace_otlp_endpoint,
-        )
-    start_scheduler()  # 启用时拉起定时任务后台轮询
-    start_cookie_health_scanner()  # Cookie 健康巡检：循环常驻，开关关闭时内部自己空转
-    start_library_dedup_scanner()  # 模板库/教训库定时巡检：循环常驻，开关关闭时内部自己空转
-    workspace_manager = get_semantic_workspace_manager()
-    workspace_manager.start()
-    from src.api.capability_governance_runtime import (
-        get_capability_validation_manager,
-        get_platform_validation_manager,
-    )
-    capability_validation_manager = get_capability_validation_manager()
-    capability_validation_manager.start()
-    platform_validation_manager = get_platform_validation_manager()
-    platform_validation_manager.start()
+        try:
+            await asyncio.to_thread(
+                configure_workspace_telemetry,
+                endpoint=settings.workspace_otlp_endpoint,
+            )
+        except asyncio.CancelledError:
+            # 取消等待不会终止构造线程，零预算锁存关闭意图以拒绝迟到启用。
+            shutdown_workspace_telemetry(timeout_millis=0)
+            raise
     try:
-        yield
+        start_scheduler()  # 启用时拉起定时任务后台轮询
+        start_cookie_health_scanner()  # Cookie 健康巡检：循环常驻，开关关闭时内部自己空转
+        start_library_dedup_scanner()  # 模板库/教训库定时巡检：循环常驻，开关关闭时内部自己空转
+        workspace_manager = get_semantic_workspace_manager()
+        workspace_manager.start()
+        from src.api.capability_governance_runtime import (
+            get_capability_validation_manager,
+            get_platform_validation_manager,
+        )
+        capability_validation_manager = get_capability_validation_manager()
+        capability_validation_manager.start()
+        platform_validation_manager = get_platform_validation_manager()
+        platform_validation_manager.start()
+        try:
+            yield
+        finally:
+            await capability_validation_manager.stop()
+            await platform_validation_manager.stop()
+            await workspace_manager.stop()
     finally:
-        await capability_validation_manager.stop()
-        await platform_validation_manager.stop()
-        await workspace_manager.stop()
-        shutdown_workspace_telemetry()
+        # 初始化或管理器收尾失败时也关闭遥测，不能遗留新建的导出 worker。
+        await asyncio.to_thread(shutdown_workspace_telemetry)
 
 
 app = FastAPI(title="Mangrove Web UI Gateway", version="1.0", lifespan=lifespan)
