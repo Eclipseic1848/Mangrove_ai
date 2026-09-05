@@ -155,18 +155,19 @@ export function Login() {
             </div>
 
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">用户名</label>
-              <Input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="至少 2 位" autoFocus />
+              <label htmlFor="auth-username" className="text-xs font-medium text-muted-foreground">用户名</label>
+              <Input id="auth-username" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="至少 2 位" autoFocus />
             </div>
             {mode === "register" && (
               <div className="space-y-1.5">
-                <label className="text-xs font-medium text-muted-foreground">显示名（可选）</label>
-                <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="如 张三" />
+                <label htmlFor="auth-display-name" className="text-xs font-medium text-muted-foreground">显示名（可选）</label>
+                <Input id="auth-display-name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="如 张三" />
               </div>
             )}
             <div className="space-y-1.5">
-              <label className="text-xs font-medium text-muted-foreground">密码</label>
+              <label htmlFor="auth-password" className="text-xs font-medium text-muted-foreground">密码</label>
               <Input
+                id="auth-password"
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}

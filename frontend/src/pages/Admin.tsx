@@ -39,6 +39,8 @@ export function Admin() {
   const [total, setTotal] = useState(0);
   const [pendingTotal, setPendingTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [refresh, setRefresh] = useState(0);
   const [allowReg, setAllowReg] = useState<boolean | null>(null);
   // 搜索/筛选/分页
   const [q, setQ] = useState("");
@@ -54,6 +56,12 @@ export function Admin() {
   const [delTarget, setDelTarget] = useState<AdminUser | null>(null);
   const [creating, setCreating] = useState(false);
   const [form, setForm] = useState({ username: "", password: "", display_name: "", role: "user" });
+  // 重开同一用户或继续编辑也是新草稿，旧提交只能收口它提交时的版本。
+  const editorGeneration = useRef(0);
+  const editDraft = (update: () => void) => {
+    editorGeneration.current += 1;
+    update();
+  };
 
   // 搜索框输入防抖 300ms 再触发请求
   useEffect(() => {
@@ -64,21 +72,8 @@ export function Admin() {
   // 筛选或分页变化时请求列表；筛选变化且不在第 1 页时先回到第 1 页，避免同一渲染里
   // 用旧 page 多打一次请求（那次请求可能因网络时序覆盖正确结果，是真实竞态而非无害浪费）
   const prevFiltersRef = useRef({ debouncedQ, roleFilter, statusFilter });
-  const load = () => {
-    setLoading(true);
-    const params = new URLSearchParams({
-      q: debouncedQ, role: roleFilter, status: statusFilter,
-      page: String(page), page_size: String(PAGE_SIZE),
-    });
-    api.get(`/api/admin/users?${params}`)
-      .then((d) => {
-        setUsers(d.users || []);
-        setTotal(d.total || 0);
-        setPendingTotal(d.pending_total || 0);
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  };
+  // 操作完成时只发刷新信号，避免异步闭包把旧筛选或页码带回请求。
+  const load = () => setRefresh((value) => value + 1);
   useEffect(() => {
     const prev = prevFiltersRef.current;
     const filtersChanged =
@@ -88,8 +83,31 @@ export function Admin() {
       setPage(1); // 下一次因 page 变化触发的 effect 才真正请求，本次跳过避免用旧 page 多打一次错误请求
       return;
     }
-    load();
-  }, [debouncedQ, roleFilter, statusFilter, page]);
+    let active = true;
+    setLoading(true);
+    setLoadError(false);
+    const params = new URLSearchParams({
+      q: debouncedQ, role: roleFilter, status: statusFilter,
+      page: String(page), page_size: String(PAGE_SIZE),
+    });
+    api.get(`/api/admin/users?${params}`)
+      .then((d) => {
+        if (!active) return;
+        setUsers(d.users || []);
+        setTotal(d.total || 0);
+        setPendingTotal(d.pending_total || 0);
+      })
+      .catch(() => {
+        if (!active) return;
+        setUsers([]);
+        setTotal(0);
+        setPendingTotal(0);
+        setLoadError(true);
+      })
+      .finally(() => { if (active) setLoading(false); });
+    // 筛选、分页、刷新、卸载和 StrictMode 重放都使上一轮结果与 finally 失效。
+    return () => { active = false; };
+  }, [debouncedQ, roleFilter, statusFilter, page, refresh]);
   useEffect(() => {
     api.get("/api/admin/registration").then((d) => setAllowReg(d.enabled)).catch(() => {});
   }, []);
@@ -112,7 +130,10 @@ export function Admin() {
 
   const resetPwd = async () => {
     if (!pwdTarget || newPwd.length < 6) return;
+    const generation = editorGeneration.current;
     await patch(pwdTarget, { password: newPwd }, "已重置密码");
+    if (generation !== editorGeneration.current) return;
+    editorGeneration.current += 1;
     setPwdTarget(null);
     setNewPwd("");
   };
@@ -120,7 +141,10 @@ export function Admin() {
   const renameUser = async () => {
     const name = newName.trim();
     if (!nameTarget || !name || name.length > 32) return;
+    const generation = editorGeneration.current;
     await patch(nameTarget, { display_name: name }, "已修改昵称");
+    if (generation !== editorGeneration.current) return;
+    editorGeneration.current += 1;
     setNameTarget(null);
     setNewName("");
   };
@@ -143,11 +167,15 @@ export function Admin() {
       toast.error("用户名至少2位、密码至少6位");
       return;
     }
+    const generation = editorGeneration.current;
     try {
       await api.post("/api/admin/users", form);
       toast.success("已创建用户");
-      setCreating(false);
-      setForm({ username: "", password: "", display_name: "", role: "user" });
+      if (generation === editorGeneration.current) {
+        editorGeneration.current += 1;
+        setCreating(false);
+        setForm({ username: "", password: "", display_name: "", role: "user" });
+      }
       load();
     } catch (e: any) {
       toast.error(e.message || "创建失败");
@@ -172,7 +200,7 @@ export function Admin() {
           <p className="text-sm text-muted-foreground">账号、角色与权限（仅管理员可见）</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => setCreating(true)} className="gap-1.5">
+          <Button variant="outline" size="sm" onClick={() => editDraft(() => setCreating(true))} className="gap-1.5">
             <UserPlus className="h-4 w-4" /> 新建用户
           </Button>
           <Button variant="outline" size="sm" onClick={load} className="gap-1.5">
@@ -207,8 +235,8 @@ export function Admin() {
           <Card>
             <CardHeader className="space-y-3">
               <CardTitle className="flex items-center gap-2 text-base">
-                <Users className="h-4 w-4 text-primary" /> 用户（共 {total}）
-                {pendingTotal > 0 && (
+                <Users className="h-4 w-4 text-primary" /> 用户（共 {loading ? "…" : total}）
+                {!loading && pendingTotal > 0 && (
                   <Badge variant="warning">
                     <Clock className="h-3.5 w-3.5" /> {pendingTotal} 待审批
                   </Badge>
@@ -247,6 +275,8 @@ export function Admin() {
             <CardContent className="space-y-2">
               {loading ? (
                 <p className="text-sm text-muted-foreground">加载中…</p>
+              ) : loadError ? (
+                <p role="alert" className="text-sm text-destructive">加载用户失败，请点击刷新重试。</p>
               ) : users.length === 0 ? (
                 <p className="text-sm text-muted-foreground">未找到匹配的用户</p>
               ) : (
@@ -315,14 +345,14 @@ export function Admin() {
                           <Button
                             variant="ghost" size="icon" className="h-7 w-7"
                             title="修改昵称"
-                            onClick={() => { setNameTarget(u); setNewName(u.display_name || ""); }}
+                            onClick={() => editDraft(() => { setNameTarget(u); setNewName(u.display_name || ""); })}
                           >
                             <Pencil className="h-4 w-4" />
                           </Button>
                           <Button
                             variant="ghost" size="icon" className="h-7 w-7"
                             title="重置密码"
-                            onClick={() => { setPwdTarget(u); setNewPwd(""); }}
+                            onClick={() => editDraft(() => { setPwdTarget(u); setNewPwd(""); })}
                           >
                             <KeyRound className="h-4 w-4" />
                           </Button>
@@ -350,7 +380,7 @@ export function Admin() {
                 >
                   <ChevronLeft className="h-4 w-4" /> 上一页
                 </Button>
-                <span>第 {page} / {Math.max(1, Math.ceil(total / PAGE_SIZE))} 页</span>
+                <span>{loading ? "加载分页信息…" : `第 ${page} / ${Math.max(1, Math.ceil(total / PAGE_SIZE))} 页`}</span>
                 <Button
                   variant="outline" size="sm"
                   disabled={page >= Math.max(1, Math.ceil(total / PAGE_SIZE))}
@@ -365,20 +395,20 @@ export function Admin() {
       </div>
 
       {/* 新建用户 */}
-      <Modal open={creating} onClose={() => setCreating(false)} title="新建用户">
+      <Modal open={creating} onClose={() => editDraft(() => setCreating(false))} title="新建用户">
         <div className="space-y-3">
           <Input placeholder="用户名（≥2位）" value={form.username}
-            onChange={(e) => setForm({ ...form, username: e.target.value })} />
+            onChange={(e) => editDraft(() => setForm({ ...form, username: e.target.value }))} />
           <Input placeholder="昵称（可选）" value={form.display_name}
-            onChange={(e) => setForm({ ...form, display_name: e.target.value })} />
+            onChange={(e) => editDraft(() => setForm({ ...form, display_name: e.target.value }))} />
           <Input type="password" placeholder="密码（≥6位）" value={form.password}
-            onChange={(e) => setForm({ ...form, password: e.target.value })} />
+            onChange={(e) => editDraft(() => setForm({ ...form, password: e.target.value }))} />
           <div className="flex items-center gap-2 text-sm">
             <span className="text-muted-foreground">角色</span>
             <div className="flex gap-1">
               {(canSetRole ? (["user", "admin"] as const) : (["user"] as const)).map((r) => (
                 <Button key={r} type="button" size="sm" variant={form.role === r ? "default" : "outline"}
-                  onClick={() => setForm({ ...form, role: r })}>
+                  onClick={() => editDraft(() => setForm({ ...form, role: r }))}>
                   {roleLabel(r)}
                 </Button>
               ))}
@@ -386,29 +416,29 @@ export function Admin() {
           </div>
         </div>
         <div className="mt-4 flex justify-end gap-2">
-          <Button variant="outline" size="sm" onClick={() => setCreating(false)}>取消</Button>
+          <Button variant="outline" size="sm" onClick={() => editDraft(() => setCreating(false))}>取消</Button>
           <Button size="sm" onClick={createUser}>创建</Button>
         </div>
       </Modal>
 
       {/* 重置密码 */}
-      <Modal open={!!pwdTarget} onClose={() => setPwdTarget(null)} title={`重置密码 · ${pwdTarget?.username ?? ""}`}>
+      <Modal open={!!pwdTarget} onClose={() => editDraft(() => setPwdTarget(null))} title={`重置密码 · ${pwdTarget?.username ?? ""}`}>
         <Input type="password" placeholder="新密码（≥6位）" value={newPwd}
-          onChange={(e) => setNewPwd(e.target.value)}
+          onChange={(e) => editDraft(() => setNewPwd(e.target.value))}
           onKeyDown={(e) => e.key === "Enter" && resetPwd()} />
         <div className="mt-4 flex justify-end gap-2">
-          <Button variant="outline" size="sm" onClick={() => setPwdTarget(null)}>取消</Button>
+          <Button variant="outline" size="sm" onClick={() => editDraft(() => setPwdTarget(null))}>取消</Button>
           <Button size="sm" disabled={newPwd.length < 6} onClick={resetPwd}>确定</Button>
         </div>
       </Modal>
 
       {/* 修改昵称 */}
-      <Modal open={!!nameTarget} onClose={() => setNameTarget(null)} title={`修改昵称 · @${nameTarget?.username ?? ""}`}>
+      <Modal open={!!nameTarget} onClose={() => editDraft(() => setNameTarget(null))} title={`修改昵称 · @${nameTarget?.username ?? ""}`}>
         <Input placeholder="新昵称（1~32 字符）" value={newName}
-          onChange={(e) => setNewName(e.target.value)}
+          onChange={(e) => editDraft(() => setNewName(e.target.value))}
           onKeyDown={(e) => e.key === "Enter" && renameUser()} />
         <div className="mt-4 flex justify-end gap-2">
-          <Button variant="outline" size="sm" onClick={() => setNameTarget(null)}>取消</Button>
+          <Button variant="outline" size="sm" onClick={() => editDraft(() => setNameTarget(null))}>取消</Button>
           <Button size="sm" disabled={!newName.trim() || newName.trim().length > 32} onClick={renameUser}>确定</Button>
         </div>
       </Modal>

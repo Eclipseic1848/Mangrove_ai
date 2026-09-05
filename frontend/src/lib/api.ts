@@ -108,24 +108,22 @@ export function streamChat(
   events: ChatEvents,
 ): () => void {
   const controller = new AbortController();
+  let finished = false;
+  const finish = (error?: { message: string }) => {
+    if (finished) return;
+    // 先冻结终态，避免重复 done、取消或迟到事件再次修改调用者状态。
+    finished = true;
+    try {
+      if (error) events.onError?.(error);
+    } finally {
+      events.onDone?.();
+    }
+  };
 
   (async () => {
-    const res = await fetch("/api/chat/stream", {
-      method: "POST",
-      headers: authHeaders({ Accept: "text/event-stream" }),
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
-    if (!res.ok || !res.body) {
-      events.onError?.({ message: `请求失败（${res.status}）` });
-      events.onDone?.();
-      return;
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const dispatch = (event: string, data: string) => {
+      if (finished) return;
       let parsed: any = {};
       try {
         parsed = data ? JSON.parse(data) : {};
@@ -136,25 +134,42 @@ export function streamChat(
       else if (event === "node") events.onNode?.(parsed);
       else if (event === "result") events.onResult?.(parsed);
       else if (event === "error") {
-        events.onError?.({
+        finish({
           ...parsed,
-          ...(typeof parsed?.message === "string"
-            ? { message: productText(parsed.message) }
-            : {}),
+          message: productText(parsed?.message || "聊天请求失败"),
         });
       }
-      else if (event === "done") events.onDone?.();
+      else if (event === "done") finish();
     };
 
     try {
-      while (true) {
+      const res = await fetch("/api/chat/stream", {
+        method: "POST",
+        headers: authHeaders({ Accept: "text/event-stream" }),
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+      if (finished) {
+        await res.body?.cancel();
+        return;
+      }
+      if (!res.ok || !res.body) {
+        finish({ message: `请求失败（${res.status}）` });
+        await res.body?.cancel();
+        return;
+      }
+      reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (!finished) {
         const { done, value } = await reader.read();
-        if (done) break;
-        // sse_starlette 用 \r\n 作行分隔（块以 \r\n\r\n 结尾），归一化为 \n 再按空行切块
-        buffer += decoder.decode(value, { stream: true });
-        const normalized = buffer.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+        if (finished) break;
+        buffer += decoder.decode(value, { stream: !done });
+        // 块尾的 CR 可能属于下一块的 CRLF，先保留，避免将一行误切为事件边界。
+        const pendingCR = !done && buffer.endsWith("\r");
+        const normalized = (pendingCR ? buffer.slice(0, -1) : buffer).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
         const blocks = normalized.split("\n\n");
-        buffer = blocks.pop() ?? "";
+        buffer = (blocks.pop() ?? "") + (pendingCR ? "\r" : "");
         for (const block of blocks) {
           let event = "message";
           const dataLines: string[] = [];
@@ -164,14 +179,22 @@ export function streamChat(
           }
           if (dataLines.length || event !== "message") dispatch(event, dataLines.join("\n"));
         }
+        if (done) break;
       }
     } catch (e: any) {
-      if (e?.name !== "AbortError") {
-        events.onError?.({ message: productText(String(e?.message || e)) });
+      if (!controller.signal.aborted) {
+        finish({ message: productText(String(e?.message || e)) });
+      }
+    } finally {
+      // 即使尚未取得 reader 就失败，也必须终止该请求的传输。
+      controller.abort();
+      finish();
+      if (reader) {
+        try { await reader.cancel(); } catch { /* 已断开的流仍需释放读取锁。 */ }
+        reader.releaseLock();
       }
     }
-    events.onDone?.();
   })();
 
-  return () => controller.abort();
+  return () => { controller.abort(); finish(); };
 }
