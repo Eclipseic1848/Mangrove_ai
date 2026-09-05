@@ -64,8 +64,6 @@ jobs:
             tests/test_dependency_groups.py \
             tests/test_data_prep_contracts.py \
             tests/test_candidate_verification_migration.py \
-            tests/test_auth_bootstrap.py \
-            tests/test_api_spa_fallback.py \
             -k "not collectors_import_smoke_reaches_scrapling_runtime_seams" \
             --junitxml=.artifacts/ci/python-fast.xml
       - name: 上传后端门证据

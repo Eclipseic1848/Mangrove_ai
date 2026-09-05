@@ -9,6 +9,7 @@ on:
         type: choice
         options:
           - full-regression
+          - entry-auth
           - g1-frozen-contracts
           - docker-build
           - dependency-groups
@@ -22,7 +23,7 @@ defaults:
 
 jobs:
   python-heavy:
-    if: inputs.gate == 'full-regression' || inputs.gate == 'g1-frozen-contracts'
+    if: inputs.gate == 'full-regression' || inputs.gate == 'g1-frozen-contracts' || inputs.gate == 'entry-auth'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -54,6 +55,9 @@ jobs:
           set -euo pipefail
           if [[ "${{ inputs.gate }}" == "g1-frozen-contracts" ]]; then
             python -m pytest -q tests/test_g1_*.py --junitxml=.artifacts/heavy/g1-contracts.xml
+          elif [[ "${{ inputs.gate }}" == "entry-auth" ]]; then
+            python -m pytest -q tests/test_auth_bootstrap.py tests/test_api_spa_fallback.py \
+              --randomly-seed=0 --timeout=120 --junitxml=.artifacts/heavy/entry-auth.xml
           else
             python -m pytest --junitxml=.artifacts/heavy/python-full.xml
           fi
