@@ -339,6 +339,23 @@ class WebUIStore:
         return [dict(r) for r in rows]
 
     # ---------- 用户 ----------
+    def bootstrap_super_admin(
+        self, username: str, password_hash: str, display_name: str = "",
+    ) -> Dict[str, Any]:
+        """仅供本机维护者显式初始化；已有首管时不修改任何账号。"""
+        user_id = f"u_{uuid.uuid4().hex[:12]}"
+        with self._lock, self._conn() as conn:
+            # 单条条件写入让跨实例、跨进程的并发初始化也只能成功一次。
+            inserted = conn.execute(
+                "INSERT INTO users (user_id, username, password_hash, display_name, role, pending, created_at) "
+                "SELECT ?, ?, ?, ?, 'super_admin', 0, ? "
+                "WHERE NOT EXISTS (SELECT 1 FROM users WHERE role='super_admin')",
+                (user_id, username, password_hash, display_name or username, _now()),
+            )
+            if inserted.rowcount != 1:
+                raise ValueError("超级管理员已存在，禁止重复初始化")
+        return {"user_id": user_id, "username": username, "role": "super_admin"}
+
     def create_user(
         self, username: str, password_hash: str, display_name: str = "",
         role: str = "user", pending: bool = False,

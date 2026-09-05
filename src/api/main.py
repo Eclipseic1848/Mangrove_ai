@@ -20,10 +20,11 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from starlette.types import Scope
 
 # 确保可导入项目 src。
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -47,6 +48,7 @@ _FRONTEND_DIST = PROJECT_ROOT / "frontend" / "dist"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    settings.require_jwt_secret()
     # 先套用管理员在前端保存的全局运行时配置（.env 为兜底基线），再拉起调度器
     from src.api.auth import get_store
     from src.api.semantic_workspace_runtime import (
@@ -132,21 +134,34 @@ def readiness():
 
 
 # ---------- 前端静态托管（构建后才有 dist；开发期用 Vite，不影响）----------
-if _FRONTEND_DIST.is_dir():
-    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="assets")
+class FrontendAssets(StaticFiles):
+    async def get_response(self, path: str, scope: Scope) -> Response:
+        # 以 dist 而非 assets 为可信根，保留原生缓存/HEAD 行为并拒绝挂载根链接逃逸。
+        return await super().get_response(f"assets/{path}", scope)
 
-    @app.get("/{full_path:path}")
-    def spa(full_path: str):
-        # SPA 回退：非 /api 路径一律交给 index.html 由前端路由处理
-        if full_path == "api" or full_path.startswith("api/"):
-            return JSONResponse(
-                status_code=404,
-                content={"detail": "API 接口不存在"},
-            )
-        candidate = _FRONTEND_DIST / full_path
+
+if _FRONTEND_DIST.is_dir():
+    app.mount("/assets", FrontendAssets(directory=_FRONTEND_DIST), name="assets")
+
+
+@app.get("/{full_path:path}")
+def spa(full_path: str):
+    if full_path == "api" or full_path.startswith("api/"):
+        return JSONResponse(status_code=404, content={"detail": "API 接口不存在"})
+    try:
+        root = _FRONTEND_DIST.resolve()
+        candidate = (root / full_path).resolve()
+        # URL 只接受正斜杠；解析链接后仍须位于构建目录内，避免跨平台路径绕过。
+        if "\\" in full_path or not candidate.is_relative_to(root):
+            raise HTTPException(status_code=404, detail="资源不存在")
         if full_path and candidate.is_file():
             return FileResponse(candidate)
-        return FileResponse(_FRONTEND_DIST / "index.html")
+        index = (root / "index.html").resolve()
+        if index.is_relative_to(root) and index.is_file():
+            return FileResponse(index)
+    except (OSError, ValueError, RuntimeError):
+        pass
+    raise HTTPException(status_code=404, detail="资源不存在")
 
 
 if __name__ == "__main__":

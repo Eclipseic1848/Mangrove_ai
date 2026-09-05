@@ -462,7 +462,7 @@ CHECKPOINT_ENABLED=True
 # 安全
 JWT_SECRET=<至少64位随机字符串>
 JWT_EXPIRE_HOURS=168
-WEBUI_ALLOW_REGISTER=True
+WEBUI_ALLOW_REGISTER=False
 WEBUI_CORS_ORIGINS=https://mangrove.example.com
 
 # 辅助采集服务
@@ -619,13 +619,13 @@ server {
     add_heading(doc, "11. 首次管理员初始化", 1)
     add_numbered(doc, [
         "暂时不要开放 Nginx 公网入口。",
-        "通过 SSH 隧道访问：ssh -L 8088:127.0.0.1:8088 用户名@服务器IP。",
-        "本机打开 http://127.0.0.1:8088。",
-        "注册第一个用户，该用户自动成为 super_admin。",
-        "登录后关闭自助注册，或设置 WEBUI_ALLOW_REGISTER=False。",
+        "完成 WebUI 数据库显式迁移，并配置至少 32 字节随机 JWT_SECRET。",
+        "维护者在服务器交互终端运行：python -m src.api.bootstrap_admin --database data/webui.db --username maintainer。",
+        "按提示隐藏输入并确认至少 12 位密码；已有超级管理员时跳过，不覆盖账号。",
+        "保持 WEBUI_ALLOW_REGISTER=False，通过 SSH 隧道登录管理员验证。",
         "完成管理员初始化后再开放 HTTPS 域名。",
     ])
-    add_note(doc, "安全原因", "如果服务先公开，攻击者可能抢先注册成为首个超级管理员。", True)
+    add_note(doc, "初始化边界", "首次管理员只由本机维护者显式建立。公开注册即使开启也只创建待审批普通用户。", True)
 
     add_heading(doc, "12. Windows 数据迁移", 1)
     add_para(doc, "迁移前停止 Windows Mangrove，确保 SQLite 不再写入。需要复制：")

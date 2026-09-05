@@ -19,6 +19,10 @@ def _isolate_remote_services_and_memory(monkeypatch, tmp_path):
 
     monkeypatch.setattr(settings, "mineru_enabled", False)
     monkeypatch.setattr(settings, "paddleocr_vl_enabled", False)
+    monkeypatch.setattr(settings, "embedding_enabled", False)
+    monkeypatch.setattr(settings, "rerank_base_url", "")
+    monkeypatch.setattr(settings, "jwt_secret", "isolated-test-signing-key-" + "x" * 32)
+    monkeypatch.setattr(settings, "data_prep_db_secret_key", "isolated-test-database-key-" + "x" * 32)
     monkeypatch.setattr(lessons, "LESSONS_DIR", tmp_path / "lessons")
     monkeypatch.setattr(templates, "TEMPLATES_DIR", tmp_path / "templates")
 

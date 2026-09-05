@@ -61,7 +61,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         login: async (username, password) => apply(await api.post("/api/auth/login", { username, password })),
         register: async (username, password, display_name) => {
           const r = await api.post("/api/auth/register", { username, password, display_name });
-          if (r.access_token) apply(r); // 直接激活（首个管理员）才登录；待审批则不签发令牌
+          if (r.access_token) apply(r); // 兼容已签发令牌的响应；待审批注册保持未登录。
           return r;
         },
         logout: () => {

@@ -41,7 +41,7 @@ def _derive_key(secret: str) -> bytes:
 
 
 def _get_fernet() -> Fernet:
-    secret = settings.data_prep_db_secret_key or settings.jwt_secret
+    secret = settings.data_prep_db_secret_key or settings.require_jwt_secret()
     if not settings.data_prep_db_secret_key:
         import logging
         logging.getLogger("db_connections").warning(

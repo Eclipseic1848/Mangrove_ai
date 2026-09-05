@@ -599,11 +599,11 @@ class Settings(BaseSettings):
     # ===== Web UI 网关（React 前端 + FastAPI 网关，多用户 + JWT 登录）=====
     # webui_db_path：用户与会话历史的 SQLite（与业务 app.db / scheduler.db 分开）。
     webui_db_path: str = Field(default="data/webui.db", description="Web UI 用户/会话 SQLite 路径")
-    # jwt_secret：JWT 签名密钥。务必在 .env 覆盖为随机长串，否则用开发默认值（仅本地）。
-    jwt_secret: str = Field(default="mangrove-dev-secret-change-me-in-production-please", description="JWT 签名密钥（放 .env）")
+    # 缺失配置保持失败关闭，不生成临时密钥或回退公开的开发密钥。
+    jwt_secret: str = Field(default="", description="JWT 签名密钥（至少 32 字节随机值，放 .env）")
     jwt_expire_hours: int = Field(default=168, description="登录令牌有效期(小时)，默认 7 天")
-    # 允许自助注册：False 时仅管理员可建账号（v1 默认开放，便于试用）。
-    webui_allow_register: bool = Field(default=True, description="是否允许前端自助注册账号")
+    # 私有实例默认由管理员开通账号；首次管理员只走本机显式初始化。
+    webui_allow_register: bool = Field(default=False, description="是否允许前端自助注册账号")
     # 前端开发服务器源（Vite dev 默认 5173），用于 CORS 放行；生产由网关同源托管时可忽略。
     webui_cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173", description="允许的前端源，逗号分隔")
     
@@ -662,6 +662,16 @@ class Settings(BaseSettings):
     rate_limit_requests: int = Field(default=100, description="速率限制请求数")
     rate_limit_window: int = Field(default=60, description="速率限制时间窗口(秒)")
     
+    def require_jwt_secret(self) -> str:
+        """鉴权和相关密钥派生统一失败关闭；不回显、不改写既有配置。"""
+        secret = self.jwt_secret
+        if len(secret.strip().encode("utf-8")) < 32 or secret.strip() in {
+            "mangrove-dev-secret-change-me-in-production-please",
+            "change-me-to-a-long-random-secret-string",
+        }:
+            raise ValueError("JWT_SECRET 必须显式配置为至少 32 字节随机值，不能使用默认或示例密钥")
+        return secret
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
