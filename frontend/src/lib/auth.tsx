@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, clearToken, getToken, setToken } from "./api";
 
 export interface User {
@@ -32,20 +32,28 @@ const AuthCtx = createContext<AuthState>(null as unknown as AuthState);
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const sessionGeneration = useRef(0);
 
   useEffect(() => {
+    const generation = ++sessionGeneration.current;
+    const token = getToken();
+    // 启动鉴权只能提交给发起时的会话；退出、换账号或 effect 重放都会使旧响应失效。
+    const isCurrent = () => sessionGeneration.current === generation && getToken() === token;
     (async () => {
-      if (getToken()) {
+      if (token) {
         try {
           const me = await api.get("/api/auth/me");
-          setToken(me.access_token);
-          setUser({ user_id: me.user_id, username: me.username, display_name: me.display_name, role: me.role });
+          if (isCurrent()) {
+            setToken(me.access_token);
+            setUser({ user_id: me.user_id, username: me.username, display_name: me.display_name, role: me.role });
+          }
         } catch {
-          clearToken();
+          if (isCurrent()) clearToken();
         }
       }
-      setLoading(false);
+      if (sessionGeneration.current === generation) setLoading(false);
     })();
+    return () => { sessionGeneration.current += 1; };
   }, []);
 
   const apply = (r: any) => {
@@ -58,15 +66,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       value={{
         user,
         loading,
-        login: async (username, password) => apply(await api.post("/api/auth/login", { username, password })),
+        login: async (username, password) => {
+          const generation = ++sessionGeneration.current;
+          try {
+            const r = await api.post("/api/auth/login", { username, password });
+            if (sessionGeneration.current === generation) apply(r);
+          } finally {
+            if (sessionGeneration.current === generation) setLoading(false);
+          }
+        },
         register: async (username, password, display_name) => {
-          const r = await api.post("/api/auth/register", { username, password, display_name });
-          if (r.access_token) apply(r); // 兼容已签发令牌的响应；待审批注册保持未登录。
-          return r;
+          const generation = ++sessionGeneration.current;
+          try {
+            const r = await api.post("/api/auth/register", { username, password, display_name });
+            if (sessionGeneration.current === generation && r.access_token) apply(r); // 兼容已签发令牌的响应；待审批注册保持未登录。
+            return r;
+          } finally {
+            if (sessionGeneration.current === generation) setLoading(false);
+          }
         },
         logout: () => {
+          sessionGeneration.current += 1;
           clearToken();
           setUser(null);
+          setLoading(false);
         },
       }}
     >

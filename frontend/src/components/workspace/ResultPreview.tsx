@@ -874,6 +874,8 @@ export function ResultPreview({
     queryKey: [
       "semantic-workspace-preview",
       task.task_id,
+      task.viewing_revision,
+      task.delivery?.delivery_id,
       page,
       search,
       sorting,
@@ -888,7 +890,6 @@ export function ResultPreview({
         revision: task.viewing_revision,
       }),
     enabled: task.status === "completed",
-    placeholderData: (previous) => previous,
   });
   const delivery = task.delivery;
   const hasWarnings = Boolean(

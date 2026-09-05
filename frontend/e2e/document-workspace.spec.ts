@@ -393,8 +393,20 @@ test.describe("文档智能抽取工作台", () => {
     await expect(page.getByText("上传失败", { exact: true })).toHaveCount(0);
   });
 
-  test("DOCX 上传后立即显示结构化预览且隐藏 PDF 控件", async ({ page }) => {
+  for (const lateRestore of [false, true]) {
+  test(`DOCX 上传后立即显示结构化预览且隐藏 PDF 控件${lateRestore ? "（初始工作区迟到）" : ""}`, async ({ page }) => {
     await mockSession(page);
+    let releaseRestore!: () => void;
+    const restoreBarrier = new Promise<void>((resolve) => { releaseRestore = resolve; });
+    let restoreRequested!: () => void;
+    const restoreStarted = new Promise<void>((resolve) => { restoreRequested = resolve; });
+    if (lateRestore) await page.route("**/api/data-tasks/document-workspace", async (route) => {
+      if (route.request().method() !== "GET") return route.fallback();
+      restoreRequested();
+      await restoreBarrier;
+      await route.fulfill({ json: { upload_ids: [], checked_upload_ids: [], active_task_id: null,
+        active_unit_id: null, selected_upload_id: null } });
+    });
     await page.unroute("**/api/data-sources/uploads");
     await page.route("**/api/data-sources/uploads", (route) => route.fulfill({
       json: {
@@ -445,6 +457,7 @@ test.describe("文档智能抽取工作台", () => {
       }),
     );
     await page.goto("/data-prep?legacy=1");
+    if (lateRestore) await restoreStarted;
 
     await expect(page.getByText("AI 生成的抽取方案")).toHaveCount(0);
     await page.locator('input[type="file"]').setInputFiles({
@@ -454,11 +467,84 @@ test.describe("文档智能抽取工作台", () => {
     });
 
     await expect(page.getByText("结构化预览 · 2 个内容块")).toBeVisible();
+    if (lateRestore) {
+      releaseRestore();
+      await expect(page.getByText("正在恢复上次任务", { exact: true })).toHaveCount(0);
+      await expect(page.getByText("结构化预览 · 2 个内容块")).toBeVisible();
+    }
     await expect(page.getByText("付款条件：验收后 30 日内付款")).toBeVisible();
     await expect(page.getByText("订单号：PO-001；金额：1000 元")).toBeVisible();
     await expect(page.getByRole("button", { name: "上一页" })).toHaveCount(0);
     await expect(page.getByText("说明目标", { exact: true })).toBeVisible();
   });
+  }
+
+  for (const latePhase of ["历史恢复", "上传完成"] as const) {
+    test(`DOCX ${latePhase}迟到时保留历史与新文件及用户选择`, async ({ page }) => {
+      await page.route("**/api/**", (route) => route.fulfill({ status: 404, json: {} }));
+      await mockSession(page);
+      let release!: () => void;
+      const barrier = new Promise<void>((resolve) => { release = resolve; });
+      let entered!: () => void;
+      const requested = new Promise<void>((resolve) => { entered = resolve; });
+      const upload = (id: string) => ({ upload_id: id, original_name: `${id}.docx`,
+        media_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        size_bytes: 64, sha256: "0".repeat(64) });
+      const unit = (id: string) => ({ unit_id: `unit-${id}`, unit_type: "single_file",
+        name: `${id}.docx`, business_type: null, upload_ids: [id], members: [upload(id)],
+        latest_task: null, run_count: 0, created_at: "2026-07-23T00:00:00Z", updated_at: "2026-07-23T00:00:00Z" });
+      const units = [unit("历史")];
+      await page.route("**/api/data-tasks/document-units", (route) => {
+        if (route.request().method() === "GET") return route.fulfill({ json: units });
+        const created = unit("新增"); units.push(created);
+        return route.fulfill({ json: created });
+      });
+      await page.route("**/api/data-tasks/document-workspace", (route) => route.fulfill({
+        json: route.request().method() === "GET" ? {
+          upload_ids: ["历史"], checked_upload_ids: ["历史"], active_task_id: null,
+          active_unit_id: "unit-历史", selected_upload_id: "历史",
+        } : route.request().postDataJSON(),
+      }));
+      await page.route("**/api/data-sources/uploads", (route) => route.fulfill({ json: upload("新增") }));
+      await page.route("**/api/data-sources/uploads/*", (route) => {
+        const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/").at(-1)!);
+        return route.fulfill({ json: upload(id) });
+      });
+      await page.route("**/api/data-sources/uploads/*/content", (route) =>
+        route.fulfill({ body: "synthetic-docx", contentType: upload("历史").media_type }));
+      await page.route("**/api/data-sources/uploads/*/document-preview", async (route) => {
+        const id = decodeURIComponent(new URL(route.request().url()).pathname.split("/").at(-2)!);
+        if (id === (latePhase === "历史恢复" ? "历史" : "新增")) { entered(); await barrier; }
+        await route.fulfill({ json: { ...upload(id), status: "ready", rejects: [], elements: [{
+          element_id: `${id}-paragraph`, artifact_id: id, page: 1, element_type: "paragraph",
+          text: `${id}文件正文`, reading_order: 0, extractor: "python-docx", extractor_version: "1.2.0",
+          metadata: { location: { kind: "docx_paragraph", paragraph: 1 } },
+        }] } });
+      });
+      await page.goto("/data-prep?legacy=1");
+      if (latePhase === "历史恢复") await requested;
+      else await expect(page.getByRole("article", { name: "历史.docx结构化预览" })).toContainText("历史文件正文");
+      await page.locator('input[type="file"]').setInputFiles({ name: "新增.docx",
+        mimeType: upload("新增").media_type, buffer: Buffer.from("synthetic-docx") });
+      if (latePhase === "历史恢复") {
+        await expect(page.getByRole("article", { name: "新增.docx结构化预览" })).toContainText("新增文件正文");
+      } else {
+        await requested;
+        await page.getByRole("button", { name: "打开独立任务 历史.docx", exact: true }).click();
+        await expect(page.getByRole("article", { name: "历史.docx结构化预览" })).toContainText("历史文件正文");
+      }
+      release();
+      await expect(page.getByText("正在恢复上次任务", { exact: true })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: "打开独立任务 历史.docx", exact: true })).toBeVisible();
+      await expect(page.getByRole("button", { name: "打开独立任务 新增.docx", exact: true })).toBeVisible();
+      await expect(page.getByRole("article")).toContainText(latePhase === "历史恢复" ? "新增文件正文" : "历史文件正文");
+      // 两个方向都能重新打开，证明正文被保留，而非仅剩任务列表元数据。
+      for (const id of ["历史", "新增"]) {
+        await page.getByRole("button", { name: `打开独立任务 ${id}.docx`, exact: true }).click();
+        await expect(page.getByRole("article", { name: `${id}.docx结构化预览` })).toContainText(`${id}文件正文`);
+      }
+    });
+  }
 
   test("不支持的文件类型会显示明确提示", async ({ page }) => {
     await mockSession(page);
