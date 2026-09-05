@@ -79,12 +79,12 @@ def create_token(user_id: str) -> str:
         "iat": now,
         "exp": now + timedelta(hours=settings.jwt_expire_hours),
     }
-    return jwt.encode(payload, settings.jwt_secret, algorithm=_ALGO)
+    return jwt.encode(payload, settings.require_jwt_secret(), algorithm=_ALGO)
 
 
 def _decode_token(token: str) -> str:
     try:
-        payload = jwt.decode(token, settings.jwt_secret, algorithms=[_ALGO])
+        payload = jwt.decode(token, settings.require_jwt_secret(), algorithms=[_ALGO])
         return payload["sub"]
     except jwt.PyJWTError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录已失效，请重新登录")

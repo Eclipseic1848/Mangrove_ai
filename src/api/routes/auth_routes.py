@@ -15,29 +15,18 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 @router.post("/register")
 def register(body: RegisterIn):
     store = get_store()
-    # 首个用户允许注册并自动成为管理员（系统引导）；之后受自助注册开关控制
-    bootstrap = store.count_users() == 0
-    if not bootstrap and not registration_allowed():
+    # 公开注册不能承担首管初始化，也不能因空库绕过注册开关。
+    if not registration_allowed():
         raise HTTPException(status_code=403, detail="已关闭自助注册，请联系管理员开通账号")
     username = body.username.strip()
     if len(username) < 2 or len(body.password) < 6:
         raise HTTPException(status_code=400, detail="用户名至少2位、密码至少6位")
     if store.get_user_by_name(username):
         raise HTTPException(status_code=409, detail="用户名已存在")
-    # 首个用户=超级管理员且直接激活；其余自助注册者待管理员审批（pending），审批前不能登录
-    role = "super_admin" if bootstrap else "user"
-    pending = not bootstrap
-    user = store.create_user(
-        username, hash_password(body.password), body.display_name or "", role=role, pending=pending,
+    store.create_user(
+        username, hash_password(body.password), body.display_name or "", role="user", pending=True,
     )
-    if pending:
-        # 待审批：不签发令牌，前端提示等待管理员通过
-        return {"pending": True, "message": "注册成功，待管理员审批通过后即可登录"}
-    token = create_token(user["user_id"])
-    return TokenOut(
-        access_token=token, user_id=user["user_id"],
-        username=user["username"], display_name=user["display_name"], role=user["role"],
-    ).model_dump()
+    return {"pending": True, "message": "注册成功，待管理员审批通过后即可登录"}
 
 
 @router.post("/login", response_model=TokenOut)

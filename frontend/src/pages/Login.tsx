@@ -42,7 +42,7 @@ export function Login() {
           setMode("login");
           setPassword("");
         } else {
-          navigate("/"); // 首个用户=管理员，直接进入
+          navigate("/"); // 兼容已激活账号的响应。
         }
       }
     } catch (err) {
@@ -175,7 +175,7 @@ export function Login() {
             </div>
 
             <Button type="submit" className="w-full" disabled={busy || !username || !password}>
-              {busy ? "处理中…" : mode === "login" ? "登录" : "注册并进入"}
+              {busy ? "处理中…" : mode === "login" ? "登录" : "提交注册"}
             </Button>
 
             <p className="flex items-center justify-center gap-1.5 pt-1 text-xs text-muted-foreground">
