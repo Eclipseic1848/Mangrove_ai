@@ -39,6 +39,20 @@ def _state_store(tmp_path: Path) -> AgenticRuntimeRepository:
     )
 
 
+@pytest.fixture
+def pi_image_runner(monkeypatch):
+    async def inspect_image(*command, **_kwargs):
+        # Host 编排单测只模拟镜像检查；漏接的执行或清理命令必须失败，不能落到真实 Docker。
+        assert command[:3] == ("docker", "image", "inspect"), command
+
+        async def communicate():
+            return ("sha256:" + "f" * 64).encode("utf-8"), b""
+
+        return SimpleNamespace(returncode=0, communicate=communicate)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", inspect_image)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("unknown_creation", [False, True])
 async def test_pi_restart_preserves_cleanup_identity_and_owner(tmp_path, unknown_creation):
@@ -549,6 +563,7 @@ async def test_capability_host_rejects_empty_or_remote_only_selection(
 @pytest.mark.asyncio
 async def test_pi_runtime_uses_sidecar_only_for_native_capability(
     tmp_path: Path,
+    pi_image_runner,
 ) -> None:
     docker = RecordingDocker()
     pack = _native_pack(tmp_path / "pack", "prettier")
@@ -654,7 +669,7 @@ async def test_pi_runtime_uses_sidecar_only_for_native_capability(
 
 
 @pytest.mark.asyncio
-async def test_pi_runtime_cancel_revokes_host_before_return(tmp_path: Path) -> None:
+async def test_pi_runtime_cancel_revokes_host_before_return(tmp_path: Path, pi_image_runner) -> None:
     docker = RecordingDocker()
     broker = RecordingBroker()
     pack = _native_pack(tmp_path / "pack", "prettier")

@@ -21,6 +21,7 @@ from PIL import Image
 
 import src.api.auth as auth_mod
 import src.api.semantic_workspace_runtime as runtime_mod
+import src.capability_catalog.default_mounts as default_mounts_mod
 import src.model_connections.broker as broker_mod
 from src.agentic_runtime.models import (
     CandidateArtifact,
@@ -594,6 +595,26 @@ def _client(
         settings,
         "semantic_execution_root",
         str(tmp_path / "executions"),
+    )
+    monkeypatch.setattr(
+        settings, "capability_oci_layout_path", str(tmp_path / "oci")
+    )
+    monkeypatch.setattr(
+        settings, "capability_mount_cache_path", str(tmp_path / "mounts")
+    )
+
+    def reject_artifact_command(*_args, **_kwargs):
+        raise AssertionError("工作台模拟测试不得执行真实 ORAS 命令")
+
+    def isolated_artifact_store(*args, **kwargs):
+        from src.capability_catalog.oci_store import OrasOciLayoutStore
+
+        kwargs.update(oras_executable="isolated-oras", runner=reject_artifact_command)
+        return OrasOciLayoutStore(*args, **kwargs)
+
+    # 保留真实冻结选择和 Owner 校验，仅隔离本票不执行的制品工具。
+    monkeypatch.setattr(
+        default_mounts_mod, "OrasOciLayoutStore", isolated_artifact_store
     )
     database = Path(settings.webui_db_path)
     if migrate_schema:
