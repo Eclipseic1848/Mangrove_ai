@@ -11,6 +11,8 @@
 import asyncio
 import sys
 import tempfile
+from contextlib import contextmanager
+from unittest.mock import AsyncMock, patch
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -24,6 +26,7 @@ from src.api.session_store import pending_store  # noqa: E402
 from src.scheduler.service import SchedulerService  # noqa: E402
 from src.scheduler.store import ScheduleStore  # noqa: E402
 from tests.database_migration_helpers import migrated_profile_database  # noqa: E402
+from tests.scheduler_helpers import scheduler_owner  # noqa: E402
 
 USER = {"user_id": "u1", "username": "u1"}
 OTHER = {"user_id": "u2", "username": "u2"}
@@ -33,14 +36,15 @@ async def _stub_runner(user_input, **kw):
     return {"outputs": {"report_md": "r.md"}}
 
 
-def _fresh_store(tmp_dir: str) -> ScheduleStore:
+@contextmanager
+def _fresh_store(tmp_dir: str):
     database = migrated_profile_database(
         Path(tmp_dir) / "s.db", profile="scheduler"
     )
     store = ScheduleStore(str(database))
-    services_module._store = store
-    services_module._service = SchedulerService(store, poll_interval=1.0, runner=_stub_runner)
-    return store
+    service = SchedulerService(store, poll_interval=1.0, runner=AsyncMock(wraps=_stub_runner))
+    with patch.object(services_module, "_store", store), patch.object(services_module, "_service", service):
+        yield store
 
 
 def _status_code(e: Exception):
@@ -48,8 +52,7 @@ def _status_code(e: Exception):
 
 
 def test_create_manual_task_cron():
-    with tempfile.TemporaryDirectory() as d:
-        _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d):
         body = ManualTaskIn(
             name="行业新闻早报", prompt="采集AI行业新闻并汇总",
             trigger=TriggerIn(type="cron", cron_expr="30 8 * * *"),
@@ -62,8 +65,7 @@ def test_create_manual_task_cron():
 
 
 def test_create_manual_task_interval():
-    with tempfile.TemporaryDirectory() as d:
-        _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d):
         body = ManualTaskIn(
             name="每2小时监控", prompt="每2小时抓一次新闻",
             trigger=TriggerIn(type="interval", interval_seconds=7200),
@@ -74,8 +76,7 @@ def test_create_manual_task_interval():
 
 
 def test_create_manual_task_once():
-    with tempfile.TemporaryDirectory() as d:
-        _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d):
         future = (datetime.now() + timedelta(days=1)).isoformat(timespec="minutes")
         body = ManualTaskIn(
             name="单次采集", prompt="采集一次某主题",
@@ -87,8 +88,7 @@ def test_create_manual_task_once():
 
 
 def test_create_manual_task_from_template_marks_source_template():
-    with tempfile.TemporaryDirectory() as d:
-        _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d):
         body = ManualTaskIn(
             name="每日竞品口碑日报", prompt="采集汽车之家上小米SU7的最新评论并输出口碑分析",
             trigger=TriggerIn(type="cron", cron_expr="0 9 * * *"),
@@ -100,8 +100,7 @@ def test_create_manual_task_from_template_marks_source_template():
 
 
 def test_create_manual_task_past_once_rejected():
-    with tempfile.TemporaryDirectory() as d:
-        _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d):
         body = ManualTaskIn(name="过期任务", prompt="x",
                              trigger=TriggerIn(type="once", run_at="2000-01-01T00:00"))
         try:
@@ -114,8 +113,7 @@ def test_create_manual_task_past_once_rejected():
 
 def test_create_task_from_pending_sets_auto_name_source():
     """既有语义自动创建链路：落库应补 source='auto'，name 取 planner 概括的 intent。"""
-    with tempfile.TemporaryDirectory() as d:
-        store = _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         pending_store.put("u1", "task123", {"schedule": {
             "schedule": "cron@0 8 * * *", "user_input": "每天8点抓新闻",
             "provider": "deepseek", "model": "deepseek-chat", "intent": "每日新闻抓取",
@@ -127,8 +125,7 @@ def test_create_task_from_pending_sets_auto_name_source():
 
 
 def test_patch_pause_resume():
-    with tempfile.TemporaryDirectory() as d:
-        store = _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         tid = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1")
@@ -139,8 +136,7 @@ def test_patch_pause_resume():
 
 
 def test_patch_pause_other_user_forbidden():
-    with tempfile.TemporaryDirectory() as d:
-        store = _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         tid = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1")
@@ -153,8 +149,7 @@ def test_patch_pause_other_user_forbidden():
 
 
 def test_patch_edit_fields():
-    with tempfile.TemporaryDirectory() as d:
-        store = _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         tid = store.add(user_input="旧文案", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1",
@@ -169,16 +164,14 @@ def test_patch_edit_fields():
 
 
 def test_list_templates():
-    with tempfile.TemporaryDirectory() as d:
-        _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d):
         res = tasks_routes.list_templates(user=USER)
         ids = {t["id"] for t in res}
         assert "daily_voc_report" in ids
 
 
 def test_recent_runs():
-    with tempfile.TemporaryDirectory() as d:
-        store = _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         tid = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1",
@@ -190,8 +183,7 @@ def test_recent_runs():
 
 
 def test_recent_runs_filters_and_pagination():
-    with tempfile.TemporaryDirectory() as d:
-        store = _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         tid1 = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                           cron_expr="0 8 * * *", run_at=None,
                           next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1",
@@ -220,19 +212,18 @@ def test_recent_runs_filters_and_pagination():
 
 
 def test_run_now_started():
-    with tempfile.TemporaryDirectory() as d:
-        store = _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store, scheduler_owner(Path(d) / "users.db") as owner:
         tid = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
-                         next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1")
-        res = asyncio.run(tasks_routes.run_task_now_endpoint(tid, user=USER))
+                         next_run_at=datetime.now() + timedelta(days=1), owner_user_id=owner["user_id"])
+        res = asyncio.run(tasks_routes.run_task_now_endpoint(tid, user=owner))
+        assert services_module.get_scheduler_service()._runner.await_count == 1
         assert res["ok"] is True
         assert store.get(tid)["run_count"] == 1
 
 
 def test_run_now_not_owned_forbidden():
-    with tempfile.TemporaryDirectory() as d:
-        store = _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         tid = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1")
@@ -245,8 +236,7 @@ def test_run_now_not_owned_forbidden():
 
 
 def test_run_now_running_conflict():
-    with tempfile.TemporaryDirectory() as d:
-        store = _fresh_store(d)
+    with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         tid = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1")

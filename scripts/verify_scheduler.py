@@ -18,6 +18,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.scheduler.service import SchedulerService
 from src.scheduler.store import ScheduleStore
+from tests.database_migration_helpers import migrated_profile_database
+from tests.scheduler_helpers import scheduler_owner
 
 
 async def main() -> int:
@@ -33,12 +35,13 @@ async def main() -> int:
         )
         return {"outputs": {"report_md": f"downloads/{session_id}/report.md"}, "reply": "已完成"}
 
-    with tempfile.TemporaryDirectory() as d:
-        store = ScheduleStore(str(Path(d) / "sched.db"))
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
+        store = ScheduleStore(str(migrated_profile_database(Path(d) / "sched.db", profile="scheduler")))
         svc = SchedulerService(store, poll_interval=1.0, runner=stub_runner)
 
         # 注册：周一三五 09:30，next_run_at 故意设在过去 → 立即到点
         task_id = store.add(
+            owner_user_id=owner["user_id"],
             user_input="抓某招投标网最新标讯并提炼摘要",
             provider="deepseek", model="deepseek-chat",
             trigger_type="cron", cron_expr="30 9 * * 1,3,5", run_at=None,
@@ -70,11 +73,13 @@ async def main() -> int:
 
         # once 任务：执行后应 done
         once_id = store.add(
+            owner_user_id=owner["user_id"],
             user_input="一次性抓取并汇总", provider="deepseek", model=None,
             trigger_type="once", cron_expr=None, run_at=datetime(2026, 6, 22, 9, 0),
             next_run_at=datetime(2026, 6, 22, 9, 0),
         )
         await svc.tick(now=now)
+        assert len(calls) == 2, "once 任务必须实际调用 runner"
         once_row = store.get(once_id)
         assert once_row["status"] == "done", "once 任务执行后应置 done"
         assert once_row["next_run_at"] is None

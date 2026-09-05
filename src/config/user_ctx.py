@@ -52,5 +52,15 @@ def set_user_memories(texts: List[str]):
     return _MEMORIES.set(list(texts or []))
 
 
+@contextmanager
+def user_memories_context(texts: List[str]) -> Iterator[None]:
+    """临时使用本人记忆；成功、异常或取消后恢复调用者原值。"""
+    token = set_user_memories(texts)
+    try:
+        yield
+    finally:
+        _MEMORIES.reset(token)
+
+
 def get_user_memories() -> List[str]:
     return list(_MEMORIES.get())

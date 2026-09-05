@@ -13,6 +13,7 @@ on:
           - cancellation
           - frontend-e2e
           - database-pagination
+          - scheduler-owner
           - g1-frozen-contracts
           - docker-build
           - dependency-groups
@@ -26,7 +27,7 @@ defaults:
 
 jobs:
   python-heavy:
-    if: inputs.gate == 'full-regression' || inputs.gate == 'g1-frozen-contracts' || inputs.gate == 'entry-auth' || inputs.gate == 'cancellation' || inputs.gate == 'database-pagination'
+    if: inputs.gate == 'full-regression' || inputs.gate == 'g1-frozen-contracts' || inputs.gate == 'entry-auth' || inputs.gate == 'cancellation' || inputs.gate == 'database-pagination' || inputs.gate == 'scheduler-owner'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -62,6 +63,11 @@ jobs:
           elif [[ "${{ inputs.gate }}" == "entry-auth" ]]; then
             python -m pytest -q tests/test_auth_bootstrap.py tests/test_api_spa_fallback.py \
               --randomly-seed=0 --timeout=120 --junitxml=.artifacts/heavy/entry-auth.xml
+          elif [[ "${{ inputs.gate }}" == "scheduler-owner" ]]; then
+            python -m pytest -q tests/test_scheduler_owner.py scripts/test_scheduler.py \
+              scripts/test_scheduler_api.py tests/test_llm_provider.py tests/test_runtime_config_secret_refs.py \
+              --randomly-seed=0 --timeout=120 --junitxml=.artifacts/heavy/scheduler-owner.xml
+            python -X utf8 scripts/verify_scheduler.py
           elif [[ "${{ inputs.gate }}" == "database-pagination" ]]; then
             python -m pytest -q tests/test_database_connector.py tests/test_database_pagination.py \
               tests/test_phase3_completion.py tests/test_db_dialects.py tests/test_db_security.py \
