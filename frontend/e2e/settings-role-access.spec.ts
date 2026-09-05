@@ -620,7 +620,7 @@ test("部分成功连接展示逐模型结果并可只重试失败模型", async
   await page.getByLabel("API Key").fill("sk-personal-multi-model-1234");
   await page.getByRole("button", { name: "保存并验证全部推荐模型" }).click();
 
-  await expect(page.getByText("1 / 2 个模型可用")).toBeVisible();
+  await expect(page.getByText(/^1 \/ 2 个模型可用 · 默认 DeepSeek V4 Flash · Key/)).toBeVisible();
   await expect(page.getByText("DeepSeek V4 Flash", { exact: true })).toBeVisible();
   await expect(page.getByText("无模型权限")).toBeVisible();
   await page.getByRole("button", { name: "重试 DeepSeek V4 Pro" }).click();

@@ -11,6 +11,7 @@ on:
           - full-regression
           - entry-auth
           - cancellation
+          - frontend-e2e
           - g1-frozen-contracts
           - docker-build
           - dependency-groups
@@ -144,7 +145,7 @@ jobs:
           retention-days: 14
 
   frontend-e2e:
-    if: inputs.gate == 'full-regression' || inputs.gate == 'cancellation'
+    if: inputs.gate == 'full-regression' || inputs.gate == 'cancellation' || inputs.gate == 'frontend-e2e'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     defaults:

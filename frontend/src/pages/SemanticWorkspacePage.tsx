@@ -351,8 +351,11 @@ export function SemanticWorkspacePage() {
   const [recycleBin, setRecycleBin] = useState(false);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
-  const [selectedEvidence, setSelectedEvidence] =
-    useState<Record<string, unknown> | null>(null);
+  const [taskSourceSelection, setTaskSourceSelection] = useState<{
+    resultIdentity: string;
+    uploadId: string | null;
+    evidence: Record<string, unknown> | null;
+  } | null>(null);
   const [draftUploads, setDraftUploads] = useState<UploadItem[]>([]);
   const [sourceMode, setSourceMode] = useState<"file" | "web">("file");
   const [liveEvents, setLiveEvents] = useState<WorkspaceEvent[]>([]);
@@ -426,6 +429,15 @@ export function SemanticWorkspacePage() {
     },
   });
   const task = detail.data;
+  const resultIdentity = JSON.stringify([
+    task?.task_id,
+    task?.viewing_revision,
+    task?.delivery?.delivery_id,
+  ]);
+  // 缓存命中时也必须在本次渲染排除旧版本选择，不能等 effect 再消除错位。
+  const sourceSelection = taskSourceSelection?.resultIdentity === resultIdentity
+    ? taskSourceSelection : null;
+  const taskUploadId = sourceSelection?.uploadId ?? task?.upload_ids[0] ?? null;
 
   useEffect(() => {
     if (!selectedTaskId || !task) return;
@@ -465,11 +477,6 @@ export function SemanticWorkspacePage() {
       setShowOnboarding(false);
     }
   }, [showOnboarding, task?.status]);
-
-  useEffect(() => {
-    if (!selectedTaskId || !task) return;
-    setSelectedUploadId((current) => current || task.upload_ids[0] || null);
-  }, [selectedTaskId, task?.upload_ids]);
 
   const useExample = (example: WorkspaceGuidance["examples"][number]) => {
     setNewTask(true);
@@ -561,10 +568,11 @@ export function SemanticWorkspacePage() {
 
   const viewSource = (evidence: Record<string, unknown>) => {
     const artifactId = String(evidence.artifact_id || "");
-    if (artifactId && task?.upload_ids.includes(artifactId)) {
-      setSelectedUploadId(artifactId);
-    }
-    setSelectedEvidence(evidence);
+    setTaskSourceSelection({
+      resultIdentity,
+      uploadId: artifactId && task?.upload_ids.includes(artifactId) ? artifactId : taskUploadId,
+      evidence,
+    });
     setInspectorOpen(true);
   };
 
@@ -879,12 +887,13 @@ export function SemanticWorkspacePage() {
               {inspectorOpen && draftUploads.length > 0 && (
                 <div className="h-full w-[min(42%,620px)] min-w-[380px] border-l bg-background shadow-[-18px_0_45px_-38px_rgba(15,23,42,0.45)]">
                   <SourcePreviewPanel
+                    key={selectedUploadId}
                     uploads={draftUploads}
                     selectedUploadId={selectedUploadId}
                     evidence={null}
                     onSelectUpload={(uploadId) => {
                       setSelectedUploadId(uploadId);
-                      setSelectedEvidence(null);
+                      setTaskSourceSelection(null);
                     }}
                     onClose={() => setInspectorOpen(false)}
                   />
@@ -1297,7 +1306,7 @@ export function SemanticWorkspacePage() {
                           }
                         />
                         {task.status === "completed" && (
-                          <ResultPreview task={task} onViewSource={viewSource} />
+                          <ResultPreview key={resultIdentity} task={task} onViewSource={viewSource} />
                         )}
                         {task.status === "candidate_ready" && (
                           <CandidatePreview
@@ -1473,12 +1482,12 @@ export function SemanticWorkspacePage() {
                     className="bg-background"
                   >
                     <SourcePreviewPanel
+                      key={`${resultIdentity}:${taskUploadId}`}
                       uploads={task.uploads || []}
-                      selectedUploadId={selectedUploadId}
-                      evidence={selectedEvidence}
+                      selectedUploadId={taskUploadId}
+                      evidence={sourceSelection?.evidence ?? null}
                       onSelectUpload={(uploadId) => {
-                        setSelectedUploadId(uploadId);
-                        setSelectedEvidence(null);
+                        setTaskSourceSelection({ resultIdentity, uploadId, evidence: null });
                       }}
                       onClose={() => setInspectorOpen(false)}
                     />
