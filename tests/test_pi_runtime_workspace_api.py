@@ -21,6 +21,7 @@ from PIL import Image
 
 import src.api.auth as auth_mod
 import src.api.semantic_workspace_runtime as runtime_mod
+import src.capability_catalog.default_mounts as default_mounts_mod
 import src.model_connections.broker as broker_mod
 from src.agentic_runtime.models import (
     CandidateArtifact,
@@ -594,6 +595,26 @@ def _client(
         settings,
         "semantic_execution_root",
         str(tmp_path / "executions"),
+    )
+    monkeypatch.setattr(
+        settings, "capability_oci_layout_path", str(tmp_path / "oci")
+    )
+    monkeypatch.setattr(
+        settings, "capability_mount_cache_path", str(tmp_path / "mounts")
+    )
+
+    def reject_artifact_command(*_args, **_kwargs):
+        raise AssertionError("工作台模拟测试不得执行真实 ORAS 命令")
+
+    def isolated_artifact_store(*args, **kwargs):
+        from src.capability_catalog.oci_store import OrasOciLayoutStore
+
+        kwargs.update(oras_executable="isolated-oras", runner=reject_artifact_command)
+        return OrasOciLayoutStore(*args, **kwargs)
+
+    # 保留真实冻结选择和 Owner 校验，仅隔离本票不执行的制品工具。
+    monkeypatch.setattr(
+        default_mounts_mod, "OrasOciLayoutStore", isolated_artifact_store
     )
     database = Path(settings.webui_db_path)
     if migrate_schema:
@@ -3908,9 +3929,40 @@ def test_cancel_running_pi_task_calls_runtime_hard_stop(
 
     assert cancelled.status_code == 200, cancelled.text
     assert cancelled.json()["status"] == "cancelled"
-    assert blocking_runtime.cancel_calls == [
-        ("user-a", task_id, 1)
-    ]
+    # 硬停止与编排退出后的静默确认可幂等重试，但只能作用于同一冻结身份。
+    assert set(blocking_runtime.cancel_calls) == {("user-a", task_id, 1)}
+
+
+def test_execution_cleanup_failure_remains_retryable_until_resources_stop(tmp_path, monkeypatch):
+    class CleanupFailureRuntime(FakePiRuntime):
+        cleanup_ready = False
+
+        async def start(self, request, *, on_event, run_id=None):
+            self.start_calls += 1
+            raise RuntimeError("模拟执行退出时清理失败")
+
+        async def cancel(self, user_id, task_id, revision):
+            if not self.cleanup_ready:
+                raise RuntimeError("模拟资源暂未停止")
+
+    runtime = CleanupFailureRuntime()
+    client = _client(tmp_path, monkeypatch, role="admin", pi_runtime=runtime)
+    document, _ = _uploads(tmp_path)
+    with client:
+        created = client.post("/api/semantic-workspace/tasks", json={
+            "objective_text": "验证隔离资源清理", "upload_ids": [document], "output_formats": ["csv"],
+            "runtime_version": "pi", "permission_profile": "standard", "provider": "local",
+        })
+        assert created.status_code == 202, created.text
+        task_id = created.json()["task_id"]
+        pending = _wait_for_status(client, task_id, "cancelling")
+        assert pending["cancel_requested"] is True
+        assert runtime.start_calls == 1
+        runtime.cleanup_ready = True
+        stopped = client.post(f"/api/semantic-workspace/tasks/{task_id}/cancel")
+        assert stopped.status_code == 200, stopped.text
+        assert stopped.json()["status"] == "cancelled"
+        assert runtime.start_calls == 1
 
 
 def test_pi_start_exposes_understanding_before_data_processing(

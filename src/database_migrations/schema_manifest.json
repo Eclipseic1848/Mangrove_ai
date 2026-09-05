@@ -127,7 +127,7 @@
       "trigger:web_task_contracts_no_delete": "087edf8a00b0d641049f16b71fecb82ea57f2a29480ea1d532b25ae89f5f93a4",
       "trigger:web_task_contracts_no_update": "f70469242d490e4d28c884d7d2669bf72b3d3cd123ebefce630f33aab25274c0"
     },
-    "revision": "webui_0009",
+    "revision": "webui_0010",
     "tables": {
       "agentic_runtime_coverage": "74c52319a68a7d681d3b2bbdebd68ff5a9114dba18fcb4b77c4f53d771d45ad8",
       "agentic_runtime_events": "305c83f3aaa22aceaaabeaade973623f806dd8089afeb986f591f076f36f517a",
@@ -201,8 +201,8 @@
       "semantic_workspace_audit_tombstones": "33226e972900985f445e788d2c5db2eeb1d657a547b9339f1b662dee8f4ed02c",
       "semantic_workspace_events": "e43755ceaadc329f0c65d8c6196523270a1ae82944400e1038147bb104e193cc",
       "semantic_workspace_revisions": "e0e671b21f3a5ae8b6b54bf797e94b2cf8d549be32b7539e70792540ae54206b",
-      "semantic_workspace_tasks": "3efa0b2a2b1f0123091934536c7f10bf3f1ab27e3c1872be81f51fc0eeadbd80",
-      "source_acquisition_attempts": "5a24e15ead2581300ca737bab429284968fc80e8441dedf1d64ef0e9992eee9d",
+      "semantic_workspace_tasks": "2b67ae4060ef3bb42604662eec52346a8126477c8efc57544fb046d2b2ca7feb",
+      "source_acquisition_attempts": "21a1650491494b2dedd3b42312f9132e32c72b484d84c3e03f2cd62177a15f30",
       "source_artifacts": "4f989bb2ffa9b86dac48bd172d619593132d636507ac2a9902298ccd6c67941a",
       "source_inspection_reports": "45cf50fcda27938c03bd6fbe35259572eb4efce9006bc2ff0143143c1c49fc5a",
       "source_page_failures": "015b705c8fbeebb93b4e83f4df8865bd88f5e9e9e90453e70529641ea5621970",

@@ -1229,37 +1229,7 @@ class SemanticWorkspaceManager:
         # 恢复必须由 Web 服务进程接管，确保 Runtime 与文档 Relay 共享同一 Grant 域。
         for task in store.list_pending_semantic_workspace_tasks():
             if task["status"] == "cancelling":
-                runtime = AgenticRuntimeRepository(
-                    settings.webui_db_path
-                ).get(
-                    task["user_id"],
-                    task["task_id"],
-                    task["active_revision"],
-                )
-                try:
-                    if runtime is not None and runtime.get("run_id"):
-                        get_default_broker().revoke_run_grants(
-                            task["user_id"],
-                            task["task_id"],
-                            task["active_revision"],
-                            runtime["run_id"],
-                            reason="host_restart_cancel",
-                        )
-                except Exception:  # noqa: BLE001
-                    store.append_semantic_workspace_event(
-                        task["user_id"],
-                        task["task_id"],
-                        stage="cancelling",
-                        event_type="runtime_cleanup_pending",
-                        summary="服务恢复后临时模型授权仍未清理，保持取消中",
-                        details={"recovery_status": "pending"},
-                    )
-                    continue
-                self._mark_cancelled(
-                    task["user_id"],
-                    task["task_id"],
-                    task["active_revision"],
-                )
+                # 异步维护循环确认执行静默和资源清理，不在启动时推断终态。
                 continue
             store.update_semantic_workspace_task(
                 task["user_id"],
@@ -1328,6 +1298,9 @@ class SemanticWorkspaceManager:
                 pending_tasks = get_store().list_pending_semantic_workspace_tasks()
                 now = time.monotonic()
                 for pending in pending_tasks:
+                    if pending["status"] == "cancelling":
+                        await self.cancel(pending["user_id"], pending["task_id"])
+                        continue
                     if self._delivery_retry_after.get(
                         pending["task_id"], 0.0
                     ) > now:
@@ -1457,26 +1430,17 @@ class SemanticWorkspaceManager:
                 continue
             # 硬门命中：先停容器与 Sidecar（阻断后续能力调用），
             # 再标记取消，最后取消执行协程并等待其清理收尾。
-            try:
-                await self._kernel_for_run(user_id, task_id, revision).cancel(
-                    user_id, task_id, revision
-                )
-            except Exception as error:
-                # 容器清理失败不能掩盖治理取消事实；留痕供审计。
-                get_store().append_semantic_workspace_event(
-                    user_id,
-                    task_id,
-                    stage="cancelled",
-                    event_type="gate_cancel_cleanup_failed",
-                    summary="治理门取消：容器清理失败",
-                    details={
-                        "error": str(error) or type(error).__name__,
-                    },
-                )
-            self._mark_cancelled(user_id, task_id, revision)
+            get_store().request_semantic_workspace_cancellation(user_id, task_id)
+            cleanup_confirmed = await self._confirm_runtime_stopped(user_id, task_id, revision)
             execution.cancel()
-            with suppress(asyncio.CancelledError):
+            try:
                 await execution
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                return True
+            if cleanup_confirmed:
+                self._mark_cancelled(user_id, task_id, revision)
             return True
 
     async def _await_with_gate_supervision(
@@ -1533,33 +1497,34 @@ class SemanticWorkspaceManager:
         self._queued.add(task_id)
         self._queue.put_nowait((user_id, task_id))
 
-    async def cancel(self, user_id: str, task_id: str) -> dict[str, Any]:
+    async def cancel(self, user_id: str, task_id: str, *, for_revision: bool = False) -> dict[str, Any]:
         store = get_store()
         task = store.get_semantic_workspace_task(user_id, task_id)
         if task is None:
             raise KeyError("工作台任务不存在或无权访问")
+        if not for_revision:
+            task = store.request_semantic_workspace_cancellation(user_id, task_id)
         if task["status"] in _TERMINAL_STATUSES:
-            return task
+            from src.source_acquisition import SourceAcquisitionRepository
+
+            if not SourceAcquisitionRepository(settings.webui_db_path).task_attempts(
+                user_id, task_id,
+            ):
+                return task
+        saved = store.update_semantic_workspace_task(
+            user_id, task_id, status="cancelling", cancel_requested=True,
+        )
         running = self._active.get(task_id)
         if running is None:
             self._queued.discard(task_id)
             # 排队阶段也必须同步 vNext Run 状态，否则详情会同时显示
             # “任务已取消”和“Runtime 仍在排队”两种相互冲突的事实。
-            self._mark_cancelled(
-                user_id,
-                task_id,
-                task["active_revision"],
-            )
+            if await self._confirm_runtime_stopped(user_id, task_id, task["active_revision"]):
+                self._mark_cancelled(user_id, task_id, task["active_revision"])
             return (
                 store.get_semantic_workspace_task(user_id, task_id)
                 or task
             )
-        saved = store.update_semantic_workspace_task(
-            user_id,
-            task_id,
-            status="cancelling",
-            cancel_requested=True,
-        )
         runtime = AgenticRuntimeRepository(
             settings.webui_db_path
         ).get(user_id, task_id, task["active_revision"])
@@ -1569,13 +1534,8 @@ class SemanticWorkspaceManager:
         ):
             # 先显式终止容器，再取消编排协程；不能依赖 CancelledError
             # 恰好传播到底层，否则第三方 Adapter 可能留下继续运行的子进程。
-            await self._kernel_for_run(
-                user_id, task_id, task["active_revision"]
-            ).cancel(
-                user_id,
-                task_id,
-                task["active_revision"],
-            )
+            if not await self._confirm_runtime_stopped(user_id, task_id, task["active_revision"]):
+                return store.get_semantic_workspace_task(user_id, task_id) or saved
         running.cancel()
         with suppress(asyncio.CancelledError):
             await running
@@ -1583,6 +1543,26 @@ class SemanticWorkspaceManager:
             store.get_semantic_workspace_task(user_id, task_id)
             or saved
         )
+
+    async def _confirm_runtime_stopped(self, user_id: str, task_id: str, revision: int) -> bool:
+        store = get_store()
+        runtime = AgenticRuntimeRepository(settings.webui_db_path).get(user_id, task_id, revision)
+        try:
+            from src.source_acquisition import SourceAcquisitionRepository
+
+            source_stopped = SourceAcquisitionRepository(settings.webui_db_path).cancel_for_task(user_id, task_id)
+            if runtime is not None and runtime.get("run_id"):
+                await self._kernel_for_run(user_id, task_id, revision).cancel(user_id, task_id, revision)
+            if not source_stopped:
+                raise RuntimeError("来源读取尚未停止")
+        except Exception:
+            store.update_semantic_workspace_task(user_id, task_id, status="cancelling", cancel_requested=True)
+            store.append_semantic_workspace_event(
+                user_id, task_id, stage="cancelling", event_type="runtime_cleanup_pending",
+                summary="正在停止，资源清理尚未完成，可重试停止", details={"recovery_status": "pending"},
+            )
+            return False
+        return True
 
     async def answer(
         self,
@@ -2214,7 +2194,8 @@ class SemanticWorkspaceManager:
                 2.0 * (2 ** (attempts - 1)),
             )
         except asyncio.CancelledError:
-            self._mark_cancelled(user_id, task_id, revision)
+            if await self._confirm_runtime_stopped(user_id, task_id, revision):
+                self._mark_cancelled(user_id, task_id, revision)
         except AgentKernelResultUnknownError as exc:
             failure = self._runtime_failure(
                 user_id,
@@ -2233,6 +2214,15 @@ class SemanticWorkspaceManager:
                 failure,
             )
         except Exception as exc:  # noqa: BLE001
+            cancelling = store.get_semantic_workspace_task(user_id, task_id)
+            if cancelling and cancelling.get("cancel_requested"):
+                if await self._confirm_runtime_stopped(user_id, task_id, revision):
+                    self._mark_cancelled(user_id, task_id, revision)
+                return
+            # 执行异常也可能来自资源关闭失败；必须保留可重试停止态，不能落入不可清理的失败终态。
+            store.request_semantic_workspace_cancellation(user_id, task_id)
+            if not await self._confirm_runtime_stopped(user_id, task_id, revision):
+                return
             failure = self._runtime_failure(
                 user_id,
                 task_id,

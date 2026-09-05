@@ -8,6 +8,7 @@ from contextlib import suppress
 import hashlib
 import ipaddress
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -15,6 +16,8 @@ import subprocess
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 import uuid
+
+from filelock import FileLock, Timeout as FileLockTimeout
 
 from src.config.settings import settings
 from src.candidate_verification import CandidateVerificationService
@@ -40,8 +43,13 @@ from .candidate_verifier import (
 )
 from .egress_policy import (
     EgressLease,
+    EgressPhase,
     EgressPolicy,
     SmokescreenEgressController,
+    await_creation,
+    _run_docker,
+    owned_resource_id,
+    resource_owner_identity,
 )
 from .document_retrieval import DocumentRetrievalModule
 from .document_tools import (
@@ -91,6 +99,10 @@ _CAPABILITY_KIND_LABELS = {
 
 class PiRuntimeError(RuntimeError):
     """Pi Runtime 无法形成候选结果。"""
+
+
+class _MainCreateRejected(PiRuntimeError):
+    """Docker 已明确拒绝创建，不属于创建结果未知。"""
 
 
 def _settled_repair_prompt(issue: str) -> str:
@@ -504,6 +516,8 @@ class PiRuntime:
         self._docker_relay_host_candidates: tuple[str, ...] | None = None
         self._capability_mount_resolver = capability_mount_resolver
         self._capability_host = capability_host
+        self._state_store = state_store or AgenticRuntimeRepository(settings.webui_db_path)
+        self._operations: dict[tuple[str, str, int], asyncio.Task] = {}
         self._containers: dict[tuple[str, str, int], str] = {}
         self._egress_leases: dict[
             tuple[str, str, int],
@@ -914,12 +928,160 @@ class PiRuntime:
             grant.grant_id
         )
 
+    def _lifecycle_dir(self, key: tuple[str, str, int]) -> Path:
+        identity = hashlib.sha256(json.dumps(key).encode("utf-8")).hexdigest()
+        root = self.execution_root.resolve() / ".pi-lifecycle"
+        directory = root / identity
+        if root.is_symlink() or directory.is_symlink() or directory.resolve().parent != root:
+            raise PiRuntimeError("任务清理账本路径无效")
+        directory.mkdir(parents=True, exist_ok=True)
+        if any((directory / name).is_symlink() for name in ("resources.json", "resources.tmp", "execution.lock", "cancel", "cleaned")):
+            raise PiRuntimeError("拒绝重定向的任务清理账本")
+        return directory
+
+    async def _owned_run(self, request: PiRuntimeRequest, operation) -> PiRuntimeResult:
+        key = (request.user_id, request.task_id, request.revision)
+        if self._operations.get(key) is asyncio.current_task():
+            return await operation
+        directory = self._lifecycle_dir(key)
+        lock = FileLock(str(directory / "execution.lock"))
+        try:
+            lock.acquire(timeout=0)
+            if (directory / "cancel").exists():
+                raise PiRuntimeError("任务正在停止，禁止重新执行")
+            if (directory / "resources.json").exists():
+                self._restore_resources(key)
+                await self._cleanup_resources(key)
+        except BaseException:
+            operation.close()
+            lock.release()
+            raise
+        task = asyncio.create_task(operation)
+        self._operations[key] = task
+
+        async def watch_cancel():
+            while not task.done():
+                if (directory / "cancel").exists():
+                    if not task.cancelling():
+                        task.cancel()
+                    return
+                await asyncio.sleep(0.05)
+
+        watcher = asyncio.create_task(watch_cancel())
+        try:
+            return await task
+        finally:
+            watcher.cancel()
+            with suppress(asyncio.CancelledError):
+                await watcher
+            try:
+                # 创建协程完全结算后才删资源；失败时账本和内存身份都保留。
+                await self._cleanup_resources(key)
+            finally:
+                self._operations.pop(key, None)
+                lock.release()
+
+    def _plan_resources(self, request, run_id, root, policy_dir, has_host):
+        key = (request.user_id, request.task_id, request.revision)
+        directory = self._lifecycle_dir(key)
+        if (directory / "cancel").exists():
+            raise asyncio.CancelledError
+        record = {
+            "owner": request.user_id, "task": request.task_id, "revision": request.revision,
+            "run": run_id, "root": str(root.resolve()), "policy_dir": str(policy_dir.resolve()),
+            "host_root": str(self._capability_host.execution_root.resolve()) if has_host else None,
+            "main_started": False,
+        }
+        self._write_resource_record(directory, record)
+        (directory / "cleaned").unlink(missing_ok=True)
+        self._restore_resources(key)
+
+    @staticmethod
+    def _write_resource_record(directory, record):
+        temporary = directory / "resources.tmp"
+        with temporary.open("w", encoding="utf-8") as stream:
+            json.dump(record, stream, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(directory / "resources.json")
+
+    def _restore_resources(self, key):
+        path = self._lifecycle_dir(key) / "resources.json"
+        if not path.exists():
+            return
+        if path.is_symlink():
+            raise PiRuntimeError("拒绝符号链接清理账本")
+        record = json.loads(path.read_text(encoding="utf-8"))
+        if (record["owner"], record["task"], record["revision"]) != key:
+            raise PiRuntimeError("清理账本 Owner/任务身份不匹配")
+        run_id = record["run"]
+        if not re.fullmatch(r"pi_(?:run|validation)_[a-z0-9]{16}", run_id):
+            raise PiRuntimeError("清理账本 Run 身份无效")
+        user, task, revision = key
+        root = self.execution_root.resolve() / "agentic-vnext" / hashlib.sha256(user.encode("utf-8")).hexdigest()[:16] / task / f"r{revision}" / run_id
+        if root.resolve() != root or Path(record["root"]) != root or self.execution_root.resolve() not in root.parents:
+            raise PiRuntimeError("清理账本工作区越界")
+        policy_dir = Path(record["policy_dir"])
+        if policy_dir.resolve() != policy_dir or policy_dir.parent != root / "trace" or not re.fullmatch(r"egress-business(?:-resume-[a-f0-9]{8})?", policy_dir.name):
+            raise PiRuntimeError("清理账本网络目录越界")
+        host_lease = None
+        if record["host_root"] is not None:
+            if self._capability_host is None or Path(record["host_root"]) != self._capability_host.execution_root.resolve():
+                raise PiRuntimeError("清理账本 Host 配置不匹配")
+            host_lease = self._capability_host.cleanup_lease(user, task, revision, run_id)
+        self._containers[key] = self._container_name(task, revision, run_id)
+        # 这里只重建清理身份，空白策略不能启用任何外发目标。
+        self._egress_leases[key] = SmokescreenEgressController.lease_for(
+            policy=EgressPolicy(EgressPhase.BUSINESS_EXECUTION, (), (), False),
+            user_id=user, task_id=task, revision=revision, run_id=run_id, policy_dir=policy_dir,
+        )
+        if host_lease is not None:
+            self._capability_host_leases[key] = host_lease
+
+        if (policy_dir / ".creating").exists() or (root / "trace" / ".creating-main").exists() or (host_lease is not None and (host_lease.runtime_dir / ".creating").exists()):
+            raise PiRuntimeError("资源创建结果尚未确认，保持清理待重试")
+
+    async def _cleanup_resources(self, key):
+        errors = []
+        journal = self._lifecycle_dir(key) / "resources.json"
+        main_started = True
+        identity = None
+        if journal.exists():
+            record = json.loads(journal.read_text(encoding="utf-8"))
+            main_started = record["main_started"]
+            identity = resource_owner_identity(*key, record["run"])
+            if (Path(record["root"]) / "trace" / ".creating-main").exists():
+                errors.append(PiRuntimeError("主容器创建结果尚未确认"))
+        name = self._containers.get(key)
+        if name and main_started:
+            try:
+                await self._remove_owned_container(name, identity)
+            except Exception as error:
+                errors.append(error)
+            else:
+                self._containers.pop(key, None)
+        elif name:
+            self._containers.pop(key, None)
+        try:
+            await self._release_supporting_resources(key, reason="run_closed", cancel_host=True)
+        except Exception as error:
+            errors.append(error)
+        if errors:
+            raise PiRuntimeError("任务资源清理未完成：" + "；".join(str(error) for error in errors)) from errors[0]
+        journal.unlink(missing_ok=True)
+        (self._lifecycle_dir(key) / "cleaned").touch(exist_ok=True)
+
     async def start(
         self,
         request: PiRuntimeRequest,
         *,
         on_event: EventSink,
         run_id: str | None = None,
+    ) -> PiRuntimeResult:
+        return await self._owned_run(request, self._start(request, on_event=on_event, run_id=run_id))
+
+    async def _start(
+        self, request: PiRuntimeRequest, *, on_event: EventSink, run_id: str | None = None,
     ) -> PiRuntimeResult:
         """启动一次完整 Pi Run，并只返回通过文件完整性检查的候选。"""
 
@@ -1009,6 +1171,7 @@ class PiRuntime:
                 item.manifest.kind in {"python", "node", "cli", "mcp_local"}
                 for item in load_runtime_manifests(capability_dirs)
             )
+            self._plan_resources(request, run_id, root, trace_dir / "egress-business", has_native_capability)
             if has_native_capability:
                 if self._capability_host is None:
                     raise PiRuntimeError("原生能力 Sidecar 尚未启用，已保持现有任务路径不变")
@@ -1123,7 +1286,6 @@ class PiRuntime:
                 on_event=on_event,
             )
         finally:
-            self._containers.pop(run_key, None)
             await self._release_supporting_resources(
                 run_key,
                 reason="run_closed",
@@ -1136,6 +1298,11 @@ class PiRuntime:
         *,
         checkpoint: PiRuntimeCheckpoint,
         on_event: EventSink,
+    ) -> PiRuntimeResult:
+        return await self._owned_run(request, self._resume(request, checkpoint=checkpoint, on_event=on_event))
+
+    async def _resume(
+        self, request: PiRuntimeRequest, *, checkpoint: PiRuntimeCheckpoint, on_event: EventSink,
     ) -> PiRuntimeResult:
         """使用 Pi 官方 JSONL 会话恢复同一 Run。"""
 
@@ -1198,7 +1365,7 @@ class PiRuntime:
         if checkpoint.container_name:
             # 服务异常退出时容器可能仍在运行；必须先终止旧执行者，避免两个
             # Agent 同时写同一候选目录。
-            await self._remove_container(checkpoint.container_name)
+            await self._remove_owned_container(checkpoint.container_name, resource_owner_identity(request.user_id, request.task_id, request.revision, checkpoint.run_id))
         if request.model_connection_id is not None:
             # 即便会话缺失而重开新 Run，旧进程遗留授权也必须先关闭。
             self._broker().revoke_run_grants(
@@ -1269,6 +1436,7 @@ class PiRuntime:
                 item.manifest.kind in {"python", "node", "cli", "mcp_local"}
                 for item in load_runtime_manifests(capability_dirs)
             )
+            self._plan_resources(request, checkpoint.run_id, root, trace_dir / f"egress-business-resume-{resume_token}", has_native_capability)
             capability_host_lease: CapabilityHostLease | None = None
             if has_native_capability:
                 if self._capability_host is None:
@@ -1395,7 +1563,6 @@ class PiRuntime:
                 ),
             )
         finally:
-            self._containers.pop(run_key, None)
             await self._release_supporting_resources(
                 run_key,
                 reason="run_closed",
@@ -1651,11 +1818,6 @@ class PiRuntime:
                 request.revision,
             )
             raise
-        finally:
-            self._containers.pop(
-                (request.user_id, request.task_id, request.revision),
-                None,
-            )
 
     async def _release_supporting_resources(
         self,
@@ -1707,32 +1869,54 @@ class PiRuntime:
         """中止当前任务的容器及其全部子进程。"""
 
         run_key = (user_id, task_id, revision)
-        container_name = self._containers.get(run_key)
+        directory = self._lifecycle_dir(run_key)
+        marker = directory / "cancel"
+        first_request = not marker.exists()
+        marker.touch(exist_ok=True)
+        operation = self._operations.get(run_key)
+        lock = None
         try:
-            if container_name:
-                await self._remove_container(container_name)
+            if operation is not None and operation is not asyncio.current_task():
+                if first_request:
+                    operation.cancel()
+                try:
+                    await asyncio.wait_for(asyncio.shield(operation), timeout=30)
+                except asyncio.CancelledError:
+                    pass
+                except TimeoutError as error:
+                    raise PiRuntimeError("任务创建或执行尚未静默，保持取消中") from error
+                except Exception:
+                    # 本次清理仍可重试失败协程留下的身份。
+                    pass
+            if operation is not asyncio.current_task():
+                lock = FileLock(str(directory / "execution.lock"))
+                for _ in range(600):
+                    try:
+                        lock.acquire(timeout=0)
+                        break
+                    except FileLockTimeout:
+                        await asyncio.sleep(0.05)
+                else:
+                    raise PiRuntimeError("其他进程仍在停止当前 Run，清理未完成")
+            if operation is None and not (directory / "resources.json").exists() and not (directory / "cleaned").exists() and not any(run_key in leases for leases in (self._containers, self._egress_leases, self._capability_host_leases)):
+                persisted = self._state_store.get(*run_key)
+                if persisted is not None and persisted.get("run_id"):
+                    raise PiRuntimeError("旧 Run 缺少可验证资源账本，清理需要确认")
+            self._restore_resources(run_key)
+            await self._cleanup_resources(run_key)
         finally:
-            # cancel 返回即表示本 Run 的网络授权已经撤销，不能等待后台协程
-            # 自行结束后才清理 sidecar。
             try:
-                await self._release_supporting_resources(
-                    run_key,
-                    reason="run_cancelled",
-                    cancel_host=True,
+                self._broker().revoke_revision_grants(
+                    user_id, task_id, revision, reason="run_cancelled",
                 )
             finally:
-                self._broker().revoke_revision_grants(
-                    user_id,
-                    task_id,
-                    revision,
-                    reason="run_cancelled",
-                )
-            self._document_tool_broker.revoke_revision_grants(
-                user_id,
-                task_id,
-                revision,
-                reason="run_cancelled",
-            )
+                try:
+                    self._document_tool_broker.revoke_revision_grants(
+                        user_id, task_id, revision, reason="run_cancelled",
+                    )
+                finally:
+                    if lock is not None:
+                        lock.release()
 
     async def _assert_image(self) -> None:
         await self.resolve_runtime_artifact()
@@ -2093,7 +2277,34 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
         settled_check: SettledCheck,
         initial_prompt: str | None = None,
     ) -> str:
-        process = await self._spawn_rpc_process(command)
+        directory = self._lifecycle_dir((request.user_id, request.task_id, request.revision))
+        journal = directory / "resources.json"
+        identity = None
+        if journal.exists():
+            record = json.loads(journal.read_text(encoding="utf-8"))
+            record["main_started"] = True
+            self._write_resource_record(directory, record)
+            identity = resource_owner_identity(request.user_id, request.task_id, request.revision, record["run"])
+            command = (*command[:2], "--label", f"mangrove.owner-run={identity}", *command[2:])
+        marker = trace_dir / ".creating-main"
+        with marker.open("w", encoding="utf-8") as stream:
+            stream.write("creation_pending\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        try:
+            process = await self._spawn_rpc_process(command)
+        except _MainCreateRejected:
+            marker.unlink(missing_ok=True)
+            if journal.exists():
+                record["main_started"] = False
+                self._write_resource_record(directory, record)
+            raise
+        except asyncio.CancelledError:
+            # spawn 的创建命令已结算才传播取消，此时没有迟到 create。
+            marker.unlink(missing_ok=True)
+            raise
+        else:
+            marker.unlink(missing_ok=True)
         assert process.stdin is not None
         assert process.stdout is not None
         assert process.stderr is not None
@@ -2213,7 +2424,7 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(process.wait(), timeout=2)
             if process.returncode is None:
-                await self._remove_container(container_name)
+                await self._remove_owned_container(container_name, identity)
                 with suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(process.wait(), timeout=10)
             await stderr_task
@@ -2233,13 +2444,24 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
     ) -> asyncio.subprocess.Process:
         # Pi 会把文档读取结果放在单条 JSONL 事件中；默认 64KB 上限会让
         # 大文档在传输层失败。保留显式内存上限，同时允许常见 Office 文件事件。
-        return await asyncio.create_subprocess_exec(
+        if command[:2] == ("docker", "run"):
+            # 先取得创建确认，再连接已存在容器；取消后的迟到 start 无法复活已删除身份。
+            arguments = list(command[2:])
+            if "--rm" in arguments:
+                arguments.remove("--rm")
+            create = ("docker", "create", *arguments)
+            result = await await_creation(_run_docker(create))
+            if result.returncode:
+                raise _MainCreateRejected("Pi 容器创建失败：" + result.stderr[:300])
+            name = command[command.index("--name") + 1]
+            command = ("docker", "start", "--attach", "--interactive", name)
+        return await await_creation(asyncio.create_subprocess_exec(
             *command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=_RPC_STREAM_LIMIT_BYTES,
-        )
+        ))
 
     @staticmethod
     async def _capture_stderr(
@@ -2361,6 +2583,11 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
         safe_task = re.sub(r"[^a-z0-9-]", "-", task_id.lower())[-24:]
         return f"mangrove-pi-{safe_task}-r{revision}-{run_id[-6:]}"[:63]
 
+    async def _remove_owned_container(self, container_name: str, owner_identity: str | None) -> None:
+        resource_id = await owned_resource_id(_run_docker, "container", container_name, owner_identity)
+        if resource_id is not None:
+            await self._remove_container(resource_id)
+
     @staticmethod
     async def _remove_container(container_name: str) -> None:
         process = await asyncio.create_subprocess_exec(
@@ -2368,8 +2595,13 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
             "rm",
             "-f",
             container_name,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        with suppress(asyncio.TimeoutError):
-            await asyncio.wait_for(process.wait(), timeout=30)
+        try:
+            _stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+        except TimeoutError as error:
+            raise PiRuntimeError("任务容器清理超时，身份保留供重试") from error
+        detail = stderr.decode("utf-8", errors="replace")
+        if process.returncode != 0 and "no such container" not in detail.casefold():
+            raise PiRuntimeError("任务容器清理失败：" + detail[:300])

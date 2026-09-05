@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { nanoid } from "nanoid/non-secure";
 import { toast } from "sonner";
+import { ApiError } from "@/lib/api";
 import {
   cancelSourceAcquisition,
   createWorkspaceTask,
@@ -83,6 +84,40 @@ type StoredTaskAttempt = {
   idempotency_key: string;
   payload: WorkspaceTaskPayload;
 };
+
+function pendingAcquisition(stored: StoredSourceAcquisition): SourceAcquisitionAttempt {
+  return {
+    attempt_id: "pending",
+    idempotency_key: stored.idempotency_key,
+    request_url: stored.url,
+    normalized_url: stored.url,
+    allowed_scope: {
+      kind: stored.scope_kind,
+      normalized_url: stored.url,
+      site: normalizedUrl(stored.url) ? new URL(stored.url).host : "",
+      page_limit: stored.page_limit,
+      completeness: {
+        mode: stored.completeness_mode,
+        required_valid_pages: stored.required_valid_pages,
+      },
+    },
+    purpose: stored.purpose,
+    status: "acquiring",
+    started_at: new Date().toISOString(),
+    finished_at: null,
+    snapshot_id: null,
+    error_code: null,
+    error_message: null,
+    snapshot: null,
+  };
+}
+
+function preserveStopping(previous: SourceAcquisitionAttempt | null, saved: SourceAcquisitionAttempt) {
+  // 首个长请求可能迟于停止响应返回，不能让旧的获取中状态覆盖停止事实。
+  return previous?.attempt_id === saved.attempt_id
+    && (previous.status === "canceled" || (previous.status === "cancelling" && saved.status === "acquiring"))
+    ? previous : saved;
+}
 
 function readStoredAcquisition(value: string): StoredSourceAcquisition | null {
   try {
@@ -242,6 +277,7 @@ export function WebSourceIntake({
   const taskReplayPromiseRef = useRef<Promise<WorkspaceTask> | null>(null);
   const onTaskCreatedRef = useRef(onTaskCreated);
   const normalized = useMemo(() => normalizedUrl(url), [url]);
+  const acquiring = attempt?.status === "acquiring" || attempt?.status === "cancelling";
 
   useEffect(() => {
     if (attempt?.status !== "succeeded") return;
@@ -320,6 +356,7 @@ export function WebSourceIntake({
       };
     }
     setLoading(!stored.attempt_id);
+    if (!stored.attempt_id) setAttempt(pendingAcquisition(stored));
     const restored = stored.attempt_id
       ? getSourceAcquisition(stored.attempt_id)
       : createSourceAcquisition({
@@ -333,7 +370,7 @@ export function WebSourceIntake({
     void restored
       .then((saved) => {
         if (!active) return;
-        setAttempt(saved);
+        setAttempt((previous) => preserveStopping(previous, saved));
         setUrl(saved.normalized_url);
         setPurpose(saved.purpose);
         storeAcquisition(storageKey, saved);
@@ -395,24 +432,32 @@ export function WebSourceIntake({
   }, [taskStorageKey]);
 
   useEffect(() => {
-    if (!attempt || attempt.status !== "acquiring" || attempt.attempt_id === "pending") {
+    if (!attempt || !["acquiring", "cancelling"].includes(attempt.status)) {
       return;
     }
     let active = true;
+    let polling = false;
     const timer = window.setInterval(() => {
-      void createSourceAcquisition({
-        url: attempt.normalized_url,
-        purpose: attempt.purpose,
-        allowed_scope: attempt.allowed_scope.kind,
-        page_limit: attempt.allowed_scope.page_limit ?? 1,
-        completeness_mode: attempt.allowed_scope.completeness?.mode ?? "exploratory",
-        required_valid_pages: attempt.allowed_scope.completeness?.required_valid_pages ?? null,
-      }, attempt.idempotency_key).then((saved) => {
+      if (polling) return;
+      polling = true;
+      const request = attempt.status === "cancelling"
+        ? getSourceAcquisition(attempt.attempt_id)
+        : createSourceAcquisition({
+          url: attempt.normalized_url,
+          purpose: attempt.purpose,
+          allowed_scope: attempt.allowed_scope.kind,
+          page_limit: attempt.allowed_scope.page_limit ?? 1,
+          completeness_mode: attempt.allowed_scope.completeness?.mode ?? "exploratory",
+          required_valid_pages: attempt.allowed_scope.completeness?.required_valid_pages ?? null,
+        }, attempt.idempotency_key);
+      void request.then((saved) => {
         if (!active) return;
-        setAttempt(saved);
+        setAttempt((previous) => preserveStopping(previous, saved));
         storeAcquisition(storageKey, saved);
       }).catch(() => {
         // 短暂断网不改变服务端持久状态，保持轮询即可。
+      }).finally(() => {
+        polling = false;
       });
     }, 1000);
     return () => {
@@ -422,7 +467,7 @@ export function WebSourceIntake({
   }, [attempt, storageKey]);
 
   const submit = async () => {
-    if (!normalized || !purpose.trim() || loading) return;
+    if (!normalized || !purpose.trim() || loading || acquiring) return;
     const effectivePageLimit = scopeKind === "current_page" ? 1 : pageLimit;
     const effectiveRequired = completenessMode === "hard_min_pages"
       ? requiredValidPages
@@ -438,7 +483,7 @@ export function WebSourceIntake({
     if (keyRef.current?.fingerprint !== fingerprint) {
       keyRef.current = { fingerprint, key: nanoid() };
     }
-    writeStoredValue(storageKey, {
+    const stored: StoredSourceAcquisition = {
       attempt_id: null,
       idempotency_key: keyRef.current.key,
       url: normalized,
@@ -447,32 +492,10 @@ export function WebSourceIntake({
       page_limit: effectivePageLimit,
       completeness_mode: completenessMode,
       required_valid_pages: effectiveRequired,
-    } satisfies StoredSourceAcquisition);
+    };
+    writeStoredValue(storageKey, stored);
     setLoading(true);
-    setAttempt({
-      attempt_id: "pending",
-      idempotency_key: keyRef.current.key,
-      request_url: url,
-      normalized_url: normalized,
-      allowed_scope: {
-        kind: scopeKind,
-        normalized_url: normalized,
-        site: new URL(normalized).host,
-        page_limit: effectivePageLimit,
-        completeness: {
-          mode: completenessMode,
-          required_valid_pages: effectiveRequired,
-        },
-      },
-      purpose: purpose.trim(),
-      status: "acquiring",
-      started_at: new Date().toISOString(),
-      finished_at: null,
-      snapshot_id: null,
-      error_code: null,
-      error_message: null,
-      snapshot: null,
-    });
+    setAttempt(pendingAcquisition(stored));
     try {
       const saved = await createSourceAcquisition({
         url: normalized,
@@ -482,14 +505,20 @@ export function WebSourceIntake({
         completeness_mode: completenessMode,
         required_valid_pages: effectiveRequired,
       }, keyRef.current.key);
-      setAttempt(saved);
+      if (keyRef.current?.key !== stored.idempotency_key) return;
+      setAttempt((previous) => preserveStopping(previous, saved));
       storeAcquisition(storageKey, saved);
       if (saved.status === "succeeded") toast.success("网页来源已冻结");
     } catch (error) {
-      setAttempt(null);
+      // 初次响应丢失仍保留幂等身份，轮询继续确认停止或完成事实。
+      if (error instanceof ApiError && [400, 401, 403, 404, 409, 422].includes(error.status)) {
+        setAttempt((previous) => previous?.attempt_id === "pending" ? null : previous);
+        const raw = readStoredValue(storageKey);
+        if (raw && readStoredAcquisition(raw)?.attempt_id === null) removeStoredValue(storageKey);
+      }
       toast.error(error instanceof Error ? error.message : "网页来源获取失败");
     } finally {
-      setLoading(false);
+      if (keyRef.current?.key === stored.idempotency_key) setLoading(false);
     }
   };
 
@@ -497,7 +526,7 @@ export function WebSourceIntake({
     if (!attempt || attempt.attempt_id === "pending") return;
     try {
       const saved = await cancelSourceAcquisition(attempt.attempt_id);
-      setAttempt(saved);
+      setAttempt((previous) => preserveStopping(previous, saved));
       storeAcquisition(storageKey, saved);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "取消失败");
@@ -505,8 +534,10 @@ export function WebSourceIntake({
   };
 
   const clear = () => {
+    if (acquiring) return;
     removeStoredValue(storageKey);
     keyRef.current = null;
+    setLoading(false);
     setAttempt(null);
     setUrl("");
   };
@@ -614,7 +645,7 @@ export function WebSourceIntake({
               先确认来源事实；此阶段不会创建分析任务或调用模型。
             </p>
           </div>
-          {attempt && attempt.status !== "acquiring" && (
+          {attempt && !acquiring && (
             <button
               type="button"
               onClick={clear}
@@ -627,7 +658,7 @@ export function WebSourceIntake({
         </div>
       </div>
 
-      {!attempt || attempt.status === "acquiring" ? (
+      {!attempt || acquiring ? (
         <div className="p-4">
           <label className="block text-xs font-medium" htmlFor="web-source-url">
             精确网址
@@ -640,7 +671,7 @@ export function WebSourceIntake({
               inputMode="url"
               autoComplete="url"
               value={url}
-              disabled={loading}
+              disabled={loading || acquiring}
               onChange={(event) => setUrl(event.target.value)}
               placeholder="https://example.com/article"
               className="h-10 w-full rounded-xl border bg-background pl-9 pr-3 text-sm outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-primary/15 disabled:opacity-60"
@@ -663,7 +694,7 @@ export function WebSourceIntake({
             id="web-source-purpose"
             rows={2}
             value={purpose}
-            disabled={loading}
+            disabled={loading || acquiring}
             onChange={(event) => setPurpose(event.target.value)}
             className="mt-2 w-full resize-none rounded-xl border bg-background px-3 py-2 text-sm leading-6 outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-primary/15 disabled:opacity-60"
           />
@@ -673,7 +704,7 @@ export function WebSourceIntake({
             <div className="mt-2 flex flex-wrap gap-2">
               <button
                 type="button"
-                disabled={loading}
+                disabled={loading || acquiring}
                 aria-pressed={scopeKind === "current_page"}
                 onClick={() => {
                   setScopeKind("current_page");
@@ -687,7 +718,7 @@ export function WebSourceIntake({
               </button>
               <button
                 type="button"
-                disabled={loading}
+                disabled={loading || acquiring}
                 aria-pressed={scopeKind === "same_site"}
                 onClick={() => {
                   setScopeKind("same_site");
@@ -710,7 +741,7 @@ export function WebSourceIntake({
                   min={1}
                   max={50}
                   value={pageLimit}
-                  disabled={loading}
+                  disabled={loading || acquiring}
                   onChange={(event) => {
                     const next = Math.max(1, Math.min(50, Number(event.target.value) || 1));
                     setPageLimit(next);
@@ -723,7 +754,7 @@ export function WebSourceIntake({
                 结果要求
                 <select
                   value={completenessMode}
-                  disabled={loading}
+                  disabled={loading || acquiring}
                   onChange={(event) => setCompletenessMode(event.target.value as "exploratory" | "hard_min_pages" | "hard_scope_complete")}
                   className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 disabled:cursor-not-allowed disabled:opacity-60"
                 >
@@ -740,7 +771,7 @@ export function WebSourceIntake({
                     min={1}
                     max={pageLimit}
                     value={requiredValidPages}
-                    disabled={loading}
+                    disabled={loading || acquiring}
                     onChange={(event) => setRequiredValidPages(
                       Math.max(1, Math.min(pageLimit, Number(event.target.value) || 1)),
                     )}
@@ -782,7 +813,9 @@ export function WebSourceIntake({
             <p className="text-[11px] leading-5 text-muted-foreground">
               页面内容将以读取时间和 SHA-256 冻结，便于后续核验。
             </p>
-            {attempt?.status === "acquiring" && attempt.attempt_id !== "pending" ? (
+            {attempt?.status === "cancelling" ? (
+              <p role="status" className="shrink-0 text-xs font-medium">正在停止来源获取</p>
+            ) : attempt?.status === "acquiring" && attempt.attempt_id !== "pending" ? (
               <button
                 type="button"
                 onClick={() => void cancel()}
@@ -1205,7 +1238,7 @@ export function WebSourceIntake({
             )}
             <div>
               <p className="text-sm font-semibold">
-                {attempt.status === "canceled" ? "来源获取已取消" : "没有形成可用来源"}
+                {attempt.status === "canceled" ? "来源获取已停止" : "没有形成可用来源"}
               </p>
               <p className="mt-1 text-xs leading-5 text-muted-foreground">
                 {attempt.error_code

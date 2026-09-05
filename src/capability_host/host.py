@@ -15,6 +15,7 @@ from src.agentic_runtime.egress_policy import DockerCommandResult
 from src.capability_adapters import load_runtime_manifests
 
 from .models import CapabilityHostLease, CapabilityHostRequest
+from src.agentic_runtime.egress_policy import await_creation, owned_resource_id, resource_owner_identity, ResourceOwnershipError
 
 
 DockerCommandRunner = Callable[[tuple[str, ...]], Awaitable[DockerCommandResult]]
@@ -68,6 +69,16 @@ class CapabilityHost:
                 f"Docker 操作超时：{' '.join(command[:3])}"
             ) from error
 
+    def cleanup_lease(self, user_id: str, task_id: str, revision: int, run_id: str) -> CapabilityHostLease:
+        """启动与恢复复用确定性身份；清理不需要读取或持久化 Relay Token。"""
+        identity = hashlib.sha256(f"{user_id}:{task_id}:{revision}:{run_id}".encode("utf-8")).hexdigest()[:12]
+        safe_task = re.sub(r"[^a-z0-9-]", "-", task_id.casefold())[-16:]
+        container_name = f"mangrove-cap-host-{safe_task}-{identity}"[:63]
+        runtime_dir = (self.execution_root / identity).resolve()
+        if self.execution_root not in runtime_dir.parents:
+            raise RuntimeError("Capability Host 运行目录越界")
+        return CapabilityHostLease(container_name=container_name, relay_url="", relay_token="", capability_names=(), capability_kinds=(), runtime_dir=runtime_dir, owner_identity=resource_owner_identity(user_id, task_id, revision, run_id))
+
     async def start(self, request: CapabilityHostRequest) -> CapabilityHostLease:
         mounted = tuple(
             item
@@ -76,16 +87,8 @@ class CapabilityHost:
         )
         if not mounted:
             raise ValueError("任务没有可由 Sidecar 执行的本地原生能力")
-        identity = hashlib.sha256(
-            f"{request.user_id}:{request.task_id}:{request.revision}:{request.run_id}".encode(
-                "utf-8"
-            )
-        ).hexdigest()[:12]
-        safe_task = re.sub(r"[^a-z0-9-]", "-", request.task_id.casefold())[-16:]
-        container_name = f"mangrove-cap-host-{safe_task}-{identity}"[:63]
-        runtime_dir = (self.execution_root / identity).resolve()
-        if self.execution_root not in runtime_dir.parents:
-            raise RuntimeError("Capability Host 运行目录越界")
+        cleanup = self.cleanup_lease(request.user_id, request.task_id, request.revision, request.run_id)
+        container_name, runtime_dir = cleanup.container_name, cleanup.runtime_dir
         runtime_dir.mkdir(parents=True, exist_ok=False)
         token = secrets.token_urlsafe(32)
         config = {
@@ -115,6 +118,7 @@ class CapabilityHost:
             "--network", request.network_name,
             "--label", "mangrove.agentic-runtime=true",
             "--label", "mangrove.capability-host=true",
+            "--label", f"mangrove.owner-run={cleanup.owner_identity}",
             "--init", "--stop-timeout", "3",
             "--read-only", "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
@@ -143,33 +147,42 @@ class CapabilityHost:
                 (item.manifest.name, item.manifest.kind) for item in mounted
             ),
             runtime_dir=runtime_dir,
+            owner_identity=cleanup.owner_identity,
         )
         try:
             # identity 绑定 Owner/Task/revision/run；恢复同一 Run 时只替换该确定性 Host。
-            await self._docker(("docker", "rm", "-f", container_name))
-            result = await self._docker(tuple(command))
+            previous_id = await owned_resource_id(self._docker, "container", container_name, lease.owner_identity)
+            if previous_id is not None:
+                removed = await self._docker(("docker", "rm", "-f", previous_id))
+                if removed.returncode and "no such container" not in removed.stderr.casefold():
+                    raise RuntimeError("无法替换当前 Capability Host：" + removed.stderr[:300])
+            result = await await_creation(self._docker(tuple(command)), runtime_dir / ".creating")
             if result.returncode != 0:
                 raise RuntimeError(
                     "无法启动 Capability Host：" + result.stderr.strip()[:300]
                 )
             await self._wait_until_ready(lease)
             return lease
-        except Exception as error:
+        except (Exception, asyncio.CancelledError) as error:
+            if isinstance(error, ResourceOwnershipError):
+                raise
             logs: DockerCommandResult | None = None
             try:
-                logs = await self._docker(("docker", "logs", container_name))
+                owned_id = await owned_resource_id(self._docker, "container", container_name, lease.owner_identity)
+                if owned_id is not None:
+                    logs = await self._docker(("docker", "logs", owned_id))
             except Exception:
                 pass
             try:
                 await self.stop(lease)
-            except Exception:
-                pass
+            except Exception as cleanup_error:
+                raise RuntimeError(f"{error}；Capability Host 清理未完成：{cleanup_error}") from cleanup_error
             detail = (
                 (logs.stdout + logs.stderr).strip()[-1500:]
                 if logs is not None
                 else ""
             )
-            if detail:
+            if detail and not isinstance(error, asyncio.CancelledError):
                 raise RuntimeError(f"{error}；Host 日志：{detail}") from error
             raise
 
@@ -187,19 +200,16 @@ class CapabilityHost:
         raise RuntimeError("Capability Host 健康检查超时")
 
     async def stop(self, lease: CapabilityHostLease) -> None:
+        resource_id = await owned_resource_id(self._docker, "container", lease.container_name, lease.owner_identity)
         stop_error = ""
         try:
-            stopped = await self._docker(
-                ("docker", "stop", "--time", "3", lease.container_name)
-            )
+            stopped = await self._docker(("docker", "stop", "--time", "3", resource_id)) if resource_id is not None else DockerCommandResult(0, "", "")
             if stopped.returncode != 0:
                 stop_error = stopped.stderr.strip()
         except Exception as error:
             stop_error = str(error)
         try:
-            removed = await self._docker(
-                ("docker", "rm", "-f", lease.container_name)
-            )
+            removed = await self._docker(("docker", "rm", "-f", resource_id)) if resource_id is not None else DockerCommandResult(0, "", "")
         except Exception as error:
             raise RuntimeError(
                 f"无法清理 Capability Host：{error}；停止结果：{stop_error}"
@@ -211,6 +221,8 @@ class CapabilityHost:
                 f"停止结果：{stop_error}"
             )
         runtime_dir = lease.runtime_dir.resolve()
+        if (runtime_dir / ".creating").exists():
+            raise RuntimeError("Capability Host 创建结果尚未确认，保留清理身份")
         if self.execution_root in runtime_dir.parents:
             # 恢复/取消可能重复清理同一确定性 Lease；目录已不存在仍属于幂等成功。
             try:

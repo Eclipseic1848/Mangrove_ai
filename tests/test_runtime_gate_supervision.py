@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from src.agentic_runtime.models import PermissionProfile
 from src.api import semantic_workspace_runtime as runtime_mod
 from src.api.semantic_workspace_runtime import SemanticWorkspaceManager
+from src.api.store import WebUIStore
 from src.capability_catalog import (
     CapabilityCatalog,
     CapabilityPackRef,
@@ -44,6 +46,50 @@ class _GateFakeRuntime:
 
     async def cancel(self, user_id, task_id, revision):
         self.cancel_calls.append((user_id, task_id, revision))
+
+
+def _prepare_stop_store(tmp_path, monkeypatch):
+    database = migrated_webui_database(tmp_path / "w.db")
+    store = WebUIStore(str(database))
+    store.create_semantic_workspace_task(
+        "user-a", task_id="task-a", title="test", objective_text="test", upload_ids=[],
+        output_formats=["txt"], provider="local", model=None, external_api_confirmed=False,
+    )
+    monkeypatch.setattr(runtime_mod, "get_store", lambda: store)
+    return store
+
+
+def _bind_stop_runtime(manager, runtime, monkeypatch):
+    monkeypatch.setattr(runtime_mod, "AgenticRuntimeRepository", lambda *_: SimpleNamespace(get=lambda *_: {"run_id": "synthetic-run"}))
+    monkeypatch.setattr(manager, "_kernel_for_run", lambda *_: runtime)
+
+
+@pytest.mark.asyncio
+async def test_restarted_manager_keeps_cleanup_pending_until_retry(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "w.db"))
+    store = _prepare_stop_store(tmp_path, monkeypatch)
+    failed = True
+    stopped = []
+
+    async def cancel(*key):
+        if failed:
+            raise RuntimeError("synthetic cleanup failure")
+        stopped.append(key)
+
+    def restarted():
+        manager = object.__new__(SemanticWorkspaceManager)
+        manager._active, manager._queued = {}, set()
+        _bind_stop_runtime(manager, SimpleNamespace(cancel=cancel), monkeypatch)
+        manager._mark_cancelled = lambda user, task, revision: store.update_semantic_workspace_task(user, task, status="cancelled")
+        return manager
+
+    pending = await restarted().cancel("user-a", "task-a")
+    assert pending["status"] == "cancelling"
+    assert stopped == []
+    failed = False
+    done = await restarted().cancel("user-a", "task-a")
+    assert done["status"] == "cancelled"
+    assert stopped == [("user-a", "task-a", 1)]
 
 
 def _db_with_selection(
@@ -236,8 +282,10 @@ class TestS6Supervision:
             runtime_mod, "RUNTIME_GATE_POLL_SECONDS", 0.02
         )
         monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "w.db"))
+        _prepare_stop_store(tmp_path, monkeypatch)
         runtime = _GateFakeRuntime()
         manager = SemanticWorkspaceManager(pi_runtime=runtime)
+        _bind_stop_runtime(manager, runtime, monkeypatch)
         cancelled_marks: list = []
         monkeypatch.setattr(
             manager,
@@ -281,8 +329,10 @@ class TestS6Supervision:
             runtime_mod, "RUNTIME_GATE_POLL_SECONDS", 0.02
         )
         monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "w.db"))
+        _prepare_stop_store(tmp_path, monkeypatch)
         runtime = _GateFakeRuntime()
         manager = SemanticWorkspaceManager(pi_runtime=runtime)
+        _bind_stop_runtime(manager, runtime, monkeypatch)
         cancelled_marks: list = []
         monkeypatch.setattr(
             manager,
@@ -382,6 +432,7 @@ class TestS6Supervision:
             runtime_mod, "RUNTIME_GATE_POLL_SECONDS", 0.02
         )
         monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "w.db"))
+        migrated_webui_database(tmp_path / "w.db")
         runtime = _GateFakeRuntime()
 
         async def failing_cancel(user_id, task_id, revision):
@@ -390,8 +441,16 @@ class TestS6Supervision:
 
         monkeypatch.setattr(runtime, "cancel", failing_cancel)
         events: list = []
+        states: list = []
+        cancelled_marks: list = []
 
         class _EventStore:
+            def request_semantic_workspace_cancellation(self, user_id, task_id):
+                states.append({"status": "cancelling", "cancel_requested": True})
+
+            def update_semantic_workspace_task(self, user_id, task_id, **kwargs):
+                states.append(kwargs)
+
             def append_semantic_workspace_event(
                 self, user_id, task_id, **kwargs
             ):
@@ -399,6 +458,7 @@ class TestS6Supervision:
 
         monkeypatch.setattr(runtime_mod, "get_store", lambda: _EventStore())
         manager = SemanticWorkspaceManager(pi_runtime=runtime)
+        _bind_stop_runtime(manager, runtime, monkeypatch)
         monkeypatch.setattr(
             manager,
             "_selection_has_capabilities",
@@ -412,7 +472,7 @@ class TestS6Supervision:
         monkeypatch.setattr(
             manager,
             "_mark_cancelled",
-            lambda user_id, task_id, revision: None,
+            lambda user_id, task_id, revision: cancelled_marks.append(task_id),
         )
 
         async def run():
@@ -423,9 +483,11 @@ class TestS6Supervision:
                 )
             assert len(runtime.cancel_calls) == 1
             assert events
-            assert events[0][2]["event_type"] == "gate_cancel_cleanup_failed"
-            assert "容器" in events[0][2]["summary"]
+            assert events[0][2]["event_type"] == "runtime_cleanup_pending"
+            assert "清理" in events[0][2]["summary"]
             assert execution.cancelled()
+            assert states[-1]["status"] == "cancelling"
+            assert cancelled_marks == []
 
         asyncio.run(run())
 
@@ -434,6 +496,8 @@ class TestS6Supervision:
     ) -> None:
         """B1：_run_pi_task 捕获专用异常静默退出，状态保持 cancelled，
         不落 failed 标记（事件流不再矛盾）。"""
+
+        monkeypatch.setattr(settings, "webui_db_path", str(migrated_webui_database(tmp_path / "gate.db")))
 
         class _FakeRuntimeRepository:
             def __init__(self, runtime_row):

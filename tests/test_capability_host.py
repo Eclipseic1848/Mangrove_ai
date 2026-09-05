@@ -5,10 +5,12 @@ import asyncio
 from contextlib import suppress
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,6 +19,7 @@ from src.agentic_runtime.egress_policy import (
     EgressLease,
     EgressPhase,
     SmokescreenEgressController,
+    EgressPolicy,
 )
 from src.agentic_runtime.models import PiRuntimeCheckpoint, PiRuntimeRequest, SourceInput
 from src.agentic_runtime.pi_runtime import PiRuntime, build_docker_command
@@ -36,6 +39,174 @@ def _state_store(tmp_path: Path) -> AgenticRuntimeRepository:
     )
 
 
+@pytest.fixture
+def pi_image_runner(monkeypatch):
+    async def inspect_image(*command, **_kwargs):
+        # Host 编排单测只模拟镜像检查；漏接的执行或清理命令必须失败，不能落到真实 Docker。
+        assert command[:3] == ("docker", "image", "inspect"), command
+
+        async def communicate():
+            return ("sha256:" + "f" * 64).encode("utf-8"), b""
+
+        return SimpleNamespace(returncode=0, communicate=communicate)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", inspect_image)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unknown_creation", [False, True])
+async def test_pi_restart_preserves_cleanup_identity_and_owner(tmp_path, unknown_creation):
+    commands = []
+    failed = True
+
+    async def runner(command):
+        commands.append(command)
+        if command[:3] == ("docker", "network", "rm") and failed:
+            return DockerCommandResult(1, "", "synthetic daemon failure")
+        return DockerCommandResult(0, "f" * 64 if "inspect" in command else "", "")
+
+    state = _state_store(tmp_path)
+
+    def runtime():
+        return PiRuntime(
+            state_store=state, execution_root=tmp_path / "runtime", connection_broker=RecordingBroker(),
+            egress_controller=SmokescreenEgressController(image="test", command_runner=runner),
+        )
+
+    first = runtime()
+    key = ("owner", "task", 1)
+    run_id = "pi_run_1234567890abcdef"
+    root = first.execution_root / "agentic-vnext" / hashlib.sha256(b"owner").hexdigest()[:16] / "task" / "r1" / run_id
+    policy_dir = root / "trace" / "egress-business"
+    policy_dir.mkdir(parents=True)
+    first._plan_resources(SimpleNamespace(user_id="owner", task_id="task", revision=1), run_id, root, policy_dir, False)
+    journal = first._lifecycle_dir(key) / "resources.json"
+    if unknown_creation:
+        (policy_dir / ".creating").write_text("creation_pending", encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        await first.cancel(*key)
+    assert journal.exists()
+    second = runtime()
+    count = len(commands)
+    await second.cancel("another-owner", "task", 1)
+    assert len(commands) == count
+    if unknown_creation:
+        with pytest.raises(RuntimeError, match="创建结果"):
+            await second.cancel(*key)
+        assert journal.exists()
+        # 故障替身现在给出创建已结算的证据，模拟原执行者解除未知结果。
+        (policy_dir / ".creating").unlink()
+    failed = False
+    await second.cancel(*key)
+    assert not journal.exists()
+    assert not second._egress_leases
+
+
+@pytest.mark.asyncio
+async def test_pi_restart_rejects_foreign_journal_before_docker(tmp_path):
+    runtime = PiRuntime(state_store=_state_store(tmp_path), execution_root=tmp_path / "runtime", connection_broker=RecordingBroker())
+    key = ("owner", "task", 1)
+    journal = runtime._lifecycle_dir(key) / "resources.json"
+    journal.write_text(json.dumps({"owner": "other", "task": "task", "revision": 1}), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Owner"):
+        await runtime.cancel(*key)
+    assert journal.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other_worker", [False, True])
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize("barrier", ["network", "proxy", "host", "ready"])
+async def test_pi_cancel_during_resource_creation(tmp_path, monkeypatch, barrier, resume, other_worker):
+    entered, release = asyncio.Event(), asyncio.Event()
+    commands = []
+    enabled = not resume
+
+    async def runner(command):
+        commands.append(command)
+        kind = (
+            "network" if command[:3] == ("docker", "network", "create") else
+            "host" if command[:3] == ("docker", "run", "-d") and "mangrove.capability-host=true" in command else
+            "proxy" if command[:3] == ("docker", "run", "-d") else
+            "ready" if command[:2] == ("docker", "exec") else "other"
+        )
+        if enabled and kind == barrier:
+            entered.set()
+            await release.wait()
+        return DockerCommandResult(0, "f" * 64 if "inspect" in command else "", "")
+
+    source = tmp_path / "source.txt"
+    source.write_text("synthetic", encoding="utf-8")
+    request = PiRuntimeRequest(
+        user_id="owner", task_id="task", revision=1, objective_text="read", requested_output_formats=("txt",),
+        sources=(SourceInput(upload_id="upload", original_name="source.txt", host_path=source, sha256=hashlib.sha256(source.read_bytes()).hexdigest()),),
+        model="test", base_url="http://192.168.1.20:6012/v1", api_key="synthetic-not-in-journal",
+    )
+    host = CapabilityHost(image="test", execution_root=tmp_path / "hosts", command_runner=runner)
+    runtime = PiRuntime(
+        execution_root=tmp_path / "runtime", state_store=_state_store(tmp_path), connection_broker=RecordingBroker(),
+        egress_controller=SmokescreenEgressController(image="test", command_runner=runner), capability_host=host,
+        capability_mount_resolver=lambda *_: (_native_pack(tmp_path / "pack", "prettier"),),
+    )
+    pack = _native_pack(tmp_path / "pack", "prettier")
+    runtime._capability_mount_resolver = lambda *_: (pack,)
+
+    async def no_image():
+        pass
+
+    async def remove(name, _owner_identity):
+        commands.append(("docker", "rm", "-f", name))
+
+    monkeypatch.setattr(runtime, "_assert_image", no_image)
+    monkeypatch.setattr(runtime, "_remove_owned_container", remove)
+    checkpoint = {}
+
+    class Prepared(Exception):
+        pass
+
+    async def event(event):
+        if event.event_type == "runtime.preparing":
+            checkpoint.update(event.details["_checkpoint"])
+            if not enabled:
+                raise Prepared
+
+    run_id = "pi_run_1234567890abcdef"
+    if resume:
+        with pytest.raises(Prepared):
+            await runtime.start(request, run_id=run_id, on_event=event)
+        root = Path(checkpoint["workspace_root"])
+        (root / "session" / "persisted.jsonl").write_text("{}\n", encoding="utf-8")
+        enabled = True
+        operation = runtime.resume(request, checkpoint=PiRuntimeCheckpoint(run_id=run_id, workspace_root=root, container_name=None, session_file="session/persisted.jsonl"), on_event=event)
+    else:
+        operation = runtime.start(request, run_id=run_id, on_event=event)
+    task = asyncio.create_task(operation)
+    await asyncio.wait_for(entered.wait(), 3)
+    journal = runtime._lifecycle_dir(("owner", "task", 1)) / "resources.json"
+    assert "synthetic-not-in-journal" not in journal.read_text(encoding="utf-8")
+    canceller = runtime
+    if other_worker:
+        # 独立实例无执行Task/Lease，只能依赖持久标记和操作系统文件锁。
+        canceller = PiRuntime(
+            execution_root=runtime.execution_root, state_store=runtime._state_store,
+            connection_broker=RecordingBroker(), egress_controller=runtime.egress_controller, capability_host=host,
+        )
+        monkeypatch.setattr(canceller, "_remove_owned_container", remove)
+    cancel = asyncio.create_task(canceller.cancel("owner", "task", 1))
+    await asyncio.sleep(0.02)
+    if barrier != "ready":
+        assert not cancel.done()
+    release.set()
+    await asyncio.wait_for(cancel, 3)
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    count = len(commands)
+    await runtime.cancel("owner", "task", 1)
+    assert len(commands) == count
+    assert not journal.exists()
+    assert not runtime._containers and not runtime._egress_leases and not runtime._capability_host_leases
+
+
 def test_capability_host_is_disabled_by_default() -> None:
     """原生能力仍是显式灰度项，不能改变既有任务的默认执行路径。"""
     assert Settings.model_fields["pi_capability_host_enabled"].default is False
@@ -49,7 +220,7 @@ class RecordingDocker:
 
     async def __call__(self, command: tuple[str, ...]) -> DockerCommandResult:
         self.commands.append(command)
-        return DockerCommandResult(returncode=0, stdout="", stderr="")
+        return DockerCommandResult(returncode=0, stdout="f" * 64 if "inspect" in command else "", stderr="")
 
 
 class FailedRemovalDocker(RecordingDocker):
@@ -57,7 +228,44 @@ class FailedRemovalDocker(RecordingDocker):
         self.commands.append(command)
         if command[:3] == ("docker", "rm", "-f"):
             return DockerCommandResult(returncode=1, stdout="", stderr="daemon unavailable")
-        return DockerCommandResult(returncode=0, stdout="", stderr="")
+        return DockerCommandResult(returncode=0, stdout="f" * 64 if "inspect" in command else "", stderr="")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["host", "egress"])
+async def test_predicted_resource_collision_never_removes_foreign_owner(tmp_path, kind):
+    commands = []
+
+    async def runner(command):
+        commands.append(command)
+        if "inspect" in command:
+            return DockerCommandResult(0, "", "")
+        return DockerCommandResult(1, "", "name already in use")
+
+    if kind == "host":
+        host = CapabilityHost(image="test", execution_root=tmp_path / "hosts", command_runner=runner)
+        operation = host.start(CapabilityHostRequest(user_id="owner", task_id="task", revision=1, run_id="run", network_name="network", capability_dirs=(_native_pack(tmp_path / "pack", "prettier"),)))
+    else:
+        controller = SmokescreenEgressController(image="test", command_runner=runner)
+        operation = controller.start(policy=EgressPolicy.for_business_execution(model_base_url="http://192.168.1.20:6012/v1"), user_id="owner", task_id="task", revision=1, run_id="run", policy_dir=tmp_path / "policy")
+    with pytest.raises(RuntimeError, match="身份不匹配"):
+        await operation
+    assert not any("rm" in command or "stop" in command or "logs" in command for command in commands)
+
+
+@pytest.mark.asyncio
+async def test_host_cleanup_uses_verified_id_instead_of_predicted_name(tmp_path):
+    commands = []
+
+    async def runner(command):
+        commands.append(command)
+        return DockerCommandResult(0, "a" * 64 if "inspect" in command else "", "")
+
+    host = CapabilityHost(image="test", execution_root=tmp_path / "hosts", command_runner=runner)
+    lease = host.cleanup_lease("owner", "task", 1, "run")
+    await host.stop(lease)
+    assert commands[-1] == ("docker", "rm", "-f", "a" * 64)
+    assert lease.container_name not in commands[-1]
 
 
 class HangingDocker(RecordingDocker):
@@ -65,6 +273,36 @@ class HangingDocker(RecordingDocker):
         self.commands.append(command)
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("barrier", ["run", "exec"])
+async def test_host_creation_cancel_waits_and_cleans(tmp_path, barrier):
+    entered, release = asyncio.Event(), asyncio.Event()
+    commands = []
+
+    async def runner(command):
+        commands.append(command)
+        if command[1] == barrier:
+            entered.set()
+            await release.wait()
+        return DockerCommandResult(0, "f" * 64 if "inspect" in command else "", "")
+
+    host = CapabilityHost(image="test", execution_root=tmp_path / "hosts", command_runner=runner)
+    task = asyncio.create_task(host.start(CapabilityHostRequest(
+        user_id="owner", task_id="task", revision=1, run_id="run", network_name="network",
+        capability_dirs=(_native_pack(tmp_path / "pack", "prettier"),),
+    )))
+    await entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    if barrier == "run":
+        assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert commands[-1][:3] == ("docker", "rm", "-f")
+    assert not any((tmp_path / "hosts").iterdir())
 
 
 class FailingHostCleanup:
@@ -158,7 +396,7 @@ async def test_capability_host_starts_one_isolated_sidecar_for_multiple_packs(
 
     await host.stop(lease)
 
-    assert any(item[:4] == ("docker", "rm", "-f", lease.container_name) for item in docker.commands)
+    assert any(item[:4] == ("docker", "rm", "-f", "f" * 64) for item in docker.commands)
     assert not lease.runtime_dir.exists()
 
 
@@ -216,6 +454,7 @@ async def test_capability_host_preserves_runtime_evidence_when_forced_remove_fai
         capability_names=("prettier",),
         capability_kinds=(("prettier", "node"),),
         runtime_dir=runtime_dir,
+        owner_identity="a" * 64,
     )
 
     with pytest.raises(RuntimeError, match="无法清理 Capability Host"):
@@ -283,6 +522,7 @@ async def test_pi_cancel_revokes_network_and_revision_when_host_cleanup_fails(
         proxy_container_name="mangrove-pi-proxy-cleanup",
         proxy_url="http://mangrove-pi-proxy-cleanup:4750",
         policy_dir=policy_dir,
+        owner_identity="a" * 64,
     )
 
     with pytest.raises(Exception, match="任务授权清理未完全成功"):
@@ -323,6 +563,7 @@ async def test_capability_host_rejects_empty_or_remote_only_selection(
 @pytest.mark.asyncio
 async def test_pi_runtime_uses_sidecar_only_for_native_capability(
     tmp_path: Path,
+    pi_image_runner,
 ) -> None:
     docker = RecordingDocker()
     pack = _native_pack(tmp_path / "pack", "prettier")
@@ -428,7 +669,7 @@ async def test_pi_runtime_uses_sidecar_only_for_native_capability(
 
 
 @pytest.mark.asyncio
-async def test_pi_runtime_cancel_revokes_host_before_return(tmp_path: Path) -> None:
+async def test_pi_runtime_cancel_revokes_host_before_return(tmp_path: Path, pi_image_runner) -> None:
     docker = RecordingDocker()
     broker = RecordingBroker()
     pack = _native_pack(tmp_path / "pack", "prettier")
@@ -484,11 +725,15 @@ async def test_pi_runtime_cancel_revokes_host_before_return(tmp_path: Path) -> N
     with suppress(asyncio.CancelledError):
         await task
 
-    host_remove = max(
+    host_stop = max(
         index
         for index, item in enumerate(docker.commands)
-        if item[:3] == ("docker", "rm", "-f")
-        and item[3].startswith("mangrove-cap-host-")
+        if item[:3] == ("docker", "stop", "--time")
+    )
+    host_remove = next(
+        index
+        for index, item in enumerate(docker.commands)
+        if index > host_stop and item[:4] == ("docker", "rm", "-f", "f" * 64)
     )
     network_remove = next(
         index
@@ -499,6 +744,7 @@ async def test_pi_runtime_cancel_revokes_host_before_return(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(os.environ.get("MANGROVE_RUN_DOCKER_TESTS") != "1", reason="真实 Docker 验证需显式启用")
 async def test_real_capability_host_invokes_command_without_business_mounts(
     tmp_path: Path,
 ) -> None:

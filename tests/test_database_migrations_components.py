@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from contextlib import closing
 from pathlib import Path
+import hashlib
+import shutil
 import sqlite3
 
 from alembic import command
@@ -10,7 +12,10 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
 
-from src.database_migrations import DatabaseTarget, apply_migrations
+from src.database_migrations import (
+    DatabaseTarget, SchemaNotCurrentError, apply_migrations, inspect_database,
+    verify_restored_copy,
+)
 
 
 _CENTRAL_BACKUP_SHA256 = "a" * 64
@@ -41,6 +46,96 @@ def _upgrade(
             connection.commit()
     finally:
         engine.dispose()
+
+
+def test_webui_0010_preserves_source_history_and_supports_recovery(tmp_path: Path) -> None:
+    from src.api.store import WebUIStore
+
+    database = tmp_path / "webui.db"
+    _upgrade(database, "webui_0009")
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            "INSERT INTO semantic_workspace_tasks "
+            "(task_id, user_id, title, objective_text, created_at, updated_at) "
+            "VALUES ('task-old', 'owner-test', '历史任务', '保留任务目标', '2026-09-05', '2026-09-05')"
+        )
+        connection.execute(
+            "INSERT INTO source_acquisition_attempts "
+            "(attempt_id, owner_id, idempotency_key, request_hash, request_url, "
+            "normalized_url, allowed_scope_json, purpose, status, started_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("attempt-old", "owner-test", "request-old", "a" * 64,
+             "https://example.invalid/", "https://example.invalid/", "{}",
+             "历史来源", "succeeded", "2026-09-05T00:00:00Z"),
+        )
+        connection.execute(
+            "INSERT INTO source_snapshots "
+            "(snapshot_id, owner_id, attempt_id, allowed_scope_json, "
+            "valid_page_count, failed_page_count, created_at) "
+            "VALUES ('snapshot-old', 'owner-test', 'attempt-old', '{}', 1, 0, '2026-09-05')"
+        )
+        connection.execute(
+            "INSERT INTO source_artifacts "
+            "(artifact_id, owner_id, snapshot_id, request_url, final_url, read_at, "
+            "content_sha256, media_type, size_bytes, title, text_preview, content_blob) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("artifact-old", "owner-test", "snapshot-old", "https://example.invalid/",
+             "https://example.invalid/", "2026-09-05", "b" * 64, "text/plain",
+             7, "历史标题", "历史正文", b"history"),
+        )
+        history = {
+            table: connection.execute(f"SELECT * FROM {table}").fetchall()
+            for table in (
+                "source_acquisition_attempts", "source_snapshots", "source_artifacts",
+                "semantic_workspace_tasks",
+            )
+        }
+        connection.commit()
+    before = database.read_bytes()
+    target = DatabaseTarget("webui", database)
+    assert inspect_database(target).pending_revisions == ("webui_0010",)
+    with pytest.raises(SchemaNotCurrentError):
+        WebUIStore(str(database))
+    assert database.read_bytes() == before
+
+    receipt = apply_migrations(
+        target, tmp_path / "before-0010.db",
+        expected_source_sha256=hashlib.sha256(before).hexdigest(),
+    )
+    assert receipt.source_revision == "webui_0009"
+    assert receipt.applied_revisions == ("webui_0010",)
+    with closing(sqlite3.connect(database)) as connection:
+        columns = {row[1]: row for row in connection.execute(
+            "PRAGMA table_info(source_acquisition_attempts)"
+        )}
+        assert columns["cancel_requested_at"][2:5] == ("TEXT", 0, None)
+        assert columns["request_context"][2:5] == ("TEXT", 1, "''")
+        rows = connection.execute("SELECT * FROM source_acquisition_attempts").fetchall()
+        assert rows == [(*row, None, "") for row in history["source_acquisition_attempts"]]
+        task_columns = {row[1]: row for row in connection.execute(
+            "PRAGMA table_info(semantic_workspace_tasks)"
+        )}
+        assert task_columns["cancel_generation"][2:5] == ("INTEGER", 1, "0")
+        assert connection.execute("SELECT * FROM semantic_workspace_tasks").fetchall() == [
+            (*row, 0) for row in history["semantic_workspace_tasks"]
+        ]
+        for table in ("source_snapshots", "source_artifacts"):
+            assert connection.execute(f"SELECT * FROM {table}").fetchall() == history[table]
+    inspect_database(target).require_current()
+
+    restored = tmp_path / "restored-0009.db"
+    shutil.copyfile(receipt.backup_path, restored)
+    verification = verify_restored_copy(receipt.receipt_path, restored)
+    assert verification.integrity_check == "ok"
+    assert verification.backup_sha256 == receipt.backup_sha256
+    assert inspect_database(DatabaseTarget("webui", restored)).current_revision == "webui_0009"
+    with closing(sqlite3.connect(restored)) as connection:
+        for table, rows in history.items():
+            assert connection.execute(f"SELECT * FROM {table}").fetchall() == rows
+    current = database.read_bytes()
+    replay = apply_migrations(target, tmp_path / "before-replay.db")
+    assert replay.applied_revisions == ()
+    assert database.read_bytes() == current
 
 
 def test_current_webui_installs_component_schemas_and_evidence(tmp_path: Path) -> None:
@@ -75,7 +170,7 @@ def test_current_webui_installs_component_schemas_and_evidence(tmp_path: Path) -
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("webui_0009",)
+        ).fetchone() == ("webui_0010",)
         candidate_rows = connection.execute(
             "SELECT migration_id, backup_sha256 "
             "FROM candidate_verification_migrations ORDER BY migration_id"
@@ -211,7 +306,7 @@ def test_current_webui_resumes_known_history_without_rewriting_evidence(
             )
         connection.commit()
 
-    _upgrade(database, "webui_0009")
+    _upgrade(database, "webui_0010")
 
     attempts = SqliteCandidateVerificationRepository(database).list_for_candidate(
         "owner-a",

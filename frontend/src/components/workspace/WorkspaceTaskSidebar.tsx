@@ -36,12 +36,12 @@ const STATUS: Record<
     className: "text-amber-600 dark:text-amber-400",
   },
   cancelling: {
-    label: "正在取消",
+    label: "正在停止",
     icon: Loader2,
     className: "text-slate-500",
   },
   cancelled: {
-    label: "已取消",
+    label: "已停止",
     icon: CircleStop,
     className: "text-slate-500",
   },

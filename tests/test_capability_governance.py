@@ -1823,6 +1823,7 @@ def test_governance_validation_rejects_undeclared_permission_or_docker_socket(
     import subprocess
 
     from src.capability_governance import CapabilityGovernanceTarget
+    from src.capability_host import CapabilityHost
 
     catalog = CapabilityCatalog(InMemoryCapabilityCatalogRepository())
     repository = InMemoryCapabilityGovernanceRepository()
@@ -1872,7 +1873,7 @@ def test_governance_validation_rejects_undeclared_permission_or_docker_socket(
     production = TaskEvidenceValidationExecutor(
         task_resolver=Resolver(),
         capability_mounts=lambda *_args: (mount,),
-        capability_host=object(),
+        capability_host=CapabilityHost(image="synthetic-host", execution_root=tmp_path / "host"),
         execution_root=tmp_path / "runtime",
         task_replay=lambda _run: {},
     )
@@ -2045,6 +2046,10 @@ def test_production_validation_executor_runs_host_denial_verifier_and_cleanup(
             self.started = 0
             self.stopped = 0
 
+        def cleanup_lease(self, *identity):
+            from src.capability_host import CapabilityHost
+            return CapabilityHost(image="synthetic-host", execution_root=tmp_path / "runtime").cleanup_lease(*identity)
+
         async def start(self, request):
             self.started += 1
             runtime_dir = tmp_path / "runtime" / "active"
@@ -2180,6 +2185,10 @@ def test_production_cleanup_does_not_treat_docker_daemon_failure_as_absent(
     from src.capability_governance import CapabilityGovernanceTarget, CapabilityValidationRun
 
     class Host:
+        def cleanup_lease(self, *identity):
+            from src.capability_host import CapabilityHost
+            return CapabilityHost(image="synthetic-host", execution_root=tmp_path / "runtime").cleanup_lease(*identity)
+
         async def stop(self, _lease):
             return None
 

@@ -504,6 +504,7 @@ export interface WorkspaceStorage {
 
 export type SourceAcquisitionStatus =
   | "acquiring"
+  | "cancelling"
   | "succeeded"
   | "failed"
   | "canceled";

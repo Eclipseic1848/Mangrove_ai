@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import sqlite3
 import subprocess
@@ -36,7 +37,8 @@ def test_preflight_reports_every_outdated_database_before_startup(tmp_path: Path
             "--scheduler-database",
             str(scheduler_database),
         ],
-        cwd=PROJECT_ROOT,
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(PROJECT_ROOT)},
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -45,7 +47,7 @@ def test_preflight_reports_every_outdated_database_before_startup(tmp_path: Path
 
     assert completed.returncode == 1
     assert "数据库迁移预检失败" in completed.stdout
-    assert "webui: legacy -> webui_0009" in completed.stdout
+    assert "webui: legacy -> webui_0010" in completed.stdout
     assert "scheduler: legacy -> scheduler_0001" in completed.stdout
     assert "python -m src.database_migrations apply --profile webui" in completed.stdout
     assert "python -m src.database_migrations apply --profile scheduler" in completed.stdout
@@ -83,7 +85,8 @@ def test_preflight_allows_startup_when_every_database_is_current(tmp_path: Path)
             "--scheduler-database",
             str(scheduler_database),
         ],
-        cwd=PROJECT_ROOT,
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(PROJECT_ROOT)},
         capture_output=True,
         text=True,
         encoding="utf-8",
