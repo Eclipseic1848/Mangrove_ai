@@ -1,5 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Route } from "@playwright/test";
 
 const guidance = {
   schema_version: "1",
@@ -325,6 +325,146 @@ function sourceAttempt(
 }
 
 test.describe("统一数据工作台", () => {
+  test("已完成任务的长来源刷新仍可停止且不提前确认", async ({ page }) => {
+    // 拦住所有未声明的 API，隔离开发入口不会转发到真实服务。
+    await page.route("**/api/**", (route) => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    let status = "completed";
+    let refreshing: Route | undefined;
+    const task = workspaceTask("task-refresh-stop", status, "停止网页刷新");
+    const snapshot = sourceAttempt("succeeded").snapshot!;
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [{ ...task, status }] }));
+    await page.route("**/api/semantic-workspace/tasks/task-refresh-stop", (route) =>
+      route.fulfill({ json: workspaceDetail({ ...task, status }, {
+        web_source: { source_snapshot_id: snapshot.snapshot_id, snapshot },
+      }) }));
+    await page.route("**/api/semantic-workspace/tasks/task-refresh-stop/source-refresh", (route) => {
+      refreshing = route;
+    });
+    await page.route("**/api/semantic-workspace/tasks/task-refresh-stop/cancel", (route) => {
+      status = "cancelling";
+      return route.fulfill({ json: { ...task, status } });
+    });
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /停止网页刷新/ }).click();
+    await expect(page.getByRole("button", { name: "取消任务", exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "获取最新网页", exact: true }).click();
+    await expect.poll(() => Boolean(refreshing)).toBe(true);
+    await page.getByRole("button", { name: "取消任务", exact: true }).click();
+    await page.getByRole("button", { name: "确认取消", exact: true }).click();
+    await expect(page.getByText("正在停止，等待读取和资源清理完成。", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "重试停止", exact: true })).toBeVisible();
+    await expect(page.getByText("已停止", { exact: true })).toHaveCount(0);
+    await refreshing!.fulfill({ status: 409, json: { detail: "来源刷新已请求停止" } });
+    await expect(page.getByText("来源刷新已请求停止", { exact: true })).toBeVisible();
+    await expect(page.getByText("正在停止，等待读取和资源清理完成。", { exact: true })).toBeVisible();
+  });
+
+  test("来源请求被拒绝后仍可修改网址", async ({ page }) => {
+    await mockWorkspace(page);
+    await page.route("**/api/semantic-workspace/source-acquisitions", (route) =>
+      route.fulfill({ status: 422, json: { detail: "网址不在允许范围" } }));
+    await page.goto("/data-prep");
+    await page.getByRole("radio", { name: "公开网页" }).focus();
+    await page.getByRole("radio", { name: "公开网页" }).press("Space");
+    await page.getByLabel("精确网址").fill("https://example.com/article");
+    await page.getByRole("button", { name: "获取网页", exact: true }).click();
+    await expect(page.getByText("网址不在允许范围", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("精确网址")).toBeEnabled();
+    await expect(page.getByRole("button", { name: "获取网页", exact: true })).toBeEnabled();
+    expect(await page.evaluate(() => localStorage.getItem("mangrove_web_source_attempt_u1"))).toBeNull();
+  });
+
+  test("来源长首请求可取得停止身份并跨刷新等待已停止", async ({ page }, testInfo) => {
+    await mockWorkspace(page);
+    let status = "acquiring";
+    let firstRequest: Route | undefined;
+    const keys: string[] = [];
+    const saved = () => sourceAttempt("failed", {
+      attempt_id: "source-stopping", idempotency_key: keys[0], status,
+      error_code: null, error_message: null,
+      finished_at: status === "canceled" ? "2026-09-05T12:00:00Z" : null,
+    });
+    await page.route("**/api/semantic-workspace/source-acquisitions", async (route) => {
+      keys.push(route.request().headers()["idempotency-key"] ?? "");
+      if (keys.length === 1) {
+        firstRequest = route;
+        return;
+      }
+      await route.fulfill({ status: 202, json: saved() });
+    });
+    await page.route("**/api/semantic-workspace/source-acquisitions/source-stopping", (route) =>
+      route.fulfill({ json: saved() }));
+    await page.route("**/api/semantic-workspace/source-acquisitions/source-stopping/cancel", (route) => {
+      status = "cancelling";
+      return route.fulfill({ json: saved() });
+    });
+    await page.goto("/data-prep");
+    await page.getByRole("radio", { name: "公开网页" }).focus();
+    await page.getByRole("radio", { name: "公开网页" }).press("Space");
+    await page.getByLabel("精确网址").fill("https://example.com/article");
+    await page.getByRole("button", { name: "获取网页", exact: true }).click();
+    await page.getByRole("button", { name: "取消获取" }).click();
+    await expect(page.getByRole("status").filter({ hasText: "正在停止来源获取" })).toBeVisible();
+    expect(keys.length).toBeGreaterThanOrEqual(2);
+    expect(new Set(keys).size).toBe(1);
+    const postCount = keys.length;
+    // 迟到的首个响应不能覆盖已观察到的停止状态。
+    await firstRequest!.fulfill({ status: 202, json: { ...saved(), status: "acquiring" } });
+    const observed = page.waitForResponse((response) =>
+      response.request().method() === "GET" && response.url().endsWith("/source-stopping"));
+    await observed;
+    await expect(page.getByText("正在停止来源获取", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "清除网页来源" })).toHaveCount(0);
+    await page.reload();
+    await page.getByRole("radio", { name: "公开网页" }).focus();
+    await page.getByRole("radio", { name: "公开网页" }).press("Space");
+    await expect(page.getByText("正在停止来源获取", { exact: true })).toBeVisible();
+    status = "canceled";
+    await expect(page.getByText("来源获取已停止", { exact: true })).toBeVisible();
+    const stoppedScreenshot = testInfo.outputPath("source-stopped.png");
+    await page.screenshot({ path: stoppedScreenshot });
+    await testInfo.attach("source-stopped", { path: stoppedScreenshot, contentType: "image/png" });
+    expect(keys).toHaveLength(postCount);
+    await page.getByRole("button", { name: "清除网页来源" }).click();
+    await expect(page.getByRole("button", { name: "获取网页", exact: true })).toBeVisible();
+  });
+
+  test("任务清理未完成可重试停止并显示已停止", async ({ page }, testInfo) => {
+    await mockWorkspace(page);
+    let status = "running";
+    let stopCalls = 0;
+    const task = workspaceTask("task-cleanup", status, "清理重试任务");
+    await page.route("**/api/semantic-workspace/tasks?*", (route) =>
+      route.fulfill({ json: [{ ...task, status }] }));
+    await page.route("**/api/semantic-workspace/tasks/task-cleanup", (route) =>
+      route.fulfill({ json: workspaceDetail({ ...task, status }, {
+        events: status === "cancelling" ? [{
+          event_id: "cleanup-pending", sequence: 1, stage: "cancelling",
+          event_type: "runtime_cleanup_pending", summary: "正在停止，资源清理尚未完成，可重试停止",
+          details: { recovery_status: "pending" }, created_at: task.updated_at,
+        }] : [],
+      }) }));
+    await page.route("**/api/semantic-workspace/tasks/task-cleanup/cancel", (route) => {
+      stopCalls += 1;
+      status = stopCalls === 1 ? "cancelling" : "cancelled";
+      return route.fulfill({ json: { ...task, status } });
+    });
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /清理重试任务/ }).click();
+    await page.getByRole("button", { name: "取消任务", exact: true }).click();
+    await page.getByRole("button", { name: "确认取消", exact: true }).click();
+    await expect(page.getByText("清理未完成，任务仍在停止中。可重试停止。", { exact: true })).toBeVisible();
+    const cleanupScreenshot = testInfo.outputPath("cleanup-pending.png");
+    await page.screenshot({ path: cleanupScreenshot });
+    await testInfo.attach("cleanup-pending", { path: cleanupScreenshot, contentType: "image/png" });
+    await page.getByRole("button", { name: "重试停止", exact: true }).click();
+    await expect(page.getByText("任务已停止，未发布新的正式交付。你可以从原要求创建新版本。", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "重试停止", exact: true })).toHaveCount(0);
+    expect(stopCalls).toBe(2);
+  });
+
   for (const item of [
     { theme: "light" as const, width: 1366, height: 768 },
     { theme: "dark" as const, width: 1920, height: 1080 },
@@ -2050,9 +2190,9 @@ test.describe("统一数据工作台", () => {
     await page.getByRole("button", { name: "稍后回答" }).click();
     await page.getByRole("button", { name: "取消任务" }).click();
     await page.getByRole("button", { name: "确认取消" }).click();
-    await expect(page.getByText("任务已取消，未发布新的正式交付。")).toBeVisible();
+    await expect(page.getByText("任务已停止，未发布新的正式交付。你可以从原要求创建新版本。")).toBeVisible();
     await expect(page.getByLabel("需要你处理后才能继续")).toHaveCount(0);
-    await expect(page.getByText("已取消", { exact: true }).first()).toBeVisible();
+    await expect(page.getByText("已停止", { exact: true }).first()).toBeVisible();
   });
 
   test("历史任务详情加载失败时说明原因并可重试恢复", async ({ page }) => {

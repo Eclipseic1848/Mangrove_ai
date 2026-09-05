@@ -488,19 +488,8 @@ class TaskEvidenceValidationExecutor(CapabilityValidationExecutor):
             raise RuntimeError("Capability Host 未使用 internal 隔离网络")
 
     def _stale_lease(self, run: CapabilityValidationRun) -> CapabilityHostLease:
-        identity = self._identity(run)
-        safe_task = re.sub(
-            r"[^a-z0-9-]",
-            "-",
-            run.task_ref.task_id.casefold(),
-        )[-16:]
-        return CapabilityHostLease(
-            container_name=f"mangrove-cap-host-{safe_task}-{identity}"[:63],
-            relay_url="http://invalid:8765",
-            relay_token="stale-validation-token",
-            capability_names=(),
-            capability_kinds=(),
-            runtime_dir=(self._execution_root / identity).resolve(),
+        return self._capability_host.cleanup_lease(
+            run.owner_id, run.task_ref.task_id, run.task_ref.revision, run.run_id,
         )
 
     @staticmethod

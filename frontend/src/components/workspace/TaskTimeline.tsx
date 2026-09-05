@@ -39,7 +39,8 @@ const STAGE_LABELS: Record<string, string> = {
   repair: "自动修复",
   deliver: "正式交付",
   needs_input: "等待确认",
-  cancelled: "任务取消",
+  cancelling: "正在停止",
+  cancelled: "已停止",
   failed: "任务失败",
   goal_interpretation: "目标理解",
   source_probe: "来源识别",
@@ -517,6 +518,7 @@ export function TaskTimeline({
   const [retryingUnknown, setRetryingUnknown] = useState(false);
   const [refreshingSource, setRefreshingSource] = useState(false);
   const [gapAction, setGapAction] = useState<string | null>(null);
+  const [retryingStop, setRetryingStop] = useState(false);
   const events = useMemo(() => {
     const map = new Map<string, WorkspaceEvent>();
     [...(task.events || []), ...(task.harness_events || []), ...liveEvents].forEach(
@@ -527,8 +529,12 @@ export function TaskTimeline({
         new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
     );
   }, [liveEvents, task.events, task.harness_events]);
-  const canCancel = ["queued", "running", "needs_input", "cancelling"].includes(
+  const canCancel = refreshingSource || ["queued", "running", "needs_input", "cancelling"].includes(
     task.status,
+  );
+  const cleanupPending = task.status === "cancelling" && events.some(
+    (event) => event.event_type === "runtime_cleanup_pending"
+      && event.details.recovery_status === "pending",
   );
   const milestones = useMemo(() => {
     if (!task.progress) return buildMilestones(events, task.status);
@@ -719,6 +725,20 @@ export function TaskTimeline({
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          {task.status === "cancelling" && (
+            <button
+              type="button"
+              disabled={retryingStop}
+              onClick={() => {
+                setRetryingStop(true);
+                void onCancel().finally(() => setRetryingStop(false));
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted disabled:opacity-50"
+            >
+              <RotateCcw className="h-3.5 w-3.5" />
+              {retryingStop ? "正在重试停止" : "重试停止"}
+            </button>
+          )}
           {canCancel && task.status !== "cancelling" && (
             <AlertDialog.Root>
               <AlertDialog.Trigger asChild>
@@ -1287,10 +1307,16 @@ export function TaskTimeline({
         </div>
       )}
 
+      {task.status === "cancelling" && (
+        <div role="status" className="mt-3 rounded-2xl border bg-muted/25 p-4 text-sm text-muted-foreground">
+          {cleanupPending ? "清理未完成，任务仍在停止中。可重试停止。" : "正在停止，等待读取和资源清理完成。"}
+        </div>
+      )}
+
       {task.status === "cancelled" && (
         <div className="mt-3 flex items-center gap-3 rounded-2xl border bg-muted/25 p-4 text-sm text-muted-foreground">
           <CircleStop className="h-5 w-5" />
-          任务已取消，未发布新的正式交付。你可以从原要求创建新版本。
+          任务已停止，未发布新的正式交付。你可以从原要求创建新版本。
         </div>
       )}
 

@@ -2546,6 +2546,7 @@ class WebUIStore:
                 else None
             ),
             "cancel_requested": bool(row["cancel_requested"]),
+            "cancel_generation": int(row["cancel_generation"]),
             "deleted_at": row["deleted_at"],
             "purge_after": row["purge_after"],
             "created_at": row["created_at"],
@@ -2949,6 +2950,19 @@ class WebUIStore:
         assert saved is not None
         return saved
 
+    def request_semantic_workspace_cancellation(self, user_id: str, task_id: str) -> Dict[str, Any]:
+        with self._lock, self._conn() as conn:
+            cursor = conn.execute(
+                "UPDATE semantic_workspace_tasks SET cancel_generation=cancel_generation+1, "
+                "updated_at=? WHERE user_id=? AND task_id=?",
+                (_now(), user_id, task_id),
+            )
+            if cursor.rowcount != 1:
+                raise KeyError("工作台任务不存在或无权访问")
+        saved = self.get_semantic_workspace_task(user_id, task_id)
+        assert saved is not None
+        return saved
+
     def create_semantic_workspace_revision(
         self,
         user_id: str,
@@ -2960,6 +2974,7 @@ class WebUIStore:
         source_refs: List[Dict[str, str]] | None = None,
         table_output_contracts: List[Dict[str, Any]] | None = None,
         expected_revision: int | None = None,
+        expected_cancel_generation: int | None = None,
         transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     ) -> Dict[str, Any]:
         now = _now()
@@ -2979,6 +2994,9 @@ class WebUIStore:
             if task is None:
                 raise KeyError("工作台任务不存在或无权访问")
             revision = int(task["active_revision"]) + 1
+            if expected_cancel_generation is not None and task["cancel_generation"] != expected_cancel_generation:
+                # 与版本创建共用写事务；停止期间的异步准备不得重新启动任务。
+                raise RuntimeError("任务已收到新的停止请求，禁止提交迟到 Revision")
             if expected_revision is not None and revision != expected_revision:
                 raise RuntimeError("活动版本已变化，禁止创建路由错配的 Revision")
             publish_intents = conn.execute(

@@ -524,7 +524,6 @@ class DockerBuildkitAcquisitionEnvironment:
         workspace = lease.workspace.resolve()
         if self._workspace_root not in workspace.parents:
             raise RuntimeError("拒绝清理能力获取根目录之外的路径")
-        try:
-            await self._egress_controller.stop(lease.egress)
-        finally:
-            shutil.rmtree(workspace)
+        await self._egress_controller.stop(lease.egress)
+        # 撤权失败时保留清理身份和证据，供恢复重试。
+        shutil.rmtree(workspace)

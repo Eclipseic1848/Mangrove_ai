@@ -3204,9 +3204,17 @@ async def create_revision(
     payload: WorkspaceRevisionIn,
     user=Depends(get_current_user),
 ):
+    return await _create_revision(task_id, payload, user)
+
+
+async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, expected_cancel_generation: int | None = None):
     user_id = user["user_id"]
     store = get_store()
     task = _task_or_404(user_id, task_id)
+    if expected_cancel_generation is None:
+        expected_cancel_generation = task["cancel_generation"]
+    elif task["cancel_generation"] != expected_cancel_generation:
+        raise HTTPException(status_code=409, detail="任务已收到新的停止请求，来源刷新未创建新版本")
     if int(task["active_revision"]) != payload.expected_active_revision:
         # 风险确认只对用户刚看到的失败版本有效，不能被旧页面重复使用。
         raise HTTPException(
@@ -3361,8 +3369,10 @@ async def create_revision(
         "failed",
         "cancelled",
     }:
-        await get_semantic_workspace_manager().cancel(user_id, task_id)
+        await get_semantic_workspace_manager().cancel(user_id, task_id, for_revision=True)
         task = _task_or_404(user_id, task_id)
+        if task["status"] == "cancelling":
+            raise HTTPException(status_code=409, detail="旧任务仍在停止，请在清理完成后再创建新版本")
     if int(task["active_revision"]) + 1 != expected_revision:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -3513,6 +3523,7 @@ async def create_revision(
             ),
             expected_revision=expected_revision,
             transaction_hook=transaction_hook,
+            expected_cancel_generation=expected_cancel_generation,
         )
     except RuntimeError as exc:
         raise HTTPException(
@@ -3768,6 +3779,14 @@ async def refresh_task_source(
         f"{hashlib.sha256(idempotency_key.encode('utf-8')).hexdigest()}"
     )
     existing_attempt = repository.get_by_idempotency_key(user_id, refresh_key)
+    cancel_generation = task["cancel_generation"]
+
+    def refresh_cancelled() -> bool:
+        current = store.get_semantic_workspace_task(user_id, task_id)
+        return current is None or current["cancel_generation"] != cancel_generation or current["status"] in {"cancelling", "cancelled"}
+
+    if refresh_cancelled():
+        raise HTTPException(status_code=409, detail="任务正在停止或已停止，请明确创建新版本后再刷新")
     if (
         existing_attempt is None
         and int(task["active_revision"]) != payload.expected_active_revision
@@ -3790,14 +3809,17 @@ async def refresh_task_source(
                 required_valid_pages=completeness.get("required_valid_pages"),
                 request_context=(
                     f"source-refresh:{task_id}:revision:"
-                    f"{payload.expected_active_revision}"
+                    f"{payload.expected_active_revision}:cancel:{cancel_generation}"
                 ),
             ),
             resume_unknown=payload.resume_unknown,
+            cancel_if=refresh_cancelled,
         )
     except AcquisitionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    if attempt["status"] == "acquiring":
+    if refresh_cancelled():
+        raise HTTPException(status_code=409, detail="任务已收到新的停止请求，来源刷新未创建新版本")
+    if attempt["status"] in {"acquiring", "cancelling"}:
         # 结果未知时不切换版本；调用方用相同幂等键恢复该 Attempt。
         return {"status": "acquiring", "attempt": attempt, "revision": None}
     if attempt["status"] != "succeeded" or attempt.get("snapshot") is None:
@@ -3890,7 +3912,7 @@ async def refresh_task_source(
             detail="来源已刷新但活动版本发生变化；请保留幂等键并重新确认",
         )
     try:
-        revision = await create_revision(
+        revision = await _create_revision(
             task_id,
             WorkspaceRevisionIn(
                 instruction="按原授权范围刷新网页来源",
@@ -3899,6 +3921,7 @@ async def refresh_task_source(
                 source_snapshot_id=snapshot["snapshot_id"],
             ),
             user,
+            expected_cancel_generation=cancel_generation,
         )
     except HTTPException as exc:
         existing_revision = store.find_web_task_revision_by_snapshot(

@@ -753,9 +753,9 @@ async def test_pi_external_mode_uses_relay_grant_without_provider_secret(
         return ImageInspectProcess()
 
     async def record_docker(
-        _command: tuple[str, ...],
+        command: tuple[str, ...],
     ) -> DockerCommandResult:
-        return DockerCommandResult(returncode=0, stdout="", stderr="")
+        return DockerCommandResult(returncode=0, stdout="f" * 64 if "inspect" in command else "", stderr="")
 
     monkeypatch.setattr(
         asyncio,
@@ -1112,7 +1112,7 @@ async def test_egress_controller_uses_internal_network_and_cleans_up(
 
     async def record(command: tuple[str, ...]) -> DockerCommandResult:
         commands.append(command)
-        return DockerCommandResult(returncode=0, stdout="", stderr="")
+        return DockerCommandResult(returncode=0, stdout="f" * 64 if "inspect" in command else "", stderr="")
 
     controller = SmokescreenEgressController(
         image="mangrove/smokescreen:da4840c9",
@@ -1160,8 +1160,62 @@ async def test_egress_controller_uses_internal_network_and_cleans_up(
         "docker",
         "network",
         "rm",
-        lease.network_name,
+        "f" * 64,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("barrier", [("docker", "network", "create"), ("docker", "run", "-d")])
+async def test_egress_cancel_waits_for_creation_before_cleanup(tmp_path, barrier):
+    entered, release = asyncio.Event(), asyncio.Event()
+    commands = []
+
+    async def record(command):
+        commands.append(command)
+        if command[:3] == barrier:
+            entered.set()
+            await release.wait()
+        return DockerCommandResult(0, "f" * 64 if "inspect" in command else "", "")
+
+    controller = SmokescreenEgressController(image="test", command_runner=record)
+    task = asyncio.create_task(controller.start(
+        policy=EgressPolicy.for_business_execution(model_base_url="http://192.168.1.20:6012/v1"),
+        user_id="owner", task_id="task", revision=1, run_id="run", policy_dir=tmp_path / "policy",
+    ))
+    await entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert commands[-1][:3] == ("docker", "network", "rm")
+    assert not any(command[:3] == ("docker", "network", "connect") for command in commands)
+
+
+@pytest.mark.asyncio
+async def test_egress_cleanup_failure_is_retryable_and_logs_do_not_block(tmp_path):
+    commands = []
+    failed = True
+
+    async def record(command):
+        commands.append(command)
+        if command[:2] == ("docker", "logs"):
+            raise OSError("synthetic log failure")
+        if "inspect" in command:
+            return DockerCommandResult(0, "f" * 64, "")
+        return DockerCommandResult(1 if failed else 0, "", "synthetic removal failure")
+
+    controller = SmokescreenEgressController(image="test", command_runner=record)
+    lease = controller.lease_for(
+        policy=EgressPolicy.for_business_execution(model_base_url="http://192.168.1.20:6012/v1"),
+        user_id="owner", task_id="task", revision=1, run_id="run", policy_dir=tmp_path,
+    )
+    with pytest.raises(RuntimeError):
+        await controller.stop(lease)
+    assert any(command[:3] == ("docker", "network", "rm") for command in commands)
+    failed = False
+    await controller.stop(lease)
 
 
 @pytest.mark.asyncio
@@ -1174,7 +1228,7 @@ async def test_egress_controller_replaces_same_run_resources_only_on_resume(
 
     async def record(command: tuple[str, ...]) -> DockerCommandResult:
         commands.append(command)
-        return DockerCommandResult(returncode=0, stdout="", stderr="")
+        return DockerCommandResult(returncode=0, stdout="f" * 64 if "inspect" in command else "", stderr="")
 
     controller = SmokescreenEgressController(
         image="mangrove/smokescreen:da4840c9",
@@ -1198,7 +1252,7 @@ async def test_egress_controller_replaces_same_run_resources_only_on_resume(
         "docker",
         "network",
         "rm",
-        lease.network_name,
+        "f" * 64,
     )
     create_index = next(
         index
@@ -1237,7 +1291,7 @@ async def test_pi_runtime_start_is_forced_through_business_egress(
         command: tuple[str, ...],
     ) -> DockerCommandResult:
         docker_commands.append(command)
-        return DockerCommandResult(returncode=0, stdout="", stderr="")
+        return DockerCommandResult(returncode=0, stdout="f" * 64 if "inspect" in command else "", stderr="")
 
     monkeypatch.setattr(
         asyncio,
@@ -1352,8 +1406,8 @@ async def test_pi_runtime_rebuilds_uncheckpointed_pre_dispatch_workspace(
     async def inspect_image(*_command: str, **_kwargs: object) -> ImageInspectProcess:
         return ImageInspectProcess()
 
-    async def record_docker(_command: tuple[str, ...]) -> DockerCommandResult:
-        return DockerCommandResult(returncode=0, stdout="", stderr="")
+    async def record_docker(command: tuple[str, ...]) -> DockerCommandResult:
+        return DockerCommandResult(returncode=0, stdout="f" * 64 if "inspect" in command else "", stderr="")
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", inspect_image)
     source = tmp_path / "source.txt"
@@ -1444,7 +1498,7 @@ async def test_pi_runtime_cancel_revokes_egress_before_returning(
         command: tuple[str, ...],
     ) -> DockerCommandResult:
         docker_commands.append(command)
-        return DockerCommandResult(returncode=0, stdout="", stderr="")
+        return DockerCommandResult(returncode=0, stdout="f" * 64 if "inspect" in command else "", stderr="")
 
     monkeypatch.setattr(
         asyncio,
@@ -1537,7 +1591,7 @@ async def test_pi_runtime_resume_restores_business_egress(
         command: tuple[str, ...],
     ) -> DockerCommandResult:
         docker_commands.append(command)
-        return DockerCommandResult(returncode=0, stdout="", stderr="")
+        return DockerCommandResult(returncode=0, stdout="f" * 64 if "inspect" in command else "", stderr="")
 
     monkeypatch.setattr(
         asyncio,
@@ -1689,10 +1743,125 @@ async def test_pi_rpc_transport_accepts_large_jsonl_events(
             migrated_webui_database(tmp_path / "pi-runtime-state.db")
         ),
         execution_root=tmp_path,
-    )._spawn_rpc_process(("docker", "run"))
+    )._spawn_rpc_process(("docker", "start", "--attach", "--interactive", "test-container"))
 
     assert process is sentinel
     assert int(captured["limit"]) >= 8 * 1024 * 1024
+
+
+@pytest.mark.asyncio
+async def test_pi_main_creation_cancellation_never_starts_container(monkeypatch):
+    entered, release = asyncio.Event(), asyncio.Event()
+    commands = []
+
+    class Creating:
+        returncode = 0
+
+        async def communicate(self):
+            entered.set()
+            await release.wait()
+            return b"container-id", b""
+
+    async def subprocess(*command, **kwargs):
+        commands.append(command)
+        return Creating()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", subprocess)
+    task = asyncio.create_task(PiRuntime._spawn_rpc_process(("docker", "run", "--rm", "--name", "owned", "image")))
+    await entered.wait()
+    task.cancel()
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert commands == [("docker", "create", "--name", "owned", "image")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["denied", "timeout", "absent"])
+async def test_pi_container_removal_requires_confirmation(monkeypatch, failure):
+    class Removing:
+        returncode = 1
+
+        async def communicate(self):
+            if failure == "timeout":
+                raise TimeoutError
+            return b"", b"No such container: owned" if failure == "absent" else b"permission denied"
+
+    async def subprocess(*args, **kwargs):
+        return Removing()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", subprocess)
+    if failure == "absent":
+        await PiRuntime._remove_container("owned")
+    else:
+        with pytest.raises(RuntimeError):
+            await PiRuntime._remove_container("owned")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unknown", [False, True])
+async def test_main_create_failure_preserves_only_unknown_result(tmp_path, monkeypatch, unknown):
+    commands = []
+
+    async def runner(command):
+        commands.append(command)
+        if command[:2] == ("docker", "create"):
+            if unknown:
+                raise OSError("synthetic connection lost")
+            return DockerCommandResult(1, "", "name already in use")
+        return DockerCommandResult(1, "", f"No such {command[1]}")
+
+    monkeypatch.setattr(pi_runtime_module, "_run_docker", runner)
+    runtime = PiRuntime(state_store=AgenticRuntimeRepository(migrated_webui_database(tmp_path / "db")), execution_root=tmp_path / "runtime", egress_controller=SmokescreenEgressController(image="test", command_runner=runner))
+    request = SimpleNamespace(user_id="owner", task_id="task", revision=1)
+    key = ("owner", "task", 1)
+    run_id = "pi_run_1234567890abcdef"
+    root = runtime.execution_root / "agentic-vnext" / hashlib.sha256(b"owner").hexdigest()[:16] / "task" / "r1" / run_id
+    trace = root / "trace"
+    trace.mkdir(parents=True)
+    runtime._plan_resources(request, run_id, root, trace / "egress-business", False)
+    name = runtime._containers[key]
+    with pytest.raises((RuntimeError, OSError)):
+        await runtime._run_rpc(request, command=("docker", "run", "--name", name, "image"), container_name=name, output_dir=root / "output", trace_dir=trace, on_event=None, settled_check=None)
+    journal = runtime._lifecycle_dir(key) / "resources.json"
+    if unknown:
+        with pytest.raises(RuntimeError, match="创建结果"):
+            await runtime._cleanup_resources(key)
+        assert (trace / ".creating-main").exists() and journal.exists()
+    else:
+        assert not (trace / ".creating-main").exists()
+        await runtime._cleanup_resources(key)
+        assert not journal.exists()
+    assert not any(command[:3] == ("docker", "rm", "-f") for command in commands)
+
+
+@pytest.mark.asyncio
+async def test_main_predicted_name_collision_never_deletes_foreign_owner(tmp_path, monkeypatch):
+    from src.agentic_runtime.egress_policy import resource_owner_identity
+
+    commands = []
+    removed = []
+    actual_owner = resource_owner_identity("owner-a", "task", 1, "run")
+    other_owner = resource_owner_identity("owner-b", "task", 1, "run")
+
+    async def runner(command):
+        commands.append(command)
+        return DockerCommandResult(0, "f" * 64 if actual_owner in command[4] else "", "")
+
+    async def remove(resource_id):
+        removed.append(resource_id)
+
+    monkeypatch.setattr(pi_runtime_module, "_run_docker", runner)
+    runtime = PiRuntime(state_store=AgenticRuntimeRepository(migrated_webui_database(tmp_path / "db")), execution_root=tmp_path)
+    monkeypatch.setattr(runtime, "_remove_container", remove)
+    with pytest.raises(RuntimeError, match="身份不匹配"):
+        await runtime._remove_owned_container("colliding-name", other_owner)
+    assert len(commands) == 1 and commands[0][1:3] == ("container", "inspect")
+    assert removed == []
+    await runtime._remove_owned_container("colliding-name", actual_owner)
+    assert removed == ["f" * 64]
 
 
 def test_pi_runtime_resolves_local_relay_in_docker_network(
@@ -2465,6 +2634,7 @@ def test_pi_runtime_refuses_remote_mcp_without_task_grant(tmp_path: Path) -> Non
         )
 
 
+@pytest.mark.skipif(os.environ.get("MANGROVE_RUN_DOCKER_TESTS") != "1", reason="真实 Docker 验证需显式启用")
 def test_fixed_pi_image_cannot_enable_native_capability_without_isolation(
     tmp_path: Path,
 ) -> None:

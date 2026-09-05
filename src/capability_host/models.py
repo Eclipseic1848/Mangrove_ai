@@ -27,3 +27,4 @@ class CapabilityHostLease(BaseModel):
     capability_names: tuple[str, ...]
     capability_kinds: tuple[tuple[str, str], ...]
     runtime_dir: Path
+    owner_identity: str | None = None

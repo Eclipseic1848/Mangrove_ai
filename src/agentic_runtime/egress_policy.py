@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from enum import Enum
 import hashlib
 import ipaddress
+import json
+import os
 from pathlib import Path
 import re
 from urllib.parse import urlsplit
@@ -30,6 +32,55 @@ DockerCommandRunner = Callable[
 ]
 
 
+def resource_owner_identity(user_id: str, task_id: str, revision: int, run_id: str) -> str:
+    return hashlib.sha256(json.dumps([user_id, task_id, revision, run_id], ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
+class ResourceOwnershipError(RuntimeError):
+    """外来资源不得进入当前 Run 的读取或删除范围。"""
+
+
+async def owned_resource_id(runner: DockerCommandRunner, kind: str, name: str, owner_identity: str | None) -> str | None:
+    """名称只负责定位；删除必须核验完整身份并改用不可变资源 ID。"""
+    if not owner_identity or re.fullmatch(r"[a-f0-9]{64}", owner_identity) is None:
+        raise ResourceOwnershipError("资源缺少可验证的 Owner/Run 身份")
+    labels = ".Config.Labels" if kind == "container" else ".Labels"
+    template = '{{if eq (index ' + labels + ' "mangrove.owner-run") "' + owner_identity + '"}}{{.Id}}{{end}}'
+    result = await asyncio.wait_for(runner(("docker", kind, "inspect", "--format", template, name)), timeout=30)
+    detail = result.stderr.casefold()
+    if result.returncode:
+        if f"no such {kind}" in detail or (kind == "network" and f"network {name} not found" in detail):
+            return None
+        raise RuntimeError("无法确认待清理资源身份：" + result.stderr[:300])
+    resource_id = result.stdout.strip()
+    if not re.fullmatch(r"[a-f0-9]{64}", resource_id):
+        raise ResourceOwnershipError("资源 Owner/Run 身份不匹配，拒绝删除")
+    return resource_id
+
+
+async def await_creation(operation: Awaitable, marker: Path | None = None):
+    """取消不能杀掉创建命令后假定 daemon 没有迟到资源；先等结果再撤销。"""
+    if marker is not None:
+        with marker.open("w", encoding="utf-8") as stream:
+            stream.write("creation_pending\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+    task = asyncio.ensure_future(operation)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    # 进程在结果未知时崩溃，标记留下；恢复不能把一次 rm 当作迟到创建已排除。
+    result = task.result()
+    if marker is not None:
+        marker.unlink(missing_ok=True)
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class EgressLease:
     """当前 Run 独占的网络和代理身份。"""
@@ -39,6 +90,7 @@ class EgressLease:
     proxy_container_name: str
     proxy_url: str
     policy_dir: Path
+    owner_identity: str | None = None
 
 
 class EgressPhase(str, Enum):
@@ -232,8 +284,8 @@ class SmokescreenEgressController:
         self.image = image
         self._run = command_runner or _run_docker
 
+    @staticmethod
     def lease_for(
-        self,
         *,
         policy: EgressPolicy,
         user_id: str,
@@ -258,6 +310,7 @@ class SmokescreenEgressController:
             proxy_container_name=proxy_name,
             proxy_url=f"http://{proxy_name}:4750",
             policy_dir=policy_dir,
+            owner_identity=resource_owner_identity(user_id, task_id, revision, run_id),
         )
 
     async def start(
@@ -302,14 +355,15 @@ class SmokescreenEgressController:
             "--internal",
             "--label",
             "mangrove.agentic-runtime=true",
+            "--label", f"mangrove.owner-run={lease.owner_identity}",
             lease.network_name,
         )
-        result = await self._run(create)
-        if result.returncode != 0:
-            raise RuntimeError(
-                f"无法创建任务级内部网络：{result.stderr.strip()[:300]}"
-            )
         try:
+            result = await await_creation(self._run(create), policy_dir / ".creating")
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"无法创建任务级内部网络：{result.stderr.strip()[:300]}"
+                )
             mount = (
                 f"type=bind,source={policy_dir.resolve()},"
                 "target=/etc/smokescreen,readonly"
@@ -325,6 +379,7 @@ class SmokescreenEgressController:
                 lease.network_name,
                 "--label",
                 "mangrove.agentic-runtime=true",
+                "--label", f"mangrove.owner-run={lease.owner_identity}",
                 "--mount",
                 mount,
                 self.image,
@@ -335,7 +390,7 @@ class SmokescreenEgressController:
                 "--disable-acl-policy-action",
                 "report",
             )
-            result = await self._run(run)
+            result = await await_creation(self._run(run), policy_dir / ".creating")
             if result.returncode != 0:
                 raise RuntimeError(
                     f"无法启动 Egress sidecar：{result.stderr.strip()[:300]}"
@@ -347,30 +402,43 @@ class SmokescreenEgressController:
                 "bridge",
                 lease.proxy_container_name,
             )
-            result = await self._run(connect)
+            result = await await_creation(self._run(connect), policy_dir / ".creating")
             if result.returncode != 0:
                 raise RuntimeError(
                     f"Egress sidecar 无法连接外部桥：{result.stderr.strip()[:300]}"
                 )
             return lease
-        except Exception:
+        except (Exception, asyncio.CancelledError):
             await self.stop(lease)
             raise
 
     async def stop(self, lease: EgressLease) -> None:
         """先保留结构化代理日志，再删除代理和任务网络。"""
 
-        logs = await self._run(
-            ("docker", "logs", lease.proxy_container_name)
-        )
-        if (logs.stdout or logs.stderr) and lease.policy_dir.is_dir():
-            (lease.policy_dir / "egress.log").write_text(
-                logs.stdout + logs.stderr,
-                encoding="utf-8",
-            )
-        await self._run(
-            ("docker", "rm", "-f", lease.proxy_container_name)
-        )
-        await self._run(
-            ("docker", "network", "rm", lease.network_name)
-        )
+        errors = ["资源创建结果尚未确认"] if (lease.policy_dir / ".creating").exists() else []
+        for kind, name, prefix, absent in (
+            ("container", lease.proxy_container_name, ("docker", "rm", "-f"), "no such container"),
+            ("network", lease.network_name, ("docker", "network", "rm"), "no such network"),
+        ):
+            try:
+                resource_id = await owned_resource_id(self._run, kind, name, lease.owner_identity)
+                if resource_id is None:
+                    continue
+                if kind == "container":
+                    try:
+                        logs = await asyncio.wait_for(self._run(("docker", "logs", resource_id)), timeout=30)
+                        if lease.policy_dir.is_dir():
+                            (lease.policy_dir / "egress.log").write_text(logs.stdout + logs.stderr, encoding="utf-8")
+                    except Exception:
+                        # 只读已确权资源的日志，失败不能阻断撤权。
+                        pass
+                command = (*prefix, resource_id)
+                result = await asyncio.wait_for(self._run(command), timeout=30)
+                detail = result.stderr.casefold()
+                missing_network = command[1:3] == ("network", "rm") and f"network {lease.network_name} not found" in detail
+                if result.returncode and absent not in detail and not missing_network:
+                    raise RuntimeError(result.stderr.strip() or "Docker 清理失败")
+            except Exception as error:
+                errors.append(str(error) or type(error).__name__)
+        if errors:
+            raise RuntimeError("任务网络清理未完成：" + "；".join(errors))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import shutil
 import logging
@@ -368,7 +369,7 @@ def test_webui_0004_migrates_legacy_plaintext_and_backup_has_no_plaintext(
     backup = tmp_path / "webui-after-secretref.db"
     shutil.copy2(database, backup)
     # 先冻结 webui_0004 专属备份，再升到当前头供 Repository 失败关闭门使用。
-    _upgrade(database, "webui_0009")
+    _upgrade(database, "webui_0010")
 
     store = WebUIStore(str(database))
     assert store.config_all("global")["smtp_password"] == "legacy-smtp-secret-4400"
@@ -391,7 +392,7 @@ def test_webui_0004_migrates_legacy_plaintext_and_backup_has_no_plaintext(
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("webui_0009",)
+        ).fetchone() == ("webui_0010",)
         values = {
             row[0]
             for row in connection.execute(
@@ -486,7 +487,7 @@ def test_plaintext_scanner_is_read_only_and_fails_closed_on_bad_ciphertext(
         scan_artifacts_for_plaintext_secrets(database, (database,))
 
 
-def test_plaintext_scanner_documented_module_cli_runs_from_repository(
+def test_plaintext_scanner_documented_module_cli_runs_in_isolated_directory(
     tmp_path: Path,
 ) -> None:
     store, database = _store(tmp_path)
@@ -502,7 +503,8 @@ def test_plaintext_scanner_documented_module_cli_runs_from_repository(
             "--artifact",
             str(database),
         ],
-        cwd=Path(__file__).parents[1],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(Path(__file__).parents[1])},
         check=False,
         capture_output=True,
         text=True,

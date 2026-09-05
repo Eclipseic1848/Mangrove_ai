@@ -10,6 +10,7 @@ on:
         options:
           - full-regression
           - entry-auth
+          - cancellation
           - g1-frozen-contracts
           - docker-build
           - dependency-groups
@@ -23,11 +24,12 @@ defaults:
 
 jobs:
   python-heavy:
-    if: inputs.gate == 'full-regression' || inputs.gate == 'g1-frozen-contracts' || inputs.gate == 'entry-auth'
+    if: inputs.gate == 'full-regression' || inputs.gate == 'g1-frozen-contracts' || inputs.gate == 'entry-auth' || inputs.gate == 'cancellation'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
       PYTHONUTF8: '1'
+      MANGROVE_RUN_DOCKER_TESTS: '0'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
@@ -58,6 +60,17 @@ jobs:
           elif [[ "${{ inputs.gate }}" == "entry-auth" ]]; then
             python -m pytest -q tests/test_auth_bootstrap.py tests/test_api_spa_fallback.py \
               --randomly-seed=0 --timeout=120 --junitxml=.artifacts/heavy/entry-auth.xml
+          elif [[ "${{ inputs.gate }}" == "cancellation" ]]; then
+            python -m pytest -q tests/test_source_cancellation.py tests/test_source_refresh_cancellation.py \
+              tests/test_source_acquisition.py tests/test_source_acquisition_api.py tests/test_web_source_delivery_api.py \
+              tests/test_agentic_runtime.py tests/test_capability_host.py tests/test_capability_acquisition.py \
+              tests/test_runtime_gate_supervision.py tests/test_semantic_workspace_api.py tests/test_pi_runtime_workspace_api.py \
+              tests/test_capability_governance.py::test_governance_validation_rejects_undeclared_permission_or_docker_socket \
+              tests/test_capability_governance.py::test_production_validation_executor_runs_host_denial_verifier_and_cleanup \
+              tests/test_capability_governance.py::test_production_cleanup_does_not_treat_docker_daemon_failure_as_absent \
+              tests/test_database_migrations.py tests/test_database_migrations_components.py \
+              tests/test_dev_database_preflight.py tests/test_runtime_config_secret_refs.py \
+              --randomly-seed=0 --timeout=120 --junitxml=.artifacts/heavy/cancellation.xml
           else
             python -m pytest --junitxml=.artifacts/heavy/python-full.xml
           fi
@@ -131,7 +144,7 @@ jobs:
           retention-days: 14
 
   frontend-e2e:
-    if: inputs.gate == 'full-regression'
+    if: inputs.gate == 'full-regression' || inputs.gate == 'cancellation'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     defaults:
@@ -151,10 +164,15 @@ jobs:
           mkdir -p ../.artifacts/heavy
           npm ci 2>&1 | tee ../.artifacts/heavy/frontend-install.log
           npm run build 2>&1 | tee ../.artifacts/heavy/frontend-build.log
-      - name: 运行浏览器完整回归
+      - name: 运行所选浏览器回归
         env:
           PLAYWRIGHT_JUNIT_OUTPUT_NAME: ../.artifacts/heavy/frontend-e2e.xml
-        run: npm run test:e2e -- --reporter=junit
+        run: |
+          if [[ "${{ inputs.gate }}" == "cancellation" ]]; then
+            npm run test:e2e -- semantic-workspace.spec.ts --grep '停止|来源请求被拒绝|来源刷新结果未知|Attempt ID 前刷新' --reporter=junit
+          else
+            npm run test:e2e -- --reporter=junit
+          fi
       - name: 验证浏览器子进程和端口无残留
         if: always()
         run: |
