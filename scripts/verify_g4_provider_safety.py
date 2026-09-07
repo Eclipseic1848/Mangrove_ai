@@ -15,6 +15,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from urllib.parse import urlsplit
 import uuid
 from collections.abc import Callable
@@ -832,57 +833,64 @@ def create_qualification_batch(
                 "task_ids": sorted(report_task_ids),
             }
         )
-    try:
-        anchor = _load_qualification_ledger_anchor(db_path=db_path)
-        if anchor is None:
-            if not confirm_new_batch_after_exhausted_history:
-                raise QualificationError(
-                    "权威台账首次建立必须绑定两份已耗尽的旧报告"
+    # 同一台账与外部锚点必须一起串行化，不能暴露两个提交之间的暂态。
+    with _exclusive_file_lock(
+        _qualification_ledger_lock_path(ledger_path),
+        "已有 G4 资格操作正在执行，请稍后重试",
+        timeout_seconds=30,
+    ):
+        _require_active_superadmin(db_path=db_path, actor_user_id=authorized_by)
+        try:
+            anchor = _load_qualification_ledger_anchor(db_path=db_path)
+            if anchor is None:
+                if not confirm_new_batch_after_exhausted_history:
+                    raise QualificationError(
+                        "权威台账首次建立必须绑定两份已耗尽的旧报告"
+                    )
+                if ledger_path.exists():
+                    raise QualificationError(
+                        "发现没有外部锚点的资格台账，拒绝自动接管"
+                    )
+                apply_migrations(
+                    DatabaseTarget(
+                        profile="qualification_ledger",
+                        path=ledger_path,
+                    ),
+                    ledger_path.with_name(
+                        f"{ledger_path.name}.before-schema-{uuid.uuid4().hex}.db"
+                    ),
                 )
-            if ledger_path.exists():
-                raise QualificationError(
-                    "发现没有外部锚点的资格台账，拒绝自动接管"
+                ledger = QualificationBatchLedger(ledger_path)
+            else:
+                ledger = _anchored_qualification_ledger(
+                    db_path=db_path,
+                    ledger_path=ledger_path,
                 )
-            apply_migrations(
-                DatabaseTarget(
-                    profile="qualification_ledger",
-                    path=ledger_path,
+            batch = ledger.create_batch(
+                manifest_sha256=str(manifest["manifest_sha256"]),
+                providers=[dict(provider) for provider in manifest["providers"]],
+                expected_commit=expected_commit,
+                owner_user_id=owner_user_id,
+                relay_base_url=relay_base_url,
+                timeout_seconds=timeout_seconds,
+                authorized_by=authorized_by,
+                authorization_reason=authorization_reason,
+                idempotency_key=idempotency_key,
+                batch_kind=(
+                    "initial" if confirm_initial_batch else "successor"
                 ),
-                ledger_path.with_name(
-                    f"{ledger_path.name}.before-schema-{uuid.uuid4().hex}.db"
-                ),
+                parent_batch_id=None,
+                previous_evidence=previous_evidence,
             )
-            ledger = QualificationBatchLedger(ledger_path)
-        else:
-            ledger = _anchored_qualification_ledger(
+            _sync_qualification_ledger_anchor(
                 db_path=db_path,
-                ledger_path=ledger_path,
+                ledger=ledger,
+                bootstrap_batch_id=(str(batch["batch_id"]) if anchor is None else None),
+                initialized_by=(authorized_by if anchor is None else None),
             )
-        batch = ledger.create_batch(
-            manifest_sha256=str(manifest["manifest_sha256"]),
-            providers=[dict(provider) for provider in manifest["providers"]],
-            expected_commit=expected_commit,
-            owner_user_id=owner_user_id,
-            relay_base_url=relay_base_url,
-            timeout_seconds=timeout_seconds,
-            authorized_by=authorized_by,
-            authorization_reason=authorization_reason,
-            idempotency_key=idempotency_key,
-            batch_kind=(
-                "initial" if confirm_initial_batch else "successor"
-            ),
-            parent_batch_id=None,
-            previous_evidence=previous_evidence,
-        )
-        _sync_qualification_ledger_anchor(
-            db_path=db_path,
-            ledger=ledger,
-            bootstrap_batch_id=(str(batch["batch_id"]) if anchor is None else None),
-            initialized_by=(authorized_by if anchor is None else None),
-        )
-        return batch
-    except (QualificationLedgerError, sqlite3.Error, OSError) as exc:
-        raise QualificationError(str(exc)) from exc
+            return batch
+        except (QualificationLedgerError, sqlite3.Error, OSError) as exc:
+            raise QualificationError(str(exc)) from exc
 
 
 def _write_json_atomic(path: Path, value: object) -> None:
@@ -1097,29 +1105,36 @@ def authorize_qualification_batch_retry(
     ]
     if len(providers) != 1:
         raise QualificationError("重试授权连接不属于冻结清单")
-    try:
-        ledger = _anchored_qualification_ledger(
-            db_path=db_path,
-            ledger_path=ledger_path,
-        )
-        authorization = ledger.authorize_retry(
-            batch_id=batch_id,
-            provider=providers[0],
-            manifest_sha256=str(manifest["manifest_sha256"]),
-            git_identity=dict(git_identity or _git_identity()),
-            authorized_by=authorized_by,
-            authorization_reason=authorization_reason,
-            user_confirmed_duplicate_request_and_cost=(
-                confirm_duplicate_request_and_cost
-            ),
-        )
-        _sync_qualification_ledger_anchor(
-            db_path=db_path,
-            ledger=ledger,
-        )
-        return authorization
-    except (QualificationLedgerError, sqlite3.Error, OSError) as exc:
-        raise QualificationError(str(exc)) from exc
+    # 同一台账与外部锚点必须一起串行化，不能暴露两个提交之间的暂态。
+    with _exclusive_file_lock(
+        _qualification_ledger_lock_path(ledger_path),
+        "已有 G4 资格操作正在执行，请稍后重试",
+        timeout_seconds=30,
+    ):
+        _require_active_superadmin(db_path=db_path, actor_user_id=authorized_by)
+        try:
+            ledger = _anchored_qualification_ledger(
+                db_path=db_path,
+                ledger_path=ledger_path,
+            )
+            authorization = ledger.authorize_retry(
+                batch_id=batch_id,
+                provider=providers[0],
+                manifest_sha256=str(manifest["manifest_sha256"]),
+                git_identity=dict(git_identity or _git_identity()),
+                authorized_by=authorized_by,
+                authorization_reason=authorization_reason,
+                user_confirmed_duplicate_request_and_cost=(
+                    confirm_duplicate_request_and_cost
+                ),
+            )
+            _sync_qualification_ledger_anchor(
+                db_path=db_path,
+                ledger=ledger,
+            )
+            return authorization
+        except (QualificationLedgerError, sqlite3.Error, OSError) as exc:
+            raise QualificationError(str(exc)) from exc
 
 
 def authorize_ambiguous_retry(
@@ -1395,7 +1410,7 @@ def _broker_for_database(db_path: Path) -> ConnectionBroker:
 
 
 @contextmanager
-def _exclusive_file_lock(lock_path: Path, busy_message: str):
+def _exclusive_file_lock(lock_path: Path, busy_message: str, *, timeout_seconds: float = 0):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     handle = lock_path.open("a+b")
     if handle.tell() == 0:
@@ -1404,18 +1419,23 @@ def _exclusive_file_lock(lock_path: Path, busy_message: str):
     handle.seek(0)
     locked = False
     try:
-        try:
-            if os.name == "nt":
-                import msvcrt
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            try:
+                if os.name == "nt":
+                    import msvcrt
 
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
 
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            locked = True
-        except OSError as exc:
-            raise QualificationError(busy_message) from exc
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except OSError as exc:
+                if time.monotonic() >= deadline:
+                    raise QualificationError(busy_message) from exc
+                time.sleep(min(0.05, max(0, deadline - time.monotonic())))
         yield
     finally:
         if locked:

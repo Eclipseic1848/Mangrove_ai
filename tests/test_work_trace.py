@@ -286,7 +286,7 @@ def test_legacy_naive_timestamp_can_be_compared_with_aware_observation() -> None
         status="running",
         events=(event,),
         provider_usage=[],
-        observed_at=datetime(2026, 8, 28, 19, 0, 1, tzinfo=timezone.utc),
+        observed_at=event.created_at.astimezone(timezone.utc) + timedelta(seconds=1),
     )
 
     assert view.work_duration_ms == 1_000

@@ -364,9 +364,15 @@ def test_mount_resolver_describes_selected_components_without_sensitive_fields(
             ),
         ),
     )
+    def unexpected_command(*args, **kwargs):
+        pytest.fail("描述元数据不应调用 ORAS")
+
     resolver = CapabilityMountResolver(
         catalog,
-        OrasOciLayoutStore(tmp_path / "oci", layout_id="test"),
+        OrasOciLayoutStore(
+            tmp_path / "oci", layout_id="test",
+            oras_executable="oras-test", runner=unexpected_command,
+        ),
         tmp_path / "mounts",
     )
 

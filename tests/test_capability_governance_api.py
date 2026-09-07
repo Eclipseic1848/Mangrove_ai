@@ -83,12 +83,22 @@ def _seed_catalog(db_path: str) -> None:
     )
 
 
+def _use_read_governance(monkeypatch, db_path) -> None:
+    # 读取投影使用真实临时库，不初始化本测试不会调用的发布签名工具。
+    governance = CapabilityGovernance(
+        CapabilityCatalog(SqliteCapabilityCatalogRepository(db_path)),
+        SqliteCapabilityGovernanceRepository(db_path),
+    )
+    monkeypatch.setattr(governance_routes, "_governance", lambda: governance)
+
+
 def test_governance_api_projects_user_and_admin_fields(
     tmp_path,
     monkeypatch,
 ) -> None:
     db_path = tmp_path / "webui.db"
     _seed_catalog(str(db_path))
+    _use_read_governance(monkeypatch, db_path)
     monkeypatch.setattr(settings, "webui_db_path", str(db_path))
     app.dependency_overrides[get_current_user] = lambda: {
         "execution_generation": 0,
@@ -218,6 +228,7 @@ def test_packs_endpoint_serializes_sanitized_promotion_gaps(
     db_path = tmp_path / "webui.db"
     _seed_catalog(str(db_path))
     migrate_capability_governance(db_path, tmp_path / "backup.db")
+    _use_read_governance(monkeypatch, db_path)
     monkeypatch.setattr(settings, "webui_db_path", str(db_path))
     app.dependency_overrides[get_current_user] = lambda: {
         "execution_generation": 0,

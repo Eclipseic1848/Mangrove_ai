@@ -1440,6 +1440,7 @@ def test_qualification_batch_requires_secret_free_exact_relay_url(
 def test_qualification_batch_is_idempotent_under_concurrent_requests(
     tmp_path,
     authoritative_ledger_path,
+    monkeypatch,
 ) -> None:
     database = tmp_path / "webui.db"
     manifest_path = tmp_path / "manifest.json"
@@ -1475,8 +1476,29 @@ def test_qualification_batch_is_idempotent_under_concurrent_requests(
             git_identity={"git_commit": "commit-a", "git_dirty": False},
         )
 
+    from scripts import verify_g4_provider_safety as script
+    from concurrent.futures import TimeoutError as FutureTimeout
+    entered, release = threading.Event(), threading.Event()
+    original_sync = script._sync_qualification_ledger_anchor
+
+    def blocked_sync(**kwargs):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        return original_sync(**kwargs)
+
+    monkeypatch.setattr(script, "_sync_qualification_ledger_anchor", blocked_sync)
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(lambda _index: create(), range(2)))
+        first = executor.submit(create)
+        assert entered.wait(5)
+        second = executor.submit(create)
+        try:
+            # 台账已提交但锚点尚未同步；第二请求必须等待同一文件锁。
+            with pytest.raises(FutureTimeout):
+                second.result(timeout=0.2)
+        finally:
+            release.set()
+        results = [first.result(timeout=5), second.result(timeout=5)]
 
     assert results[0]["batch_id"] == results[1]["batch_id"]
     with sqlite3.connect(ledger_path) as connection:
@@ -1500,6 +1522,105 @@ def test_qualification_batch_is_idempotent_under_concurrent_requests(
             previous_report_paths=(),
             git_identity={"git_commit": "commit-a", "git_dirty": False},
         )
+
+
+@pytest.mark.parametrize("operation", ["create", "authorize", "authorize_sync_failure",
+    "create_disabled", "authorize_disabled", "create_demoted", "authorize_demoted"])
+def test_qualification_writes_wait_for_shared_execution_lock(tmp_path, authoritative_ledger_path, monkeypatch, operation):
+    from scripts import verify_g4_provider_safety as script
+    from contextlib import contextmanager
+    from concurrent.futures import TimeoutError as FutureTimeout
+    database, manifest_path = tmp_path / "webui.db", tmp_path / "manifest.json"
+    _create_inventory_database(database)
+    manifest = freeze_manifest(db_path=database, presets=["deepseek"])
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    batch = _create_test_qualification_batch(database=database, ledger_path=authoritative_ledger_path,
+        manifest=manifest, owner_user_id="g4-synthetic-owner")
+    ledger = _qualification_ledger(authoritative_ledger_path)
+    provider = dict(manifest["providers"][0])
+    ledger.begin_attempt(batch_id=batch["batch_id"], provider=provider, attempt_context={"task_id_sha256": "a" * 64})
+    _sync_qualification_ledger_anchor(db_path=database, ledger=ledger)
+    ledger.finish_attempt(batch_id=batch["batch_id"], provider=provider, check={"outcome": "failed", "error_code": "synthetic"})
+    _sync_qualification_ledger_anchor(db_path=database, ledger=ledger)
+    before_receipt = ledger.state_receipt()
+    before_anchor = _load_qualification_ledger_anchor(db_path=database)
+    actor_invalidated = operation.endswith(("_disabled", "_demoted"))
+    reached = threading.Event()
+    original_lock = script._exclusive_file_lock
+
+    @contextmanager
+    def observed_lock(path, message, **kwargs):
+        assert kwargs["timeout_seconds"] == 30
+        reached.set()
+        with original_lock(path, message, **kwargs):
+            yield
+
+    monkeypatch.setattr(script, "_exclusive_file_lock", observed_lock)
+    if operation == "authorize_sync_failure":
+        def fail_sync(**kwargs):
+            raise OSError("虚构锚点同步失败")
+        monkeypatch.setattr(script, "_sync_qualification_ledger_anchor", fail_sync)
+    identity = {"git_commit": "commit-a", "git_dirty": False}
+
+    def invoke():
+        if operation.startswith("authorize"):
+            return authorize_qualification_batch_retry(db_path=database, manifest_path=manifest_path,
+                ledger_path=authoritative_ledger_path, batch_id=batch["batch_id"],
+                connection_id=provider["connection_id"], authorized_by="super-admin",
+                authorization_reason="虚构用户明确决定重试", confirm_duplicate_request_and_cost=True,
+                git_identity=identity)
+        return create_qualification_batch(db_path=database, manifest_path=manifest_path,
+            ledger_path=authoritative_ledger_path, owner_user_id="g4-synthetic-owner",
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay", timeout_seconds=1800,
+            expected_commit="commit-a", authorized_by="super-admin", authorization_reason="虚构新请求",
+            idempotency_key="different-request", confirm_initial_batch=True,
+            confirm_new_batch_after_exhausted_history=False, previous_report_paths=(), git_identity=identity)
+
+    lock_path = script._qualification_ledger_lock_path(authoritative_ledger_path)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with original_lock(lock_path, "真实执行已占锁"):
+            future = executor.submit(invoke)
+            assert reached.wait(5)
+            with pytest.raises(FutureTimeout):
+                future.result(timeout=0.2)
+            if actor_invalidated:
+                # 请求已通过初始鉴权并开始等锁；随后账号变化必须在锁内重新拒绝。
+                with sqlite3.connect(database) as connection:
+                    if operation.endswith("_disabled"):
+                        connection.execute("UPDATE users SET disabled=1 WHERE user_id='super-admin'")
+                    else:
+                        connection.execute("UPDATE users SET role='admin' WHERE user_id='super-admin'")
+        if actor_invalidated:
+            with pytest.raises(QualificationError, match="授权人必须是启用且已审批的超级管理员"):
+                future.result(timeout=5)
+            assert ledger.state_receipt() == before_receipt
+            assert _load_qualification_ledger_anchor(db_path=database) == before_anchor
+        elif operation == "authorize":
+            assert future.result(timeout=5)["retry_number"] == 1
+        else:
+            with pytest.raises(QualificationError):
+                future.result(timeout=5)
+    # 成功或业务拒绝都释放原锁，且锚点仍严格匹配。
+    with original_lock(lock_path, "锁未释放"):
+        if operation == "authorize_sync_failure":
+            with pytest.raises(QualificationError, match="状态与外部锚点不一致"):
+                script._anchored_qualification_ledger(db_path=database, ledger_path=authoritative_ledger_path)
+        else:
+            script._anchored_qualification_ledger(db_path=database, ledger_path=authoritative_ledger_path)
+
+
+def test_qualification_lock_timeout_preserves_default_nonblocking_and_releases(tmp_path):
+    from scripts import verify_g4_provider_safety as script
+    lock_path = tmp_path / "ledger.lock"
+    with script._exclusive_file_lock(lock_path, "outer"):
+        with pytest.raises(QualificationError, match="immediate"):
+            with script._exclusive_file_lock(lock_path, "immediate"):
+                pytest.fail("不能进入已有锁")
+        with pytest.raises(QualificationError, match="bounded"):
+            with script._exclusive_file_lock(lock_path, "bounded", timeout_seconds=0.05):
+                pytest.fail("不能进入已有锁")
+    with script._exclusive_file_lock(lock_path, "released"):
+        pass
 
 
 def test_qualification_batch_blocks_concurrent_distinct_requests(

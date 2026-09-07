@@ -38,6 +38,9 @@ jobs:
       MANGROVE_RUN_DOCKER_TESTS: '0'
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # 兼容证据回归需要真实父提交及历史源码，浅克隆不能证明提交关系。
+          fetch-depth: 0
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
           python-version: '3.13'
