@@ -170,6 +170,66 @@ SCRIPT = PROJECT_ROOT / "scripts" / "verify_g4_provider_safety.py"
 
 
 @pytest.fixture
+def compatible_provider_history(tmp_path, monkeypatch):
+    # 使用独立小型历史，避免当前提交内容或 CI 浅克隆决定测试语义。
+    root = tmp_path / "provider-history"
+    root.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-c", "user.name=G4 Test", "-c",
+             "user.email=g4@example.invalid", "-c", "commit.gpgsign=false",
+             "-c", f"core.hooksPath={root / '.git' / 'no-hooks'}", *args],
+            cwd=root, capture_output=True, text=True, encoding="utf-8", check=True,
+        ).stdout.strip()
+
+    def commit(path, source):
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+        git("add", "--", path)
+        git("commit", "-m", "G4 fixture")
+        return git("rev-parse", "HEAD")
+
+    git("init")
+    provider_commit = commit(
+        "scripts/verify_g4_provider_safety.py",
+        "def execute_qualification():\n    return 1\n",
+    )
+    current_commit = commit("README.md", "G4 fixture documentation\n")
+    assert provider_commit != current_commit
+    monkeypatch.setattr("scripts.verify_g4_provider_safety.PROJECT_ROOT", root)
+    return provider_commit, current_commit, commit
+
+
+@pytest.mark.parametrize("path", [
+    "src/model_connections/broker.py",
+    "scripts/verify_g4_provider_safety.py",
+])
+def test_provider_runtime_compatibility_rejects_protected_changes(
+    compatible_provider_history, path,
+):
+    provider_commit, current_commit, commit = compatible_provider_history
+    assert _provider_runtime_compatibility(
+        provider_evidence_commit=provider_commit, current_commit=current_commit,
+    )["compatible"] is True
+    changed_commit = commit(path, "def execute_qualification():\n    return 2\n")
+    result = _provider_runtime_compatibility(
+        provider_evidence_commit=provider_commit, current_commit=changed_commit,
+    )
+    assert result["compatible"] is False
+    assert result["reason"] == "provider_runtime_changed"
+    unavailable = _provider_runtime_compatibility(
+        provider_evidence_commit="0" * 40, current_commit=current_commit,
+    )
+    assert unavailable == {"compatible": False, "reason": "git_commit_unavailable"}
+    reversed_history = _provider_runtime_compatibility(
+        provider_evidence_commit=current_commit, current_commit=provider_commit,
+    )
+    assert reversed_history["reason"] == "provider_commit_not_ancestor"
+
+
+@pytest.fixture
 def authoritative_ledger_path(tmp_path, monkeypatch) -> Path:
     path = tmp_path / "authoritative" / "qualification-ledger.sqlite3"
     monkeypatch.setattr(
@@ -2760,8 +2820,10 @@ def test_g4_assessment_requires_pi_transport_and_scoped_rotation_evidence(
 
 def test_retained_vault_safety_report_preserves_production_key_and_database(
     tmp_path,
+    compatible_provider_history,
     monkeypatch,
 ):
+    provider_commit, current_commit, _ = compatible_provider_history
     database = tmp_path / "webui.db"
     key_path = tmp_path / "webui.db.model-connections.key"
     backup_root = tmp_path / "backups"
@@ -2806,22 +2868,6 @@ def test_retained_vault_safety_report_preserves_production_key_and_database(
     report_path = tmp_path / "retention-report.json"
     key_before = key_path.read_bytes()
     database_before = database.read_bytes()
-    current_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    ).stdout.strip()
-    provider_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD^"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    ).stdout.strip()
 
     report = verify_vault_retention_safety(
         db_path=database,
@@ -3101,24 +3147,10 @@ def test_retained_vault_safety_has_explicit_cli_contract(tmp_path):
 
 def test_g4_assessment_accepts_compatible_provider_report_with_retained_key(
     tmp_path,
+    compatible_provider_history,
     authoritative_ledger_path,
 ):
-    provider_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD^"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    ).stdout.strip()
-    current_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    ).stdout.strip()
+    provider_commit, current_commit, _ = compatible_provider_history
     provider_runtime_compatibility = _provider_runtime_compatibility(
         provider_evidence_commit=provider_commit,
         current_commit=current_commit,
@@ -3315,25 +3347,11 @@ def test_g4_assessment_accepts_compatible_provider_report_with_retained_key(
 @pytest.mark.parametrize("shared_provider_commit", [False, True])
 def test_g4_assessment_combines_independent_provider_batches(
     tmp_path,
+    compatible_provider_history,
     authoritative_ledger_path,
     shared_provider_commit,
 ):
-    old_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD^"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    ).stdout.strip()
-    current_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    ).stdout.strip()
+    old_commit, current_commit, _ = compatible_provider_history
     database = tmp_path / "webui.db"
     _create_inventory_database(database)
     combined_manifest = freeze_manifest(

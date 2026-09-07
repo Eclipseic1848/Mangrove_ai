@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from src.api.auth import get_store
 from src.api.routes import semantic_workspace
 from src.agentic_runtime.repository import AgenticRuntimeRepository
@@ -14,7 +16,7 @@ from tests.test_web_source_delivery_api import (
     _client,
     _seed_snapshot,
 )
-from tests.test_pi_runtime_workspace_api import _wait_for_delivery
+from tests.test_pi_runtime_workspace_api import _wait_for_delivery, _wait_for_status
 from tests.test_conversation_steering_api import _ApiManager, _ApiMaterialRewriter
 
 
@@ -185,6 +187,9 @@ def test_material_web_revision_keeps_frozen_source_contract_and_context(
     manager.prepare_runtime_binding = (  # type: ignore[attr-defined]
         semantic_workspace.get_semantic_workspace_manager().prepare_runtime_binding
     )
+    manager.inspect_candidate_reverification = (  # type: ignore[attr-defined]
+        semantic_workspace.get_semantic_workspace_manager().inspect_candidate_reverification
+    )
 
     with client:
         preview = client.post(
@@ -250,9 +255,11 @@ def test_material_web_revision_keeps_frozen_source_contract_and_context(
         )
 
 
+@pytest.mark.parametrize("result_search_complete", [True, False])
 def test_new_web_task_keeps_source_refs_contract_and_context(
     tmp_path,
     monkeypatch,
+    result_search_complete,
 ) -> None:
     runtime = CoverageAwareWebPiRuntime()
     client = _client(tmp_path, monkeypatch, role="admin", pi_runtime=runtime)
@@ -265,6 +272,9 @@ def test_new_web_task_keeps_source_refs_contract_and_context(
     manager = _ApiManager()
     manager.prepare_runtime_binding = (  # type: ignore[attr-defined]
         semantic_workspace.get_semantic_workspace_manager().prepare_runtime_binding
+    )
+    manager.inspect_candidate_reverification = (  # type: ignore[attr-defined]
+        semantic_workspace.get_semantic_workspace_manager().inspect_candidate_reverification
     )
 
     with client:
@@ -292,6 +302,8 @@ def test_new_web_task_keeps_source_refs_contract_and_context(
         )
         task_id = created.json()["task_id"]
         original = _wait_for_delivery(client, task_id)
+        # 固定覆盖已发布和留有缺口的候选，不能依赖 GET 恰好赶在执行完成前。
+        runtime.result_search_complete = result_search_complete
         monkeypatch.setattr(
             semantic_workspace,
             "build_context_rewriter",
@@ -314,9 +326,11 @@ def test_new_web_task_keeps_source_refs_contract_and_context(
         )
         assert response.status_code == 202, response.text
         new_task_id = response.json()["new_task"]["task_id"]
-        detail = client.get(
-            f"/api/semantic-workspace/tasks/{new_task_id}"
-        ).json()
+        detail = (
+            _wait_for_delivery(client, new_task_id)
+            if result_search_complete
+            else _wait_for_status(client, new_task_id, "candidate_ready")
+        )
         assert detail["source_refs"] == original["source_refs"]
         assert detail["web_source"]["source_snapshot_id"] == snapshot_id
         assert detail["web_source"]["delivery_spec"]["formats"] == ["csv"]
