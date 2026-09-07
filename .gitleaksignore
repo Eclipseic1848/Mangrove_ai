@@ -10,3 +10,6 @@
 8dd234af3832b63e8c3b58e40fa1ae1fea91f51b:.claude/settings.local.json:curl-auth-header:203
 8dd234af3832b63e8c3b58e40fa1ae1fea91f51b:.claude/settings.local.json:curl-auth-header:204
 8dd234af3832b63e8c3b58e40fa1ae1fea91f51b:.claude/settings.local.json:curl-auth-header:205
+
+# 已核对：账号来源回归的固定幂等键 synthetic 不是真实凭据，仅忽略该历史行。
+8f23acbdcb69890cc94c733bb47baa3a75d5de22:tests/test_source_account_generation.py:generic-api-key:19

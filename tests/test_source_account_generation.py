@@ -16,7 +16,11 @@ def source(tmp_path):
     auth = seed_execution_owner(path)
     repo = SourceAcquisitionRepository(path)
     with execution.execution_context(auth):
-        attempt, _ = repo.claim_attempt(owner_id=auth.owner_user_id, idempotency_key='synthetic', request=SourceAcquisitionRequest('https://example.invalid/', '虚构来源'))
+        attempt, _ = repo.claim_attempt(
+            owner_id=auth.owner_user_id,
+            idempotency_key='synthetic',
+            request=SourceAcquisitionRequest('https://example.invalid/', '虚构来源'),
+        )
     return path, repo, auth, attempt['attempt_id']
 
 
