@@ -5,7 +5,8 @@ from threading import Barrier
 import asyncio
 import sqlite3
 import warnings
-from fastapi import FastAPI
+import time
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 import pytest
 
@@ -24,7 +25,8 @@ def auth_client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "webui_allow_register", False)
     app = FastAPI()
     app.include_router(auth_routes.router)
-    return TestClient(app), store
+    with TestClient(app, base_url="https://testserver", headers={"Origin": "https://testserver", "X-Mangrove-CSRF": "1"}) as client:
+        yield client, store
 
 
 @pytest.mark.parametrize("setting", [None, "0"])
@@ -51,7 +53,10 @@ def test_open_registration_only_creates_pending_ordinary_user(auth_client):
     user = store.get_user_by_name("alice")
     assert user["role"] == "user"
     assert user["pending"] == 1
-    assert client.post("/api/auth/login", json={"username": "alice", "password": "example-password"}).status_code == 403
+    pending = client.post("/api/auth/login", json={"username": "alice", "password": "example-password"})
+    unknown = client.post("/api/auth/login", json={"username": "unknown", "password": "example-password"})
+    assert pending.status_code == unknown.status_code == 401
+    assert pending.json() == unknown.json()
 
 
 def test_concurrent_maintainers_create_exactly_one_super_admin(auth_client):
@@ -106,19 +111,28 @@ def test_maintainer_cli_initializes_with_registration_closed(auth_client, monkey
     response = client.post("/api/auth/login", json={"username": "maintainer", "password": "example-admin-password"})
     assert response.status_code == 200
     assert response.json()["role"] == "super_admin"
-    assert client.get("/api/auth/me", headers={"Authorization": "Bearer " + response.json()["access_token"]}).status_code == 200
+    assert "access_token" not in response.json()
+    assert client.cookies.get(auth.ACCESS_COOKIE)
+    assert client.cookies.get(auth.REFRESH_COOKIE)
+    assert client.get("/api/auth/me").status_code == 200
 
 
 @pytest.mark.parametrize("secret", ["", " " * 32, "short", "mangrove-dev-secret-change-me-in-production-please", "change-me-to-a-long-random-secret-string"])
 def test_token_signing_and_verification_reject_unsafe_configuration(secret, monkeypatch):
     monkeypatch.setattr(settings, "jwt_secret", "isolated-auth-test-key-" + "x" * 32)
-    token = auth.create_token("owner-test")
+    now = time.time()
+    claims = {"session_id": "synthetic-device", "issued_at": now, "expires_at": now + 1800}
+    token = auth.create_token("owner-test", **claims)
     monkeypatch.setattr(settings, "jwt_secret", secret)
+    def unexpected_store_access():
+        pytest.fail("签名配置拒绝必须先于数据库访问")
+    monkeypatch.setattr(auth, "get_store", unexpected_store_access)
+    request = Request({"type": "http", "method": "GET", "scheme": "https", "path": "/api/auth/me", "server": ("testserver", 443), "headers": [(b"cookie", f"{auth.ACCESS_COOKIE}={token}".encode("utf-8"))]})
 
     with pytest.raises(ValueError, match="JWT_SECRET"):
-        auth.create_token("owner-test")
+        auth.create_token("owner-test", **claims)
     with pytest.raises(ValueError, match="JWT_SECRET"):
-        auth.get_current_user(auth.HTTPAuthorizationCredentials(scheme="Bearer", credentials=token))
+        auth.get_current_user(request)
 
 
 def test_gateway_rejects_missing_secret_before_starting_services(monkeypatch):
@@ -215,3 +229,43 @@ def test_bootstrap_cli_stops_if_password_cannot_be_hidden(auth_client, monkeypat
     assert exc.value.code == 1
     assert calls == warning_at
     assert store.count_users() == 0
+
+
+def test_acceptance_restore_uses_isolated_cookie_jars_and_csrf(monkeypatch):
+    import io
+    import json
+    from email.message import Message
+    import urllib.request
+    from urllib.response import addinfourl
+    from scripts.acceptance import run_phase4b_8b1 as acceptance
+
+    requests = []
+
+    class SyntheticHTTPS(urllib.request.HTTPSHandler):
+        def https_open(self, request):
+            requests.append(request)
+            headers = Message()
+            headers["Content-Type"] = "application/json"
+            if request.full_url.endswith("/login"):
+                username = json.loads(request.data)["username"]
+                headers.add_header("Set-Cookie", f"mangrove_access={username}; Path=/api; Secure; HttpOnly; SameSite=Strict")
+                headers.add_header("Set-Cookie", f"mangrove_refresh={username}-refresh; Path=/api/auth; Secure; HttpOnly; SameSite=Strict")
+                payload = {"user_id": username}
+            else:
+                payload = {"ok": True}
+            response = addinfourl(io.BytesIO(json.dumps(payload).encode("utf-8")), headers, request.full_url, 200)
+            response.msg = "OK"
+            return response
+
+    original = urllib.request.build_opener
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *handlers: original(*handlers, SyntheticHTTPS()))
+    first = acceptance._login("https://synthetic.invalid", "owner-a", "synthetic-password")
+    second = acceptance._login("https://synthetic.invalid", "owner-b", "synthetic-password")
+    for session in (first, second):
+        assert acceptance._http_request("https://synthetic.invalid/api/business", session=session)[0] == 200
+    assert all(request.get_header("Authorization") is None for request in requests)
+    for request in requests[:2]:
+        assert request.get_header("Origin") == "https://synthetic.invalid"
+        assert request.get_header("X-mangrove-csrf") == "1"
+    assert requests[2].get_header("Cookie") == "mangrove_access=owner-a"
+    assert requests[3].get_header("Cookie") == "mangrove_access=owner-b"

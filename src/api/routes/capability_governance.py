@@ -90,7 +90,7 @@ def _http_error(error: Exception) -> HTTPException:
     return HTTPException(status_code=422, detail=str(error))
 
 
-@router.post("/validations", status_code=202)
+@router.post("/validations", status_code=202, openapi_extra={"x-mangrove-task-control": True})
 async def request_capability_validation(
     body: ValidationRequest,
     user=Depends(get_current_user),

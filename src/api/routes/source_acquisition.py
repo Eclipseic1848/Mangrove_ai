@@ -53,6 +53,7 @@ def _not_found() -> HTTPException:
 @router.post(
     "/source-acquisitions",
     status_code=status.HTTP_202_ACCEPTED,
+    openapi_extra={"x-mangrove-task-control": True},
 )
 async def acquire_source(
     payload: SourceAcquisitionIn,

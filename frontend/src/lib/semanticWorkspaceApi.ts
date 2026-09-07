@@ -1,5 +1,5 @@
 import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { api, downloadFile, getToken } from "@/lib/api";
+import { api, downloadFile, authenticatedFetch, getAuthGeneration, revalidateStreamSession, ApiError } from "@/lib/api";
 import type {
   WorkspaceEvent,
   WorkspaceGuidance,
@@ -376,32 +376,66 @@ export function streamWorkspaceTask(
     onError?: (error: Error) => void;
   },
 ): () => void {
-  const controller = new AbortController();
-  const token = getToken();
-  void fetchEventSource(`${BASE}/tasks/${taskId}/stream`, {
-    method: "GET",
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-    signal: controller.signal,
-    openWhenHidden: true,
-    async onopen(response) {
-      if (!response.ok) {
-        throw new Error(`事件流连接失败（${response.status}）`);
-      }
-    },
-    onmessage(message) {
-      if (!message.data) return;
-      const payload = JSON.parse(message.data);
-      if (message.event === "progress") handlers.onProgress?.(payload);
-      else if (message.event === "status") handlers.onStatus?.(payload);
-      else if (message.event === "done") handlers.onDone?.(payload);
-    },
-    onerror(error) {
-      if (!controller.signal.aborted) handlers.onError?.(error as Error);
-      // 不抛出即可让 fetch-event-source 按协议重连；任务事实仍以服务端持久化
-      // sequence 为准，刷新或网络抖动不会制造第二个执行状态。
-    },
-  }).catch((error) => {
-    if (!controller.signal.aborted) handlers.onError?.(error as Error);
-  });
-  return () => controller.abort();
+  const generation = getAuthGeneration();
+  let stopped = false;
+  let controller: AbortController;
+  let lastEventId = "";
+  const connect = () => {
+    if (stopped || generation !== getAuthGeneration()) return;
+    const connection = new AbortController();
+    controller = connection;
+    void fetchEventSource(`${BASE}/tasks/${taskId}/stream`, {
+      method: "GET",
+      headers: lastEventId ? { "Last-Event-ID": lastEventId } : {},
+      fetch: (path, init) => {
+        if (stopped || generation !== getAuthGeneration()) {
+          connection.abort();
+          return Promise.reject(new Error("登录身份已变化，请重新打开当前任务"));
+        }
+        return authenticatedFetch(path, init);
+      },
+      signal: connection.signal,
+      openWhenHidden: true,
+      async onopen(response) {
+        if (!response.ok) throw new ApiError(response.status, `事件流连接失败（${response.status}）`);
+      },
+      onmessage(message) {
+        if (connection.signal.aborted || stopped) return;
+        if (generation !== getAuthGeneration()) { connection.abort(); return; }
+        if (message.id) lastEventId = message.id;
+        if (!message.data) return;
+        const payload = JSON.parse(message.data);
+        if (message.event === "auth-expired") {
+          connection.abort();
+          // 只复核会话并重新订阅 GET；不能把连接过期转换为任务取消或重复执行。
+          void revalidateStreamSession(generation).then((current) => {
+            if (current && !stopped) connect();
+          }).catch((error) => {
+            if (!stopped) handlers.onError?.(error as Error);
+          });
+        }
+        else if (message.event === "progress") handlers.onProgress?.(payload);
+        else if (message.event === "status") handlers.onStatus?.(payload);
+        else if (message.event === "done") {
+          stopped = true;
+          connection.abort();
+          handlers.onDone?.(payload);
+        }
+      },
+      onerror(error) {
+        if (connection.signal.aborted || stopped) throw error;
+        if (error instanceof ApiError && (error.status === 401 || error.status === 429)) {
+          connection.abort();
+          handlers.onError?.(error);
+          throw error;
+        }
+        handlers.onError?.(error as Error);
+        // 只读订阅按协议重连，任务事实仍由持久化 sequence 决定。
+      },
+    }).catch((error) => {
+      if (!connection.signal.aborted && !stopped) handlers.onError?.(error as Error);
+    });
+  };
+  connect();
+  return () => { stopped = true; controller?.abort(); };
 }

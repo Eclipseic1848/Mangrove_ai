@@ -139,6 +139,12 @@ py -3.13 -X utf8 scripts/dev_reload.py
 打开 <http://localhost:8088>，按 `Ctrl+C` 停止服务。启动失败时先检查
 `logs/dev_reload.log`。
 
+平台登录使用 HttpOnly Cookie：访问权限最长 30 分钟，可轮换续期，一次登录绝对期限为 7 天。
+“我的设置 → 登录与密码”可修改密码或退出所有设备；退出不取消后台任务。非环回访问须使用
+HTTPS；浏览器需支持 Web Locks，以协调同一浏览器多个标签页的刷新。刷新结果未知时重新登录。
+旧 Bearer 凭证不再接受；升级到 `webui_0011` 后需重新登录，已有实例迁移仍须独立维护窗口和备份。
+脚本请求须保留 Cookie，并为写请求提供同源 `Origin` 与 `X-Mangrove-CSRF: 1`；登录响应不返回凭证。
+
 > [!TIP]
 > `http://localhost:5173` 只用于前端热更新，不是统一产品入口。需要前端开发服务时，在第二个
 > 终端进入 `frontend/` 后运行 `npm run dev -- --host 0.0.0.0`。

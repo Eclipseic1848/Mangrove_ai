@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Modal } from "@/components/ui/modal";
 import { Pagination } from "@/components/ui/pagination";
-import { api, getToken } from "@/lib/api";
+import { api, authenticatedFetch, readAuthenticatedBlob } from "@/lib/api";
 
 interface Overview {
   total_sessions: number;
@@ -97,9 +97,9 @@ export function Feedback() {
 
   const doExport = async () => {
     try {
-      const res = await fetch("/api/feedback/export", { headers: { Authorization: `Bearer ${getToken()}` } });
+      const res = await authenticatedFetch("/api/feedback/export");
       if (!res.ok) throw new Error("导出失败");
-      const blob = await res.blob();
+      const blob = await readAuthenticatedBlob(res);
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
       a.download = "feedback.csv";

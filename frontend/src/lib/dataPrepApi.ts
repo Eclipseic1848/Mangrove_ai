@@ -2,7 +2,7 @@
  * 数据准备 API 客户端（Phase 2 Task 11）。
  * 复用 lib/api 的鉴权与错误处理；上传走 multipart（不用 JSON Content-Type）。
  */
-import { api, ApiError, getToken } from "./api";
+import { api, ApiError, authenticatedFetch, readAuthenticatedJson, readAuthenticatedBlob } from "./api";
 import type {
   DataTaskPreview,
   DataTask,
@@ -41,22 +41,20 @@ export type DataTaskSource =
 export async function uploadFile(file: File): Promise<UploadItem> {
   const body = new FormData();
   body.append("file", file);
-  const t = getToken();
-  const res = await fetch("/api/data-sources/uploads", {
+  const res = await authenticatedFetch("/api/data-sources/uploads", {
     method: "POST",
-    headers: t ? { Authorization: `Bearer ${t}` } : {},
     body,
   });
   if (!res.ok) {
     let detail = `上传失败（${res.status}）`;
     try {
-      detail = (await res.json()).detail || detail;
+      detail = (await readAuthenticatedJson(res)).detail || detail;
     } catch {
       /* ignore */
     }
     throw new ApiError(res.status, detail);
   }
-  return res.json();
+  return readAuthenticatedJson(res);
 }
 
 /** 使用浏览器原生上传进度事件，不引入第二套上传框架。 */
@@ -64,32 +62,33 @@ export function uploadFileWithProgress(
   file: File,
   onProgress: (percent: number) => void,
 ): Promise<UploadItem> {
-  return new Promise((resolve, reject) => {
-    const body = new FormData();
-    body.append("file", file);
+  const body = new FormData();
+  body.append("file", file);
+  return authenticatedFetch("/api/data-sources/uploads", {
+    method: "POST", body,
+  }, (path, init = {}) => new Promise<Response>((resolve, reject) => {
     const request = new XMLHttpRequest();
-    request.open("POST", "/api/data-sources/uploads");
-    const token = getToken();
-    if (token) request.setRequestHeader("Authorization", `Bearer ${token}`);
+    request.open("POST", String(path));
+    new Headers(init.headers).forEach((value, key) => request.setRequestHeader(key, value));
     request.upload.addEventListener("progress", (event) => {
-      if (!event.lengthComputable) return;
-      onProgress(Math.round((event.loaded / event.total) * 100));
+      if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100));
     });
     request.addEventListener("load", () => {
-      if (request.status < 200 || request.status >= 300) {
-        try {
-          const payload = JSON.parse(request.responseText);
-          reject(new Error(payload.detail || "上传失败"));
-        } catch {
-          reject(new Error(`上传失败（${request.status}）`));
-        }
-        return;
+      const headers = new Headers();
+      for (const line of request.getAllResponseHeaders().trim().split(/[\r\n]+/)) {
+        const separator = line.indexOf(":");
+        if (separator > 0) headers.append(line.slice(0, separator), line.slice(separator + 1).trim());
       }
-      onProgress(100);
-      resolve(JSON.parse(request.responseText) as UploadItem);
+      resolve(new Response(request.responseText, { status: request.status, headers }));
     });
     request.addEventListener("error", () => reject(new Error("上传连接中断")));
+    request.addEventListener("abort", () => reject(new DOMException("上传已中止", "AbortError")));
     request.send(body);
+  })).then(async (response) => {
+    const payload = await readAuthenticatedJson(response);
+    if (!response.ok) throw new ApiError(response.status, payload.detail || "上传失败");
+    onProgress(100);
+    return payload as UploadItem;
   });
 }
 
@@ -105,14 +104,12 @@ export function getDocumentPreview(uploadId: string): Promise<DocumentPreview> {
 
 /** 下载用户自己的上传原件，供页面刷新后恢复本地预览。 */
 export async function getUploadFile(item: UploadItem): Promise<File> {
-  const t = getToken();
-  const res = await fetch(`/api/data-sources/uploads/${item.upload_id}/content`, {
-    headers: t ? { Authorization: `Bearer ${t}` } : {},
+  const res = await authenticatedFetch(`/api/data-sources/uploads/${item.upload_id}/content`, {
   });
   if (!res.ok) {
     throw new ApiError(res.status, "上传原件读取失败");
   }
-  const blob = await res.blob();
+  const blob = await readAuthenticatedBlob(res);
   return new File([blob], item.original_name, {
     type: item.media_type || blob.type,
   });

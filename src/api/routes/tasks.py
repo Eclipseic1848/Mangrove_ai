@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from src.scheduler import Schedule, TASK_TEMPLATES, compute_next_run, parse_schedule
@@ -78,7 +78,7 @@ def list_tasks(user=Depends(get_current_user)) -> List[Dict[str, Any]]:
     return get_schedule_store().list_active(owner_user_id=user["user_id"])
 
 
-@router.post("")
+@router.post("", openapi_extra={"x-mangrove-task-control": True})
 def create_task(body: ScheduleIn, user=Depends(get_current_user)):
     pend = pending_store.pop_action(user["user_id"], body.task_id, "schedule")
     if not pend:
@@ -104,7 +104,7 @@ def create_task(body: ScheduleIn, user=Depends(get_current_user)):
     return {"ok": True, "task_id": sched_id, "next_run_at": next_run.isoformat(timespec="minutes")}
 
 
-@router.post("/manual")
+@router.post("/manual", openapi_extra={"x-mangrove-task-control": True})
 def create_manual_task(body: ManualTaskIn, user=Depends(get_current_user)):
     """手动创建自动化任务（含从模板创建：template_id 非空则 source 记 template）。"""
     try:
@@ -125,7 +125,13 @@ def create_manual_task(body: ManualTaskIn, user=Depends(get_current_user)):
     return {"ok": True, "task_id": sched_id, "next_run_at": next_run.isoformat(timespec="minutes")}
 
 
-@router.patch("/{sched_id}")
+async def _mark_schedule_resume(request: Request):
+    payload = await request.json()
+    if isinstance(payload, dict) and payload.get("status") == "active":
+        request.state.platform_task_control = True
+
+
+@router.patch("/{sched_id}", dependencies=[Depends(_mark_schedule_resume)])
 def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_current_user)):
     """暂停/恢复（仅传 status）或整体编辑（名称/提示词/触发方式/生效区间）。"""
     task = _owned_task(sched_id, user)
@@ -184,7 +190,7 @@ def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_current_user)
     return {"ok": True, "next_run_at": next_run.isoformat(timespec="minutes")}
 
 
-@router.post("/{sched_id}/run_now")
+@router.post("/{sched_id}/run_now", openapi_extra={"x-mangrove-task-control": True})
 async def run_task_now_endpoint(sched_id: str, user=Depends(get_current_user)):
     """立即执行一次，不影响原定 next_run_at/status。"""
     _owned_task(sched_id, user)

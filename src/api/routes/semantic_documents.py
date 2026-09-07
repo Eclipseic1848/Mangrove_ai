@@ -111,7 +111,7 @@ def list_document_plans(
     return rows
 
 
-@router.post("/{plan_id}/document-plans/{physical_plan_id}/execute")
+@router.post("/{plan_id}/document-plans/{physical_plan_id}/execute", openapi_extra={"x-mangrove-task-control": True})
 async def execute_document(
     plan_id: str,
     physical_plan_id: str,

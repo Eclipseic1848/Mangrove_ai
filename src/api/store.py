@@ -14,6 +14,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta
@@ -338,6 +339,123 @@ class WebUIStore:
             ).fetchall()
         return [dict(r) for r in rows]
 
+    # ---------- 平台登录会话（与业务对话、HITL、来源登录分离） ----------
+    def platform_login_retry(self, *, account_key: str, source_key: str, now: float) -> int:
+        from .platform_rate_limits import login_retry_after
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return login_retry_after(conn, account_key=account_key, source_key=source_key, now=now)
+
+    def platform_login_commit(
+        self, *, username: str, expected_password_hash: str | None,
+        session_id: str, refresh_digest: str, now: float,
+        access_expires_at: float, absolute_expires_at: float,
+        account_key: str, source_key: str,
+    ) -> tuple[int, dict | None]:
+        from .platform_rate_limits import login_retry_after, record_login_result, append_security_event
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            retry = login_retry_after(conn, account_key=account_key, source_key=source_key, now=now)
+            if retry:
+                return retry, None
+            row = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+            # 密码计算在锁外；提交时重查，不能让改密或停用前的验证迟到生效。
+            valid = row is not None and expected_password_hash is not None and row["password_hash"] == expected_password_hash and not row["pending"] and not row["disabled"]
+            record_login_result(conn, account_key=account_key, source_key=source_key, success=bool(valid), now=now)
+            if not valid:
+                return 0, None
+            conn.execute(
+                "INSERT INTO platform_login_sessions (session_id, owner_user_id, created_at, absolute_expires_at, access_expires_at, refresh_digest) VALUES (?, ?, ?, ?, ?, ?)",
+                (session_id, row["user_id"], now, absolute_expires_at, access_expires_at, refresh_digest),
+            )
+            append_security_event(conn, action="session_created", subject_digest=hashlib.sha256(session_id.encode("utf-8")).hexdigest(), reason="login", result="succeeded", now=now, actor_user_id=row["user_id"])
+            return 0, dict(row)
+
+    def get_platform_session(self, session_id: str, owner_user_id: str | None = None) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM platform_login_sessions WHERE session_id=?", (session_id,)).fetchone()
+        if row is None or (owner_user_id is not None and row["owner_user_id"] != owner_user_id):
+            return None
+        return dict(row)
+
+    def platform_request_limit(self, *, owner_user_id: str, control: bool, now: float) -> int:
+        from .platform_rate_limits import consume_request_limits
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return consume_request_limits(conn, owner_user_id=owner_user_id, control=control, now=now)
+
+    @staticmethod
+    def _revoke_platform_sessions(conn: sqlite3.Connection, owner_user_id: str, reason: str, now: float, session_id: str | None = None, *, actor_user_id: str | None = None) -> None:
+        from .platform_rate_limits import append_security_event
+        where = "owner_user_id=? AND revoked_at IS NULL"
+        values: list[Any] = [now, reason, owner_user_id]
+        if session_id is not None:
+            where += " AND session_id=?"
+            values.append(session_id)
+        changed = conn.execute(f"UPDATE platform_login_sessions SET revoked_at=?, revocation_reason=? WHERE {where}", values)
+        if changed.rowcount:
+            subject = hashlib.sha256((session_id or owner_user_id).encode("utf-8")).hexdigest()
+            append_security_event(conn, action="session_revoked", subject_digest=subject, reason=reason, result="succeeded", now=now, actor_user_id=actor_user_id)
+
+    def platform_rotate_refresh(self, *, session_id: str, digest: str, next_digest: str, now: float, access_expires_at: float, expected_owner: str | None = None) -> tuple[int, tuple[dict, dict] | None]:
+        from .platform_rate_limits import consume_request_limits
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            session = conn.execute("SELECT * FROM platform_login_sessions WHERE session_id=?", (session_id,)).fetchone()
+            if session is None or session["revoked_at"] is not None or session["absolute_expires_at"] <= now:
+                return 0, None
+            user = conn.execute("SELECT * FROM users WHERE user_id=?", (session["owner_user_id"],)).fetchone()
+            if user is None or user["pending"] or user["disabled"]:
+                return 0, None
+            if expected_owner is not None and expected_owner != user["user_id"]:
+                return -1, None
+            if session["refresh_digest"] != digest:
+                spent = conn.execute("SELECT 1 FROM platform_spent_refresh WHERE session_id=? AND refresh_digest=?", (session_id, digest)).fetchone()
+                if spent:
+                    # 只由已消费的真实摘要证明重放；猜测 session_id 不能撤别人的设备。
+                    self._revoke_platform_sessions(conn, user["user_id"], "refresh_replay", now, session_id)
+                return 0, None
+            retry = consume_request_limits(conn, owner_user_id=user["user_id"], control=False, now=now)
+            if retry:
+                return retry, None
+            conn.execute("INSERT INTO platform_spent_refresh (session_id, refresh_digest, consumed_at) VALUES (?, ?, ?)", (session_id, digest, now))
+            expires = min(access_expires_at, session["absolute_expires_at"])
+            conn.execute("UPDATE platform_login_sessions SET refresh_digest=?, access_expires_at=? WHERE session_id=?", (next_digest, expires, session_id))
+            updated = dict(session)
+            updated.update(refresh_digest=next_digest, access_expires_at=expires)
+            return 0, (dict(user), updated)
+
+    def platform_logout(self, *, session_id: str, now: float, owner_user_id: str | None = None, refresh_digest: str | None = None, expected_owner: str | None = None) -> int:
+        from .platform_rate_limits import consume_request_limits
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM platform_login_sessions WHERE session_id=?", (session_id,)).fetchone()
+            if row is not None and ((owner_user_id is not None and row["owner_user_id"] == owner_user_id) or (refresh_digest is not None and row["refresh_digest"] == refresh_digest and row["absolute_expires_at"] > now)):
+                if expected_owner is not None and expected_owner != row["owner_user_id"]:
+                    return -1
+                if row["revoked_at"] is not None:
+                    return 0
+                retry = consume_request_limits(conn, owner_user_id=row["owner_user_id"], control=False, now=now)
+                if retry:
+                    return retry
+                self._revoke_platform_sessions(conn, row["owner_user_id"], "logout", now, session_id, actor_user_id=row["owner_user_id"])
+            return 0
+
+    def platform_logout_all(self, owner_user_id: str, *, now: float) -> None:
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._revoke_platform_sessions(conn, owner_user_id, "logout_all", now, actor_user_id=owner_user_id)
+
+    def platform_change_password(self, *, owner_user_id: str, session_id: str, expected_password_hash: str, password_hash: str, now: float) -> bool:
+        with self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = conn.execute("SELECT 1 FROM users u JOIN platform_login_sessions s ON s.owner_user_id=u.user_id WHERE u.user_id=? AND u.password_hash=? AND u.disabled=0 AND u.pending=0 AND s.session_id=? AND s.revoked_at IS NULL AND s.absolute_expires_at>?", (owner_user_id, expected_password_hash, session_id, now)).fetchone()
+            if current is None:
+                return False
+            conn.execute("UPDATE users SET password_hash=? WHERE user_id=?", (password_hash, owner_user_id))
+            self._revoke_platform_sessions(conn, owner_user_id, "password_changed", now, actor_user_id=owner_user_id)
+            return True
+
     # ---------- 用户 ----------
     def bootstrap_super_admin(
         self, username: str, password_hash: str, display_name: str = "",
@@ -440,6 +558,7 @@ class WebUIStore:
         pending: Optional[bool] = None,
         password_hash: Optional[str] = None,
         display_name: Optional[str] = None,
+        actor_user_id: str | None = None,
     ) -> None:
         """更新用户角色/禁用/审批/密码/昵称（仅设置传入的字段）。"""
         sets: List[str] = []
@@ -458,11 +577,16 @@ class WebUIStore:
             return
         vals.append(user_id)
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(f"UPDATE users SET {', '.join(sets)} WHERE user_id=?", vals)
+            if password_hash is not None or disabled is True or pending is True:
+                self._revoke_platform_sessions(conn, user_id, "account_changed", time.time(), actor_user_id=actor_user_id)
 
-    def delete_user(self, user_id: str) -> None:
+    def delete_user(self, user_id: str, *, actor_user_id: str | None = None) -> None:
         """删除用户及其全部会话/消息/个人记忆。"""
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._revoke_platform_sessions(conn, user_id, "account_deleted", time.time(), actor_user_id=actor_user_id)
             rows = conn.execute(
                 "SELECT conv_id FROM conversations WHERE user_id=?", (user_id,)
             ).fetchall()

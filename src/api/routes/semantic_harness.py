@@ -190,7 +190,7 @@ async def invoke_run_record(
         )
 
 
-@router.post("/runs")
+@router.post("/runs", openapi_extra={"x-mangrove-task-control": True})
 async def create_run(
     payload: HarnessRunCreateIn,
     user=Depends(get_current_user),
@@ -240,7 +240,7 @@ def get_attempts(
     )
 
 
-@router.post("/runs/{run_id}/resume")
+@router.post("/runs/{run_id}/resume", openapi_extra={"x-mangrove-task-control": True})
 async def resume_run(
     run_id: str,
     payload: HarnessResumeIn,

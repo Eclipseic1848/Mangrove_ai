@@ -81,6 +81,7 @@ def update_user(user_id: str, body: AdminUserUpdateIn, admin=Depends(require_adm
     store.update_user(
         user_id, role=body.role, disabled=body.disabled,
         pending=body.pending, password_hash=pwd_hash, display_name=display_name,
+        actor_user_id=admin["user_id"],
     )
     return {"ok": True}
 
@@ -92,7 +93,7 @@ def delete_user(user_id: str, admin=Depends(require_admin)):
     if not target:
         raise HTTPException(status_code=404, detail="用户不存在")
     _assert_outranks(admin, target)  # 不能删自己/同级/更高（自删因此被禁）
-    store.delete_user(user_id)
+    store.delete_user(user_id, actor_user_id=admin["user_id"])
     return {"ok": True}
 
 

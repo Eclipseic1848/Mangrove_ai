@@ -90,7 +90,7 @@ def list_physical_plans(
     return rows
 
 
-@router.post("/{plan_id}/physical-plans/{physical_plan_id}/execute")
+@router.post("/{plan_id}/physical-plans/{physical_plan_id}/execute", openapi_extra={"x-mangrove-task-control": True})
 async def execute_plan(
     plan_id: str,
     physical_plan_id: str,

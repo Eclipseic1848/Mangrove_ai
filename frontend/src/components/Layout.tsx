@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { LayoutDashboard, MessagesSquare, CalendarClock, Moon, Sun, LogOut, Library, Brain, Settings, Users, BarChart3, Database, Menu, X } from "lucide-react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { toast } from "sonner";
 import { useAuth, isAdminish } from "@/lib/auth";
 import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
@@ -27,6 +28,7 @@ export function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [loggingOut, setLoggingOut] = useState(false);
   const compactDataPrep = location.pathname === "/data-prep";
 
   useEffect(() => {
@@ -137,9 +139,16 @@ export function Layout() {
               <div className="truncate text-[11px] text-muted-foreground">@{user?.username}</div>
             </div>
             <button
-              onClick={() => {
-                logout();
-                navigate("/login");
+              disabled={loggingOut}
+              onClick={async () => {
+                setLoggingOut(true);
+                try {
+                  await logout();
+                } catch (error) {
+                  toast.error(error instanceof Error ? error.message : "退出失败，请重试");
+                } finally {
+                  setLoggingOut(false);
+                }
               }}
               className="rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
               title="退出登录"

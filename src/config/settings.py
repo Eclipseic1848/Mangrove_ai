@@ -601,7 +601,7 @@ class Settings(BaseSettings):
     webui_db_path: str = Field(default="data/webui.db", description="Web UI 用户/会话 SQLite 路径")
     # 缺失配置保持失败关闭，不生成临时密钥或回退公开的开发密钥。
     jwt_secret: str = Field(default="", description="JWT 签名密钥（至少 32 字节随机值，放 .env）")
-    jwt_expire_hours: int = Field(default=168, description="登录令牌有效期(小时)，默认 7 天")
+    jwt_expire_hours: int = Field(default=168, description="历史兼容配置；平台访问凭证固定最长30分钟，登录会话绝对期限7天")
     # 私有实例默认由管理员开通账号；首次管理员只走本机显式初始化。
     webui_allow_register: bool = Field(default=False, description="是否允许前端自助注册账号")
     # 前端开发服务器源（Vite dev 默认 5173），用于 CORS 放行；生产由网关同源托管时可忽略。

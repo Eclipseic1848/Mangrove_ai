@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import { MessagesSquare, Database, ShieldCheck, KeyRound, Repeat, Sparkles, Moon, Sun } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -18,14 +18,24 @@ const FEATURES = [
 ];
 
 export function Login() {
-  const { login, register } = useAuth();
+  const { login, register, message } = useAuth();
   const { theme, toggle } = useTheme();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [mode, setMode] = useState<"login" | "register">("login");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [busy, setBusy] = useState(false);
+
+  const returnTo = () => {
+    const path = searchParams.get("returnTo") || "/";
+    // 只恢复站内位置；不能借登录跳转到外部站点或再次进入登录页。
+    if (!path.startsWith("/") || path.startsWith("//") || /[\\\u0000-\u001f]/.test(path)) return "/";
+    const destination = new URL(path, window.location.origin);
+    if (destination.origin !== window.location.origin || destination.pathname === "/login") return "/";
+    return destination.pathname + destination.search + destination.hash;
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -33,7 +43,7 @@ export function Login() {
     try {
       if (mode === "login") {
         await login(username, password);
-        navigate("/");
+        navigate(returnTo(), { replace: true });
       } else {
         const r = await register(username, password, displayName);
         if (r.pending) {
@@ -42,7 +52,7 @@ export function Login() {
           setMode("login");
           setPassword("");
         } else {
-          navigate("/"); // 兼容已激活账号的响应。
+          navigate(returnTo(), { replace: true }); // 兼容已激活账号的响应。
         }
       }
     } catch (err) {
@@ -138,6 +148,7 @@ export function Login() {
           </div>
 
           <form onSubmit={submit} className="space-y-3 rounded-xl border border-border bg-card p-6 shadow-sm">
+            {message && <p role="alert" className="text-sm text-muted-foreground">{message}</p>}
             <div className="mb-2 flex gap-1 rounded-lg bg-muted p-1 text-sm">
               {(["login", "register"] as const).map((m) => (
                 <button
@@ -156,18 +167,20 @@ export function Login() {
 
             <div className="space-y-1.5">
               <label htmlFor="auth-username" className="text-xs font-medium text-muted-foreground">用户名</label>
-              <Input id="auth-username" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="至少 2 位" autoFocus />
+              <Input id="auth-username" name="username" autoComplete="username" value={username} onChange={(e) => setUsername(e.target.value)} placeholder="至少 2 位" autoFocus />
             </div>
             {mode === "register" && (
               <div className="space-y-1.5">
                 <label htmlFor="auth-display-name" className="text-xs font-medium text-muted-foreground">显示名（可选）</label>
-                <Input id="auth-display-name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="如 张三" />
+                <Input id="auth-display-name" name="display_name" autoComplete="nickname" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="如 张三" />
               </div>
             )}
             <div className="space-y-1.5">
               <label htmlFor="auth-password" className="text-xs font-medium text-muted-foreground">密码</label>
               <Input
                 id="auth-password"
+                name="password"
+                autoComplete={mode === "login" ? "current-password" : "new-password"}
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}

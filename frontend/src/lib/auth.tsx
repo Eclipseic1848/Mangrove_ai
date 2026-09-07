@@ -1,5 +1,5 @@
-import { createContext, useContext, useEffect, useRef, useState, type ReactNode } from "react";
-import { api, clearToken, getToken, setToken } from "./api";
+import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
+import { bootstrapSession, getSessionState, sessionCommand, subscribeSession } from "./api";
 
 export interface User {
   user_id: string;
@@ -24,75 +24,41 @@ interface AuthState {
     password: string,
     displayName?: string,
   ) => Promise<{ pending?: boolean; message?: string }>;
-  logout: () => void;
+  message: string | null;
+  logout: () => Promise<void>;
+  logoutAll: () => Promise<void>;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
 }
 
 const AuthCtx = createContext<AuthState>(null as unknown as AuthState);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<User | null>(null);
+  const [session, setSession] = useState(getSessionState);
   const [loading, setLoading] = useState(true);
-  const sessionGeneration = useRef(0);
-
   useEffect(() => {
-    const generation = ++sessionGeneration.current;
-    const token = getToken();
-    // 启动鉴权只能提交给发起时的会话；退出、换账号或 effect 重放都会使旧响应失效。
-    const isCurrent = () => sessionGeneration.current === generation && getToken() === token;
-    (async () => {
-      if (token) {
-        try {
-          const me = await api.get("/api/auth/me");
-          if (isCurrent()) {
-            setToken(me.access_token);
-            setUser({ user_id: me.user_id, username: me.username, display_name: me.display_name, role: me.role });
-          }
-        } catch {
-          if (isCurrent()) clearToken();
-        }
-      }
-      if (sessionGeneration.current === generation) setLoading(false);
-    })();
-    return () => { sessionGeneration.current += 1; };
+    let active = true;
+    const unsubscribe = subscribeSession(() => { if (active) setSession(getSessionState()); });
+    void bootstrapSession().catch((error) => {
+      if (active) setSession((current) => ({ ...current, message: String(error.message || error) }));
+    }).finally(() => { if (active) setLoading(false); });
+    return () => { active = false; unsubscribe(); };
   }, []);
-
-  const apply = (r: any) => {
-    setToken(r.access_token);
-    setUser({ user_id: r.user_id, username: r.username, display_name: r.display_name, role: r.role });
-  };
-
   return (
-    <AuthCtx.Provider
-      value={{
-        user,
-        loading,
-        login: async (username, password) => {
-          const generation = ++sessionGeneration.current;
-          try {
-            const r = await api.post("/api/auth/login", { username, password });
-            if (sessionGeneration.current === generation) apply(r);
-          } finally {
-            if (sessionGeneration.current === generation) setLoading(false);
-          }
-        },
-        register: async (username, password, display_name) => {
-          const generation = ++sessionGeneration.current;
-          try {
-            const r = await api.post("/api/auth/register", { username, password, display_name });
-            if (sessionGeneration.current === generation && r.access_token) apply(r); // 兼容已签发令牌的响应；待审批注册保持未登录。
-            return r;
-          } finally {
-            if (sessionGeneration.current === generation) setLoading(false);
-          }
-        },
-        logout: () => {
-          sessionGeneration.current += 1;
-          clearToken();
-          setUser(null);
-          setLoading(false);
-        },
-      }}
-    >
+    <AuthCtx.Provider value={{
+      ...session, loading,
+      login: async (username, password) => {
+        await sessionCommand("/api/auth/login", { username, password });
+        setLoading(false);
+      },
+      register: async (username, password, display_name) => {
+        return sessionCommand("/api/auth/register", { username, password, display_name });
+      },
+      logout: async () => { await sessionCommand("/api/auth/logout"); },
+      logoutAll: async () => { await sessionCommand("/api/auth/logout-all"); },
+      changePassword: async (current_password, new_password) => {
+        await sessionCommand("/api/auth/password", { current_password, new_password });
+      },
+    }}>
       {children}
     </AuthCtx.Provider>
   );
