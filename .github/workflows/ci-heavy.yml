@@ -198,13 +198,14 @@ jobs:
           npm run build 2>&1 | tee ../.artifacts/heavy/frontend-build.log
       - name: 运行所选浏览器回归
         env:
-          PLAYWRIGHT_JUNIT_OUTPUT_NAME: ../.artifacts/heavy/frontend-e2e.xml
+          PLAYWRIGHT_JUNIT_OUTPUT_FILE: ../.artifacts/heavy/frontend-e2e.xml
         run: |
           if [[ "${{ inputs.gate }}" == "cancellation" ]]; then
             npm run test:e2e -- semantic-workspace.spec.ts --grep '停止|来源请求被拒绝|来源刷新结果未知|Attempt ID 前刷新' --reporter=junit
           else
             npm run test:e2e -- --reporter=junit
           fi
+          test -s ../.artifacts/heavy/frontend-e2e.xml
       - name: 验证浏览器子进程和端口无残留
         if: always()
         run: |
@@ -221,6 +222,7 @@ jobs:
           path: |
             .artifacts/heavy
             frontend/test-results
+          include-hidden-files: true
           if-no-files-found: warn
           retention-days: 14
 

@@ -41,7 +41,7 @@ from src.agentic_runtime.models import (
     RuntimeVersion,
 )
 from src.agentic_runtime.repository import AgenticRuntimeRepository
-from src.api.auth import get_current_user, get_store, is_admin_role, platform_session_valid
+from src.api.auth import access_identity, get_current_user, get_store, is_admin_role, platform_session_valid, require_csrf
 from src.api.catalog_actor import catalog_actor_from_user
 from src.api.semantic_workspace_runtime import (
     get_semantic_workspace_manager,
@@ -3067,15 +3067,31 @@ async def decide_steering_revision(
     return response
 
 
-@router.post("/tasks/{task_id}/answer", openapi_extra={"x-mangrove-task-control": True})
+async def _mark_answer_control(request: Request):
+    request.state.platform_task_control = True
+    payload = await request.json()
+    answer = payload.get("answer") if isinstance(payload, dict) else None
+    if not isinstance(answer, str) or answer.strip() != "cancel":
+        return
+    require_csrf(request)
+    user, _, _ = access_identity(request)
+    task = get_store().get_semantic_workspace_task(user["user_id"], request.path_params["task_id"])
+    if task and task["status"] == "needs_input" and (task.get("question") or {}).get("kind") == "external":
+        request.state.platform_task_control = False
+        request.state.cancel_only = True
+
+
+@router.post("/tasks/{task_id}/answer", dependencies=[Depends(_mark_answer_control)])
 async def answer_task(
     task_id: str,
     payload: WorkspaceAnswerIn,
+    request: Request,
     user=Depends(get_current_user),
 ):
     try:
         return await get_semantic_workspace_manager().answer(
-            user["user_id"], task_id, payload.answer.strip()
+            user["user_id"], task_id, payload.answer.strip(),
+            cancel_only=getattr(request.state, "cancel_only", False),
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

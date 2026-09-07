@@ -103,3 +103,82 @@ test("旧Owner响应头已成功但正文迟到时不得交给调用者", async 
   expect(result.result).toBe("rejected");
   expect(result.state.user?.user_id).toBe("synthetic-other-owner");
 });
+
+test("广播已投递时仍等待本页续期完成再重读身份", async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const mod = await import("/src/lib/api.ts");
+    const user = { user_id: "synthetic-owner", username: "owner", display_name: "当前", role: "user" };
+    window.fetch = async () => Response.json(user);
+    await mod.bootstrapSession();
+    let releaseRead!: (response: Response) => void;
+    let notifyRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { notifyRead = resolve; });
+    let reads = 0;
+    let rotations = 0;
+    let renewed = false;
+    window.fetch = async (path) => {
+      if (String(path) === "/api/auth/refresh") {
+        rotations += 1;
+        renewed = true;
+        return Response.json(user);
+      }
+      if (String(path) === "/api/auth/me" && ++reads === 1) {
+        return new Promise<Response>((resolve) => { releaseRead = resolve; notifyRead(); });
+      }
+      return renewed ? Response.json(user) : new Response("{}", { status: 401, headers: { "X-Mangrove-Auth": "access-expired" } });
+    };
+    const request = mod.authenticatedFetch("/api/business").then((response) => response.status, (error) => error.message);
+    await readStarted;
+    const sender = new BroadcastChannel("mangrove-platform-session");
+    // 同源较晚创建的接收端见证投递，避免用 sleep 猜测广播与锁内读取的顺序。
+    const witness = new BroadcastChannel("mangrove-platform-session");
+    const delivered = new Promise<void>((resolve) => witness.addEventListener("message", () => resolve(), { once: true }));
+    sender.postMessage("identity-changed");
+    await delivered;
+    releaseRead(new Response("{}", { status: 401, headers: { "X-Mangrove-Auth": "access-expired" } }));
+    const status = await request;
+    sender.close();
+    witness.close();
+    return { status, rotations, state: mod.getSessionState() };
+  });
+  expect(result.status).toBe(200);
+  expect(result.rotations).toBe(1);
+  expect(result.state.user?.user_id).toBe("synthetic-owner");
+});
+
+test("续期失败后仍处理已排队的换Owner广播", async ({ page }) => {
+  const result = await page.evaluate(async () => {
+    const mod = await import("/src/lib/api.ts");
+    const user = { user_id: "synthetic-owner", username: "owner", display_name: "当前", role: "user" };
+    window.fetch = async () => Response.json(user);
+    await mod.bootstrapSession();
+    let releaseRead!: (response: Response) => void;
+    let notifyRead!: () => void;
+    const readStarted = new Promise<void>((resolve) => { notifyRead = resolve; });
+    let reads = 0;
+    window.fetch = async (path) => {
+      if (String(path) === "/api/business") return new Response("{}", { status: 401, headers: { "X-Mangrove-Auth": "access-expired" } });
+      if (++reads === 1) return new Promise<Response>((resolve) => { releaseRead = resolve; notifyRead(); });
+      return Response.json({ ...user, user_id: "synthetic-other-owner" });
+    };
+    const changed = new Promise<void>((resolve) => {
+      const unsubscribe = mod.subscribeSession(() => {
+        if (mod.getSessionState().user?.user_id === "synthetic-other-owner") { unsubscribe(); resolve(); }
+      });
+    });
+    const request = mod.authenticatedFetch("/api/business").catch(() => null);
+    await readStarted;
+    const sender = new BroadcastChannel("mangrove-platform-session");
+    const witness = new BroadcastChannel("mangrove-platform-session");
+    const delivered = new Promise<void>((resolve) => witness.addEventListener("message", () => resolve(), { once: true }));
+    sender.postMessage("identity-changed");
+    await delivered;
+    releaseRead(Response.json({ detail: "synthetic read failure" }, { status: 503 }));
+    await request;
+    await changed;
+    sender.close();
+    witness.close();
+    return mod.getSessionState();
+  });
+  expect(result.user?.user_id).toBe("synthetic-other-owner");
+});

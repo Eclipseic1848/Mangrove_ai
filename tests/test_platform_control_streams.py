@@ -22,7 +22,7 @@ CONTROL_ROUTES = {
     "semantic_executions": {"execute_plan"},
     "semantic_documents": {"execute_document"},
     "data_tasks": {"create_document_draft", "create_document_scope_revision", "execute_document_extraction", "create_task", "rerun_task"},
-    "semantic_workspace": {"create_task", "answer_task", "decide_steering_revision", "request_candidate_reverification", "create_revision", "refresh_task_source"},
+    "semantic_workspace": {"create_task", "decide_steering_revision", "request_candidate_reverification", "create_revision", "refresh_task_source"},
     "source_acquisition": {"acquire_source"},
     "capability_governance": {"request_capability_validation"},
 }
@@ -217,6 +217,69 @@ def test_gap_action_only_acceptance_consumes_control(stream_session, action):
         counts = dict(conn.execute("SELECT bucket, count(*) FROM platform_rate_events GROUP BY bucket"))
     assert counts["request.api"] == 2
     assert counts.get("request.control", 0) == int(action == "accept_gap")
+
+
+@pytest.mark.parametrize("kind", ["external", "plan", "binding", "harness"])
+def test_answer_cancel_only_external_question_bypasses_full_control_bucket(stream_session, monkeypatch, kind):
+    from src.api.semantic_workspace_runtime import SemanticWorkspaceManager
+    from src.config.settings import settings
+
+    store, path, request, user = stream_session
+    monkeypatch.setattr(settings, "webui_db_path", str(path))
+    manager = SemanticWorkspaceManager()
+    monkeypatch.setattr(semantic_workspace, "get_semantic_workspace_manager", lambda: manager)
+    store.create_semantic_workspace_task(user["user_id"], task_id="synthetic-answer", title="虚构任务", objective_text="虚构目标", upload_ids=[], output_formats=[], provider="local", model=None, external_api_confirmed=False)
+    store.update_semantic_workspace_task(user["user_id"], "synthetic-answer", status="needs_input", question={"kind": kind, "question_id": "synthetic-question", "options": [{"value": "cancel", "label": "取消"}], "allow_free_text": kind != "external"})
+    for _ in range(10):
+        assert store.platform_request_limit(owner_user_id=user["user_id"], control=True, now=auth.time.time()) == 0
+    app = FastAPI()
+    app.include_router(semantic_workspace.router)
+    with TestClient(app, base_url="https://testserver", headers={"Origin": "https://testserver", "X-Mangrove-CSRF": "1", "Cookie": request.headers["cookie"]}) as client:
+        response = client.post("/api/semantic-workspace/tasks/synthetic-answer/answer", json={"answer": "cancel"})
+    assert response.status_code == (200 if kind == "external" else 429), response.text
+    task = store.get_semantic_workspace_task(user["user_id"], "synthetic-answer")
+    assert task["status"] == ("cancelled" if kind == "external" else "needs_input")
+    assert manager._queue.empty()
+    with sqlite3.connect(path) as conn:
+        counts = dict(conn.execute("SELECT bucket, count(*) FROM platform_rate_events GROUP BY bucket"))
+    assert counts["request.control"] == 10
+    assert counts["request.api"] == (12 if kind == "external" else 11)
+
+
+@pytest.mark.parametrize("scenario", ["question_changed", "other_owner", "disallowed_answer"])
+def test_answer_cancel_classification_preserves_question_and_owner_guards(stream_session, monkeypatch, scenario):
+    from src.api.semantic_workspace_runtime import SemanticWorkspaceManager
+    from src.config.settings import settings
+
+    store, path, request, user = stream_session
+    monkeypatch.setattr(settings, "webui_db_path", str(path))
+    manager = SemanticWorkspaceManager()
+    monkeypatch.setattr(semantic_workspace, "get_semantic_workspace_manager", lambda: manager)
+    owner = store.create_user("synthetic-other-owner", auth.hash_password("synthetic-password"), pending=False) if scenario == "other_owner" else user
+    store.create_semantic_workspace_task(owner["user_id"], task_id="synthetic-answer-guard", title="虚构任务", objective_text="虚构目标", upload_ids=[], output_formats=[], provider="local", model=None, external_api_confirmed=False)
+    question = {"kind": "external", "question_id": "synthetic-question", "options": [{"value": "confirm" if scenario == "disallowed_answer" else "cancel", "label": "虚构选项"}], "allow_free_text": False}
+    store.update_semantic_workspace_task(owner["user_id"], "synthetic-answer-guard", status="needs_input", question=question)
+    if scenario == "question_changed":
+        consume = store.platform_request_limit
+
+        def consume_then_change_question(**kwargs):
+            result = consume(**kwargs)
+            # 分类已结束，模拟另一请求在实际 answer 执行前切换当前问题。
+            store.update_semantic_workspace_task(owner["user_id"], "synthetic-answer-guard", question={**question, "kind": "plan", "allow_free_text": True})
+            return result
+
+        monkeypatch.setattr(store, "platform_request_limit", consume_then_change_question)
+    app = FastAPI()
+    app.include_router(semantic_workspace.router)
+    with TestClient(app, base_url="https://testserver", headers={"Origin": "https://testserver", "X-Mangrove-CSRF": "1", "Cookie": request.headers["cookie"]}) as client:
+        response = client.post("/api/semantic-workspace/tasks/synthetic-answer-guard/answer", json={"answer": " cancel "})
+    assert response.status_code == (404 if scenario == "other_owner" else 409), response.text
+    assert store.get_semantic_workspace_task(owner["user_id"], "synthetic-answer-guard")["status"] == "needs_input"
+    assert manager._queue.empty()
+    with sqlite3.connect(path) as conn:
+        counts = dict(conn.execute("SELECT bucket, count(*) FROM platform_rate_events GROUP BY bucket"))
+    assert counts["request.api"] == 2
+    assert counts.get("request.control", 0) == int(scenario == "other_owner")
 
 
 @pytest.mark.parametrize("module_name,names", CONTROL_ROUTES.items())

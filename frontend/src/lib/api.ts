@@ -152,8 +152,9 @@ export async function bootstrapSession() {
 }
 channel?.addEventListener("message", (event) => {
   if (event.data !== "identity-changed") return;
-  // 通知只触发服务端身份重读，不携带凭证或信任消息中的身份。
-  void bootstrapSession().catch(() => {});
+  // 通知只触发身份重读；先等本页续期收口，避免通知反过来使锁内读取失效。
+  // 续期失败也要重读，其他标签可能已切换 Owner，不能吞掉身份变更通知。
+  void (refreshFlight ?? Promise.resolve()).catch(() => {}).then(bootstrapSession).catch(() => {});
 });
 export async function sessionCommand(path: string, body?: unknown) {
   const generation = ++authGeneration;

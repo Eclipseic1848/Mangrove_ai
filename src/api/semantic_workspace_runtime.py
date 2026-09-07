@@ -1569,6 +1569,8 @@ class SemanticWorkspaceManager:
         user_id: str,
         task_id: str,
         answer: str,
+        *,
+        cancel_only: bool = False,
     ) -> dict[str, Any]:
         store = get_store()
         task = store.get_semantic_workspace_task(user_id, task_id)
@@ -1578,6 +1580,9 @@ class SemanticWorkspaceManager:
         if task["status"] != "needs_input" or not question:
             raise ValueError("当前任务没有待回答问题")
         kind = question.get("kind")
+        # 按停止分类的请求不能因问题在鉴权后变化而免扣启动额并继续执行。
+        if cancel_only and (kind != "external" or answer != "cancel"):
+            raise ValueError("当前问题已变化，请重新确认操作")
         allowed = {
             str(option["value"])
             for option in question.get("options", [])
