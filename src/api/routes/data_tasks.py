@@ -491,7 +491,7 @@ async def _execute_task(
 
 
 # ---------- 端点 ----------
-@router.post("/document-drafts")
+@router.post("/document-drafts", openapi_extra={"x-mangrove-task-control": True})
 async def create_document_draft(
     req: DocumentDraftIn,
     user=Depends(get_current_user),
@@ -785,7 +785,7 @@ def update_document_model_selection(
     }
 
 
-@router.post("/{task_id}/scope-revisions")
+@router.post("/{task_id}/scope-revisions", openapi_extra={"x-mangrove-task-control": True})
 def create_document_scope_revision(
     task_id: str,
     req: DocumentScopeRevisionIn,
@@ -964,7 +964,7 @@ async def revise_document_draft(
     }
 
 
-@router.post("/{task_id}/extract")
+@router.post("/{task_id}/extract", openapi_extra={"x-mangrove-task-control": True})
 async def execute_document_extraction(
     task_id: str,
     user=Depends(get_current_user),
@@ -1562,7 +1562,7 @@ async def preview_task(req: PreviewIn, user=Depends(get_current_user)):
         shutil.rmtree(artifact_store.task_dir(task_id), ignore_errors=True)
 
 
-@router.post("")
+@router.post("", openapi_extra={"x-mangrove-task-control": True})
 async def create_task(req: TaskCreateIn, user=Depends(get_current_user)):
     """创建并同步执行数据准备任务。返回最终任务记录。"""
     source = _source_spec(req.source, user["user_id"])
@@ -1620,7 +1620,7 @@ def get_manifest(task_id: str, user=Depends(get_current_user)):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-@router.post("/{task_id}/rerun")
+@router.post("/{task_id}/rerun", openapi_extra={"x-mangrove-task-control": True})
 async def rerun_task(task_id: str, user=Depends(get_current_user)):
     """复跑任务（重新执行完整图）。跨用户返回 404。
 

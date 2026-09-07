@@ -104,6 +104,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Mangrove-Auth", "Retry-After"],
 )
 
 for r in (auth_routes, conversations, chat, confirm, tasks, models, downloads,

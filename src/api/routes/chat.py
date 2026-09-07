@@ -1,7 +1,7 @@
 """
 聊天路由：SSE 流式转发 astream_conductor。
 
-POST /api/chat/stream  (Bearer 鉴权，请求体 ChatIn)
+POST /api/chat/stream  (平台 Cookie 鉴权，请求体 ChatIn)
 事件序列：
   event: meta    {"conv_id": ...}                       会话句柄（新建时回传）
   event: node    {"node": "collect", "label": "采集数据"} 每个流水线节点完成
@@ -19,7 +19,7 @@ import asyncio
 import json
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
@@ -28,7 +28,7 @@ from src.conductor.graph import astream_conductor
 from src.llm import list_models
 from src.llm.provider import _usage_ctx
 
-from ..auth import get_current_user, get_store
+from ..auth import get_current_user, get_store, platform_session_valid
 from ..schemas import ChatIn
 from ..session_store import pending_store
 
@@ -224,8 +224,8 @@ def _build_data_prep_result(
     }
 
 
-@router.post("/stream")
-async def chat_stream(body: ChatIn, user=Depends(get_current_user)):
+@router.post("/stream", openapi_extra={"x-mangrove-task-control": True})
+async def chat_stream(body: ChatIn, request: Request, user=Depends(get_current_user)):
     store = get_store()
     user_id = user["user_id"]
 
@@ -347,9 +347,22 @@ async def chat_stream(body: ChatIn, user=Depends(get_current_user)):
 
     async def event_gen():
         """只负责把队列里的事件转发给客户端；客户端断开只是本生成器被取消，pipeline 不受影响。"""
+        if not platform_session_valid(request):
+            yield {"event": "auth-expired", "data": json.dumps({"message": "登录已失效，请重新登录"}, ensure_ascii=False)}
+            return
         yield {"event": "meta", "data": json.dumps({"conv_id": conv_id}, ensure_ascii=False)}
         while True:
-            item = await queue.get()
+            # 空闲时也复核撤销；只结束读取，不取消已经开始的后台流水线。
+            if not platform_session_valid(request):
+                yield {"event": "auth-expired", "data": json.dumps({"message": "登录已失效，请重新登录"}, ensure_ascii=False)}
+                return
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=0.5)
+            except asyncio.TimeoutError:
+                continue
+            if not platform_session_valid(request):
+                yield {"event": "auth-expired", "data": json.dumps({"message": "登录已失效，请重新登录"}, ensure_ascii=False)}
+                return
             yield item
             if item.get("event") == "done":
                 break

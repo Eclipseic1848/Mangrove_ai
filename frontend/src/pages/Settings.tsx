@@ -9,6 +9,7 @@ import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { api } from "@/lib/api";
 import { useAuth, isAdminish, roleLabel } from "@/lib/auth";
@@ -170,6 +171,61 @@ function Toggle({ checked, disabled, title, onChange }: {
 
 export function Settings() {
   return <SettingsContent />;
+}
+
+function AccountSecurity() {
+  const { user, changePassword, logoutAll } = useAuth();
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">登录与密码</CardTitle>
+        <p className="text-xs text-muted-foreground">修改密码会退出所有设备。后台任务继续运行，重新登录后可继续查看。</p>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <form className="max-w-md space-y-3" onSubmit={async (event) => {
+          event.preventDefault();
+          setBusy(true);
+          setError("");
+          try {
+            await changePassword(currentPassword, newPassword);
+          } catch (failure) {
+            setError(failure instanceof Error ? failure.message : "修改密码失败，请重试");
+          } finally {
+            setBusy(false);
+          }
+        }}>
+          <input type="hidden" name="username" autoComplete="username" value={user?.username || ""} />
+          <div className="space-y-1.5">
+            <label htmlFor="current-password" className="text-sm">当前密码</label>
+            <Input id="current-password" name="current_password" type="password" autoComplete="current-password"
+              value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required disabled={busy} />
+          </div>
+          <div className="space-y-1.5">
+            <label htmlFor="new-password" className="text-sm">新密码</label>
+            <Input id="new-password" name="new_password" type="password" autoComplete="new-password" minLength={6}
+              value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required disabled={busy} />
+          </div>
+          {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+          <Button type="submit" disabled={busy || !currentPassword || newPassword.length < 6}>修改密码并退出所有设备</Button>
+        </form>
+        <Button variant="outline" disabled={busy} onClick={async () => {
+          setBusy(true);
+          setError("");
+          try {
+            await logoutAll();
+          } catch (failure) {
+            setError(failure instanceof Error ? failure.message : "退出所有设备失败，请重试");
+          } finally {
+            setBusy(false);
+          }
+        }}>退出所有设备</Button>
+      </CardContent>
+    </Card>
+  );
 }
 
 function SettingsContent() {
@@ -343,6 +399,7 @@ function SettingsContent() {
           <div className="space-y-5">
             {section === "personal" && (
               <>
+                <AccountSecurity />
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base">外观</CardTitle>

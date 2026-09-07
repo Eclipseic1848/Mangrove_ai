@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useSearchParams } from "react-router-dom";
 import { nanoid } from "nanoid/non-secure";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import * as Dialog from "@radix-ui/react-dialog";
@@ -342,9 +343,33 @@ export function SemanticWorkspacePage() {
     key: string;
   } | null>(null);
   const { user } = useAuth();
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
-  const [selectedRevision, setSelectedRevision] = useState<number | null>(null);
-  const [newTask, setNewTask] = useState(true);
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectionParams = useRef(searchParams);
+  selectionParams.current = searchParams;
+  // 选择保留在站内地址，重新登录后仍读取同一任务与修订；正文仍经 Owner 鉴权获取。
+  const selectedTaskId = searchParams.get("task") || null;
+  const revision = Number(searchParams.get("revision"));
+  const selectedRevision = Number.isSafeInteger(revision) && revision > 0 ? revision : null;
+  const setSelectedTaskId = (taskId: string | null) => {
+    const next = new URLSearchParams(selectionParams.current);
+    if (taskId) next.set("task", taskId);
+    else next.delete("task");
+    next.delete("revision");
+    selectionParams.current = next;
+    setSearchParams(next, { replace: true });
+  };
+  const setSelectedRevision = (value: number | null) => {
+    const current = selectionParams.current;
+    // 异步操作属于发起时的任务/修订，迟到回调不能覆盖用户的新选择。
+    if (current.get("task") !== selectedTaskId || current.get("revision") !== searchParams.get("revision")) return;
+    const next = new URLSearchParams(current);
+    if (value === null) next.delete("revision");
+    else next.set("revision", String(value));
+    selectionParams.current = next;
+    setSearchParams(next, { replace: true });
+  };
+  const [showNewTask, setNewTask] = useState(!selectedTaskId);
+  const newTask = !selectedTaskId && showNewTask;
   const [filter, setFilter] = useState<
     "all" | "active" | "needs_input" | "completed"
   >("all");
@@ -481,7 +506,6 @@ export function SemanticWorkspacePage() {
   const useExample = (example: WorkspaceGuidance["examples"][number]) => {
     setNewTask(true);
     setSelectedTaskId(null);
-    setSelectedRevision(null);
     setDraftUploads([]);
     setSelectedUploadId(null);
     setInspectorOpen(false);
@@ -553,7 +577,6 @@ export function SemanticWorkspacePage() {
       );
       createAttemptRef.current = null;
       setSelectedTaskId(created.task_id);
-      setSelectedRevision(null);
       setNewTask(false);
       setRecycleBin(false);
       setLiveEvents([]);
@@ -591,7 +614,6 @@ export function SemanticWorkspacePage() {
               type="button"
               onClick={() => {
                 setSelectedTaskId(null);
-                setSelectedRevision(null);
               }}
               className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted md:hidden"
             >
@@ -640,7 +662,6 @@ export function SemanticWorkspacePage() {
           storage={storage.data}
           onSelect={(taskId) => {
             setSelectedTaskId(taskId);
-            setSelectedRevision(null);
             setNewTask(false);
             setLiveEvents([]);
           }}
@@ -651,7 +672,6 @@ export function SemanticWorkspacePage() {
           onNew={() => {
             setRecycleBin(false);
             setSelectedTaskId(null);
-            setSelectedRevision(null);
             setDraftUploads([]);
             setSelectedUploadId(null);
             setInspectorOpen(false);
@@ -660,7 +680,6 @@ export function SemanticWorkspacePage() {
           onToggleRecycleBin={() => {
             setRecycleBin((value) => !value);
             setSelectedTaskId(null);
-            setSelectedRevision(null);
             setNewTask(false);
           }}
           />
@@ -816,7 +835,6 @@ export function SemanticWorkspacePage() {
                       }
                       onTaskCreated={async (created) => {
                         setSelectedTaskId(created.task_id);
-                        setSelectedRevision(null);
                         setNewTask(false);
                         setRecycleBin(false);
                         setLiveEvents([]);
@@ -1108,7 +1126,6 @@ export function SemanticWorkspacePage() {
                             try {
                               await recycleWorkspaceTask(task.task_id);
                               setSelectedTaskId(null);
-                              setSelectedRevision(null);
                               await Promise.all([
                                 queryClient.invalidateQueries({
                                   queryKey: ["semantic-workspace-tasks"],

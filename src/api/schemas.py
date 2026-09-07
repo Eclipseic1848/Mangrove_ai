@@ -19,12 +19,17 @@ class LoginIn(BaseModel):
 
 
 class TokenOut(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
     user_id: str
     username: str
     display_name: str
     role: str = "user"
+    access_expires_at: float
+    session_expires_at: float
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str
+    new_password: str
 
 
 # ---------- 管理员：用户管理 ----------

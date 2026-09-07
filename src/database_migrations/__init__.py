@@ -104,13 +104,18 @@ class RestoreVerification:
 
 
 _PROFILE_HEADS = {
-    "webui": "webui_0010",
+    "webui": "webui_0011",
     "scheduler": "scheduler_0001",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
 }
 _PROFILE_REQUIRED_COLUMNS = {
     "webui": {
+        "platform_login_sessions": ("session_id", "owner_user_id", "absolute_expires_at", "refresh_digest", "revoked_at"),
+        "platform_spent_refresh": ("session_id", "refresh_digest", "consumed_at"),
+        "platform_rate_events": ("bucket", "subject_digest", "occurred_at"),
+        "platform_rate_blocks": ("bucket", "subject_digest", "blocked_until"),
+        "platform_security_audit": ("event_id", "actor_user_id", "action", "subject_digest", "reason", "result", "occurred_at"),
         "users": ("role", "disabled", "pending"),
         "messages": ("task_id", "meta_json"),
         "user_memory": ("purpose", "source", "deleted_at"),

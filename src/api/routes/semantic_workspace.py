@@ -21,6 +21,7 @@ from fastapi import (
     Header,
     HTTPException,
     Query,
+    Request,
     status,
 )
 from fastapi.responses import FileResponse
@@ -40,7 +41,7 @@ from src.agentic_runtime.models import (
     RuntimeVersion,
 )
 from src.agentic_runtime.repository import AgenticRuntimeRepository
-from src.api.auth import get_current_user, get_store, is_admin_role
+from src.api.auth import get_current_user, get_store, is_admin_role, platform_session_valid
 from src.api.catalog_actor import catalog_actor_from_user
 from src.api.semantic_workspace_runtime import (
     get_semantic_workspace_manager,
@@ -1620,7 +1621,7 @@ def _task_detail(
     return task
 
 
-@router.post("/tasks", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/tasks", status_code=status.HTTP_202_ACCEPTED, openapi_extra={"x-mangrove-task-control": True})
 async def create_task(
     payload: WorkspaceTaskCreateIn,
     idempotency_key: str | None = Header(
@@ -2287,6 +2288,7 @@ def get_task_events(
 @router.get("/tasks/{task_id}/stream")
 def stream_task(
     task_id: str,
+    request: Request,
     user=Depends(get_current_user),
 ):
     user_id = user["user_id"]
@@ -2334,6 +2336,9 @@ def stream_task(
         harness_after = 0
         last_status = ""
         while True:
+            if not platform_session_valid(request):
+                yield {"event": "auth-expired", "data": json.dumps({"message": "登录已失效，请重新登录"}, ensure_ascii=False)}
+                return
             task = store.get_semantic_workspace_task(user_id, task_id)
             if task is None:
                 yield {
@@ -2406,8 +2411,27 @@ def stream_task(
                 break
             await asyncio.sleep(0.5)
 
+    async def authenticated_events():
+        # 原生成器每轮最多等待半秒；每个业务事件发出前复核，后台 Run 不受影响。
+        events = event_gen()
+        try:
+            while True:
+                if not platform_session_valid(request):
+                    yield {"event": "auth-expired", "data": json.dumps({"message": "登录已失效，请重新登录"}, ensure_ascii=False)}
+                    return
+                try:
+                    event = await anext(events)
+                except StopAsyncIteration:
+                    return
+                if not platform_session_valid(request):
+                    yield {"event": "auth-expired", "data": json.dumps({"message": "登录已失效，请重新登录"}, ensure_ascii=False)}
+                    return
+                yield event
+        finally:
+            await events.aclose()
+
     return EventSourceResponse(
-        event_gen(),
+        authenticated_events(),
         ping=15,
         headers={"Cache-Control": "no-cache"},
     )
@@ -2772,6 +2796,7 @@ async def _apply_confirmed_steering_revision(
 @router.post(
     "/tasks/{task_id}/revision-proposals/{proposal_id}/decision",
     status_code=status.HTTP_202_ACCEPTED,
+    openapi_extra={"x-mangrove-task-control": True},
 )
 async def decide_steering_revision(
     task_id: str,
@@ -3042,7 +3067,7 @@ async def decide_steering_revision(
     return response
 
 
-@router.post("/tasks/{task_id}/answer")
+@router.post("/tasks/{task_id}/answer", openapi_extra={"x-mangrove-task-control": True})
 async def answer_task(
     task_id: str,
     payload: WorkspaceAnswerIn,
@@ -3091,6 +3116,7 @@ async def retry_candidate_verification(
 @router.post(
     "/tasks/{task_id}/candidate-verifications",
     status_code=status.HTTP_202_ACCEPTED,
+    openapi_extra={"x-mangrove-task-control": True},
 )
 async def request_candidate_reverification(
     task_id: str,
@@ -3198,6 +3224,7 @@ async def publish_candidate_verification(
 @router.post(
     "/tasks/{task_id}/revisions",
     status_code=status.HTTP_202_ACCEPTED,
+    openapi_extra={"x-mangrove-task-control": True},
 )
 async def create_revision(
     task_id: str,
@@ -3549,8 +3576,15 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
     return revision
 
 
+async def _mark_gap_resume(request: Request):
+    payload = await request.json()
+    if isinstance(payload, dict) and payload.get("action") == "accept_gap":
+        request.state.platform_task_control = True
+
+
 @router.post(
     "/tasks/{task_id}/candidate-gap-actions",
+    dependencies=[Depends(_mark_gap_resume)],
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def decide_candidate_gap(
@@ -3735,6 +3769,7 @@ async def decide_candidate_gap(
 @router.post(
     "/tasks/{task_id}/source-refresh",
     status_code=status.HTTP_202_ACCEPTED,
+    openapi_extra={"x-mangrove-task-control": True},
 )
 async def refresh_task_source(
     task_id: str,

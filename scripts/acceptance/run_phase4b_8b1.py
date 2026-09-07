@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from http.cookiejar import CookieJar
 import json
 import os
 import re
@@ -298,7 +299,7 @@ def _http_request(
     *,
     method: str = "GET",
     payload: dict[str, object] | None = None,
-    token: str | None = None,
+    session: urllib.request.OpenerDirector | None = None,
     timeout: float = 10.0,
 ) -> tuple[int, bytes, str]:
     body = None
@@ -306,11 +307,12 @@ def _http_request(
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+        parsed = urllib.parse.urlsplit(url)
+        headers.update({"Origin": f"{parsed.scheme}://{parsed.netloc}", "X-Mangrove-CSRF": "1"})
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with (session.open if session else urllib.request.urlopen)(request, timeout=timeout) as response:
             return response.status, response.read(), response.headers.get("content-type", "")
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read(), exc.headers.get("content-type", "")
@@ -847,28 +849,31 @@ def _sqlite_snapshot_probe(path: Path) -> str:
         connection.close()
 
 
-def _login(base_url: str, username: str, password: str) -> str:
+def _login(base_url: str, username: str, password: str) -> urllib.request.OpenerDirector:
+    cookies = CookieJar()
+    session = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookies))
     status, body, _ = _http_request(
         f"{base_url}/api/auth/login",
         method="POST",
         payload={"username": username, "password": password},
+        session=session,
     )
     if status != 200:
         raise AcceptanceError("restore_login_failed")
     try:
-        token = json.loads(body)["access_token"]
+        user_id = json.loads(body)["user_id"]
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise AcceptanceError("restore_login_invalid") from exc
-    if not isinstance(token, str) or not token:
+    if not isinstance(user_id, str) or not user_id or not {"mangrove_access", "mangrove_refresh"} <= {cookie.name for cookie in cookies}:
         raise AcceptanceError("restore_login_invalid")
-    return token
+    return session
 
 
 def _restore_public_probe(*, base_url: str, flow: dict[str, object]) -> None:
     suffix = str(flow["suffix"])
     password = str(flow["password"])
-    owner_token = _login(base_url, f"g5_owner_a_{suffix}", password)
-    other_token = _login(base_url, f"g5_owner_b_{suffix}", password)
+    owner_session = _login(base_url, f"g5_owner_a_{suffix}", password)
+    other_session = _login(base_url, f"g5_owner_b_{suffix}", password)
     upload_id = urllib.parse.quote(str(flow["upload_id"]), safe="")
     task_id = urllib.parse.quote(str(flow["task_id"]), safe="")
     owner_urls = [
@@ -883,9 +888,9 @@ def _restore_public_probe(*, base_url: str, flow: dict[str, object]) -> None:
             for part in PurePosixPath(str(output_path)).parts
         )
         owner_urls.append(f"{base_url}/api/downloads/{encoded_path}")
-    if any(_http_request(url, token=owner_token)[0] != 200 for url in owner_urls):
+    if any(_http_request(url, session=owner_session)[0] != 200 for url in owner_urls):
         raise AcceptanceError("restore_owner_read_failed")
-    if any(_http_request(url, token=other_token)[0] != 404 for url in owner_urls):
+    if any(_http_request(url, session=other_session)[0] != 404 for url in owner_urls):
         raise AcceptanceError("restore_cross_owner_visible")
 
 

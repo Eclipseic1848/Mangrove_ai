@@ -79,6 +79,13 @@ result.write_text(json.dumps(payload), encoding="utf-8")
 """
 
 
+def _remove_platform_session_schema(connection: sqlite3.Connection) -> None:
+    # 这些 fixture 从当前空库构造历史未盖戳库；历史时尚无设备会话表。
+    for table in ("platform_spent_refresh", "platform_login_sessions", "platform_rate_events", "platform_rate_blocks", "platform_security_audit"):
+        assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+        connection.execute(f"DROP TABLE {table}")
+
+
 def _drop_legacy_simple_columns(database: Path) -> None:
     with sqlite3.connect(database) as connection:
         connection.execute("DROP INDEX IF EXISTS idx_dpt_unit")
@@ -125,10 +132,10 @@ def test_inspect_uninitialized_database_is_read_only(tmp_path: Path) -> None:
 
     assert status.state == "uninitialized"
     assert status.current_revision is None
-    assert status.target_revision == "webui_0010"
+    assert status.target_revision == "webui_0011"
     assert status.pending_revisions == (
         "webui_0001", "webui_0002", "webui_0003", "webui_0004", "webui_0005",
-        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010",
+        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011",
     )
     assert not database.exists()
     with pytest.raises(
@@ -171,7 +178,7 @@ def test_plan_lists_full_ordered_revision_chain_without_writing(
     assert result == 0
     assert plan.pending_revisions == (
         "webui_0001", "webui_0002", "webui_0003", "webui_0004", "webui_0005",
-        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010",
+        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011",
     )
     assert [item.revision for item in plan.revisions] == [
         "webui_0001",
@@ -180,13 +187,13 @@ def test_plan_lists_full_ordered_revision_chain_without_writing(
         "webui_0004",
         "webui_0005",
         "webui_0006",
-        "webui_0007", "webui_0008", "webui_0009", "webui_0010",
+        "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011",
     ]
     assert all(len(item.content_sha256) == 64 for item in plan.revisions)
     assert all(item.requires_copy_validation for item in plan.revisions)
     assert payload["pending_revisions"] == [
         "webui_0001", "webui_0002", "webui_0003", "webui_0004", "webui_0005",
-        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010",
+        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011",
     ]
     assert payload["revisions"][0]["revision"] == "webui_0001"
     assert str(tmp_path) not in json.dumps(payload)
@@ -224,7 +231,7 @@ def test_inspect_current_database_is_read_only(tmp_path: Path) -> None:
     status = inspect_database(DatabaseTarget(profile="webui", path=database))
 
     assert status.state == "current"
-    assert status.current_revision == "webui_0010"
+    assert status.current_revision == "webui_0011"
     assert status.pending_revisions == ()
     status.require_current()
     assert database.read_bytes() == before
@@ -242,10 +249,10 @@ def test_apply_empty_database_creates_backup_and_current_revision(
     )
 
     assert receipt.source_revision is None
-    assert receipt.target_revision == "webui_0010"
+    assert receipt.target_revision == "webui_0011"
     assert receipt.applied_revisions == (
         "webui_0001", "webui_0002", "webui_0003", "webui_0004", "webui_0005",
-        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010",
+        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011",
     )
     assert receipt.backup_path == backup.resolve()
     assert receipt.backup_sha256 == hashlib.sha256(backup.read_bytes()).hexdigest()
@@ -777,6 +784,7 @@ def test_apply_known_webui_accepts_authorized_vnext_default_rollout(
             "active_gate_snapshot_id=? WHERE state_id=1",
             ("vnext_default", snapshot_id),
         )
+        _remove_platform_session_schema(connection)
         connection.execute("DELETE FROM alembic_version")
 
     receipt = apply_migrations(
@@ -786,7 +794,7 @@ def test_apply_known_webui_accepts_authorized_vnext_default_rollout(
 
     assert receipt.applied_revisions == (
         "webui_0001", "webui_0002", "webui_0003", "webui_0004", "webui_0005",
-        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010",
+        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011",
     )
     with sqlite3.connect(database) as connection:
         state = connection.execute(
@@ -814,6 +822,7 @@ def test_apply_known_webui_rejects_invalid_rollout_modes_without_rewriting_state
             "active_gate_snapshot_id=? WHERE state_id=1",
             (invalid_mode, snapshot_id),
         )
+        _remove_platform_session_schema(connection)
         connection.execute("DELETE FROM alembic_version")
 
     backup = tmp_path / f"{invalid_mode}-before.db"
@@ -842,6 +851,7 @@ def test_apply_known_legacy_webui_adds_message_metadata_columns(
         tmp_path / "empty-before.db",
     )
     with sqlite3.connect(database) as connection:
+        _remove_platform_session_schema(connection)
         connection.execute("DELETE FROM alembic_version")
         connection.execute("ALTER TABLE messages DROP COLUMN task_id")
         connection.execute("ALTER TABLE messages DROP COLUMN meta_json")
@@ -885,7 +895,7 @@ def test_inspect_current_revision_fails_closed_on_schema_drift(
     status = inspect_database(DatabaseTarget(profile="webui", path=database))
 
     assert status.state == "drift"
-    assert status.current_revision == "webui_0010"
+    assert status.current_revision == "webui_0011"
     assert status.gaps == ("column:memory_hit_log.hit",)
     with pytest.raises(SchemaNotCurrentError, match="Schema"):
         status.require_current()
@@ -1145,6 +1155,7 @@ def test_apply_known_legacy_webui_repairs_all_frozen_column_gaps(
     )
     _drop_legacy_simple_columns(database)
     with sqlite3.connect(database) as connection:
+        _remove_platform_session_schema(connection)
         connection.execute("DELETE FROM alembic_version")
 
     apply_migrations(
@@ -1166,6 +1177,7 @@ def test_apply_known_legacy_webui_backfills_document_task_unit(
         tmp_path / "empty-before.db",
     )
     with sqlite3.connect(database) as connection:
+        _remove_platform_session_schema(connection)
         connection.execute("DELETE FROM alembic_version")
         connection.execute("DELETE FROM document_task_unit_members")
         connection.execute("DELETE FROM document_task_units")

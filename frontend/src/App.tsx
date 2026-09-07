@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth, isAdminish } from "@/lib/auth";
 import { Layout } from "@/components/Layout";
 import { Login } from "@/pages/Login";
@@ -14,13 +14,14 @@ import { Feedback } from "@/pages/Feedback";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
+  const location = useLocation();
   if (loading)
     return (
       <div className="flex h-screen w-screen items-center justify-center text-sm text-muted-foreground">
         加载中…
       </div>
     );
-  if (!user) return <Navigate to="/login" replace />;
+  if (!user) return <Navigate to={`/login?returnTo=${encodeURIComponent(location.pathname + location.search + location.hash)}`} replace />;
   return <>{children}</>;
 }
 

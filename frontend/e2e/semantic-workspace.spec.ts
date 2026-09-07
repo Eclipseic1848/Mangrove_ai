@@ -410,8 +410,9 @@ test.describe("结果缓存身份隔离", () => {
     });
     await page.route("**/api/auth/login", (route) => {
       owner = "B";
-      return route.fulfill({ json: { user_id: "owner-b", username: "owner-b", display_name: "账号乙", role: "admin", access_token: "synthetic-b" } });
+      return route.fulfill({ json: { user_id: "owner-b", username: "owner-b", display_name: "账号乙", role: "admin" } });
     });
+    await page.route("**/api/auth/logout", (route) => route.fulfill({ json: { ok: true } }));
     await page.route("**/api/semantic-workspace/tasks?*", async (route) => {
       const requestedOwner = owner;
       if (requestedOwner === "B") { listRequested.release(); await list.promise; }
@@ -523,22 +524,62 @@ test.describe("结果缓存身份隔离", () => {
     const started = responseBarrier(), release = responseBarrier();
     await page.route("**/api/auth/me", async (route) => {
       started.release(); await release.promise;
-      await route.fulfill({ status, json: status === 401 ? { detail: "旧会话已过期" } : { user_id: "owner-a", username: "owner-a", display_name: "账号甲", role: "admin", access_token: "synthetic-a" } });
+      await route.fulfill({ status, json: status === 401 ? { detail: "旧会话已过期" } : { user_id: "owner-a", username: "owner-a", display_name: "账号甲", role: "admin" } });
     });
     await page.route("**/api/auth/login", (route) => route.fulfill({ json: {
-      user_id: "owner-b", username: "owner-b", display_name: "账号乙", role: "admin", access_token: "synthetic-b",
+      user_id: "owner-b", username: "owner-b", display_name: "账号乙", role: "admin",
     } }));
     await page.goto("/login");
     await started.promise;
     await loginAsB(page);
-    await expect.poll(() => page.evaluate(() => localStorage.getItem("mangrove_token"))).toBe("synthetic-b");
+    await expect(page.getByText("账号乙", { exact: true })).toBeVisible();
     const restored = page.waitForResponse("**/api/auth/me");
     release.release(); await restored;
     await expect(page.getByText("账号乙", { exact: true })).toBeVisible();
     await expect(page.getByText("账号甲", { exact: true })).toHaveCount(0);
-    expect(await page.evaluate(() => localStorage.getItem("mangrove_token"))).toBe("synthetic-b");
+    expect(await page.evaluate(() => localStorage.getItem("mangrove_token"))).toBeNull();
   });
   }
+});
+
+test("会话过期重新登录后恢复原任务与结果修订", async ({ page }) => {
+  let expired = false;
+  const user = { user_id: "u1", username: "tester", display_name: "测试员", role: "admin" };
+  await page.route("**/api/**", (route) => route.fulfill({ status: 404, json: {} }));
+  await mockWorkspace(page);
+  const sessionResponse = (route: Route) => expired
+    ? route.fulfill({ status: 401, headers: { "X-Mangrove-Auth": "session-invalid" }, json: { detail: "登录已失效，请重新登录" } })
+    : route.fulfill({ json: user });
+  await page.route("**/api/auth/me", sessionResponse);
+  await page.route("**/api/auth/login", (route) => {
+    expired = false;
+    return route.fulfill({ json: user });
+  });
+  await page.route("**/api/semantic-workspace/tasks?*", (route) => expired
+    ? sessionResponse(route)
+    : route.fulfill({ json: [previewIdentityFixture("A", 2).task] }));
+  await page.route(/\/api\/semantic-workspace\/tasks\/identity-task(?:\?.*)?$/, (route) => {
+    const revision = Number(new URL(route.request().url()).searchParams.get("revision") || 2);
+    return route.fulfill({ json: previewIdentityFixture("A", revision).detail });
+  });
+  await page.route("**/identity-task/preview?*", (route) => {
+    const revision = Number(new URL(route.request().url()).searchParams.get("revision") || 2);
+    return route.fulfill({ json: previewIdentityFixture("A", revision).preview });
+  });
+  await page.goto("/data-prep");
+  await page.getByRole("button", { name: /A的结果任务/ }).click();
+  await expect(page.getByText("A-V2-正文", { exact: true })).toBeVisible();
+  await page.getByLabel("结果版本").selectOption("1");
+  await expect(page.getByText("A-V1-正文", { exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/task=identity-task.*revision=1/);
+  expired = true;
+  await expect(page.getByText("登录已失效，请重新登录", { exact: true })).toBeVisible();
+  await page.getByLabel("用户名", { exact: true }).fill("tester");
+  await page.getByLabel("密码", { exact: true }).fill("synthetic-password");
+  await page.getByLabel("密码", { exact: true }).press("Enter");
+  await expect(page).toHaveURL(/\/data-prep\?task=identity-task.*revision=1/);
+  await expect(page.getByText("A-V1-正文", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("结果版本")).toHaveValue("1");
 });
 
 function sourceAttempt(
@@ -878,6 +919,8 @@ test.describe("统一数据工作台", () => {
       .toBeVisible();
 
     await page.reload();
+    await expect(page.getByRole("heading", { name: "公开网页产品摘要" })).toBeVisible();
+    await page.getByRole("button", { name: "新建任务", exact: true }).click();
     await page.getByText("公开网页", { exact: true }).click();
     await expect(
       page.getByRole("region", { name: "获取一个公开网页" })
@@ -1047,6 +1090,48 @@ test.describe("统一数据工作台", () => {
     await expect(page.getByRole("button", { name: "启动任务" })).toBeDisabled();
   });
 
+  test("来源刷新迟到成功不能把当前任务地址和正文切回旧任务", async ({ page }) => {
+    await page.setViewportSize({ width: 1920, height: 1080 });
+    await page.route("**/api/**", (route) => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    const task = { ...workspaceTask("task-late-refresh", "completed", "A的网页任务"), runtime_version: "pi", model_connection_id: null };
+    const snapshot = sourceAttempt("succeeded").snapshot!;
+    const detail = workspaceDetail(task, { web_source: {
+      source_snapshot_id: snapshot.snapshot_id,
+      goal_contract: { objective: task.objective_text, must_include: [], explicit_exclusions: [], quantity_requirement: "当前页面中有证据的内容", completeness_requirement: "仅对当前精确页面负责" },
+      delivery_spec: { formats: ["markdown"] },
+      runtime_binding: { adapter_id: "pi", adapter_version: "1", runtime_artifact: "fixture", protocol_version: "1", event_schema_version: "1", capability_digest: "a".repeat(64), external_run_id: "run-late-refresh", model_connection_id: null, model_connection_version: null, model: "Qwen3.6-35B-A3B" },
+      created_at: snapshot.created_at, snapshot,
+    } });
+    const selected = previewIdentityFixture("B", 2);
+    const requested = responseBarrier(), release = responseBarrier();
+    await page.route("**/api/semantic-workspace/tasks?*", (route) => route.fulfill({ json: [task, selected.task] }));
+    await page.route("**/api/semantic-workspace/tasks/task-late-refresh", (route) => route.fulfill({ json: detail }));
+    await page.route("**/task-late-refresh/preview?*", (route) => route.fulfill({ json: { kind: "document", items: [], total: 0, offset: 0, limit: 100 } }));
+    await page.route("**/api/semantic-workspace/tasks/identity-task", (route) => route.fulfill({ json: selected.detail }));
+    await page.route("**/identity-task/preview?*", (route) => route.fulfill({ json: selected.preview }));
+    await page.route("**/task-late-refresh/source-refresh", async (route) => {
+      requested.release();
+      await release.promise;
+      await route.fulfill({ status: 202, json: { status: "revision_created", attempt: sourceAttempt("succeeded"), revision: { ...detail.revisions[0], revision: 2 } } });
+    });
+    try {
+      await page.goto("/data-prep");
+      await page.getByRole("button", { name: /A的网页任务/ }).click();
+      await page.getByRole("button", { name: "获取最新网页", exact: true }).click();
+      await requested.promise;
+      await page.getByRole("button", { name: /B的结果任务/ }).click();
+      await expect(page.getByText("B-V2-正文", { exact: true })).toBeVisible();
+      await expect(page).toHaveURL(/task=identity-task/);
+      release.release();
+      await expect(page.getByText("最新网页已冻结，并创建了新版本", { exact: true })).toBeVisible();
+      await expect(page).toHaveURL(/task=identity-task/);
+      await expect(page.getByText("B-V2-正文", { exact: true })).toBeVisible();
+    } finally {
+      release.release();
+    }
+  });
+
   test("来源刷新结果未知时由用户恢复同一请求并创建一个新版本", async ({ page }) => {
     await mockWorkspace(page);
     const task = {
@@ -1124,7 +1209,7 @@ test.describe("统一数据工作台", () => {
     await expect(page.getByText("刷新请求结果仍未知", { exact: false })).toBeVisible();
 
     await page.reload();
-    await page.getByText("公开网页摘要", { exact: true }).click();
+    await expect(page.getByRole("heading", { name: "公开网页摘要", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "获取最新网页" }).click();
     await expect(page.getByText("最新网页已冻结，并创建了新版本")).toBeVisible();
     expect(receivedKeys).toHaveLength(2);
