@@ -438,10 +438,13 @@ def submit_feedback(body: FeedbackIn, user=Depends(get_execution_user)):
     if not conv or conv["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="会话不存在")
     reasons_json = json.dumps(body.reasons, ensure_ascii=False) if body.reasons else None
-    store.upsert_feedback(
-        message_id=body.message_id, conv_id=body.conv_id, user_id=user_id,
-        rating=body.rating, reasons=reasons_json, comment=body.comment,
-    )
+    try:
+        store.upsert_feedback(
+            message_id=body.message_id, conv_id=body.conv_id, user_id=user_id,
+            rating=body.rating, reasons=reasons_json, comment=body.comment,
+        )
+    except ValueError:
+        raise HTTPException(404, '反馈对象不可用') from None
     return {"ok": True}
 
 

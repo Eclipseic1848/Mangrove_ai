@@ -527,6 +527,27 @@ class TestS1OutcomeModels:
 class TestS2AuditEventRepository:
     """审计事件专用入口：幂等、串类型拒绝、按 target 列表。"""
 
+    @pytest.mark.parametrize("backend", ["memory", "sqlite"])
+    @pytest.mark.parametrize("changed", [
+        {"actor_id": "another-admin"},
+        {"reason": "不同的审计用途说明"},
+        {"subject_type": "task_output"},
+        {"subject_sha256": "f" * 64},
+        {"task_id": "different-task"},
+        {"revision": 3},
+    ])
+    def test_audit_retry_rejects_changed_evidence(self, tmp_path, backend, changed):
+        if backend == "sqlite":
+            db_path = tmp_path / "webui.db"
+            migrate_capability_governance(db_path, tmp_path / "backup.db")
+            repository = SqliteCapabilityGovernanceRepository(str(db_path))
+        else:
+            repository = InMemoryCapabilityGovernanceRepository()
+        original = repository.save_audit_view_event(_audit_event(_target()))
+        with pytest.raises(ValueError, match="审计幂等键冲突"):
+            repository.save_audit_view_event(_audit_event(_target(), **changed))
+        assert repository.list_audit_view_events() == (original,)
+
     def test_memory_save_audit_event_is_idempotent(self) -> None:
         repository = InMemoryCapabilityGovernanceRepository()
         target = _target()

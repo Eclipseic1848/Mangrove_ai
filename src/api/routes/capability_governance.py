@@ -7,6 +7,7 @@ from src.api.auth import get_execution_user, require_execution_admin
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.api.auth import get_current_user, require_admin
@@ -83,6 +84,10 @@ def list_capability_governance(user=Depends(get_current_user)):
 
 
 def _http_error(error: Exception) -> HTTPException:
+    from src.capability_governance.models import AuditIdempotencyConflict
+
+    if isinstance(error, AuditIdempotencyConflict):
+        return HTTPException(status_code=409, detail=str(error))
     if isinstance(error, PermissionError):
         return HTTPException(status_code=403, detail=str(error))
     if isinstance(error, KeyError):
@@ -267,7 +272,7 @@ def audit_view_business_content(
         )
     except (PermissionError, KeyError, RuntimeError, ValueError) as error:
         raise _http_error(error) from error
-    return outcome.model_dump(mode="json")
+    return JSONResponse(outcome.model_dump(mode="json"), headers={"Cache-Control": "no-store"})
 
 
 @admin_router.get("/audit-log")

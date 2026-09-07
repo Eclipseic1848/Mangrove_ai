@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { BadgeCheck, Library, Merge, Trash2, RefreshCw, Eye, Tag, TrendingUp, Repeat } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { BadgeCheck, Library, Share2, Trash2, RefreshCw, Eye, Tag, TrendingUp, Repeat } from "lucide-react";
 import { toast } from "sonner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -8,9 +8,16 @@ import { Modal } from "@/components/ui/modal";
 import { Pagination } from "@/components/ui/pagination";
 import { Markdown } from "@/components/Markdown";
 import { api } from "@/lib/api";
-import { useAuth, isAdminish } from "@/lib/auth";
+import { useAuth, isAdminish, type User } from "@/lib/auth";
 
-interface Template {
+interface LibraryEntry {
+  scope: "owner" | "platform";
+  is_owner: boolean;
+  can_delete: boolean;
+  content_digest: string;
+}
+
+interface Template extends LibraryEntry {
   slug: string;
   title: string;
   data_type: string;
@@ -21,7 +28,7 @@ interface Template {
   quality_avg: number;
 }
 
-interface Lesson {
+interface Lesson extends LibraryEntry {
   slug: string;
   title: string;
   data_type: string;
@@ -40,42 +47,6 @@ interface ScanLogRow {
   lessons_scanned: number;
   lessons_merged: number;
   stale_drafts_deleted: number;
-  details: string; // 该轮每步操作的 JSON 数组，空串表示无明细
-}
-
-// 巡检操作明细（后端 JSON 反序列化）
-interface ScanDetail {
-  action: "merge_template" | "merge_lesson" | "stale_delete_template" | "stale_delete_lesson";
-  data_type?: string;
-  // 合并类字段
-  survivor_slug?: string;
-  survivor_title?: string;
-  loser_slug?: string;
-  loser_title?: string;
-  score?: number;
-  threshold?: number;
-  // 停滞清理类字段
-  slug?: string;
-  title?: string;
-  stale_days?: number;
-  threshold_days?: number;
-}
-
-// 操作类型 -> 展示文案与图标
-const ACTION_META: Record<string, { label: string; icon: typeof Eye; tone: string }> = {
-  merge_template: { label: "模板合并", icon: Merge, tone: "text-blue-500" },
-  merge_lesson: { label: "教训合并", icon: Merge, tone: "text-blue-500" },
-  stale_delete_template: { label: "清理停滞模板", icon: Trash2, tone: "text-amber-500" },
-  stale_delete_lesson: { label: "清理停滞教训", icon: Trash2, tone: "text-amber-500" },
-};
-
-function parseScanDetails(raw: string): ScanDetail[] {
-  if (!raw) return [];
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return [];
-  }
 }
 
 // 状态 -> 展示文案与徽标样式
@@ -98,6 +69,10 @@ const PAGE_SIZE = 12;
 
 export function Templates() {
   const { user } = useAuth();
+  return user ? <TemplateLibrary key={`${user.user_id}:${user.role}`} user={user} /> : null;
+}
+
+function TemplateLibrary({ user }: { user: User }) {
   const isAdmin = isAdminish(user?.role);
   const [tab, setTab] = useState<TabKey>("templates");
 
@@ -116,7 +91,21 @@ export function Templates() {
   // 巡检报告状态（只读，无 preview/delete）
   const [scanLog, setScanLog] = useState<ScanLogRow[]>([]);
   const [scanLogLoading, setScanLogLoading] = useState(true);
-  const [scanDetail, setScanDetail] = useState<ScanLogRow | null>(null);
+  const [shareTarget, setShareTarget] = useState<{ kind: "templates" | "lessons"; entry: Template | Lesson } | null>(null);
+  const [shareTitle, setShareTitle] = useState("");
+  const [shareKeywords, setShareKeywords] = useState("");
+  const [shareBody, setShareBody] = useState("");
+  const [shareConfirmed, setShareConfirmed] = useState(false);
+  const [shareBusy, setShareBusy] = useState(false);
+  const [shareError, setShareError] = useState("");
+  const shareEpoch = useRef(0);
+  const shareInFlight = useRef(false);
+  const mounted = useRef(true);
+  const loadEpoch = useRef({ templates: 0, lessons: 0, scan: 0 });
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; shareEpoch.current++; };
+  }, []);
 
   // 分页页码（三个 Tab 各自独立，刷新回到第 1 页）
   const [tplPage, setTplPage] = useState(1);
@@ -124,37 +113,40 @@ export function Templates() {
   const [scanPage, setScanPage] = useState(1);
 
   const load = () => {
+    const epoch = ++loadEpoch.current.templates;
     setLoading(true);
     setTplPage(1);
     api
       .get("/api/templates")
-      .then((d) => setItems(d.templates || []))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+      .then((d) => { if (mounted.current && epoch === loadEpoch.current.templates) setItems(d.templates || []); })
+      .catch(() => { if (mounted.current && epoch === loadEpoch.current.templates) toast.error("模板加载失败，请重试"); })
+      .finally(() => { if (mounted.current && epoch === loadEpoch.current.templates) setLoading(false); });
   };
   useEffect(load, []);
 
   const loadLessons = () => {
+    const epoch = ++loadEpoch.current.lessons;
     setLessonLoading(true);
     setLessonPage(1);
     api
       .get("/api/lessons")
-      .then((d) => setLessonItems(d.lessons || []))
-      .catch(() => {})
-      .finally(() => setLessonLoading(false));
+      .then((d) => { if (mounted.current && epoch === loadEpoch.current.lessons) setLessonItems(d.lessons || []); })
+      .catch(() => { if (mounted.current && epoch === loadEpoch.current.lessons) toast.error("经验加载失败，请重试"); })
+      .finally(() => { if (mounted.current && epoch === loadEpoch.current.lessons) setLessonLoading(false); });
   };
   useEffect(() => {
-    if (isAdmin) loadLessons();
-  }, [isAdmin]);
+    loadLessons();
+  }, []);
 
   const loadScanLog = () => {
+    const epoch = ++loadEpoch.current.scan;
     setScanLogLoading(true);
     setScanPage(1);
     api
       .get("/api/library-dedup-log")
-      .then((d) => setScanLog(d.log || []))
+      .then((d) => { if (mounted.current && epoch === loadEpoch.current.scan) setScanLog(d.log || []); })
       .catch(() => {})
-      .finally(() => setScanLogLoading(false));
+      .finally(() => { if (mounted.current && epoch === loadEpoch.current.scan) setScanLogLoading(false); });
   };
   useEffect(() => {
     if (isAdmin) loadScanLog();
@@ -186,6 +178,43 @@ export function Templates() {
     }
   };
 
+  const closeShare = () => {
+    shareEpoch.current++;
+    shareInFlight.current = false;
+    setShareTarget(null);
+    setShareTitle(""); setShareKeywords(""); setShareBody("");
+    setShareConfirmed(false); setShareBusy(false); setShareError("");
+  };
+
+  const openShare = (kind: "templates" | "lessons", entry: Template | Lesson) => {
+    closeShare();
+    setShareTarget({ kind, entry });
+    setShareTitle(entry.title); setShareKeywords(entry.keywords.join("，")); setShareBody(entry.body);
+  };
+
+  const confirmShare = async () => {
+    if (!shareTarget || !shareConfirmed || shareInFlight.current) return;
+    const epoch = shareEpoch.current;
+    shareInFlight.current = true;
+    setShareBusy(true); setShareError("");
+    try {
+      await api.post(`/api/${shareTarget.kind}/${encodeURIComponent(shareTarget.entry.slug)}/share`, {
+        title: shareTitle.trim(), keywords: shareKeywords.split(/[,，]/).map(s => s.trim()).filter(Boolean),
+        body: shareBody.trim(), data_type: shareTarget.entry.data_type,
+        expected_source_digest: shareTarget.entry.content_digest, confirmed: true,
+      });
+      if (!mounted.current || epoch !== shareEpoch.current) return;
+      const kind = shareTarget.kind;
+      closeShare();
+      toast.success("通用副本已共享，个人原件保持不变");
+      if (kind === "templates") load(); else loadLessons();
+    } catch {
+      if (mounted.current && epoch === shareEpoch.current) setShareError("分享未确认。请刷新核对条目，再预览并明确重试。");
+    } finally {
+      if (mounted.current && epoch === shareEpoch.current) { shareInFlight.current = false; setShareBusy(false); }
+    }
+  };
+
   // 分页切片（页码超出总页数时自动 clamp 到有效范围，删除后不会越界）
   const tplTotalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
   const tplPageClamped = Math.min(tplPage, tplTotalPages);
@@ -206,9 +235,9 @@ export function Templates() {
           </h1>
           <p className="text-sm text-muted-foreground">
             {tab === "templates"
-              ? "自学习沉淀的分析模板（草稿达标转正、低质淘汰）· 全局共享"
+              ? "默认仅本人使用；确认通用副本后共享。评分、转正与淘汰继续生效。"
               : tab === "lessons"
-              ? "自学习沉淀的失败教训（失败2次+至少1次有效→转正；10次失败从无效→退役）· 全局共享"
+              ? "经验默认仅本人使用，转正后可贡献通用副本；共享副本独立累计使用效果。"
               : "定时巡检最近记录（语义去重合并 + 长期停滞草稿清理，默认关闭）"}
           </p>
         </div>
@@ -222,7 +251,7 @@ export function Templates() {
             >
               模板库
             </Button>
-            {isAdmin && (
+            {(
               <Button
                 variant={tab === "lessons" ? "default" : "ghost"}
                 size="sm"
@@ -277,6 +306,7 @@ export function Templates() {
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
                           <div className="truncate font-medium">{t.title}</div>
+                          <span className="text-xs text-muted-foreground">{t.scope === "platform" ? "平台共享" : "仅本人"}</span>
                           <div className="truncate text-[11px] text-muted-foreground">
                             {t.data_type || "通用"} · {t.slug}
                           </div>
@@ -322,7 +352,12 @@ export function Templates() {
                           >
                             <Eye className="h-4 w-4" />
                           </Button>
-                          {isAdmin && (
+                          {t.is_owner && t.scope === "owner" && (
+                            <Button variant="ghost" size="icon" aria-label="共享通用副本" title="共享通用副本" onClick={() => openShare("templates", t)} className="h-7 w-7">
+                              <Share2 className="h-4 w-4" />
+                            </Button>
+                          )}
+                          {t.can_delete && (
                             <Button
                               variant="ghost"
                               size="icon"
@@ -373,6 +408,7 @@ export function Templates() {
                       <div className="flex items-start justify-between gap-2">
                         <div className="min-w-0">
                           <div className="truncate font-medium">{t.title}</div>
+                          <span className="text-xs text-muted-foreground">{t.scope === "platform" ? "平台共享" : "仅本人"}</span>
                           <div className="truncate text-[11px] text-muted-foreground">
                             {t.data_type || "通用"} · {t.slug}
                           </div>
@@ -418,7 +454,12 @@ export function Templates() {
                           >
                             <Eye className="h-4 w-4" />
                           </Button>
-                          {isAdmin && (
+                          {t.is_owner && t.scope === "owner" && t.status === "active" && (
+                            <Button variant="ghost" size="icon" aria-label="共享通用副本" title="共享通用副本" onClick={() => openShare("lessons", t)} className="h-7 w-7">
+                              <Share2 className="h-4 w-4" />
+                            </Button>
+                          )}
+                          {t.can_delete && (
                             <Button
                               variant="ghost"
                               size="icon"
@@ -460,7 +501,6 @@ export function Templates() {
           ) : (
             <div className="space-y-2">
               {scanPaged.map((row) => {
-                const hasDetails = row.templates_merged + row.lessons_merged + row.stale_drafts_deleted > 0;
                 return (
                   <Card key={row.id}>
                     <CardContent className="flex flex-wrap items-center gap-4 p-4 text-sm">
@@ -472,16 +512,7 @@ export function Templates() {
                         教训：扫描 {row.lessons_scanned} · 合并 {row.lessons_merged}
                       </span>
                       <span>清理停滞草稿 {row.stale_drafts_deleted} 条</span>
-                      {hasDetails && (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          onClick={() => setScanDetail(row)}
-                          className="ml-auto gap-1.5 text-muted-foreground hover:text-foreground"
-                        >
-                          <Eye className="h-4 w-4" /> 查看详情
-                        </Button>
-                      )}
+
                     </CardContent>
                   </Card>
                 );
@@ -553,70 +584,29 @@ export function Templates() {
         </div>
       </Modal>
 
-      {/* 巡检详情 */}
-      <Modal
-        open={!!scanDetail}
-        onClose={() => setScanDetail(null)}
-        title={`巡检详情 · ${scanDetail?.ran_at ?? ""}`}
-      >
-        {(() => {
-          const details = parseScanDetails(scanDetail?.details ?? "");
-          return (
-            <>
-              <div className="max-h-[60vh] space-y-3 overflow-y-auto">
-                {details.length ? (
-                  details.map((d, i) => {
-                    const meta = ACTION_META[d.action] || { label: d.action, icon: Eye, tone: "" };
-                    const Icon = meta.icon;
-                    const isMerge = d.action === "merge_template" || d.action === "merge_lesson";
-                    return (
-                      <div key={i} className="rounded-md border border-border/60 p-3 text-sm">
-                        <div className="flex items-center gap-2">
-                          <Icon className={`h-4 w-4 ${meta.tone}`} />
-                          <span className="font-medium">{meta.label}</span>
-                        </div>
-                        {isMerge ? (
-                          <div className="mt-2 space-y-1 text-xs text-muted-foreground">
-                            <div>
-                              保留：<span className="text-foreground">{d.survivor_title}</span>
-                              <span className="ml-1 text-muted-foreground/70">({d.survivor_slug})</span>
-                            </div>
-                            <div>
-                              合并：<span className="text-foreground">{d.loser_title}</span>
-                              <span className="ml-1 text-muted-foreground/70">({d.loser_slug})</span>
-                            </div>
-                            <div>
-                              类型：{d.data_type || "通用"} · 相似度 {d.score?.toFixed(2)} ≥ 阈值{" "}
-                              {d.threshold?.toFixed(2)}
-                            </div>
-                          </div>
-                        ) : (
-                          <div className="mt-2 space-y-1 text-xs text-muted-foreground">
-                            <div>
-                              清理：<span className="text-foreground">{d.title}</span>
-                              <span className="ml-1 text-muted-foreground/70">({d.slug})</span>
-                            </div>
-                            <div>
-                              类型：{d.data_type || "通用"} · 停滞 {d.stale_days} 天 ≥ 阈值{" "}
-                              {d.threshold_days} 天
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })
-                ) : (
-                  <p className="text-sm text-muted-foreground">本轮无实际操作（仅扫描计数）。</p>
-                )}
-              </div>
-              <div className="mt-4 flex justify-end">
-                <Button variant="outline" size="sm" onClick={() => setScanDetail(null)}>
-                  关闭
-                </Button>
-              </div>
-            </>
-          );
-        })()}
+      {/* 只确认用户当前预览的通用副本；内容一旦修改须重新勾选。 */}
+      <Modal open={!!shareTarget} onClose={closeShare} title="共享通用副本" wide>
+        <div className="max-h-[65vh] overflow-y-auto space-y-3">
+          <p className="text-sm text-muted-foreground">仅共享下面这份副本。请移除个人信息、凭据和业务专属内容；原件保持仅本人可见。</p>
+          <label className="block text-sm">副本标题
+            <input value={shareTitle} maxLength={200} disabled={shareBusy} onChange={e => { setShareTitle(e.target.value); setShareConfirmed(false); }} className="mt-1 w-full rounded border border-input bg-transparent px-3 py-2" />
+          </label>
+          <label className="block text-sm">副本关键词（逗号分隔）
+            <input value={shareKeywords} disabled={shareBusy} onChange={e => { setShareKeywords(e.target.value); setShareConfirmed(false); }} className="mt-1 w-full rounded border border-input bg-transparent px-3 py-2" />
+          </label>
+          <label className="block text-sm">副本正文
+            <textarea value={shareBody} maxLength={100000} disabled={shareBusy} onChange={e => { setShareBody(e.target.value); setShareConfirmed(false); }} className="mt-1 h-48 w-full rounded border border-input bg-transparent px-3 py-2" />
+          </label>
+          <label className="flex items-start gap-2 text-sm">
+            <input type="checkbox" checked={shareConfirmed} disabled={shareBusy} onChange={e => setShareConfirmed(e.target.checked)} className="mt-1" />
+            我已移除个人信息、凭据和业务专属内容，同意共享此副本
+          </label>
+          {shareError && <p role="alert" className="text-sm text-destructive">{shareError}</p>}
+        </div>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="outline" onClick={closeShare}>关闭</Button>
+          <Button onClick={confirmShare} disabled={shareBusy || !shareConfirmed || !shareTitle.trim() || !shareBody.trim()}>{shareBusy ? "正在共享…" : "确认共享"}</Button>
+        </div>
       </Modal>
     </>
   );

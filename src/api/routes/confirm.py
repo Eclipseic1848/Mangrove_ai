@@ -75,13 +75,13 @@ async def confirm_template(body: ConfirmIn, user=Depends(get_execution_user)):
         try:
             execution_checkpoint(required=True)
             tpl = await distill_template(pend["intent"], pend["data_type"], pend["analysis"],
-                                         provider=pend.get("provider"), model=pend.get("model"))
+                                         provider=pend.get("provider"), model=pend.get("model"), owner_id=user["user_id"])
             execution_checkpoint(required=True)
             if not tpl:
                 raise HTTPException(status_code=422, detail="未能提炼出有效模板结构，请重试")
             execution_checkpoint(required=True)
             slug = await save_template(title=tpl["title"], data_type=pend["data_type"],
-                                       keywords=tpl["keywords"] or pend.get("keywords") or [], body=tpl["body"])
+                                       keywords=tpl["keywords"] or pend.get("keywords") or [], body=tpl["body"], owner_id=user["user_id"])
         except HTTPException:
             raise
         except ExecutionDenied:

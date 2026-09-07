@@ -56,8 +56,8 @@ def test_semantic_recall_without_keyword_overlap():
     old_enabled = settings.embedding_enabled
     # 建立固定测试库存时禁用真实 embedding/Curator，避免读取开发机端点配置。
     settings.embedding_enabled = False
-    asyncio.run(tpl.save_template("新闻事件梳理", "generic", ["新闻", "时事"], "新闻结构"))
-    asyncio.run(tpl.save_template("招投标扫标", "generic", ["招标", "标讯"], "扫标结构"))
+    asyncio.run(tpl.save_template("新闻事件梳理", "generic", ["新闻", "时事"], "新闻结构", owner_id="library-test-owner"))
+    asyncio.run(tpl.save_template("招投标扫标", "generic", ["招标", "标讯"], "扫标结构", owner_id="library-test-owner"))
     old_embed, old_embed2 = emb.embed_texts, emb.embed_texts_with_model
     settings.embedding_enabled = True
     emb.embed_texts_with_model = _mock_embed_with_model  # 新 API
@@ -65,8 +65,8 @@ def test_semantic_recall_without_keyword_overlap():
         # 查询用"要闻"——不在任何模板关键词里（关键词匹配会 miss），但语义属新闻
         spec = TaskSpec(intent="今日要闻速递汇总", data_type=DataType.GENERIC, keywords=[])
         # 先确认关键词匹配确实 miss
-        assert tpl._match_keyword(spec) is None
-        m = tpl.match_template(spec)
+        assert tpl._match_keyword(spec, owner_id="library-test-owner") is None
+        m = tpl.match_template(spec, owner_id="library-test-owner")
         assert m is not None and "新闻" in m["title"], m
         # 向量缓存已生成
         assert tpl._vectors_path().exists()
@@ -81,13 +81,13 @@ def test_fallback_to_keyword_when_endpoint_fails():
     _setup_tmp()
     old_enabled = settings.embedding_enabled
     settings.embedding_enabled = False
-    asyncio.run(tpl.save_template("招投标扫标", "generic", ["招标", "标讯"], "扫标结构"))
+    asyncio.run(tpl.save_template("招投标扫标", "generic", ["招标", "标讯"], "扫标结构", owner_id="library-test-owner"))
     old_embed, old_embed2 = emb.embed_texts, emb.embed_texts_with_model
     settings.embedding_enabled = True
     emb.embed_texts_with_model = lambda texts: None  # 模拟端点失败
     try:
         spec = TaskSpec(intent="帮我做招标分析", data_type=DataType.GENERIC, keywords=["招标"])
-        m = tpl.match_template(spec)
+        m = tpl.match_template(spec, owner_id="library-test-owner")
         assert m is not None and "招标" in m["keywords"], m  # 关键词兜底命中
     finally:
         settings.embedding_enabled = old_enabled
@@ -100,7 +100,7 @@ def test_disabled_uses_keyword():
     _setup_tmp()
     old_enabled = settings.embedding_enabled
     settings.embedding_enabled = False
-    asyncio.run(tpl.save_template("招投标扫标", "generic", ["招标"], "扫标结构"))
+    asyncio.run(tpl.save_template("招投标扫标", "generic", ["招标"], "扫标结构", owner_id="library-test-owner"))
 
     def _boom(texts):
         raise AssertionError("未启用时不应调用 embed_texts")
@@ -109,7 +109,7 @@ def test_disabled_uses_keyword():
     emb.embed_texts = _boom
     try:
         spec = TaskSpec(intent="招标分析", data_type=DataType.GENERIC, keywords=["招标"])
-        assert tpl.match_template(spec) is not None
+        assert tpl.match_template(spec, owner_id="library-test-owner") is not None
     finally:
         settings.embedding_enabled = old_enabled
         emb.embed_texts = old_embed
@@ -137,3 +137,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+from tests.library_test_helpers import _isolate_library_services  # noqa: F401

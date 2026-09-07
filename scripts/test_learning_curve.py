@@ -39,7 +39,7 @@ def _setup_tpl_tmp():
 
 def _write_template(d, slug, title, data_type, keywords, body, status="active", uses=0, quality_avg=0):
     front = yaml.safe_dump(
-        {"title": title, "data_type": data_type, "keywords": keywords,
+        {"owner_id": "library-test-owner", "scope": "owner", "title": title, "data_type": data_type, "keywords": keywords,
          "status": status, "uses": uses, "quality_avg": quality_avg},
         allow_unicode=True, sort_keys=False,
     ).strip()
@@ -54,7 +54,7 @@ def _setup_lesson_tmp():
 
 def _write_lesson(d, slug, title, data_type, keywords, body, status="active", occurrences=1):
     front = yaml.safe_dump(
-        {"title": title, "data_type": data_type, "keywords": keywords,
+        {"owner_id": "library-test-owner", "scope": "owner", "title": title, "data_type": data_type, "keywords": keywords,
          "status": status, "occurrences": occurrences},
         allow_unicode=True, sort_keys=False,
     ).strip()
@@ -71,12 +71,12 @@ def test_template_hit_rate_converges_across_rounds():
         first_slug = None
         for i in range(8):
             slug = asyncio.run(tpl.save_template(
-                f"产品测评{i}", "product", ["测评", "参数", "卖点"], f"结构{i}",
+                f"产品测评{i}", "product", ["测评", "参数", "卖点"], f"结构{i}", owner_id="library-test-owner"
             ))
             if first_slug is None:
                 first_slug = slug
             assert slug == first_slug, f"第{i + 1}轮未复用第1轮的模板，新建/复用了 {slug}"
-            assert len(tpl.load_templates()) == 1, f"第{i + 1}轮后库存应仍为1条，实际 {len(tpl.load_templates())}"
+            assert len(tpl.load_templates(owner_id="library-test-owner")) == 1, f"第{i + 1}轮后库存应仍为1条，实际 {len(tpl.load_templates(owner_id="library-test-owner"))}"
     finally:
         settings.embedding_enabled = old_enabled
 
@@ -90,12 +90,12 @@ def test_template_promotion_curve():
     settings.embedding_enabled = False
     settings.template_promote_uses, settings.template_promote_quality = 5, 70
     try:
-        slug = asyncio.run(tpl.save_template("新闻梳理", "article", ["新闻"], "结构"))
+        slug = asyncio.run(tpl.save_template("新闻梳理", "article", ["新闻"], "结构", owner_id="library-test-owner"))
         for round_i in range(1, 5):
-            tpl.record_template_use(slug, 90)
-            t = [x for x in tpl.load_templates() if x["slug"] == slug][0]
+            tpl.record_template_use(slug, 90, owner_id="library-test-owner")
+            t = [x for x in tpl.load_templates(owner_id="library-test-owner") if x["slug"] == slug][0]
             assert t["status"] == "draft", f"第{round_i}轮不应提前转正，实际 status={t['status']}"
-        st = tpl.record_template_use(slug, 90)  # 第5轮，uses 达到阈值
+        st = tpl.record_template_use(slug, 90, owner_id="library-test-owner")  # 第5轮，uses 达到阈值
         assert st == "active", f"第5轮应转正，实际 status={st}"
     finally:
         settings.embedding_enabled = old_enabled
@@ -139,11 +139,11 @@ def test_template_patrol_dedup_converges_and_is_idempotent():
                 scanner._sleep = _no_sleep
                 scanned1, merged1, _details1 = await scanner._dedup_pass_templates()
                 assert scanned1 == 3 and merged1 == 1, (scanned1, merged1)
-                assert len(tpl.load_templates()) == 2, tpl.load_templates()
+                assert len(tpl.load_templates(owner_id="library-test-owner")) == 2, tpl.load_templates(owner_id="library-test-owner")
 
                 _scanned2, merged2, _details2 = await scanner._dedup_pass_templates()
                 assert merged2 == 1, "第二轮巡检应再发现一对重复并合并，最终收敛为1条"
-                assert len(tpl.load_templates()) == 1, "两轮巡检后应收敛为1条"
+                assert len(tpl.load_templates(owner_id="library-test-owner")) == 1, "两轮巡检后应收敛为1条"
 
                 _scanned3, merged3, _details3 = await scanner._dedup_pass_templates()
                 assert merged3 == 0, "第三轮巡检不应再发现新的重复对（幂等）"
@@ -172,11 +172,11 @@ def test_lesson_occurrences_accumulate_without_fragmenting():
         with patch("src.memory.lessons.achat", new=_fake_achat):
             for round_i in range(5):
                 asyncio.run(lesson.record_failure(
-                    "同类失败任务", "comment", ["同一失败模式"], "未采集到有效数据",
+                    "同类失败任务", "comment", ["同一失败模式"], "未采集到有效数据", owner_id="library-test-owner"
                 ))
-                lessons = lesson.load_lessons()
+                lessons = lesson.load_lessons(owner_id="library-test-owner")
                 assert len(lessons) == 1, f"第{round_i + 1}轮后应仍只有1条教训，实际 {len(lessons)}"
-        final = lesson.load_lessons()[0]
+        final = lesson.load_lessons(owner_id="library-test-owner")[0]
         assert final["occurrences"] == 5, final
     finally:
         settings.embedding_enabled = old_enabled
@@ -196,17 +196,17 @@ def test_lesson_promotion_and_consumption_curve():
         with patch("src.memory.lessons.achat", new=_fake_achat):
             for round_i in range(1, 3):
                 asyncio.run(lesson.record_failure(
-                    "同类失败任务二", "comment", ["同一失败模式二"], "未采集到有效数据",
+                    "同类失败任务二", "comment", ["同一失败模式二"], "未采集到有效数据", owner_id="library-test-owner"
                 ))
-                cur = lesson.load_lessons()[0]
+                cur = lesson.load_lessons(owner_id="library-test-owner")[0]
                 assert cur["status"] == "draft", f"第{round_i}轮不应提前转正，实际 status={cur['status']}"
             asyncio.run(lesson.record_failure(
-                "同类失败任务二", "comment", ["同一失败模式二"], "未采集到有效数据",
+                "同类失败任务二", "comment", ["同一失败模式二"], "未采集到有效数据", owner_id="library-test-owner"
             ))  # 第3轮，occurrences 达到阈值
-            final = lesson.load_lessons()[0]
+            final = lesson.load_lessons(owner_id="library-test-owner")[0]
             assert final["status"] == "draft", "仅重复失败不得自动转正"
-            assert lesson.record_lesson_helped(final["slug"])
-            final = lesson.load_lessons()[0]
+            assert lesson.record_lesson_helped(final["slug"], owner_id="library-test-owner")
+            final = lesson.load_lessons(owner_id="library-test-owner")[0]
             assert final["status"] == "active", final
     finally:
         settings.embedding_enabled = old_enabled
@@ -222,10 +222,10 @@ def test_lesson_promotion_and_consumption_curve():
     emb.rerank_scores = lambda query, docs, instruct=None: [0.9] * len(docs)
     try:
         spec = TaskSpec(intent="同类失败任务二", data_type=DataType.COMMENT, keywords=["同一失败模式二"])
-        analyze_text, active_slug = lesson.lesson_for_analyze(spec)
+        analyze_text, active_slug = lesson.lesson_for_analyze(spec, owner_id="library-test-owner")
         assert "累积应对建议正文" in analyze_text, analyze_text
         assert active_slug == final["slug"]
-        planner_text = lesson.lesson_for_planner("同类失败任务二的规划阶段查询")
+        planner_text = lesson.lesson_for_planner("同类失败任务二的规划阶段查询", owner_id="library-test-owner")
         assert "累积应对建议正文" in planner_text, planner_text
     finally:
         settings.embedding_enabled = old_enabled
@@ -270,11 +270,11 @@ def test_lesson_patrol_dedup_converges_and_is_idempotent():
                 scanner._sleep = _no_sleep
                 scanned1, merged1, _details1 = await scanner._dedup_pass_lessons()
                 assert scanned1 == 3 and merged1 == 1, (scanned1, merged1)
-                assert len(lesson.load_lessons()) == 2, lesson.load_lessons()
+                assert len(lesson.load_lessons(owner_id="library-test-owner")) == 2, lesson.load_lessons(owner_id="library-test-owner")
 
                 _scanned2, merged2, _details2 = await scanner._dedup_pass_lessons()
                 assert merged2 == 1, "第二轮巡检应再发现一对重复并合并，最终收敛为1条"
-                assert len(lesson.load_lessons()) == 1, "两轮巡检后应收敛为1条"
+                assert len(lesson.load_lessons(owner_id="library-test-owner")) == 1, "两轮巡检后应收敛为1条"
 
                 _scanned3, merged3, _details3 = await scanner._dedup_pass_lessons()
                 assert merged3 == 0, "第三轮巡检不应再发现新的重复对（幂等）"
@@ -311,3 +311,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+from tests.library_test_helpers import _isolate_library_services  # noqa: F401

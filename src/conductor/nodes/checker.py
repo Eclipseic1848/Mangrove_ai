@@ -15,7 +15,8 @@ from typing import Any, Dict
 
 from src.config.settings import settings
 from src.llm import achat
-from src.memory import distill_template, record_failure, record_lesson_helped, record_template_use, save_template
+from src.memory._library_scope import execution_owner
+from src.memory import distill_template, record_lesson_failure, record_failure, record_lesson_helped, record_template_use, save_template
 
 from ..prompts import CHECKER_SYSTEM
 from ..state import ConductorState
@@ -41,6 +42,7 @@ def _looks_like_collection_failure(dataset: list, analysis: str) -> bool:
 
 
 async def checker_node(state: ConductorState) -> Dict[str, Any]:
+    owner_id = execution_owner()
     analysis = state.get("analysis")
     # 无分析产出 或 开关关闭 → 跳过评估
     if not analysis or not settings.checker_enabled:
@@ -101,34 +103,38 @@ async def checker_node(state: ConductorState) -> Dict[str, Any]:
             out["checker_feedback"] = feedback
             return out
 
+    collection_failed = _looks_like_collection_failure(state.get("cleaned_dataset") or [], analysis)
+
     # 自学习增强：本次命中了已学模板 → 回写使用统计（uses+1、更新质量均分），据此质量门转正/淘汰
-    if state.get("analysis_source") == "learned" and state.get("template_slug"):
+    if owner_id and state.get("analysis_source") == "learned" and state.get("template_slug"):
         try:
-            new_status = record_template_use(state["template_slug"], score)
+            new_status = record_template_use(state["template_slug"], score, owner_id=owner_id)
             if new_status in ("active", "retired"):
                 out["template_status"] = {"slug": state["template_slug"], "status": new_status}
         except Exception:
             logger.warning("回写模板使用统计失败（不影响产出）", exc_info=True)
 
-    # 方案 B：本次命中了 active 教训且判定通过 → 标记教训有效（helped_avoid +1）
-    if passed and state.get("active_lesson_slug"):
+    # 报告高分不代表采集成功；只有实际避免失败才累计教训有效性。
+    if owner_id and passed and not collection_failed and state.get("active_lesson_slug"):
         try:
-            record_lesson_helped(state["active_lesson_slug"])
+            record_lesson_helped(state["active_lesson_slug"], owner_id=owner_id)
         except Exception:
             logger.warning("记录教训有效标记失败（不影响产出）", exc_info=True)
 
     # 自学习阶段2：走了兜底 且 质量通过 且非采集失败 → 自动沉淀模板（无需人工确认）
     if (
-        passed
+        owner_id
+        and passed
         and settings.template_learning_enabled
         and state.get("analysis_source") == "fallback"
-        and not _looks_like_collection_failure(state.get("cleaned_dataset") or [], analysis)
+        and not collection_failed
     ):
         try:
             tpl = await distill_template(
                 spec.intent,
                 spec.data_type.value,
                 analysis,
+                owner_id=owner_id,
                 provider=state.get("provider"),
                 model=state.get("model"),
             )
@@ -138,6 +144,7 @@ async def checker_node(state: ConductorState) -> Dict[str, Any]:
                     data_type=spec.data_type.value,
                     keywords=tpl["keywords"] or list(spec.keywords or []),
                     body=tpl["body"],
+                    owner_id=owner_id,
                 )
                 if slug:
                     out["template_saved"] = {"slug": slug, "title": tpl["title"]}
@@ -149,15 +156,16 @@ async def checker_node(state: ConductorState) -> Dict[str, Any]:
 
     # 自学习B2：本轮判定"采集失败"（叙事完整但没数据）→ 教训分流，不要求 passed/analysis_source=="fallback"
     # （模板沉淀要求 passed+fallback；教训只要"确实采集失败"就有沉淀价值，与报告质量分/分析通道无关）
-    if settings.lesson_learning_enabled and _looks_like_collection_failure(
-        state.get("cleaned_dataset") or [], analysis
-    ):
+    if owner_id and settings.lesson_learning_enabled and collection_failed:
         try:
+            if state.get("active_lesson_slug"):
+                record_lesson_failure(state["active_lesson_slug"], owner_id=owner_id)
             await record_failure(
                 spec.intent,
                 spec.data_type.value,
                 list(spec.keywords or []),
                 failure_signal=analysis,
+                owner_id=owner_id,
                 provider=state.get("provider"),
                 model=state.get("model"),
             )

@@ -243,7 +243,7 @@ async def test_curator_late_return_cannot_write_template(pending, monkeypatch, t
     store, old, actions = pending
     reached, release = asyncio.Event(), asyncio.Event()
     writes = []
-    async def curate(*args):
+    async def curate(*args, **kwargs):
         reached.set()
         await release.wait()
         return {'decision': decision, 'slug': 'existing', 'title': '虚构', 'keywords': [], 'body': '虚构'}
@@ -256,7 +256,7 @@ async def test_curator_late_return_cannot_write_template(pending, monkeypatch, t
     monkeypatch.setattr(templates, '_invalidate_and_rebuild_templates', lambda: None)
     monkeypatch.setattr(templates, '_load_vectors', lambda: {})
     with execution.execution_context(old):
-        task = asyncio.create_task(templates.save_template('虚构', 'generic', [], '虚构'))
+        task = asyncio.create_task(templates.save_template('虚构', 'generic', [], '虚构', owner_id=old.owner_user_id))
         await reached.wait()
         store.update_user(old.owner_user_id, disabled=True)
         store.update_user(old.owner_user_id, disabled=False)

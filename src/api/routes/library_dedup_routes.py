@@ -11,4 +11,6 @@ router = APIRouter(prefix="/api/library-dedup-log", tags=["library-dedup-log"])
 @router.get("")
 def list_scan_log(admin=Depends(require_admin)):
     """返回最近 200 轮巡检记录（按时间倒序）。仅管理员可读。"""
-    return {"log": get_store().library_dedup_scan_log_recent(limit=200)}
+    # 历史 details 包含任务派生标题，不能作为跨 Owner 的管理元数据公开。
+    fields = ("id", "ran_at", "templates_scanned", "templates_merged", "lessons_scanned", "lessons_merged", "stale_drafts_deleted")
+    return {"log": [{key: row[key] for key in fields} for row in get_store().library_dedup_scan_log_recent(limit=200)]}

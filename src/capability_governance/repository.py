@@ -474,8 +474,12 @@ class InMemoryCapabilityGovernanceRepository:
     ) -> CapabilityGovernanceEvent:
         if event.event_type != "audit_viewed":
             raise ValueError("审计查看事件专用入口只接受 audit_viewed 事件")
-        # 幂等键查重复用 _insert_event 的原子语义：同 target+键 返回既有事件。
-        return self._insert_event(event)
+        from .models import require_same_audit_evidence
+
+        with self._events_lock:
+            saved = self._insert_event(event)
+            require_same_audit_evidence(saved, event)
+            return saved
 
     def list_audit_view_events(
         self,

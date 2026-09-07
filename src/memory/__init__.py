@@ -1,5 +1,6 @@
 """记忆与技能层：跨会话用户偏好 + 个人记忆 + 任务技能复用 + 分析模板自学习 + 失败教训分流。"""
-from .lessons import delete_lesson, find_active_lessons, lesson_for_analyze, lesson_for_planner, load_lessons, record_failure, record_lesson_helped
+from ._library_scope import content_digest
+from .lessons import record_lesson_failure, share_lesson, delete_lesson, find_active_lessons, lesson_for_analyze, lesson_for_planner, load_lessons, record_failure, record_lesson_helped
 from .loader import (
     add_preference,
     load_preferences,
@@ -17,6 +18,7 @@ from .templates import (
     match_template,
     record_template_use,
     save_template,
+    share_template,
 )
 
 __all__ = [
@@ -27,6 +29,9 @@ __all__ = [
     "load_skills",
     "skill_for_analysis",
     "skills_for_planner",
+    "content_digest",
+    "share_template",
+    "share_lesson",
     "load_templates",
     "match_template",
     "save_template",
@@ -34,6 +39,7 @@ __all__ = [
     "record_template_use",
     "find_duplicate",
     "delete_template",
+    "record_lesson_failure",
     "record_failure",
     "lesson_for_analyze",
     "lesson_for_planner",

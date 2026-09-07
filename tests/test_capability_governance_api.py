@@ -550,6 +550,7 @@ def test_audit_view_endpoint_requires_reason_idempotency_and_admin(
     body = ok.json()
     assert body["status"] == "succeeded"
     assert "审计正文" in body["content"]
+    assert ok.headers.get("Cache-Control") == "no-store"
     assert body["event"]["subject_sha256"]
     assert body["event"]["result"] == "succeeded"
 

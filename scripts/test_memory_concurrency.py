@@ -26,7 +26,7 @@ def test_atomic_write_reads_back_correctly():
     """原子写：写入后能正确读回，内容完整。"""
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "test.md"
-        content = "---\ntitle: 测试\n---\n正文内容\n"
+        content = "---\nowner_id: library-test-owner\nscope: owner\ntitle: 测试\n---\n正文内容\n"
         atomic_write(path, content)
         result = path.read_text(encoding="utf-8")
         assert result == content, f"读回内容不一致: {result!r}"
@@ -42,8 +42,8 @@ def test_atomic_write_replaces_atomically():
     """原子写：覆盖写后旧内容完全被替换，无残留。"""
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / "test.md"
-        atomic_write(path, "---\ntitle: 旧\n---\n旧正文\n")
-        atomic_write(path, "---\ntitle: 新\n---\n新正文\n")
+        atomic_write(path, "---\nowner_id: library-test-owner\nscope: owner\ntitle: 旧\n---\n旧正文\n")
+        atomic_write(path, "---\nowner_id: library-test-owner\nscope: owner\ntitle: 新\n---\n新正文\n")
         result = path.read_text(encoding="utf-8")
         parsed = parse_frontmatter(result)
         assert parsed[0]["title"] == "新"
@@ -134,7 +134,7 @@ def _setup_lesson_tmp():
 
 def _write_lesson_file(d, slug, title, data_type, keywords, body, status="active", occurrences=1):
     front = yaml.safe_dump(
-        {"title": title, "data_type": data_type, "keywords": keywords,
+        {"owner_id": "library-test-owner", "scope": "owner", "title": title, "data_type": data_type, "keywords": keywords,
          "status": status, "occurrences": occurrences},
         allow_unicode=True, sort_keys=False,
     ).strip()
@@ -162,7 +162,7 @@ def test_record_failure_concurrent_no_lost_occurrences():
             asyncio.run(
                 lesson.record_failure(
                     "测试失败任务", "comment", ["测试", "并发"],
-                    "未采集到有效数据",
+                    "未采集到有效数据", owner_id="library-test-owner"
                 )
             )
         except Exception as e:
@@ -177,7 +177,7 @@ def test_record_failure_concurrent_no_lost_occurrences():
                 t.join()
 
         assert not errors, f"并发错误: {errors}"
-        lessons = lesson.load_lessons()
+        lessons = lesson.load_lessons(owner_id="library-test-owner")
         assert len(lessons) == 1, f"期望 1 条教训，实际 {len(lessons)} 条"
         t = lessons[0]
         assert t["occurrences"] == N, f"期望 occurrences={N}，实际 {t['occurrences']}"
@@ -200,7 +200,7 @@ def _setup_tpl_tmp():
 
 def _write_tpl_file(d, slug, title, data_type, keywords, body, status="active", uses=0, quality_avg=0):
     front = yaml.safe_dump(
-        {"title": title, "data_type": data_type, "keywords": keywords,
+        {"owner_id": "library-test-owner", "scope": "owner", "title": title, "data_type": data_type, "keywords": keywords,
          "status": status, "uses": uses, "quality_avg": quality_avg},
         allow_unicode=True, sort_keys=False,
     ).strip()
@@ -219,7 +219,7 @@ def test_record_template_use_concurrent_no_lost_uses():
 
     def _run():
         try:
-            tpl.record_template_use("existing", quality_score=80)
+            tpl.record_template_use("existing", quality_score=80, owner_id="library-test-owner")
         except Exception as e:
             errors.append(e)
 
@@ -230,7 +230,7 @@ def test_record_template_use_concurrent_no_lost_uses():
         t.join()
 
     assert not errors, f"并发错误: {errors}"
-    loaded = tpl.load_templates()
+    loaded = tpl.load_templates(owner_id="library-test-owner")
     assert len(loaded) == 1
     assert loaded[0]["uses"] == N, f"期望 uses={N}，实际 {loaded[0]['uses']}"
 
@@ -263,3 +263,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+from tests.library_test_helpers import _isolate_library_services  # noqa: F401

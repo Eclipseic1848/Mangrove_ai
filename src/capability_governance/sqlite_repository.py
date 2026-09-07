@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from src import account_execution as execution
 
 from .models import (
+    require_same_audit_evidence,
     CapabilityGovernanceEvent,
     CapabilityGovernanceTarget,
     CapabilityValidationRun,
@@ -755,10 +756,11 @@ class SqliteCapabilityGovernanceRepository:
                 ),
             ).fetchone()
             if existing is not None:
-                # 同幂等键重试返回既有审计记录；审计不可变，不覆盖、不重复落行。
-                return CapabilityGovernanceEvent.model_validate_json(
+                saved = CapabilityGovernanceEvent.model_validate_json(
                     existing["payload_json"]
                 )
+                require_same_audit_evidence(saved, event)
+                return saved
             connection.execute(
                 "INSERT INTO capability_governance_events "
                 "(event_id, owner_key, scope, pack_id, version, digest, "

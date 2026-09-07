@@ -29,7 +29,7 @@ def test_lesson_for_analyze_logs_hit():
     lesson.LESSONS_DIR = d
     lesson._lessons_cache.invalidate()
     front = yaml.safe_dump(
-        {"title": "教训甲", "data_type": "comment", "keywords": ["k"],
+        {"owner_id": "library-test-owner", "scope": "owner", "title": "教训甲", "data_type": "comment", "keywords": ["k"],
          "status": "active", "occurrences": 2, "helped_avoid": 1},
         allow_unicode=True, sort_keys=False,
     ).strip()
@@ -46,7 +46,7 @@ def test_lesson_for_analyze_logs_hit():
     emb.rerank_scores = lambda q, docs, instruct=None: [0.9] * len(docs)
     try:
         spec = TaskSpec(intent="测试", data_type=DataType.COMMENT, keywords=["k"])
-        text, slug = lesson.lesson_for_analyze(spec, store=store, task_id="t_hit")
+        text, slug = lesson.lesson_for_analyze(spec, store=store, task_id="t_hit", owner_id="library-test-owner")
         assert slug == "a"
         rows = store.memory_hit_log_recent()
         assert len(rows) == 1
@@ -76,7 +76,7 @@ def test_lesson_for_analyze_no_candidates_logs_miss_none():
     settings.embedding_enabled = False
     try:
         spec = TaskSpec(intent="测试", data_type=DataType.COMMENT, keywords=["k"])
-        text, slug = lesson.lesson_for_analyze(spec, store=store, task_id="t_miss")
+        text, slug = lesson.lesson_for_analyze(spec, store=store, task_id="t_miss", owner_id="library-test-owner")
         assert slug is None
         rows = store.memory_hit_log_recent()
         assert len(rows) == 1
@@ -183,7 +183,7 @@ def test_lesson_for_analyze_logs_miss_with_degrade_path():
     lesson.LESSONS_DIR = d
     lesson._lessons_cache.invalidate()
     front = yaml.safe_dump(
-        {"title": "教训甲", "data_type": "comment", "keywords": ["k"],
+        {"owner_id": "library-test-owner", "scope": "owner", "title": "教训甲", "data_type": "comment", "keywords": ["k"],
          "status": "active", "occurrences": 2, "helped_avoid": 1},
         allow_unicode=True, sort_keys=False,
     ).strip()
@@ -200,7 +200,7 @@ def test_lesson_for_analyze_logs_miss_with_degrade_path():
     emb.rerank_scores = lambda q, docs, instruct=None: [0.0] * len(docs)  # rerank 全筛空
     try:
         spec = TaskSpec(intent="测试", data_type=DataType.COMMENT, keywords=["k"])
-        text, slug = lesson.lesson_for_analyze(spec, store=store, task_id="t_miss_semantic")
+        text, slug = lesson.lesson_for_analyze(spec, store=store, task_id="t_miss_semantic", owner_id="library-test-owner")
         assert slug is None
         rows = store.memory_hit_log_recent()
         assert len(rows) == 1
@@ -242,3 +242,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+from tests.library_test_helpers import _isolate_library_services  # noqa: F401

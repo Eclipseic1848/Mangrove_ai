@@ -31,7 +31,7 @@ def _setup_tmp():
 
 def _write_lesson(d, slug, title, data_type, keywords, body, status="active", occurrences=1):
     front = yaml.safe_dump(
-        {"title": title, "data_type": data_type, "keywords": keywords,
+        {"owner_id": "library-test-owner", "scope": "owner", "title": title, "data_type": data_type, "keywords": keywords,
          "status": status, "occurrences": occurrences},
         allow_unicode=True, sort_keys=False,
     ).strip()
@@ -63,7 +63,7 @@ def test_find_similar_lesson_filters_by_data_type():
     old_enabled = settings.embedding_enabled
     settings.embedding_enabled = False  # 走关键词 Jaccard 兜底，确定性
     try:
-        hit = lesson.find_similar_lesson("comment", ["小众品牌"], "抖音小众品牌评论")
+        hit = lesson.find_similar_lesson("comment", ["小众品牌"], "抖音小众品牌评论", owner_id="library-test-owner")
         assert hit is not None and hit["slug"] == "a", hit
     finally:
         settings.embedding_enabled = old_enabled
@@ -81,7 +81,7 @@ def test_find_similar_lesson_semantic_hit():
     emb.is_rerank_configured = lambda: True
     emb.rerank_scores = lambda query, docs, instruct=None: [0.9] * len(docs)
     try:
-        hit = lesson.find_similar_lesson("comment", ["完全不同措辞"], "换一种说法的同类查询")
+        hit = lesson.find_similar_lesson("comment", ["完全不同措辞"], "换一种说法的同类查询", owner_id="library-test-owner")
         assert hit is not None and hit["slug"] == "a", hit
     finally:
         settings.embedding_enabled = old_enabled
@@ -98,7 +98,7 @@ def test_find_similar_lesson_falls_back_to_jaccard_when_embedding_unavailable():
     settings.embedding_enabled = True
     emb.embed_texts_with_model = lambda texts: None  # 端点不可用
     try:
-        hit = lesson.find_similar_lesson("comment", ["小众品牌", "抖音", "评论"], "任意意图文本")
+        hit = lesson.find_similar_lesson("comment", ["小众品牌", "抖音", "评论"], "任意意图文本", owner_id="library-test-owner")
         assert hit is not None and hit["slug"] == "a", hit
     finally:
         settings.embedding_enabled = old_enabled
@@ -111,7 +111,7 @@ def test_find_active_lessons_excludes_draft():
     old_enabled = settings.embedding_enabled
     settings.embedding_enabled = False
     try:
-        results, _ = lesson.find_active_lessons("comment", ["小众品牌"], "抖音小众品牌评论")
+        results, _ = lesson.find_active_lessons("comment", ["小众品牌"], "抖音小众品牌评论", owner_id="library-test-owner")
         assert results == [], "draft 教训不应被消费侧召回"
     finally:
         settings.embedding_enabled = old_enabled
@@ -128,7 +128,7 @@ def test_find_active_lessons_falls_back_to_keyword_when_embedding_unavailable():
     settings.embedding_enabled = True
     emb.embed_texts_with_model = lambda texts: None
     try:
-        results, degrade = lesson.find_active_lessons("comment", ["小众品牌", "抖音"], "任意意图文本")
+        results, degrade = lesson.find_active_lessons("comment", ["小众品牌", "抖音"], "任意意图文本", owner_id="library-test-owner")
         assert len(results) == 1 and results[0]["slug"] == "a", "语义端点不可用应退回关键词匹配命中"
         assert degrade == "keyword"
     finally:
@@ -143,8 +143,8 @@ def test_record_failure_creates_draft_when_no_match():
     settings.embedding_enabled = False
     try:
         with patch("src.memory.lessons.achat", new=_fake_achat(payload)):
-            asyncio.run(lesson.record_failure("抖音小众品牌评论分析", "comment", ["小众品牌"], "未采集到有效数据"))
-        lessons = lesson.load_lessons()
+            asyncio.run(lesson.record_failure("抖音小众品牌评论分析", "comment", ["小众品牌"], "未采集到有效数据", owner_id="library-test-owner"))
+        lessons = lesson.load_lessons(owner_id="library-test-owner")
         assert len(lessons) == 1
         assert lessons[0]["status"] == "draft" and lessons[0]["occurrences"] == 1
         assert lessons[0]["body"] == "应对建议正文"
@@ -162,8 +162,8 @@ def test_record_failure_merges_and_promotes_to_active():
     merge_payload = {"title": "旧教训", "keywords": ["小众品牌", "抖音"], "body": "融合后的新正文"}
     try:
         with patch("src.memory.lessons.achat", new=_fake_achat_sequence([fresh_payload, merge_payload])):
-            asyncio.run(lesson.record_failure("同类失败任务", "comment", ["小众品牌"], "未采集到有效数据"))
-        lessons = lesson.load_lessons()
+            asyncio.run(lesson.record_failure("同类失败任务", "comment", ["小众品牌"], "未采集到有效数据", owner_id="library-test-owner"))
+        lessons = lesson.load_lessons(owner_id="library-test-owner")
         assert len(lessons) == 1, lessons
         t = lessons[0]
         assert t["slug"] == "existing"
@@ -186,8 +186,8 @@ def test_record_failure_keeps_accumulating_when_already_active():
     merge_payload = {"title": "旧教训", "keywords": ["小众品牌"], "body": "再次融合的正文"}
     try:
         with patch("src.memory.lessons.achat", new=_fake_achat_sequence([fresh_payload, merge_payload])):
-            asyncio.run(lesson.record_failure("同类失败任务", "comment", ["小众品牌"], "未采集到有效数据"))
-        t = lesson.load_lessons()[0]
+            asyncio.run(lesson.record_failure("同类失败任务", "comment", ["小众品牌"], "未采集到有效数据", owner_id="library-test-owner"))
+        t = lesson.load_lessons(owner_id="library-test-owner")[0]
         assert t["occurrences"] == 3 and t["status"] == "active", t
         assert t["body"] == "再次融合的正文"
     finally:
@@ -204,8 +204,8 @@ def test_record_failure_skips_when_distill_returns_none():
 
     try:
         with patch("src.memory.lessons.achat", new=_empty_body):
-            asyncio.run(lesson.record_failure("失败任务", "comment", ["k"], "未采集到有效数据"))
-        assert lesson.load_lessons() == []
+            asyncio.run(lesson.record_failure("失败任务", "comment", ["k"], "未采集到有效数据", owner_id="library-test-owner"))
+        assert lesson.load_lessons(owner_id="library-test-owner") == []
     finally:
         settings.embedding_enabled = old_enabled
 
@@ -223,7 +223,7 @@ def test_lesson_for_analyze_hits_active():
     emb.rerank_scores = lambda query, docs, instruct=None: [0.9] * len(docs)
     try:
         spec = TaskSpec(intent="抖音小众品牌评论分析", data_type=DataType.COMMENT, keywords=["小众品牌"])
-        text, slug = lesson.lesson_for_analyze(spec)
+        text, slug = lesson.lesson_for_analyze(spec, owner_id="library-test-owner")
         assert "别忘了这样应对" in text
         assert slug == "a"
     finally:
@@ -240,7 +240,7 @@ def test_lesson_for_analyze_ignores_draft():
     settings.embedding_enabled = False
     try:
         spec = TaskSpec(intent="抖音小众品牌评论分析", data_type=DataType.COMMENT, keywords=["小众品牌"])
-        text, slug = lesson.lesson_for_analyze(spec)
+        text, slug = lesson.lesson_for_analyze(spec, owner_id="library-test-owner")
         assert text == ""
         assert slug is None
     finally:
@@ -259,7 +259,7 @@ def test_lesson_for_planner_ignores_data_type():
     emb.is_rerank_configured = lambda: True
     emb.rerank_scores = lambda query, docs, instruct=None: [0.9] * len(docs)
     try:
-        text = lesson.lesson_for_planner("帮我看看抖音上小众品牌的评论")
+        text = lesson.lesson_for_planner("帮我看看抖音上小众品牌的评论", owner_id="library-test-owner")
         assert "规划阶段的提醒" in text
     finally:
         settings.embedding_enabled = old_enabled
@@ -273,7 +273,7 @@ def test_lesson_for_planner_empty_when_no_match():
     old_enabled = settings.embedding_enabled
     settings.embedding_enabled = False
     try:
-        assert lesson.lesson_for_planner("完全无关的查询") == ""
+        assert lesson.lesson_for_planner("完全无关的查询", owner_id="library-test-owner") == ""
     finally:
         settings.embedding_enabled = old_enabled
 
@@ -281,13 +281,13 @@ def test_lesson_for_planner_empty_when_no_match():
 def test_delete_lesson_removes_file_returns_true():
     d = _setup_tmp()
     _write_lesson(d, "existing", "旧教训", "comment", ["小众品牌"], "旧正文", status="active", occurrences=2)
-    assert lesson.delete_lesson("existing") is True
-    assert lesson.load_lessons() == []
+    assert lesson.delete_lesson("existing", owner_id="library-test-owner") is True
+    assert lesson.load_lessons(owner_id="library-test-owner") == []
 
 
 def test_delete_lesson_missing_returns_false():
     _setup_tmp()
-    assert lesson.delete_lesson("not-a-real-slug") is False
+    assert lesson.delete_lesson("not-a-real-slug", owner_id="library-test-owner") is False
 
 
 # ---- 方案 B：教训闭环反馈 + 退役 ----
@@ -296,7 +296,7 @@ def test_lesson_helped_avoid_defaults_to_zero():
     """旧教训（无 helped_avoid 字段）加载时默认值为 0。"""
     d = _setup_tmp()
     _write_lesson(d, "a", "教训甲", "comment", ["k"], "正文", status="active", occurrences=2)
-    lessons = lesson.load_lessons()
+    lessons = lesson.load_lessons(owner_id="library-test-owner")
     assert lessons[0].get("helped_avoid") == 0
 
 
@@ -310,7 +310,7 @@ def test_lesson_helped_avoid_reads_correctly():
     raw = raw.replace("occurrences: 2", "occurrences: 2\nhelped_avoid: 3")
     path.write_text(raw, encoding="utf-8")
     lesson._lessons_cache.invalidate()
-    lessons = lesson.load_lessons()
+    lessons = lesson.load_lessons(owner_id="library-test-owner")
     assert lessons[0]["helped_avoid"] == 3
 
 
@@ -318,7 +318,7 @@ def test_lesson_retired_status_reads_correctly():
     """retired 状态的教训正常加载。"""
     d = _setup_tmp()
     _write_lesson(d, "a", "教训甲", "comment", ["k"], "正文", status="retired", occurrences=10)
-    lessons = lesson.load_lessons()
+    lessons = lesson.load_lessons(owner_id="library-test-owner")
     assert lessons[0]["status"] == "retired"
     assert lessons[0]["helped_avoid"] == 0
 
@@ -327,15 +327,15 @@ def test_record_lesson_helped_increments_counter():
     """record_lesson_helped 使 helped_avoid +1。"""
     d = _setup_tmp()
     _write_lesson(d, "a", "教训甲", "comment", ["k"], "正文", status="draft", occurrences=1)
-    lesson.record_lesson_helped("a")
-    lessons = lesson.load_lessons()
+    lesson.record_lesson_helped("a", owner_id="library-test-owner")
+    lessons = lesson.load_lessons(owner_id="library-test-owner")
     assert lessons[0]["helped_avoid"] == 1
 
 
 def test_record_lesson_helped_nonexistent_returns_false():
     """不存在的教训返回 False。"""
     _setup_tmp()
-    assert lesson.record_lesson_helped("nope") is False
+    assert lesson.record_lesson_helped("nope", owner_id="library-test-owner") is False
 
 
 def test_record_failure_no_longer_promotes_by_occurrences_alone():
@@ -348,8 +348,8 @@ def test_record_failure_no_longer_promotes_by_occurrences_alone():
     merge_payload = {"title": "旧教训", "keywords": ["k"], "body": "融合后的新正文"}
     try:
         with patch("src.memory.lessons.achat", new=_fake_achat_sequence([payload, merge_payload])):
-            asyncio.run(lesson.record_failure("同类失败任务", "comment", ["k"], "未采集到有效数据"))
-        t = lesson.load_lessons()[0]
+            asyncio.run(lesson.record_failure("同类失败任务", "comment", ["k"], "未采集到有效数据", owner_id="library-test-owner"))
+        t = lesson.load_lessons(owner_id="library-test-owner")[0]
         assert t["occurrences"] == 2
         # 仅次数达标但不满足 helped_avoid≥1，仍保持 draft
         assert t["status"] == "draft", f"期望 draft，实际 {t['status']}"
@@ -361,8 +361,8 @@ def test_record_lesson_helped_promotes_with_min_occurrences():
     """record_lesson_helped 使 draft 教训在 occurrences≥2 且 helped_avoid≥1 时转正。"""
     d = _setup_tmp()
     _write_lesson(d, "a", "教训甲", "comment", ["k"], "正文", status="draft", occurrences=2)
-    lesson.record_lesson_helped("a")
-    t = lesson.load_lessons()[0]
+    lesson.record_lesson_helped("a", owner_id="library-test-owner")
+    t = lesson.load_lessons(owner_id="library-test-owner")[0]
     assert t["status"] == "active", f"期望 active，实际 {t['status']}"
     assert t["helped_avoid"] == 1
 
@@ -374,7 +374,7 @@ def test_lesson_retired_excluded_from_active():
     old_enabled = settings.embedding_enabled
     settings.embedding_enabled = False
     try:
-        results, _ = lesson.find_active_lessons("comment", ["k"], "任务")
+        results, _ = lesson.find_active_lessons("comment", ["k"], "任务", owner_id="library-test-owner")
         assert results == [], "retired 教训不应被消费侧召回"
     finally:
         settings.embedding_enabled = old_enabled
@@ -385,8 +385,8 @@ def test_record_lesson_helped_retires_on_excessive_failures():
     d = _setup_tmp()
     _write_lesson(d, "a", "教训甲", "comment", ["k"], "正文", status="active", occurrences=10)
     # helped_avoid 默认为 0，多次失败从未帮到 → 退役
-    lesson.record_lesson_helped("a")
-    t = lesson.load_lessons()[0]
+    lesson.record_lesson_helped("a", owner_id="library-test-owner")
+    t = lesson.load_lessons(owner_id="library-test-owner")[0]
     assert t["status"] == "retired", f"期望 retired，实际 {t['status']}"
     assert t["helped_avoid"] == 1
 
@@ -418,7 +418,7 @@ def test_find_active_lessons_sorts_by_effectiveness():
     emb.is_rerank_configured = lambda: True
     emb.rerank_scores = lambda q, docs, instruct=None: [0.9] * len(docs)
     try:
-        results, degrade = lesson.find_active_lessons("comment", ["k", "common"], "测试任务", top_k=3)
+        results, degrade = lesson.find_active_lessons("comment", ["k", "common"], "测试任务", top_k=3, owner_id="library-test-owner")
         assert len(results) == 3, f"期望 3 条，实际 {len(results)}"
         # 按有效性排序：high(3/2=1.5) > mid(2/3=0.67) > low(1/5=0.2)
         assert results[0]["slug"] == "high", f"第1应为high，实际{results[0]['slug']}"
@@ -439,7 +439,7 @@ def test_find_active_lessons_falls_back_to_keyword_single():
     old_enabled = settings.embedding_enabled
     settings.embedding_enabled = False
     try:
-        results, degrade = lesson.find_active_lessons("comment", ["k", "x"], "测试", top_k=3)
+        results, degrade = lesson.find_active_lessons("comment", ["k", "x"], "测试", top_k=3, owner_id="library-test-owner")
         assert len(results) <= 1  # 退回单条匹配
         assert results[0]["slug"] == "a"
         assert degrade == "keyword"
@@ -453,7 +453,7 @@ def test_find_active_lessons_empty_when_no_match():
     old_enabled = settings.embedding_enabled
     settings.embedding_enabled = False
     try:
-        results, degrade = lesson.find_active_lessons("comment", ["nonexistent"], "x", top_k=3)
+        results, degrade = lesson.find_active_lessons("comment", ["nonexistent"], "x", top_k=3, owner_id="library-test-owner")
         assert results == []
         assert degrade == "none"
     finally:
@@ -478,7 +478,7 @@ def test_find_active_lessons_uses_recall_threshold_not_dedup_threshold():
     # 模拟真实场景：0.5 分——低于去重阈值 0.7（会被旧逻辑拒绝），但应高于召回阈值（应被新逻辑接受）
     emb.rerank_scores = lambda query, docs, instruct=None: [0.5] * len(docs)
     try:
-        results, degrade = lesson.find_active_lessons("post", ["小红书"], "去小红书采集内容", top_k=3)
+        results, degrade = lesson.find_active_lessons("post", ["小红书"], "去小红书采集内容", top_k=3, owner_id="library-test-owner")
         assert len(results) == 1, f"0.5分应能召回（召回阈值应<0.5），实际召回{len(results)}条"
         assert results[0]["slug"] == "a"
         assert degrade == "semantic"
@@ -512,7 +512,7 @@ def test_find_active_lessons_uses_recall_instruct_not_dedup_instruct():
     old_rerank = emb.rerank_scores
     emb.rerank_scores = _capture_rerank
     try:
-        lesson.find_active_lessons("comment", ["k"], "测试任务", top_k=3)
+        lesson.find_active_lessons("comment", ["k"], "测试任务", top_k=3, owner_id="library-test-owner")
         assert captured.get("instruct") != lesson._LESSON_RERANK_INSTRUCT, \
             "消费侧不应复用创建侧判重的 instruct（判据是任务→教训适用性，不是教训→教训同类性）"
     finally:
@@ -569,3 +569,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+from tests.library_test_helpers import _isolate_library_services  # noqa: F401
