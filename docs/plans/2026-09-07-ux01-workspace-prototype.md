@@ -1,6 +1,6 @@
 # UX01：任务案头交互原型与设计修订提案
 
-> 工单：#124。状态：本地工程验证通过，待最终CI及用户视觉验收。
+> 工单：#124。状态：原型方向已获用户认可，最终提交工程门待核验。
 > 基线：2322e6b686fd35875190077df13001a75a7f216c。原型不是生产能力，不连接真实服务。
 
 ## 目标与访问
@@ -13,6 +13,20 @@
 下载只生成演示内容；删除只改变页面内存。刷新可以重置演示，不代表真实业务支持撤销或从缓存复活已删除数据。
 
 ## DESIGN 修订提案
+
+### 用户反馈后的交互方向
+
+用户要求参考其描述的 Codex 交互方式；本提案采用对话为主、文件自动侧览的布局，不声称复刻或核验 Codex 全部实际行为。
+
+- 默认只展示对话，输入自然语言 query 即可开始；搜索在对话中呈现标题、来源与摘要，不强制文件或表格。
+- 附加可预览文件或首次生成文件时，右侧自动打开文件预览。对话消息与输入框同属一列，一起收窄。
+- 多文件标签切换，分隔条可拖动或键盘调整，支持展开预览；关闭后恢复对话宽度。
+- 已打开文件时，后续生成内容不抢走用户正在查看的文件；继续追问保持当前预览和阅读上下文。
+- 窄屏采用对话/文件切换，保留明确的返回入口，不把两个窄列同时塞进手机。
+- 模型选择常驻输入框旁，影响后续发送的模拟消息；用量独立查看。演示模型不意味着真实连接已配置。
+- 普通流程自动推进模拟反馈；场景和故障控制收进折叠的演示工具。始终保留虚构原型标记。
+
+2026-09-07，用户查看修订原型后反馈“大致可以”，认可本交互方向。该反馈只关闭原型视觉方向门，不代表真实联网、文件解析、模型调用或生产验收。旧版 CI 仅证明旧提交；新版同提交工程门仍须通过。
 
 现有 DESIGN 的“资料接收单”、来源类型选择和双侧栏属于旧布局。#124要求的任务案头替换这些布局约束；
 本提案先供用户操作后确认，UX02实施时与共享组件/Token一起同步 DESIGN，不将候选样式冒充已批准的运行时规范。
@@ -82,7 +96,7 @@ Token仍由 `frontend/src/index.css` 和 Tailwind 消费关系持有。原型可
 | 用户反馈及审计处理 | /chat Chat.tsx /api/chat/feedback 赞踩、原因及评论；管理员 /feedback → Feedback.tsx 审计正文 | chat-ordering.spec.ts 反馈迟到隔离；feedback-audit.spec.ts 审计原因、失败、关闭、状态备注；fake源码 | 当前结果反馈动作；管理员辅助页受控查看 | UX03 #128、UX05 #142 | 统一结果能提交反馈；后台元数据、审计原因及正文清理仍通过 |
 | 格式下载与正式交付 | TaskComposer.tsx 格式选项；ResultPreview.tsx Candidate下载和正式 output.download_url，downloadWorkspaceBundle；旧Tasks报告/JSON | semantic-workspace.spec.ts Candidate非正式、版本/QA/下载身份一致；phase4b-8b1-real.spec.ts 旧DOCX流程下载验证源码，本次未运行；格式选项不证明11种全部可生成 | 结果画布按实际输出显示格式和下载；Candidate显著标注 | UX04 #129 | 每种保留格式有实际非空重开/完整性与正确身份证据；正式交付门独立验证 |
 | 原始数据下载及定位 | ResultPreview.tsx ZIP包含原始文件选项→downloadWorkspaceBundle；SourcePreviewPanel.tsx 原件/表格预览；旧DocumentWorkspacePage.tsx raw表与审计产物 | semantic-workspace.spec.ts 结果回原件定位fake源码；ZIP原件完整下载本次未验证 | 资料画布“原始资料”；结果明确派生身份和来源 | RAW01 #132、UX04 #129 | 原始/派生区分、下载授权及内容一致、证据定位均通过；不把搜索摘要当原始数据 |
-| 模型选择与用量 | TaskComposer.tsx 模型；TaskTimeline.tsx workSession.usage/provider_usage 展示调用、原生Token、未知；Chat.tsx tokenUsage；settings/ModelConnectionsPanel.tsx 连接配置 | settings-role-access.spec.ts 连接及角色fake源码；semantic-workspace.spec.ts Provider确认fake源码；用量显示有接线，前置/Run去重和参考费用未完成核验 | 顶部模型可见；工作记录显示分会话用量，未知不得记0，参考费用带核验来源 | UX02 #127、UX03 #128、UX05 #142 | 连接隐私、外发确认、未知值、模型/会话归属与去重通过；费用不得仅凭假数据开放 |
+| 模型选择与用量 | TaskComposer.tsx 模型；TaskTimeline.tsx workSession.usage/provider_usage 展示调用、原生Token、未知；Chat.tsx tokenUsage；settings/ModelConnectionsPanel.tsx 连接配置 | settings-role-access.spec.ts 连接及角色fake源码；semantic-workspace.spec.ts Provider确认fake源码；用量显示有接线，前置/Run去重和参考费用未完成核验 | 输入框旁模型可选；独立用量入口显示分会话用量，未知不得记0，参考费用带核验来源 | UX02 #127、UX03 #128、UX05 #142 | 连接隐私、外发确认、未知值、模型/会话归属与去重通过；费用不得仅凭假数据开放 |
 | 管理与设置 | App.tsx AdminOnly保护/admin和/feedback；Admin.tsx、Settings.tsx、CapabilityGovernancePanel.tsx、ConfigCenter.tsx；/ 为Dashboard.tsx | admin-ordering.spec.ts、settings-role-access.spec.ts、capability-audit-lifecycle.spec.ts、account-execution.spec.ts 都有fake源码；权限前端不等于服务端鉴权 | 同一导航的角色受控辅助入口，保留返回任务 | UX05 #142 | 管理元数据、内容审计、账号治理、模型设置等逐项可用；保持后端独立拒绝，不扩大普通用户权限 |
 | 公开URL来源、范围及刷新 | /data-prep → WebSourceIntake.tsx；semanticWorkspaceApi.ts source attempts/refresh；有模板与记忆上下文预览 | semantic-workspace.spec.ts URL范围、同站缺口、结果未知、停止fake源码 | 统一输入自动识别来源，在当前任务显示范围与取得状态 | UX02 #127、WEB01 #134 | URL已有取得、范围确认、部分结果、未知恢复、取消证据均保留；不得用假进度替代 |
 | 无URL检索与文件/网络混合 | 当前 TaskComposer/WebSourceIntake 仍分别承担文件与网页入口；未找到无URL检索及真正混合任务连续UI | 尚规划；原型仅交互样例，不表示搜索/混合后端已通 | 同一输入写目标并附文件，可检索互联网后合并核对 | RT01 #125、MIX01 #135、UX02 #127、NL01 #130、WEB01 #134 | 完整检索/混合来源冻结、部分成功与失败、Owner范围及交付真实验证后才移除旧唯一能力 |
@@ -100,9 +114,9 @@ Token仍由 `frontend/src/index.css` 和 Tailwind 消费关系持有。原型可
 浏览器应记录网络请求，确认无真实API/外部资源访问；下载应核对虚构文件内容。静态审查不能替代可操作浏览器验证。
 Standards/Spec及同提交CI分别记录。原型构建通过不代表生产体验或用户视觉认可。
 
-**用户查看可交互原型后明确确认视觉方向，才能合并关闭#124。** 当前还未取得该确认。
+**用户已在查看修订原型后认可视觉方向（2026-09-07：“大致可以”）。** 同提交工程门通过后可按既有授权合并关闭 #124。
 
-### 已取得的本地工程证据
+### 首版工程证据（d6e3dd8，不代表本轮修订）
 
 - 30条浏览器旅程通过，另1条原生选择器键盘打开/选择通过；六场景覆盖1440/390与明暗主题，四组合axe无A/AA发现。
 - 登录取消恢复、混合来源分别核对、部分重试失败、版本1/2及三种下载一致性、IME、停止/未知恢复、弹层焦点和长输入验证通过。
@@ -110,3 +124,10 @@ Standards/Spec及同提交CI分别记录。原型构建通过不代表生产体�
 - TypeScript与生产构建通过；现有大bundle警告保持。原型范围Premium strict静态审计零发现。
 - Standards焦点问题、Spec四项旅程问题均修复并复核无遗留；测试源码保留。全部数据虚构，网络拦截未见业务API或外部资源请求。
 - 最终同SHA CI另在PR记录；用户尚未确认视觉方向，不能据测试绿色关闭#124。
+
+### 对话与自动预览修订的本地证据
+
+- 16条相称浏览器用例全部通过，覆盖正常搜索/追问、文件侧览几何、输入随列收窄、模型历史与澄清切换、多版本下载、停止/未知恢复、登录、关联删除及手机焦点。
+- 1440/390明暗四组合axe无发现；拖动和键盘调宽、桌面展开后跨手机断点、手机预览全宽均实际检查。
+- TypeScript/构建通过，Premium strict原型范围零发现，Standards/Spec末轮静态复核无遗留。此项不是新版远端CI或用户视觉验收。
+- 另4条组合回归通过：补齐混合、部分、登录和关联删除在1440/390明暗下的完整旅程，共20条用例。最终同提交CI记录在PR，不能用首版228条结果代替。
