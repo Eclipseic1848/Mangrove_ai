@@ -2,6 +2,8 @@
 """Phase 4B 批次 2 后端测试 API；只检查和绑定，不执行数据操作。"""
 from __future__ import annotations
 
+from src.api.auth import get_execution_user
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -103,7 +105,7 @@ async def _run_and_save(
 async def inspect_and_bind(
     plan_id: str,
     payload: InspectBindIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """检查真实上传来源并生成 binding revision 1。"""
 
@@ -163,7 +165,7 @@ def get_bound_revision(
 async def revise_binding(
     plan_id: str,
     payload: BindingResolutionIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """用户从候选集合中确认一个物理目标后创建下一 revision。"""
 

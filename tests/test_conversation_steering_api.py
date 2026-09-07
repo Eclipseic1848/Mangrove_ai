@@ -28,6 +28,17 @@ from src.conversation_steering import (
 )
 
 
+import pytest
+from src.account_execution import ExecutionAuthorization, execution_context
+from tests.account_execution_helpers import seed_execution_owner
+
+
+@pytest.fixture(autouse=True)
+def _authenticated_execution():
+    with execution_context(ExecutionAuthorization("user-a", 0)):
+        yield
+
+
 class _ApiStatusRewriter:
     async def rewrite(
         self,
@@ -89,6 +100,8 @@ def test_running_followup_uses_turn_api_without_creating_revision(
     monkeypatch,
 ) -> None:
     database = migrated_webui_database(tmp_path / "workspace.db")
+    seed_execution_owner(database, "user-a")
+    seed_execution_owner(database, "user-b")
     monkeypatch.setattr(settings, "webui_db_path", str(database))
     auth_mod._store = None
     user = {"value": "user-a"}
@@ -97,6 +110,7 @@ def test_running_followup_uses_turn_api_without_creating_revision(
     app.dependency_overrides[get_current_user] = lambda: {
         "user_id": user["value"],
         "role": "user",
+        "execution_generation": 0,
     }
     monkeypatch.setattr(
         semantic_workspace,
@@ -157,6 +171,8 @@ def test_material_followup_only_creates_confirmation_proposal(
     monkeypatch,
 ) -> None:
     database = migrated_webui_database(tmp_path / "workspace.db")
+    seed_execution_owner(database, "user-a")
+    seed_execution_owner(database, "user-b")
     monkeypatch.setattr(settings, "webui_db_path", str(database))
     auth_mod._store = None
     app = FastAPI()
@@ -164,6 +180,7 @@ def test_material_followup_only_creates_confirmation_proposal(
     app.dependency_overrides[get_current_user] = lambda: {
         "user_id": "user-a",
         "role": "user",
+        "execution_generation": 0,
     }
     monkeypatch.setattr(
         semantic_workspace,
@@ -246,6 +263,8 @@ def test_confirmed_cancel_now_applies_semantic_delta_as_v2(
     monkeypatch,
 ) -> None:
     database = migrated_webui_database(tmp_path / "workspace.db")
+    seed_execution_owner(database, "user-a")
+    seed_execution_owner(database, "user-b")
     monkeypatch.setattr(settings, "webui_db_path", str(database))
     auth_mod._store = None
     manager = _ApiManager()
@@ -254,6 +273,7 @@ def test_confirmed_cancel_now_applies_semantic_delta_as_v2(
     app.dependency_overrides[get_current_user] = lambda: {
         "user_id": "user-a",
         "role": "user",
+        "execution_generation": 0,
     }
     monkeypatch.setattr(
         semantic_workspace,
@@ -312,6 +332,8 @@ def test_after_safe_point_is_persisted_then_applied_by_worker(
     monkeypatch,
 ) -> None:
     database = migrated_webui_database(tmp_path / "workspace.db")
+    seed_execution_owner(database, "user-a")
+    seed_execution_owner(database, "user-b")
     monkeypatch.setattr(settings, "webui_db_path", str(database))
     auth_mod._store = None
     app = FastAPI()
@@ -319,6 +341,7 @@ def test_after_safe_point_is_persisted_then_applied_by_worker(
     app.dependency_overrides[get_current_user] = lambda: {
         "user_id": "user-a",
         "role": "user",
+        "execution_generation": 0,
     }
     monkeypatch.setattr(
         semantic_workspace,
@@ -374,6 +397,8 @@ def test_new_task_choice_keeps_current_run_and_creates_isolated_task(
     monkeypatch,
 ) -> None:
     database = migrated_webui_database(tmp_path / "workspace.db")
+    seed_execution_owner(database, "user-a")
+    seed_execution_owner(database, "user-b")
     monkeypatch.setattr(settings, "webui_db_path", str(database))
     auth_mod._store = None
     manager = _ApiManager()
@@ -382,6 +407,7 @@ def test_new_task_choice_keeps_current_run_and_creates_isolated_task(
     app.dependency_overrides[get_current_user] = lambda: {
         "user_id": "user-a",
         "role": "user",
+        "execution_generation": 0,
     }
     monkeypatch.setattr(
         semantic_workspace,
@@ -435,6 +461,8 @@ def test_external_revision_confirmation_is_required_before_cancelling_run(
     monkeypatch,
 ) -> None:
     database = migrated_webui_database(tmp_path / "workspace.db")
+    seed_execution_owner(database, "user-a")
+    seed_execution_owner(database, "user-b")
     monkeypatch.setattr(settings, "webui_db_path", str(database))
     auth_mod._store = None
     manager = _ApiManager()
@@ -443,6 +471,7 @@ def test_external_revision_confirmation_is_required_before_cancelling_run(
     app.dependency_overrides[get_current_user] = lambda: {
         "user_id": "user-a",
         "role": "user",
+        "execution_generation": 0,
     }
     monkeypatch.setattr(
         semantic_workspace,

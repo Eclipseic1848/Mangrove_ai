@@ -69,7 +69,22 @@ from src.runtime_routing import (
     SqliteRuntimeRoutingRepository,
     migrate_runtime_routing,
 )
-from tests.database_migration_helpers import migrated_webui_database
+from tests.database_migration_helpers import migrated_webui_database as _migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import ExecutionAuthorization, execution_context
+
+
+def migrated_webui_database(path):
+    database = _migrated_webui_database(path)
+    seed_execution_owner(database, "user-a")
+    seed_execution_owner(database, "user-b")
+    return database
+
+
+@pytest.fixture(autouse=True)
+def _account_execution():
+    with execution_context(ExecutionAuthorization("user-a", 0)):
+        yield
 
 
 class _FixedCandidateRulesetResolver:
@@ -624,6 +639,8 @@ def _client(
         )
     auth_mod._store = None
     auth_mod.get_store()
+    seed_execution_owner(database, "user-a")
+    seed_execution_owner(database, "user-b")
     if routing_mode is not None:
 
 
@@ -692,7 +709,7 @@ def _client(
     app.include_router(semantic_workspace.router)
     app.include_router(semantic_deliveries.router)
     app.dependency_overrides[get_current_user] = lambda: {
-        "user_id": "user-a",
+        "user_id": "user-a", "execution_generation": 0,
         "role": role,
     }
     return TestClient(app)
@@ -1731,12 +1748,12 @@ def test_pi_gray_entry_accepts_mixed_sources_and_exposes_candidate(
         assert formal_download.content == downloaded.content
 
         client.app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": "user-b",
+            "user_id": "user-b", "execution_generation": 0,
             "role": "admin",
         }
         assert client.get(candidate["download_url"]).status_code == 404
         client.app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": "user-a",
+            "user_id": "user-a", "execution_generation": 0,
             "role": "admin",
         }
 
@@ -2026,7 +2043,7 @@ def test_candidate_offer_cross_owner_returns_404_without_content(
             "filename"
         ]
         client.app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": "user-b",
+            "user_id": "user-b", "execution_generation": 0,
             "role": "user",
         }
 
@@ -2781,17 +2798,18 @@ def test_admin_cannot_request_reverification_for_another_owner(
     task_id = "workspace_other_owner_candidate"
 
     with client:
-        runtime_mod.get_store().create_semantic_workspace_task(
-            "other-owner",
-            task_id=task_id,
-            title="其他 Owner 的候选",
-            objective_text="只用于验证 Owner 隔离",
-            upload_ids=[],
-            output_formats=["json"],
-            provider="local",
-            model="local-model",
-            external_api_confirmed=False,
-        )
+        with execution_context(seed_execution_owner(settings.webui_db_path, "other-owner")):
+            runtime_mod.get_store().create_semantic_workspace_task(
+                "other-owner",
+                task_id=task_id,
+                title="其他 Owner 的候选",
+                objective_text="只用于验证 Owner 隔离",
+                upload_ids=[],
+                output_formats=["json"],
+                provider="local",
+                model="local-model",
+                external_api_confirmed=False,
+            )
 
         response = client.post(
             f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications",
@@ -2917,7 +2935,7 @@ def test_passed_candidate_reverification_requires_explicit_idempotent_publish(
             f"candidate-verifications/{attempt_id}/publish"
         )
         client.app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": "user-b",
+            "user_id": "user-b", "execution_generation": 0,
             "role": "user",
         }
         cross_owner = client.post(
@@ -2928,7 +2946,7 @@ def test_passed_candidate_reverification_requires_explicit_idempotent_publish(
         assert cross_owner.status_code == 404, cross_owner.text
         assert attempt_id not in cross_owner.text
         client.app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": "user-a",
+            "user_id": "user-a", "execution_generation": 0,
             "role": "admin",
         }
         stale = client.post(
@@ -3911,7 +3929,7 @@ def test_cancel_running_pi_task_calls_runtime_hard_stop(
         _wait_for_status(client, task_id, "running")
 
         client.app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": "user-b",
+            "user_id": "user-b", "execution_generation": 0,
             "role": "admin",
         }
         denied = client.post(
@@ -3920,7 +3938,7 @@ def test_cancel_running_pi_task_calls_runtime_hard_stop(
         assert denied.status_code == 404
         assert blocking_runtime.cancel_calls == []
         client.app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": "user-a",
+            "user_id": "user-a", "execution_generation": 0,
             "role": "admin",
         }
         cancelled = client.post(

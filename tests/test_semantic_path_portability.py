@@ -14,6 +14,17 @@ from src.services.managed_paths import ManagedPathCodec
 from tests.database_migration_helpers import migrated_webui_database
 
 
+import pytest
+from src.account_execution import ExecutionAuthorization, execution_context
+from tests.account_execution_helpers import seed_execution_owner
+
+
+@pytest.fixture(autouse=True)
+def _authenticated_execution():
+    with execution_context(ExecutionAuthorization("user-a", 0)):
+        yield
+
+
 def _codec(root: Path) -> ManagedPathCodec:
     return ManagedPathCodec(
         root,
@@ -70,6 +81,7 @@ def test_new_semantic_paths_are_managed_and_survive_root_move(
     tmp_path: Path,
 ) -> None:
     db_path = migrated_webui_database(tmp_path / "webui.db")
+    seed_execution_owner(db_path, "user-a")
     old_root = tmp_path / "old" / "semantic-executions"
     artifact = old_root / "runs" / "run-a" / "result.csv"
     artifact.parent.mkdir(parents=True)
@@ -136,6 +148,7 @@ def test_legacy_semantic_paths_map_without_rewriting_database(
     tmp_path: Path,
 ) -> None:
     db_path = migrated_webui_database(tmp_path / "webui.db")
+    seed_execution_owner(db_path, "user-a")
     root = tmp_path / "current" / "semantic-executions"
     artifact = root / "runs" / "run-a" / "result.csv"
     artifact.parent.mkdir(parents=True)

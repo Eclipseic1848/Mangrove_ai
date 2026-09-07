@@ -6,6 +6,26 @@ import json
 from pathlib import Path
 
 import pytest
+import sqlite3
+from contextlib import closing
+from src.account_execution import ExecutionAuthorization, execution_context, bind_execution
+from tests.account_execution_helpers import seed_execution_owner
+
+
+@pytest.fixture(autouse=True)
+def _evaluation_authorization():
+    with execution_context(ExecutionAuthorization("g1-eval", 0)):
+        yield
+
+
+def _publication_database(path: Path, task_id: str):
+    database = migrated_webui_database(path)
+    authorization = seed_execution_owner(database, "g1-eval")
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        bind_execution(connection, authorization, "workspace", task_id, now=0)
+        connection.commit()
+    return database
 
 from src.delivery_publishing.models import (
     CandidateRef,
@@ -66,7 +86,7 @@ def _formal_publish_context(
         source_snapshot_refs=("upload-json:" + "4" * 64,),
     )
     repository = DeliveryPublishingRepository(
-        migrated_webui_database(root / "evaluation.db")
+        _publication_database(root / "evaluation.db", command.task_id)
     )
     publisher = DeliveryPublisher(
         repository=repository,
@@ -133,7 +153,7 @@ def test_persisted_delivery_with_independent_qa_can_pass_g1(tmp_path: Path) -> N
         source_snapshot_refs=("upload-json:" + "4" * 64,),
     )
     repository = DeliveryPublishingRepository(
-        migrated_webui_database(tmp_path / "evaluation.db")
+        _publication_database(tmp_path / "evaluation.db", command.task_id)
     )
     publisher = DeliveryPublisher(
         repository=repository,
@@ -210,7 +230,7 @@ def test_runtime_result_is_published_before_g1_scoring(tmp_path: Path) -> None:
         ),
     )
     repository = DeliveryPublishingRepository(
-        migrated_webui_database(tmp_path / "evaluation.db")
+        _publication_database(tmp_path / "evaluation.db", request.task_id)
     )
 
     qualification = publish_runtime_result_as_formal_delivery(

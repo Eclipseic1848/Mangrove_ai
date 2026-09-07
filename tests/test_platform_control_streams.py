@@ -12,6 +12,7 @@ from src.api import auth
 from src.api.routes import auth_routes, chat, semantic_workspace
 from src.api.schemas import ChatIn
 from src.api.store import WebUIStore
+from src.account_execution import ExecutionAuthorization, execution_context
 from tests.database_migration_helpers import migrated_webui_database
 
 
@@ -52,7 +53,8 @@ def stream_session(tmp_path, monkeypatch):
         assert client.post("/api/auth/login", json={"username": "synthetic-stream", "password": "synthetic-password"}).status_code == 200
         request = Request({"type": "http", "method": "GET", "scheme": "https", "server": ("testserver", 443), "path": "/api/test", "query_string": b"", "headers": [(b"host", b"testserver"), (b"cookie", f"{auth.ACCESS_COOKIE}={client.cookies[auth.ACCESS_COOKIE]}".encode())], "client": ("127.0.0.1", 1)})
         user = auth.get_current_user(request)
-        yield store, path, request, user
+        with execution_context(ExecutionAuthorization(user['user_id'], user['execution_generation'])):
+            yield store, path, request, user
 
 
 def invalidate(store, request, reason, monkeypatch):
@@ -146,7 +148,10 @@ def test_scheduler_resume_counts_once_but_pause_and_edit_do_not(stream_session, 
     _, path, request, user = stream_session
     schedules = ScheduleStore(str(migrated_profile_database(tmp_path / "scheduler.db", profile="scheduler")))
     monkeypatch.setattr(tasks, "get_schedule_store", lambda: schedules)
-    task_id = schedules.add(user_input="虚构任务", provider=None, model=None, trigger_type="cron", cron_expr="0 * * * *", run_at=None, next_run_at=datetime.now(), owner_user_id=user["user_id"])
+    from src.account_execution import execution_context
+    from src.api.auth import get_store
+    with execution_context(get_store().capture_account_execution(user["user_id"])):
+        task_id = schedules.add(user_input="虚构任务", provider=None, model=None, trigger_type="cron", cron_expr="0 * * * *", run_at=None, next_run_at=datetime.now(), owner_user_id=user["user_id"])
     app = FastAPI()
     app.include_router(tasks.router)
     with TestClient(app, base_url="https://testserver", headers={"Origin": "https://testserver", "X-Mangrove-CSRF": "1", "Cookie": request.headers["cookie"]}) as client:
@@ -256,9 +261,10 @@ def test_answer_cancel_classification_preserves_question_and_owner_guards(stream
     manager = SemanticWorkspaceManager()
     monkeypatch.setattr(semantic_workspace, "get_semantic_workspace_manager", lambda: manager)
     owner = store.create_user("synthetic-other-owner", auth.hash_password("synthetic-password"), pending=False) if scenario == "other_owner" else user
-    store.create_semantic_workspace_task(owner["user_id"], task_id="synthetic-answer-guard", title="虚构任务", objective_text="虚构目标", upload_ids=[], output_formats=[], provider="local", model=None, external_api_confirmed=False)
     question = {"kind": "external", "question_id": "synthetic-question", "options": [{"value": "confirm" if scenario == "disallowed_answer" else "cancel", "label": "虚构选项"}], "allow_free_text": False}
-    store.update_semantic_workspace_task(owner["user_id"], "synthetic-answer-guard", status="needs_input", question=question)
+    with execution_context(ExecutionAuthorization(owner['user_id'], owner['execution_generation'])):
+        store.create_semantic_workspace_task(owner["user_id"], task_id="synthetic-answer-guard", title="虚构任务", objective_text="虚构目标", upload_ids=[], output_formats=[], provider="local", model=None, external_api_confirmed=False)
+        store.update_semantic_workspace_task(owner["user_id"], "synthetic-answer-guard", status="needs_input", question=question)
     if scenario == "question_changed":
         consume = store.platform_request_limit
 

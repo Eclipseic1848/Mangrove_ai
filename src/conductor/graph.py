@@ -127,8 +127,11 @@ def _node_summary(name: str, result: Dict[str, Any], state: ConductorState) -> s
 def _traced(name: str, fn: Callable[[ConductorState], Awaitable[Dict[str, Any]]]):
     """包装节点：记录耗时与摘要，追加到 state.trace（reducer 累加）。"""
     async def wrapper(state: ConductorState) -> Dict[str, Any]:
+        from src.api.execution import execution_checkpoint
+        execution_checkpoint()
         t0 = time.perf_counter()
         result = await fn(state) or {}
+        execution_checkpoint()
         ms = round((time.perf_counter() - t0) * 1000)
         entry = {"node": name, "ms": ms, "summary": _node_summary(name, result, state)}
         return {**result, "trace": [entry]}

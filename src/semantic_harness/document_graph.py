@@ -2,6 +2,8 @@
 """批次 4 compile → execute → verify 文档 Graph。"""
 from __future__ import annotations
 
+from src.api.execution import execution_to_thread
+
 import asyncio
 from pathlib import Path
 from typing import Mapping, Sequence, TypedDict
@@ -38,7 +40,7 @@ def _build_graph():
     async def compile_node(state: _DocumentState) -> dict:
         if "physical_plan" in state:
             return {"physical_plan": state["physical_plan"]}
-        physical = await asyncio.to_thread(
+        physical = await execution_to_thread(
             compile_document_plan,
             state["logical_plan"],
             state["bound_plan"],
@@ -58,7 +60,7 @@ def _build_graph():
 
     async def verify_node(state: _DocumentState) -> dict:
         bundle = state["bundle"]
-        report = await asyncio.to_thread(
+        report = await execution_to_thread(
             verify_document_execution,
             state["physical_plan"],
             bundle.result,

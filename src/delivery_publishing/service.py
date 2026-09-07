@@ -11,7 +11,8 @@ import shutil
 from typing import Callable, Mapping
 import uuid
 
-from filelock import FileLock
+from filelock import FileLock, Timeout
+from src.account_execution import ExecutionDenied
 
 from src.semantic_harness.delivery.models import (
     DeliveryManifest,
@@ -54,6 +55,27 @@ def _safe_name(value: str) -> str:
     return cleaned[:80] or "交付结果"
 
 
+def _publication_lock(output_root: Path, publication_key: str, *, timeout: float) -> FileLock:
+    lock_root = output_root / ".publication-locks"
+    lock_root.mkdir(parents=True, exist_ok=True)
+    return FileLock(str(lock_root / f"{publication_key}.lock"), timeout=timeout)
+
+
+def reconcile_account_publications(repository: DeliveryPublishingRepository, output_root: Path,
+                                   owner_id: str, task_id: str, generation: int) -> bool:
+    """已持工作台执行锁后，逐项取得原发布锁；不能绕过仍在途的 publisher。"""
+    complete = True
+    for intent in repository.account_pending_intents(owner_id, task_id, generation):
+        try:
+            with _publication_lock(output_root, intent['publication_key'], timeout=0):
+                complete = repository.abort_account_intent(
+                    owner_id, task_id, intent['publication_key'], intent['execution_generation'],
+                ) and complete
+        except Timeout:
+            complete = False
+    return complete
+
+
 class DeliveryPublisher:
     """正式发布唯一入口；Agent 和候选目录都不能直接登记 Delivery。"""
 
@@ -76,11 +98,14 @@ class DeliveryPublisher:
         *,
         actor_id: str,
     ) -> DeliveryManifest:
-        lock_root = self._output_root / ".publication-locks"
-        lock_root.mkdir(parents=True, exist_ok=True)
-        lock_path = lock_root / f"{command.publication_key}.lock"
-        with FileLock(str(lock_path), timeout=30):
-            return self._publish_locked(command, actor_id=actor_id)
+        with _publication_lock(self._output_root, command.publication_key, timeout=30):
+            try:
+                return self._publish_locked(command, actor_id=actor_id)
+            except ExecutionDenied:
+                # 账号撤销优先于正式INSERT；中止未发布意图以允许显式新Revision。
+                # rename后的文件保留为未正式发布证据，不能删候选或已正式输出。
+                self._repository.abort_revoked_intent(command)
+                raise
 
     def _publish_locked(
         self,

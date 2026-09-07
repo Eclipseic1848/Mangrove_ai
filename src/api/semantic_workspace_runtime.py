@@ -15,6 +15,13 @@ from typing import Any, Mapping
 
 from filelock import FileLock, Timeout
 
+from src.account_execution import (
+    ExecutionAuthorization,
+    ExecutionDenied,
+    current_authorization,
+    execution_context,
+)
+
 from src.agentic_runtime.models import (
     PiRuntimeCheckpoint,
     PiRuntimeRequest,
@@ -39,6 +46,7 @@ from src.agentic_runtime.coremind_runtime import CoreMindAgentKernelAdapter
 from src.agentic_runtime.pi_runtime import PiRuntime
 from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.api.auth import get_store
+from src.api.execution import execution_lock, execution_to_thread
 from src.capability_catalog import DefaultCapabilityMounts
 from src.capability_host import CapabilityHost
 from src.api.routes.semantic_bindings import _run_and_save as bind_and_save
@@ -72,7 +80,7 @@ from src.conversation_steering import (
 from src.delivery_publishing.models import PublicationGate
 from src.delivery_publishing.pi_adapter import PiCandidateAdapter
 from src.delivery_publishing.repository import DeliveryPublishingRepository
-from src.delivery_publishing.service import DeliveryPublisher
+from src.delivery_publishing.service import DeliveryPublisher, reconcile_account_publications
 from src.runtime_routing import RuntimeAssignment, runtime_routing_is_p0_blocked
 from src.semantic_harness.compiler_models import ClarificationResolution
 from src.semantic_harness.harness_models import HarnessResume
@@ -987,11 +995,13 @@ class SemanticWorkspaceManager:
             gate_reader=publication_gate,
         )
         try:
-            delivery = await asyncio.to_thread(
+            delivery = await execution_to_thread(
                 publisher.publish,
                 command,
                 actor_id=owner_id,
             )
+        except ExecutionDenied:
+            raise
         except sqlite3.OperationalError:
             if existing_intent is None:
                 store.append_semantic_workspace_event(
@@ -1096,10 +1106,14 @@ class SemanticWorkspaceManager:
             if context is not None:
                 owner_id, attempt_id = context
                 try:
-                    self._candidate_verification_module().close_unstarted_reverification(
-                        owner_id=owner_id,
-                        attempt_id=attempt_id,
-                    )
+                    binding = get_store().account_execution_binding(owner_id, "candidate", attempt_id)
+                    if binding is None:
+                        raise ExecutionDenied("候选停止缺少持久执行绑定")
+                    with execution_context(ExecutionAuthorization(owner_id, binding["generation"])):
+                        self._candidate_verification_module().close_unstarted_reverification(
+                            owner_id=owner_id,
+                            attempt_id=attempt_id,
+                        )
                 except Exception:
                     _LOGGER.exception(
                         "候选重验后台任务取消后未能安全收口：%s",
@@ -1121,6 +1135,63 @@ class SemanticWorkspaceManager:
         attempt_id: str,
         verifier_factory,
     ) -> None:
+        binding = get_store().account_execution_binding(owner_id, "candidate", attempt_id)
+        if binding is None:
+            raise ExecutionDenied("候选重验缺少持久执行绑定")
+        with execution_context(ExecutionAuthorization(owner_id, binding["generation"])):
+            await self._execute_bound_candidate_reverification(
+                owner_id=owner_id, attempt_id=attempt_id, verifier_factory=verifier_factory,
+            )
+
+    async def pause_account_candidate(self, owner_id: str, attempt_id: str, *, expected_generation: int | None = None) -> bool:
+        if expected_generation is not None:
+            ExecutionAuthorization(owner_id, expected_generation)
+        binding = get_store().account_execution_binding(owner_id, "candidate", attempt_id)
+        attempt = SqliteCandidateVerificationRepository(settings.webui_db_path).get(owner_id, attempt_id)
+        if binding is None or attempt is None:
+            return False
+        if expected_generation is None:
+            expected_generation = binding["generation"]
+        if binding["generation"] != expected_generation:
+            return False
+        if attempt.task_id in self._active or any(
+            identity == (owner_id, attempt_id) and not worker.done()
+            for worker, identity in self._reverification_task_context.items()
+        ):
+            # 验证器原子调用可能仍在线程或 Provider 中，不能取消等待后假报完成。
+            return False
+        lease = self._candidate_reverification_lease(attempt_id)
+        try:
+            lease.acquire(timeout=0)
+        except Timeout:
+            return False
+        try:
+            binding = get_store().account_execution_binding(owner_id, "candidate", attempt_id)
+            if binding is None or binding["generation"] != expected_generation:
+                return False
+            with execution_context(ExecutionAuthorization(owner_id, expected_generation)):
+                module = self._candidate_verification_module()
+                if attempt.status is AttemptStatus.REQUESTED:
+                    module.close_unstarted_reverification(owner_id=owner_id, attempt_id=attempt_id)
+                elif attempt.status is AttemptStatus.RUNNING:
+                    module.recover_interrupted_reverification(attempt)
+                else:
+                    confirmed = get_store().confirm_account_execution_stopped(
+                        owner_id, "candidate", attempt_id, binding["generation"],
+                        cleanup_failed=attempt.status is AttemptStatus.OUTCOME_UNKNOWN,
+                    )
+                    return confirmed and attempt.status is not AttemptStatus.OUTCOME_UNKNOWN
+                return get_store().account_execution_binding(owner_id, "candidate", attempt_id)["state"] == "paused"
+        finally:
+            lease.release()
+
+    async def _execute_bound_candidate_reverification(
+        self,
+        *,
+        owner_id: str,
+        attempt_id: str,
+        verifier_factory,
+    ) -> None:
         lease = self._candidate_reverification_lease(attempt_id)
         try:
             lease.acquire(timeout=0)
@@ -1129,6 +1200,7 @@ class SemanticWorkspaceManager:
             return
         try:
             try:
+                get_store().require_account_execution(current_authorization(), "candidate", attempt_id)
                 await self._candidate_verification_module().execute_requested_reverification(
                     owner_id=owner_id,
                     attempt_id=attempt_id,
@@ -1173,7 +1245,11 @@ class SemanticWorkspaceManager:
                 continue
             try:
                 try:
-                    module.recover_interrupted_reverification(attempt)
+                    binding = get_store().account_execution_binding(attempt.owner_id, "candidate", attempt.attempt_id)
+                    if binding is None:
+                        raise ExecutionDenied("候选恢复缺少持久执行绑定")
+                    with execution_context(ExecutionAuthorization(attempt.owner_id, binding["generation"])):
+                        module.recover_interrupted_reverification(attempt)
                 except Exception:
                     _LOGGER.exception(
                         "候选重验 running 收口失败，下一轮将重试：%s",
@@ -1231,11 +1307,18 @@ class SemanticWorkspaceManager:
             if task["status"] == "cancelling":
                 # 异步维护循环确认执行静默和资源清理，不在启动时推断终态。
                 continue
-            store.update_semantic_workspace_task(
-                task["user_id"],
-                task["task_id"],
-                status="queued",
-            )
+            try:
+                authorization = self._workspace_authorization(task["user_id"], task["task_id"])
+                store.require_account_execution(authorization, "workspace", task["task_id"])
+            except ExecutionDenied:
+                self.enqueue(task["user_id"], task["task_id"])
+                continue
+            with execution_context(authorization):
+                store.update_semantic_workspace_task(
+                    task["user_id"],
+                    task["task_id"],
+                    status="queued",
+                )
             self.enqueue(task["user_id"], task["task_id"])
 
     def workers_ready(self) -> bool:
@@ -1450,6 +1533,54 @@ class SemanticWorkspaceManager:
         revision: int,
         execution: asyncio.Future,
     ) -> object:
+        """账号监督覆盖无能力 Runtime；停止证明必须等待真实资源和执行收口。"""
+        async def watch_account() -> None:
+            while not execution.done():
+                self._require_workspace_execution(user_id, task_id)
+                await asyncio.sleep(0.25)
+
+        account_watch = asyncio.create_task(watch_account())
+        capability_wait = asyncio.create_task(
+            self._await_with_capability_supervision(user_id, task_id, revision, execution)
+        )
+        try:
+            await asyncio.wait({capability_wait, account_watch}, return_when=asyncio.FIRST_COMPLETED)
+            try:
+                self._require_workspace_execution(user_id, task_id)
+                if account_watch.done():
+                    account_watch.result()
+            except ExecutionDenied:
+                authorization = current_authorization()
+                store = get_store()
+                store.update_account_workspace_state(user_id, task_id, authorization.generation, "pausing")
+                stopped = await self._confirm_runtime_stopped(user_id, task_id, revision, account_hold=True)
+                if stopped:
+                    execution.cancel()
+                else:
+                    store.confirm_account_execution_stopped(
+                        user_id, "workspace", task_id, authorization.generation, cleanup_failed=True,
+                    )
+                # cancel await 不能冒充底层调用结束；清理失败时继续等待真实执行退出。
+                with suppress(asyncio.CancelledError, Exception):
+                    await execution
+                raise
+            result = await capability_wait
+            self._require_workspace_execution(user_id, task_id)
+            return result
+        finally:
+            for pending in (account_watch, capability_wait):
+                if not pending.done():
+                    pending.cancel()
+                with suppress(asyncio.CancelledError, Exception):
+                    await pending
+
+    async def _await_with_capability_supervision(
+        self,
+        user_id: str,
+        task_id: str,
+        revision: int,
+        execution: asyncio.Future,
+    ) -> object:
         """并发等待执行与运行期监督；无能力任务直接等待执行。"""
         if not await self._selection_has_capabilities(
             user_id,
@@ -1496,6 +1627,99 @@ class SemanticWorkspaceManager:
             return
         self._queued.add(task_id)
         self._queue.put_nowait((user_id, task_id))
+
+    def _workspace_authorization(self, user_id: str, task_id: str) -> ExecutionAuthorization:
+        binding = get_store().account_execution_binding(user_id, "workspace", task_id)
+        if binding is None:
+            raise ExecutionDenied("工作台缺少持久执行绑定")
+        return ExecutionAuthorization(user_id, binding["generation"])
+
+    def _require_workspace_execution(self, user_id: str, task_id: str) -> None:
+        authorization = current_authorization()
+        if authorization.owner_user_id != user_id:
+            raise ExecutionDenied("执行上下文不属于任务 Owner")
+        get_store().require_account_execution(authorization, "workspace", task_id)
+
+    def account_resume_strategy(self, user_id: str, task_id: str) -> str:
+        """只判断恢复方式；重绑与新版本冻结由入口在同一事务完成。"""
+        task = get_store().get_semantic_workspace_task(user_id, task_id)
+        binding = get_store().account_execution_binding(user_id, "workspace", task_id)
+        if task is None or binding is None or binding["state"] != "paused" or task["status"] != "paused":
+            raise ExecutionDenied("工作台尚未确认暂停")
+        runtime = AgenticRuntimeRepository(settings.webui_db_path).get(user_id, task_id, task["active_revision"])
+        if runtime is not None and runtime.get("run_id"):
+            # cancelled 保留真实终态和取消标记，只能用新 Revision 重新执行。
+            return "waiting" if runtime["status"] is RuntimeStatus.NEEDS_INPUT else "new_revision"
+        if task.get("run_id"):
+            run = get_store().get_semantic_harness_run(user_id, task["run_id"])
+            if run is None or run["status"] != "needs_user":
+                return "new_revision"
+        return "waiting" if task.get("question") else "unstarted"
+
+    async def pause_account_execution(self, user_id: str, task_id: str, *, expected_generation: int | None = None) -> bool:
+        """在途原子步骤只请求暂停；只有执行器确认静默后才写停止证明。"""
+        if expected_generation is not None:
+            ExecutionAuthorization(user_id, expected_generation)
+        authorization = self._workspace_authorization(user_id, task_id)
+        if expected_generation is not None and authorization.generation != expected_generation:
+            return False
+        store = get_store()
+        try:
+            store.require_account_execution(authorization, "workspace", task_id)
+        except ExecutionDenied:
+            pass
+        else:
+            return False
+        task = store.get_semantic_workspace_task(user_id, task_id)
+        if task is None:
+            return False
+        running = self._active.get(task_id)
+        if running is not None and not running.done() and running is not asyncio.current_task():
+            if task["status"] not in _TERMINAL_STATUSES:
+                store.update_account_workspace_state(user_id, task_id, authorization.generation, "pausing")
+            return False
+        if task["status"] not in _TERMINAL_STATUSES:
+            store.update_account_workspace_state(user_id, task_id, authorization.generation, "pausing")
+        lease = execution_lock(store, user_id, "workspace", task_id)
+        try:
+            lease.acquire(timeout=0)
+        except Timeout:
+            return False
+        try:
+            binding = store.account_execution_binding(user_id, "workspace", task_id)
+            if binding is None or binding["generation"] != authorization.generation:
+                return False
+            return await self._finish_account_pause(authorization, task_id)
+        finally:
+            lease.release()
+
+    async def _finish_account_pause(self, authorization: ExecutionAuthorization, task_id: str) -> bool:
+        store = get_store()
+        user_id = authorization.owner_user_id
+        task = store.get_semantic_workspace_task(user_id, task_id)
+        if task is None:
+            return False
+        # 原 worker 可能已在提交点崩溃；必须先持原发布锁收口旧意图，再允许确认暂停。
+        if not reconcile_account_publications(
+            DeliveryPublishingRepository(store.db_path), Path(settings.semantic_execution_root),
+            user_id, task_id, authorization.generation,
+        ):
+            return False
+        if task["status"] in _TERMINAL_STATUSES:
+            return store.confirm_account_execution_stopped(user_id, "workspace", task_id, authorization.generation)
+        if not store.update_account_workspace_state(user_id, task_id, authorization.generation, "pausing"):
+            return False
+        stopped = await self._confirm_runtime_stopped(
+            user_id, task_id, task["active_revision"], account_hold=True,
+            expected_generation=authorization.generation,
+        )
+        confirmed = store.confirm_account_execution_stopped(
+            user_id, "workspace", task_id, authorization.generation,
+            cleanup_failed=not stopped,
+        )
+        if stopped and confirmed:
+            store.update_account_workspace_state(user_id, task_id, authorization.generation, "paused")
+        return stopped and confirmed
 
     async def cancel(self, user_id: str, task_id: str, *, for_revision: bool = False) -> dict[str, Any]:
         store = get_store()
@@ -1544,18 +1768,36 @@ class SemanticWorkspaceManager:
             or saved
         )
 
-    async def _confirm_runtime_stopped(self, user_id: str, task_id: str, revision: int) -> bool:
+    async def _confirm_runtime_stopped(self, user_id: str, task_id: str, revision: int, *, account_hold: bool = False, expected_generation: int | None = None) -> bool:
         store = get_store()
         runtime = AgenticRuntimeRepository(settings.webui_db_path).get(user_id, task_id, revision)
         try:
             from src.source_acquisition import SourceAcquisitionRepository
 
-            source_stopped = SourceAcquisitionRepository(settings.webui_db_path).cancel_for_task(user_id, task_id)
-            if runtime is not None and runtime.get("run_id"):
+            sources = SourceAcquisitionRepository(settings.webui_db_path)
+            if account_hold:
+                if expected_generation is None:
+                    expected_generation = current_authorization().generation
+                binding = store.account_execution_binding(user_id, "workspace", task_id)
+                if binding is None or binding["generation"] != expected_generation:
+                    return False
+                source_stopped = True
+                for attempt_id in sources.task_attempts(user_id, task_id):
+                    requested = sources.cancel_for_account(user_id, attempt_id, expected_generation)
+                    attempt = sources.get_attempt(user_id, attempt_id)
+                    source_stopped = source_stopped and requested and bool(attempt) and attempt["status"] not in {"acquiring", "cancelling"}
+            else:
+                source_stopped = sources.cancel_for_task(user_id, task_id)
+            if runtime is not None and runtime.get("run_id") and not (
+                account_hold and runtime["status"] is RuntimeStatus.NEEDS_INPUT
+            ):
                 await self._kernel_for_run(user_id, task_id, revision).cancel(user_id, task_id, revision)
             if not source_stopped:
                 raise RuntimeError("来源读取尚未停止")
         except Exception:
+            if account_hold:
+                # 账号暂停不得借取消终态清空原问题，失败由调用者记录为未静默。
+                return False
             store.update_semantic_workspace_task(user_id, task_id, status="cancelling", cancel_requested=True)
             store.append_semantic_workspace_event(
                 user_id, task_id, stage="cancelling", event_type="runtime_cleanup_pending",
@@ -1831,11 +2073,13 @@ class SemanticWorkspaceManager:
             gate_reader=publication_gate,
         )
         try:
-            delivery = await asyncio.to_thread(
+            delivery = await execution_to_thread(
                 publisher.publish,
                 command,
                 actor_id=user_id,
             )
+        except ExecutionDenied:
+            raise
         except Exception as exc:
             retryable = self._delivery_error_is_retryable(exc)
             store.append_semantic_workspace_event(
@@ -1930,10 +2174,21 @@ class SemanticWorkspaceManager:
             or task["cancel_requested"]
         ):
             return
-        job = asyncio.create_task(
-            self._run_task(user_id, task_id),
-            name=f"semantic-workspace-job-{task_id}",
-        )
+        try:
+            authorization = self._workspace_authorization(user_id, task_id)
+        except ExecutionDenied:
+            _LOGGER.error("工作台缺少执行绑定，拒绝启动：%s", task_id)
+            return
+        try:
+            get_store().require_account_execution(authorization, "workspace", task_id)
+        except ExecutionDenied:
+            await self.pause_account_execution(user_id, task_id, expected_generation=authorization.generation)
+            return
+        with execution_context(authorization):
+            job = asyncio.create_task(
+                self._run_task(user_id, task_id),
+                name=f"semantic-workspace-job-{task_id}",
+            )
         self._active[task_id] = job
         try:
             await job
@@ -1950,6 +2205,7 @@ class SemanticWorkspaceManager:
         revision: int,
         safe_point: str,
     ) -> bool:
+        self._require_workspace_execution(user_id, task_id)
         coordinator = ConversationSteering(
             SqliteSteeringRepository(settings.webui_db_path),
             None,
@@ -2028,6 +2284,32 @@ class SemanticWorkspaceManager:
                     )
 
     async def _run_task_inner(self, user_id: str, task_id: str) -> None:
+        lease = execution_lock(get_store(), user_id, "workspace", task_id)
+        try:
+            lease.acquire(timeout=0)
+        except Timeout:
+            return
+        try:
+            await self._run_task_with_authorization(user_id, task_id)
+        finally:
+            lease.release()
+
+    async def _run_task_with_authorization(self, user_id: str, task_id: str) -> None:
+        authorization = current_authorization(required=False)
+        if authorization is None:
+            authorization = self._workspace_authorization(user_id, task_id)
+        with execution_context(authorization):
+            try:
+                self._require_workspace_execution(user_id, task_id)
+                await self._run_task_authorized(user_id, task_id)
+                self._require_workspace_execution(user_id, task_id)
+                final = get_store().get_semantic_workspace_task(user_id, task_id)
+                if final and final["status"] in _TERMINAL_STATUSES | {"needs_input"}:
+                    get_store().set_account_execution_state(authorization, "workspace", task_id, "idle")
+            except ExecutionDenied:
+                await self._finish_account_pause(authorization, task_id)
+
+    async def _run_task_authorized(self, user_id: str, task_id: str) -> None:
         store = get_store()
         task = store.get_semantic_workspace_task(user_id, task_id)
         if task is None:
@@ -2094,6 +2376,7 @@ class SemanticWorkspaceManager:
                 plan_row = await self._compile(
                     user_id, task_id, task
                 )
+                self._require_workspace_execution(user_id, task_id)
                 if plan_row["status"] == "failed":
                     self._mark_compile_failed(
                         user_id,
@@ -2126,6 +2409,7 @@ class SemanticWorkspaceManager:
                     plan_row,
                     question=question,
                 )
+            self._require_workspace_execution(user_id, task_id)
             if binding_row["status"] == "needs_user":
                 await self._pause_for_binding(
                     user_id,
@@ -2174,6 +2458,8 @@ class SemanticWorkspaceManager:
             await self._execute_harness(
                 user_id, task_id, revision, run["run_id"]
             )
+        except ExecutionDenied:
+            raise
         except _DeliveryRetryPending as exc:
             # Candidate/Verification 已经持久化，不能把任务标成普通失败后再跑 Agent。
             # 保持可恢复状态；服务重启或维护轮次只会重试同一 PublicationKey。
@@ -2199,8 +2485,13 @@ class SemanticWorkspaceManager:
                 2.0 * (2 ** (attempts - 1)),
             )
         except asyncio.CancelledError:
-            if await self._confirm_runtime_stopped(user_id, task_id, revision):
-                self._mark_cancelled(user_id, task_id, revision)
+            try:
+                self._require_workspace_execution(user_id, task_id)
+            except ExecutionDenied:
+                await self._finish_account_pause(current_authorization(), task_id)
+            else:
+                if await self._confirm_runtime_stopped(user_id, task_id, revision):
+                    self._mark_cancelled(user_id, task_id, revision)
         except AgentKernelResultUnknownError as exc:
             failure = self._runtime_failure(
                 user_id,
@@ -2485,6 +2776,7 @@ class SemanticWorkspaceManager:
                         else None
                     ),
                 )
+            self._require_workspace_execution(user_id, task_id)
             public_details = {
                 key: value
                 for key, value in event.details.items()
@@ -2569,6 +2861,7 @@ class SemanticWorkspaceManager:
             status=RuntimeStatus.RUNNING,
         )
         try:
+            self._require_workspace_execution(user_id, task_id)
             if checkpoint is not None:
                 execution: asyncio.Future = asyncio.ensure_future(
                     kernel.resume(

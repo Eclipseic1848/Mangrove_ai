@@ -2,6 +2,8 @@
 """Phase 4B 批次 5：可持久化、可暂停且有硬预算的 Harness Graph。"""
 from __future__ import annotations
 
+from src.api.execution import execution_to_thread
+
 import asyncio
 from dataclasses import dataclass
 import hashlib
@@ -120,6 +122,8 @@ def _question(
 
 def _build_graph(runtime: HarnessRuntime, checkpointer: Any):
     def load_run(state: HarnessState) -> dict[str, Any]:
+        from src.account_execution import current_authorization
+        runtime.store.require_account_execution(current_authorization(), "harness", state["run_id"])
         row = runtime.store.get_semantic_harness_run(
             state["user_id"], state["run_id"]
         )
@@ -374,7 +378,7 @@ def _build_graph(runtime: HarnessRuntime, checkpointer: Any):
                 for item in state["reports"]
             )
             adapter = get_harness_adapter(run["capability_id"])
-            physical = await asyncio.to_thread(
+            physical = await execution_to_thread(
                 adapter.compile_plan,
                 plan,
                 bound,
@@ -809,7 +813,7 @@ def _build_graph(runtime: HarnessRuntime, checkpointer: Any):
         plan = SemanticTaskPlan.model_validate(state["logical_plan"])
         bound = BoundPlan.model_validate(state["bound_plan"])
         try:
-            manifest = await asyncio.to_thread(
+            manifest = await execution_to_thread(
                 create_delivery,
                 store=runtime.store,
                 output_root=runtime.output_root,

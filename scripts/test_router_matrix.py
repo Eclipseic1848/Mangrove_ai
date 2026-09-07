@@ -15,12 +15,15 @@ mediacrawler 路径是否配置）而产生环境相关的脆弱失败。
 """
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.collectors.registry import select_collectors
 from src.conductor.task_spec import DataType, TaskSpec
+from src.config.settings import settings
 
 
 def _order(spec: TaskSpec) -> list:
@@ -88,7 +91,9 @@ def test_mediacrawler_always_first_for_social_platform():
     spec = TaskSpec(
         intent="分析抖音评论", platforms=["抖音"], keywords=["测试"], data_type=DataType.COMMENT,
     )
-    order = _order(spec)
+    # 仅提供路径可用性夹具，保留真实匹配与排序；测试不启动采集器。
+    with TemporaryDirectory() as directory, patch.object(settings, "mediacrawler_path", directory):
+        order = _order(spec)
     assert order, f"抖音任务候选列表不应为空"
     assert order[0] == "mediacrawler", f"mediacrawler 应排第一，实际顺序={order}"
 

@@ -15,7 +15,21 @@ from src.api.auth import get_current_user
 from src.api.routes import source_acquisition as source_routes
 from src.connectors.http_security import HttpSecurityGuard
 from src.source_acquisition import AnonymousWebFetcher, SourceAcquisitionRepository, SourceAcquisitionRequest, SourceAcquisitionService
-from tests.database_migration_helpers import migrated_webui_database
+from tests.database_migration_helpers import migrated_webui_database as _migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import ExecutionAuthorization, execution_context
+
+
+def migrated_webui_database(path):
+    database = _migrated_webui_database(path)
+    seed_execution_owner(database)
+    return database
+
+
+@pytest.fixture(autouse=True)
+def source_execution_context():
+    with execution_context(ExecutionAuthorization('owner-a', 0)):
+        yield
 
 
 @pytest.mark.asyncio
@@ -72,7 +86,7 @@ async def test_cancel_api_stops_open_stream_before_confirming(tmp_path, monkeypa
         ))
 
     def owner(request: Request):
-        return {"user_id": request.headers.get("X-Test-Owner", "owner-a")}
+        return {"user_id": request.headers.get("X-Test-Owner", "owner-a"), "execution_generation": 0}
 
     monkeypatch.setattr(source_routes, "get_source_acquisition_service", service)
     app = FastAPI()

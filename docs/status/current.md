@@ -1,8 +1,8 @@
 # Mangrove 当前状态台账
 
-> status: `P1_01_COMPLETE / OPEN_ISSUES_ZERO`
+> status: `P1_01_ENGINEERING_COMPLETE / REMEDIATION_IN_PROGRESS`
 >
-> last_verified: 2026-09-04（P1-01 工程闭环；P0 历史治理证据未重跑）
+> last_verified: 2026-09-06（#116 账号执行授权工程验证；不代表整个 P1 完成）
 >
 > authoritative_branch: `main`
 >
@@ -15,6 +15,18 @@
 `REMOTE_ENFORCED` 和 `RELEASED` 是不同证据等级，不能互相替代。
 
 ## 0. 当前 P1 状态
+
+- 当前整改权威为 [#113](https://github.com/Eclipseic1848/Mangrove_ai/issues/113)。
+  #114/#115/#118/#119/#120/#121/#122/#123 已经 PR #148～#155 合并关闭；仍有本期工作，不能沿用历史 Open Issues 为零的结论。
+- 本分支实现 #116：账号停用/待审批拒绝旧代新动作及迟到结果，持久记录实际执行收口；重新启用不自动恢复。
+  管理页展示处理中/完成/失败，工作台保留问题与旧交付，硬停任务经显式新 Revision 重新执行。
+  范围、回归与同提交门见 [#116 执行报告](../plans/2026-09-06-account-execution-report.md)。
+- 新增 `webui_0012` 显式迁移及 Scheduler 历史绑定回填规程，只在临时虚构库验证；没有执行生产迁移、真实账号停用、部署或发布。
+- 本票完成仍须关联 PR 的 minimum-ci 与 account-execution Linux 门通过并合并。
+  后续先继续 #117；#124 视觉原型、真实业务/账号/Provider 验收按各票独立门推进。
+- 历史 G1 资格绑定原冻结源码，不适用于当前修改。正式冻结检查保留，本票不改冻结数据、不授予新 G1 资格。
+
+### 历史 P1-01 核验快照（2026-09-04）
 
 - P1-01 的决策、规格、原型与实现工单 #83～#98 已全部关闭；2026-09-04 现场查询 GitHub Open
   Issues 为 0。关闭 #81 只表示 P1 决策地图与首个纵切片完成，不代表 P1-02～P1-05 已实现。

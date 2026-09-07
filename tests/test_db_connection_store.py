@@ -23,6 +23,8 @@ from src.services.db_connections import (
     to_public_dict,
 )
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import execution_context
 
 
 # ---------------- helpers ----------------
@@ -36,25 +38,26 @@ def _make_store(tmp_path: Path) -> WebUIStore:
 
 def test_data_prep_task_transition_is_compare_and_set(tmp_path: Path):
     store = _make_store(tmp_path)
-    task_id = "task-cas"
-    store.create_data_prep_task(
-        "user-a",
-        task_id,
-        {"task_type": "document_extraction"},
-        status="READY",
-    )
+    with execution_context(seed_execution_owner(store.db_path, "user-a")):
+        task_id = "task-cas"
+        store.create_data_prep_task(
+            "user-a",
+            task_id,
+            {"task_type": "document_extraction"},
+            status="READY",
+        )
 
-    assert store.transition_data_prep_task(
-        task_id,
-        from_statuses={"READY"},
-        to_status="EXTRACTING",
-    )
-    assert not store.transition_data_prep_task(
-        task_id,
-        from_statuses={"READY"},
-        to_status="EXTRACTING",
-    )
-    assert store.get_data_prep_task(task_id)["status"] == "EXTRACTING"
+        assert store.transition_data_prep_task(
+            task_id,
+            from_statuses={"READY"},
+            to_status="EXTRACTING",
+        )
+        assert not store.transition_data_prep_task(
+            task_id,
+            from_statuses={"READY"},
+            to_status="EXTRACTING",
+        )
+        assert store.get_data_prep_task(task_id)["status"] == "EXTRACTING"
 
 
 # ---------------- Fernet 往返测试 ----------------

@@ -228,6 +228,7 @@ def get_capability_validation_manager() -> CapabilityValidationManager:
                     / "capability-validations"
                 ),
                 task_replay=PiTaskReplayRunner(
+                    execution_authorizer=repository.check_validation_execution,
                     task_resolver=task_resolver,
                     capability_mounts=mounts,
                     execution_root=(

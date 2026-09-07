@@ -195,6 +195,19 @@ def get_current_user(request: Request) -> Dict[str, Any]:
     return user
 
 
+async def get_execution_user(user: Dict[str, Any] = Depends(get_current_user)):
+    """在异步请求上下文冻结鉴权时的代数，后台 Task 与线程继承同一授权。"""
+    from src.account_execution import ExecutionAuthorization, ExecutionDenied, execution_context
+
+    try:
+        if "execution_generation" not in user:
+            raise ExecutionDenied("账号执行代数缺失")
+        with execution_context(ExecutionAuthorization(user["user_id"], user["execution_generation"])):
+            yield user
+    except ExecutionDenied as exc:
+        raise HTTPException(status_code=409, detail="账号执行授权已变化，请刷新后显式恢复任务") from exc
+
+
 def public_user(user: dict, *, access_expires_at: float, session_expires_at: float) -> dict:
     return {"user_id": user["user_id"], "username": user["username"], "display_name": user["display_name"] or user["username"], "role": user.get("role") or "user", "access_expires_at": access_expires_at, "session_expires_at": session_expires_at}
 
@@ -234,6 +247,10 @@ def require_admin(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str,
     if not is_admin_role(user.get("role")):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要管理员权限")
     return user
+
+
+def require_execution_admin(user: Dict[str, Any] = Depends(get_execution_user)) -> Dict[str, Any]:
+    return require_admin(user)
 
 
 def registration_allowed() -> bool:

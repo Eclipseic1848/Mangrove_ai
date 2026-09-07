@@ -20,6 +20,8 @@ const STATUS: Record<
   WorkspaceTaskStatus,
   { label: string; icon: typeof Clock3; className: string }
 > = {
+  pausing: { label: "正在暂停", icon: Loader2, className: "text-amber-600" },
+  paused: { label: "已暂停", icon: Clock3, className: "text-amber-600" },
   queued: {
     label: "排队中",
     icon: Clock3,

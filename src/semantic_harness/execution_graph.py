@@ -2,6 +2,8 @@
 """批次 3 compile → execute → verify Graph；确认后全程零 LLM。"""
 from __future__ import annotations
 
+from src.api.execution import execution_to_thread
+
 import asyncio
 from pathlib import Path
 from typing import Mapping, Sequence, TypedDict
@@ -32,7 +34,7 @@ def _build_graph():
     async def compile_node(state: _ExecutionState) -> dict:
         if "physical_plan" in state:
             return {"physical_plan": state["physical_plan"]}
-        physical = await asyncio.to_thread(
+        physical = await execution_to_thread(
             compile_physical_plan,
             state["logical_plan"],
             state["bound_plan"],
@@ -42,7 +44,7 @@ def _build_graph():
         return {"physical_plan": physical}
 
     async def execute_node(state: _ExecutionState) -> dict:
-        bundle = await asyncio.to_thread(
+        bundle = await execution_to_thread(
             execute_physical_plan,
             state["physical_plan"],
             artifact_paths=state["artifact_paths"],
@@ -51,7 +53,7 @@ def _build_graph():
         return {"bundle": bundle}
 
     async def verify_node(state: _ExecutionState) -> dict:
-        report = await asyncio.to_thread(
+        report = await execution_to_thread(
             verify_table_execution,
             state["logical_plan"],
             state["bundle"],

@@ -482,7 +482,10 @@ async def save_template(title: str, data_type: str, keywords: List[str], body: s
     Curator 裁决（LLM）在锁外；merge/new 分支在锁内重读+原子写，保护 read-modify-write。
     合并时 updates 统计（uses/quality_avg/status）保持不变，只更新 title/keywords/body。
     """
+    from src.api.execution import execution_checkpoint
     decision = await curate_template(title, data_type, keywords, body)  # 锁外 LLM
+    # 平台待确认动作可能在裁决期间被停用；独立库调用保持原行为。
+    execution_checkpoint()
     kind = decision.get("decision")
 
     if kind == "discard":
@@ -510,6 +513,7 @@ async def save_template(title: str, data_type: str, keywords: List[str], body: s
             meta["title"] = decision["title"] or meta.get("title")
             meta["keywords"] = decision["keywords"] or meta.get("keywords")
             front = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).strip()
+            execution_checkpoint()
             atomic_write(path, f"---\n{front}\n---\n{decision['body'].strip()}\n")
             cache = _load_vectors()
             if slug in cache:
@@ -538,6 +542,7 @@ async def save_template(title: str, data_type: str, keywords: List[str], body: s
             "created_at": datetime.now().isoformat(),
         }
         front = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).strip()
+        execution_checkpoint()
         atomic_write(path, f"---\n{front}\n---\n{body.strip()}\n")
         _invalidate_and_rebuild_templates()
         logger.info("已沉淀分析模板（草稿）：%s", path.name)

@@ -11,6 +11,7 @@ from src.api.routes import semantic_bindings, semantic_plans
 from src.config.settings import settings
 from src.services.upload_store import UploadStore
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
 from tests.test_semantic_plan_api import ApiFakeGenerator
 
 
@@ -22,6 +23,7 @@ def _make_client(tmp_path, monkeypatch, *, user_id: str):
         "data_prep_upload_root",
         str(tmp_path / "uploads"),
     )
+    seed_execution_owner(database, user_id)
     auth_mod._store = None
     generator = ApiFakeGenerator()
     monkeypatch.setattr(
@@ -32,7 +34,7 @@ def _make_client(tmp_path, monkeypatch, *, user_id: str):
     app = FastAPI()
     app.include_router(semantic_plans.router)
     app.include_router(semantic_bindings.router)
-    app.dependency_overrides[get_current_user] = lambda: {"user_id": user_id}
+    app.dependency_overrides[get_current_user] = lambda: {"user_id": user_id, "execution_generation": 0}
     return TestClient(app), generator
 
 

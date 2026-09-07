@@ -9,6 +9,8 @@ import sqlite3
 from threading import RLock
 from typing import Any
 
+from src import account_execution as execution
+
 from src.semantic_harness.delivery.models import DeliveryManifest
 from src.database_migrations import DatabaseTarget, inspect_database
 from src.services.managed_paths import ManagedPathCodec
@@ -57,6 +59,62 @@ class DeliveryPublishingRepository:
         conn.execute("PRAGMA busy_timeout=5000")
         return conn
 
+    @staticmethod
+    def _require_publish(conn, command, intent=None):
+        auth = execution.current_authorization()
+        if auth.owner_user_id != command.owner_id:
+            raise execution.ExecutionDenied('发布 Owner 与冻结授权不符')
+        execution.require_binding(conn, auth, 'workspace', command.task_id)
+        if intent is not None and intent['execution_generation'] != auth.generation:
+            raise execution.ExecutionDenied('发布意图属于旧执行代数')
+        return auth
+
+    def abort_revoked_intent(self, command: PublishCommand) -> bool:
+        """仅收口已失效且无正式交付的意图；候选与rename证据不在此删除。"""
+        with _LOCK, self._conn() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            intent = conn.execute('SELECT * FROM delivery_publish_intents WHERE publication_key=? AND command_hash=?', (command.publication_key, command.frozen_hash())).fetchone()
+            if intent is None or intent['status'] == 'published' or conn.execute('SELECT 1 FROM formal_delivery_runs WHERE publication_key=?', (command.publication_key,)).fetchone() is not None:
+                return False
+            try:
+                execution.require_binding(conn, execution.ExecutionAuthorization(command.owner_id, intent['execution_generation']), 'workspace', command.task_id)
+            except execution.ExecutionDenied:
+                conn.execute("UPDATE delivery_publish_intents SET status='aborted',error_json=?,updated_at=? WHERE publication_key=? AND command_hash=? AND status!='published'", (json.dumps({'reason': 'account_execution_revoked'}), _now(), command.publication_key, command.frozen_hash()))
+                return True
+            # 旧调用方本身失效，不代表其恰好撞见的新代意图也应被中止。
+            return False
+
+
+    def account_pending_intents(self, owner_id: str, task_id: str, generation: int) -> list[dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT publication_key,execution_generation FROM delivery_publish_intents "
+                "WHERE owner_id=? AND task_id=? AND execution_generation<=? AND status IN ('staging','committing')",
+                (owner_id, task_id, generation),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def abort_account_intent(self, owner_id: str, task_id: str, publication_key: str, generation: int) -> bool:
+        """调用方持发布锁；旧账号代数已失效且无正式行才能收口，文件证据原样保留。"""
+        with _LOCK, self._conn() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            intent = conn.execute(
+                'SELECT * FROM delivery_publish_intents WHERE owner_id=? AND task_id=? AND publication_key=? AND execution_generation=?',
+                (owner_id, task_id, publication_key, generation),
+            ).fetchone()
+            if intent is None or intent['status'] in {'published', 'aborted'}:
+                return True
+            if conn.execute('SELECT 1 FROM formal_delivery_runs WHERE publication_key=?', (publication_key,)).fetchone():
+                return True
+            try:
+                execution.require_authorized(conn, execution.ExecutionAuthorization(owner_id, generation))
+            except execution.ExecutionDenied:
+                conn.execute(
+                    "UPDATE delivery_publish_intents SET status='aborted',error_json=?,updated_at=? WHERE publication_key=?",
+                    (json.dumps({'reason': 'account_execution_revoked'}), _now(), publication_key),
+                )
+                return True
+            return False
 
     def claim_intent(
         self,
@@ -68,14 +126,19 @@ class DeliveryPublishingRepository:
         now = _now()
         command_hash = command.frozen_hash()
         with _LOCK, self._conn() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            current = conn.execute('SELECT * FROM delivery_publish_intents WHERE publication_key=?', (command.publication_key,)).fetchone()
+            if current is not None and current['command_hash'] != command_hash:
+                raise ValueError('发布幂等键已用于不同冻结输入')
+            auth = self._require_publish(conn, command, current) if current is None or current['status'] != 'published' else None
             conn.execute(
                 """
                 INSERT OR IGNORE INTO delivery_publish_intents (
                     publication_key, command_hash, request_idempotency_hash,
                     owner_id, task_id,
                     task_revision, run_id, status, staging_dir, final_dir,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'staging', ?, ?, ?, ?)
+                    created_at, updated_at, execution_generation
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'staging', ?, ?, ?, ?, ?)
                 """,
                 (
                     command.publication_key,
@@ -89,6 +152,7 @@ class DeliveryPublishingRepository:
                     str(final_dir.resolve()),
                     now,
                     now,
+                    auth.generation if auth is not None else current['execution_generation'],
                 ),
             )
             row = conn.execute(
@@ -161,6 +225,10 @@ class DeliveryPublishingRepository:
 
         with _LOCK, self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            intent = conn.execute('SELECT * FROM delivery_publish_intents WHERE publication_key=?', (command.publication_key,)).fetchone()
+            if intent is None:
+                raise KeyError('发布意图不存在')
+            self._require_publish(conn, command, intent)
             if command.verification_attempt_id is not None:
                 task = conn.execute(
                     "SELECT active_revision, cancel_requested "
@@ -257,6 +325,7 @@ class DeliveryPublishingRepository:
         payload = manifest.model_dump(mode="json")
         now = _now()
         with _LOCK, self._conn() as conn:
+            conn.execute('BEGIN IMMEDIATE')
             existing = conn.execute(
                 "SELECT manifest_json FROM formal_delivery_runs "
                 "WHERE publication_key=?",
@@ -264,6 +333,12 @@ class DeliveryPublishingRepository:
             ).fetchone()
             if existing is not None:
                 return DeliveryManifest.model_validate_json(existing["manifest_json"])
+            intent = conn.execute('SELECT * FROM delivery_publish_intents WHERE publication_key=?', (command.publication_key,)).fetchone()
+            if intent is None:
+                raise KeyError('发布意图不存在')
+            self._require_publish(conn, command, intent)
+            if intent['status'] != 'committing' or intent['command_hash'] != command.frozen_hash():
+                raise ValueError('发布意图尚未到达冻结提交点')
             conn.execute(
                 """
                 INSERT INTO formal_delivery_runs (

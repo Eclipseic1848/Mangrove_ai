@@ -23,6 +23,7 @@ from src.services.document_extraction import (
     IntentSpecDraft,
 )
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
 
 
 def _make_client(tmp_path: Path, monkeypatch, *, user_id: str = "user-a") -> TestClient:
@@ -31,13 +32,14 @@ def _make_client(tmp_path: Path, monkeypatch, *, user_id: str = "user-a") -> Tes
     monkeypatch.setattr(settings, "data_prep_max_task_bytes", 500 * 1024 * 1024)
     database = migrated_webui_database(tmp_path / "test.db")
     monkeypatch.setattr(settings, "webui_db_path", str(database))
+    seed_execution_owner(database, user_id)
     auth_mod._store = None  # 重置 WebUIStore 单例，使其用新 db_path
     monkeypatch.setattr(as_mod, "_DEFAULT_ROOT", str(tmp_path / "downloads"))
     app = FastAPI()
     app.include_router(data_sources.router)
     app.include_router(data_tasks.router)
     app.include_router(downloads.router)
-    app.dependency_overrides[get_current_user] = lambda: {"user_id": user_id}
+    app.dependency_overrides[get_current_user] = lambda: {"user_id": user_id, "execution_generation": 0}
     return TestClient(app)
 
 

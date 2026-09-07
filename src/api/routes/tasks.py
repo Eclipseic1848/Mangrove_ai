@@ -12,7 +12,8 @@ from fastapi.responses import FileResponse
 
 from src.scheduler import Schedule, TASK_TEMPLATES, compute_next_run, parse_schedule
 
-from ..auth import get_current_user
+from ..auth import get_current_user, get_execution_user
+from src.account_execution import ExecutionDenied
 from ..schemas import ManualTaskIn, ScheduleIn, TaskPatchIn, TriggerIn
 from ..services import get_schedule_store, get_scheduler_service
 from ..session_store import pending_store
@@ -79,33 +80,33 @@ def list_tasks(user=Depends(get_current_user)) -> List[Dict[str, Any]]:
 
 
 @router.post("", openapi_extra={"x-mangrove-task-control": True})
-def create_task(body: ScheduleIn, user=Depends(get_current_user)):
-    pend = pending_store.pop_action(user["user_id"], body.task_id, "schedule")
-    if not pend:
-        raise HTTPException(status_code=404, detail="没有待创建的定时任务或已处理")
-    try:
-        sched = parse_schedule(pend.get("schedule", ""))
-        next_run = compute_next_run(sched)
-        if next_run is None:
-            raise HTTPException(status_code=422, detail="该计划的执行时间已过或无后续，未创建")
-        user_input = pend.get("user_input", "")
-        sched_id = get_schedule_store().add(
-            user_input=user_input, provider=pend.get("provider"),
-            model=pend.get("model"), trigger_type=sched.trigger_type,
-            cron_expr=sched.cron_expr, run_at=sched.run_at, next_run_at=next_run,
-            owner_user_id=user["user_id"],
-            name=(pend.get("intent") or user_input)[:30] or None,
-            source="auto",
-        )
-    except HTTPException:
-        raise
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"创建定时任务失败：{e}")
-    return {"ok": True, "task_id": sched_id, "next_run_at": next_run.isoformat(timespec="minutes")}
+def create_task(body: ScheduleIn, user=Depends(get_execution_user)):
+    with pending_store.claim_action(user["user_id"], body.task_id, "schedule") as pend:
+        if not pend:
+            raise HTTPException(status_code=404, detail="没有待创建的定时任务或已处理")
+        try:
+            sched = parse_schedule(pend.get("schedule", ""))
+            next_run = compute_next_run(sched)
+            if next_run is None:
+                raise HTTPException(status_code=422, detail="该计划的执行时间已过或无后续，未创建")
+            user_input = pend.get("user_input", "")
+            sched_id = get_schedule_store().add(
+                user_input=user_input, provider=pend.get("provider"),
+                model=pend.get("model"), trigger_type=sched.trigger_type,
+                cron_expr=sched.cron_expr, run_at=sched.run_at, next_run_at=next_run,
+                owner_user_id=user["user_id"],
+                name=(pend.get("intent") or user_input)[:30] or None,
+                source="auto",
+            )
+        except (HTTPException, ExecutionDenied):
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(status_code=500, detail=f"创建定时任务失败：{e}")
+        return {"ok": True, "task_id": sched_id, "next_run_at": next_run.isoformat(timespec="minutes")}
 
 
 @router.post("/manual", openapi_extra={"x-mangrove-task-control": True})
-def create_manual_task(body: ManualTaskIn, user=Depends(get_current_user)):
+def create_manual_task(body: ManualTaskIn, user=Depends(get_execution_user)):
     """手动创建自动化任务（含从模板创建：template_id 非空则 source 记 template）。"""
     try:
         sched = parse_schedule(_trigger_to_schedule_str(body.trigger))
@@ -132,7 +133,7 @@ async def _mark_schedule_resume(request: Request):
 
 
 @router.patch("/{sched_id}", dependencies=[Depends(_mark_schedule_resume)])
-def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_current_user)):
+def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_execution_user)):
     """暂停/恢复（仅传 status）或整体编辑（名称/提示词/触发方式/生效区间）。"""
     task = _owned_task(sched_id, user)
     store = get_schedule_store()
@@ -191,7 +192,7 @@ def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_current_user)
 
 
 @router.post("/{sched_id}/run_now", openapi_extra={"x-mangrove-task-control": True})
-async def run_task_now_endpoint(sched_id: str, user=Depends(get_current_user)):
+async def run_task_now_endpoint(sched_id: str, user=Depends(get_execution_user)):
     """立即执行一次，不影响原定 next_run_at/status。"""
     _owned_task(sched_id, user)
     outcome = await get_scheduler_service().run_task_now(sched_id)

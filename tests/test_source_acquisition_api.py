@@ -18,10 +18,13 @@ from src.source_acquisition import (
     SourceAcquisitionService,
 )
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import execution_context
 
 
 def _client(tmp_path: Path, monkeypatch, handler):
     database = migrated_webui_database(tmp_path / "source-api.db")
+    authorizations = {owner: seed_execution_owner(database, owner) for owner in ('owner-a', 'owner-b')}
     service = SourceAcquisitionService(
         SourceAcquisitionRepository(database),
         AnonymousWebFetcher(
@@ -40,10 +43,11 @@ def _client(tmp_path: Path, monkeypatch, handler):
     owner = {"value": "owner-a"}
     app = FastAPI()
     app.include_router(source_routes.router)
-    app.dependency_overrides[get_current_user] = lambda: {
-        "user_id": owner["value"],
-        "role": "user",
-    }
+    async def authorized_owner():
+        with execution_context(authorizations[owner['value']]):
+            yield {'user_id': owner['value'], 'role': 'user', 'execution_generation': authorizations[owner['value']].generation}
+
+    app.dependency_overrides[get_current_user] = authorized_owner
     return TestClient(app), database, owner
 
 

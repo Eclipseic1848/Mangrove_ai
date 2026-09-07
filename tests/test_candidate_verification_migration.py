@@ -11,6 +11,8 @@ import sqlite3
 from alembic import command
 from alembic.config import Config
 import pytest
+from src.account_execution import ExecutionAuthorization, execution_context
+from tests.account_execution_helpers import seed_execution_owner
 from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
 
@@ -23,6 +25,12 @@ from src.candidate_verification import (
 )
 from src.database_migrations import SchemaNotCurrentError
 import src.database_migrations as database_migrations
+
+
+@pytest.fixture(autouse=True)
+def frozen_execution():
+    with execution_context(ExecutionAuthorization("owner-a", 0)):
+        yield
 
 
 def _upgrade_to_supported_legacy_webui(database) -> None:
@@ -552,6 +560,7 @@ def test_database_rejects_terminal_update_and_all_attempt_deletes(tmp_path) -> N
     database = tmp_path / "ledger.db"
     sqlite3.connect(database).close()
     migrate_candidate_verification(database, tmp_path / "before.db")
+    seed_execution_owner(database, "owner-a")
     repository = SqliteCandidateVerificationRepository(database)
     repository.create(_versioned_requested_attempt())
     repository.start(
@@ -585,6 +594,7 @@ def test_database_rejects_skipping_running_state(tmp_path) -> None:
     database = tmp_path / "ledger.db"
     sqlite3.connect(database).close()
     migrate_candidate_verification(database, tmp_path / "before.db")
+    seed_execution_owner(database, "owner-a")
     repository = SqliteCandidateVerificationRepository(database)
     repository.create(_versioned_requested_attempt())
 
@@ -602,6 +612,7 @@ def test_database_rejects_report_before_terminal_state(tmp_path) -> None:
     database = tmp_path / "ledger.db"
     sqlite3.connect(database).close()
     migrate_candidate_verification(database, tmp_path / "before.db")
+    seed_execution_owner(database, "owner-a")
     repository = SqliteCandidateVerificationRepository(database)
     requested = _versioned_requested_attempt()
     repository.create(requested)
@@ -620,6 +631,7 @@ def test_database_rejects_identity_change_during_legal_transition(tmp_path) -> N
     database = tmp_path / "ledger.db"
     sqlite3.connect(database).close()
     migrate_candidate_verification(database, tmp_path / "before.db")
+    seed_execution_owner(database, "owner-a")
     SqliteCandidateVerificationRepository(database).create(
         _versioned_requested_attempt()
     )

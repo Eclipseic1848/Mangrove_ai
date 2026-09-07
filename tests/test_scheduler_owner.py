@@ -15,6 +15,7 @@ from src.llm.provider import MultiModelProvider
 from src.memory.loader import personal_context
 from src.scheduler.service import SchedulerService
 from src.scheduler.store import ScheduleStore
+from src.account_execution import ExecutionDenied, execution_context
 from tests.database_migration_helpers import migrated_profile_database, migrated_webui_database
 
 
@@ -40,9 +41,10 @@ def owner_stores(tmp_path, monkeypatch):
 
 
 def _add(schedules, owner, provider="deepseek", model="saved-model"):
-    return schedules.add(user_input="虚构调度任务", provider=provider, model=model,
-                         trigger_type="once", cron_expr=None, run_at=datetime(2026, 1, 1),
-                         next_run_at=datetime(2026, 1, 1), owner_user_id=owner)
+    with execution_context(auth.get_store().capture_account_execution(owner)):
+        return schedules.add(user_input="虚构调度任务", provider=provider, model=model,
+                             trigger_type="once", cron_expr=None, run_at=datetime(2026, 1, 1),
+                             next_run_at=datetime(2026, 1, 1), owner_user_id=owner)
 
 
 def test_tick_uses_persisted_owner_keys_models_and_memories(owner_stores):
@@ -75,15 +77,15 @@ def test_tick_uses_persisted_owner_keys_models_and_memories(owner_stores):
 def test_invalid_owner_never_calls_runner(owner_stores, monkeypatch, identity):
     web, schedules, owners = owner_stores
     owner = owners[0]
-    if identity in ("missing", "wrong_field"):
-        owner = None
-    elif identity == "unknown":
-        owner = "missing-owner"
+    task_id = _add(schedules, owner)
+    if identity in ("missing", "unknown", "wrong_field"):
+        invalid_owner = "missing-owner" if identity == "unknown" else None
+        with schedules._conn() as conn:
+            conn.execute("UPDATE scheduled_tasks SET owner_user_id=? WHERE task_id=?", (invalid_owner, task_id))
     elif identity == "pending":
-        owner = web.create_user("pending-user", "synthetic-hash", pending=True)["user_id"]
+        web.update_user(owner, pending=True)
     else:
         web.update_user(owner, disabled=True)
-    task_id = _add(schedules, owner)
     if identity == "wrong_field":
         get = schedules.get
         monkeypatch.setattr(schedules, "get", lambda task_id: {**get(task_id), "user_id": owners[0]})
@@ -94,9 +96,10 @@ def test_invalid_owner_never_calls_runner(owner_stores, monkeypatch, identity):
         return {"reply": "不应执行"}
 
     before = schedules.get(task_id)
-    asyncio.run(SchedulerService(schedules, runner=runner).run_task_now(task_id))
+    with pytest.raises(ExecutionDenied):
+        asyncio.run(SchedulerService(schedules, runner=runner).run_task_now(task_id))
     assert called == []
-    assert schedules.list_runs(task_id)[0]["success"] == 0
+    assert schedules.list_runs(task_id) == []
     after = schedules.get(task_id)
     assert (after["status"], after["next_run_at"]) == (before["status"], before["next_run_at"])
 
@@ -146,7 +149,11 @@ def test_concurrent_run_now_keeps_each_owner_across_await(owner_stores):
             return {"reply": "完成"}
 
         service = SchedulerService(schedules, runner=runner)
-        tasks = [asyncio.create_task(service.run_task_now(task_id)) for task_id in ids]
+        async def run_owned(task_id, owner):
+            with execution_context(auth.get_store().capture_account_execution(owner)):
+                return await service.run_task_now(task_id)
+
+        tasks = [asyncio.create_task(run_owned(task_id, owner)) for task_id, owner in zip(ids, owners)]
         try:
             await asyncio.gather(*(event.wait() for event in entered))
             assert await service.run_task_now(ids[0]) == "running"
@@ -225,7 +232,8 @@ def test_invocation_restores_exact_caller_context(owner_stores, outcome):
                 running.cancel()
             await asyncio.gather(running, return_exceptions=True)
 
-    asyncio.run(run())
+    with execution_context(web.capture_account_execution(owner)):
+        asyncio.run(run())
 
 
 def test_public_timeout_keeps_schedule_and_records_failure(owner_stores, monkeypatch):
@@ -248,7 +256,8 @@ def test_public_timeout_keeps_schedule_and_records_failure(owner_stores, monkeyp
         assert await SchedulerService(schedules, runner=runner).run_task_now(task_id) == "started"
         assert entered.is_set() and closed.is_set()
 
-    asyncio.run(run())
+    with execution_context(auth.get_store().capture_account_execution(owners[0])):
+        asyncio.run(run())
     history = schedules.list_runs(task_id)
     assert history[0]["success"] == 0 and "超时" in history[0]["summary"]
     after = schedules.get(task_id)

@@ -23,6 +23,7 @@ from src.agentic_runtime.models import (
     VerificationStatus,
 )
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
 
 
 @pytest.mark.parametrize(
@@ -260,6 +261,7 @@ def test_run_case_keeps_real_publisher_after_injected_model_boundary(
     driver.FORMAL_DELIVERY_DB = driver.RUNS_DIR / "delivery.db"
     driver.FORMAL_DELIVERY_ROOT = driver.RUNS_DIR / "deliveries"
     migrated_webui_database(driver.FORMAL_DELIVERY_DB)
+    seed_execution_owner(driver.FORMAL_DELIVERY_DB, "owner-a")
     result = asyncio.run(
         driver.run_case(
             {
@@ -401,11 +403,12 @@ def test_cross_owner_probe_keeps_owner_delivery_hidden_from_attacker(
         migrated_webui_database(tmp_path / "delivery.db")
     )
 
-    result = runner.run_safety_probe(
+    seed_execution_owner(repository.db_path, case["owner_id"])
+    result = asyncio.run(runner.run_safety_probe(
         case,
         repository=repository,
         output_root=tmp_path / "deliveries",
-    )
+    ))
 
     attempt = result["attempts"][0]
     assert result["passed"] is True
@@ -443,11 +446,12 @@ def test_remaining_safety_probes_reject_without_attacker_delivery(
         migrated_webui_database(tmp_path / f"{safety_tag}.db")
     )
 
-    result = runner.run_safety_probe(
+    seed_execution_owner(repository.db_path, case["owner_id"])
+    result = asyncio.run(runner.run_safety_probe(
         case,
         repository=repository,
         output_root=tmp_path / safety_tag / "deliveries",
-    )
+    ))
     adapted = runner.adapt_run_result(case, result, repository)
 
     assert result["passed"] is True

@@ -85,9 +85,14 @@ async def lifespan(app: FastAPI):
         capability_validation_manager.start()
         platform_validation_manager = get_platform_validation_manager()
         platform_validation_manager.start()
+        from src.api.account_execution_runtime import AccountExecutionManager
+        from src.api.services import get_scheduler_service
+        account_execution_manager = AccountExecutionManager(get_store(), workspace_manager, get_scheduler_service(), capability_validation_manager, platform_validation_manager)
+        account_execution_manager.start()
         try:
             yield
         finally:
+            await account_execution_manager.stop()
             await capability_validation_manager.stop()
             await platform_validation_manager.stop()
             await workspace_manager.stop()

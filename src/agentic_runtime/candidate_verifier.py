@@ -13,6 +13,7 @@ from typing import Protocol
 import unicodedata
 
 import httpx
+from src.api.execution import execution_http_checkpoint_async
 import instructor
 from openai import AsyncOpenAI
 from openpyxl import load_workbook
@@ -217,6 +218,7 @@ class LocalModelSemanticJudge:
         http_client = httpx.AsyncClient(
             trust_env=False,
             timeout=self.timeout_seconds,
+            event_hooks={"request": [execution_http_checkpoint_async], "response": [execution_http_checkpoint_async]},
         )
         raw_client = AsyncOpenAI(
             api_key=self.api_key,

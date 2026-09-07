@@ -6,8 +6,11 @@ import json
 from pathlib import Path
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 
 import pytest
+from src import account_execution as execution
+from tests.account_execution_helpers import seed_execution_owner
 
 from src.database_migrations import DatabaseTarget, apply_migrations
 from tests.database_migration_helpers import migrated_webui_database
@@ -20,6 +23,12 @@ from src.delivery_publishing.models import (
 )
 from src.delivery_publishing.repository import DeliveryPublishingRepository
 from src.delivery_publishing.service import DeliveryPublisher
+
+
+@pytest.fixture(autouse=True)
+def frozen_execution():
+    with execution.execution_context(execution.ExecutionAuthorization("owner-a", 0)):
+        yield
 
 
 def _sha256(path: Path) -> str:
@@ -64,7 +73,10 @@ def _install_explicit_cas_state(
     database: Path,
     command: PublishCommand,
 ) -> None:
+    authorization = seed_execution_owner(database, command.owner_id)
     with sqlite3.connect(database) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        execution.bind_execution(connection, authorization, "workspace", command.task_id, now=0)
         connection.execute(
             "INSERT INTO semantic_workspace_tasks "
             "(task_id, user_id, title, objective_text, active_revision, "
@@ -251,11 +263,11 @@ def test_concurrent_same_explicit_publication_returns_one_delivery(
     with ThreadPoolExecutor(max_workers=2) as executor:
         deliveries = tuple(
             executor.map(
-                lambda _index: publisher.publish(
+                lambda context: context.run(publisher.publish,
                     command,
                     actor_id="owner-a",
                 ),
-                range(2),
+                [copy_context() for _ in range(2)],
             )
         )
 
@@ -380,6 +392,7 @@ def test_explicit_publication_cancel_or_candidate_drift_has_zero_delivery(
     cancelled_repository = DeliveryPublishingRepository(
         migrated_webui_database(tmp_path / "cancel.db")
     )
+    _install_explicit_cas_state(tmp_path / "cancel.db", command)
     cancelled = DeliveryPublisher(
         repository=cancelled_repository,
         output_root=tmp_path / "cancel-deliveries",
@@ -393,6 +406,7 @@ def test_explicit_publication_cancel_or_candidate_drift_has_zero_delivery(
     drift_repository = DeliveryPublishingRepository(
         migrated_webui_database(tmp_path / "drift.db")
     )
+    _install_explicit_cas_state(tmp_path / "drift.db", command)
     drifted = DeliveryPublisher(
         repository=drift_repository,
         output_root=tmp_path / "drift-deliveries",

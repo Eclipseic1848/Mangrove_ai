@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 
 import pytest
+from src.account_execution import ExecutionAuthorization, execution_context
 from src.agentic_runtime.candidate_verifier import BrokerSemanticJudge, CandidateVerifier
 from src.candidate_verification import ReverificationContractError
 from src.candidate_verification import RebaselineAuthorizationEvidence
@@ -25,6 +26,13 @@ from tests.test_candidate_reverification_offer import (
     _prepare_legacy_candidate,
     _service,
 )
+
+
+@pytest.fixture(autouse=True)
+def frozen_execution_owner():
+    # 导入的准备函数显式创建真实临时 Owner；本模块也须保留整条请求的冻结代数。
+    with execution_context(ExecutionAuthorization("owner-a", 0)):
+        yield
 
 
 class _SemanticOnlyPassingVerifier:

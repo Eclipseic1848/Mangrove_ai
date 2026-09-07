@@ -104,7 +104,7 @@ class RestoreVerification:
 
 
 _PROFILE_HEADS = {
-    "webui": "webui_0011",
+    "webui": "webui_0012",
     "scheduler": "scheduler_0001",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
@@ -116,7 +116,9 @@ _PROFILE_REQUIRED_COLUMNS = {
         "platform_rate_events": ("bucket", "subject_digest", "occurred_at"),
         "platform_rate_blocks": ("bucket", "subject_digest", "blocked_until"),
         "platform_security_audit": ("event_id", "actor_user_id", "action", "subject_digest", "reason", "result", "occurred_at"),
-        "users": ("role", "disabled", "pending"),
+        "users": ("role", "disabled", "pending", "execution_generation"),
+        "account_execution_bindings": ("owner_user_id", "resource_kind", "resource_id", "generation", "state", "updated_at"),
+        "account_execution_holds": ("operation_id", "owner_user_id", "generation", "actor_user_id", "reason", "status", "reconciliation_complete", "error_code", "created_at", "updated_at"),
         "messages": ("task_id", "meta_json"),
         "user_memory": ("purpose", "source", "deleted_at"),
         "task_templates": (
@@ -213,6 +215,7 @@ _PROFILE_REQUIRED_COLUMNS = {
             "publication_key",
             "request_idempotency_hash",
             "status",
+            "execution_generation",
         ),
         "formal_delivery_runs": ("delivery_id", "publication_key", "status"),
         "formal_delivery_outputs": ("output_id", "delivery_id", "sha256"),

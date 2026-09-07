@@ -39,6 +39,15 @@ from src.conversation_steering import (
 )
 from tests.database_migration_helpers import migrated_webui_database
 
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import ExecutionAuthorization, execution_context
+
+
+@pytest.fixture
+def sqlite_execution_context():
+    with execution_context(ExecutionAuthorization('owner-a', 0)):
+        yield
+
 
 def _personal_pack(version: str, digest_char: str) -> CapabilityPack:
     return CapabilityPack(
@@ -580,10 +589,12 @@ def test_owner_requests_exact_digest_validation_idempotently() -> None:
         raise AssertionError("跨 Owner 不得读取验证运行")
 
 
+@pytest.mark.usefixtures("sqlite_execution_context")
 def test_validation_run_is_persisted_and_idempotent_after_reopen(tmp_path) -> None:
     db_path = tmp_path / "webui.db"
     backup = tmp_path / "before-validation-run.db"
     migrated_webui_database(db_path)
+    seed_execution_owner(db_path)
     catalog = CapabilityCatalog(SqliteCapabilityCatalogRepository(str(db_path)))
     owner = CatalogActor(owner_id="owner-a", role="user")
     pack = _personal_pack("1.0.0", "a")
@@ -815,6 +826,7 @@ def test_cancelled_validation_only_runs_cleanup_and_remains_draft() -> None:
     assert governance.list_visible_projections(owner)[0].maturity.value == "draft"
 
 
+@pytest.mark.usefixtures("sqlite_execution_context")
 def test_sqlite_lease_merges_workers_and_recovers_completed_steps(tmp_path) -> None:
     from datetime import datetime, timedelta, timezone
 
@@ -841,6 +853,7 @@ def test_sqlite_lease_merges_workers_and_recovers_completed_steps(tmp_path) -> N
 
     db_path = tmp_path / "webui.db"
     migrated_webui_database(db_path)
+    seed_execution_owner(db_path)
     catalog = CapabilityCatalog(SqliteCapabilityCatalogRepository(str(db_path)))
     owner = CatalogActor(owner_id="owner-a", role="user")
     pack = _personal_pack("1.0.0", "a")
@@ -996,6 +1009,7 @@ def test_cleanup_failure_keeps_run_recoverable_until_resources_are_clean() -> No
     assert executor.cleanup_calls == 2
 
 
+@pytest.mark.usefixtures("sqlite_execution_context")
 def test_real_task_ref_is_recomputed_from_owner_revision_and_formal_output(
     tmp_path,
 ) -> None:
@@ -1007,6 +1021,7 @@ def test_real_task_ref_is_recomputed_from_owner_revision_and_formal_output(
 
     db_path = tmp_path / "webui.db"
     migrated_webui_database(db_path)
+    seed_execution_owner(db_path)
     store = WebUIStore(str(db_path))
     AgenticRuntimeRepository(db_path)
     upload_root = tmp_path / "uploads"
@@ -1327,7 +1342,7 @@ def test_old_migration_backup_cannot_mask_missing_validation_schema(tmp_path) ->
     db_path = tmp_path / "old-governance.db"
     backup = tmp_path / "old-governance-backup.db"
     ddl = (
-        Path("src/capability_governance/migrations/0001_capability_governance.sql")
+        (Path(__file__).parents[1] / "src/capability_governance/migrations/0001_capability_governance.sql")
         .read_text(encoding="utf-8")
     )
     with sqlite3.connect(db_path) as connection:

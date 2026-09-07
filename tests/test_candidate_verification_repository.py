@@ -7,6 +7,10 @@ import sqlite3
 
 import pytest
 
+from src.account_execution import ExecutionAuthorization, execution_context
+from tests.account_execution_helpers import seed_execution_owner
+from tests.database_migration_helpers import migrated_webui_database
+
 from src.candidate_verification import (
     AttemptReason,
     AttemptStatus,
@@ -22,7 +26,16 @@ def _migrated_repository(tmp_path) -> SqliteCandidateVerificationRepository:
     database = tmp_path / "candidate-verification.db"
     sqlite3.connect(database).close()
     migrate_candidate_verification(database, tmp_path / "before.db")
+    migrated_webui_database(database)
+    seed_execution_owner(database, "owner-a")
+    seed_execution_owner(database, "owner-b")
     return SqliteCandidateVerificationRepository(database)
+
+
+@pytest.fixture(autouse=True)
+def _account_execution():
+    with execution_context(ExecutionAuthorization("owner-a", 0)):
+        yield
 
 
 def _requested_attempt() -> VerificationAttempt:
@@ -379,22 +392,23 @@ def test_previous_attempt_cannot_cross_owner_boundary(tmp_path) -> None:
             "request_hash": "a" * 64,
         }
     )
-    repository.create(previous)
-    repository.start(
-        "owner-b",
-        previous.attempt_id,
-        started_at=datetime(2026, 8, 24, 1, tzinfo=timezone.utc),
-    )
-    repository.finish(
-        "owner-b",
-        previous.attempt_id,
-        status=AttemptStatus.FAILED,
-        report_json='{"status":"failed"}',
-        report_hash=(
-            "759315d5ae8c31136d2a7bc803e591554894987559325cdf7e0b5965bec0eaca"
-        ),
-        finished_at=datetime(2026, 8, 24, 2, tzinfo=timezone.utc),
-    )
+    with execution_context(ExecutionAuthorization("owner-b", 0)):
+        repository.create(previous)
+        repository.start(
+            "owner-b",
+            previous.attempt_id,
+            started_at=datetime(2026, 8, 24, 1, tzinfo=timezone.utc),
+        )
+        repository.finish(
+            "owner-b",
+            previous.attempt_id,
+            status=AttemptStatus.FAILED,
+            report_json='{"status":"failed"}',
+            report_hash=(
+                "759315d5ae8c31136d2a7bc803e591554894987559325cdf7e0b5965bec0eaca"
+            ),
+            finished_at=datetime(2026, 8, 24, 2, tzinfo=timezone.utc),
+        )
     successor = _requested_attempt().model_copy(
         update={"previous_attempt_id": previous.attempt_id}
     )

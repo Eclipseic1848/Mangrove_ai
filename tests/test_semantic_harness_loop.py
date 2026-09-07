@@ -21,6 +21,7 @@ from src.semantic_harness.harness_adapters import (
 )
 from src.services.upload_store import UploadStore
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
 from tests.test_semantic_document_api import DocumentFakeGenerator
 from tests.test_semantic_plan_api import ApiFakeGenerator
 
@@ -44,6 +45,7 @@ def _client(
         "semantic_execution_root",
         str(tmp_path / "executions"),
     )
+    seed_execution_owner(database, user_id)
     auth_mod._store = None
     monkeypatch.setattr(
         semantic_plans,
@@ -56,7 +58,7 @@ def _client(
     app.include_router(semantic_harness.router)
     app.include_router(semantic_deliveries.router)
     app.dependency_overrides[get_current_user] = lambda: {
-        "user_id": user_id
+        "user_id": user_id, "execution_generation": 0
     }
     return TestClient(app)
 

@@ -604,22 +604,26 @@ async def test_external_verifier_uses_separate_grant_and_records_usage(
         model_connection_model=binding.model,
         external_api_confirmed=True,
     )
-    report = await CandidateVerifier(
-        semantic_judge=BrokerSemanticJudge(
-            broker=broker,
-            owner_user_id="user-a",
-            connection_id=str(connection["connection_id"]),
-                connection_version=binding.connection_version,
-                model_id=binding.model,
-                task_id=request.task_id,
-            revision=1,
-            run_id="pi_run_external_verify",
+    from src.account_execution import execution_context
+    from tests.account_execution_helpers import seed_execution_owner
+    authorization = seed_execution_owner(tmp_path / "webui.db", "user-a")
+    with execution_context(authorization):
+        report = await CandidateVerifier(
+            semantic_judge=BrokerSemanticJudge(
+                broker=broker,
+                owner_user_id="user-a",
+                connection_id=str(connection["connection_id"]),
+                    connection_version=binding.connection_version,
+                    model_id=binding.model,
+                    task_id=request.task_id,
+                revision=1,
+                run_id="pi_run_external_verify",
+            )
+        ).verify(
+            request=request,
+            candidates=inspect_candidates(output, ("csv",)),
+            manifest_path=output / "candidate-manifest.json",
         )
-    ).verify(
-        request=request,
-        candidates=inspect_candidates(output, ("csv",)),
-        manifest_path=output / "candidate-manifest.json",
-    )
 
     assert report.status is VerificationStatus.PASSED
     assert seen["authorization"] == f"Bearer {provider_secret}"
@@ -740,22 +744,26 @@ async def test_external_verifier_retries_one_empty_semantic_response(
         external_api_confirmed=True,
     )
 
-    report = await CandidateVerifier(
-        semantic_judge=BrokerSemanticJudge(
-            broker=broker,
-            owner_user_id="user-a",
-            connection_id=str(connection["connection_id"]),
-            connection_version=binding.connection_version,
-            model_id=binding.model,
-            task_id=request.task_id,
-            revision=1,
-            run_id="pi_run_external_retry",
+    from src.account_execution import execution_context
+    from tests.account_execution_helpers import seed_execution_owner
+    authorization = seed_execution_owner(tmp_path / "webui.db", "user-a")
+    with execution_context(authorization):
+        report = await CandidateVerifier(
+            semantic_judge=BrokerSemanticJudge(
+                broker=broker,
+                owner_user_id="user-a",
+                connection_id=str(connection["connection_id"]),
+                connection_version=binding.connection_version,
+                model_id=binding.model,
+                task_id=request.task_id,
+                revision=1,
+                run_id="pi_run_external_retry",
+            )
+        ).verify(
+            request=request,
+            candidates=inspect_candidates(output, ("csv",)),
+            manifest_path=output / "candidate-manifest.json",
         )
-    ).verify(
-        request=request,
-        candidates=inspect_candidates(output, ("csv",)),
-        manifest_path=output / "candidate-manifest.json",
-    )
 
     assert report.status is VerificationStatus.PASSED
     assert verify_requests == 2

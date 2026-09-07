@@ -39,6 +39,8 @@ from src.model_connections.qualification_ledger import (
     QualificationLedgerError,
 )
 from src.model_connections.vault import FernetCredentialVault
+from src import account_execution as execution
+from src.api.execution import execution_validation
 
 
 SCHEMA_VERSION = "g4-provider-manifest-v1"
@@ -50,6 +52,29 @@ QUALIFICATION_LEDGER_ANCHOR_KEY = "g4_qualification_ledger_anchor_v3"
 
 class QualificationError(RuntimeError):
     """G4 验收前置条件不满足。"""
+
+
+@contextmanager
+def _qualification_execution(db_path: Path, owner_user_id: str):
+    """明确数据库入口只读冻结一次授权，不创建账号或刷新已有旧代上下文。"""
+    try:
+        with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+            connection.execute("BEGIN")
+            authorization = execution.current_authorization(required=False)
+            if authorization is None:
+                authorization = execution.capture_authorization(connection, owner_user_id)
+            elif authorization.owner_user_id != owner_user_id:
+                raise execution.ExecutionDenied("资格执行Owner不匹配")
+            execution.require_authorized(connection, authorization)
+    except (sqlite3.Error, execution.ExecutionDenied) as exc:
+        raise QualificationError("资格执行账号不存在、已停用或授权已失效") from exc
+    def authorize_frozen(frozen):
+        with closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as connection:
+            connection.execute("BEGIN")
+            execution.require_authorized(connection, frozen)
+
+    with execution.execution_context(authorization), execution_validation(authorize_frozen):
+        yield
 
 
 def _require_authoritative_qualification_ledger(path: Path) -> Path:
@@ -1956,6 +1981,7 @@ def _execute_provider_smoke_unlocked(
     output_path: Path,
     relay_base_url: str,
     timeout_seconds: int,
+    owner_user_id: str = "g4_provider_qualification",
     relay_post=None,
     broker: ConnectionBroker | None = None,
     prior_checks: dict[str, dict[str, object]] | None = None,
@@ -1973,7 +1999,6 @@ def _execute_provider_smoke_unlocked(
     active_broker = broker or _broker_for_database(db_path)
     post = relay_post or httpx.post
     checks: list[dict[str, object]] = []
-    owner_user_id = "g4_provider_qualification"
     for provider_value in manifest["providers"]:
         provider = dict(provider_value)
         prior_check = (prior_checks or {}).get(_provider_attempt_key(provider))
@@ -2124,6 +2149,7 @@ def execute_qualification(
     output_path: Path,
     relay_base_url: str,
     timeout_seconds: int,
+    owner_user_id: str = "g4_provider_qualification",
     relay_post=None,
     broker: ConnectionBroker | None = None,
 ) -> dict[str, object]:
@@ -2134,7 +2160,7 @@ def execute_qualification(
         manifest_path=manifest_path,
         action="provider-smoke",
     )
-    with _exclusive_file_lock(lock_path, "已有相同 G4 烟测正在执行"):
+    with _qualification_execution(db_path, owner_user_id), _exclusive_file_lock(lock_path, "已有相同 G4 烟测正在执行"):
         manifest = _load_manifest(manifest_path)
         prior_checks, before_provider, after_provider = _attempt_ledger_callbacks(
             ledger_path=ledger_path,
@@ -2144,7 +2170,7 @@ def execute_qualification(
                 **_git_identity(),
                 "relay_base_url": relay_base_url.rstrip("/"),
                 "timeout_seconds": timeout_seconds,
-                "owner_user_id": "g4_provider_qualification",
+                "owner_user_id": owner_user_id,
             },
         )
         report = _execute_provider_smoke_unlocked(
@@ -2153,6 +2179,7 @@ def execute_qualification(
             output_path=output_path,
             relay_base_url=relay_base_url,
             timeout_seconds=timeout_seconds,
+            owner_user_id=owner_user_id,
             relay_post=relay_post,
             broker=broker,
             prior_checks=prior_checks,
@@ -2421,7 +2448,7 @@ async def execute_pi_provider_chain(
     lock_path = _qualification_ledger_lock_path(
         qualification_ledger_path
     )
-    with _exclusive_file_lock(lock_path, "已有相同 G4 Pi 链路正在执行"):
+    with _qualification_execution(db_path, owner_user_id), _exclusive_file_lock(lock_path, "已有相同 G4 Pi 链路正在执行"):
         manifest = _load_manifest(manifest_path)
         run_context = {
             **_git_identity(),
@@ -2976,6 +3003,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--relay-base-url", default="http://127.0.0.1:8088")
     run.add_argument("--confirm-synthetic-egress", action="store_true")
     run.add_argument("--timeout-seconds", type=int, default=1800)
+    run.add_argument("--owner-user-id", default="g4_provider_qualification", help="已存在且可执行的账号ID，不自动创建账号")
     run_pi = subparsers.add_parser(
         "run-pi",
         help="执行真实 Pi→Grant→Relay→Provider→Usage 合成链路",
@@ -3143,6 +3171,7 @@ def main() -> int:
                 output_path=args.output,
                 relay_base_url=_validate_relay_base_url(args.relay_base_url),
                 timeout_seconds=args.timeout_seconds,
+                owner_user_id=args.owner_user_id,
             )
             print(
                 "G4_PROVIDER_CHAIN_SMOKE_"

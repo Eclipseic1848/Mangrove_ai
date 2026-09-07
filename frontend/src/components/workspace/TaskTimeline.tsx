@@ -593,7 +593,7 @@ export function TaskTimeline({
 
   return (
     <section className="mx-auto w-full max-w-4xl px-6 py-6">
-      {task.question && (
+      {task.status === "needs_input" && task.question && (
         <QuestionDialog question={task.question} onAnswer={onAnswer} />
       )}
       {task.web_source && (

@@ -2,7 +2,14 @@
 """Phase 4B 批次 1 后端测试接口；不接正式前端和执行器。"""
 from __future__ import annotations
 
+from src.api.auth import get_execution_user
+
+import time
+import uuid
 from typing import Dict, Optional, Tuple
+
+from src import account_execution as execution
+from src.api.execution import running_execution
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
@@ -65,36 +72,45 @@ async def _run_and_save(
     plan_id: str | None = None,
     revision: int = 1,
 ):
-    try:
-        if request.provider != "local" and not request.external_api_confirmed:
-            generator = DeferredPlanDraftGenerator(
-                provider=request.provider,
-                model=request.model,
+    store = get_store()
+    auth = execution.current_authorization()
+    if auth.owner_user_id != user_id:
+        raise execution.ExecutionDenied("编译请求 Owner 不匹配")
+    # 只有独立 HTTP 编译进入此函数；工作台内部编译沿用父 workspace 的执行绑定。
+    resource_id = "compile_" + uuid.uuid4().hex
+    with store.account_execution_transaction(auth) as conn:
+        execution.bind_execution(conn, auth, "data", resource_id, state="idle", now=time.time())
+    async with running_execution(store, "data", resource_id):
+        try:
+            if request.provider != "local" and not request.external_api_confirmed:
+                generator = DeferredPlanDraftGenerator(
+                    provider=request.provider,
+                    model=request.model,
+                )
+            else:
+                generator = _build_generator(
+                    provider=request.provider,
+                    model=request.model,
+                )
+            result = await compile_semantic_plan(
+                request,
+                generator=generator,
+                plan_id=plan_id,
+                revision=revision,
             )
-        else:
-            generator = _build_generator(
-                provider=request.provider,
-                model=request.model,
+            return store.save_semantic_plan_revision(
+                user_id,
+                request=request,
+                result=result,
             )
-        result = await compile_semantic_plan(
-            request,
-            generator=generator,
-            plan_id=plan_id,
-            revision=revision,
-        )
-        return get_store().save_semantic_plan_revision(
-            user_id,
-            request=request,
-            result=result,
-        )
-    except (RuntimeError, ValueError) as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.post("/compile")
 async def compile_plan(
     payload: SemanticCompileIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """编译并保存 revision 1；只返回计划，不执行任何数据操作。"""
 
@@ -138,7 +154,7 @@ def get_revision(
 async def revise_plan(
     plan_id: str,
     payload: SemanticRevisionIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """用一次用户补充生成下一不可变 revision，不原地覆盖旧计划。"""
 

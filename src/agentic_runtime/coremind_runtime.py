@@ -679,7 +679,8 @@ class CoreMindAgentKernelAdapter:
         except Exception:
             revoke_error = True
         if not stopped or not state_saved or revoke_error:
-            raise AgentKernelResultUnknownError(
+            # 清理未知不是可静止等待的模型结果未知，交由调用方继续核验停止。
+            raise AgentKernelError(
                 "CoreMind Worker 或临时模型授权未能证明已清理"
             )
         if cancelled:
@@ -702,8 +703,8 @@ class CoreMindAgentKernelAdapter:
         except (OSError, TimeoutError, subprocess.TimeoutExpired):
             return False
 
-    @staticmethod
     def _write_worker_state(
+        self,
         run_root: Path,
         run_id: str,
         client: Any,
@@ -711,8 +712,14 @@ class CoreMindAgentKernelAdapter:
     ) -> None:
         process = getattr(client, "_process", None)
         pid = getattr(process, "pid", None)
+        state_path = run_root / _WORKER_STATE
+        grants_required = self._connection_broker is not None
+        if state_path.exists():
+            previous = json.loads(state_path.read_text(encoding="utf-8"))
+            # 关闭或重启不能因内存里没有 Broker 而丢失原撤权义务。
+            grants_required = grants_required or previous.get("model_grants_required") is not False
         payload = json.dumps(
-            {"run_id": run_id, "status": status, "pid": pid},
+            {"run_id": run_id, "status": status, "pid": pid, "model_grants_required": grants_required},
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -748,12 +755,23 @@ class CoreMindAgentKernelAdapter:
                 state = json.loads(state_path.read_text(encoding="utf-8"))
             except (OSError, ValueError) as exc:
                 raise AgentKernelError("CoreMind Worker 静止状态无法证明") from exc
-            if state.get("status") == "closed":
-                continue
+            run_id = state.get("run_id")
+            if not isinstance(run_id, str) or not run_id or run_id != state_path.parent.name:
+                raise AgentKernelError("CoreMind 原 Run 清理身份无法证明")
             pid = state.get("pid")
-            if isinstance(pid, int) and pid > 0 and not self._pid_exists(pid):
-                continue
-            raise AgentKernelError("CoreMind Worker 仍可能运行，取消失败关闭")
+            if state.get("status") != "closed" and not (
+                isinstance(pid, int) and pid > 0 and not self._pid_exists(pid)
+            ):
+                raise AgentKernelError("CoreMind Worker 仍可能运行，取消失败关闭")
+            if state.get("model_grants_required") is not False:
+                try:
+                    # 旧记录或未知标记也必须按持久原身份撤权，不能借空 Broker 跳过。
+                    self._broker().revoke_run_grants(
+                        user_id, task_id, revision, run_id, reason="run_cancelled",
+                    )
+                except Exception as exc:
+                    raise AgentKernelError("CoreMind 临时模型授权未能证明已清理") from exc
+
 
     @staticmethod
     def _pid_exists(pid: int) -> bool:
@@ -1086,6 +1104,14 @@ class CoreMindAgentKernelAdapter:
         run_root: Path,
         call: Mapping[str, Any],
     ) -> None:
+        from src.account_execution import ExecutionDenied, current_authorization
+        from src.api.auth import get_store
+
+        authorization = current_authorization()
+        if authorization.owner_user_id != request.user_id:
+            raise ExecutionDenied("工具执行上下文不属于任务 Owner")
+        # 一批回调可先执行多次工具再发事件，必须在真实工具调用前复核。
+        get_store().require_account_execution(authorization, "workspace", request.task_id)
         definitions = {item["name"]: item for item in _tool_definitions()}
         definition = definitions.get(str(call.get("name") or ""))
         if (

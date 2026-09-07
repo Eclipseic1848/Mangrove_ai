@@ -13,6 +13,8 @@ import sqlite3
 
 import pytest
 from pydantic import ValidationError
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import execution_context
 
 from src.capability_catalog import (
     CapabilityCatalog,
@@ -634,9 +636,10 @@ class TestS2AuditEventRepository:
             digest="sha256:" + "a" * 64,
         )
         # 真实数据形态：run.owner_id 是发起验证的管理员，run.target.owner_id 为 None。
-        repository.create_validation_run(
-            _succeeded_run(platform_target, run_id="capval_platform_run")
-        )
+        with execution_context(seed_execution_owner(db_path, "owner-a")):
+            repository.create_validation_run(
+                _succeeded_run(platform_target, run_id="capval_platform_run")
+            )
         found = repository.get_latest_succeeded_validation_run(platform_target)
         assert found is not None
         assert found.run_id == "capval_platform_run"
@@ -647,9 +650,10 @@ class TestS2AuditEventRepository:
         migrate_capability_governance(db_path, tmp_path / "backup.db")
         repository = SqliteCapabilityGovernanceRepository(str(db_path))
         target_a = _target(owner_id="owner-a")
-        repository.create_validation_run(
-            _succeeded_run(target_a, run_id="capval_owner_a_run")
-        )
+        with execution_context(seed_execution_owner(db_path, "owner-a")):
+            repository.create_validation_run(
+                _succeeded_run(target_a, run_id="capval_owner_a_run")
+            )
         other = _target(owner_id="owner-b", pack_id="python-table-summary")
         assert (
             repository.get_latest_succeeded_validation_run(other) is None

@@ -1,6 +1,8 @@
 """数据工作台的匿名网页来源获取 API。"""
 from __future__ import annotations
 
+from src.api.auth import get_execution_user
+
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -58,7 +60,7 @@ def _not_found() -> HTTPException:
 async def acquire_source(
     payload: SourceAcquisitionIn,
     idempotency_key: str = Header(alias="Idempotency-Key"),
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     service = get_source_acquisition_service()
     try:
@@ -96,7 +98,7 @@ def get_source_acquisition(
 @router.post("/source-acquisitions/{attempt_id}/cancel")
 def cancel_source_acquisition(
     attempt_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     result = get_source_acquisition_service().repository.cancel_attempt(
         user["user_id"], attempt_id

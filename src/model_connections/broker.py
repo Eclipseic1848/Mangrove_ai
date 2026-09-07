@@ -633,6 +633,12 @@ class ConnectionBroker:
             content=body,
         )
         try:
+            # DNS与请求构造期间可能停用；发送前重新读取持久撤销事实。
+            self._resolve_active_grant(grant_token)
+        except BaseException:
+            await client.aclose()
+            raise
+        try:
             response = await client.send(request, stream=True)
         except httpx.HTTPError as exc:
             await client.aclose()
@@ -640,6 +646,21 @@ class ConnectionBroker:
             raise ProviderOutcomeUnknownError(
                 "Provider 连接失败，Relay 结果无法确认"
             ) from exc
+        except BaseException:
+            await client.aclose()
+            self._record_unknown_usage(grant)
+            raise
+        try:
+            self._resolve_active_grant(grant_token)
+        except BaseException:
+            try:
+                await response.aclose()
+            finally:
+                try:
+                    await client.aclose()
+                finally:
+                    self._record_unknown_usage(grant)
+            raise
 
         def finalize(response_body: bytes) -> None:
             usage = _extract_native_usage(
@@ -663,6 +684,7 @@ class ConnectionBroker:
             response=response,
             client=client,
             finalize=finalize,
+            check_active=lambda: self._resolve_active_grant(grant_token),
         )
 
     def _record_unknown_usage(

@@ -48,8 +48,24 @@ from src.semantic_harness.models import (
     TaskFamily,
 )
 from src.services.upload_store import UploadStore
-from tests.database_migration_helpers import migrated_webui_database
+from tests.database_migration_helpers import migrated_webui_database as _migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import ExecutionAuthorization, execution_context
+from contextvars import copy_context
 from tests.test_semantic_plan_api import ApiFakeGenerator
+
+
+def migrated_webui_database(path):
+    database = _migrated_webui_database(path)
+    seed_execution_owner(database, "user-a")
+    seed_execution_owner(database, "user-b")
+    return database
+
+
+@pytest.fixture(autouse=True)
+def _account_execution():
+    with execution_context(ExecutionAuthorization("user-a", 0)):
+        yield
 
 
 def test_workspace_revision_freezes_table_output_contract(tmp_path: Path) -> None:
@@ -128,7 +144,7 @@ def test_concurrent_revision_uses_transactional_expected_revision(
             outcomes.append("created")
 
     threads = [
-        threading.Thread(target=create_revision, args=(f"修改-{index}",))
+        threading.Thread(target=copy_context().run, args=(create_revision, f"修改-{index}"))
         for index in range(2)
     ]
     for thread in threads:
@@ -179,7 +195,7 @@ def _client(tmp_path, monkeypatch, *, generator=None):
     app = FastAPI(lifespan=lifespan)
     app.include_router(semantic_workspace.router)
     app.dependency_overrides[get_current_user] = lambda: {
-        "user_id": current_user["value"]
+        "user_id": current_user["value"], "execution_generation": 0
     }
     return TestClient(app), current_user
 

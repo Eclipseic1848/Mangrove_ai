@@ -8,6 +8,10 @@
 """
 from __future__ import annotations
 
+from src.api.execution import execution_to_thread, running_execution
+
+from src.api.auth import get_execution_user
+
 import asyncio
 from datetime import datetime, timezone
 import json
@@ -17,6 +21,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from filelock import Timeout as ExecutionLockTimeout
 from pydantic import BaseModel, Field
 
 from src.cleaning.profiler import ProfileAccumulator
@@ -466,35 +471,41 @@ async def _execute_task(
     spec: DataPrepTaskSpec,
     task_id: str,
     checkpoint: Optional[Checkpoint] = None,
+    *, reset_artifacts: bool = False,
 ) -> Dict[str, Any]:
     """执行 run_data_prep 并更新 store。返回最终任务记录。"""
     store = get_store()
-    try:
-        final_state = await run_data_prep(spec, task_id, checkpoint=checkpoint)
-        st = _finalize_status(final_state)
-        quality = final_state.get("quality")
-        store.update_data_prep_task(
-            task_id,
-            status=st,
-            record_counts=final_state.get("record_counts") or {},
-            quality=quality.model_dump(mode="json") if quality else None,
-            manifest_path=final_state.get("manifest_path"),
-            error=final_state.get("error"),
-        )
-        final_checkpoint = final_state.get("checkpoint")
-        is_database = bool(spec.sources and spec.sources[0].source_type == SourceType.DATABASE)
-        if is_database and isinstance(final_checkpoint, Checkpoint):
-            store.set_task_checkpoint(task_id, final_checkpoint.to_dict())
-    except Exception as e:  # noqa: BLE001
-        store.update_data_prep_task(task_id, status="FAILED", error=str(e))
-    return store.get_data_prep_task(task_id) or {"task_id": task_id, "status": "FAILED"}
+    async with running_execution(store, "data", task_id):
+        try:
+            if reset_artifacts:
+                # 复跑清理必须晚于真实执行锁与旧绑定授权，且整次重跑只拿一次锁。
+                store.update_data_prep_task(task_id, status="RUNNING", error=None)
+                shutil.rmtree(ArtifactStore().task_dir(task_id), ignore_errors=True)
+            final_state = await run_data_prep(spec, task_id, checkpoint=checkpoint)
+            st = _finalize_status(final_state)
+            quality = final_state.get("quality")
+            store.update_data_prep_task(
+                task_id,
+                status=st,
+                record_counts=final_state.get("record_counts") or {},
+                quality=quality.model_dump(mode="json") if quality else None,
+                manifest_path=final_state.get("manifest_path"),
+                error=final_state.get("error"),
+            )
+            final_checkpoint = final_state.get("checkpoint")
+            is_database = bool(spec.sources and spec.sources[0].source_type == SourceType.DATABASE)
+            if is_database and isinstance(final_checkpoint, Checkpoint):
+                store.set_task_checkpoint(task_id, final_checkpoint.to_dict())
+        except Exception as e:  # noqa: BLE001
+            store.update_data_prep_task(task_id, status="FAILED", error=str(e))
+        return store.get_data_prep_task(task_id) or {"task_id": task_id, "status": "FAILED"}
 
 
 # ---------- 端点 ----------
 @router.post("/document-drafts", openapi_extra={"x-mangrove-task-control": True})
 async def create_document_draft(
     req: DocumentDraftIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """根据用户意图生成可编辑 ExtractionSpec；此步骤不执行字段抽取。"""
     store = get_store()
@@ -530,7 +541,7 @@ async def create_document_draft(
     with _user_model_context(user["user_id"]):
         model_selection = _resolve_document_model_selection(req.provider, req.model)
         try:
-            draft = await asyncio.to_thread(
+            draft = await execution_to_thread(
                 InstructorQwenIntentProvider(**model_selection).draft,
                 req.intent,
             )
@@ -613,7 +624,7 @@ def get_document_workspace(user=Depends(get_current_user)):
 @router.post("/document-units")
 def create_document_unit(
     req: DocumentUnitCreateIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """用户显式创建独立文件任务或批处理文件集。"""
     if req.unit_type == "single_file" and len(req.upload_ids) != 1:
@@ -706,7 +717,7 @@ def archive_document_unit(
 @router.put("/document-workspace")
 def update_document_workspace(
     req: DocumentWorkspaceIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """保存当前文件范围和选中项，不删除上传原件或历史结果。"""
     for upload_id in req.upload_ids:
@@ -758,7 +769,7 @@ def list_document_runs_by_upload(
 def update_document_model_selection(
     task_id: str,
     req: DocumentModelSelectionIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """更新同一任务使用的模型；失败任务切换模型后可重新确认并重试。"""
     store = get_store()
@@ -789,7 +800,7 @@ def update_document_model_selection(
 def create_document_scope_revision(
     task_id: str,
     req: DocumentScopeRevisionIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """文件范围变化时创建不可变新版本；旧结果继续可查。"""
     store = get_store()
@@ -862,7 +873,7 @@ def create_document_scope_revision(
 def update_extraction_spec(
     task_id: str,
     extraction_spec: ExtractionSpec,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """保存用户修改后的方案；确认前不执行抽取。"""
     store = get_store()
@@ -893,7 +904,7 @@ def update_extraction_spec(
 async def revise_document_draft(
     task_id: str,
     req: DocumentIntentMessageIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """在同一任务中根据后续聊天修订 ExtractionSpec，不新建任务。"""
     store = get_store()
@@ -925,7 +936,7 @@ async def revise_document_draft(
                 stored_selection.get("model"),
             )
         try:
-            draft = await asyncio.to_thread(
+            draft = await execution_to_thread(
                 InstructorQwenIntentProvider(**model_selection).revise,
                 current_spec,
                 messages,
@@ -967,7 +978,7 @@ async def revise_document_draft(
 @router.post("/{task_id}/extract", openapi_extra={"x-mangrove-task-control": True})
 async def execute_document_extraction(
     task_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """确认后解析文档并执行证据约束字段抽取。"""
     store = get_store()
@@ -983,147 +994,148 @@ async def execute_document_extraction(
         for upload_id in task_spec.get("upload_ids") or []
     ]
     _enforce_document_task_size(upload_items)
-    if not store.transition_data_prep_task(
-        task_id,
-        from_statuses={"READY"},
-        to_status="EXTRACTING",
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="任务状态已变化，请刷新后重试",
-        )
-    artifact_store = ArtifactStore()
-    elements: List[DocumentElement] = []
-    artifact_ids: List[str] = []
-    raw_artifacts: List[RawArtifact] = []
-    rejects: List[Dict[str, Any]] = []
-    try:
-        registry = get_parser_registry()
-        for upload_id, item in zip(
-            task_spec.get("upload_ids") or [],
-            upload_items,
+    async with running_execution(store, "data", task_id):
+        if not store.transition_data_prep_task(
+            task_id,
+            from_statuses={"READY"},
+            to_status="EXTRACTING",
         ):
-            raw_bytes = Path(item.storage_path).read_bytes()
-            ext = Path(item.original_name).suffix.lstrip(".").lower()
-            artifact = artifact_store.write_raw(
-                task_id,
-                f"upload:{upload_id}",
-                raw_bytes,
-                uri=item.original_name,
-                media_type=item.media_type,
-                ext=ext or None,
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="任务状态已变化，请刷新后重试",
             )
-            ingested = await asyncio.to_thread(
-                ingest_document_artifact,
-                artifact,
-                raw_bytes,
-                registry=registry,
-                store=artifact_store,
-            )
-            artifact_ids.extend(ingested.artifact_ids)
-            raw_artifacts.extend(ingested.raw_artifacts)
-            elements.extend(ingested.elements)
-            rejects.extend(ingested.rejects)
+        artifact_store = ArtifactStore()
+        elements: List[DocumentElement] = []
+        artifact_ids: List[str] = []
+        raw_artifacts: List[RawArtifact] = []
+        rejects: List[Dict[str, Any]] = []
+        try:
+            registry = get_parser_registry()
+            for upload_id, item in zip(
+                task_spec.get("upload_ids") or [],
+                upload_items,
+            ):
+                raw_bytes = Path(item.storage_path).read_bytes()
+                ext = Path(item.original_name).suffix.lstrip(".").lower()
+                artifact = artifact_store.write_raw(
+                    task_id,
+                    f"upload:{upload_id}",
+                    raw_bytes,
+                    uri=item.original_name,
+                    media_type=item.media_type,
+                    ext=ext or None,
+                )
+                ingested = await execution_to_thread(
+                    ingest_document_artifact,
+                    artifact,
+                    raw_bytes,
+                    registry=registry,
+                    store=artifact_store,
+                )
+                artifact_ids.extend(ingested.artifact_ids)
+                raw_artifacts.extend(ingested.raw_artifacts)
+                elements.extend(ingested.elements)
+                rejects.extend(ingested.rejects)
 
-        if not artifact_ids:
-            raise ValueError("任务范围内未发现可解析的 PDF、DOCX 或图片文档")
-        effective_spec = extraction_spec.model_copy(update={
-            "discovery": extraction_spec.discovery.model_copy(update={
-                "artifact_ids": artifact_ids,
-            }),
-        })
-        with _user_model_context(user["user_id"]):
-            stored_selection = task_spec.get("model_selection") or {}
-            model_selection = _resolve_document_model_selection(
-                stored_selection.get("provider"),
-                stored_selection.get("model"),
+            if not artifact_ids:
+                raise ValueError("任务范围内未发现可解析的 PDF、DOCX 或图片文档")
+            effective_spec = extraction_spec.model_copy(update={
+                "discovery": extraction_spec.discovery.model_copy(update={
+                    "artifact_ids": artifact_ids,
+                }),
+            })
+            with _user_model_context(user["user_id"]):
+                stored_selection = task_spec.get("model_selection") or {}
+                model_selection = _resolve_document_model_selection(
+                    stored_selection.get("provider"),
+                    stored_selection.get("model"),
+                )
+                run = await execution_to_thread(
+                    EvidenceBoundExtractor(
+                        InstructorQwenCandidateProvider(**model_selection)
+                    ).extract,
+                    effective_spec,
+                    elements,
+                )
+            task_spec["model_selection"] = model_selection
+            task_spec["effective_extraction_spec"] = effective_spec.model_dump(mode="json")
+            task_spec["raw_artifacts"] = [
+                item.model_dump(mode="json") for item in raw_artifacts
+            ]
+            raw_tables = list(run.tables)
+            table_recipe = (
+                normalize_merged_tables(raw_tables)
+                if extraction_spec.result_contract.merge_tables and raw_tables
+                else None
             )
-            run = await asyncio.to_thread(
-                EvidenceBoundExtractor(
-                    InstructorQwenCandidateProvider(**model_selection)
-                ).extract,
-                effective_spec,
-                elements,
+            effective_tables = table_recipe.tables if table_recipe else raw_tables
+            delivery = write_document_delivery(
+                artifact_store,
+                task_id,
+                spec=effective_spec,
+                raw_artifacts=raw_artifacts,
+                fields=run.fields,
+                review_tasks=run.review_tasks,
+                parse_rejects=rejects,
+                records=run.records,
+                tables=effective_tables,
+                documents=run.documents,
+                coverage=run.coverage,
+                raw_tables=raw_tables if table_recipe else None,
+                table_recipe_audit=table_recipe.audit if table_recipe else None,
             )
-        task_spec["model_selection"] = model_selection
-        task_spec["effective_extraction_spec"] = effective_spec.model_dump(mode="json")
-        task_spec["raw_artifacts"] = [
-            item.model_dump(mode="json") for item in raw_artifacts
-        ]
-        raw_tables = list(run.tables)
-        table_recipe = (
-            normalize_merged_tables(raw_tables)
-            if extraction_spec.result_contract.merge_tables and raw_tables
-            else None
-        )
-        effective_tables = table_recipe.tables if table_recipe else raw_tables
-        delivery = write_document_delivery(
-            artifact_store,
-            task_id,
-            spec=effective_spec,
-            raw_artifacts=raw_artifacts,
-            fields=run.fields,
-            review_tasks=run.review_tasks,
-            parse_rejects=rejects,
-            records=run.records,
-            tables=effective_tables,
-            documents=run.documents,
-            coverage=run.coverage,
-            raw_tables=raw_tables if table_recipe else None,
-            table_recipe_audit=table_recipe.audit if table_recipe else None,
-        )
-        final_status = _document_delivery_status(
-            delivery,
-            pending_reviews=len(run.review_tasks),
-        )
-        store.update_data_prep_task(
-            task_id,
-            status=final_status,
-            spec=task_spec,
-            record_counts=delivery.counts,
-            quality=delivery.quality.model_dump(mode="json"),
-            manifest_path=delivery.manifest_path,
-            error="",
-        )
-        return {
-            "task_id": task_id,
-            "status": final_status,
-            "artifacts": _public_document_artifacts(task_spec),
-            "fields": [field.model_dump(mode="json") for field in run.fields],
-            "records": [
-                {
-                    **record.model_dump(mode="json"),
-                    "values": record.values,
-                }
-                for record in run.records
-            ],
-            "tables": [
-                table.model_dump(mode="json")
-                for table in effective_tables
-            ],
-            "documents": [
-                document.model_dump(mode="json")
-                for document in run.documents
-            ],
-            "aggregates": [
-                {
-                    **aggregate.model_dump(mode="json"),
-                    "values": aggregate.values,
-                }
-                for aggregate in run.aggregates
-            ],
-            "table_recipe": table_recipe.audit if table_recipe else None,
-            "coverage": run.coverage,
-            "review_tasks": [
-                review.model_dump(mode="json") for review in run.review_tasks
-            ],
-        }
-    except Exception as exc:  # noqa: BLE001
-        store.update_data_prep_task(task_id, status="FAILED", error=str(exc))
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"文档抽取失败: {exc}",
-        ) from exc
+            final_status = _document_delivery_status(
+                delivery,
+                pending_reviews=len(run.review_tasks),
+            )
+            store.update_data_prep_task(
+                task_id,
+                status=final_status,
+                spec=task_spec,
+                record_counts=delivery.counts,
+                quality=delivery.quality.model_dump(mode="json"),
+                manifest_path=delivery.manifest_path,
+                error="",
+            )
+            return {
+                "task_id": task_id,
+                "status": final_status,
+                "artifacts": _public_document_artifacts(task_spec),
+                "fields": [field.model_dump(mode="json") for field in run.fields],
+                "records": [
+                    {
+                        **record.model_dump(mode="json"),
+                        "values": record.values,
+                    }
+                    for record in run.records
+                ],
+                "tables": [
+                    table.model_dump(mode="json")
+                    for table in effective_tables
+                ],
+                "documents": [
+                    document.model_dump(mode="json")
+                    for document in run.documents
+                ],
+                "aggregates": [
+                    {
+                        **aggregate.model_dump(mode="json"),
+                        "values": aggregate.values,
+                    }
+                    for aggregate in run.aggregates
+                ],
+                "table_recipe": table_recipe.audit if table_recipe else None,
+                "coverage": run.coverage,
+                "review_tasks": [
+                    review.model_dump(mode="json") for review in run.review_tasks
+                ],
+            }
+        except Exception as exc:  # noqa: BLE001
+            store.update_data_prep_task(task_id, status="FAILED", error=str(exc))
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"文档抽取失败: {exc}",
+            ) from exc
 
 
 @router.post("/{task_id}/review-decisions/{review_task_id}")
@@ -1131,7 +1143,7 @@ def decide_document_review(
     task_id: str,
     review_task_id: str,
     req: ReviewDecisionIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """保存人工裁决并更新结果；人工替换值不会被伪装为自动证据命中。"""
     store = get_store()
@@ -1496,7 +1508,7 @@ def get_document_extraction_results(
 
 
 @router.post("/preview")
-async def preview_task(req: PreviewIn, user=Depends(get_current_user)):
+async def preview_task(req: PreviewIn, user=Depends(get_execution_user)):
     """小样本预览：文件限字节；分页 HTTP 只请求起始页。"""
     src_spec = _source_spec(req.source, user["user_id"])
     if src_spec.source_type == SourceType.DATABASE:
@@ -1563,7 +1575,7 @@ async def preview_task(req: PreviewIn, user=Depends(get_current_user)):
 
 
 @router.post("", openapi_extra={"x-mangrove-task-control": True})
-async def create_task(req: TaskCreateIn, user=Depends(get_current_user)):
+async def create_task(req: TaskCreateIn, user=Depends(get_execution_user)):
     """创建并同步执行数据准备任务。返回最终任务记录。"""
     source = _source_spec(req.source, user["user_id"])
 
@@ -1621,7 +1633,7 @@ def get_manifest(task_id: str, user=Depends(get_current_user)):
 
 
 @router.post("/{task_id}/rerun", openapi_extra={"x-mangrove-task-control": True})
-async def rerun_task(task_id: str, user=Depends(get_current_user)):
+async def rerun_task(task_id: str, user=Depends(get_execution_user)):
     """复跑任务（重新执行完整图）。跨用户返回 404。
 
     reuse_raw 复用 RawArtifact 的增量路径保留给后续阶段；本版重新获取。
@@ -1633,8 +1645,8 @@ async def rerun_task(task_id: str, user=Depends(get_current_user)):
     spec = DataPrepTaskSpec.model_validate(task["spec"])
     spec.task_id = task_id
 
-    # 清理旧产物后重跑（parsed/clean 的 part 文件用独占写，必须先清）
-    shutil.rmtree(ArtifactStore().task_dir(task_id), ignore_errors=True)
-    store.update_data_prep_task(task_id, status="RUNNING", error=None)
-    # 旧产物已移除，必须按冻结规格重新获取；旧 checkpoint 会跳过已删除的前半段数据。
-    return await _execute_task(spec, task_id)
+    # 已删除的产物不能沿用旧 checkpoint；锁内清理后按原冻结规格完整执行。
+    try:
+        return await _execute_task(spec, task_id, reset_artifacts=True)
+    except ExecutionLockTimeout as exc:
+        raise HTTPException(status_code=409, detail="任务仍在执行或停止中，请稍后重试") from exc

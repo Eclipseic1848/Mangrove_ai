@@ -143,6 +143,14 @@ export function answerWorkspaceTask(
   return api.post(`${BASE}/tasks/${taskId}/answer`, { answer });
 }
 
+export function resumeAccountWorkspaceTask(taskId: string, expectedGeneration: number, expectedActiveRevision: number, externalApiConfirmed: boolean): Promise<{ strategy: "waiting" | "unstarted" | "new_revision"; revision: WorkspaceRevision | null }> {
+  return api.post(`${BASE}/tasks/${taskId}/account-resume`, {
+    expected_generation: expectedGeneration,
+    expected_active_revision: expectedActiveRevision,
+    external_api_confirmed: externalApiConfirmed,
+  });
+}
+
 export function cancelWorkspaceTask(taskId: string): Promise<WorkspaceTask> {
   return api.post(`${BASE}/tasks/${taskId}/cancel`);
 }

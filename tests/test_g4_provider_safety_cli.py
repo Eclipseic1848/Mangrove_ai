@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from src.account_execution import ExecutionAuthorization, execution_context
+
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -63,7 +65,11 @@ from tests.database_migration_helpers import (
 
 
 def _model_repository(path: str | Path) -> ModelConnectionRepository:
-    return ModelConnectionRepository(str(migrated_webui_database(path)))
+    database = migrated_webui_database(path)
+    from tests.account_execution_helpers import seed_execution_owner
+    for owner_id in ("user-a", "g4_provider_qualification", "g4-synthetic-owner", "g4-ordinary-synthetic-user"):
+        seed_execution_owner(database, owner_id)
+    return ModelConnectionRepository(str(database))
 
 
 def _qualification_ledger(path: str | Path) -> QualificationBatchLedger:
@@ -204,7 +210,8 @@ def _create_inventory_database(path: Path) -> None:
                 created_at TEXT NOT NULL,
                 role TEXT NOT NULL,
                 disabled INTEGER NOT NULL,
-                pending INTEGER NOT NULL
+                pending INTEGER NOT NULL,
+                execution_generation INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE app_settings (
                 key TEXT PRIMARY KEY,
@@ -225,6 +232,9 @@ def _create_inventory_database(path: Path) -> None:
                 ("ordinary-user", "ordinary-user", "user", 0, 0),
                 ("disabled-root", "disabled-root", "super_admin", 1, 0),
                 ("pending-root", "pending-root", "super_admin", 0, 1),
+                ("g4_provider_qualification", "g4_provider_qualification", "user", 0, 0),
+                ("g4-synthetic-owner", "g4-synthetic-owner", "user", 0, 0),
+                ("g4-ordinary-synthetic-user", "g4-ordinary-synthetic-user", "user", 0, 0),
             ],
         )
         connection.executemany(
@@ -2105,16 +2115,17 @@ def test_pi_provider_chain_uses_standard_ordinary_owner_and_never_claims_g4(
     class FakeRuntime:
         async def start(self, request, *, on_event):
             seen_requests.append(request)
-            grant = broker.issue_grant(
-                owner_user_id=request.user_id,
-                connection_id=request.model_connection_id,
-                connection_version=request.model_connection_version,
-                model_id=request.model_connection_model,
-                task_id=request.task_id,
-                revision=request.revision,
-                run_id="pi_run_1234567890abcdef",
-                purpose="agent_inference",
-            )
+            with execution_context(ExecutionAuthorization(request.user_id, 0)):
+                grant = broker.issue_grant(
+                    owner_user_id=request.user_id,
+                    connection_id=request.model_connection_id,
+                    connection_version=request.model_connection_version,
+                    model_id=request.model_connection_model,
+                    task_id=request.task_id,
+                    revision=request.revision,
+                    run_id="pi_run_1234567890abcdef",
+                    purpose="agent_inference",
+                )
             response = await broker.relay(
                 grant_token=grant.token,
                 protocol_path="chat/completions",
@@ -3449,15 +3460,16 @@ def test_provider_relay_pins_validated_ip_and_preserves_tls_identity(tmp_path):
             "user-a",
             str(connection["connection_id"]),
         )
-        grant = broker.issue_grant(
-            owner_user_id="user-a",
-            connection_id=binding.connection_id,
-            connection_version=binding.connection_version,
-            task_id="g4-dns-pin",
-            revision=1,
-            run_id="g4-dns-pin-run",
-            purpose="agent_inference",
-        )
+        with execution_context(ExecutionAuthorization("user-a", 0)):
+            grant = broker.issue_grant(
+                owner_user_id="user-a",
+                connection_id=binding.connection_id,
+                connection_version=binding.connection_version,
+                task_id="g4-dns-pin",
+                revision=1,
+                run_id="g4-dns-pin-run",
+                purpose="agent_inference",
+            )
         response = await broker.relay(
             grant_token=grant.token,
             protocol_path="chat/completions",
@@ -3523,15 +3535,16 @@ def test_provider_relay_does_not_follow_redirect_or_repeat_dns(tmp_path):
             "user-a",
             str(connection["connection_id"]),
         )
-        grant = broker.issue_grant(
-            owner_user_id="user-a",
-            connection_id=binding.connection_id,
-            connection_version=binding.connection_version,
-            task_id="g4-no-redirect",
-            revision=1,
-            run_id="g4-no-redirect-run",
-            purpose="agent_inference",
-        )
+        with execution_context(ExecutionAuthorization("user-a", 0)):
+            grant = broker.issue_grant(
+                owner_user_id="user-a",
+                connection_id=binding.connection_id,
+                connection_version=binding.connection_version,
+                task_id="g4-no-redirect",
+                revision=1,
+                run_id="g4-no-redirect-run",
+                purpose="agent_inference",
+            )
         response = await broker.relay(
             grant_token=grant.token,
             protocol_path="chat/completions",
@@ -3808,15 +3821,16 @@ def test_two_phase_vault_rotation_keeps_live_secret_and_erases_database_backup(
             "user-a",
             str(connection["connection_id"]),
         )
-        grant = broker.issue_grant(
-            owner_user_id="user-a",
-            connection_id=binding.connection_id,
-            connection_version=binding.connection_version,
-            task_id=task_id,
-            revision=1,
-            run_id=f"{task_id}-run",
-            purpose="agent_inference",
-        )
+        with execution_context(ExecutionAuthorization("user-a", 0)):
+            grant = broker.issue_grant(
+                owner_user_id="user-a",
+                connection_id=binding.connection_id,
+                connection_version=binding.connection_version,
+                task_id=task_id,
+                revision=1,
+                run_id=f"{task_id}-run",
+                purpose="agent_inference",
+            )
         response = await broker.relay(
             grant_token=grant.token,
             protocol_path="chat/completions",

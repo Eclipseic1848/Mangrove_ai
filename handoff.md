@@ -1,15 +1,29 @@
 # Mangrove 零上下文交接
 
-> 状态：`P1_01_COMPLETE / OPEN_ISSUES_ZERO`
+> 状态：`P1_01_ENGINEERING_COMPLETE / REMEDIATION_IN_PROGRESS`
 >
-> 最后核验：2026-09-04
+> 最后核验：2026-09-06
 >
 > 公开仓库：`Eclipseic1848/Mangrove_ai`
 
 本文件写给完全没有上下文的新会话。先读 `AGENTS.md`、`docs/status/current.md`、`CONTEXT.md`，
 再现场读取 GitHub、Git 与运行态。历史计划是证据，不是当前状态。
 
-## 1. 我们在做什么
+## 0. 当前接手位置：#116
+
+按 [当前状态](docs/status/current.md) 与 [整改地图 #113](https://github.com/Eclipseic1848/Mangrove_ai/issues/113)继续逐票工作。
+当前分支实现账号停用与执行授权，工程证据见
+[#116 执行报告](docs/plans/2026-09-06-account-execution-report.md)。先现场读取关联 PR 的最终提交和门禁；若已经合并关闭，继续 #117，不能重做 #116。
+
+当前代码需要显式 WebUI 0012；Scheduler 历史绑定使用配对快照、摘要及备份回填。
+启动不自动迁移，真实数据库和账号尚未执行本票验证。历史冻结 G1 仍保留原资格门，本票未更新其冻结数据。
+
+沿用现有 checkout；保存其他任务与用户改动，仅精确暂存本票文件。工作树中的规划文档、冻结评测数据及本机脚本可能有独立工作，不能清理或整体提交。
+Git 权限按当前用户授权及 AGENTS.md 执行；真实秘密、生产迁移/恢复、发布与不可逆操作保留独立门。
+
+下面是 2026-09-04 的历史交接记录，不是当前 Issues 或服务状态。
+
+## 1. 历史工作目标（2026-09-04）
 
 本轮目标是自主完成 GitHub 当时剩余的 Issues，执行相称验证、PR/CI/受保护合并与关闭，然后清理
 过期产物并留下零上下文交接。该目标已完成：2026-09-04 现场查询 Open Issues 为 0。

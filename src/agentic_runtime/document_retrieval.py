@@ -2,7 +2,6 @@
 """按能力暴露来源观察、候选发现和权威证据读取。"""
 from __future__ import annotations
 
-import asyncio
 from contextvars import ContextVar
 import hashlib
 import io
@@ -15,6 +14,7 @@ from typing import Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.api.execution import execution_to_thread
 from src.agentic_runtime.models import SourceInput
 from src.config.settings import settings
 from src.parsers.document_routing import PageSignals, route_page
@@ -192,7 +192,7 @@ class DocumentRetrievalModule:
         *,
         owner_key: str = "anonymous",
     ) -> dict[str, object]:
-        return await asyncio.to_thread(
+        return await execution_to_thread(
             self._inspect,
             source,
             owner_key,
@@ -217,7 +217,7 @@ class DocumentRetrievalModule:
         query: str,
         unit_ids: tuple[str, ...],
     ) -> dict[str, object]:
-        return await asyncio.to_thread(
+        return await execution_to_thread(
             self._discover,
             source,
             owner_key,
@@ -306,7 +306,7 @@ class DocumentRetrievalModule:
         unit_ids: tuple[str, ...],
         needs: tuple[str, ...] = ("text", "layout"),
     ) -> dict[str, object]:
-        return await asyncio.to_thread(
+        return await execution_to_thread(
             self._read,
             source,
             owner_key,

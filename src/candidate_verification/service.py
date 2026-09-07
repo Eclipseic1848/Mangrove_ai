@@ -2,6 +2,8 @@
 """统一承接候选验证生命周期与兼容投影。"""
 from __future__ import annotations
 
+from src.account_execution import ExecutionDenied
+
 import asyncio
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
@@ -123,6 +125,10 @@ class ReverificationUnavailableError(RuntimeError):
 
 class ReverificationContractError(ValueError):
     """冻结候选或任务契约缺失、损坏，调用方必须先修复数据。"""
+
+
+class CandidateUnavailableError(ValueError):
+    """运行状态已经变化，当前没有可供重验的候选。"""
 
 
 class _P0ViolationAbort(RuntimeError):
@@ -516,7 +522,7 @@ class CandidateVerificationService:
             or context["status"] != "candidate_ready"
             or not context["run_id"]
         ):
-            raise ValueError("当前任务没有可检查的候选")
+            raise CandidateUnavailableError("当前任务没有可检查的候选")
         if not context["request_json"] or not context["candidates_json"]:
             raise ReverificationContractError(
                 "候选缺少冻结运行信息，不能检查重验资格"
@@ -1763,12 +1769,18 @@ class CandidateVerificationService:
             ensure_ascii=False,
         )
         try:
+            self._repository.require_account_execution(running.owner_id, running.attempt_id)
             self._event_writer("candidate_verification_attempt_started", running)
             report = (
                 await self._await_with_p0_supervision(request, operation)
                 if supervise_p0
                 else await operation()
             )
+            self._repository.require_account_execution(running.owner_id, running.attempt_id)
+        except ExecutionDenied:
+            # 当前原子验证已经返回或尚未启动，不提交旧结论，保留取消证据。
+            self._finish_cancelled(running)
+            raise
         except _P0ViolationAbort:
             if running.provider_attempt_id is not None:
                 return self._finish_outcome_unknown(running)
@@ -1811,6 +1823,9 @@ class CandidateVerificationService:
                 candidate_set_hash=candidate_hash,
                 require_reverification_current=supervise_p0,
             )
+        except ExecutionDenied:
+            self._finish_cancelled(running)
+            raise
         except Exception:
             if running.provider_attempt_id is not None:
                 self._finish_outcome_unknown(running)
