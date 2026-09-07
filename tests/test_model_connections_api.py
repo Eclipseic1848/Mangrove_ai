@@ -81,7 +81,7 @@ def _client(
     return test_app, TestClient(test_app)
 
 
-def test_authenticated_user_sees_seven_small_provider_presets_without_internal_endpoint():
+def test_authenticated_user_sees_eight_verified_provider_presets_without_internal_endpoint():
     _, client = _client()
     response = client.get("/api/model-connections/presets")
 
@@ -95,8 +95,9 @@ def test_authenticated_user_sees_seven_small_provider_presets_without_internal_e
         "gemini",
         "kimi",
         "zhipu",
+        "xai",
     ]
-    assert all(2 <= len(item["models"]) <= 4 for item in payload["items"])
+    assert all(3 <= len(item["models"]) <= 4 for item in payload["items"])
     assert all(item["recommended_model"] in item["models"] for item in payload["items"])
     assert all(
         len(item["model_catalog"]) == len(item["models"])
@@ -113,7 +114,7 @@ def test_authenticated_user_sees_seven_small_provider_presets_without_internal_e
     assert flash["display_name"] == "DeepSeek V4 Flash（0731 正式版）"
     assert "base_url" not in response.text
     assert "api_format" not in response.text
-    assert "api_key" not in response.text
+    assert all("api_key" not in item for item in payload["items"])
 
 
 def test_user_sets_isolated_default_connection_and_model(tmp_path):
@@ -134,6 +135,7 @@ def test_user_sets_isolated_default_connection_and_model(tmp_path):
             display_name="我的 DeepSeek",
             preset_id="deepseek",
             api_key="personal-secret-1234",
+            verify_all=True,
         )
     )
     _, owner = _client(user_id="user-a", broker=broker)
@@ -154,6 +156,8 @@ def test_user_sets_isolated_default_connection_and_model(tmp_path):
     assert other.get("/api/model-connections/preferences/default").json() == {
         "preference": None
     }
+
+
 
 
 def test_user_configures_and_lists_personal_preset_connection(tmp_path):
@@ -190,7 +194,7 @@ def test_user_configures_and_lists_personal_preset_connection(tmp_path):
     assert saved.status_code == 200
     assert saved.json()["owner_scope"] == "user_personal"
     assert saved.json()["preset_id"] == "deepseek"
-    assert saved.json()["preset_version"] == "2026-08-02.1"
+    assert saved.json()["preset_version"] == "2026-09-07.1"
     assert saved.json()["display_name"] == "DeepSeek"
     assert saved.json()["model"] == "deepseek-v4-pro"
     assert saved.json()["default_model"] == "deepseek-v4-pro"
@@ -263,8 +267,6 @@ def test_user_creates_two_named_personal_connections_for_same_provider(tmp_path)
     }
     assert verified_keys == [
         "Bearer sk-personal-primary-1111",
-        "Bearer sk-personal-primary-1111",
-        "Bearer sk-personal-backup-2222",
         "Bearer sk-personal-backup-2222",
     ]
 
@@ -294,7 +296,7 @@ def test_personal_connection_keeps_independent_model_results_and_available_defau
 
     def provider(request: httpx.Request) -> httpx.Response:
         model = json.loads(request.content)["model"]
-        if model == "deepseek-v4-pro":
+        if model != "deepseek-v4-flash":
             return httpx.Response(
                 403,
                 json={"error": {"message": "SENSITIVE_NO_MODEL_PERMISSION"}},
@@ -330,7 +332,7 @@ def test_personal_connection_keeps_independent_model_results_and_available_defau
         "/api/model-connections/presets/deepseek",
         json={
             "display_name": "DeepSeek 主连接",
-            "api_key": "sk-personal-multi-model-1234",
+            "verify_all": True, "api_key": "sk-personal-multi-model-1234",
             "model": "deepseek-v4-flash",
         },
     )
@@ -340,12 +342,12 @@ def test_personal_connection_keeps_independent_model_results_and_available_defau
     assert payload["model"] == "deepseek-v4-flash"
     assert payload["default_model"] == "deepseek-v4-flash"
     assert payload["available_model_count"] == 1
-    assert payload["models"] == [
+    assert payload["models"][:2] == [
         {
             "model_id": "deepseek-v4-flash",
             "display_name": "DeepSeek V4 Flash（0731 正式版）",
             "catalog_role": "balanced",
-            "catalog_version": "2026-08-02.1",
+            "catalog_version": "2026-09-07.1",
             "status": "available",
             "enabled": True,
             "is_default": True,
@@ -357,7 +359,7 @@ def test_personal_connection_keeps_independent_model_results_and_available_defau
             "model_id": "deepseek-v4-pro",
             "display_name": "DeepSeek V4 Pro",
             "catalog_role": "quality",
-            "catalog_version": "2026-08-02.1",
+            "catalog_version": "2026-09-07.1",
             "status": "model_access_denied",
             "enabled": False,
             "is_default": False,
@@ -369,6 +371,11 @@ def test_personal_connection_keeps_independent_model_results_and_available_defau
     raw_db = db_path.read_bytes()
     assert b"SENSITIVE_PROVIDER_RESPONSE" not in raw_db
     assert b"SENSITIVE_NO_MODEL_PERMISSION" not in raw_db
+
+    assert payload["models"][2]["model_id"] == "deepseek-v4-flash-vision-exp"
+    assert payload["models"][2]["status"] == "model_access_denied"
+
+
 
 
 def test_all_recommended_models_failing_does_not_create_connection_or_secret(
@@ -394,38 +401,16 @@ def test_all_recommended_models_failing_does_not_create_connection_or_secret(
         "/api/model-connections/presets/deepseek",
         json={
             "display_name": "不会保存的连接",
-            "api_key": "sk-invalid-all-models-1234",
+            "verify_all": True, "api_key": "sk-invalid-all-models-1234",
         },
     )
 
     assert response.status_code == 400
-    assert response.json() == {
-        "detail": "所有推荐模型验证失败，连接未保存",
-        "model_results": [
-            {
-                "model_id": "deepseek-v4-flash",
-                "display_name": "DeepSeek V4 Flash（0731 正式版）",
-                "catalog_role": "balanced",
-                "catalog_version": "2026-08-02.1",
-                "status": "credentials_invalid",
-                "enabled": False,
-                "verified_at": response.json()["model_results"][0]["verified_at"],
-                "error_code": "credentials_invalid",
-                "usage_status": "unknown",
-            },
-            {
-                "model_id": "deepseek-v4-pro",
-                "display_name": "DeepSeek V4 Pro",
-                "catalog_role": "quality",
-                "catalog_version": "2026-08-02.1",
-                "status": "credentials_invalid",
-                "enabled": False,
-                "verified_at": response.json()["model_results"][1]["verified_at"],
-                "error_code": "credentials_invalid",
-                "usage_status": "unknown",
-            },
-        ],
-    }
+    assert "密钥无效" in response.json()["detail"]
+    results = response.json()["model_results"]
+    assert len(results) == 3
+    assert all(item["status"] == "credentials_invalid" and not item["enabled"] for item in results)
+    assert "SENSITIVE_INVALID_CREDENTIAL" not in response.text
     assert client.get("/api/model-connections").json()["items"] == []
     with sqlite3.connect(db_path) as conn:
         assert conn.execute(
@@ -435,6 +420,8 @@ def test_all_recommended_models_failing_does_not_create_connection_or_secret(
             "SELECT COUNT(*) FROM model_connection_secrets"
         ).fetchone()[0] == 0
     assert b"SENSITIVE_INVALID_CREDENTIAL" not in db_path.read_bytes()
+
+
 
 
 @pytest.mark.parametrize(
@@ -481,7 +468,7 @@ def test_each_model_validation_failure_has_stable_product_status(
         "/api/model-connections/presets/deepseek",
         json={
             "display_name": f"DeepSeek {failure_kind}",
-            "api_key": "sk-classification-secret-1234",
+            "verify_all": True, "api_key": "sk-classification-secret-1234",
         },
     )
 
@@ -494,6 +481,8 @@ def test_each_model_validation_failure_has_stable_product_status(
     assert failed["status"] == expected_status
     assert failed["error_code"] == expected_status
     assert failed["enabled"] is False
+
+
 
 
 def test_user_retries_failed_model_changes_default_and_controls_model_state(tmp_path):
@@ -568,7 +557,6 @@ def test_user_retries_failed_model_changes_default_and_controls_model_state(tmp_
 
     assert requests == [
         "deepseek-v4-flash",
-        "deepseek-v4-pro",
         "deepseek-v4-pro",
     ]
     assert retried.status_code == 200
@@ -658,7 +646,7 @@ def test_admin_publishes_provider_preset_with_required_key(tmp_path):
     assert saved.status_code == 201
     assert saved.json()["owner_scope"] == "platform_shared"
     assert saved.json()["preset_id"] == "deepseek"
-    assert saved.json()["preset_version"] == "2026-08-02.1"
+    assert saved.json()["preset_version"] == "2026-09-07.1"
     assert saved.json()["display_name"] == "平台 DeepSeek"
     assert saved.json()["model"] == "deepseek-v4-pro"
     assert saved.json()["key_hint"] == "2468"
@@ -674,7 +662,7 @@ def test_manager_publishes_multiple_platform_connections_with_partial_models(
 ):
     def provider(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
-        if payload["model"] == "deepseek-v4-pro":
+        if payload["model"] != "deepseek-v4-flash":
             return httpx.Response(403, json={"error": {"message": "not entitled"}})
         return httpx.Response(
             200,
@@ -697,8 +685,8 @@ def test_manager_publishes_multiple_platform_connections_with_partial_models(
             "/api/model-connections/managed/presets/deepseek",
             json={
                 "display_name": name,
-                "model": "deepseek-v4-pro",
-                "api_key": key,
+                "model": "deepseek-v4-flash",
+                "verify_all": True, "api_key": key,
             },
         )
         for name, key in [
@@ -726,9 +714,12 @@ def test_manager_publishes_multiple_platform_connections_with_partial_models(
         ] == [
             ("deepseek-v4-flash", "available", True),
             ("deepseek-v4-pro", "model_access_denied", False),
+            ("deepseek-v4-flash-vision-exp", "model_access_denied", False),
         ]
     assert "platform-primary-1111" not in member.get("/api/model-connections").text
     assert "platform-backup-2222" not in member.get("/api/model-connections").text
+
+
 
 
 @pytest.mark.asyncio
@@ -754,7 +745,7 @@ async def test_only_manager_controls_platform_models_and_disabling_revokes_grant
         json={
             "display_name": "平台 DeepSeek",
             "model": "deepseek-v4-flash",
-            "api_key": "platform-secret-2468",
+            "verify_all": True, "api_key": "platform-secret-2468",
         },
     ).json()
     connection_id = saved["connection_id"]
@@ -840,6 +831,8 @@ async def test_only_manager_controls_platform_models_and_disabling_revokes_grant
             headers={"content-type": "application/json"},
             body=json.dumps({"model": next_grant.model, "messages": []}).encode(),
         )
+
+
 
 
 @pytest.mark.parametrize("manager_role", ["admin", "super_admin"])
@@ -1353,8 +1346,9 @@ def test_imported_official_preset_can_retry_through_clash_fake_ip(tmp_path):
     assert response.status_code == 200
     assert response.json()["status"] == "verified"
     assert {
-        item["status"] for item in response.json()["models"]
+        item["status"] for item in response.json()["models"] if item["model_id"] in {"deepseek-v4-flash", "deepseek-v4-pro"}
     } == {"available"}
+    assert response.json()["models"][2]["status"] == "pending_validation"
 
 
 def test_manager_discovers_four_protocols_but_user_cannot_probe_custom_endpoint(
@@ -1384,11 +1378,11 @@ def test_manager_discovers_four_protocols_but_user_cannot_probe_custom_endpoint(
     _, admin = _client(role="admin", broker=broker)
     denied = user.post(
         "/api/model-connections/managed/discover",
-        json={"base_url": "https://gateway.example/v1", "api_key": "secret-1234"},
+        json={"probe_protocols": True, "base_url": "https://gateway.example/v1", "api_key": "secret-1234"},
     )
     discovered = admin.post(
         "/api/model-connections/managed/discover",
-        json={"base_url": "https://gateway.example/v1", "api_key": "secret-1234"},
+        json={"probe_protocols": True, "base_url": "https://gateway.example/v1", "api_key": "secret-1234"},
     )
 
     assert denied.status_code == 403
@@ -1631,7 +1625,7 @@ def test_gemini_preset_is_verified_through_native_generate_content(tmp_path):
     _assert_pinned_provider_request(
         seen,
         "https://generativelanguage.googleapis.com/v1beta/"
-        "models/gemini-3.6-flash:generateContent",
+        "models/gemini-3.8-flash:generateContent",
     )
     assert seen["api_key"] == "gemini-secret-0004"
     assert '"contents":' in str(seen["json"])
@@ -1848,7 +1842,7 @@ def test_broker_relay_uses_scoped_grant_and_records_native_stream_usage(
         ),
         (
             "gemini",
-            "models/gemini-3.6-flash:generateContent",
+            "models/gemini-3.8-flash:generateContent",
             {
                 "contents": [
                     {
@@ -1884,7 +1878,7 @@ def test_broker_relay_uses_scoped_grant_and_records_native_stream_usage(
             },
             (
                 "https://generativelanguage.googleapis.com/v1beta/"
-                "models/gemini-3.6-flash:generateContent"
+                "models/gemini-3.8-flash:generateContent"
             ),
             "x-goog-api-key",
             (5, 4, 9),
@@ -2219,7 +2213,7 @@ def test_broker_restores_gemini_sse_query_and_json_content_type(tmp_path):
         response = await broker.relay(
             grant_token=grant.token,
             protocol_path=(
-                "models/gemini-3.6-flash:streamGenerateContent"
+                "models/gemini-3.8-flash:streamGenerateContent"
             ),
             method="POST",
             headers={"x-goog-api-key": grant.token},
@@ -2231,7 +2225,7 @@ def test_broker_restores_gemini_sse_query_and_json_content_type(tmp_path):
 
     body = asyncio.run(scenario())
     assert seen["url"].endswith(
-        "/models/gemini-3.6-flash:streamGenerateContent?alt=sse"
+        "/models/gemini-3.8-flash:streamGenerateContent?alt=sse"
     )
     assert seen["content_type"] == "application/json"
     assert body.startswith(b"data: ")

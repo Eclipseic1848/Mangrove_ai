@@ -204,17 +204,18 @@ test("普通用户只看到个人范围并可配置自己的 Provider 连接", a
   await page.getByRole("tab", { name: "模型与连接" }).click();
   await expect(page.getByRole("heading", { name: "连接一个模型服务" })).toBeVisible();
   await expect(page.getByText("自定义兼容接口")).toHaveCount(0);
-  await page.getByLabel("模型 Provider").selectOption("deepseek");
-  await expect(page.getByLabel("首选默认模型")).toHaveValue("deepseek-v4-flash");
-  await expect(page.getByLabel("Base URL")).toHaveCount(0);
+  await page.getByLabel("模型服务商").selectOption("deepseek");
+  await expect(page.getByLabel("选择模型")).toHaveValue("deepseek-v4-flash");
+  await expect(page.getByLabel("模型服务地址")).toHaveCount(0);
   await expect(page.getByLabel("API 格式")).toHaveCount(0);
   await page.getByLabel("连接名称").fill("我的 DeepSeek");
   await page.getByLabel("API Key").fill("sk-user-secret-1234");
-  await page.getByRole("button", { name: "保存并验证" }).click();
+  await page.getByRole("button", { name: "测试并保存所选模型" }).click();
 
   expect(configured).toEqual({
     display_name: "我的 DeepSeek",
     api_key: "sk-user-secret-1234",
+    region: null, workspace_id: "",
     model: "deepseek-v4-flash",
   });
   await expect(page.getByText("连接已验证并保存")).toBeVisible();
@@ -512,27 +513,29 @@ test("普通用户可创建并区分同一 Provider 的多套命名连接", asyn
   await page.goto("/settings?section=models");
   await page.getByLabel("连接名称").fill("DeepSeek 日常");
   await page.getByLabel("API Key").fill("sk-personal-primary-1111");
-  await page.getByRole("button", { name: "保存并验证" }).click();
+  await page.getByRole("button", { name: "测试并保存所选模型" }).click();
   await expect(page.getByText("DeepSeek 日常")).toBeVisible();
 
   await page.getByRole("button", { name: "添加个人连接" }).click();
   await page.getByLabel("连接名称").fill("DeepSeek 备用");
   await page.getByLabel("API Key").fill("sk-personal-backup-2222");
-  await page.getByRole("button", { name: "保存并验证" }).click();
+  await page.getByRole("button", { name: "测试并保存所选模型" }).click();
 
   await expect(page.getByText("DeepSeek 日常")).toBeVisible();
-  await expect(page.getByText("DeepSeek 备用")).toBeVisible();
+  await expect(page.locator("#model-connection-list").getByText("DeepSeek 备用", { exact: true })).toBeVisible();
   await expect(page.getByText("Key •••• 1111")).toBeVisible();
   await expect(page.getByText("Key •••• 2222")).toBeVisible();
   expect(createdBodies).toEqual([
     {
       display_name: "DeepSeek 日常",
       api_key: "sk-personal-primary-1111",
+    region: null, workspace_id: "",
       model: "deepseek-v4-flash",
     },
     {
       display_name: "DeepSeek 备用",
       api_key: "sk-personal-backup-2222",
+    region: null, workspace_id: "",
       model: "deepseek-v4-flash",
     },
   ]);
@@ -618,7 +621,7 @@ test("部分成功连接展示逐模型结果并可只重试失败模型", async
   await page.goto("/settings?section=models");
   await page.getByLabel("连接名称").fill("DeepSeek 主连接");
   await page.getByLabel("API Key").fill("sk-personal-multi-model-1234");
-  await page.getByRole("button", { name: "保存并验证全部推荐模型" }).click();
+  await page.getByRole("button", { name: "测试并保存所选模型" }).click();
 
   await expect(page.getByText(/^1 \/ 2 个模型可用 · 默认 DeepSeek V4 Flash · Key/)).toBeVisible();
   await expect(page.getByText("DeepSeek V4 Flash", { exact: true })).toBeVisible();
@@ -675,7 +678,7 @@ test("管理员同时拥有个人设置和平台治理入口", async ({ page }) 
     "平台连接表单存在可访问性违规",
   ).toEqual([]);
   await page.getByLabel("连接名称").fill("生产 DeepSeek");
-  await page.getByLabel("模型 Provider").selectOption("deepseek");
+  await page.getByLabel("模型服务商").selectOption("deepseek");
   await page.getByLabel("模型版本").selectOption("deepseek-v4-pro");
   await page.getByLabel("API Key").fill("sk-platform-secret-2468");
   await page.getByRole("button", { name: "验证并发布" }).click();
@@ -683,11 +686,12 @@ test("管理员同时拥有个人设置和平台治理入口", async ({ page }) 
     display_name: "生产 DeepSeek",
     model: "deepseek-v4-pro",
     api_key: "sk-platform-secret-2468",
+    region: null, workspace_id: "",
   });
 
   await page.getByRole("button", { name: "添加平台连接" }).click();
   await page.getByRole("button", { name: "自定义 / LAN" }).click();
-  await expect(page.getByLabel("Base URL")).toBeVisible();
+  await expect(page.getByLabel("模型服务地址")).toBeVisible();
   await expect(page.getByLabel("API 格式")).toBeVisible();
   await expect(
     page.getByText("公网连接必须填写；无鉴权 LAN/本地服务可以留空。"),
@@ -816,9 +820,9 @@ test("超级管理员可发现四协议并手工覆盖最多八个模型", async
   await page.getByRole("button", { name: "自定义 / LAN" }).click();
   await expect(page.getByLabel("API 格式").locator("option")).toHaveCount(4);
   await page.getByLabel("连接名称").fill("多协议网关");
-  await page.getByLabel("Base URL").fill("https://gateway.example/v1");
+  await page.getByLabel("模型服务地址").fill("https://gateway.example/v1");
   await page.getByLabel("API Key").fill("gateway-secret-1234");
-  await page.getByRole("button", { name: "自动发现模型与协议" }).click();
+  await page.getByRole("button", { name: "探测模型与四种协议（会产生测试用量）" }).click();
   await expect(page.getByText(/已检测：/)).toContainText("openai_responses");
   await expect(page.getByLabel("API 格式")).toHaveValue("openai_responses");
   await page.getByLabel("默认模型").fill("model-b");

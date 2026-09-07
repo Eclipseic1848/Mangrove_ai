@@ -6,7 +6,7 @@
 - 只允许 HTTP/HTTPS
 - 拒绝 URL userinfo（嵌入式凭证，易泄漏到日志）
 - 解析 host 全部 A/AAAA 记录，逐个校验（防 DNS 绕过）
-- 硬黑名单（不可放行）：loopback / link-local / multicast / reserved / unspecified / 云元数据
+- 硬黑名单：link-local / multicast / reserved / unspecified / 云元数据；回环仅允许显式本地模型例外
 - 私网（含 CGN）默认拒绝；allow_private=True 时放行（管理员白名单场景）
 
 用标准库 ipaddress + urllib.parse + socket，不引入新依赖。
@@ -132,6 +132,7 @@ def validate_http_target(
     *,
     allow_private: bool = False,
     allow_proxy_fake_ip: bool = False,
+    allow_loopback: bool = False,
     resolver: Optional[HostResolver] = None,
 ) -> ValidatedTarget:
     """校验 HTTP 目标 URL。
@@ -168,8 +169,15 @@ def validate_http_target(
             raise SsrfError(f"DNS 解析失败: {host}")
 
     # 硬黑名单逐个校验
+    if allow_loopback and (
+        host not in {"localhost", "127.0.0.1", "::1"}
+        or not all(ipaddress.ip_address(ip).is_loopback for ip in ips)
+    ):
+        raise SsrfError("本地模型地址必须只解析到回环地址")
     for ip in ips:
         category = _hard_blacklist_category(ip)
+        if category == "loopback" and allow_loopback and allow_private:
+            continue
         if category is not None:
             raise SsrfError(f"目标 IP {ip} 命中黑名单: {category}")
 
@@ -203,6 +211,7 @@ class HttpSecurityGuard:
     private_host_allowlist: Tuple[str, ...] = ()
     proxy_fake_ip_host_allowlist: Tuple[str, ...] = ()
     resolver: Optional[HostResolver] = None
+    loopback_host_allowlist: Tuple[str, ...] = ()
 
     def validate(self, url: str) -> ValidatedTarget:
         parts = urlsplit(url)
@@ -219,6 +228,7 @@ class HttpSecurityGuard:
             url,
             allow_private=allow_private,
             allow_proxy_fake_ip=allow_proxy_fake_ip,
+            allow_loopback=self.allow_private and host in self.loopback_host_allowlist,
             resolver=self.resolver,
         )
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { EVENTS, Joyride, type Step } from "react-joyride";
 import {
   SiAlibabacloud,
@@ -22,7 +22,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
@@ -37,8 +37,15 @@ interface ProviderPreset {
     model_id: string;
     display_name: string;
     role: string;
+    verified_on?: string;
+    source_url?: string;
+    release_status?: string;
   }>;
   help_url: string;
+  key_url?: string;
+  region_note?: string;
+  regions?: Array<{ id: string; label: string; workspace_required: boolean }>;
+  catalog_stale?: boolean;
 }
 
 interface ConnectionModel {
@@ -125,7 +132,17 @@ const MODEL_STATUS_LABELS: Record<string, string> = {
   protocol_incompatible: "协议不兼容",
   rate_limited: "限流",
   network_unreachable: "网络不可达",
+  balance_insufficient: "API 额度不足",
+  result_unknown: "验证结果未知",
   disabled: "已停用",
+};
+
+const MODEL_ROLE_HINTS: Record<string, string> = {
+  balanced: "通用问答、整理资料与日常任务，兼顾响应速度和效果。",
+  quality: "适合复杂分析和较难任务；费用与等待时间请以官方说明为准。",
+  efficiency: "适合快速问答和高频轻量任务。",
+  coding: "适合代码理解与编程任务。",
+  vision: "适合图文相关需求；当前连接测试只验证文本，图像能力需另行验证。",
 };
 
 function ProviderMark({ id }: { id: string }) {
@@ -183,6 +200,13 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
   const [selectedPresetId, setSelectedPresetId] = useState("");
   const [selectedModel, setSelectedModel] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [region, setRegion] = useState("");
+  const [workspaceId, setWorkspaceId] = useState("");
+  const [setupError, setSetupError] = useState("");
+  const [setupUnknown, setSetupUnknown] = useState(false);
+  const [localInfo, setLocalInfo] = useState(false);
+  const [savedConnection, setSavedConnection] = useState<ModelConnection | null>(null);
+  const submission = useRef(false);
   const [saving, setSaving] = useState(false);
   const [modelAction, setModelAction] = useState("");
   const [preference, setPreference] = useState<{
@@ -193,6 +217,9 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
   const [tourRun, setTourRun] = useState(false);
   const [managedOpen, setManagedOpen] = useState(false);
   const [managedMode, setManagedMode] = useState<"preset" | "custom">("preset");
+  const [localService, setLocalService] = useState("custom");
+  const [platformRegion, setPlatformRegion] = useState("");
+  const [platformWorkspace, setPlatformWorkspace] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<ModelConnection | null>(null);
   const [platformPreset, setPlatformPreset] = useState({
     display_name: "",
@@ -308,6 +335,10 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
   useEffect(() => {
     if (selectedPreset) {
       setSelectedModel(selectedPreset.recommended_model);
+      setRegion(selectedPreset.regions?.[0]?.id || "");
+      setWorkspaceId("");
+      setApiKey("");
+      setSetupError("");
     }
   }, [selectedPreset?.preset_id]);
 
@@ -320,17 +351,22 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
   };
 
   const savePersonal = async () => {
-    if (!selectedPreset || !personalName.trim() || !apiKey.trim()) return;
+    if (!selectedPreset || !personalName.trim() || !apiKey.trim() || submission.current || setupUnknown) return;
+    submission.current = true;
     setSaving(true);
+    setSetupError("");
     try {
       const saved = await api.post(`/api/model-connections/presets/${selectedPreset.preset_id}`, {
         display_name: personalName.trim(),
         api_key: apiKey.trim(),
         model: selectedModel || selectedPreset.recommended_model,
+        region: region || null,
+        workspace_id: workspaceId.trim(),
       });
       setApiKey("");
       setPersonalName("");
       setShowSetup(false);
+      setSavedConnection(saved);
       const total = Array.isArray(saved.models) ? saved.models.length : 0;
       toast.success(
         total
@@ -340,14 +376,19 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
       await rememberTour("completed");
       await load();
     } catch (error: any) {
-      toast.error(error.message || "连接验证失败");
+      const unknown = !(error instanceof ApiError) || error.status >= 500 || error.message.includes("未知");
+      setSetupUnknown(unknown);
+      setSetupError(unknown ? "结果尚不确定，可能已保存或产生用量。请先检查连接列表和服务商记录，确认后再重试。" : error.message || "连接验证失败，请检查密钥和模型后重试");
     } finally {
+      submission.current = false;
       setSaving(false);
     }
   };
 
   const saveManaged = async () => {
-    if (!managed.display_name.trim() || !managed.base_url.trim() || !managed.model.trim()) return;
+    if (!managed.display_name.trim() || !managed.base_url.trim() || !managed.model.trim() || submission.current || setupUnknown) return;
+    submission.current = true;
+    setSetupError("");
     setSaving(true);
     try {
       const models = managed.model_ids_text
@@ -355,16 +396,19 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
         .map((item) => item.trim())
         .filter(Boolean)
         .slice(0, 8);
-      await api.post("/api/model-connections/managed", {
+      const saved = await api.post("/api/model-connections/managed", {
         display_name: managed.display_name,
         base_url: managed.base_url,
         api_format: managed.api_format,
         model: managed.model,
-        models: models.length ? models : [managed.model],
+        models: localService === "custom" && models.length ? models : [managed.model],
         api_key: managed.api_key,
       });
       toast.success("平台连接已验证并发布");
       setManagedOpen(false);
+      setSavedConnection(saved);
+      setShowSetup(false);
+      setScope("platform");
       setManaged({
         display_name: "",
         base_url: "",
@@ -375,14 +419,20 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
       });
       await load();
     } catch (error: any) {
-      toast.error(error.message || "平台连接验证失败");
+      const unknown = !(error instanceof ApiError) || error.status >= 500 || error.message.includes("未知");
+      setSetupUnknown(unknown);
+      setSetupError(unknown ? "结果尚不确定，可能已保存或产生用量。请先检查连接列表和服务记录，再决定是否重试。" : error.message || "连接失败，请检查服务是否已启动、地址和模型 ID");
     } finally {
+      submission.current = false;
       setSaving(false);
     }
   };
 
   const discoverManaged = async () => {
+    if (submission.current) return;
+    submission.current = true;
     setSaving(true);
+    setSetupError("");
     try {
       const manual = managed.model_ids_text
         .split(/[\n,]/)
@@ -393,6 +443,7 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
         base_url: managed.base_url,
         api_key: managed.api_key,
         model_ids: manual,
+        probe_protocols: localService === "custom",
       });
       setDiscovery(result);
       setManaged((current) => ({
@@ -402,24 +453,27 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
         api_format: result.recommended_api_format || current.api_format,
       }));
       toast.success(
-        result.detected_api_formats.length
+        localService !== "custom" ? (result.models.length ? "已读取模型列表，尚未测试推理" : "服务未提供模型列表，请手动填写模型 ID") : result.detected_api_formats.length
           ? `检测到 ${result.detected_api_formats.length} 种可用协议`
           : "未自动识别协议，请确认模型 ID 和 API 格式",
       );
     } catch (error: any) {
-      toast.error(error.message || "连接发现失败");
+      setSetupError(error.message || "无法读取模型列表，请检查服务地址和鉴权；也可以手动填写模型 ID");
     } finally {
+      submission.current = false;
       setSaving(false);
     }
   };
 
   const savePlatformPreset = async () => {
     if (
-      !selectedPlatformPreset
+      submission.current || setupUnknown || !selectedPlatformPreset
       || !platformPreset.display_name.trim()
       || !platformPreset.api_key.trim()
       || !platformPreset.model
     ) return;
+    submission.current = true;
+    setSetupError("");
     setSaving(true);
     try {
       const saved = await api.post(
@@ -428,6 +482,8 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
           display_name: platformPreset.display_name.trim(),
           model: platformPreset.model,
           api_key: platformPreset.api_key.trim(),
+          region: platformRegion || null,
+          workspace_id: platformWorkspace.trim(),
         },
       );
       const total = Array.isArray(saved.models) ? saved.models.length : 0;
@@ -445,8 +501,11 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
       });
       await load();
     } catch (error: any) {
-      toast.error(error.message || "平台 Provider 连接验证失败");
+      const unknown = !(error instanceof ApiError) || error.status >= 500 || /未知/.test(error.message);
+      setSetupUnknown(unknown);
+      setSetupError(unknown ? "结果未知：请先检查连接列表和服务商用量记录，避免立即重复计费。" : error.message || "平台连接验证失败，请检查密钥、地域和模型权限");
     } finally {
+      submission.current = false;
       setSaving(false);
     }
   };
@@ -454,11 +513,17 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
   const openPlatformConnection = () => {
     const preset = selectedPlatformPreset ?? presets[0];
     setManagedMode("preset");
+    setLocalService("custom");
+    setSetupError("");
+    setSetupUnknown(false);
     if (preset) {
+      setPlatformRegion(preset.regions?.[0]?.id || "");
+      setPlatformWorkspace("");
       setPlatformPreset((current) => ({
         ...current,
         preset_id: preset.preset_id,
         model: current.model || preset.recommended_model,
+        api_key: "",
       }));
     }
     setManagedOpen(true);
@@ -637,6 +702,8 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
       setPersonalName(suggestedPersonalName(preset, connections));
     }
     setApiKey("");
+    setSetupError("");
+    setSetupUnknown(false);
     setShowSetup(true);
   };
 
@@ -697,6 +764,24 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
           </Button>
         </div>
       </div>
+
+      <div className="flex flex-wrap gap-2" aria-label="模型接入方式">
+        <Button variant="outline" disabled={saving} onClick={() => { setLocalInfo(false); openPersonalConnection(); }}>云端服务商</Button>
+        <Button variant="outline" disabled={saving} onClick={() => setLocalInfo(true)}>本地或局域网模型</Button>
+      </div>
+      {localInfo && <div className="space-y-3 rounded-lg border p-4 text-sm">
+        <h3 className="font-semibold">连接已经运行的本地模型</h3>
+        <p>支持 Ollama、LM Studio 及兼容 OpenAI 接口的服务（如 vLLM）。先启动模型服务，再填写地址并选择模型。</p>
+        <p>localhost 指运行 Mangrove 后端的电脑。若平台在服务器或容器中，请填写后端能访问的模型服务地址；不会自动扫描设备或修改防火墙。</p>
+        <p>{isManager ? "本地服务登记为平台连接，获准用户可使用。只测试明确选定的模型；无鉴权服务无需填写密钥。" : "本地地址由管理员登记，以免普通账户任意访问服务器内网。请把服务类型、地址和模型名称交给管理员；密钥请由管理员在配置页面填写。登记后可在“平台可用连接”中选择。"}</p>
+        {isManager && <Button onClick={() => { setLocalService("ollama"); setManagedMode("custom"); setManaged({ display_name: "Ollama 本地模型", base_url: "http://localhost:11434/v1", api_format: "openai_chat_completions", model: "", model_ids_text: "", api_key: "" }); setDiscovery(null); setSetupError(""); setSetupUnknown(false); setManagedOpen(true); }}>登记本地模型</Button>}
+        <Button variant="ghost" onClick={() => { setScope("platform"); setShowSetup(false); setLocalInfo(false); }}>查看平台可用连接</Button>
+      </div>}
+      {savedConnection && <div role="status" className="space-y-2 rounded-lg border border-primary/30 p-4 text-sm">
+        <p>已保存：{savedConnection.display_name} · {savedConnection.default_model || savedConnection.model}</p>
+        <p>所选模型已通过文本连接测试；工具任务能力需要另外验证。其他目录模型未自动启用。</p>
+        <Button disabled={!!modelAction} onClick={() => { const model = savedConnection.models?.find((item) => item.is_default); if (model) void setUserDefault(savedConnection, model); }}>用于新任务</Button>
+      </div>}
 
       <Card data-model-tour="default-connection" className="border-primary/25">
         <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
@@ -769,7 +854,7 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
                 <div>
                   <h3 className="text-base font-semibold">连接一个模型服务</h3>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    选择 Provider 并填写自己的 API Key，平台会逐项验证少量推荐模型。
+                    选择服务商，按官方指引获取密钥，再选择并测试一个模型。
                   </p>
                 </div>
                 {connections.length > 0 && (
@@ -778,6 +863,7 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
               </div>
             </CardHeader>
             <CardContent className="space-y-5">
+              <fieldset disabled={saving} className="space-y-5">
               {loadError && (
                 <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-4">
                   <p className="font-medium text-destructive">模型连接加载失败</p>
@@ -809,7 +895,7 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
                     maxLength={80}
                   />
                   <p className="mt-1.5 text-xs text-muted-foreground">
-                    用途清晰的名称能帮助你区分同一 Provider 的多套 Key。
+                    名称已自动填写，可按用途修改。
                   </p>
                 </div>
               )}
@@ -819,7 +905,7 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
                     htmlFor="personal-provider"
                     className="mb-1.5 block text-sm font-medium"
                   >
-                    模型 Provider <span className="text-destructive">*</span>
+                    模型服务商 <span className="text-destructive">*</span>
                   </label>
                   <select
                     id="personal-provider"
@@ -843,16 +929,32 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
                     ))}
                   </select>
                   <p className="mt-1.5 text-xs text-muted-foreground">
-                    Base URL 和 API 格式由平台维护，无需手动填写。
+                    服务地址与接口已自动填写。
                   </p>
                 </div>
               )}
 
+              {selectedPreset?.regions && selectedPreset.regions.length > 0 && <div className="space-y-3">
+                <label htmlFor="personal-region" className="block text-sm font-medium">密钥所属地域</label>
+                <select id="personal-region" value={region} onChange={(event) => { setRegion(event.target.value); setApiKey(""); setWorkspaceId(""); }} className="h-10 w-full rounded-md border bg-background px-3 text-sm">
+                  {selectedPreset.regions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                </select>
+                {selectedPreset.regions.find((item) => item.id === region)?.workspace_required && <>
+                  <label htmlFor="personal-workspace" className="block text-sm font-medium">业务空间 ID</label>
+                  <Input id="personal-workspace" value={workspaceId} onChange={(event) => setWorkspaceId(event.target.value)} placeholder="从百炼控制台复制，无需填写网址" maxLength={63} />
+                </>}
+              </div>}
+              {selectedPreset?.region_note && <p className="text-xs leading-5 text-muted-foreground">{selectedPreset.region_note}</p>}
+              {selectedPreset?.catalog_stale && <p role="status" className="text-sm text-destructive">目录超过 30 天未核验，请先查看官方目录确认模型仍可用。</p>}
+              {setupError && !managedOpen && <div role="alert" className="space-y-2 text-sm text-destructive">
+                <p>{setupError}</p>
+                {setupUnknown && <Button variant="outline" onClick={() => { setShowSetup(false); void load(); }}>先检查连接列表</Button>}
+              </div>}
               {!loadError && selectedPreset && (
                 <>
                   <div>
                     <label htmlFor="personal-model" className="mb-1.5 block text-sm font-medium">
-                      首选默认模型 <span className="text-destructive">*</span>
+                      选择模型 <span className="text-destructive">*</span>
                     </label>
                     <select
                       id="personal-model"
@@ -870,6 +972,12 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
                       ))}
                     </select>
                   </div>
+                  <p className="break-words text-xs text-muted-foreground">
+                    {MODEL_ROLE_HINTS[selectedPreset.model_catalog?.find((item) => item.model_id === selectedModel)?.role || ""]}
+                    {selectedModel === selectedPreset.recommended_model && " 推荐是平台按上述用途给出的起点，不代表你的任务评测或账户资格已通过。"}
+                    {selectedPreset.model_catalog?.find((item) => item.model_id === selectedModel)?.verified_on && <>目录核验：{selectedPreset.model_catalog.find((item) => item.model_id === selectedModel)?.verified_on} · </>}
+                    <a href={selectedPreset.model_catalog?.find((item) => item.model_id === selectedModel)?.source_url || selectedPreset.help_url} target="_blank" rel="noreferrer" className="text-primary underline underline-offset-2">查看官方模型说明</a>。列入目录不代表你的账户已获权限。
+                  </p>
                   <div data-model-tour="key">
                     <label htmlFor="personal-api-key" className="mb-1.5 block text-sm font-medium">
                       API Key <span className="text-destructive">*</span>
@@ -889,23 +997,24 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
                     </div>
                     <div className="mt-1.5 flex justify-between gap-3 text-xs text-muted-foreground">
                       <span>保存后只显示尾部遮罩，不提供复制或导出。</span>
-                      <a href={selectedPreset.help_url} target="_blank" rel="noreferrer" className="shrink-0 text-primary hover:underline">
+                      <a href={selectedPreset.key_url || selectedPreset.help_url} target="_blank" rel="noreferrer" className="shrink-0 text-primary hover:underline">
                         获取 Key
                       </a>
                     </div>
                   </div>
                   <Button
                     data-model-tour="complete"
-                    disabled={!personalName.trim() || !apiKey.trim() || saving}
+                    disabled={!personalName.trim() || !apiKey.trim() || saving || setupUnknown || (!!selectedPreset.regions?.find((item) => item.id === region)?.workspace_required && !workspaceId.trim())}
                     onClick={savePersonal}
                     className="w-full"
                   >
                     {saving
                       ? <Loader2 className="h-4 w-4 animate-spin" />
-                      : "保存并验证全部推荐模型"}
+                      : "测试并保存所选模型"}
                   </Button>
                 </>
               )}
+              </fieldset>
             </CardContent>
           </Card>
 
@@ -925,8 +1034,7 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
                 <div className="mt-1 break-all font-medium">{selectedModel || "—"}</div>
               </div>
               <p className="text-xs leading-5 text-muted-foreground">
-                将对 {selectedPreset?.models.length || 0} 个推荐模型分别发送一次极小合成
-                请求，可能产生少量 Provider 原生 Token；不会发送用户业务数据。
+                仅向所选模型发送一次简短测试，可能按服务商标准计费；不发送任务正文或附件。连接测试不代表工具任务资格。
               </p>
             </CardContent>
           </Card>
@@ -1009,7 +1117,6 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
                           const failed = ![
                             "available",
                             "disabled",
-                            "pending_validation",
                             "validating",
                           ].includes(model.status);
                           return (
@@ -1047,10 +1154,10 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
                                   variant="ghost"
                                   size="sm"
                                   disabled={isBusy}
-                                  aria-label={`重试 ${model.display_name}`}
+                                  aria-label={`${model.status === "pending_validation" ? "验证" : "重试"} ${model.display_name}`}
                                   onClick={() => void retryModel(connection, model)}
                                 >
-                                  {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : "重试"}
+                                  {isBusy ? <Loader2 className="h-4 w-4 animate-spin" /> : model.status === "pending_validation" ? "验证（可能计费）" : "重试"}
                                 </Button>
                               )}
                               {(connection.owner_scope === "user_personal" || isManager)
@@ -1153,10 +1260,11 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
 
       <Modal
         open={managedOpen}
-        onClose={() => setManagedOpen(false)}
-        title="添加平台连接"
+        onClose={() => { if (!saving) { setManagedOpen(false); setManaged((current) => ({ ...current, api_key: "" })); } }}
+        title={localService === "custom" ? "添加平台连接" : "连接本地模型（平台范围）"}
         wide
       >
+        <fieldset disabled={saving} className="space-y-4">
         <div className="mb-4 grid grid-cols-2 gap-1 rounded-lg border bg-muted/30 p-1">
           <button
             type="button"
@@ -1206,7 +1314,7 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
             </div>
             <div>
               <label htmlFor="platform-provider" className="mb-1 block text-sm font-medium">
-                模型 Provider <span className="text-destructive">*</span>
+                模型服务商 <span className="text-destructive">*</span>
               </label>
               <select
                 id="platform-provider"
@@ -1219,7 +1327,10 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
                     ...platformPreset,
                     preset_id: event.target.value,
                     model: preset?.recommended_model || "",
+                    api_key: "",
                   });
+                  setPlatformRegion(preset?.regions?.[0]?.id || "");
+                  setPlatformWorkspace("");
                 }}
                 className="h-10 w-full rounded-md border bg-background px-3 text-sm"
               >
@@ -1276,12 +1387,35 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
                 placeholder="必填，用于验证并发布平台共享连接"
               />
             </div>
+            {!!selectedPlatformPreset?.regions?.length && <div className="space-y-2 md:col-span-2">
+              <label htmlFor="platform-region" className="block text-sm font-medium">密钥所属地域</label>
+              <select id="platform-region" value={platformRegion} onChange={(event) => { setPlatformRegion(event.target.value); setPlatformWorkspace(""); setPlatformPreset((current) => ({ ...current, api_key: "" })); }} className="h-10 w-full rounded-md border bg-background px-3 text-sm">
+                {selectedPlatformPreset.regions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+              </select>
+              {selectedPlatformPreset.regions.find((item) => item.id === platformRegion)?.workspace_required && <>
+                <label htmlFor="platform-workspace" className="block text-sm font-medium">业务空间 ID</label>
+                <Input id="platform-workspace" value={platformWorkspace} onChange={(event) => setPlatformWorkspace(event.target.value)} maxLength={63} placeholder="从百炼控制台复制" />
+              </>}
+            </div>}
             <p className="text-xs leading-5 text-muted-foreground md:col-span-2">
-              保存时只发送合成测试内容验证所选模型，不会发送用户业务数据。
+              {selectedPlatformPreset?.region_note} 保存时只验证所选模型，可能按服务商标准计费；不发送用户业务数据。
             </p>
           </div>
         ) : (
           <div className="grid gap-4 md:grid-cols-2">
+            <div className="space-y-2 md:col-span-2">
+              <label htmlFor="local-service" className="block text-sm font-medium">模型服务类型</label>
+              <select id="local-service" value={localService} onChange={(event) => {
+                const kind = event.target.value;
+                setLocalService(kind); setDiscovery(null); setSetupError("");
+                const port = kind === "ollama" ? "11434" : kind === "lmstudio" ? "1234" : "8000";
+                setManaged({ display_name: kind === "ollama" ? "Ollama 本地模型" : kind === "lmstudio" ? "LM Studio 本地模型" : "本地模型", base_url: `http://localhost:${port}/v1`, api_format: "openai_chat_completions", model: "", model_ids_text: "", api_key: "" });
+              }} className="h-10 w-full rounded-md border bg-background px-3 text-sm">
+                <option value="ollama">Ollama</option><option value="lmstudio">LM Studio</option><option value="vllm">vLLM / OpenAI 兼容服务</option><option value="custom">其他接口（高级）</option>
+              </select>
+              <p className="text-xs leading-5 text-muted-foreground">先启动模型服务。示例地址适用于 Mangrove 与模型运行在同一电脑；服务器/容器部署需改为后端可达地址。只读取指定地址，不扫描设备。</p>
+              <a className="text-xs text-primary hover:underline" href={localService === "ollama" ? "https://docs.ollama.com/api/openai-compatibility" : localService === "lmstudio" ? "https://lmstudio.ai/docs/developer/openai-compat" : "https://docs.vllm.ai/en/latest/serving/online_serving/"} target="_blank" rel="noreferrer">查看服务开启与接口指引</a>
+            </div>
             <div>
               <label htmlFor="managed-name" className="mb-1 block text-sm font-medium">
                 连接名称 <span className="text-destructive">*</span>
@@ -1290,9 +1424,9 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
             </div>
             <div>
               <label htmlFor="managed-url" className="mb-1 block text-sm font-medium">
-                Base URL <span className="text-destructive">*</span>
+                模型服务地址 <span className="text-destructive">*</span>
               </label>
-              <Input id="managed-url" value={managed.base_url} onChange={(event) => setManaged({ ...managed, base_url: event.target.value })} placeholder="https://provider.example/v1 或精确 LAN 地址" />
+              <Input id="managed-url" value={managed.base_url} onChange={(event) => { setManaged({ ...managed, base_url: event.target.value }); setDiscovery(null); }} placeholder="https://provider.example/v1 或精确 LAN 地址" />
             </div>
             <div>
               <label htmlFor="managed-format" className="mb-1 block text-sm font-medium">
@@ -1309,11 +1443,12 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
             </div>
             <div>
               <label htmlFor="managed-model" className="mb-1 block text-sm font-medium">
-                默认模型 <span className="text-destructive">*</span>
+                {localService === "custom" ? "默认模型" : "本地模型 ID"} <span className="text-destructive">*</span>
               </label>
-              <Input id="managed-model" value={managed.model} onChange={(event) => setManaged({ ...managed, model: event.target.value })} />
+              <Input list="discovered-models" id="managed-model" value={managed.model} onChange={(event) => setManaged({ ...managed, model: event.target.value })} />
             </div>
-            <div className="md:col-span-2">
+            <datalist id="discovered-models">{discovery?.models.map((model) => <option key={model} value={model} />)}</datalist>
+            {localService === "custom" && <div className="md:col-span-2">
               <label htmlFor="managed-models" className="mb-1 block text-sm font-medium">
                 待验证模型 ID（每行一个，最多 8 个）
               </label>
@@ -1324,7 +1459,7 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
                 className="min-h-24 w-full rounded-md border bg-background px-3 py-2 text-sm"
                 placeholder="可以先点击自动发现；发现失败时在这里手工输入"
               />
-            </div>
+            </div>}
             <div>
               <label htmlFor="managed-key" className="mb-1 block text-sm font-medium">
                 API Key
@@ -1335,7 +1470,7 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
               </p>
             </div>
             <p className="text-xs leading-5 text-amber-700 dark:text-amber-300 md:col-span-2">
-              高级入口会验证精确 Endpoint。LAN 放行只绑定当前 scheme、主机、端口和协议，不开放整个私网。
+              仅连接上方明确指定的地址。保存时发送所选模型的简短文本测试；高级多模型会逐项测试，可能产生用量。通过文本测试不代表工具任务资格。
             </p>
             <div className="flex flex-wrap items-center gap-2 md:col-span-2">
               <Button
@@ -1345,30 +1480,33 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
                 disabled={saving || !managed.base_url.trim()}
                 onClick={() => void discoverManaged()}
               >
-                自动发现模型与协议
+                {localService === "custom" ? "探测模型与四种协议（会产生测试用量）" : "读取可用模型"}
               </Button>
               {discovery && (
                 <span className="text-xs text-muted-foreground">
                   {discovery.detected_api_formats.length
                     ? `已检测：${discovery.detected_api_formats.join("、")}`
-                    : "未识别协议，可手工覆盖后验证"}
+                    : "仅取得列表，不代表文本或工具调用通过；可手填模型 ID"}
                 </span>
               )}
             </div>
           </div>
         )}
+        {setupError && <div role="alert" className="text-sm text-destructive">{setupError}</div>}
+        </fieldset>
         <div className="mt-4 flex justify-end gap-2">
-          <Button variant="outline" size="sm" onClick={() => setManagedOpen(false)}>取消</Button>
+          <Button variant="outline" size="sm" disabled={saving} onClick={() => { setManagedOpen(false); setManaged((current) => ({ ...current, api_key: "" })); }}>取消</Button>
           <Button
             size="sm"
             disabled={
-              saving
+              saving || setupUnknown
               || (
                 managedMode === "preset"
                   ? (
                     !platformPreset.display_name.trim()
                     || !platformPreset.model
                     || !platformPreset.api_key.trim()
+                    || (!!selectedPlatformPreset?.regions?.find((item) => item.id === platformRegion)?.workspace_required && !platformWorkspace.trim())
                   )
                   : (
                     !managed.display_name.trim()
