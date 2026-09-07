@@ -44,9 +44,6 @@ const VERIFY_TARGET: Record<string, string> = {
   tavily_api_key: "search", searxng_base_url: "searxng_base_url",
   firecrawl_base_url: "firecrawl_base_url", firecrawl_api_key: "firecrawl_base_url",
   rsshub_base_url: "rsshub_base_url",
-  smtp_enabled: "email", smtp_host: "email", smtp_port: "email", smtp_user: "email", smtp_password: "email",
-  smtp_from: "email", smtp_use_ssl: "email",
-  slack_enabled: "slack", slack_webhook_url: "slack",
   embedding_enabled: "semantic", embedding_base_url: "semantic", embedding_api_key: "semantic",
   embedding_model: "semantic", rerank_base_url: "semantic", rerank_api_key: "semantic", rerank_model: "semantic",
   db_backend: "mysql", mysql_host: "mysql", mysql_port: "mysql", mysql_user: "mysql",
@@ -73,13 +70,10 @@ const VERIFY_TARGET: Record<string, string> = {
 
 /** 验证会有真实副作用/耗时较长的目标：点击前需先弹确认框，不能秒触发。 */
 function isSlowVerifyTarget(target: string): boolean {
-  return target === "slack" || target.startsWith("mc_cookie_");
+  return target.startsWith("mc_cookie_");
 }
 
-function slowVerifyConfirmText(target: string): string {
-  if (target === "slack") {
-    return "会向 Webhook 绑定的频道发送一条测试消息，频道成员可见。";
-  }
+function slowVerifyConfirmText(): string {
   return "会真实启动一次 MediaCrawler 浏览器自动化登录并小范围搜索，用来确认该平台 Cookie 是否还有效——耗时可能从十几秒到几分钟不等。";
 }
 
@@ -92,7 +86,7 @@ const LEGACY_MODEL_GROUPS = ["llm_default", "document_extraction", "llm_deepseek
 /** 管理员平台配置按用途分区；旧模型配置单独放进折叠兼容区。 */
 const GROUP_CATEGORIES: { label: string; groups: string[] }[] = [
   { label: "采集与反爬", groups: ["search", "cookies", "cookie_health", "proxy", "mc_cdp"] },
-  { label: "通知集成", groups: ["email", "slack"] },
+  { label: "历史通知配置（只读）", groups: ["email", "slack"] },
   { label: "高级 / 基础设施", groups: ["semantic", "mysql", "checkpoint"] },
   { label: "知识库巡检", groups: ["library_dedup"] },
 ];
@@ -146,7 +140,7 @@ export function AdminConfigCenter() {
   const [confirmTarget, setConfirmTarget] = useState<string | null>(null);  // 待确认的慢速/副作用验证目标
   const [guideOpen, setGuideOpen] = useState(false);
 
-  /** 验证有真实副作用或耗时较长（Slack 发消息、Cookie 真实登录探测）时先弹确认，其余直接跑。 */
+  /** 验证有真实副作用或耗时较长（Cookie 真实登录探测）时先弹确认，其余直接跑。 */
   const runOrConfirm = (target: string) => {
     if (isSlowVerifyTarget(target)) setConfirmTarget(target);
     else run(target);
@@ -262,6 +256,7 @@ export function AdminConfigCenter() {
           const leftover = groups.filter((g) => !categorized.has(g.key));
           const renderGroup = (g: CfgGroup) => {
             const opened = open.has(g.key);
+            const readOnly = g.key === "email" || g.key === "slack";
             return (
               <div key={g.key} className="rounded-md border border-border/60">
                 <button
@@ -277,6 +272,7 @@ export function AdminConfigCenter() {
                 </button>
                 {opened && (
                   <div className="space-y-1 border-t border-border/60 px-3 py-2">
+                    {readOnly && <p className="text-xs text-muted-foreground">外部只读边界：保留历史凭据，不开放编辑、启用、验证或发送。</p>}
                     {g.items.map((it) => {
                       const target = VERIFY_TARGET[it.key];
                       return (
@@ -301,7 +297,7 @@ export function AdminConfigCenter() {
                               )}
                             </>
                           )}
-                          <span className="ml-auto flex items-center gap-1">
+                          {!readOnly && <span className="ml-auto flex items-center gap-1">
                             <Button variant="ghost" size="sm" className="h-7 gap-1 px-2"
                               onClick={() => openEdit(it)}>
                               <Pencil className="h-3.5 w-3.5" /> 修改
@@ -321,7 +317,7 @@ export function AdminConfigCenter() {
                                 ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
                                 : <Play className="h-3.5 w-3.5" />} 验证
                             </Button>
-                          </span>
+                          </span>}
                         </div>
                       );
                     })}
@@ -441,10 +437,10 @@ export function AdminConfigCenter() {
         </div>
       </Modal>
 
-      {/* 慢速/副作用验证确认（Slack 发消息、Cookie 真实登录探测） */}
+      {/* 慢速/副作用验证确认（Cookie 真实登录探测） */}
       <Modal open={!!confirmTarget} onClose={() => setConfirmTarget(null)} title="确认验证">
         <p className="text-sm text-muted-foreground">
-          {confirmTarget && slowVerifyConfirmText(confirmTarget)} 确定继续？
+          {confirmTarget && slowVerifyConfirmText()} 确定继续？
         </p>
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="outline" size="sm" onClick={() => setConfirmTarget(null)}>取消</Button>
@@ -571,7 +567,7 @@ export function SelfConfigCenter() {
       {/* 慢速/副作用验证确认（Cookie 真实登录探测等） */}
       <Modal open={!!confirmTarget} onClose={() => setConfirmTarget(null)} title="确认验证">
         <p className="text-sm text-muted-foreground">
-          {confirmTarget && slowVerifyConfirmText(confirmTarget)} 确定继续？
+          {confirmTarget && slowVerifyConfirmText()} 确定继续？
         </p>
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="outline" size="sm" onClick={() => setConfirmTarget(null)}>取消</Button>

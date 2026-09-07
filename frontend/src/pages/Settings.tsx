@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
-  Boxes, Cpu, Mail, Slack, Sparkles, Save, Moon, Sun, CircleDot, RefreshCw,
+  Boxes, Cpu, Sparkles, Save, Moon, Sun, CircleDot, RefreshCw,
   Play, Loader2, CheckCircle2, XCircle, ShieldAlert, Unlock, UserRound,
   KeyRound, SlidersHorizontal, Activity, ShieldCheck,
 } from "lucide-react";
@@ -10,7 +10,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Modal } from "@/components/ui/modal";
 import { api } from "@/lib/api";
 import { useAuth, isAdminish, roleLabel } from "@/lib/auth";
 import { AdminConfigCenter, SelfConfigCenter } from "@/components/ConfigCenter";
@@ -245,7 +244,6 @@ function SettingsContent() {
   const [savingDocumentModel, setSavingDocumentModel] = useState(false);
   const [testing, setTesting] = useState<string | null>(null); // 正在自检的 target
   const [results, setResults] = useState<Record<string, CheckResult>>({});
-  const [slackConfirm, setSlackConfirm] = useState(false); // Slack 自检会发消息，先确认
   const [togglingKey, setTogglingKey] = useState<string | null>(null); // 正在切换开关的 connector.key
 
   const selectSection = (next: SettingsSection) => {
@@ -327,14 +325,12 @@ function SettingsContent() {
     }
   };
 
-  // target 为 null 表示不可主动自检，仅展示配置状态（目前 4 项都有对应自检目标）
+  // target 为 null 表示不可主动自检，仅展示配置状态
   // enabledKey：对应配置中心的开关字段（管理员可用它临时启停服务，不影响已保存的凭证）
   const connectors: {
-    key: string; label: string; icon: typeof Mail; on?: boolean; hint: string;
-    target: string | null; sideEffect?: boolean; enabledKey: string;
+    key: string; label: string; icon: typeof Sparkles; on?: boolean; hint: string;
+    target: string | null; enabledKey: string;
   }[] = [
-    { key: "email", label: "邮件 (SMTP)", icon: Mail, on: ov?.connectors.email, hint: "连接并登录，不发送邮件", target: "email", enabledKey: "smtp_enabled" },
-    { key: "slack", label: "Slack", icon: Slack, on: ov?.connectors.slack, hint: "向频道发送一条测试消息", target: "slack", sideEffect: true, enabledKey: "slack_enabled" },
     { key: "embedding", label: "语义召回 (embedding)", icon: Sparkles, on: ov?.connectors.embedding, hint: "请求一次 embedding 端点", target: "embedding", enabledKey: "embedding_enabled" },
     { key: "checkpoint", label: "断点续跑 (checkpoint)", icon: Save, on: ov?.connectors.checkpoint, hint: "本地存储，检查存储目录可写", target: "checkpoint", enabledKey: "checkpoint_enabled" },
   ];
@@ -492,6 +488,7 @@ function SettingsContent() {
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base">平台连接器 / 增强</CardTitle>
+                    <p className="text-xs text-muted-foreground">邮件和 Slack 外发已关闭；历史配置仅在平台配置中只读保留。</p>
                   </CardHeader>
                   <CardContent className="space-y-2">
                     {connectors.map((c) => {
@@ -520,7 +517,7 @@ function SettingsContent() {
                               variant="outline"
                               size="sm"
                               disabled={busy}
-                              onClick={() => (c.sideEffect ? setSlackConfirm(true) : runTest(c.target!))}
+                              onClick={() => runTest(c.target!)}
                               className="h-7 gap-1.5"
                             >
                               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
@@ -578,26 +575,6 @@ function SettingsContent() {
         </div>
       </div>
 
-      {/* Slack 自检确认（会向频道发送测试消息） */}
-      <Modal open={slackConfirm} onClose={() => setSlackConfirm(false)} title="测试 Slack 连接">
-        <p className="text-sm text-muted-foreground">
-          自检会向 Webhook 绑定的频道<strong className="text-foreground">发送一条测试消息</strong>，频道成员可见。确定继续？
-        </p>
-        <div className="mt-4 flex justify-end gap-2">
-          <Button variant="outline" size="sm" onClick={() => setSlackConfirm(false)}>
-            取消
-          </Button>
-          <Button
-            size="sm"
-            onClick={() => {
-              setSlackConfirm(false);
-              runTest("slack");
-            }}
-          >
-            发送测试消息
-          </Button>
-        </div>
-      </Modal>
     </>
   );
 }

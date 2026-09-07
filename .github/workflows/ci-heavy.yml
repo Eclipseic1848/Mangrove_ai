@@ -17,6 +17,7 @@ on:
           - database-pagination
           - scheduler-owner
           - telemetry-control
+          - external-readonly
           - g1-frozen-contracts
           - docker-build
           - dependency-groups
@@ -30,7 +31,7 @@ defaults:
 
 jobs:
   python-heavy:
-    if: inputs.gate == 'full-regression' || inputs.gate == 'account-execution' || inputs.gate == 'g1-frozen-contracts' || inputs.gate == 'entry-auth' || inputs.gate == 'platform-sessions' || inputs.gate == 'cancellation' || inputs.gate == 'database-pagination' || inputs.gate == 'scheduler-owner' || inputs.gate == 'telemetry-control'
+    if: inputs.gate == 'full-regression' || inputs.gate == 'account-execution' || inputs.gate == 'g1-frozen-contracts' || inputs.gate == 'entry-auth' || inputs.gate == 'platform-sessions' || inputs.gate == 'cancellation' || inputs.gate == 'database-pagination' || inputs.gate == 'scheduler-owner' || inputs.gate == 'telemetry-control' || inputs.gate == 'external-readonly'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -84,6 +85,15 @@ jobs:
               tests/test_data_task_api.py tests/test_source_acquisition_api.py tests/test_scheduler_owner.py \
               scripts/test_scheduler_api.py \
               --randomly-seed=0 --timeout=120 --junitxml=.artifacts/heavy/platform-sessions.xml
+          elif [[ "${{ inputs.gate }}" == "external-readonly" ]]; then
+            python -m pytest -q tests/test_external_readonly_delivery.py tests/test_browser_readonly_boundary.py \
+              tests/test_model_relay_readonly_tools.py tests/test_model_connections_api.py \
+              tests/test_account_execution_confirm.py tests/test_db_writer.py tests/test_settings_permissions.py \
+              tests/test_capability_host.py tests/test_capability_adapters.py tests/test_agent_kernel.py \
+              tests/test_coremind_agent_kernel_adapter.py tests/test_semantic_harness_policy.py \
+              tests/test_source_acquisition.py tests/test_source_acquisition_api.py tests/test_scheduler_owner.py \
+              tests/test_account_execution_legacy.py tests/test_account_execution_providers.py \
+              --randomly-seed=0 --timeout=120 --junitxml=.artifacts/heavy/external-readonly.xml
           elif [[ "${{ inputs.gate }}" == "telemetry-control" ]]; then
             python -m pytest -q tests/test_workspace_telemetry.py tests/test_workspace_telemetry_control.py \
               tests/test_workspace_telemetry_lifecycle.py tests/test_semantic_workspace_api.py \
@@ -185,7 +195,7 @@ jobs:
           retention-days: 14
 
   frontend-e2e:
-    if: inputs.gate == 'full-regression' || inputs.gate == 'account-execution' || inputs.gate == 'cancellation' || inputs.gate == 'frontend-e2e' || inputs.gate == 'platform-sessions'
+    if: inputs.gate == 'full-regression' || inputs.gate == 'account-execution' || inputs.gate == 'cancellation' || inputs.gate == 'frontend-e2e' || inputs.gate == 'platform-sessions' || inputs.gate == 'external-readonly'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     defaults:

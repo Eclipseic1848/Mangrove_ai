@@ -193,3 +193,21 @@ test("chat ordering: 旧动作迟到不能消费新会话同下标按钮", async
   await expect(page.getByRole("button", { name: "确认入库", exact: true })).toBeVisible();
   await expect(page.getByText("A已完成", { exact: true })).toHaveCount(0);
 });
+
+
+test("外部只读边界：聊天忽略外发动作，保留内部入库与模板", async ({ page }) => {
+  await openChat(page);
+  await expect(page.getByText("邮件推送", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "会话A", exact: true }).click();
+  await send(page, "整理虚构资料", 0);
+  await emit(page, 0, "result", { reply: "整理完成", task_id: "fixture-task", actions: ["email", "slack", "db", "template"] });
+  await emit(page, 0, "done", {});
+  await expect(page.getByRole("button", { name: /确认发送邮件|确认推送 Slack/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "沉淀为模板", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "确认入库", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).chatMock.calls)).toContain("POST /api/confirm/db");
+  await page.getByRole("button", { name: "沉淀为模板", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as any).chatMock.calls)).toContain("POST /api/confirm/template");
+  const calls = await page.evaluate(() => (window as any).chatMock.calls as string[]);
+  expect(calls.filter((call) => /confirm\/(email|slack)/.test(call))).toEqual([]);
+});

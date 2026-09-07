@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Plus, Send, Square, PanelRightOpen, PanelRightClose, Download, Database, Mail, Slack, FileText,
+  Plus, Send, Square, PanelRightOpen, PanelRightClose, Download, Database, FileText,
   CalendarClock, Trash2, Pencil, AlertTriangle, Award, Sparkles, MessageSquare,
   Copy, ThumbsUp, ThumbsDown,
 } from "lucide-react";
@@ -69,8 +69,6 @@ interface ModelOpt { provider: string; model: string; label: string }
 
 const ACTION_LABELS: Record<string, { label: string; icon: any; path: string }> = {
   db: { label: "确认入库", icon: Database, path: "/api/confirm/db" },
-  email: { label: "确认发送邮件", icon: Mail, path: "/api/confirm/email" },
-  slack: { label: "确认推送 Slack", icon: Slack, path: "/api/confirm/slack" },
   template: { label: "沉淀为模板", icon: Sparkles, path: "/api/confirm/template" },
 };
 
@@ -848,7 +846,7 @@ const SAMPLES = [
   { tag: "定向网页", text: "抓取这个网页的正文并总结今日财经要闻：https://finance.sina.com.cn/" },
   { tag: "站内检索", text: "去懂车帝搜集3条问界M9的资讯并总结要点" },
   { tag: "定时任务", text: "每周一三五 9:30 搜集3条医疗设备招标公告，整理成标讯报告" },
-  { tag: "邮件推送", text: "采集3条关于新能源汽车销量的最新新闻，生成汇总报告并发邮件到 test@example.com" },
+  { tag: "新闻汇总", text: "采集3条关于新能源汽车销量的最新新闻，生成汇总报告" },
 ];
 
 function Welcome({ onPick }: { onPick: (t: string) => void }) {

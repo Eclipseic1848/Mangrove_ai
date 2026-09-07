@@ -2,7 +2,7 @@
 
 副作用提示（前端据此决定是否二次确认）：
 - email      ：仅连接 + 登录，不发送邮件——无副作用。
-- slack      ：会向 Webhook 绑定的频道发送一条测试消息——有副作用，前端应先让用户确认。
+- slack      ：外部消息写入不在产品范围内，拒绝发送测试消息。
 - embedding  ：实际请求一次 embedding 端点——无外部可见副作用。
 - checkpoint ：本地 SQLite 持久化，没有远程连接可测，仅探测本地存储目录可写——无副作用。
 
@@ -74,11 +74,8 @@ async def selfcheck(body: SelfCheckIn, _admin=Depends(require_admin)):
             return {"ok": True, "detail": "SMTP 连接并登录成功（未发送邮件）"}
 
         if target == "slack":
-            from src.conductor.slack_sender import is_slack_configured, send_report, unavailable_reason
-            if not is_slack_configured():
-                return {"ok": False, "detail": unavailable_reason()}
-            await send_report("Mangrove 连接自检", "这是一条来自设置页的连接测试消息，可忽略。")
-            return {"ok": True, "detail": "已向 Slack 频道发送测试消息"}
+            from src.external_readonly import reject_external_write
+            reject_external_write()
 
         if target == "embedding":
             from src.memory.embeddings import (

@@ -51,25 +51,25 @@ def test_late_put_is_rejected(pending):
 async def test_authenticated_then_held_confirmation_never_starts_action(pending, monkeypatch, flag):
     store, old, actions = pending
     calls = []
-    monkeypatch.setattr(confirm, 'send_email', lambda *args, **kwargs: calls.append(1) or 1)
+    monkeypatch.setattr(confirm, 'write_items', lambda *args, **kwargs: calls.append(1) or 1)
     with execution.execution_context(old):
-        actions.put(old.owner_user_id, 'task', {'email': {'to': ['fake@example.invalid'], 'subject': '虚构'}})
+        actions.put(old.owner_user_id, 'task', {'db': {'task_id': 'task', 'items': ['fake']}})
         store.update_user(old.owner_user_id, **{flag: True})
         with pytest.raises(execution.ExecutionDenied):
-            await confirm.confirm_email(ConfirmIn(task_id='task'), user={'user_id': old.owner_user_id})
+            await confirm.confirm_db(ConfirmIn(task_id='task'), user={'user_id': old.owner_user_id})
     assert calls == []
 
 
 @pytest.mark.asyncio
-async def test_valid_email_once(pending, monkeypatch):
+async def test_valid_internal_db_once(pending, monkeypatch):
     store, old, actions = pending
     calls = []
-    monkeypatch.setattr(confirm, 'send_email', lambda *args, **kwargs: calls.append(args) or 1)
+    monkeypatch.setattr(confirm, 'write_items', lambda *args, **kwargs: calls.append(args) or 1)
     with execution.execution_context(old):
-        actions.put(old.owner_user_id, 'task', {'email': {'to': ['fake@example.invalid'], 'subject': '虚构'}})
-        await confirm.confirm_email(ConfirmIn(task_id='task'), user={'user_id': old.owner_user_id})
+        actions.put(old.owner_user_id, 'task', {'db': {'task_id': 'task', 'items': ['fake']}})
+        await confirm.confirm_db(ConfirmIn(task_id='task'), user={'user_id': old.owner_user_id})
         with pytest.raises(Exception):
-            await confirm.confirm_email(ConfirmIn(task_id='task'), user={'user_id': old.owner_user_id})
+            await confirm.confirm_db(ConfirmIn(task_id='task'), user={'user_id': old.owner_user_id})
     assert len(calls) == 1
 
 
@@ -81,10 +81,10 @@ async def test_cancelled_wait_keeps_real_thread_and_unknown_binding(pending, mon
         reached.set()
         assert release.wait(5)
         return 1
-    monkeypatch.setattr(confirm, 'send_email', fake_send)
+    monkeypatch.setattr(confirm, 'write_items', fake_send)
     with execution.execution_context(old):
-        actions.put(old.owner_user_id, 'task', {'email': {'to': ['fake@example.invalid'], 'subject': '虚构'}})
-        task = asyncio.create_task(confirm.confirm_email(ConfirmIn(task_id='task'), user={'user_id': old.owner_user_id}))
+        actions.put(old.owner_user_id, 'task', {'db': {'task_id': 'task', 'items': ['fake']}})
+        task = asyncio.create_task(confirm.confirm_db(ConfirmIn(task_id='task'), user={'user_id': old.owner_user_id}))
         try:
             assert await asyncio.to_thread(reached.wait, 3)
             task.cancel()
@@ -131,40 +131,37 @@ async def test_unknown_action_cannot_be_registered_or_consumed_again(pending, mo
     def send(*args, **kwargs):
         calls.append(1)
         raise RuntimeError('fake unknown')
-    monkeypatch.setattr(confirm, 'send_email', send)
+    monkeypatch.setattr(confirm, 'write_items', send)
     with execution.execution_context(old):
-        payload = {'email': {'to': ['fake@example.invalid'], 'subject': '虚构'}}
+        payload = {'db': {'task_id': 'task', 'items': ['fake']}}
         actions.put(old.owner_user_id, 'task', payload)
         with pytest.raises(Exception):
-            await confirm.confirm_email(ConfirmIn(task_id='task'), user={'user_id': old.owner_user_id})
+            await confirm.confirm_db(ConfirmIn(task_id='task'), user={'user_id': old.owner_user_id})
         with pytest.raises(execution.ExecutionDenied):
             actions.put(old.owner_user_id, 'task', payload)
         with pytest.raises(HTTPException) as consumed:
-            await confirm.confirm_email(ConfirmIn(task_id='task'), user={'user_id': old.owner_user_id})
+            await confirm.confirm_db(ConfirmIn(task_id='task'), user={'user_id': old.owner_user_id})
         assert consumed.value.status_code == 404
     assert calls == [1]
 
 
 @pytest.mark.asyncio
-async def test_normal_db_slack_and_template_keep_business_results(pending, monkeypatch):
+async def test_normal_db_and_template_keep_business_results(pending, monkeypatch):
     store, old, actions = pending
     calls = []
     monkeypatch.setattr(confirm, 'write_items', lambda *args, **kwargs: calls.append('db') or 2)
-    async def slack(*args):
-        calls.append('slack')
     async def distill(*args, **kwargs):
         return {'title': '虚构', 'keywords': [], 'body': '虚构'}
     async def save(**kwargs):
         calls.append('template')
         return 'fake-template'
-    monkeypatch.setattr(confirm, 'send_slack', slack)
     monkeypatch.setattr(confirm, 'distill_template', distill)
     monkeypatch.setattr(confirm, 'save_template', save)
     with execution.execution_context(old):
-        actions.put(old.owner_user_id, 'task', {'db': {'task_id': 'task', 'items': ['fake']}, 'slack': {'title': '虚构'}, 'template': {'intent': '虚构', 'data_type': 'generic', 'analysis': '虚构'}})
-        for handler in (confirm.confirm_db, confirm.confirm_slack, confirm.confirm_template):
+        actions.put(old.owner_user_id, 'task', {'db': {'task_id': 'task', 'items': ['fake']}, 'template': {'intent': '虚构', 'data_type': 'generic', 'analysis': '虚构'}})
+        for handler in (confirm.confirm_db, confirm.confirm_template):
             assert (await handler(ConfirmIn(task_id='task'), user={'user_id': old.owner_user_id}))['ok']
-    assert calls == ['db', 'slack', 'template']
+    assert calls == ['db', 'template']
 
 
 def test_schedule_confirmation_claim_retains_context(pending, monkeypatch):
@@ -191,16 +188,16 @@ async def test_http_dependency_freezes_legitimate_owner(pending, monkeypatch):
     import httpx
     store, old, actions = pending
     calls = []
-    monkeypatch.setattr(confirm, 'send_email', lambda *args, **kwargs: calls.append(execution.current_authorization()) or 1)
+    monkeypatch.setattr(confirm, 'write_items', lambda *args, **kwargs: calls.append(execution.current_authorization()) or 1)
     app = FastAPI()
     app.include_router(confirm.router)
     app.dependency_overrides[auth.get_current_user] = lambda: store.get_user(old.owner_user_id)
     with execution.execution_context(old):
-        actions.put(old.owner_user_id, 'task', {'email': {'to': ['fake@example.invalid'], 'subject': '虚构'}})
+        actions.put(old.owner_user_id, 'task', {'db': {'task_id': 'task', 'items': ['fake']}})
     assert execution.current_authorization(required=False) is None
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://test.invalid') as client:
-        response = await client.post('/api/confirm/email', json={'task_id': 'task'})
-        missing = await client.post('/api/confirm/email', json={'task_id': 'unknown'})
+        response = await client.post('/api/confirm/db', json={'task_id': 'task'})
+        missing = await client.post('/api/confirm/db', json={'task_id': 'unknown'})
     assert response.status_code == 200
     assert missing.status_code == 404
     assert calls == [old]
@@ -211,23 +208,24 @@ async def test_parallel_confirmation_returns_409_without_second_action(pending, 
     from fastapi import FastAPI
     import httpx
     store, old, actions = pending
-    reached, release = asyncio.Event(), asyncio.Event()
+    reached, release = threading.Event(), threading.Event()
     calls = []
-    async def slack(*args):
+    def write(*args, **kwargs):
         calls.append(1)
         reached.set()
-        await release.wait()
-    monkeypatch.setattr(confirm, 'send_slack', slack)
+        assert release.wait(5)
+        return 1
+    monkeypatch.setattr(confirm, 'write_items', write)
     app = FastAPI()
     app.include_router(confirm.router)
     app.dependency_overrides[auth.get_current_user] = lambda: store.get_user(old.owner_user_id)
     with execution.execution_context(old):
-        actions.put(old.owner_user_id, 'task', {'slack': {'title': '虚构'}})
+        actions.put(old.owner_user_id, 'task', {'db': {'task_id': 'task', 'items': ['fake']}})
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://test.invalid') as client:
-        first = asyncio.create_task(client.post('/api/confirm/slack', json={'task_id': 'task'}))
+        first = asyncio.create_task(client.post('/api/confirm/db', json={'task_id': 'task'}))
         try:
-            await reached.wait()
-            second = await client.post('/api/confirm/slack', json={'task_id': 'task'})
+            assert await asyncio.to_thread(reached.wait, 3)
+            second = await client.post('/api/confirm/db', json={'task_id': 'task'})
             assert second.status_code == 409
         finally:
             release.set()

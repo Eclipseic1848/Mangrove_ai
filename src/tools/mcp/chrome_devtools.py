@@ -52,6 +52,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List
 from enum import Enum
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from src.config.settings import CHROME_DEVTOOLS_MCP_INDEX_JS, PROJECT_ROOT
 from src.services.voc_processor import filter_voc_file, analyze_voc_file
@@ -69,6 +70,33 @@ logger = logging.getLogger(__name__)
 DEFAULT_DOWNLOAD_DIR = PROJECT_ROOT / "downloads"
 # 分析结果目录（VOC、视频文字提取等），与 downloads 子目录结构对齐
 DEFAULT_ANALYSIS_DIR = PROJECT_ROOT / "analysis"
+
+# 只开放已知读取或本机视图操作；服务端自报只读不能授权脚本、表单和业务写入。
+_READ_ONLY_BROWSER_TOOLS = {
+    "navigate_page": "browser_navigate", "new_page": "browser_new_page",
+    "list_pages": "browser_list_pages", "select_page": "browser_select_page",
+    "close_page": "browser_close_page", "take_screenshot": "browser_screenshot",
+    "take_snapshot": "browser_snapshot", "wait_for": "browser_wait_for",
+    "list_console_messages": "browser_console_messages",
+    "get_console_message": "browser_get_console_message",
+    "list_network_requests": "browser_network_requests",
+    "get_network_request": "browser_get_network_request", "resize_page": "browser_resize_page",
+}
+
+
+def _assert_readonly_browser_call(name: str, arguments: dict) -> None:
+    if name not in _READ_ONLY_BROWSER_TOOLS:
+        raise PermissionError("外部系统仅支持读取；该浏览器操作未获准")
+    if name in {"navigate_page", "new_page"}:
+        parsed = urlsplit(arguments.get("url", ""))
+        if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+                or parsed.username or parsed.password
+                or arguments.get("type", "url") != "url"):
+            raise ValueError("只允许读取明确的 HTTP/HTTPS 页面地址")
+    if arguments.get("filePath"):
+        target = Path(arguments["filePath"]).resolve()
+        if not target.is_relative_to(PROJECT_ROOT.resolve()):
+            raise PermissionError("浏览器输出只能保存在本项目目录")
 
 # MCP 规范结果约定：MCP 端在响应中输出一行 "MCP_TOOL_RESULT:" + 单行 JSON，
 # 便于 Python 端可靠解析 file_path / file_name 等，避免依赖正则或非结构化文本。
@@ -342,6 +370,13 @@ class ChromeDevToolsMCP:
         Returns:
             响应结果
         """
+        # 兄弟调用者直接发 RPC 也不能绕过只读操作门。
+        if method == "tools/call":
+            payload = params or {}
+            _assert_readonly_browser_call(payload.get("name", ""), payload.get("arguments") or {})
+            # 每次发送重新核对目录；普通调用和直接 RPC 都不沿用旧放行事实。
+            if payload.get("name") not in {item["name"] for item in self.list_tools()}:
+                raise PermissionError("浏览器工具不可用或只读元数据冲突")
         if not self._process:
             raise RuntimeError("MCP 服务器进程未启动")
         if not skip_connected_check and not self._connected:
@@ -401,6 +436,9 @@ class ChromeDevToolsMCP:
             params: 参数
             skip_connected_check: 是否跳过连接状态检查（用于初始化阶段）
         """
+        # 本客户端只发送初始化通知；工具调用不能藏在无回执通道中绕过执行门。
+        if method != "notifications/initialized":
+            raise PermissionError("不支持通过通知通道执行浏览器操作")
         if not self._process:
             raise RuntimeError("MCP 服务器进程未启动")
         if not skip_connected_check and not self._connected:
@@ -566,7 +604,11 @@ class ChromeDevToolsMCP:
         """
         response = self._send_request("tools/list")
         logger.info(f"--------可用工具列表------------{response}")
-        return response.get("result", {}).get("tools", [])
+        return [item for item in response.get("result", {}).get("tools", [])
+                if item.get("name") in _READ_ONLY_BROWSER_TOOLS
+                and isinstance(item.get("annotations", {}), dict)
+                and item.get("annotations", {}).get("readOnlyHint", True) is True
+                and item.get("annotations", {}).get("destructiveHint", False) is False]
     
     def call_tool(self, tool_name: str, arguments: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
@@ -579,6 +621,7 @@ class ChromeDevToolsMCP:
         Returns:
             工具执行结果
         """
+        _assert_readonly_browser_call(tool_name, arguments or {})
         # 执行工具入口：便于排查执行过程中是否有其他操作
         args_preview = arguments or {}
         args_str = json.dumps(args_preview, ensure_ascii=False)
@@ -2881,7 +2924,8 @@ def create_browser_tools(mcp_client: ChromeDevToolsMCP) -> List:
         browser_analyze_video, # Qwen 视频文字提取：从视频画面提取字幕/标牌/界面文字
     ]
     
-    return tools
+    return [item for item in tools if item.name in _READ_ONLY_BROWSER_TOOLS.values()
+            or item.name in {"browser_filter_voc", "browser_analyze_voc", "browser_analyze_video"}]
 
 
 # ============================================================================
@@ -2937,4 +2981,3 @@ def save_cursor_mcp_config(
     
     logger.info(f"Cursor MCP 配置已保存到: {config_path}")
     return str(config_path)
-

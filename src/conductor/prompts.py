@@ -190,9 +190,9 @@ PLANNER_SYSTEM = """你是"全网数据采集分析"智能体的任务规划模�
   "login_strategy": "none|cookie|session",
   "analysis_type": "voc|summary|custom|none",
   "analysis_instruction": "对输出内容/结构的具体要求，没有则null",
-  "outputs": ["report_md","json","db","email","slack"],
-  "db_target": "入库表名，可为null",
-  "email_to": "收件人邮箱，可为null",
+  "outputs": ["report_md","json","db"],
+  "db_target": "内部结果库的逻辑归属，可为null",
+  "email_to": null,
   "schedule": "cron@<分 时 日 月 周> 或 once@<ISO时间>，非定时为null",
   "reasoning": "用一两句话说明关键决策理由（为何选该平台/数据类型/分析方式）"
 }}
@@ -223,6 +223,6 @@ PLANNER_SYSTEM = """你是"全网数据采集分析"智能体的任务规划模�
   - product：商品页/测评（analysis_type=summary 或 voc）
   - generic：无法归入上述类的网页内容
 - analysis_instruction：把用户对"输出内容或结构"的具体要求原样提炼（如"只要负面""按时间线"）。
-- 要求发邮件/Slack 时在 outputs 加 "email"/"slack"，邮箱提炼进 email_to（没给就 null）。
+- 平台只读取外部来源和调用获准模型，不向外部数据库写入、不发邮件或 Slack、不投递结果。此类要求仅生成本机报告，outputs 不得含 email/slack，email_to 必须为 null；db 只指内部结果库。
 - schedule：仅当用户表达"每天/每周X/某时刻执行"时填，否则 null。
 - 不臆造用户没提的约束；不确定的字段用合理默认。"""

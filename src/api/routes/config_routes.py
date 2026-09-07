@@ -352,11 +352,8 @@ async def _verify_target(target: str) -> str:
         await asyncio.to_thread(verify_connection)
         return "SMTP 连接并登录成功（未发送邮件）"
     if target == "slack":
-        from src.conductor.slack_sender import is_slack_configured, send_report, unavailable_reason
-        if not is_slack_configured():
-            raise RuntimeError(unavailable_reason())
-        await send_report("Mangrove 配置验证", "配置中心连通性测试消息，可忽略。")
-        return "已向 Slack 发送测试消息"
+        from src.external_readonly import reject_external_write
+        reject_external_write()
     if target == "semantic":
         from src.memory.embeddings import embed_texts_with_model, is_rerank_configured, rerank_scores
         got = await asyncio.to_thread(embed_texts_with_model, ["连通验证"])

@@ -1,7 +1,7 @@
 """
 入库实现（MVP）：把清洗后的数据写入数据库。
 
-按 settings.db_backend 选择后端：sqlite（默认，本地）| mysql（用 mysql_* 连接，PyMySQL）。
+保留内部 SQLite 结果落库；旧 MySQL 外部业务写入口永久拒绝。
 仅在用户经 HITL 确认后调用（见前端 / output 节点）。
 表结构通用，按 db_target 区分逻辑归属（记录在 source 列）。
 """
@@ -15,6 +15,7 @@ from typing import Any, Dict, List
 
 from src.config.settings import PROJECT_ROOT, settings
 from src.database_migrations import DatabaseTarget, inspect_database
+from src.external_readonly import reject_external_write
 
 _DB_PATH = PROJECT_ROOT / "data" / "app.db"
 _TABLE = "collected_items"
@@ -34,15 +35,6 @@ _INSERT_COLUMN_SPEC = tuple(
     if inserted
 )
 _INSERT_COLUMNS_SQL = ", ".join(name for name, _ in _INSERT_COLUMN_SPEC)
-_MYSQL_COLUMN_DEFINITIONS = dict(_INSERT_COLUMN_SPEC)
-_MYSQL_SCHEMA_DDL = (
-    f"CREATE TABLE {_TABLE} (\n"
-    + ",\n".join(
-        f"    {name} {definition}"
-        for name, definition, _inserted in _MYSQL_COLUMN_SPEC
-    )
-    + "\n) CHARACTER SET utf8mb4;"
-)
 
 
 def _connect() -> sqlite3.Connection:
@@ -70,60 +62,8 @@ def _write_sqlite(rows: List[tuple]) -> int:
 
 
 def _write_mysql(rows: List[tuple]) -> int:
-    """写入已经由 DBA 显式安装 Schema 的 MySQL。"""
-    import pymysql
-
-    conn = pymysql.connect(
-        host=settings.mysql_host,
-        port=settings.mysql_port,
-        user=settings.mysql_user,
-        password=settings.mysql_password,
-        database=settings.mysql_database,
-        charset="utf8mb4",
-    )
-    try:
-        with conn.cursor() as cur:
-            # 远程 MySQL 不允许在业务写入路径隐式建表；缺 Schema 由数据库明确拒绝。
-            try:
-                cur.executemany(
-                    f"INSERT INTO {_TABLE} ({_INSERT_COLUMNS_SQL}) "
-                    f"VALUES ({', '.join('%s' for _ in _INSERT_COLUMN_SPEC)})",
-                    rows,
-                )
-            except pymysql.MySQLError as exc:
-                if exc.args and exc.args[0] == 1146:
-                    raise RuntimeError(
-                        "Legacy Conductor MySQL 缺少 collected_items 表；"
-                        "未执行自动建表。请由数据库管理员在目标库显式执行：\n"
-                        f"{_MYSQL_SCHEMA_DDL}"
-                    ) from exc
-                if exc.args and exc.args[0] == 1054:
-                    missing_column = next(
-                        (
-                            column
-                            for column in _MYSQL_COLUMN_DEFINITIONS
-                            if f"'{column}'" in str(exc)
-                        ),
-                        None,
-                    )
-                    if missing_column is None:
-                        dba_command = "SHOW COLUMNS FROM collected_items;"
-                    else:
-                        column_type = _MYSQL_COLUMN_DEFINITIONS[missing_column]
-                        dba_command = (
-                            "ALTER TABLE collected_items ADD COLUMN "
-                            f"{missing_column} {column_type};"
-                        )
-                    raise RuntimeError(
-                        "Legacy Conductor MySQL 缺少项目要求的列；"
-                        "未执行自动改表。请由数据库管理员核对后显式执行：\n"
-                        f"{dba_command}"
-                    ) from exc
-                raise
-        conn.commit()
-        return len(rows)
-    finally:
-        conn.close()
+    """旧 MySQL 接缝不再允许外部业务写；连接或凭据读取之前拒绝。"""
+    reject_external_write()
 
 
 def write_items(

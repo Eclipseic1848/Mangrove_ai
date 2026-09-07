@@ -589,6 +589,7 @@ class ConnectionBroker:
         if str(grant["api_format"]) != "gemini_generate_content":
             if payload.get("model") != grant["model"]:
                 raise GrantError("请求模型与 Grant 冻结模型不一致")
+        _validate_local_tool_request(payload, str(grant["api_format"]))
 
         endpoint = _provider_endpoint(grant, operation)
         allow_private = grant["locality"] == "managed_private"
@@ -1445,6 +1446,61 @@ def _connection_version(connection: Mapping[str, object]) -> str:
     return hashlib.sha256(
         f"{secret_version}\0{model}".encode("utf-8")
     ).hexdigest()
+
+
+def _validate_local_tool_request(payload: dict, api_format: str) -> None:
+    """Provider 只生成本机函数调用，不能代 Runtime 装载外部执行器。"""
+    # 旧服务端上下文可能携带未由宿主冻结的工具，不能凭引用恢复其执行权限。
+    if {"previous_response_id", "conversation", "container", "mcp_servers",
+            "cachedContent", "cached_content"} & payload.keys():
+        raise GrantError("模型 Relay 不接受未授权的服务端工具上下文")
+    if api_format == "openai_responses" and isinstance(payload.get("input"), list):
+        if any(isinstance(item, dict) and item.get("type") in {
+                "item_reference", "mcp_approval_response", "mcp_call", "mcp_list_tools",
+                "mcp_approval_request"} for item in payload["input"]):
+            raise GrantError("模型 Relay 不接受服务端工具引用或授权回复")
+    tools = payload.get("tools", [])
+    if not isinstance(tools, list):
+        raise GrantError("模型工具必须是本机函数定义列表")
+    for tool in tools:
+        if not isinstance(tool, dict):
+            raise GrantError("模型工具必须是本机函数定义")
+        if api_format == "openai_chat_completions":
+            valid = (tool.get("type") == "function" and set(tool) <= {"type", "function"}
+                     and isinstance(tool.get("function"), dict)
+                     and bool(tool["function"].get("name")))
+        elif api_format == "openai_responses":
+            valid = (tool.get("type") == "function" and bool(tool.get("name"))
+                     and set(tool) <= {"type", "name", "description", "parameters", "strict"})
+        elif api_format == "anthropic_messages":
+            valid = (tool.get("type", "custom") == "custom" and bool(tool.get("name"))
+                     and isinstance(tool.get("input_schema"), dict)
+                     and set(tool) <= {"type", "name", "description", "input_schema", "cache_control", "strict"})
+        else:
+            declarations = tool.get("functionDeclarations", tool.get("function_declarations"))
+            valid = (len(tool) == 1 and set(tool) <= {"functionDeclarations", "function_declarations"}
+                     and isinstance(declarations, list) and bool(declarations)
+                     and all(isinstance(item, dict) and bool(item.get("name")) for item in declarations))
+        if not valid:
+            raise GrantError("模型 Relay 只允许本机函数工具，拒绝远程或未知执行器")
+    # 只检查协议的控制字段，不扫描函数参数 schema 中同名的普通业务属性。
+    if "tool_choice" in payload:
+        choice = payload["tool_choice"]
+        if api_format == "anthropic_messages":
+            valid = (isinstance(choice, dict) and choice.get("type") in {"auto", "any", "none", "tool"}
+                     and set(choice) <= {"type", "name", "disable_parallel_tool_use"})
+        else:
+            valid = (isinstance(choice, str) and choice in {"auto", "none", "required"}) or (
+                isinstance(choice, dict) and choice.get("type") == "function"
+                and set(choice) <= {"type", "name", "function"})
+        if not valid:
+            raise GrantError("模型工具选择不能请求服务端执行器")
+    for key in ("toolConfig", "tool_config"):
+        if key in payload:
+            config = payload[key]
+            if (api_format != "gemini_generate_content" or not isinstance(config, dict)
+                    or not set(config) <= {"functionCallingConfig", "function_calling_config"}):
+                raise GrantError("模型工具配置只能选择本机函数")
 
 
 def _validate_protocol_path(
