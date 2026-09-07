@@ -35,3 +35,11 @@ condition = "AND"
 regexTarget = "line"
 paths = ['''^src/database_migrations/schema_manifest\.json$''']
 regexes = ['''"(?:model_connection_secrets|runtime_config_secrets)"\s*:\s*"[0-9a-f]{64}"''']
+
+[[allowlists]]
+description = "反馈审计表及不可变触发器的值是结构摘要"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''^src/database_migrations/schema_manifest\.json$''']
+regexes = ['''^\s*"(?:feedback_content_access|trigger:feedback_content_access_no_(?:delete|replace|update))"\s*:\s*"[0-9a-f]{64}"\s*,?\s*$''']

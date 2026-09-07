@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 import subprocess
 import sys
+import tomllib
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -269,8 +271,8 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     ]
 
     assert "useDefault = true" in config
-    assert config.count('targetRules = ["generic-api-key"]') == 4
-    assert config.count('condition = "AND"') == 4
+    assert config.count('targetRules = ["generic-api-key"]') == 5
+    assert config.count('condition = "AND"') == 5
     assert 'regexTarget = "line"' in config
     assert '^src/database_migrations/schema_manifest\\.json$' in config
     assert 'model_connection_secrets|runtime_config_secrets' in config
@@ -284,3 +286,19 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     ) in ignored
     assert all("*" not in fingerprint for fingerprint in ignored)
     assert all(fingerprint.count(":") >= 3 for fingerprint in ignored)
+
+
+def test_feedback_schema_digest_exception_rejects_adjacent_credentials() -> None:
+    config = tomllib.loads((PROJECT_ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+    rule = next(item for item in config["allowlists"] if "feedback_content_access" in item["regexes"][0])
+    pattern = re.compile(rule["regexes"][0])
+    digest = "1234567890abcdef" * 4
+    for name in ("feedback_content_access", "trigger:feedback_content_access_no_delete",
+                 "trigger:feedback_content_access_no_replace", "trigger:feedback_content_access_no_update"):
+        line = f'  "{name}": "{digest}",'
+        assert pattern.search(line)
+        assert not pattern.search(line + ' "api_key": "synthetic-key"')
+    assert not pattern.search(f'"api_key": "{digest}"')
+    assert not pattern.search('"feedback_content_access": "synthetic-key"')
+    assert re.search(rule["paths"][0], "src/database_migrations/schema_manifest.json")
+    assert not re.search(rule["paths"][0], "other/schema_manifest.json")
