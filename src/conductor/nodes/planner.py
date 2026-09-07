@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional, Tuple
 from src.collectors import known_platforms, normalize_platform
 from src.config.settings import settings
 from src.llm import achat
+from src.memory._library_scope import execution_owner
 from src.memory import lesson_for_planner, skills_for_planner
 
 from ..prompts import PLANNER_SYSTEM
@@ -82,7 +83,7 @@ async def planner_node(state: ConductorState) -> Dict[str, Any]:
         _store = _get_store()
     except Exception:
         _store = None
-    lesson_text = lesson_for_planner(user_input, store=_store, task_id=state.get("task_id") or "")
+    lesson_text = lesson_for_planner(user_input, store=_store, task_id=state.get("task_id") or "", owner_id=execution_owner())
 
     try:
         draft, reasoning = await _plan(understanding, user_input, state.get("provider"), state.get("model"), lesson_text)

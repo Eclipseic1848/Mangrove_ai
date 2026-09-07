@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ThumbsUp, ThumbsDown, Download, RefreshCw, Filter, MessageSquare, MessagesSquare, BarChart3, Check, Trash2, Ban, Clock } from "lucide-react";
 import { toast } from "sonner";
 import { Card, CardContent } from "@/components/ui/card";
@@ -6,7 +6,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Modal } from "@/components/ui/modal";
 import { Pagination } from "@/components/ui/pagination";
-import { api, authenticatedFetch, readAuthenticatedBlob } from "@/lib/api";
+import { api, ApiError, authenticatedFetch, getSessionState, readAuthenticatedBlob, readAuthenticatedJson } from "@/lib/api";
+import { isAdminish, useAuth } from "@/lib/auth";
 
 interface Overview {
   total_sessions: number;
@@ -24,14 +25,19 @@ interface FeedbackItem {
   user_id: string;
   display_name: string | null;
   username: string | null;
-  model: string | null;
   reasons: string[];
-  comment: string | null;
   created_at: string;
-  question: string | null;
-  answer: string | null;
   status: "pending" | "resolved" | "ignored";
-  admin_note: string | null;
+  has_comment: boolean;
+  has_admin_note: boolean;
+  content_available: boolean;
+}
+
+interface AuditContent {
+  event_id: string;
+  content: { question: string | null; answer: string | null; comment: string | null; admin_note: string | null };
+  truncated: boolean;
+  content_bytes: number;
 }
 
 const REASON_OPTIONS = ["理解错误", "上下文错误", "回答不清晰", "代码错误", "回答不专业", "格式错误", "其他"];
@@ -50,12 +56,19 @@ function userLabel(it: FeedbackItem): string {
 }
 
 export function Feedback() {
+  const { user } = useAuth();
+  if (!user || !isAdminish(user.role)) return null;
+  // 同一 Owner 降权也必须卸载临时正文，不能只依赖 API 的 Owner 代数。
+  return <FeedbackPage key={`${user.user_id}:${user.role}`} actorId={user.user_id} actorRole={user.role} />;
+}
+
+function FeedbackPage({ actorId, actorRole }: { actorId: string; actorRole: string }) {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [items, setItems] = useState<FeedbackItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
-  const [expanded, setExpanded] = useState<number | null>(null);
+  const [revision, setRevision] = useState(0);
   // 筛选
   const [fRating, setFRating] = useState("");
   const [fReason, setFReason] = useState("");
@@ -64,79 +77,150 @@ export function Feedback() {
   const [fUser, setFUser] = useState("");
   const [fStatus, setFStatus] = useState("");
   // 操作弹框
-  const [resolveTarget, setResolveTarget] = useState<FeedbackItem | null>(null);
+  const [auditTarget, setAuditTarget] = useState<FeedbackItem | null>(null);
+  const [auditReason, setAuditReason] = useState("");
+  const [auditContent, setAuditContent] = useState<AuditContent | null>(null);
+  const [auditError, setAuditError] = useState("");
+  const [auditFailureEvent, setAuditFailureEvent] = useState("");
+  const [auditBusy, setAuditBusy] = useState(false);
+  const [auditAttempted, setAuditAttempted] = useState(false);
   const [resolveNote, setResolveNote] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<FeedbackItem | null>(null);
+  const auditGeneration = useRef(0);
+  const auditFlight = useRef(false);
+  const reasonInput = useRef<HTMLTextAreaElement>(null);
+  const mounted = useRef(true);
+  const current = () => mounted.current && getSessionState().user?.user_id === actorId && getSessionState().user?.role === actorRole;
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; auditGeneration.current++; };
+  }, []);
 
-  const reloadOverview = () => api.get("/api/feedback/overview").then(setOverview).catch(() => {});
+  const refresh = () => setRevision((value) => value + 1);
+  const filters = new URLSearchParams();
+  if (fRating) filters.set("rating", fRating);
+  if (fReason) filters.set("reason", fReason);
+  if (fFrom) filters.set("date_from", fFrom);
+  if (fTo) filters.set("date_to", fTo);
+  if (fUser) filters.set("user_id", fUser);
+  if (fStatus) filters.set("status", fStatus);
+  const filterQuery = filters.toString();
 
   useEffect(() => {
     setLoading(true);
-    const params = new URLSearchParams();
-    if (fRating) params.set("rating", fRating);
-    if (fReason) params.set("reason", fReason);
-    if (fFrom) params.set("date_from", fFrom);
-    if (fTo) params.set("date_to", fTo);
-    if (fUser) params.set("user_id", fUser);
-    if (fStatus) params.set("status", fStatus);
+    let active = true;
     Promise.all([
       api.get("/api/feedback/overview"),
-      api.get(`/api/feedback/list?limit=${PAGE_SIZE}&offset=${(page - 1) * PAGE_SIZE}&${params.toString()}`),
+      api.get(`/api/feedback/list?limit=${PAGE_SIZE}&offset=${(page - 1) * PAGE_SIZE}&${filterQuery}`),
     ])
       .then(([ov, list]: any) => {
+        if (!active || !current()) return;
         setOverview(ov);
         setItems(list.items || []);
         setTotal(list.total || 0);
       })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, [page, fRating, fReason, fFrom, fTo, fUser, fStatus]);
+      .catch(() => { if (active && current()) { setItems([]); setTotal(0); toast.error("反馈加载失败，请刷新重试"); } })
+      .finally(() => { if (active && current()) setLoading(false); });
+    // 筛选与刷新只接受最新请求，旧结果不能覆盖当前列表。
+    return () => { active = false; };
+  }, [page, filterQuery, revision]);
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const pageClamped = Math.min(page, totalPages);
 
   const doExport = async () => {
     try {
-      const res = await authenticatedFetch("/api/feedback/export");
+      const res = await authenticatedFetch(`/api/feedback/export?${filterQuery}`);
       if (!res.ok) throw new Error("导出失败");
       const blob = await readAuthenticatedBlob(res);
+      if (!current()) return;
       const a = document.createElement("a");
       a.href = URL.createObjectURL(blob);
       a.download = "feedback.csv";
       a.click();
       URL.revokeObjectURL(a.href);
-      toast.success("已导出点踩明细");
-    } catch (e: any) {
-      toast.error(e.message || "导出失败");
+      toast.success("已导出当前筛选元数据");
+    } catch {
+      if (current()) toast.error("导出失败，请重试");
     }
   };
 
-  const setIgnored = async (it: FeedbackItem) => {
+  const setStatus = async (it: FeedbackItem, status: "ignored" | "resolved") => {
     try {
-      await api.patch(`/api/feedback/${it.id}`, { status: "ignored", admin_note: it.admin_note });
-      setItems((m) => m.map((x) => (x.id === it.id ? { ...x, status: "ignored" as const } : x)));
-      reloadOverview();
-    } catch (e: any) {
-      toast.error(e.message || "更新失败");
+      // 仅改状态时省略备注，避免把未读取的旧备注清空。
+      await api.patch(`/api/feedback/${it.id}`, { status });
+      if (current()) refresh();
+    } catch {
+      if (current()) toast.error("状态更新失败，请刷新核对");
     }
   };
 
-  const openResolve = (it: FeedbackItem) => {
-    setResolveTarget(it);
-    setResolveNote(it.admin_note || "");
+  const closeAudit = () => {
+    auditGeneration.current++;
+    auditFlight.current = false;
+    setAuditTarget(null);
+    setAuditContent(null);
+    setAuditReason("");
+    setResolveNote("");
+    setAuditError("");
+    setAuditFailureEvent("");
+    setAuditBusy(false);
+    setAuditAttempted(false);
   };
 
-  const confirmResolve = async () => {
-    if (!resolveTarget) return;
-    const it = resolveTarget;
-    setResolveTarget(null);
+  const openAudit = (it: FeedbackItem) => { closeAudit(); setAuditTarget(it); };
+
+  const submitAudit = async () => {
+    const reason = auditReason.trim();
+    if (!auditTarget || auditFlight.current || auditAttempted || reason.length < 5 || reason.length > 1000) return;
+    const generation = auditGeneration.current;
+    // 提交按钮禁用后仍把焦点留在弹窗内，Escape 和 Tab 才能继续工作。
+    reasonInput.current?.focus();
+    auditFlight.current = true;
+    setAuditBusy(true);
+    setAuditAttempted(true);
     try {
-      await api.patch(`/api/feedback/${it.id}`, { status: "resolved", admin_note: resolveNote || null });
-      setItems((m) => m.map((x) => (x.id === it.id ? { ...x, status: "resolved" as const, admin_note: resolveNote || null } : x)));
-      reloadOverview();
-      toast.success("已标记为已处理");
-    } catch (e: any) {
-      toast.error(e.message || "更新失败");
+      const response = await authenticatedFetch(`/api/feedback/${auditTarget.id}/audit-content`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reason, idempotency_key: crypto.randomUUID() }),
+      });
+      if (!current() || generation !== auditGeneration.current) return;
+      // 失败事件只有服务端提交后才返回；没有事件号不能声称已留痕。
+      const failedEvent = response.headers.get("X-Audit-Event-ID");
+      if (response.status === 404 && failedEvent) {
+        setAuditFailureEvent(failedEvent);
+        setAuditError("正文不可用，访问失败已记录");
+        return;
+      }
+      if (!response.ok) throw new ApiError(response.status, "审计查看失败");
+      const result: AuditContent = await readAuthenticatedJson(response);
+      if (!current() || generation !== auditGeneration.current) return;
+      if (!result.event_id || !result.content) throw new Error("审计响应不完整");
+      setAuditContent(result);
+      setResolveNote(result.content.admin_note || "");
+    } catch (error) {
+      if (!current() || generation !== auditGeneration.current) return;
+      setAuditError(error instanceof ApiError && error.status === 429
+        ? "请求过于频繁，未显示正文；请稍后重新打开。"
+        : "未取得可核实的审计结果，未显示正文；请关闭后核对，不会自动重试。");
+    } finally {
+      if (current() && generation === auditGeneration.current) { auditFlight.current = false; setAuditBusy(false); }
+    }
+  };
+
+  const saveNote = async () => {
+    if (!auditTarget || !auditContent || auditContent.truncated || auditFlight.current) return;
+    const generation = auditGeneration.current;
+    auditFlight.current = true;
+    setAuditBusy(true);
+    try {
+      await api.patch(`/api/feedback/${auditTarget.id}`, { admin_note: resolveNote.trim() || null });
+      if (current() && generation === auditGeneration.current) { closeAudit(); refresh(); toast.success("备注已保存"); }
+    } catch {
+      if (current() && generation === auditGeneration.current) setAuditError("备注保存结果未确认，请关闭后重新审计核对。");
+    } finally {
+      if (current() && generation === auditGeneration.current) { auditFlight.current = false; setAuditBusy(false); }
     }
   };
 
@@ -146,12 +230,11 @@ export function Feedback() {
     setDeleteTarget(null);
     try {
       await api.del(`/api/feedback/${it.id}`);
-      setItems((m) => m.filter((x) => x.id !== it.id));
-      setTotal((t) => Math.max(0, t - 1));
-      reloadOverview();
+      if (!current()) return;
+      refresh();
       toast.success("已删除");
-    } catch (e: any) {
-      toast.error(e.message || "删除失败");
+    } catch {
+      if (current()) toast.error("删除结果未确认，请刷新核对");
     }
   };
 
@@ -165,11 +248,11 @@ export function Feedback() {
           <p className="text-sm text-muted-foreground">用户点赞/点踩统计与明细，驱动对话质量优化</p>
         </div>
         <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={() => { reloadOverview(); setPage(page); }} className="gap-1.5">
+          <Button variant="outline" size="sm" onClick={refresh} className="gap-1.5">
             <RefreshCw className="h-4 w-4" /> 刷新
           </Button>
           <Button variant="outline" size="sm" onClick={doExport} className="gap-1.5">
-            <Download className="h-4 w-4" /> 导出点踩 CSV
+            <Download className="h-4 w-4" /> 导出元数据 CSV
           </Button>
         </div>
       </header>
@@ -305,53 +388,29 @@ export function Feedback() {
                       )}
                       <span className="text-muted-foreground">{it.created_at}</span>
                       <span className="text-muted-foreground" title={userLabel(it)}>{userLabel(it)}</span>
-                      {it.model && (
-                        <span className="rounded bg-muted px-1.5 py-0.5 text-[11px] text-muted-foreground">{it.model}</span>
-                      )}
                       <Badge variant={sm.variant} className="text-[11px]">{sm.label}</Badge>
                       {it.reasons.map((r) => (
                         <Badge key={r} variant="warning" className="text-[11px]">{r}</Badge>
                       ))}
                       <div className="ml-auto flex gap-1">
-                        <Button variant="ghost" size="sm" onClick={() => openResolve(it)} className="h-7 gap-1 text-xs" title="标记已处理">
+                        <Button variant="ghost" size="sm" onClick={() => setStatus(it, "resolved")} className="h-7 gap-1 text-xs" title="标记已处理">
                           <Check className="h-3.5 w-3.5" /> 已处理
                         </Button>
-                        <Button variant="ghost" size="sm" onClick={() => setIgnored(it)} className="h-7 gap-1 text-xs" title="标记忽略">
+                        <Button variant="ghost" size="sm" onClick={() => setStatus(it, "ignored")} className="h-7 gap-1 text-xs" title="标记忽略">
                           <Ban className="h-3.5 w-3.5" /> 忽略
                         </Button>
                         <Button variant="ghost" size="sm" onClick={() => setDeleteTarget(it)} className="h-7 gap-1 text-xs text-destructive" title="删除">
                           <Trash2 className="h-3.5 w-3.5" />
                         </Button>
-                        <Button variant="ghost" size="sm" onClick={() => setExpanded(expanded === it.id ? null : it.id)} className="h-7 text-xs">
-                          {expanded === it.id ? "收起" : "详情"}
+                        <Button variant="ghost" size="sm" onClick={() => openAudit(it)} disabled={!it.content_available} className="h-7 text-xs">
+                          审计查看业务内容
                         </Button>
                       </div>
                     </div>
-                    {it.comment && (
-                      <div className="mt-2 rounded bg-muted/50 px-3 py-2 text-xs text-muted-foreground">
-                        用户描述：{it.comment}
-                      </div>
-                    )}
-                    {it.admin_note && (
-                      <div className="mt-2 rounded bg-amber-500/10 px-3 py-2 text-xs text-muted-foreground">
-                        处理备注：{it.admin_note}
-                      </div>
-                    )}
-                    {expanded === it.id && (
-                      <div className="mt-3 space-y-2 border-t border-border/60 pt-3 text-xs">
-                        {it.model && (
-                          <div className="text-muted-foreground">模型：<span className="text-foreground">{it.model}</span></div>
-                        )}
-                        <div>
-                          <div className="mb-1 font-medium text-foreground">用户问题</div>
-                          <div className="whitespace-pre-wrap text-muted-foreground">{it.question || "（无）"}</div>
-                        </div>
-                        <div>
-                          <div className="mb-1 font-medium text-foreground">AI 回复</div>
-                          <div className="max-h-60 overflow-y-auto whitespace-pre-wrap text-muted-foreground">{it.answer || "（无）"}</div>
-                        </div>
-                      </div>
-                    )}
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      {it.has_comment ? "有用户描述" : "无用户描述"} · {it.has_admin_note ? "有处理备注" : "无处理备注"}
+                      {!it.content_available && " · 业务内容不可用"}
+                    </p>
                   </CardContent>
                 </Card>
               );
@@ -362,19 +421,35 @@ export function Feedback() {
         <Pagination page={pageClamped} totalPages={totalPages} total={total} onChange={setPage} />
       </div>
 
-      {/* 标记已处理弹框 */}
-      <Modal open={!!resolveTarget} onClose={() => setResolveTarget(null)} title="标记为已处理">
-        <p className="text-sm text-muted-foreground">记录处理方式（可选），便于后续回溯这条反馈催生了什么改进。</p>
-        <textarea
-          value={resolveNote}
-          onChange={(e) => setResolveNote(e.target.value)}
-          placeholder="如：已修 prompt / 已加教训 / 已优化采集器"
-          className="mt-3 h-24 w-full resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        />
-        <div className="mt-4 flex justify-end gap-2">
-          <Button variant="outline" size="sm" onClick={() => setResolveTarget(null)}>取消</Button>
-          <Button size="sm" onClick={confirmResolve}>确认</Button>
-        </div>
+      {/* 正文仅保存在当前弹窗，关闭或换身份立即失效。 */}
+      <Modal open={!!auditTarget} onClose={closeAudit} title="审计查看业务内容" wide>
+        <p className="text-sm text-muted-foreground">反馈 #{auditTarget?.id}。查看需填写原因并留下审计记录。</p>
+        {!auditContent && (
+          <form onSubmit={(event) => { event.preventDefault(); void submitAudit(); }}>
+            <label htmlFor="feedback-audit-reason" className="mt-3 block text-sm">查看原因</label>
+            <textarea ref={reasonInput} id="feedback-audit-reason" value={auditReason} onChange={(event) => setAuditReason(event.target.value)} readOnly={auditAttempted} maxLength={1000} className="mt-1 h-24 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm" />
+            <p className="text-xs text-muted-foreground">去除首尾空白后 5–1000 字。只查看当前单条反馈。</p>
+            <Button type="submit" size="sm" className="mt-3" disabled={auditAttempted || auditReason.trim().length < 5 || auditReason.trim().length > 1000}>提交审计并查看</Button>
+          </form>
+        )}
+        {auditBusy && <p role="status" className="mt-3 text-sm">正在提交…</p>}
+        {auditError && <p role="alert" className="mt-3 text-sm text-destructive">{auditError}</p>}
+        {auditFailureEvent && <p role="status" className="mt-3 text-sm">审计事件：{auditFailureEvent}</p>}
+        {auditContent && (
+          <div className="mt-3 space-y-3 text-sm">
+            <p role="status">审计事件：{auditContent.event_id}</p>
+            {auditContent.truncated && <p>正文已截断，仅显示有界内容；为避免覆盖完整备注，本次不可编辑备注。</p>}
+            <div className="max-h-72 space-y-3 overflow-y-auto">
+              {([['question', '用户问题'], ['answer', 'AI 回复'], ['comment', '用户描述']] as const).map(([key, label]) => (
+                <div key={key}><p className="font-medium">{label}</p><p className="whitespace-pre-wrap break-words text-muted-foreground">{auditContent.content[key] || "（无）"}</p></div>
+              ))}
+            </div>
+            <label htmlFor="feedback-admin-note" className="block">处理备注（清空后保存将删除旧备注）</label>
+            <textarea autoFocus id="feedback-admin-note" value={resolveNote} onChange={(event) => setResolveNote(event.target.value)} readOnly={auditBusy || !!auditError || auditContent.truncated} className="h-24 w-full rounded-md border border-input bg-transparent px-3 py-2" />
+            <Button size="sm" onClick={saveNote} disabled={auditBusy || !!auditError || auditContent.truncated || resolveNote === (auditContent.content.admin_note || "")}>保存备注</Button>
+          </div>
+        )}
+        <div className="mt-4 flex justify-end"><Button variant="outline" size="sm" onClick={closeAudit}>关闭</Button></div>
       </Modal>
 
       {/* 删除确认 */}

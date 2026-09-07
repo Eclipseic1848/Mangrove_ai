@@ -54,7 +54,7 @@ class LibraryDedupScanner:
         """模板库去重扫描：返回 (scanned, merged, details)。"""
         from src.memory import templates as tpl
 
-        entries = tpl.load_templates()
+        entries = tpl._patrol_entries()
         scanned = len(entries)
         merged_slugs: set = set()
         merged = 0
@@ -62,31 +62,32 @@ class LibraryDedupScanner:
         for entry in entries:
             if merged >= settings.library_dedup_scan_max_merges_per_run:
                 break
+            if entry["scope"] != "owner":
+                continue
             if entry["slug"] in merged_slugs or entry["status"] == "retired":
                 continue
             # embedding/rerank 客户端为同步 HTTP，放入工作线程，避免阻塞 API 事件循环。
-            result = await asyncio.to_thread(tpl.find_patrol_duplicate, entry)
+            result = await asyncio.to_thread(tpl.find_patrol_duplicate, entry, owner_id=entry["owner_id"])
             if not result:
                 continue
             dup, score = result
             if dup["slug"] in merged_slugs:
                 continue
             survivor, loser = (entry, dup) if entry["uses"] >= dup["uses"] else (dup, entry)
-            fused = await tpl.merge_template_pair(survivor, loser)
+            fused = await tpl.merge_template_pair(survivor, loser, owner_id=entry["owner_id"])
             if not fused:
                 continue
-            if not tpl.apply_patrol_merge(survivor["slug"], fused):
+            if not tpl.apply_patrol_merge(survivor["slug"], fused, owner_id=entry["owner_id"],
+                                          expected_source_digest=survivor["content_digest"], loser_slug=loser["slug"],
+                                          expected_loser_digest=loser["content_digest"]):
                 continue
-            tpl.delete_template(loser["slug"])
             merged_slugs.add(survivor["slug"])
             merged_slugs.add(loser["slug"])
             merged += 1
             details.append({
                 "action": "merge_template",
                 "survivor_slug": survivor["slug"],
-                "survivor_title": survivor["title"],
                 "loser_slug": loser["slug"],
-                "loser_title": loser["title"],
                 "data_type": survivor.get("data_type", ""),
                 "score": round(score, 4),
                 "threshold": settings.template_dedup_rerank_threshold,
@@ -98,7 +99,7 @@ class LibraryDedupScanner:
         """教训库去重扫描：返回 (scanned, merged, details)。"""
         from src.memory import lessons as lsn
 
-        entries = lsn.load_lessons()
+        entries = lsn._patrol_entries()
         scanned = len(entries)
         merged_slugs: set = set()
         merged = 0
@@ -106,31 +107,32 @@ class LibraryDedupScanner:
         for entry in entries:
             if merged >= settings.library_dedup_scan_max_merges_per_run:
                 break
+            if entry["scope"] != "owner":
+                continue
             if entry["slug"] in merged_slugs:
                 continue
             # embedding/rerank 客户端为同步 HTTP，放入工作线程，避免阻塞 API 事件循环。
-            result = await asyncio.to_thread(lsn.find_patrol_duplicate_lesson, entry)
+            result = await asyncio.to_thread(lsn.find_patrol_duplicate_lesson, entry, owner_id=entry["owner_id"])
             if not result:
                 continue
             dup, score = result
             if dup["slug"] in merged_slugs:
                 continue
             survivor, loser = (entry, dup) if entry["occurrences"] >= dup["occurrences"] else (dup, entry)
-            fused = await lsn.merge_lesson_pair(survivor, loser)
+            fused = await lsn.merge_lesson_pair(survivor, loser, owner_id=entry["owner_id"])
             if not fused:
                 continue
-            if not lsn.apply_patrol_merge_lesson(survivor["slug"], fused):
+            if not lsn.apply_patrol_merge_lesson(survivor["slug"], fused, owner_id=entry["owner_id"],
+                                                 expected_source_digest=survivor["content_digest"], loser_slug=loser["slug"],
+                                                 expected_loser_digest=loser["content_digest"]):
                 continue
-            lsn.delete_lesson(loser["slug"])
             merged_slugs.add(survivor["slug"])
             merged_slugs.add(loser["slug"])
             merged += 1
             details.append({
                 "action": "merge_lesson",
                 "survivor_slug": survivor["slug"],
-                "survivor_title": survivor["title"],
                 "loser_slug": loser["slug"],
-                "loser_title": loser["title"],
                 "data_type": survivor.get("data_type", ""),
                 "score": round(score, 4),
                 "threshold": settings.template_dedup_rerank_threshold,
@@ -145,7 +147,7 @@ class LibraryDedupScanner:
         now = datetime.now()
         deleted = 0
         details: list = []
-        for entry in tpl.load_templates():
+        for entry in tpl._patrol_entries():
             if entry["status"] != "draft" or not entry.get("created_at"):
                 continue
             try:
@@ -154,12 +156,12 @@ class LibraryDedupScanner:
                 continue
             stale_days = (now - created).days
             if stale_days > settings.library_stale_draft_days:
-                if tpl.delete_template(entry["slug"]):
+                if tpl.delete_template(entry["slug"], owner_id=entry["owner_id"],
+                                       expected_source_digest=entry["content_digest"], expected_status="draft"):
                     deleted += 1
                     details.append({
                         "action": "stale_delete_template",
                         "slug": entry["slug"],
-                        "title": entry["title"],
                         "data_type": entry.get("data_type", ""),
                         "stale_days": stale_days,
                         "threshold_days": settings.library_stale_draft_days,
@@ -173,7 +175,7 @@ class LibraryDedupScanner:
         now = datetime.now()
         deleted = 0
         details: list = []
-        for entry in lsn.load_lessons():
+        for entry in lsn._patrol_entries():
             if entry["status"] != "draft" or not entry.get("created_at"):
                 continue
             try:
@@ -182,12 +184,12 @@ class LibraryDedupScanner:
                 continue
             stale_days = (now - created).days
             if stale_days > settings.library_stale_draft_days:
-                if lsn.delete_lesson(entry["slug"]):
+                if lsn.delete_lesson(entry["slug"], owner_id=entry["owner_id"],
+                                     expected_source_digest=entry["content_digest"], expected_status="draft"):
                     deleted += 1
                     details.append({
                         "action": "stale_delete_lesson",
                         "slug": entry["slug"],
-                        "title": entry["title"],
                         "data_type": entry.get("data_type", ""),
                         "stale_days": stale_days,
                         "threshold_days": settings.library_stale_draft_days,

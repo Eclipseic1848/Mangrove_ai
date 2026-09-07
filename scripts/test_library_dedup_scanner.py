@@ -48,8 +48,8 @@ def test_save_template_writes_created_at():
     old_enabled = settings.embedding_enabled
     settings.embedding_enabled = False
     try:
-        slug = asyncio.run(tpl.save_template("巡检测试模板", "generic", ["巡检"], "正文"))
-        t = [x for x in tpl.load_templates() if x["slug"] == slug][0]
+        slug = asyncio.run(tpl.save_template("巡检测试模板", "generic", ["巡检"], "正文", owner_id="library-test-owner"))
+        t = [x for x in tpl.load_templates(owner_id="library-test-owner") if x["slug"] == slug][0]
         assert t["created_at"], "新建模板应写入 created_at"
     finally:
         settings.embedding_enabled = old_enabled
@@ -58,10 +58,10 @@ def test_save_template_writes_created_at():
 def test_legacy_template_without_created_at_reads_empty():
     d = _setup_tpl_tmp()
     (d / "legacy.md").write_text(
-        "---\ntitle: 老模板\ndata_type: article\nkeywords: [旧格式]\n---\n正文\n",
+        "---\nowner_id: library-test-owner\nscope: owner\ntitle: 老模板\ndata_type: article\nkeywords: [旧格式]\n---\n正文\n",
         encoding="utf-8",
     )
-    t = [x for x in tpl.load_templates() if x["slug"] == "legacy"][0]
+    t = [x for x in tpl.load_templates(owner_id="library-test-owner") if x["slug"] == "legacy"][0]
     assert t["created_at"] == ""
 
 
@@ -76,8 +76,8 @@ def test_record_failure_writes_created_at():
 
     try:
         with patch("src.memory.lessons.achat", new=_fake):
-            asyncio.run(lesson.record_failure("巡检测试任务", "generic", ["巡检"], "未采集到有效数据"))
-        t = lesson.load_lessons()[0]
+            asyncio.run(lesson.record_failure("巡检测试任务", "generic", ["巡检"], "未采集到有效数据", owner_id="library-test-owner"))
+        t = lesson.load_lessons(owner_id="library-test-owner")[0]
         assert t["created_at"], "新建教训应写入 created_at"
     finally:
         settings.embedding_enabled = old_enabled
@@ -86,10 +86,10 @@ def test_record_failure_writes_created_at():
 def test_legacy_lesson_without_created_at_reads_empty():
     d = _setup_lesson_tmp()
     (d / "legacy.md").write_text(
-        "---\ntitle: 老教训\ndata_type: generic\nkeywords: [旧格式]\nstatus: draft\noccurrences: 1\n---\n正文\n",
+        "---\nowner_id: library-test-owner\nscope: owner\ntitle: 老教训\ndata_type: generic\nkeywords: [旧格式]\nstatus: draft\noccurrences: 1\n---\n正文\n",
         encoding="utf-8",
     )
-    t = [x for x in lesson.load_lessons() if x["slug"] == "legacy"][0]
+    t = [x for x in lesson.load_lessons(owner_id="library-test-owner") if x["slug"] == "legacy"][0]
     assert t["created_at"] == ""
 
 
@@ -115,7 +115,7 @@ def test_scan_log_add_and_recent():
 def _write_template(d, slug, title, data_type, keywords, body, status="active", uses=0, quality_avg=0):
     import yaml
     front = yaml.safe_dump(
-        {"title": title, "data_type": data_type, "keywords": keywords,
+        {"owner_id": "library-test-owner", "scope": "owner", "title": title, "data_type": data_type, "keywords": keywords,
          "status": status, "uses": uses, "quality_avg": quality_avg},
         allow_unicode=True, sort_keys=False,
     ).strip()
@@ -135,8 +135,8 @@ def test_find_patrol_duplicate_excludes_self_and_finds_other():
     emb.is_rerank_configured = lambda: True
     emb.rerank_scores = lambda query, docs, instruct=None: [0.9] * len(docs)
     try:
-        entry = [x for x in tpl.load_templates() if x["slug"] == "a"][0]
-        result = tpl.find_patrol_duplicate(entry)
+        entry = [x for x in tpl.load_templates(owner_id="library-test-owner") if x["slug"] == "a"][0]
+        result = tpl.find_patrol_duplicate(entry, owner_id="library-test-owner")
         assert result is not None
         dup, score = result
         assert dup["slug"] == "b", dup
@@ -155,8 +155,8 @@ def test_find_patrol_duplicate_returns_none_when_embedding_disabled():
     old_enabled = settings.embedding_enabled
     settings.embedding_enabled = False
     try:
-        entry = [x for x in tpl.load_templates() if x["slug"] == "a"][0]
-        assert tpl.find_patrol_duplicate(entry) is None
+        entry = [x for x in tpl.load_templates(owner_id="library-test-owner") if x["slug"] == "a"][0]
+        assert tpl.find_patrol_duplicate(entry, owner_id="library-test-owner") is None
     finally:
         settings.embedding_enabled = old_enabled
 
@@ -167,11 +167,15 @@ def test_merge_template_pair_returns_fused_content():
     b = {"title": "模板乙", "keywords": ["体验"], "body": "正文乙"}
     payload = {"title": "模板甲", "keywords": ["评测", "体验"], "body": "融合正文"}
 
+    for slug, entry in (("a", a), ("b", b)):
+        _write_template(tpl.TEMPLATES_DIR, slug, entry["title"], "generic", entry["keywords"], entry["body"])
+    a, b = tpl.load_templates(owner_id="library-test-owner")
+
     async def _fake(messages, **kwargs):
         return json.dumps(payload, ensure_ascii=False)
 
     with patch("src.memory.templates.achat", new=_fake):
-        result = asyncio.run(tpl.merge_template_pair(a, b))
+        result = asyncio.run(tpl.merge_template_pair(a, b, owner_id="library-test-owner"))
     assert result == {"title": "模板甲", "keywords": ["评测", "体验"], "body": "融合正文"}
 
 
@@ -180,20 +184,25 @@ def test_merge_template_pair_returns_none_on_llm_failure():
     a = {"title": "模板甲", "keywords": ["评测"], "body": "正文甲"}
     b = {"title": "模板乙", "keywords": ["体验"], "body": "正文乙"}
 
+    for slug, entry in (("a", a), ("b", b)):
+        _write_template(tpl.TEMPLATES_DIR, slug, entry["title"], "generic", entry["keywords"], entry["body"])
+    a, b = tpl.load_templates(owner_id="library-test-owner")
+
     async def _boom(messages, **kwargs):
         raise RuntimeError("boom")
 
     with patch("src.memory.templates.achat", new=_boom):
-        result = asyncio.run(tpl.merge_template_pair(a, b))
+        result = asyncio.run(tpl.merge_template_pair(a, b, owner_id="library-test-owner"))
     assert result is None
 
 
 def test_apply_patrol_merge_keeps_stats_updates_content():
     d = _setup_tpl_tmp()
     _write_template(d, "survivor", "旧标题", "product", ["旧词"], "旧正文", status="active", uses=5, quality_avg=80)
-    ok = tpl.apply_patrol_merge("survivor", {"title": "新标题", "keywords": ["旧词", "新词"], "body": "新正文"})
+    source_digest = tpl.load_templates(owner_id="library-test-owner")[0]["content_digest"]
+    ok = tpl.apply_patrol_merge("survivor", {"title": "新标题", "keywords": ["旧词", "新词"], "body": "新正文"}, owner_id="library-test-owner", expected_source_digest=source_digest)
     assert ok is True
-    t = [x for x in tpl.load_templates() if x["slug"] == "survivor"][0]
+    t = [x for x in tpl.load_templates(owner_id="library-test-owner") if x["slug"] == "survivor"][0]
     assert t["title"] == "新标题" and t["body"] == "新正文"
     assert set(t["keywords"]) == {"旧词", "新词"}
     assert t["uses"] == 5 and t["quality_avg"] == 80.0 and t["status"] == "active"
@@ -202,7 +211,7 @@ def test_apply_patrol_merge_keeps_stats_updates_content():
 def _write_lesson(d, slug, title, data_type, keywords, body, status="active", occurrences=1):
     import yaml
     front = yaml.safe_dump(
-        {"title": title, "data_type": data_type, "keywords": keywords,
+        {"owner_id": "library-test-owner", "scope": "owner", "title": title, "data_type": data_type, "keywords": keywords,
          "status": status, "occurrences": occurrences},
         allow_unicode=True, sort_keys=False,
     ).strip()
@@ -222,8 +231,8 @@ def test_find_patrol_duplicate_lesson_excludes_self_and_finds_other():
     emb.is_rerank_configured = lambda: True
     emb.rerank_scores = lambda query, docs, instruct=None: [0.9] * len(docs)
     try:
-        entry = [x for x in lesson.load_lessons() if x["slug"] == "a"][0]
-        result = lesson.find_patrol_duplicate_lesson(entry)
+        entry = [x for x in lesson.load_lessons(owner_id="library-test-owner") if x["slug"] == "a"][0]
+        result = lesson.find_patrol_duplicate_lesson(entry, owner_id="library-test-owner")
         assert result is not None
         dup, score = result
         assert dup["slug"] == "b", dup
@@ -242,8 +251,8 @@ def test_find_patrol_duplicate_lesson_returns_none_when_embedding_disabled():
     old_enabled = settings.embedding_enabled
     settings.embedding_enabled = False
     try:
-        entry = [x for x in lesson.load_lessons() if x["slug"] == "a"][0]
-        assert lesson.find_patrol_duplicate_lesson(entry) is None
+        entry = [x for x in lesson.load_lessons(owner_id="library-test-owner") if x["slug"] == "a"][0]
+        assert lesson.find_patrol_duplicate_lesson(entry, owner_id="library-test-owner") is None
     finally:
         settings.embedding_enabled = old_enabled
 
@@ -254,11 +263,15 @@ def test_merge_lesson_pair_returns_fused_content():
     b = {"title": "教训乙", "keywords": ["抖音"], "body": "正文乙"}
     payload = {"title": "教训甲", "keywords": ["小众品牌", "抖音"], "body": "融合正文"}
 
+    for slug, entry in (("a", a), ("b", b)):
+        _write_lesson(lesson.LESSONS_DIR, slug, entry["title"], "generic", entry["keywords"], entry["body"])
+    a, b = lesson.load_lessons(owner_id="library-test-owner")
+
     async def _fake(messages, **kwargs):
         return json.dumps(payload, ensure_ascii=False)
 
     with patch("src.memory.lessons.achat", new=_fake):
-        result = asyncio.run(lesson.merge_lesson_pair(a, b))
+        result = asyncio.run(lesson.merge_lesson_pair(a, b, owner_id="library-test-owner"))
     assert result == {"title": "教训甲", "keywords": ["小众品牌", "抖音"], "body": "融合正文"}
 
 
@@ -267,20 +280,25 @@ def test_merge_lesson_pair_returns_none_on_llm_failure():
     a = {"title": "教训甲", "keywords": ["小众品牌"], "body": "正文甲"}
     b = {"title": "教训乙", "keywords": ["抖音"], "body": "正文乙"}
 
+    for slug, entry in (("a", a), ("b", b)):
+        _write_lesson(lesson.LESSONS_DIR, slug, entry["title"], "generic", entry["keywords"], entry["body"])
+    a, b = lesson.load_lessons(owner_id="library-test-owner")
+
     async def _boom(messages, **kwargs):
         raise RuntimeError("boom")
 
     with patch("src.memory.lessons.achat", new=_boom):
-        result = asyncio.run(lesson.merge_lesson_pair(a, b))
+        result = asyncio.run(lesson.merge_lesson_pair(a, b, owner_id="library-test-owner"))
     assert result is None
 
 
 def test_apply_patrol_merge_lesson_keeps_stats_updates_content():
     d = _setup_lesson_tmp()
     _write_lesson(d, "survivor", "旧标题", "comment", ["旧词"], "旧正文", status="active", occurrences=3)
-    ok = lesson.apply_patrol_merge_lesson("survivor", {"title": "新标题", "keywords": ["旧词", "新词"], "body": "新正文"})
+    source_digest = lesson.load_lessons(owner_id="library-test-owner")[0]["content_digest"]
+    ok = lesson.apply_patrol_merge_lesson("survivor", {"title": "新标题", "keywords": ["旧词", "新词"], "body": "新正文"}, owner_id="library-test-owner", expected_source_digest=source_digest)
     assert ok is True
-    t = [x for x in lesson.load_lessons() if x["slug"] == "survivor"][0]
+    t = [x for x in lesson.load_lessons(owner_id="library-test-owner") if x["slug"] == "survivor"][0]
     assert t["title"] == "新标题" and t["body"] == "新正文"
     assert set(t["keywords"]) == {"旧词", "新词"}
     assert t["occurrences"] == 3 and t["status"] == "active"
@@ -330,13 +348,13 @@ def test_run_one_scan_merges_and_logs():
             scanner = LibraryDedupScanner()
             asyncio.run(scanner._run_one_scan())
 
-        tpl_remaining = tpl.load_templates()
+        tpl_remaining = tpl.load_templates(owner_id="library-test-owner")
         assert len(tpl_remaining) == 1, tpl_remaining
         assert tpl_remaining[0]["slug"] == "tpl-a"
         assert tpl_remaining[0]["body"] == "融合正文-模板"
         assert tpl_remaining[0]["uses"] == 5 and tpl_remaining[0]["quality_avg"] == 80.0
 
-        lsn_remaining = lesson.load_lessons()
+        lsn_remaining = lesson.load_lessons(owner_id="library-test-owner")
         assert len(lsn_remaining) == 1, lsn_remaining
         assert lsn_remaining[0]["slug"] == "lsn-a"
         assert lsn_remaining[0]["body"] == "融合正文-教训"
@@ -368,7 +386,7 @@ def test_run_one_scan_deletes_stale_drafts():
     td = _setup_tpl_tmp()
     old_created = (datetime.now() - timedelta(days=31)).isoformat()
     (td / "stale.md").write_text(
-        f"---\ntitle: 停滞模板\ndata_type: generic\nkeywords: [x]\nstatus: draft\nuses: 0\n"
+        f"---\nowner_id: library-test-owner\nscope: owner\ntitle: 停滞模板\ndata_type: generic\nkeywords: [x]\nstatus: draft\nuses: 0\n"
         f"quality_avg: 0\ncreated_at: {old_created}\n---\n正文\n",
         encoding="utf-8",
     )
@@ -389,7 +407,7 @@ def test_run_one_scan_deletes_stale_drafts():
         with patch("src.api.auth.get_store", new=lambda: fake_store):
             scanner = LibraryDedupScanner()
             asyncio.run(scanner._run_one_scan())
-        assert tpl.load_templates() == []
+        assert tpl.load_templates(owner_id="library-test-owner") == []
         assert fake_store.calls[0]["stale_drafts_deleted"] == 1
         details = json.loads(fake_store.calls[0]["details"])
         assert len(details) == 1 and details[0]["action"] == "stale_delete_template"
@@ -420,7 +438,7 @@ def test_run_one_scan_skips_dedup_when_embedding_disabled():
         with patch("src.api.auth.get_store", new=lambda: fake_store):
             scanner = LibraryDedupScanner()
             asyncio.run(scanner._run_one_scan())
-        assert len(tpl.load_templates()) == 2, "embedding 关闭时不应发生任何合并"
+        assert len(tpl.load_templates(owner_id="library-test-owner")) == 2, "embedding 关闭时不应发生任何合并"
         assert fake_store.calls[0]["templates_merged"] == 0
     finally:
         settings.embedding_enabled = old_enabled
@@ -431,7 +449,7 @@ def test_patrol_duplicate_lookup_does_not_block_event_loop():
     d = _setup_tpl_tmp()
     _write_template(d, "slow", "慢判重模板", "generic", ["巡检"], "正文")
 
-    def _slow_lookup(entry):
+    def _slow_lookup(entry, **kwargs):
         time.sleep(0.2)
         return None
 
@@ -485,3 +503,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+from tests.library_test_helpers import _isolate_library_services  # noqa: F401

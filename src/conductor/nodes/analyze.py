@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from src.config.settings import settings
 from src.llm import achat
+from src.memory._library_scope import execution_owner
 from src.memory import lesson_for_analyze, match_template, skill_for_analysis
 
 from ..prompts import (
@@ -97,7 +98,7 @@ def _has_voc_signal(spec: TaskSpec) -> bool:
     return has_signal and not has_anti
 
 
-def _select_system(spec: TaskSpec, llm_route: Optional[str] = None) -> tuple[str, str, Optional[str]]:
+def _select_system(spec: TaskSpec, llm_route: Optional[str] = None, *, owner_id: str | None = None) -> tuple[str, str, Optional[str]]:
     """按任务选分析模板，返回 (system_prompt, 来源, 已学模板slug)。slug 仅在 learned 时非空。
 
     双通道路由（P0-4）：词表信号（确定性）+ LLM 分类（llm_route，覆盖词表盲区）；
@@ -136,7 +137,7 @@ def _select_system(spec: TaskSpec, llm_route: Optional[str] = None) -> tuple[str
             pass
         else:
             return builtin, "builtin", None
-    learned = match_template(spec)
+    learned = match_template(spec, owner_id=owner_id)
     if learned:
         return learned["body"], "learned", learned["slug"]
     return ANALYZE_SUMMARY_SYSTEM, "fallback", None
@@ -216,7 +217,7 @@ async def analyze_node(state: ConductorState) -> Dict[str, Any]:
         source, template_slug = "video", None
     else:
         # 按任务类型选模板（口碑/招投标/新闻/商品/已学/通用），source 供前端判断是否提议沉淀
-        system, source, template_slug = _select_system(spec, llm_route=llm_route)
+        system, source, template_slug = _select_system(spec, llm_route=llm_route, owner_id=execution_owner())
         # 技能复用：VOC 任务注入 voc-analysis 技能正文，强化输出结构
         system += skill_for_analysis(spec)
     # 方案 D：传入 store 写命中埋点（供概览页聚合统计）
@@ -226,7 +227,7 @@ async def analyze_node(state: ConductorState) -> Dict[str, Any]:
     except Exception:
         _store = None
     lesson_text, active_lesson_slug = ("", None) if direct_video else lesson_for_analyze(
-        spec, store=_store, task_id=state.get("task_id") or ""
+        spec, store=_store, task_id=state.get("task_id") or "", owner_id=execution_owner()
     )
     system += lesson_text
 

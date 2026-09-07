@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Boxes, ChevronDown, Eye, Loader2, Play, ShieldCheck, X } from "lucide-react";
-import { api } from "@/lib/api";
+import { api, getSessionState } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader } from "@/components/ui/card";
@@ -241,6 +242,8 @@ function utcMinute(value: string) {
 }
 
 export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: boolean }) {
+  const { user } = useAuth();
+  const identity = `${user?.user_id}:${user?.role}`;
   const [items, setItems] = useState<GovernanceItem[]>([]);
   const [runs, setRuns] = useState<ValidationRun[]>([]);
   const [supplyChainEvidence, setSupplyChainEvidence] = useState<Record<string, SupplyChainEvidence | null>>({});
@@ -259,7 +262,14 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
   const [auditReason, setAuditReason] = useState("");
   const [auditSubmitting, setAuditSubmitting] = useState(false);
   const [auditOutcome, setAuditOutcome] = useState<AuditViewResult | null>(null);
-  // 弹窗生命周期内固定幂等键：网络重试不会落第二条审计记录。
+  const [auditError, setAuditError] = useState("");
+  const [auditAttempted, setAuditAttempted] = useState(false);
+  const [auditIdentity, setAuditIdentity] = useState("");
+  const auditGeneration = useRef(0);
+  const auditFlight = useRef(false);
+  const auditReasonInput = useRef<HTMLTextAreaElement>(null);
+  const auditCloseButton = useRef<HTMLButtonElement>(null);
+  // 一次明确提交固定幂等键；结果未知时不允许修改请求后复用。
   const [auditIdempotencyKey, setAuditIdempotencyKey] = useState("");
   const [candidates, setCandidates] = useState<PlatformCandidate[]>([]);
   const [candidateTarget, setCandidateTarget] = useState<ResolvedGovernanceItem | null>(null);
@@ -271,6 +281,30 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
   const [publishSubmitting, setPublishSubmitting] = useState(false);
   const [publishIdempotencyKey, setPublishIdempotencyKey] = useState("");
   const runElementRef = useRef<HTMLDetailsElement | null>(null);
+
+  function closeAuditView() {
+    auditGeneration.current++;
+    auditFlight.current = false;
+    setAuditTarget(null);
+    setAuditReason("");
+    setAuditSubject("task_prompt");
+    setAuditOutcome(null);
+    setAuditError("");
+    setAuditSubmitting(false);
+    setAuditAttempted(false);
+    setAuditIdempotencyKey("");
+    setAuditIdentity("");
+  }
+
+  useEffect(() => {
+    closeAuditView();
+    // 换身份、降权和卸载均使在途正文失效，不影响其他治理操作。
+    return () => { auditGeneration.current++; };
+  }, [identity]);
+
+  useEffect(() => {
+    if (auditOutcome) auditCloseButton.current?.focus();
+  }, [auditOutcome]);
 
   const reload = () => Promise.all([
     api.get("/api/capability-governance/packs"),
@@ -344,10 +378,9 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
       setError("该能力没有可审计查看的关联任务");
       return;
     }
+    closeAuditView();
     setAuditTarget(item);
-    setAuditSubject("task_prompt");
-    setAuditReason("");
-    setAuditOutcome(null);
+    setAuditIdentity(identity);
     setAuditIdempotencyKey(crypto.randomUUID());
     setError("");
   }
@@ -401,9 +434,17 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
   }
 
   async function submitAuditView() {
-    if (!auditTarget?.task_metadata) return;
+    if (!auditTarget?.task_metadata || auditFlight.current || auditAttempted || auditReason.trim().length < 5 || auditReason.trim().length > 1000) return;
+    const generation = auditGeneration.current;
+    const current = () => {
+      const actor = getSessionState().user;
+      return generation === auditGeneration.current && identity === `${actor?.user_id}:${actor?.role}`;
+    };
+    auditFlight.current = true;
+    auditReasonInput.current?.focus();
+    setAuditAttempted(true);
     setAuditSubmitting(true);
-    setError("");
+    setAuditError("");
     try {
       const data = await api.post(
         "/api/capability-governance/admin/audit-view",
@@ -418,11 +459,13 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
         },
         { "Idempotency-Key": auditIdempotencyKey },
       );
+      if (!current()) return;
+      if (!data.event?.event_id) throw new Error("审计响应不完整");
       setAuditOutcome(data);
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "审计查看失败");
+    } catch {
+      if (current()) setAuditError("未取得可核实的审计结果，未显示正文；请关闭后核对，不会自动重试。");
     } finally {
-      setAuditSubmitting(false);
+      if (current()) { auditFlight.current = false; setAuditSubmitting(false); }
     }
   }
 
@@ -825,8 +868,9 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
           </div>
         </div>
       </Modal>
-      <Modal open={auditTarget !== null} onClose={() => !auditSubmitting && setAuditTarget(null)} title="审计查看业务内容">
+      <Modal open={auditTarget !== null && auditIdentity === identity} onClose={closeAuditView} title="审计查看业务内容">
         <div className="space-y-4">
+          {auditError && <p role="alert" className="text-sm text-destructive">{auditError}</p>}
           {auditOutcome === null ? (
             <>
               <p className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-foreground">
@@ -837,6 +881,7 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                 <select
                   className="h-10 w-full rounded-md border border-input bg-background px-3"
                   value={auditSubject}
+                  disabled={auditAttempted}
                   onChange={(event) => setAuditSubject(event.target.value as AuditSubject)}
                 >
                   {(Object.keys(AUDIT_SUBJECT_LABEL) as AuditSubject[]).map((key) => (
@@ -847,15 +892,18 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
               <label className="block space-y-1.5 text-sm">
                 <span className="font-medium">查看原因</span>
                 <textarea
+                  ref={auditReasonInput}
                   className="min-h-20 w-full rounded-md border border-input bg-background px-3 py-2"
                   value={auditReason}
+                  readOnly={auditAttempted}
+                  maxLength={1000}
                   onChange={(event) => setAuditReason(event.target.value)}
                   placeholder="说明排障或审核用途，至少 5 个字符"
                 />
               </label>
               <div className="flex justify-end gap-2">
-                <Button variant="outline" onClick={() => setAuditTarget(null)} disabled={auditSubmitting}>取消</Button>
-                <Button onClick={submitAuditView} disabled={auditReason.trim().length < 5 || auditSubmitting}>
+                <Button variant="outline" onClick={closeAuditView}>取消</Button>
+                <Button onClick={submitAuditView} disabled={auditReason.trim().length < 5 || auditReason.trim().length > 1000 || auditAttempted}>
                   {auditSubmitting && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
                   确认查看并写入审计记录
                 </Button>
@@ -873,16 +921,16 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
               )}
               <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs">{auditOutcome.content}</pre>
               <div className="flex justify-end gap-2">
-                <Button variant="outline" onClick={() => setAuditTarget(null)}>关闭</Button>
+                <Button ref={auditCloseButton} variant="outline" onClick={closeAuditView}>关闭</Button>
               </div>
             </>
           ) : (
             <>
               <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
-                读取失败：{auditOutcome.failure_reason ? (FAILURE_REASON_LABEL[auditOutcome.failure_reason] ?? auditOutcome.failure_reason) : "未知原因"}；失败尝试已写入审计记录（{auditOutcome.event.event_id}）。
+                读取失败：{auditOutcome.failure_reason ? (FAILURE_REASON_LABEL[auditOutcome.failure_reason] ?? "未知原因") : "未知原因"}；失败尝试已写入审计记录（{auditOutcome.event.event_id}）。
               </div>
               <div className="flex justify-end gap-2">
-                <Button variant="outline" onClick={() => setAuditTarget(null)}>关闭</Button>
+                <Button ref={auditCloseButton} variant="outline" onClick={closeAuditView}>关闭</Button>
               </div>
             </>
           )}

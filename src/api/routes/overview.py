@@ -71,8 +71,8 @@ def overview(user=Depends(get_current_user)):
         for platform, key in _cookie_platform_key.items()
     }
 
-    # 模板（全局共享）按状态统计
-    templates = load_templates()
+    # 统计与模板页使用相同范围，不能把其他 Owner 的个人原件计入。
+    templates = load_templates(owner_id=user["user_id"])
     tpl_stats = {"total": len(templates), "active": 0, "draft": 0, "retired": 0}
     for t in templates:
         st = (t.get("status") or "active").lower()

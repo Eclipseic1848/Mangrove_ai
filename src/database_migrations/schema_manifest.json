@@ -111,6 +111,9 @@
       "trigger:candidate_verification_state_shape_guard": "33f19b2e090247cd3e7de54b5e3c2c945e2e2dda1b9b75e42dd9da8752e1d7b2",
       "trigger:candidate_verification_status_transition_guard": "beaafd66e986450a9f7581fde237ec1e2f4b198cee6d3fd5da0a5b743cba2c2a",
       "trigger:candidate_verification_terminal_no_update": "d5cbb781452bb99d5288d1b41402d907582c795e80cd89daf772275450925da7",
+      "trigger:feedback_content_access_no_delete": "51824b09a499ebfe02fd9513480ef159630f6ddda2a829c16470b7f66ead4455",
+      "trigger:feedback_content_access_no_replace": "a4c2b297c09d3f86a0abec9c8f26bc4cb40c1334762d391ad0e03887e9f9afc6",
+      "trigger:feedback_content_access_no_update": "319b2ec59d469c99361593b41b883f765ee8cbc7ae0c2ffcf653829996f5a0de",
       "trigger:runtime_assignments_no_delete": "25daf99b2d44403a8f8ea3e8ab643c317825276b2bc085750cb03e0377d88829",
       "trigger:runtime_assignments_no_update": "18692caed74a8a1679326b473cf1626eefe3bc085df71c83c98d12ba1c1eb6b5",
       "trigger:runtime_gate_snapshots_no_delete": "e6aaaf832254440913eee926167757def0d145e17a7b30b51b95976b483b65f8",
@@ -132,7 +135,7 @@
       "trigger:web_task_contracts_no_delete": "087edf8a00b0d641049f16b71fecb82ea57f2a29480ea1d532b25ae89f5f93a4",
       "trigger:web_task_contracts_no_update": "f70469242d490e4d28c884d7d2669bf72b3d3cd123ebefce630f33aab25274c0"
     },
-    "revision": "webui_0012",
+    "revision": "webui_0013",
     "tables": {
       "account_execution_bindings": "792d18e3f5416745c405e022cc798847f4a44d9c1123e58e3900e724c60e0cfd",
       "account_execution_holds": "985dd26ff02bf54e43557d05f72b11d5c97c3f3f18294bb3451afd2748e64db3",
@@ -176,6 +179,7 @@
       "document_task_unit_members": "5147dc077d32f94485a4c20f420fb80f5294d9395ebbb5e1f626efa7fc6465fb",
       "document_task_units": "82115a9d279af5e96b0324f367cfd7958587bb9b3690337b332fb8e485f15cb2",
       "document_workspaces": "02321cb11d81b161937545f5cf91210fd5656fc8a38860ffb52897ca9751399f",
+      "feedback_content_access": "c14b96f83e0fa50bc8dad0c41414b7a6f4e805895e275840194c0e65bb104b48",
       "formal_delivery_outputs": "86505abf115e1ec4ba9b046f7807ccff4371578388e9d85e1011fb87c9e7b274",
       "formal_delivery_runs": "e91e3618714d310458546e0fa96e209aa2f3e9ce52f95af42e90c8889a0ec2be",
       "library_dedup_scan_log": "d004647cda25673763a69aebf608d9267ccd0747c624596ef704a3f0249d34c2",

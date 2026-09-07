@@ -27,7 +27,10 @@ def _spec() -> TaskSpec:
 
 
 def _run(coro):
-    return asyncio.run(coro)
+    from src.account_execution import ExecutionAuthorization, execution_context
+    from src.api.execution import execution_validation
+    with execution_context(ExecutionAuthorization("library-test-owner", 0)), execution_validation(lambda auth: None):
+        return asyncio.run(coro)
 
 
 def _checker_state(**extra):
@@ -280,3 +283,6 @@ if __name__ == "__main__":
             print(f"[FAIL] {t.__name__}: {e}")
     print(f"\n{len(tests) - failed}/{len(tests)} 通过")
     sys.exit(1 if failed else 0)
+
+
+from tests.library_test_helpers import _isolate_library_services  # noqa: F401

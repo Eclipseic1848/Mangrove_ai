@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from src import account_execution as execution
+from .feedback_audit import REASONS, fixed_reasons
 from src.database_migrations import DatabaseTarget, inspect_database
 from src.config.secret_refs import (
     RUNTIME_CONFIG_SECRET_KEYS,
@@ -882,6 +883,18 @@ class WebUIStore:
     ) -> None:
         """提交/更新一条消息反馈（UNIQUE(message_id,user_id) 天然覆盖）。"""
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            # 不能借本人会话编号给他人的消息挂反馈；旧损坏关联也不能自动修复。
+            if rating not in ('up', 'down') or conn.execute(
+                "SELECT 1 FROM messages m JOIN conversations c ON c.conv_id=m.conv_id "
+                "JOIN users owner ON owner.user_id=c.user_id "
+                "WHERE m.id=? AND m.conv_id=? AND c.user_id=? AND m.role='assistant'",
+                (message_id, conv_id, user_id),
+            ).fetchone() is None:
+                raise ValueError("反馈对象不可用")
+            old = conn.execute("SELECT conv_id FROM message_feedback WHERE message_id=? AND user_id=?", (message_id, user_id)).fetchone()
+            if old is not None and old['conv_id'] != conv_id:
+                raise ValueError("反馈对象不可用")
             conn.execute(
                 "INSERT INTO message_feedback (message_id, conv_id, user_id, rating, reasons, comment, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?) "
@@ -934,11 +947,8 @@ class WebUIStore:
             ).fetchall()
             reason_counts: Counter = Counter()
             for r in down_rows:
-                try:
-                    for reason in json.loads(r["reasons"]):
-                        reason_counts[reason] += 1
-                except Exception:
-                    pass
+                for reason in fixed_reasons(r["reasons"]):
+                    reason_counts[reason] += 1
             # 按天趋势
             all_rows = conn.execute(
                 "SELECT rating, created_at FROM message_feedback ORDER BY created_at"
@@ -967,15 +977,17 @@ class WebUIStore:
         date_from: Optional[str] = None, date_to: Optional[str] = None,
         status: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """反馈明细分页列表（join messages 拿原始问答），带筛选。"""
+        """反馈管理元数据分页列表，原因只允许固定枚举。"""
         where = []
         params: list = []
         if rating:
             where.append("f.rating = ?")
             params.append(rating)
         if reason:
-            where.append("f.reasons LIKE ?")
-            params.append(f"%{reason}%")
+            if reason not in REASONS:
+                raise ValueError("反馈原因必须使用固定枚举")
+            where.append("feedback_has_reason(f.reasons, ?) = 1")
+            params.append(reason)
         if user_id:
             where.append("f.user_id = ?")
             params.append(user_id)
@@ -991,52 +1003,66 @@ class WebUIStore:
             params.append(status)
         where_sql = (" WHERE " + " AND ".join(where)) if where else ""
         with self._conn() as conn:
+            conn.create_function("feedback_has_reason", 2, lambda raw, value: value in fixed_reasons(raw))
             total = conn.execute(
                 f"SELECT COUNT(*) FROM message_feedback f{where_sql}", params
             ).fetchone()[0]
             rows = conn.execute(
                 f"""SELECT f.id, f.message_id, f.conv_id, f.user_id, f.rating,
-                           f.reasons, f.comment, f.created_at, f.status, f.admin_note,
-                           m.content AS answer,
-                           m.meta_json AS meta_json,
-                           u.display_name AS display_name, u.username AS username,
-                           (SELECT content FROM messages
-                            WHERE conv_id = f.conv_id AND role='user' AND id < f.message_id
-                            ORDER BY id DESC LIMIT 1) AS question
-                    FROM message_feedback f
-                    LEFT JOIN messages m ON f.message_id = m.id
-                    LEFT JOIN users u ON f.user_id = u.user_id
-                    {where_sql}
-                    ORDER BY f.id DESC
-                    LIMIT ? OFFSET ?""",
+                           f.reasons, f.created_at, f.status,
+                           COALESCE(length(f.comment),0)>0 AS has_comment,
+                           COALESCE(length(f.admin_note),0)>0 AS has_admin_note,
+                           u.display_name, u.username,
+                           EXISTS(SELECT 1 FROM messages m JOIN conversations c ON c.conv_id=m.conv_id
+                             JOIN users owner ON owner.user_id=c.user_id
+                             WHERE m.id=f.message_id AND m.conv_id=f.conv_id
+                             AND m.role='assistant' AND c.user_id=f.user_id) AS content_available
+                    FROM message_feedback f LEFT JOIN users u ON f.user_id=u.user_id
+                    {where_sql} ORDER BY f.id DESC LIMIT ? OFFSET ?""",
                 params + [limit, offset],
             ).fetchall()
         items = []
-        for r in rows:
-            d = dict(r)
-            reasons = d.get("reasons")
-            try:
-                d["reasons"] = json.loads(reasons) if reasons else []
-            except Exception:
-                d["reasons"] = []
-            # 从消息 meta_json 解析模型（assistant 消息产生时记录的实际模型）
-            meta_raw = d.pop("meta_json", None)
-            d["model"] = None
-            if meta_raw:
-                try:
-                    d["model"] = json.loads(meta_raw).get("model")
-                except Exception:
-                    pass
-            items.append(d)
+        for row in rows:
+            item = dict(row)
+            item["reasons"] = fixed_reasons(item["reasons"])
+            for flag in ("has_comment", "has_admin_note", "content_available"):
+                item[flag] = bool(item[flag])
+            items.append(item)
         return {"total": total, "items": items}
 
-    def update_feedback_status(self, fb_id: int, status: str, admin_note: Optional[str] = None) -> None:
+    def update_feedback_status(self, fb_id: int, status: str | None = None, admin_note=..., *, actor_id: str | None = None) -> None:
         """管理员更新反馈处理状态与备注。"""
+        from .feedback_audit import require_admin, feedback_content, digest
+        if status is not None and status not in ('pending', 'resolved', 'ignored'):
+            raise ValueError('反馈状态无效')
         with self._lock, self._conn() as conn:
-            conn.execute(
-                "UPDATE message_feedback SET status=?, admin_note=? WHERE id=?",
-                (status, admin_note, fb_id),
-            )
+            conn.execute('BEGIN IMMEDIATE')
+            if admin_note is ...:
+                conn.execute('UPDATE message_feedback SET status=COALESCE(?,status) WHERE id=?', (status, fb_id))
+                return
+            require_admin(conn, actor_id)
+            old = conn.execute('SELECT admin_note FROM message_feedback WHERE id=?', (fb_id,)).fetchone()
+            if old and old['admin_note']:
+                row, payload = feedback_content(conn, fb_id)
+                if payload['truncated']:
+                    raise PermissionError('截断正文不能用于覆盖旧备注')
+                # 旧备注必须是本人实际看过的当前内容，不能沿用另一个对象或旧内容的证据。
+                if conn.execute('''SELECT 1 FROM feedback_content_access
+                    WHERE actor_id=? AND feedback_id=? AND message_id=? AND conv_id=? AND owner_id=?
+                    AND response_digest=? LIMIT 1''',
+                    (actor_id,fb_id,row['message_id'],row['conv_id'],row['user_id'],digest(payload))).fetchone() is None:
+                    raise PermissionError('请先审计查看当前备注')
+            conn.execute('UPDATE message_feedback SET status=COALESCE(?,status),admin_note=? WHERE id=?', (status,admin_note,fb_id))
+
+    def audit_feedback_content(self, fb_id: int, *, actor_id: str, reason: str, idempotency_key: str) -> Dict[str, Any]:
+        """先持久化不可变证据；提交失败时调用方拿不到正文。"""
+        from .feedback_audit import audit_content, AuditedFeedbackUnavailable
+        with self._lock, self._conn() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            response = audit_content(conn, fb_id, actor_id, reason, idempotency_key)
+        if response.get('result') == 'failure':
+            raise AuditedFeedbackUnavailable(response['event_id'])
+        return response
 
     def delete_feedback_admin(self, fb_id: int) -> None:
         """管理员删除一条反馈（按 feedback id，区别于用户取消自己的反馈）。"""

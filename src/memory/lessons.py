@@ -22,7 +22,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -36,6 +35,8 @@ from src.conductor.utils import parse_json_obj
 from src.llm import achat
 from src.memory._frontmatter import FrontmatterError, parse_frontmatter
 from src.memory._io import atomic_write, MtimeCache
+from ._library_scope import apply_private_merge, same_private_snapshot, valid_entry, content_digest, entry_path, may_mutate, read_entry, require_owner, share_copy, visible
+from uuid import uuid4
 
 logger = logging.getLogger(__name__)
 
@@ -50,22 +51,13 @@ _LESSON_RERANK_INSTRUCT = "判断这两条教训是否描述同一类容易采�
 # 导致消费侧比对两侧不同质，rerank 分数被去重阈值压低，库里明明有相关教训却召不回）。
 _LESSON_RECALL_INSTRUCT = "判断这条历史教训是否对完成当前任务有参考价值（提醒需要规避的坑或应对方式）"
 
-_lessons_lock = threading.Lock()
+_lessons_lock = threading.RLock()
 _lessons_cache = MtimeCache()
 
 
 def _invalidate_and_rebuild_index() -> None:
-    """写操作后：失效缓存并重建 INDEX.md（方案 C）。"""
+    """写操作后失效旧缓存；不再把本人标题写入全局索引。"""
     _lessons_cache.invalidate()
-    _rebuild_lessons_index()
-
-
-def _slugify(text: str) -> str:
-    """生成文件名 slug：保留中英文/数字，空白转连字符，限长。"""
-    text = (text or "lesson").strip()
-    text = re.sub(r"\s+", "-", text)
-    text = re.sub(r"[^\w-]", "", text)
-    return text[:40] or "lesson"
 
 
 def _load_lessons_from_disk() -> List[Dict]:
@@ -74,6 +66,8 @@ def _load_lessons_from_disk() -> List[Dict]:
     if not LESSONS_DIR.exists():
         return out
     for p in sorted(LESSONS_DIR.glob("*.md")):
+        if p.is_symlink():
+            continue
         try:
             raw = p.read_text(encoding="utf-8")
         except Exception:
@@ -86,12 +80,13 @@ def _load_lessons_from_disk() -> List[Dict]:
         if parsed is None:
             continue
         meta, body = parsed
-        if not body:
+        if not body or not valid_entry({**meta, "body": body}):
             continue
         kws = meta.get("keywords") or []
         if isinstance(kws, str):
             kws = [kws]
         out.append({
+            **meta,
             "slug": p.stem,
             "title": str(meta.get("title") or p.stem),
             "data_type": str(meta.get("data_type") or "").strip().lower(),
@@ -105,14 +100,12 @@ def _load_lessons_from_disk() -> List[Dict]:
     return out
 
 
-def load_lessons() -> List[Dict]:
-    """加载 data/lessons/*.md，mtime 缓存加速；无 frontmatter 或解析失败的跳过。"""
-    cached = _lessons_cache.get(LESSONS_DIR)
-    if cached is not None:
-        return cached
-    result = _load_lessons_from_disk()
-    _lessons_cache.set(LESSONS_DIR, result)
-    return result
+def load_lessons(*, owner_id: str | None = None, scope: str = "visible") -> List[Dict]:
+    """未知归属历史不公开；仅本人和摘要仍一致的平台副本可用。"""
+    if owner_id is None:
+        return []
+    require_owner(owner_id)
+    return [{**t, "content_digest": content_digest(t)} for t in _load_lessons_from_disk() if visible(t, owner_id, scope)]
 
 
 def _lesson_text(t: Dict) -> str:
@@ -129,15 +122,16 @@ def _jaccard(a: List[str], b: List[str]) -> float:
     return len(sa & sb) / len(sa | sb)
 
 
-def _match_keyword(data_type: Optional[str], keywords: List[str], statuses: Tuple[str, ...]) -> Optional[Dict]:
+def _match_keyword(data_type: Optional[str], keywords: List[str], statuses: Tuple[str, ...], *, owner_id: str | None = None, scope: str = "visible", trial: bool = False) -> Optional[Dict]:
     """关键词 Jaccard 兜底：同 data_type（data_type 为空则不限）、关键词重叠度最高且达阈值者命中。"""
     from src.config.settings import settings
 
     dt = (data_type or "").lower()
     best: Optional[Dict] = None
     best_sim = 0.0
-    for t in load_lessons():
-        if t["status"] not in statuses or (dt and t["data_type"] != dt):
+    for t in load_lessons(owner_id=owner_id, scope=scope):
+        eligible = _recallable(t, owner_id) if trial else t["status"] in statuses
+        if not eligible or (dt and t["data_type"] != dt):
             continue
         sim = _jaccard(keywords, t["keywords"])
         if sim >= settings.template_dedup_threshold and sim > best_sim:
@@ -146,7 +140,7 @@ def _match_keyword(data_type: Optional[str], keywords: List[str], statuses: Tupl
 
 
 def _semantic_match(
-    data_type: Optional[str], keywords: List[str], intent: str, statuses: Tuple[str, ...],
+    data_type: Optional[str], keywords: List[str], intent: str, statuses: Tuple[str, ...], *, owner_id: str | None = None
 ) -> Tuple[bool, Optional[Dict]]:
     """语义召回单条最相似的教训。返回 (是否完成了确定性的语义判断, 命中或None)。
 
@@ -162,7 +156,7 @@ def _semantic_match(
         return False, None
 
     dt = (data_type or "").lower()
-    cands = [t for t in load_lessons() if t["status"] in statuses and (not dt or t["data_type"] == dt)]
+    cands = [t for t in load_lessons(owner_id=owner_id, scope="owner") if t["status"] in statuses and (not dt or t["data_type"] == dt)]
     if not cands:
         return True, None  # 无候选，无需调用 embedding 也能确定"没有"
 
@@ -197,14 +191,14 @@ def _semantic_match(
     return True, None
 
 
-def find_similar_lesson(data_type: Optional[str], keywords: List[str], intent: str) -> Optional[Dict]:
+def find_similar_lesson(data_type: Optional[str], keywords: List[str], intent: str, *, owner_id: str | None = None) -> Optional[Dict]:
     """创建/合并判重用（checker.py 的 record_failure 调用）：候选含 draft+active。
     语义不可用时退回关键词 Jaccard 判重，不致瘫。"""
     statuses: Tuple[str, ...] = ("draft", "active")
-    ok, result = _semantic_match(data_type, keywords, intent, statuses)
+    ok, result = _semantic_match(data_type, keywords, intent, statuses, owner_id=owner_id)
     if ok:
         return result
-    return _match_keyword(data_type, keywords, statuses)
+    return _match_keyword(data_type, keywords, statuses, owner_id=owner_id, scope="owner")
 
 
 def _effectiveness(t: Dict) -> float:
@@ -213,8 +207,16 @@ def _effectiveness(t: Dict) -> float:
     return t.get("helped_avoid", 0) / occ
 
 
-def find_active_lessons(data_type: Optional[str], keywords: List[str], intent: str, top_k: int = 3) -> Tuple[List[Dict], str]:
-    """方案 C：返回多条匹配的 active 教训，按有效性(helped_avoid/occurrences)降序排列。
+def _recallable(entry: Dict, owner_id: str | None) -> bool:
+    # 本人重复出现的草稿须有试用入口，才能积累原有 helped_avoid 晋级条件；平台仍只召回 active。
+    return entry["status"] == "active" or (
+        entry["status"] == "draft" and entry.get("scope") == "owner"
+        and entry.get("owner_id") == owner_id and entry.get("occurrences", 0) >= 2
+    )
+
+
+def find_active_lessons(data_type: Optional[str], keywords: List[str], intent: str, top_k: int = 3, *, owner_id: str | None = None) -> Tuple[List[Dict], str]:
+    """返回匹配的 active 教训及本人已重复出现的试用草稿，按有效性(helped_avoid/occurrences)降序排列。
     语义不可用时退回关键词匹配（单条）；语义可用时用 _semantic_match_top_k 取候选再按有效性排序。
     返回 (教训列表, 降级路径：semantic/keyword/none)。"""
     from src.config.settings import settings
@@ -222,25 +224,25 @@ def find_active_lessons(data_type: Optional[str], keywords: List[str], intent: s
 
     dt = (data_type or "").lower()
     statuses: Tuple[str, ...] = ("active",)
-    cands = [t for t in load_lessons() if t["status"] in statuses and (not dt or t["data_type"] == dt)]
+    cands = [t for t in load_lessons(owner_id=owner_id) if _recallable(t, owner_id) and (not dt or t["data_type"] == dt)]
     if not cands:
         return [], "none"
 
     if not settings.embedding_enabled:
-        t = _match_keyword(data_type, keywords, statuses)
+        t = _match_keyword(data_type, keywords, statuses, owner_id=owner_id, trial=True)
         return ([t] if t else [], "keyword") if t else ([], "none")
 
     # 语义召回：先取 rerank top-(k*2) 候选，再按有效性降序截断
     query_text = (intent or "") + " " + " ".join(keywords or [])
     got = emb.embed_texts_with_model([query_text])
     if not got or not got[1]:
-        t = _match_keyword(data_type, keywords, statuses)
+        t = _match_keyword(data_type, keywords, statuses, owner_id=owner_id, trial=True)
         return ([t] if t else [], "keyword") if t else ([], "none")
     model, qvec = got[0], got[1][0]
 
     got2 = emb.embed_texts_with_model([_lesson_text(t) for t in cands])
     if not got2 or got2[0] != model or len(got2[1]) != len(cands):
-        t = _match_keyword(data_type, keywords, statuses)
+        t = _match_keyword(data_type, keywords, statuses, owner_id=owner_id, trial=True)
         return ([t] if t else [], "keyword") if t else ([], "none")
 
     scored = sorted(
@@ -274,12 +276,16 @@ async def distill_lesson(
     existing: Optional[Dict] = None,
     provider: Optional[str] = None,
     model: Optional[str] = None,
+    owner_id: str | None = None,
 ) -> Optional[Dict]:
     """用 LLM 把一次失败蒸馏成教训，返回 {title, keywords, body}；调用失败或无正文返回 None。
 
     existing 传入命中的旧教训（含 title/body）时，提示词要求融合新旧信息产出更完整的一份，
     而不是简单拼接（合并语义与 B1 阶段 Curator merge 一致）。
     """
+    require_owner(owner_id)
+    if existing and not same_private_snapshot(LESSONS_DIR, existing, owner_id):
+        return None
     user = (
         f"任务目标：{intent}\n数据类型：{data_type}\n失败现象：\n{(failure_signal or '')[:2000]}"
     )
@@ -312,9 +318,12 @@ async def distill_lesson(
 
 
 def _build_lesson_meta(title: str, data_type: str, keywords: List[str], status: str, occurrences: int,
-                      *, helped_avoid: int = 0, created_at: str = "") -> str:
+                      *, helped_avoid: int = 0, created_at: str = "", owner_id: str | None = None) -> str:
     """构造 frontmatter YAML 字符串（不含分隔符）。"""
+    require_owner(owner_id)
     meta = {
+        "owner_id": owner_id,
+        "scope": "owner",
         "title": title,
         "data_type": (data_type or "").lower(),
         "keywords": [k for k in (keywords or []) if k],
@@ -327,38 +336,12 @@ def _build_lesson_meta(title: str, data_type: str, keywords: List[str], status: 
     return yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).strip()
 
 
-def _read_lesson_by_slug(slug: str) -> Optional[Dict]:
-    """锁内用：从磁盘重读单条教训，拿最新状态（不走缓存）。"""
-    path = LESSONS_DIR / f"{slug}.md"
-    if not path.is_file():
+def _read_lesson_by_slug(slug: str, *, owner_id: str | None = None) -> Optional[Dict]:
+    entry = read_entry(LESSONS_DIR, slug)
+    if not entry or not visible(entry, owner_id, "owner"):
         return None
-    try:
-        raw = path.read_text(encoding="utf-8")
-    except Exception:
-        return None
-    try:
-        parsed = parse_frontmatter(raw)
-    except FrontmatterError:
-        return None
-    if parsed is None:
-        return None
-    meta, body = parsed
-    if not body:
-        return None
-    kws = meta.get("keywords") or []
-    if isinstance(kws, str):
-        kws = [kws]
-    return {
-        "slug": slug,
-        "title": str(meta.get("title") or slug),
-        "data_type": str(meta.get("data_type") or "").strip().lower(),
-        "keywords": [str(k).strip() for k in kws if str(k).strip()],
-        "body": body,
-        "status": str(meta.get("status") or "draft").strip().lower(),
-        "occurrences": int(meta.get("occurrences") or 0),
-        "helped_avoid": int(meta.get("helped_avoid") or 0),
-        "created_at": str(meta.get("created_at") or ""),
-    }
+    return {**entry, "status": entry.get("status", "draft"),
+            "occurrences": int(entry.get("occurrences") or 0), "helped_avoid": int(entry.get("helped_avoid") or 0)}
 
 
 async def record_failure(
@@ -368,7 +351,7 @@ async def record_failure(
     failure_signal: str,
     *,
     provider: Optional[str] = None,
-    model: Optional[str] = None,
+    model: Optional[str] = None, owner_id: str | None = None
 ) -> None:
     """checker.py 判定"采集失败"后的唯一调用入口。
 
@@ -378,35 +361,36 @@ async def record_failure(
     LLM 调用全在锁外（避免长时间持锁阻塞事件循环）；锁内只做"重读最新状态 + 计算 + 原子写"。
     新建分支锁内重判发现 existing 时选择放弃本次（同类失败会重复发生，下次再合并）。
     """
+    require_owner(owner_id)
     # ---- 锁外：LLM 蒸馏（不含 existing，拿到"这次失败"的通用化描述）----
     fresh = await distill_lesson(
         intent, data_type, keywords, failure_signal,
-        existing=None, provider=provider, model=model,
+        existing=None, provider=provider, model=model, owner_id=owner_id,
     )
     if not fresh:
         logger.warning("教训蒸馏无有效正文，本次跳过")
         return
 
-    existing_snap = find_similar_lesson(data_type, fresh["keywords"] or keywords, fresh["title"])
+    existing_snap = find_similar_lesson(data_type, fresh["keywords"] or keywords, fresh["title"], owner_id=owner_id)
 
     # ---- 新建分支：锁内重判 + 原子写 ----
     if not existing_snap:
         with _lessons_lock:
-            existing = find_similar_lesson(data_type, fresh["keywords"] or keywords, fresh["title"])
+            existing = find_similar_lesson(data_type, fresh["keywords"] or keywords, fresh["title"], owner_id=owner_id)
             if existing:
                 # 并发期间他人已创建同类教训：锁内不能 await LLM merge，
                 # 直接 occurrences+1、body 保持现有（下次失败会走合并分支融合 body）
-                existing = _read_lesson_by_slug(existing["slug"])
+                existing = _read_lesson_by_slug(existing["slug"], owner_id=owner_id)
                 if not existing:
                     # 极端情况：被巡检删了，降级新建
                     LESSONS_DIR.mkdir(parents=True, exist_ok=True)
-                    slug = _slugify(fresh["title"])
-                    path = LESSONS_DIR / f"{slug}.md"
+                    slug = uuid4().hex
+                    path = entry_path(LESSONS_DIR, slug)
                     i = 2
                     while path.exists():
                         path = LESSONS_DIR / f"{slug}-{i}.md"
                         i += 1
-                    meta = _build_lesson_meta(fresh["title"], data_type, fresh["keywords"] or keywords, "draft", 1, created_at=datetime.now().isoformat())
+                    meta = _build_lesson_meta(fresh["title"], data_type, fresh["keywords"] or keywords, "draft", 1, created_at=datetime.now().isoformat(), owner_id=owner_id)
                     atomic_write(path, f"---\n{meta}\n---\n{fresh['body'].strip()}\n")
                     _invalidate_and_rebuild_index()
                     logger.info("教训已被删除，降级新建：%s", path.stem)
@@ -416,20 +400,20 @@ async def record_failure(
                 status = existing["status"]
                 meta = _build_lesson_meta(
                     existing["title"], data_type, existing["keywords"], status, occurrences,
-                    helped_avoid=existing["helped_avoid"],
+                    helped_avoid=existing["helped_avoid"], created_at=existing.get("created_at", ""), owner_id=owner_id
                 )
                 atomic_write(path, f"---\n{meta}\n---\n{existing['body'].strip()}\n")
                 _invalidate_and_rebuild_index()
                 logger.info("并发新建转为合并（不调LLM）：%s occurrences=%d", existing["slug"], occurrences)
                 return
             LESSONS_DIR.mkdir(parents=True, exist_ok=True)
-            slug = _slugify(fresh["title"])
-            path = LESSONS_DIR / f"{slug}.md"
+            slug = uuid4().hex
+            path = entry_path(LESSONS_DIR, slug)
             i = 2
             while path.exists():
                 path = LESSONS_DIR / f"{slug}-{i}.md"
                 i += 1
-            meta = _build_lesson_meta(fresh["title"], data_type, fresh["keywords"] or keywords, "draft", 1, created_at=datetime.now().isoformat())
+            meta = _build_lesson_meta(fresh["title"], data_type, fresh["keywords"] or keywords, "draft", 1, created_at=datetime.now().isoformat(), owner_id=owner_id)
             atomic_write(path, f"---\n{meta}\n---\n{fresh['body'].strip()}\n")
             _invalidate_and_rebuild_index()
             logger.info("已沉淀新教训（草稿）：%s", path.stem)
@@ -438,31 +422,16 @@ async def record_failure(
     # ---- 锁外：LLM 合并蒸馏（用快照 existing_snap）----
     merged = await distill_lesson(
         intent, data_type, keywords, failure_signal,
-        existing=existing_snap, provider=provider, model=model,
+        existing=existing_snap, provider=provider, model=model, owner_id=owner_id,
     )
     if not merged:
         logger.warning("教训合并蒸馏无有效正文，本次跳过")
         return
 
-    # ---- 锁内：重读最新 existing + 计算 occurrences + 原子写 ----
+    # 锁外融合的来源变化或被删除时丢弃迟到结果，禁止覆盖新正文。
     with _lessons_lock:
-        existing = _read_lesson_by_slug(existing_snap["slug"])
-        if not existing:
-            # 被巡检删了，降级新建
-            LESSONS_DIR.mkdir(parents=True, exist_ok=True)
-            slug = _slugify(merged["title"] or fresh["title"])
-            path = LESSONS_DIR / f"{slug}.md"
-            i = 2
-            while path.exists():
-                path = LESSONS_DIR / f"{slug}-{i}.md"
-                i += 1
-            meta = _build_lesson_meta(
-                merged["title"] or fresh["title"], data_type, merged["keywords"] or keywords,
-                "draft", 1, created_at=datetime.now().isoformat(),
-            )
-            atomic_write(path, f"---\n{meta}\n---\n{merged['body'].strip()}\n")
-            _invalidate_and_rebuild_index()
-            logger.info("教训已被删除，降级新建：%s", path.stem)
+        existing = _read_lesson_by_slug(existing_snap["slug"], owner_id=owner_id)
+        if not existing or content_digest(existing) != content_digest(existing_snap):
             return
 
         path = LESSONS_DIR / f"{existing['slug']}.md"
@@ -470,7 +439,7 @@ async def record_failure(
         status = existing["status"]  # B：不再自动转正，需 helped_avoid≥1 由 record_lesson_helped 控制
         meta = _build_lesson_meta(
             merged["title"] or existing["title"], data_type, merged["keywords"] or existing["keywords"],
-            status, occurrences, helped_avoid=existing["helped_avoid"],
+            status, occurrences, helped_avoid=existing["helped_avoid"], created_at=existing.get("created_at", ""), owner_id=owner_id
         )
         atomic_write(path, f"---\n{meta}\n---\n{merged['body'].strip()}\n")
         _invalidate_and_rebuild_index()
@@ -492,11 +461,11 @@ def _log_lesson_recall(store, task_id: str, lessons: List[Dict], degrade_path: s
         logger.warning("教训召回埋点失败（不影响产出）", exc_info=True)
 
 
-def lesson_for_analyze(spec, *, store=None, task_id: str = "") -> Tuple[str, Optional[str]]:
+def lesson_for_analyze(spec, *, store=None, task_id: str = "", owner_id: str | None = None) -> Tuple[str, Optional[str]]:
     """analyze 节点用：召回多条 active 教训，按有效性降序取 top-3 拼接提醒。
     未命中/语义不可用返回 ("", None)。返回 (提醒文本, 最优 slug 或 None)。
     方案 D/E3：传入 store 时无论命中与否都写一条埋点（供概览页聚合命中率）。"""
-    lessons, degrade_path = find_active_lessons(spec.data_type.value, spec.keywords, spec.intent, top_k=3)
+    lessons, degrade_path = find_active_lessons(spec.data_type.value, spec.keywords, spec.intent, top_k=3, owner_id=owner_id)
     _log_lesson_recall(store, task_id, lessons, degrade_path)
     if not lessons:
         return "", None
@@ -506,11 +475,11 @@ def lesson_for_analyze(spec, *, store=None, task_id: str = "") -> Tuple[str, Opt
     return "".join(parts), lessons[0]["slug"]
 
 
-def lesson_for_planner(user_input: str, *, store=None, task_id: str = "") -> str:
+def lesson_for_planner(user_input: str, *, store=None, task_id: str = "", owner_id: str | None = None) -> str:
     """planner 节点用：此时尚无 TaskSpec，只有原始用户输入，因此不按 data_type 过滤，直接
     用原始文本做语义比对。召回多条 active 教训，按有效性降序取 top-3 拼接提醒；
     未命中/语义不可用返回空串。方案 D/E3：传入 store 时无论命中与否都写一条埋点。"""
-    lessons, degrade_path = find_active_lessons(None, [], user_input, top_k=3)
+    lessons, degrade_path = find_active_lessons(None, [], user_input, top_k=3, owner_id=owner_id)
     _log_lesson_recall(store, task_id, lessons, degrade_path)
     if not lessons:
         return ""
@@ -520,24 +489,19 @@ def lesson_for_planner(user_input: str, *, store=None, task_id: str = "") -> str
     return "".join(parts)
 
 
-def _rebuild_lessons_index() -> None:
-    """方案 C：重建 data/lessons/INDEX.md（一行一条教训概要，供管理员快速浏览）。"""
-    lessons = load_lessons()
-    lines = ["# 教训库索引\n\n"]
-    if not lessons:
-        lines.append("（暂无教训）\n")
-    else:
-        for t in lessons:
-            lines.append(f"- [{t['slug']}] {t['title']} | {t['data_type'] or '通用'} | "
-                         f"{t['status']} | 命中{t['occurrences']}次 | 有效{t['helped_avoid']}次\n")
-    atomic_write(LESSONS_DIR / "INDEX.md", "".join(lines))
-
-
-def delete_lesson(slug: str) -> bool:
+def delete_lesson(slug: str, *, owner_id: str | None = None, is_admin: bool = False,
+                    expected_source_digest: str | None = None, expected_status: str | None = None) -> bool:
     """删除一条已学教训：移除 data/lessons/<slug>.md。供前端教训库管理使用。
     文件不存在返回 False。加锁保护，同步失效缓存+重建索引。"""
-    path = LESSONS_DIR / f"{slug}.md"
+    path = entry_path(LESSONS_DIR, slug)
     with _lessons_lock:
+        current = read_entry(LESSONS_DIR, slug)
+        if expected_source_digest is not None and (not current or content_digest(current) != expected_source_digest):
+            return False
+        if expected_status is not None and (not current or current.get("status") != expected_status):
+            return False
+        if not may_mutate(current, owner_id, is_admin=is_admin):
+            return False
         if not path.is_file():
             return False
         try:
@@ -550,7 +514,7 @@ def delete_lesson(slug: str) -> bool:
         return True
 
 
-def record_lesson_helped(slug: str) -> bool:
+def record_lesson_helped(slug: str, *, owner_id: str | None = None) -> bool:
     """标记一条教训在本轮任务中帮到了（避免同类型失败）。
 
     当某次任务命中 active 教训且 Checker 判定通过时调用此函数：
@@ -558,8 +522,10 @@ def record_lesson_helped(slug: str) -> bool:
     自动转正 active；如果满足退役条件（active 且 occurrences≥10 且 helped_avoid==0）
     自动退役 retired。文件不存在返回 False。
     """
-    path = LESSONS_DIR / f"{slug}.md"
+    path = entry_path(LESSONS_DIR, slug)
     with _lessons_lock:
+        if not may_mutate(read_entry(LESSONS_DIR, slug), owner_id, stats=True):
+            return False
         if not path.is_file():
             return False
         try:
@@ -589,12 +555,15 @@ def record_lesson_helped(slug: str) -> bool:
 
 
 async def merge_lesson_pair(
-    a: Dict, b: Dict, *, provider: Optional[str] = None, model: Optional[str] = None,
+    a: Dict, b: Dict, *, provider: Optional[str] = None, model: Optional[str] = None, owner_id: str | None = None,
 ) -> Optional[Dict]:
     """定时巡检专用：给定两条已确认描述同一类失败场景的教训，直接融合成一份正文。
     返回 {title, keywords, body} 或 None（LLM 调用失败/无正文）。"""
     from src.conductor.prompts import LESSON_PAIR_MERGE_SYSTEM
 
+    if not all(same_private_snapshot(LESSONS_DIR, entry, owner_id) for entry in (a, b)):
+        return None
+    require_owner(owner_id)
     user = (
         f"教训A：\n标题：{a['title']}\n关键词：{', '.join(a['keywords'])}\n正文：{a['body']}\n\n"
         f"教训B：\n标题：{b['title']}\n关键词：{', '.join(b['keywords'])}\n正文：{b['body']}\n\n"
@@ -626,17 +595,19 @@ async def merge_lesson_pair(
     }
 
 
-def find_patrol_duplicate_lesson(entry: Dict) -> Optional[tuple[Dict, float]]:
+def find_patrol_duplicate_lesson(entry: Dict, *, owner_id: str | None = None) -> Optional[tuple[Dict, float]]:
     """定时巡检专用：在同 data_type 的其余教训里找与 entry 语义重复的一条（排除自身）。
     返回 (匹配条目, rerank 相似度分数) 或 None。
     embedding 不可用/rerank 未配置时返回 None（同模板库巡检哲学：宁可不查也不要弱兜底误判）。"""
     from src.config.settings import settings
     from . import embeddings as emb
 
+    if not same_private_snapshot(LESSONS_DIR, entry, owner_id):
+        return None
     if not settings.embedding_enabled:
         return None
     dt = (entry["data_type"] or "").lower()
-    cands = [t for t in load_lessons() if t["slug"] != entry["slug"] and (not dt or t["data_type"] == dt)]
+    cands = [t for t in load_lessons(owner_id=owner_id, scope="owner") if t["slug"] != entry["slug"] and (not dt or t["data_type"] == dt)]
     if not cands:
         return None
     if not emb.is_rerank_configured():
@@ -665,24 +636,46 @@ def find_patrol_duplicate_lesson(entry: Dict) -> Optional[tuple[Dict, float]]:
     return None
 
 
-def apply_patrol_merge_lesson(slug: str, merged: Dict) -> bool:
-    """定时巡检专用：把融合结果写回目标教训文件，status/occurrences 保持不变。
-    文件不存在/解析失败返回 False。加锁保护 read-modify-write。"""
-    path = LESSONS_DIR / f"{slug}.md"
+def apply_patrol_merge_lesson(slug: str, merged: Dict, *, owner_id: str | None = None,
+                        expected_source_digest: str | None = None, loser_slug: str | None = None,
+                        expected_loser_digest: str | None = None) -> bool:
+    """锁内复核同 Owner 快照再融合，平台正文不可沿旧确认改写。"""
     with _lessons_lock:
-        try:
-            raw = path.read_text(encoding="utf-8")
-            parsed = parse_frontmatter(raw)
-        except (OSError, FrontmatterError):
-            parsed = None
-        if parsed is None:
-            logger.warning("巡检合并的目标教训读取/解析失败，跳过：%s", slug)
-            return False
-        meta, _old_body = parsed
-        meta["title"] = merged["title"] or meta.get("title")
-        meta["keywords"] = merged["keywords"] or meta.get("keywords")
-        front = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).strip()
-        atomic_write(path, f"---\n{front}\n---\n{merged['body'].strip()}\n")
+        applied = apply_private_merge(LESSONS_DIR, slug, merged, owner_id=owner_id,
+                                      expected_source_digest=expected_source_digest, loser_slug=loser_slug,
+                                      expected_loser_digest=expected_loser_digest)
+        if applied:
+            _invalidate_and_rebuild_index()
+        return applied
+
+
+def share_lesson(slug: str, **kwargs) -> Dict:
+    """已验证教训贡献独立副本，保留 active 召回门且独立累计质量。"""
+    with _lessons_lock:
+        source = read_entry(LESSONS_DIR, slug)
+        if not source or source.get("status") != "active":
+            raise ValueError("仅已验证教训可贡献平台副本")
+        result = share_copy(LESSONS_DIR, slug, stats={"occurrences": 0, "helped_avoid": 0},
+                            initial_status="active", source_quality={k: source.get(k) for k in ("status", "occurrences", "helped_avoid")}, **kwargs)
         _invalidate_and_rebuild_index()
-        logger.info("巡检去重合并：%s", slug)
+        return result
+
+
+def _patrol_entries() -> List[Dict]:
+    return [{**t, "content_digest": content_digest(t)} for t in _load_lessons_from_disk() if valid_entry(t)]
+
+def record_lesson_failure(slug: str, *, owner_id: str | None = None) -> bool:
+    """平台教训只累计实际失败，不把本轮个人正文融合进已确认副本。"""
+    with _lessons_lock:
+        entry = read_entry(LESSONS_DIR, slug)
+        if not entry or entry.get("scope") != "platform" or not may_mutate(entry, owner_id, stats=True):
+            return False
+        entry["occurrences"] = int(entry.get("occurrences") or 0) + 1
+        if entry.get("status") == "active" and entry["occurrences"] >= 10 and not entry.get("helped_avoid"):
+            entry["status"] = "retired"
+        body = entry.pop("body")
+        entry.pop("slug", None)
+        front = yaml.safe_dump(entry, allow_unicode=True, sort_keys=False).strip()
+        atomic_write(entry_path(LESSONS_DIR, slug), f"---\n{front}\n---\n{body}\n")
+        _invalidate_and_rebuild_index()
         return True

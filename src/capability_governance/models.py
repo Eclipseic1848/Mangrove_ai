@@ -73,6 +73,17 @@ AuditSubjectType = Literal["task_prompt", "task_sources", "task_output"]
 CapabilityAudience = Literal["admin_gray", "users"]
 
 
+class AuditIdempotencyConflict(ValueError):
+    """同一审计命令不能为不同主体、用途或正文重复背书。"""
+
+
+def require_same_audit_evidence(existing, requested) -> None:
+    # 重试只允许时间和事件编号变化；其余字段必须证明同一次正文访问。
+    exclude = {"event_id", "occurred_at"}
+    if existing.model_dump(exclude=exclude) != requested.model_dump(exclude=exclude):
+        raise AuditIdempotencyConflict("审计幂等键冲突，请核对内容后重新发起")
+
+
 class CapabilityGovernanceEvent(BaseModel):
     """只追加的治理事实；登记建立初始态，晋级由有界命令生成，审计查看独立留痕。"""
 
