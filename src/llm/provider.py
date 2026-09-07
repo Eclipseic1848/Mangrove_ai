@@ -28,6 +28,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
 from src.config import settings
+from src.api.execution import execution_http_checkpoint, execution_http_checkpoint_async
 
 # 请求级 LLM token 用量累积器：chat.py pipeline 进入时 set 一个 dict，
 # achat/chat 每次调用把 resp.usage_metadata 累加进去；未 set 时零开销跳过。
@@ -337,16 +338,16 @@ class MultiModelProvider:
             if connection.extra_body:
                 # 直接透传额外 body 字段（如 enable_thinking）到底层 OpenAI create()
                 kwargs["extra_body"] = connection.extra_body
-            if name == "local":
-                # 本地模型走局域网，绕过系统代理（否则代理会拦截 LAN 请求导致 502/超时）
-                kwargs["http_client"] = httpx.Client(
-                    trust_env=False,
-                    timeout=connection.timeout,
-                )
-                kwargs["http_async_client"] = httpx.AsyncClient(
-                    trust_env=False,
-                    timeout=connection.timeout,
-                )
+            kwargs["http_client"] = httpx.Client(
+                trust_env=connection.trust_env,
+                timeout=connection.timeout,
+                event_hooks={"request": [execution_http_checkpoint], "response": [execution_http_checkpoint]},
+            )
+            kwargs["http_async_client"] = httpx.AsyncClient(
+                trust_env=connection.trust_env,
+                timeout=connection.timeout,
+                event_hooks={"request": [execution_http_checkpoint_async], "response": [execution_http_checkpoint_async]},
+            )
             self._cache[key] = ChatOpenAI(**kwargs)
             logger.info("已创建模型: provider=%s model=%s(real=%s)", name, requested, real_model)
         return self._cache[key]

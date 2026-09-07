@@ -50,7 +50,12 @@ from src.delivery_publishing.repository import DeliveryPublishingRepository
 from src.delivery_publishing.models import canonical_hash
 from src.evaluation.formal_delivery import publish_runtime_result_as_formal_delivery
 from src.evaluation.g1_manifest import qualification_gaps
-from src.model_connections import get_default_broker
+from src.account_execution import ExecutionDenied
+from src.model_connections.broker import ConnectionBroker
+from src.model_connections.storage import ModelConnectionRepository
+from src.model_connections.vault import FernetCredentialVault
+from src.evaluation.account_execution import evaluation_execution
+from src.api.execution import execution_checkpoint
 
 from assertions import (
     formal_assertion_gaps,
@@ -86,6 +91,7 @@ EVALUATION_DRIVER_FILES = (
     Path(__file__),
     PROJECT_ROOT / "evals/generalization-g1/run_independent_g1.py",
     PROJECT_ROOT / "src/evaluation/g1_manifest.py",
+    PROJECT_ROOT / "src/evaluation/account_execution.py",
 )
 
 # ------------------------------------------------------------------
@@ -97,14 +103,34 @@ EVALUATION_DRIVER_FILES = (
 _relay_lock = threading.Lock()
 _relay_broker: DocumentToolBroker | None = None
 _relay_url: str | None = None
+_relay_database: Path | None = None
+_evaluation_broker = None
+_evaluation_model_relay: str | None = None
+
+def configure_evaluation_model_broker(broker, relay_url: str) -> None:
+    """调用者显式提供同库 Broker 及其 Relay；不读取产品默认凭证。"""
+    global _evaluation_broker, _evaluation_model_relay
+    if Path(broker._repository.db_path).resolve() != Path(FORMAL_DELIVERY_DB).resolve() or not relay_url:
+        raise ValueError("评测模型 Broker 必须绑定正式评测库和显式 Relay")
+    _evaluation_broker, _evaluation_model_relay = broker, relay_url
+
+def _require_evaluation_broker():
+    if _evaluation_broker is None or not _evaluation_model_relay:
+        raise ValueError("外部模型评测缺少显式同库 Broker/Relay")
+    if Path(_evaluation_broker._repository.db_path).resolve() != Path(FORMAL_DELIVERY_DB).resolve():
+        raise ValueError("评测模型 Broker 数据库不匹配")
+    return _evaluation_broker
+
 
 
 def ensure_document_relay(
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
 ) -> tuple[DocumentToolBroker, str]:
-    global _relay_broker, _relay_url
+    global _relay_broker, _relay_url, _relay_database
     with _relay_lock:
         if _relay_url is not None and _relay_broker is not None:
+            if _relay_database != Path(FORMAL_DELIVERY_DB).resolve():
+                raise ValueError("文档 Relay 已绑定另一评测库")
             return _relay_broker, _relay_url
         from fastapi import FastAPI
         import uvicorn
@@ -113,7 +139,7 @@ def ensure_document_relay(
         broker = DocumentToolBroker(
             retriever=DocumentRetrievalModule(),
             ttl_seconds=timeout_seconds,
-            state_store=AgenticRuntimeRepository(settings.webui_db_path),
+            state_store=AgenticRuntimeRepository(FORMAL_DELIVERY_DB),
         )
         configure_default_document_tool_broker(broker)
         app = FastAPI()
@@ -142,6 +168,7 @@ def ensure_document_relay(
             import time
 
             time.sleep(0.1)
+        _relay_database = Path(FORMAL_DELIVERY_DB).resolve()
         _relay_broker = broker
         _relay_url = f"http://127.0.0.1:{port}/internal/document-tools"
         print(f"文档工具 Relay 就绪：{_relay_url}", flush=True)
@@ -330,7 +357,7 @@ def _resolve_model_route(connection_id: str, model_id: str) -> dict[str, str]:
             "model": settings.llm_model_name,
             "base_url": settings.llm_base_url,
         }
-    binding = get_default_broker().freeze_connection("g1-eval", connection_id)
+    binding = _require_evaluation_broker().freeze_connection("g1-eval", connection_id)
     return {
         "kind": "connection",
         "connection_id": binding.connection_id,
@@ -419,17 +446,41 @@ async def _run_runtime(
 ):
     """默认模型执行边界；测试与独立评测只替换这一外部边界。"""
 
+    if request.model_connection_id is not None:
+        connection_broker = _require_evaluation_broker()
+    else:
+        # 本地模型仍需同库撤持久 Grant；临时 Vault 不读取产品密钥文件。
+        connection_broker = ConnectionBroker(
+            repository=ModelConnectionRepository(str(FORMAL_DELIVERY_DB)),
+            vault=FernetCredentialVault.generate(),
+        )
     broker, relay_url = ensure_document_relay(timeout_seconds)
     runtime = PiRuntime(
         execution_root=execution_root,
         timeout_seconds=timeout_seconds,
         document_tool_broker=broker,
         document_relay_base_url=relay_url,
+        state_store=AgenticRuntimeRepository(FORMAL_DELIVERY_DB),
+        connection_broker=connection_broker,
+        relay_base_url=_evaluation_model_relay,
     )
     return await runtime.start(request, on_event=on_event)
 
 
-async def run_case(
+async def run_case(case, run_number, retries, model_route,
+                   timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+                   request_factory=_make_request, runtime_runner=_run_runtime,
+                   candidate_assertion=run_assert):
+    # 请求与代数只冻结一次；重试不得从已重新启用的账号捕获新身份。
+    request = request_factory(case, run_number, model_route)
+    if case.get("owner_id") and request.user_id != case["owner_id"]:
+        raise ValueError("评测请求 Owner 与夹具不一致")
+    async with evaluation_execution(FORMAL_DELIVERY_DB, request):
+        return await _run_case_authorized(case, run_number, retries, model_route,
+            timeout_seconds, lambda *args: request, runtime_runner, candidate_assertion)
+
+
+async def _run_case_authorized(
     case: dict,
     run_number: int,
     retries: int,
@@ -493,12 +544,14 @@ async def run_case(
             async def event_sink(event: RuntimeEvent) -> None:
                 print(f"[{case['id']}] {event.event_type}: {event.summary}", flush=True)
 
+            execution_checkpoint(required=True)
             outcome = await runtime_runner(
                 request,
                 execution_root,
                 timeout_seconds,
                 event_sink,
             )
+            execution_checkpoint(required=True)
             attempt_result["run_id"] = outcome.run_id
             candidates = getattr(outcome, "candidates", []) or []
             if len(candidates) != 1:
@@ -556,7 +609,9 @@ async def run_case(
                 result["passed"] = True
                 return result
             try:
+                execution_checkpoint(required=True)
                 candidate_assertion(case, artifact)
+                execution_checkpoint(required=True)
                 attempt_result["assertion_passed"] = True
             except AssertionError as exc:
                 attempt_result["error"] = f"断言失败：{exc}"
@@ -586,6 +641,8 @@ async def run_case(
                         "formal_delivery_reason": qualification.reason_code,
                         "formal_delivery_details": list(qualification.details),
                     })
+                except ExecutionDenied:
+                    raise
                 except (PermissionError, ValueError) as exc:
                     failure_code = (
                         "permission_denied"
@@ -630,9 +687,11 @@ async def run_case(
                 attempt_result["error"] = "安全夹具预期拒绝，但实际形成正式 Delivery"
                 result["security_violation"] = True
                 return result
-        except Exception as exc:  # noqa: BLE001 —— 评测驱动需要把任何失败归类为失败项
+        except Exception as exc:
             attempt_result["error"] = f"{type(exc).__name__}: {exc}"
             result["attempts"].append(attempt_result)
+            # 未知外部失败交由共享生命周期保留清理失败，不能自动重放或宣告静默。
+            raise
         finally:
             shutil.rmtree(execution_root, ignore_errors=True)
     return result

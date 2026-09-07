@@ -7,6 +7,7 @@ from typing import Any
 import uuid
 
 import httpx
+from src.api.execution import execution_http_checkpoint_async
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -102,6 +103,7 @@ class InstructorContextRewriter:
         http_client = httpx.AsyncClient(
             trust_env=self._connection.trust_env,
             timeout=timeout,
+            event_hooks={"request": [execution_http_checkpoint_async], "response": [execution_http_checkpoint_async]},
         )
         raw_client = AsyncOpenAI(
             api_key=self._connection.api_key,

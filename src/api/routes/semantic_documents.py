@@ -2,6 +2,10 @@
 """Phase 4B 批次 4 后端测试 API：冻结、执行并验证文档计划。"""
 from __future__ import annotations
 
+from src.api.auth import get_execution_user
+from src.account_execution import current_authorization
+from src.api.execution import running_execution
+
 from pathlib import Path
 import uuid
 
@@ -84,7 +88,7 @@ def _semantic_provider(physical: DocumentPhysicalPlan):
 def prepare_document_plan(
     plan_id: str,
     payload: PrepareDocumentPlanIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     plan, bound_plan, reports = _context(user["user_id"], plan_id)
     physical = compile_document_plan(
@@ -115,7 +119,7 @@ def list_document_plans(
 async def execute_document(
     plan_id: str,
     physical_plan_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     stored = get_store().get_physical_plan(user["user_id"], physical_plan_id)
     if stored is None or stored["plan_id"] != plan_id:
@@ -160,32 +164,34 @@ async def execute_document(
         / plan_id
         / run_id
     )
-    try:
-        _, bundle, verification = await run_document_execution_graph(
-            plan,
-            bound_plan,
-            reports,
-            profile=physical.runtime_policy.profile,
-            artifact_paths=paths,
-            output_dir=output_dir,
-            semantic_provider=_semantic_provider(physical),
-            physical_plan=physical,
+    get_store().bind_account_execution(current_authorization(), "data", run_id)
+    async with running_execution(get_store(), "data", run_id):
+        try:
+            _, bundle, verification = await run_document_execution_graph(
+                plan,
+                bound_plan,
+                reports,
+                profile=physical.runtime_policy.profile,
+                artifact_paths=paths,
+                output_dir=output_dir,
+                semantic_provider=_semantic_provider(physical),
+                physical_plan=physical,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc)[:400],
+            ) from exc
+        return get_store().save_document_execution_run(
+            user["user_id"],
+            run_id=run_id,
+            plan_id=plan_id,
+            physical_plan_id=physical_plan_id,
+            result=bundle.result,
+            tool_result=bundle.tool_result,
+            verification=verification,
+            artifact_paths={"result": str(bundle.result_path.resolve())},
         )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(exc)[:400],
-        ) from exc
-    return get_store().save_document_execution_run(
-        user["user_id"],
-        run_id=run_id,
-        plan_id=plan_id,
-        physical_plan_id=physical_plan_id,
-        result=bundle.result,
-        tool_result=bundle.tool_result,
-        verification=verification,
-        artifact_paths={"result": str(bundle.result_path.resolve())},
-    )
 
 
 @router.get("/{plan_id}/document-runs/{run_id}")

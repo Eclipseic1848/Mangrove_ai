@@ -20,6 +20,14 @@ from src.candidate_verification import (
     SqliteCandidateVerificationRepository,
 )
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import ExecutionAuthorization, execution_context
+
+
+@pytest.fixture(autouse=True)
+def historical_owner_context():
+    with execution_context(ExecutionAuthorization("owner-a", 0)):
+        yield
 
 
 def _evidence() -> HistoricalReverificationEvidence:
@@ -72,6 +80,7 @@ def _seed_runtime_boundary(
     with_assignment: bool = False,
 ) -> None:
     evidence = _evidence()
+    seed_execution_owner(database, evidence.owner_id)
     AgenticRuntimeRepository(database).register(
         RuntimeTaskConfig(
             user_id=evidence.owner_id,

@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import hashlib
 from pathlib import Path
 from typing import Callable, Protocol
 import uuid
+from filelock import Timeout as FileLockTimeout
+
+from src.account_execution import ExecutionDenied
+from src.api.execution import execution_to_thread
+from .sqlite_repository import validation_checkpoint
 
 from .models import (
     CapabilityGovernanceTarget,
@@ -161,7 +167,7 @@ class PlatformValidationManager:
 
     async def _run(self) -> None:
         while True:
-            self.run_once()
+            await execution_to_thread(self.run_once)
             try:
                 await asyncio.wait_for(
                     self._wake.wait(), timeout=self._poll_seconds
@@ -172,27 +178,71 @@ class PlatformValidationManager:
 
     def run_once(self) -> None:
         for run in self._repository.list_platform_validation_runs():
-            # 外部步骤（Trivy/Syft/探针/签名）必须独占；Lease 到期由下一轮接管。
-            if not self._repository.acquire_platform_validation_lease(
-                run_id=run.run_id,
-                digest=run.target.digest,
-                worker_id=self._worker_id,
-                now=datetime.now(timezone.utc),
-                lease_seconds=self._lease_seconds,
-            ):
-                continue
+            context = getattr(self._repository, 'validation_execution', None)
             try:
-                run = self._advance_validation(run)
-                if (
-                    run is not None
-                    and run.status is ValidationRunStatus.SUCCEEDED
-                ):
-                    self._advance_signing(run)
-            finally:
-                self._repository.release_platform_validation_lease(
-                    run.run_id,
-                    self._worker_id,
-                )
+                with context(run) if context else nullcontext():
+                    self._step_active = False
+                    self._known_quiet = self._repository.validation_never_started(run, self._worker_id) if context else True
+                    try:
+                        validation_checkpoint()
+                        self._run_one(run)
+                    except ExecutionDenied:
+                        if context:
+                            if self._repository.validation_cleanup_available(run, self._worker_id):
+                                self._repository.confirm_validation_stopped(run, cleanup_failed=not self._known_quiet)
+            except (ExecutionDenied, FileLockTimeout):
+                continue
+
+    def _run_one(self, run: PlatformValidationRun) -> None:
+        # 外部步骤（Trivy/Syft/探针/签名）必须独占；Lease 到期由下一轮接管。
+        if not self._repository.acquire_platform_validation_lease(
+            run_id=run.run_id,
+            digest=run.target.digest,
+            worker_id=self._worker_id,
+            now=datetime.now(timezone.utc),
+            lease_seconds=self._lease_seconds,
+        ):
+            return
+        try:
+            run = self._advance_validation(run)
+            if (
+                run is not None
+                and run.status is ValidationRunStatus.SUCCEEDED
+            ):
+                self._advance_signing(run)
+            if self._known_quiet and run is not None and run.status in {ValidationRunStatus.SUCCEEDED, ValidationRunStatus.FAILED, ValidationRunStatus.CANCELLED}:
+                finish = getattr(self._repository, 'finish_validation_execution', None)
+                if finish:
+                    finish(run)
+        finally:
+            self._repository.release_platform_validation_lease(
+                run.run_id,
+                self._worker_id,
+            )
+
+    def reconcile_account_execution(self, owner_id: str, resource_id: str, expected_generation: int) -> bool:
+        if not resource_id.startswith('platform:'):
+            return False
+        run = self._repository.get_platform_validation_run(resource_id.removeprefix('platform:'))
+        if run is None or run.actor_id != owner_id:
+            return False
+        binding = self._repository.get_validation_binding(run)
+        if binding is None or binding['generation'] != expected_generation:
+            return False
+        if binding['state'] == 'paused':
+            return True
+        # 无持久资源清理协议的历史外部步骤必须保留未知，不能仅靠拿到锁确认。
+        if not self._repository.validation_never_started(run, self._worker_id):
+            return False
+        try:
+            with self._repository.validation_execution(run):
+                current = self._repository.get_validation_binding(run)
+                if current is None or current['generation'] != expected_generation:
+                    return False
+                self._repository.confirm_validation_stopped(run)
+                return True
+        except (ExecutionDenied, FileLockTimeout):
+            return False
 
     def _advance_validation(
         self,
@@ -203,6 +253,8 @@ class PlatformValidationManager:
             ValidationRunStatus.RUNNING,
         }:
             return run
+        if run.status is ValidationRunStatus.QUEUED:
+            run = self._repository.save_platform_validation_run(run.model_copy(update={'status': ValidationRunStatus.RUNNING, 'updated_at': datetime.now(timezone.utc)}))
         completed = {item.step for item in run.evidence}
         failed = any(
             item.status is ValidationStepStatus.FAILED
@@ -211,7 +263,13 @@ class PlatformValidationManager:
         for step in PlatformValidationStep:
             if step in completed or failed:
                 continue
+            validation_checkpoint()
+            self._step_active = True
+            self._known_quiet = False
             evidence = self._executor.execute(run, step)
+            self._step_active = False
+            self._known_quiet = True
+            validation_checkpoint()
             if evidence.step is not step:
                 raise ValueError("平台验证执行器返回了错误的步骤身份")
             run = self._repository.save_platform_validation_run(
@@ -267,6 +325,13 @@ class PlatformValidationManager:
         )
         if candidate is None:
             return
+        binding_reader = getattr(self._repository, 'get_validation_binding', None)
+        if binding_reader and not self._known_quiet:
+            binding = binding_reader(run)
+            if binding is not None and binding['state'] == 'active':
+                # 重启时只剩在途标记，不能猜测签名尚未发生并重复外发。
+                self._repository.confirm_validation_stopped(run, cleanup_failed=True)
+                return
         from .oci_signing import OciSigningRequest
 
         request = OciSigningRequest(
@@ -281,9 +346,24 @@ class PlatformValidationManager:
             public_key_path=self._public_key_path,
         )
         try:
+            validation_checkpoint()
+            begin = getattr(self._repository, 'begin_validation_execution', None)
+            if begin:
+                begin(run)
+            self._step_active = True
+            self._known_quiet = False
             evidence = self._signing.execute(request)
+            self._step_active = False
+            self._known_quiet = True
+            validation_checkpoint()
+        except ExecutionDenied:
+            raise
         except Exception:
-            # 签名失败保持未签名状态，下一轮 run_once 重试；不吞掉运行事实。
+            # 普通异常也可能留下签名进程或未知外部结果；不得标为空闲或自动重签。
+            self._step_active = False
+            confirm = getattr(self._repository, 'confirm_validation_stopped', None)
+            if confirm:
+                confirm(run, cleanup_failed=True)
             return
         if evidence.subject_digest != run.target.digest:
             raise RuntimeError("平台签名主体 digest 与运行目标不一致")
@@ -333,6 +413,8 @@ class LockedPlatformValidationExecutor:
         if step is PlatformValidationStep.TRIVY:
             try:
                 evidence = self._supply_chain.collect(run.target, subject)
+            except ExecutionDenied:
+                raise
             except Exception as error:
                 return _failed_evidence(run, step, error)
             self._supply_cache[run.run_id] = evidence
@@ -379,6 +461,8 @@ class LockedPlatformValidationExecutor:
     ) -> PlatformValidationEvidence:
         try:
             evidence = runner.run(subject)
+        except ExecutionDenied:
+            raise
         except Exception as error:
             return _failed_evidence(run, step, error)
         if evidence.step is not step:

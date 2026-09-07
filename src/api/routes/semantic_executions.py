@@ -2,6 +2,10 @@
 """Phase 4B 批次 3 后端测试 API：冻结、执行并验证表格 PhysicalPlan。"""
 from __future__ import annotations
 
+from src.api.auth import get_execution_user
+from src.account_execution import current_authorization
+from src.api.execution import running_execution
+
 from pathlib import Path
 import uuid
 
@@ -65,7 +69,7 @@ def _context(user_id: str, plan_id: str, binding_revision: int | None = None):
 def prepare_physical_plan(
     plan_id: str,
     payload: PreparePhysicalPlanIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """从最新已确认绑定冻结一个不可变 PhysicalPlan，不执行数据。"""
 
@@ -94,7 +98,7 @@ def list_physical_plans(
 async def execute_plan(
     plan_id: str,
     physical_plan_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """只执行服务端保存的不可变计划；客户端不能提交 SQL 或文件路径。"""
 
@@ -145,29 +149,31 @@ async def execute_plan(
         / plan_id
         / run_id
     )
-    _, bundle, verification = await run_table_execution_graph(
-        plan,
-        bound_plan,
-        reports,
-        profile=physical.runtime_policy.profile,
-        artifact_paths=paths,
-        output_dir=output_dir,
-        physical_plan=physical,
-    )
-    internal_paths = {}
-    if bundle.result_path is not None:
-        internal_paths["result"] = str(bundle.result_path.resolve())
-    if bundle.lineage_path is not None:
-        internal_paths["lineage"] = str(bundle.lineage_path.resolve())
-    return get_store().save_table_execution_run(
-        user["user_id"],
-        run_id=run_id,
-        plan_id=plan_id,
-        physical_plan_id=physical_plan_id,
-        tool_result=bundle.tool_result,
-        verification=verification,
-        artifact_paths=internal_paths,
-    )
+    get_store().bind_account_execution(current_authorization(), "data", run_id)
+    async with running_execution(get_store(), "data", run_id):
+        _, bundle, verification = await run_table_execution_graph(
+            plan,
+            bound_plan,
+            reports,
+            profile=physical.runtime_policy.profile,
+            artifact_paths=paths,
+            output_dir=output_dir,
+            physical_plan=physical,
+        )
+        internal_paths = {}
+        if bundle.result_path is not None:
+            internal_paths["result"] = str(bundle.result_path.resolve())
+        if bundle.lineage_path is not None:
+            internal_paths["lineage"] = str(bundle.lineage_path.resolve())
+        return get_store().save_table_execution_run(
+            user["user_id"],
+            run_id=run_id,
+            plan_id=plan_id,
+            physical_plan_id=physical_plan_id,
+            tool_result=bundle.tool_result,
+            verification=verification,
+            artifact_paths=internal_paths,
+        )
 
 
 @router.get("/{plan_id}/execution-runs/{run_id}")

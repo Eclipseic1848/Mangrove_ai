@@ -277,6 +277,10 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     assert "commits =" not in config
     assert "tests/.*" not in config
     assert "evals/.*" not in config
-    assert len(ignored) == 9
+    assert len(ignored) == 10
+    assert (
+        "8f23acbdcb69890cc94c733bb47baa3a75d5de22:"
+        "tests/test_source_account_generation.py:generic-api-key:19"
+    ) in ignored
     assert all("*" not in fingerprint for fingerprint in ignored)
     assert all(fingerprint.count(":") >= 3 for fingerprint in ignored)

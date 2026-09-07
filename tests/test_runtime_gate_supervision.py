@@ -31,6 +31,23 @@ from src.conversation_steering import (
     ProcedureScope,
 )
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import execution_context
+
+
+@pytest.fixture(autouse=True)
+def account_workspace(tmp_path, monkeypatch):
+    database = migrated_webui_database(tmp_path / "w.db")
+    auth = seed_execution_owner(database, "user-a")
+    store = WebUIStore(str(database))
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
+    monkeypatch.setattr(runtime_mod, "get_store", lambda: store)
+    with execution_context(auth):
+        store.create_semantic_workspace_task(
+            "user-a", task_id="task-a", title="test", objective_text="test", upload_ids=[],
+            output_formats=["txt"], provider="local", model=None, external_api_confirmed=False,
+        )
+        yield store
 
 
 class _GateFakeRuntime:
@@ -51,10 +68,6 @@ class _GateFakeRuntime:
 def _prepare_stop_store(tmp_path, monkeypatch):
     database = migrated_webui_database(tmp_path / "w.db")
     store = WebUIStore(str(database))
-    store.create_semantic_workspace_task(
-        "user-a", task_id="task-a", title="test", objective_text="test", upload_ids=[],
-        output_formats=["txt"], provider="local", model=None, external_api_confirmed=False,
-    )
     monkeypatch.setattr(runtime_mod, "get_store", lambda: store)
     return store
 
@@ -444,7 +457,7 @@ class TestS6Supervision:
         states: list = []
         cancelled_marks: list = []
 
-        class _EventStore:
+        class _EventStore(WebUIStore):
             def request_semantic_workspace_cancellation(self, user_id, task_id):
                 states.append({"status": "cancelling", "cancel_requested": True})
 
@@ -456,7 +469,7 @@ class TestS6Supervision:
             ):
                 events.append((user_id, task_id, kwargs))
 
-        monkeypatch.setattr(runtime_mod, "get_store", lambda: _EventStore())
+        monkeypatch.setattr(runtime_mod, "get_store", lambda: _EventStore(str(tmp_path / "w.db")))
         manager = SemanticWorkspaceManager(pi_runtime=runtime)
         _bind_stop_runtime(manager, runtime, monkeypatch)
         monkeypatch.setattr(
@@ -526,7 +539,7 @@ class TestS6Supervision:
             runtime_mod, "AgenticRuntimeRepository", lambda db_path: repository
         )
 
-        class _Store:
+        class _Store(WebUIStore):
             def get_semantic_workspace_revision(
                 self, user_id, task_id, revision
             ):
@@ -569,7 +582,7 @@ class TestS6Supervision:
             async def start(self, request, on_event=None):
                 await asyncio.get_running_loop().create_future()
 
-        monkeypatch.setattr(runtime_mod, "get_store", lambda: _Store())
+        monkeypatch.setattr(runtime_mod, "get_store", lambda: _Store(str(tmp_path / "w.db")))
         monkeypatch.setattr(
             runtime_mod, "_upload_store", lambda: _UploadStore()
         )

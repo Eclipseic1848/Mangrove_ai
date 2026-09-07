@@ -15,6 +15,8 @@ GET /api/chat/running/{conv_id} 供前端查询会话是否有任务仍在后台
 """
 from __future__ import annotations
 
+from src.api.auth import get_execution_user
+
 import asyncio
 import json
 from typing import Any, Dict, List, Optional
@@ -225,7 +227,7 @@ def _build_data_prep_result(
 
 
 @router.post("/stream", openapi_extra={"x-mangrove-task-control": True})
-async def chat_stream(body: ChatIn, request: Request, user=Depends(get_current_user)):
+async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution_user)):
     store = get_store()
     user_id = user["user_id"]
 
@@ -245,7 +247,7 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_current_u
     # 载入历史 + 追加本轮用户消息（持久化）
     history = [{"role": m["role"], "content": m["content"]} for m in store.list_messages(conv_id)]
     history.append({"role": "user", "content": body.content})
-    store.add_message(conv_id, "user", body.content)
+    run_id = store.start_chat_execution(user_id, conv_id, body.content)
 
     queue: asyncio.Queue = asyncio.Queue()
 
@@ -329,12 +331,17 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_current_u
                 "conv_id": conv_id, "kind": "cancelled",
                 "reply": "❌ 用户已取消任务",
             }, ensure_ascii=False)})
+            raise
+        except ExecutionDenied:
+            # 账号暂停保留原会话，不写成用户取消或把迟到业务结果提交回会话。
+            raise
         except Exception as e:  # noqa: BLE001
             try:
                 store.add_message(conv_id, "assistant", f"❌ 任务执行失败：{e}")
             except Exception:
                 pass
             queue.put_nowait({"event": "error", "data": json.dumps({"message": str(e)}, ensure_ascii=False)})
+            raise
         finally:
             if _usage_tok is not None:
                 _usage_ctx.reset(_usage_tok)
@@ -342,7 +349,23 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_current_u
             _RUNNING.pop(task_key, None)
 
     task_key = f"{user_id}:{conv_id}"
-    bg = asyncio.create_task(pipeline())
+    from src.account_execution import ExecutionDenied
+    from src.api.execution import execution_checkpoint, running_execution
+
+    async def authorized_pipeline():
+        try:
+            async with running_execution(store, "chat", run_id):
+                execution_checkpoint(required=True)
+                await pipeline()
+        except ExecutionDenied:
+            queue.put_nowait({"event": "error", "data": json.dumps({"message": "账号执行已暂停"}, ensure_ascii=False)})
+            queue.put_nowait({"event": "done", "data": "{}"})
+            _RUNNING.pop(task_key, None)
+        except (Exception, asyncio.CancelledError):
+            # 原流水线已发送失败/取消回执；运行资源的未知状态由持久绑定继续保留。
+            pass
+
+    bg = asyncio.create_task(authorized_pipeline())
     _RUNNING[task_key] = bg
 
     async def event_gen():
@@ -386,7 +409,7 @@ def chat_running(conv_id: str, user=Depends(get_current_user)):
 
 
 @router.post("/{conv_id}/cancel")
-async def cancel_pipeline(conv_id: str, user=Depends(get_current_user)):
+async def cancel_pipeline(conv_id: str, user=Depends(get_execution_user)):
     """取消正在执行的聊天流水线。"""
     user_id = user["user_id"]
     task = _RUNNING.get(f"{user_id}:{conv_id}")
@@ -405,7 +428,7 @@ class FeedbackIn(BaseModel):
 
 
 @router.post("/feedback")
-def submit_feedback(body: FeedbackIn, user=Depends(get_current_user)):
+def submit_feedback(body: FeedbackIn, user=Depends(get_execution_user)):
     """提交/更新一条消息反馈（点赞/点踩，UNIQUE 覆盖）。"""
     store = get_store()
     user_id = user["user_id"]

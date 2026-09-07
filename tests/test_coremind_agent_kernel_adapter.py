@@ -44,6 +44,24 @@ from src.agentic_runtime.models import (
 from src.conversation_steering import CompiledContext
 from src.model_connections import ProviderOutcomeUnknownError
 from src.api.semantic_workspace_runtime import SemanticWorkspaceManager
+from src.api import auth
+from src.api.store import WebUIStore
+from src.config.settings import settings
+from src.account_execution import execution_context
+from tests.account_execution_helpers import seed_execution_owner
+from tests.database_migration_helpers import migrated_webui_database
+
+
+@pytest.fixture(autouse=True)
+def _account_execution(tmp_path, monkeypatch):
+    database = migrated_webui_database(tmp_path / "account-workspace.db")
+    authorization = seed_execution_owner(database, "user-a")
+    store = WebUIStore(str(database))
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
+    monkeypatch.setattr(auth, "_store", store)
+    with execution_context(authorization):
+        store.create_semantic_workspace_task("user-a", task_id="task-a", title="虚构Runtime", objective_text="虚构目标", upload_ids=[], output_formats=[], provider="local", model=None, external_api_confirmed=False)
+        yield
 
 
 def _sse_response(*chunks: dict) -> bytes:
@@ -699,7 +717,7 @@ async def test_close_failure_still_revokes_grant_and_fails_closed(
         poll_interval_seconds=0,
     )
 
-    with pytest.raises(AgentKernelResultUnknownError, match="清理"):
+    with pytest.raises(AgentKernelError, match="清理"):
         await adapter.start(
             _external_request(tmp_path),
             binding=_external_binding(adapter, "cm_run_close_failure"),
@@ -729,7 +747,7 @@ async def test_worker_crash_is_safe_result_unknown(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_new_adapter_accepts_cancel_only_after_closed_worker_proof(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch,
 ) -> None:
     root = tmp_path / "runs"
     first = CoreMindAgentKernelAdapter(
@@ -747,6 +765,9 @@ async def test_new_adapter_accepts_cancel_only_after_closed_worker_proof(
         client_factory=lambda **_kwargs: _FakeCoreMindClient(),
     )
 
+    def unexpected_broker():
+        raise AssertionError("明确本地 Worker 不应取得默认 Broker")
+    monkeypatch.setattr("src.agentic_runtime.coremind_runtime.get_default_broker", unexpected_broker)
     await restarted.cancel("user-a", "task-a", 1)
     with pytest.raises(AgentKernelError, match="静止状态无法证明"):
         await restarted.cancel("user-a", "missing-task", 1)
@@ -1285,3 +1306,42 @@ async def test_locked_worker_executes_real_tools_and_host_verification(
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("marker", [True, None, "false"])
+async def test_restarted_worker_cleanup_requires_original_grant_revocation(tmp_path, monkeypatch, marker):
+    from types import SimpleNamespace
+    import hashlib
+    from src.agentic_runtime import coremind_runtime
+
+    fail = True
+    revoked = []
+    class Broker:
+        def revoke_run_grants(self, owner, task, revision, run_id, **kwargs):
+            revoked.append((owner, task, revision, run_id))
+            if fail:
+                raise OSError('虚构撤权失败')
+
+    broker = Broker()
+    first = CoreMindAgentKernelAdapter(execution_root=tmp_path, connection_broker=broker)
+    run_root = tmp_path / 'coremind' / hashlib.sha256(b'user-a').hexdigest()[:16] / 'task-a' / 'r1' / 'original-run'
+    run_root.mkdir(parents=True)
+    with pytest.raises(AgentKernelError):
+        await first._close_client_for_identity(SimpleNamespace(close=lambda: None), run_root,
+            user_id='user-a', task_id='task-a', revision=1, run_id='original-run', reason='run_closed')
+    state_path = run_root / '.mangrove-worker-state.json'
+    state = json.loads(state_path.read_text(encoding='utf-8'))
+    assert state['model_grants_required'] is True
+    if marker is None:
+        state.pop('model_grants_required')
+    else:
+        state['model_grants_required'] = marker
+    state_path.write_text(json.dumps(state), encoding='utf-8')
+    restarted = CoreMindAgentKernelAdapter(execution_root=tmp_path)
+    monkeypatch.setattr(coremind_runtime, 'get_default_broker', lambda: broker)
+    with pytest.raises(AgentKernelError):
+        await restarted.cancel('user-a', 'task-a', 1)
+    fail = False
+    await restarted.cancel('user-a', 'task-a', 1)
+    assert revoked == [('user-a', 'task-a', 1, 'original-run')] * 3

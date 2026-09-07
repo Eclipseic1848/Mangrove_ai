@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -15,6 +16,7 @@ from threading import RLock
 from typing import Any
 import uuid
 
+from src import account_execution as execution
 from src.database_migrations import DatabaseTarget, inspect_database
 
 from .models import (
@@ -56,6 +58,12 @@ class AgenticRuntimeRepository:
         return conn
 
 
+    def authorize_execution(self, authorization: execution.ExecutionAuthorization) -> None:
+        """在本仓库实际数据库核对冻结账号授权。"""
+        with closing(self._conn()) as conn:
+            conn.execute("BEGIN")
+            execution.require_authorized(conn, authorization)
+
     def save_coverage(
         self,
         *,
@@ -69,6 +77,12 @@ class AgenticRuntimeRepository:
         """幂等保存冻结契约和可追加账本；既有契约身份不可替换。"""
 
         with _LOCK, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            authorization = execution.current_authorization(required=False)
+            if authorization is not None:
+                if authorization.owner_user_id != user_id:
+                    raise execution.ExecutionDenied("文档账本Owner不匹配")
+                execution.require_authorized(conn, authorization)
             row = conn.execute(
                 """
                 SELECT contract_json FROM agentic_runtime_coverage

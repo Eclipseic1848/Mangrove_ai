@@ -23,6 +23,7 @@ from .repository import (
 )
 from .runtime_request import parse_frozen_runtime_request
 from .service import (
+    CandidateUnavailableError,
     CandidateVerificationService,
     ReverificationContractError,
     ReverificationUnavailableError,
@@ -30,6 +31,7 @@ from .service import (
 from .ruleset import CurrentVerifierRulesetResolver
 
 __all__ = [
+    "CandidateUnavailableError",
     "AttemptReason",
     "AttemptStatus",
     "CandidateVerificationService",

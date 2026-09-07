@@ -19,6 +19,7 @@ from src.connectors.database_connector import DatabaseConnector
 from src.data_prep.artifact_store import ArtifactStore
 from src.data_prep.models import SourceLimits, SourceSpec, SourceType
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
 
 
 def _database(path: Path, ddl: str, rows: list[tuple]) -> None:
@@ -105,13 +106,15 @@ def _client(tmp_path: Path, monkeypatch) -> TestClient:
     monkeypatch.setattr(settings, "data_prep_db_sqlite_root", str(db_root))
     monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "webui.db"))
     migrated_webui_database(settings.webui_db_path)
+    seed_execution_owner(settings.webui_db_path, "other-user")
+    seed_execution_owner(settings.webui_db_path, "phase3-user")
     monkeypatch.setattr(artifact_mod, "_DEFAULT_ROOT", str(tmp_path / "downloads"))
     auth_mod._store = None
     app = FastAPI()
     app.include_router(data_sources.router)
     app.include_router(data_tasks.router)
     app.include_router(downloads.router)
-    app.dependency_overrides[get_current_user] = lambda: {"user_id": "phase3-user"}
+    app.dependency_overrides[get_current_user] = lambda: {"user_id": "phase3-user", "execution_generation": 0}
     return TestClient(app)
 
 
@@ -180,7 +183,7 @@ def test_database_rerun_reloads_frozen_range_without_losing_prior_rows(tmp_path:
         assert [row["id"] for row in rows] == [3, 4, 5, 6, 7]
         assert source_db.read_bytes() == before
 
-    client.app.dependency_overrides[get_current_user] = lambda: {"user_id": "other-user"}
+    client.app.dependency_overrides[get_current_user] = lambda: {"user_id": "other-user", "execution_generation": 0}
     assert client.post(f"/api/data-tasks/{task_id}/rerun").status_code == 404
     assert client.get(f"/api/downloads/{task_id}/clean/data.jsonl").status_code == 404
     assert source_db.read_bytes() == before
@@ -209,6 +212,6 @@ def test_database_api_null_preview_and_invalid_key_return_correct_status(tmp_pat
     preview = client.post("/api/data-tasks/preview", json={"source": source})
     assert preview.status_code == 200, preview.text
     assert [row["id"] for row in preview.json()["sample"]] == [2, 3]
-    client.app.dependency_overrides[get_current_user] = lambda: {"user_id": "other-user"}
+    client.app.dependency_overrides[get_current_user] = lambda: {"user_id": "other-user", "execution_generation": 0}
     assert client.post("/api/data-tasks/preview", json={"source": source}).status_code == 404
     assert source_db.read_bytes() == before

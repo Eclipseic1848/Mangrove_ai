@@ -16,11 +16,12 @@ import sqlite3
 import threading
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
+from src import account_execution as execution
 from src.database_migrations import DatabaseTarget, inspect_database
 from src.config.secret_refs import (
     RUNTIME_CONFIG_SECRET_KEYS,
@@ -488,6 +489,7 @@ class WebUIStore:
         return {
             "user_id": user_id, "username": username,
             "display_name": display_name or username, "role": role, "pending": pending,
+            "execution_generation": 0,
         }
 
     def get_user_by_name(self, username: str) -> Optional[Dict[str, Any]]:
@@ -499,6 +501,158 @@ class WebUIStore:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM users WHERE user_id=?", (user_id,)).fetchone()
         return dict(row) if row else None
+
+    def capture_account_execution(self, user_id: str) -> execution.ExecutionAuthorization:
+        with self._conn() as conn:
+            return execution.capture_authorization(conn, user_id)
+
+    @contextmanager
+    def account_execution_transaction(self, auth, kind: str | None = None, resource_id: str | None = None):
+        """先锁 WebUI，再由调用者执行短 SQL；不得跨 await 或外部调用持锁。"""
+        with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            execution.require_authorized(conn, auth)
+            if kind is not None:
+                execution.require_binding(conn, auth, kind, resource_id)
+            yield conn
+
+    def require_account_authorization(self, auth) -> None:
+        with self._conn() as conn:
+            conn.execute("BEGIN")
+            execution.require_authorized(conn, auth)
+
+    def account_execution_binding(self, user_id: str, kind: str, resource_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM account_execution_bindings WHERE owner_user_id=? AND resource_kind=? AND resource_id=?",
+                (user_id, kind, resource_id),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def require_account_execution(self, auth, kind: str, resource_id: str) -> dict:
+        with self._conn() as conn:
+            conn.execute("BEGIN")
+            return execution.require_binding(conn, auth, kind, resource_id)
+
+    def set_account_execution_state(self, auth, kind: str, resource_id: str, state: str) -> dict:
+        with self.account_execution_transaction(auth, kind, resource_id) as conn:
+            return execution.set_execution_state(conn, auth, kind, resource_id, state=state, now=time.time())
+
+    def bind_account_execution(self, auth, kind: str, resource_id: str, *, state: str = "active") -> dict:
+        with self.account_execution_transaction(auth) as conn:
+            return execution.bind_execution(conn, auth, kind, resource_id, state=state, now=time.time())
+
+    def confirm_account_execution_stopped(self, user_id: str, kind: str, resource_id: str, expected_generation: int, cleanup_failed: bool = False) -> bool:
+        with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            return execution.confirm_execution_stopped(conn, user_id, kind, resource_id, expected_generation=expected_generation, cleanup_failed=cleanup_failed, now=time.time())
+
+    def update_account_workspace_state(self, user_id: str, task_id: str, expected_generation: int, status: str) -> bool:
+        if status not in {"pausing", "paused"}:
+            raise ValueError("账号停止只能投影正在暂停或已暂停")
+        with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            binding = conn.execute(
+                "SELECT state FROM account_execution_bindings WHERE owner_user_id=? AND resource_kind='workspace' AND resource_id=? AND generation=?",
+                (user_id, task_id, expected_generation),
+            ).fetchone()
+            if binding is None or (status == "paused" and binding["state"] != "paused"):
+                return False
+            # 保留原问题、失败、Run 与冻结输入；不能把账号暂停伪装成用户取消。
+            conn.execute("UPDATE semantic_workspace_tasks SET status=?,updated_at=? WHERE user_id=? AND task_id=?", (status, _now(), user_id, task_id))
+            conn.execute(
+                "UPDATE semantic_workspace_revisions SET status=?,updated_at=? WHERE user_id=? AND task_id=? AND revision=(SELECT active_revision FROM semantic_workspace_tasks WHERE user_id=? AND task_id=?)",
+                (status, _now(), user_id, task_id, user_id, task_id),
+            )
+            return True
+
+    def resume_account_workspace_execution(self, user_id: str, task_id: str, expected_generation: int, status: str, *, expected_active_revision: int) -> dict:
+        if status not in {"needs_input", "queued"}:
+            raise ValueError("账号恢复只能回到等待或尚未执行的队列")
+        auth = execution.current_authorization()
+        from src.api.execution import execution_lock
+        with execution_lock(self, user_id, "workspace", task_id), self.account_execution_transaction(auth) as conn:
+            self._execution_owner(conn, user_id)
+            task = conn.execute("SELECT * FROM semantic_workspace_tasks WHERE user_id=? AND task_id=? AND active_revision=? AND status='paused'", (user_id, task_id, expected_active_revision)).fetchone()
+            if task is None:
+                raise execution.ExecutionDenied("活动版本或暂停状态已变化")
+            execution.resume_execution(conn, auth, "workspace", task_id, expected_generation=expected_generation, now=time.time())
+            if status == "needs_input" and task["run_id"]:
+                run = conn.execute("SELECT status FROM semantic_harness_runs WHERE user_id=? AND run_id=?", (user_id, task["run_id"])).fetchone()
+                if run is not None:
+                    if run["status"] != "needs_user":
+                        raise execution.ExecutionDenied("旧 Harness 不在可恢复的等待点")
+                    execution.resume_execution(conn, auth, "harness", task["run_id"], expected_generation=expected_generation, now=time.time())
+            conn.execute("UPDATE semantic_workspace_tasks SET status=?,updated_at=? WHERE user_id=? AND task_id=? AND active_revision=?", (status, _now(), user_id, task_id, expected_active_revision))
+            conn.execute("UPDATE semantic_workspace_revisions SET status=?,updated_at=? WHERE user_id=? AND task_id=? AND revision=?", (status, _now(), user_id, task_id, expected_active_revision))
+        return self.get_semantic_workspace_task(user_id, task_id)
+
+    @staticmethod
+    def _execution_owner(conn, user_id: str):
+        auth = execution.current_authorization()
+        if auth.owner_user_id != user_id:
+            raise execution.ExecutionDenied("执行 Owner 不匹配")
+        execution.require_authorized(conn, auth)
+        return auth
+
+    @staticmethod
+    def _is_cancel_cleanup(changes: dict) -> bool:
+        return (
+            bool(changes) and set(changes) <= {"status", "cancel_requested", "question", "failure"}
+            and changes.get("status") in {None, "cancelling", "cancelled"}
+            and changes.get("cancel_requested", True) is True
+            and changes.get("question") is None and changes.get("failure") is None
+            and ("status" in changes or changes.get("cancel_requested") is True)
+        )
+
+    @staticmethod
+    def _require_cancel_cleanup(conn, user_id: str, task_id: str) -> None:
+        auth = execution.current_authorization()
+        if auth.owner_user_id != user_id:
+            raise execution.ExecutionDenied("取消执行 Owner 不匹配")
+        binding = conn.execute("SELECT generation FROM account_execution_bindings WHERE owner_user_id=? AND resource_kind='workspace' AND resource_id=?", (user_id, task_id)).fetchone()
+        if binding is None:
+            raise execution.ExecutionDenied("取消缺少持久执行身份")
+        if binding["generation"] != auth.generation:
+            # 有效的当前 Owner 可清理旧执行；旧回调不能取消已经显式恢复的新代。
+            execution.require_authorized(conn, auth)
+            if binding["generation"] > auth.generation:
+                raise execution.ExecutionDenied("不能用旧代回调清理新执行")
+
+    @staticmethod
+    def _hold_projection(conn, user_id: str) -> dict | None:
+        operations = execution.list_hold_operations(conn, user_id)
+        if not operations:
+            return None
+        latest = operations[0]
+        counts = dict(conn.execute("SELECT state,count(*) FROM account_execution_bindings WHERE owner_user_id=? AND generation<? GROUP BY state", (user_id, latest["generation"])).fetchall())
+        failed = latest["error_code"] or ("cleanup_failed" if latest["status"] == "failed" and counts.get("cleanup_failed") else None)
+        pending = counts.get("active", 0) + counts.get("cleanup_failed", 0)
+        complete = latest["reconciliation_complete"] and not pending and not failed
+        return {
+            "operation_id": latest["operation_id"], "generation": latest["generation"],
+            "status": "failed" if failed else ("completed" if complete else "processing"),
+            "affected_count": sum(counts.values()), "pending_count": pending,
+            "error_code": failed, "retryable": bool(failed),
+            "updated_at": datetime.fromtimestamp(latest["updated_at"]).astimezone().isoformat(),
+        }
+
+    def admin_user(self, user_id: str) -> dict | None:
+        with self._conn() as conn:
+            conn.execute("BEGIN")
+            row = conn.execute("SELECT user_id,username,display_name,role,disabled,pending,created_at FROM users WHERE user_id=?", (user_id,)).fetchone()
+            return {**dict(row), "execution_hold": self._hold_projection(conn, user_id)} if row else None
+
+    def retry_account_execution_hold(self, user_id: str, operation_id: str) -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            operation = conn.execute("SELECT * FROM account_execution_holds WHERE owner_user_id=? AND operation_id=?", (user_id, operation_id)).fetchone()
+            if operation is None:
+                raise KeyError("停止操作不存在")
+            if operation["status"] == "completed":
+                return
+            # 仅重试同一停用操作的核对；不推进代数、不恢复任何业务绑定。
+            conn.execute("UPDATE account_execution_holds SET status='pending',reconciliation_complete=0,error_code=NULL,updated_at=? WHERE operation_id=?", (time.time(), operation_id))
 
     def count_users(self) -> int:
         with self._conn() as conn:
@@ -537,13 +691,15 @@ class WebUIStore:
         clause = f"WHERE {' AND '.join(where)}" if where else ""
         offset = max(0, (page - 1) * page_size)
         with self._conn() as conn:
+            conn.execute("BEGIN")
             total = conn.execute(f"SELECT COUNT(*) AS c FROM users {clause}", params).fetchone()["c"]
             rows = conn.execute(
                 f"SELECT user_id, username, display_name, role, disabled, pending, created_at "
                 f"FROM users {clause} ORDER BY created_at, rowid LIMIT ? OFFSET ?",
                 params + [page_size, offset],
             ).fetchall()
-        return [dict(r) for r in rows], total
+            users = [{**dict(r), "execution_hold": self._hold_projection(conn, r["user_id"])} for r in rows]
+        return users, total
 
     def count_pending(self) -> int:
         with self._conn() as conn:
@@ -565,20 +721,19 @@ class WebUIStore:
         vals: List[Any] = []
         if role is not None:
             sets.append("role=?"); vals.append(role)
-        if disabled is not None:
-            sets.append("disabled=?"); vals.append(1 if disabled else 0)
-        if pending is not None:
-            sets.append("pending=?"); vals.append(1 if pending else 0)
         if password_hash is not None:
             sets.append("password_hash=?"); vals.append(password_hash)
         if display_name is not None:
             sets.append("display_name=?"); vals.append(display_name)
-        if not sets:
+        if not sets and disabled is None and pending is None:
             return
         vals.append(user_id)
         with self._lock, self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute(f"UPDATE users SET {', '.join(sets)} WHERE user_id=?", vals)
+            if disabled is not None or pending is not None:
+                execution.update_account_status(conn, user_id, disabled=disabled, pending=pending, actor_user_id=actor_user_id or "system:account-update", now=time.time())
+            if sets:
+                conn.execute(f"UPDATE users SET {', '.join(sets)} WHERE user_id=?", vals)
             if password_hash is not None or disabled is True or pending is True:
                 self._revoke_platform_sessions(conn, user_id, "account_changed", time.time(), actor_user_id=actor_user_id)
 
@@ -586,6 +741,7 @@ class WebUIStore:
         """删除用户及其全部会话/消息/个人记忆。"""
         with self._lock, self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            execution.update_account_status(conn, user_id, disabled=True, actor_user_id=actor_user_id or "system:account-delete", now=time.time())
             self._revoke_platform_sessions(conn, user_id, "account_deleted", time.time(), actor_user_id=actor_user_id)
             rows = conn.execute(
                 "SELECT conv_id FROM conversations WHERE user_id=?", (user_id,)
@@ -667,6 +823,18 @@ class WebUIStore:
             conn.execute("DELETE FROM conversations WHERE conv_id=?", (conv_id,))
 
     # ---------- 消息 ----------
+    def start_chat_execution(self, user_id: str, conv_id: str, content: str) -> str:
+        run_id = f"chat_{uuid.uuid4().hex}"
+        with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            auth = self._execution_owner(conn, user_id)
+            if conn.execute("SELECT 1 FROM conversations WHERE user_id=? AND conv_id=?", (user_id, conv_id)).fetchone() is None:
+                raise KeyError("会话不存在或无权访问")
+            execution.bind_execution(conn, auth, "chat", run_id, now=time.time())
+            conn.execute("INSERT INTO messages(conv_id,role,content,created_at) VALUES (?,'user',?,?)", (conv_id, content, _now()))
+            conn.execute("UPDATE conversations SET updated_at=? WHERE conv_id=?", (_now(), conv_id))
+        return run_id
+
     def add_message(
         self,
         conv_id: str,
@@ -679,6 +847,12 @@ class WebUIStore:
         """追加一条消息并返回新消息 id（供前端反馈定位）。"""
         meta_json = json.dumps(meta, ensure_ascii=False) if meta else None
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            auth = execution.current_authorization(required=False)
+            if auth is not None:
+                execution.require_authorized(conn, auth)
+                if conn.execute("SELECT 1 FROM conversations WHERE conv_id=? AND user_id=?", (conv_id, auth.owner_user_id)).fetchone() is None:
+                    raise execution.ExecutionDenied("会话执行 Owner 不匹配")
             cur = conn.execute(
                 "INSERT INTO messages (conv_id, role, content, task_id, meta_json, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
@@ -897,6 +1071,9 @@ class WebUIStore:
         now = _now()
         unit_id = spec_dict.get("unit_id")
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            auth = self._execution_owner(conn, user_id)
+            execution.bind_execution(conn, auth, "data", task_id, state="idle" if status in {"READY", "SUCCEEDED", "FAILED"} else "active", now=time.time())
             conn.execute(
                 "INSERT INTO data_prep_tasks "
                 "(task_id, user_id, unit_id, spec_json, status, created_at, updated_at) "
@@ -976,6 +1153,13 @@ class WebUIStore:
         sets.append("updated_at=?"); args.append(_now())
         args.append(task_id)
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            task = conn.execute("SELECT user_id FROM data_prep_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if task is None:
+                raise execution.ExecutionDenied("数据任务不存在")
+            # 绑定键可被其它 Owner 复用，业务行的真实归属也必须在同一事务核对。
+            auth = self._execution_owner(conn, task["user_id"])
+            execution.require_binding(conn, auth, "data", task_id)
             conn.execute(
                 f"UPDATE data_prep_tasks SET {', '.join(sets)} WHERE task_id=?", args
             )
@@ -1014,6 +1198,13 @@ class WebUIStore:
         placeholders = ",".join("?" for _ in from_statuses)
         now = _now()
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            task = conn.execute("SELECT user_id FROM data_prep_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if task is None:
+                raise execution.ExecutionDenied("数据任务不存在")
+            # 绑定键可被其它 Owner 复用，业务行的真实归属也必须在同一事务核对。
+            auth = self._execution_owner(conn, task["user_id"])
+            execution.require_binding(conn, auth, "data", task_id)
             cursor = conn.execute(
                 f"UPDATE data_prep_tasks SET status=?, updated_at=? "
                 f"WHERE task_id=? AND status IN ({placeholders})",
@@ -1376,6 +1567,13 @@ class WebUIStore:
     def set_task_checkpoint(self, task_id: str, checkpoint: Dict[str, Any]) -> None:
         """写入/更新数据准备任务的 checkpoint_json。"""
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            task = conn.execute("SELECT user_id FROM data_prep_tasks WHERE task_id=?", (task_id,)).fetchone()
+            if task is None:
+                raise execution.ExecutionDenied("数据任务不存在")
+            # checkpoint 与结果一样会驱动后续执行，不能让迟到回调跨账号代数提交。
+            auth = self._execution_owner(conn, task["user_id"])
+            execution.require_binding(conn, auth, "data", task_id)
             conn.execute(
                 "UPDATE data_prep_tasks SET checkpoint_json=?, updated_at=? WHERE task_id=?",
                 (json.dumps(checkpoint, ensure_ascii=False), _now(), task_id),
@@ -1522,6 +1720,9 @@ class WebUIStore:
         plan_hash = plan.canonical_hash() if plan is not None else None
         try:
             with self._lock, self._conn() as conn:
+                # 编译可能跨 await；结果提交必须复核原请求冻结的账号代数。
+                conn.execute("BEGIN IMMEDIATE")
+                self._execution_owner(conn, user_id)
                 conn.execute(
                     "INSERT INTO semantic_plan_revisions "
                     "(plan_id, revision, task_id, user_id, status, request_json, "
@@ -1677,6 +1878,9 @@ class WebUIStore:
         now = _now()
         try:
             with self._lock, self._conn() as conn:
+                # 编译可能跨 await；结果提交必须复核原请求冻结的账号代数。
+                conn.execute("BEGIN IMMEDIATE")
+                self._execution_owner(conn, user_id)
                 for report, report_dict in zip(reports, report_dicts):
                     conn.execute(
                         "INSERT OR IGNORE INTO source_inspection_reports "
@@ -1839,6 +2043,9 @@ class WebUIStore:
         now = _now()
         try:
             with self._lock, self._conn() as conn:
+                # 编译可能跨 await；结果提交必须复核原请求冻结的账号代数。
+                conn.execute("BEGIN IMMEDIATE")
+                self._execution_owner(conn, user_id)
                 conn.execute(
                     "INSERT INTO physical_plan_revisions "
                     "(physical_plan_id, plan_id, logical_revision, "
@@ -1931,6 +2138,8 @@ class WebUIStore:
     ) -> Dict[str, Any]:
         now = _now()
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._execution_owner(conn, user_id)
             conn.execute(
                 "INSERT INTO table_execution_runs "
                 "(run_id, user_id, plan_id, physical_plan_id, status, "
@@ -2004,6 +2213,8 @@ class WebUIStore:
     ) -> Dict[str, Any]:
         now = _now()
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._execution_owner(conn, user_id)
             conn.execute(
                 "INSERT INTO document_execution_runs "
                 "(run_id, user_id, plan_id, physical_plan_id, status, "
@@ -2095,6 +2306,9 @@ class WebUIStore:
         payload = run.model_dump(mode="json")
         with self._lock, self._conn() as conn:
             try:
+                conn.execute("BEGIN IMMEDIATE")
+                auth = self._execution_owner(conn, run.user_id)
+                execution.bind_execution(conn, auth, "harness", run.run_id, now=time.time())
                 conn.execute(
                     "INSERT INTO semantic_harness_runs "
                     "(run_id, user_id, thread_id, logical_plan_id, "
@@ -2171,6 +2385,9 @@ class WebUIStore:
             return json.dumps(value, ensure_ascii=False)
 
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            auth = self._execution_owner(conn, user_id)
+            execution.require_binding(conn, auth, "harness", run_id)
             cursor = conn.execute(
                 "UPDATE semantic_harness_runs SET status=?, current_node=?, "
                 "repair_rounds=?, semantic_replans=?, transient_retries=?, "
@@ -2347,6 +2564,10 @@ class WebUIStore:
             return json.dumps(value, ensure_ascii=False)
 
         with self._lock, self._conn() as conn:
+            # 尝试结果也属于执行提交；停用后的迟到回调不能写入历史。
+            conn.execute("BEGIN IMMEDIATE")
+            auth = self._execution_owner(conn, user_id)
+            execution.require_binding(conn, auth, "harness", run_id)
             owner = conn.execute(
                 "SELECT 1 FROM semantic_harness_runs "
                 "WHERE user_id=? AND run_id=?",
@@ -2498,6 +2719,9 @@ class WebUIStore:
 
         payload = manifest.model_dump(mode="json")
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            auth = self._execution_owner(conn, user_id)
+            execution.require_binding(conn, auth, "harness", run_id)
             owner = conn.execute(
                 "SELECT 1 FROM semantic_harness_runs "
                 "WHERE user_id=? AND run_id=?",
@@ -2697,6 +2921,8 @@ class WebUIStore:
         with self._lock, self._conn() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
+                auth = self._execution_owner(conn, user_id)
+                execution.bind_execution(conn, auth, "workspace", task_id, now=time.time())
                 conn.execute(
                     "INSERT INTO semantic_workspace_tasks "
                     "(task_id, user_id, title, objective_text, "
@@ -3056,6 +3282,13 @@ class WebUIStore:
             where += " AND active_revision=?"
             values.append(expected_active_revision)
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if self._is_cancel_cleanup(changes):
+                self._require_cancel_cleanup(conn, user_id, task_id)
+            else:
+                auth = self._execution_owner(conn, user_id)
+                if not set(changes).issubset({"deleted_at", "purge_after"}):
+                    execution.require_binding(conn, auth, "workspace", task_id)
             cursor = conn.execute(
                 "UPDATE semantic_workspace_tasks SET "
                 + ", ".join(sets)
@@ -3099,16 +3332,27 @@ class WebUIStore:
         table_output_contracts: List[Dict[str, Any]] | None = None,
         expected_revision: int | None = None,
         expected_cancel_generation: int | None = None,
+        account_resume_generation: int | None = None,
         transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     ) -> Dict[str, Any]:
         now = _now()
-        with self._lock, self._conn() as conn:
+        from src.api.execution import execution_lock
+        resume_lock = execution_lock(self, user_id, "workspace", task_id) if account_resume_generation is not None else nullcontext()
+        with resume_lock, self._lock, self._conn() as conn:
             try:
                 conn.execute("BEGIN IMMEDIATE")
             except sqlite3.OperationalError as exc:
                 if "locked" in str(exc).lower():
                     raise RuntimeError("工作台数据库繁忙，请稍后重试") from exc
                 raise
+            auth = self._execution_owner(conn, user_id)
+            if account_resume_generation is not None:
+                paused = conn.execute("SELECT 1 FROM semantic_workspace_tasks WHERE user_id=? AND task_id=? AND status='paused'", (user_id, task_id)).fetchone()
+                if paused is None:
+                    raise execution.ExecutionDenied("任务已不在已确认暂停状态")
+                execution.resume_execution(conn, auth, "workspace", task_id, expected_generation=account_resume_generation, now=time.time())
+            else:
+                execution.require_binding(conn, auth, "workspace", task_id)
             row = conn.execute(
                 "SELECT * FROM semantic_workspace_tasks "
                 "WHERE user_id=? AND task_id=?",
@@ -3299,6 +3543,12 @@ class WebUIStore:
         sets.append("updated_at=?")
         values.extend([_now(), user_id, task_id, revision])
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if set(changes) == {"status"} and changes["status"] in {"cancelling", "cancelled"}:
+                self._require_cancel_cleanup(conn, user_id, task_id)
+            else:
+                auth = self._execution_owner(conn, user_id)
+                execution.require_binding(conn, auth, "workspace", task_id)
             cursor = conn.execute(
                 "UPDATE semantic_workspace_revisions SET "
                 + ", ".join(sets)

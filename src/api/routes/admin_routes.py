@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..auth import get_store, hash_password, registration_allowed, require_admin, role_level
 from ..schemas import AdminUserCreateIn, AdminUserUpdateIn, RegistrationIn
@@ -83,7 +84,26 @@ def update_user(user_id: str, body: AdminUserUpdateIn, admin=Depends(require_adm
         pending=body.pending, password_hash=pwd_hash, display_name=display_name,
         actor_user_id=admin["user_id"],
     )
-    return {"ok": True}
+    return {"ok": True, "user": store.admin_user(user_id)}
+
+
+class ExecutionHoldRetryIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation_id: str = Field(min_length=1, max_length=128)
+
+
+@router.post("/users/{user_id}/execution-hold/retry")
+def retry_execution_hold(user_id: str, body: ExecutionHoldRetryIn, admin=Depends(require_admin)):
+    store = get_store()
+    target = store.get_user(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    _assert_outranks(admin, target)
+    try:
+        store.retry_account_execution_hold(user_id, body.operation_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="停止操作不存在") from exc
+    return {"ok": True, "user": store.admin_user(user_id)}
 
 
 @router.delete("/users/{user_id}")

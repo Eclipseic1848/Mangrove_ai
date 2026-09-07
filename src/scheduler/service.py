@@ -5,7 +5,7 @@
 记录结果并为 cron 任务续算下次执行时刻。once 任务执行后置 done。
 
 单实例设计：本地/单进程场景无需分布式锁；每个任务执行用 try/except 隔离，
-单个任务失败不影响其它任务与循环本身（cron 任务自然在下一周期重试）。
+单个任务失败不影响其它任务与循环本身；停止状态未知的执行禁止自动重试。
 多实例生产部署时需要引入分布式锁；当前只保证本地单实例语义。
 """
 from __future__ import annotations
@@ -18,6 +18,7 @@ from typing import Any, Dict, Optional
 
 from .cron import Schedule, compute_next_run
 from .store import ScheduleStore
+from src import account_execution as execution
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +96,16 @@ class SchedulerService:
         if task_id in self._running_ids:
             logger.info("定时任务已在执行中，本次触发跳过 task_id=%s", task_id)
             return False
+        try:
+            auth, task = self.store.claim_execution(task_id, expected_task=task, manual=keep_next_run)
+        except execution.ExecutionDenied:
+            if keep_next_run:
+                raise
+            return False
         self._running_ids.add(task_id)
         try:
-            await self._run_one_body(task, now, keep_next_run=keep_next_run)
+            with execution.execution_context(auth):
+                await self._run_one_body(task, now, keep_next_run=keep_next_run)
         finally:
             self._running_ids.discard(task_id)
         return True
@@ -135,6 +143,20 @@ class SchedulerService:
             else:
                 self.store.mark_run(task_id, success=success, result=result, error=error, next_run_at=next_run)
 
+        from src.api.auth import get_store
+
+        web = get_store()
+        auth = execution.current_authorization()
+        returned = False
+
+        def record_unknown_stop(message: str) -> None:
+            try:
+                # 仍获授权时保留失败可见性，但不推进下一次计划；未知停止不自动重跑。
+                self.store.mark_run_keep_schedule(task_id, success=False, error=message)
+                self.store.add_run(task_id, success=False, summary=message)
+            except execution.ExecutionDenied:
+                pass
+
         try:
             # 超时保护：单个卡死的任务不冻住整个调度循环（连带其它定时任务）
             from src.config.settings import settings
@@ -142,6 +164,8 @@ class SchedulerService:
             result = await asyncio.wait_for(
                 self._invoke_runner(task), timeout=settings.scheduler_task_timeout_seconds
             )
+            returned = True
+            web.require_account_execution(auth, "schedule", task_id)
             ok, summary = self._assess(result)
             summary = late_note + summary
             _mark(success=ok, result=summary if ok else "", error="" if ok else summary)
@@ -154,15 +178,31 @@ class SchedulerService:
             )
             logger.info("定时任务%s task_id=%s next=%s %s",
                         "完成" if ok else "失败（流程内错误）", task_id, next_run, summary[:120])
-        except asyncio.TimeoutError:
-            logger.warning("定时任务超时 task_id=%s（cron 将下轮重试）", task_id)
-            _mark(success=False, error=late_note + "执行超时")
-            self.store.add_run(task_id, success=False, summary=late_note + "执行超时")
-        except Exception as e:
-            logger.exception("定时任务执行失败 task_id=%s", task_id)
-            # 失败也按计划续算下次（cron 在下一周期重试）；once 失败置 done 并记录错误
-            _mark(success=False, error=late_note + str(e))
-            self.store.add_run(task_id, success=False, summary=late_note + str(e))
+        except execution.ExecutionDenied:
+            # 已返回的执行可以确认停止；安全点抛错尚不能证明子工作者静默。
+            # 两者均丢弃旧代正文，且不阻断其它账号的调度。
+            pass
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            # 取消等待不证明底层线程停止；保留失败状态，禁止下一轮重复启动。
+            logger.warning("定时任务停止状态待确认 task_id=%s", task_id)
+            record_unknown_stop("执行超时或等待被取消，停止状态待确认")
+            if asyncio.current_task().cancelling():
+                raise
+        except Exception:
+            logger.exception("定时任务执行失败，停止状态待确认 task_id=%s", task_id)
+            record_unknown_stop("执行失败，停止状态待确认")
+        finally:
+            if returned:
+                try:
+                    web.set_account_execution_state(auth, "schedule", task_id, "idle")
+                except execution.ExecutionDenied:
+                    web.confirm_account_execution_stopped(auth.owner_user_id, "schedule", task_id, auth.generation)
+            else:
+                web.confirm_account_execution_stopped(auth.owner_user_id, "schedule", task_id, auth.generation, cleanup_failed=True)
+
+    async def reconcile_account_execution(self, owner: str, before_generation: int) -> bool:
+        # 无 await 期间持 SQL 锁；执行中的任务到安全点后提交自己的停止证明。
+        return self.store.reconcile_account_execution(owner, before_generation)
 
     async def run_task_now(self, task_id: str) -> str:
         """手动「立即执行一次」，不影响原定 next_run_at/status。
@@ -187,6 +227,7 @@ class SchedulerService:
             raise ValueError("定时任务缺少有效的所属用户，无法执行")
         try:
             store = get_store()
+            store.require_account_execution(execution.current_authorization(), "schedule", task["task_id"])
             user = store.get_user(owner)
             if user is None or user.get("pending") or user.get("disabled"):
                 raise ValueError("所属用户不可用")

@@ -16,6 +16,7 @@ from src.config.settings import settings
 from src.services.upload_store import UploadStore
 from tests.test_semantic_plan_api import ApiFakeGenerator
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
 
 
 def _client(tmp_path, monkeypatch):
@@ -29,6 +30,7 @@ def _client(tmp_path, monkeypatch):
         "semantic_execution_root",
         str(tmp_path / "executions"),
     )
+    seed_execution_owner(database, "user-a")
     auth_mod._store = None
     generator = ApiFakeGenerator()
     monkeypatch.setattr(
@@ -39,7 +41,7 @@ def _client(tmp_path, monkeypatch):
     app.include_router(semantic_bindings.router)
     app.include_router(semantic_executions.router)
     app.dependency_overrides[get_current_user] = lambda: {
-        "user_id": "user-a"
+        "user_id": "user-a", "execution_generation": 0
     }
     return TestClient(app)
 

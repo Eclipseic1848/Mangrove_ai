@@ -31,6 +31,15 @@ from src.candidate_verification import (
     VerifierRulesetBinding,
 )
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import execution_context
+
+
+@pytest.fixture(autouse=True)
+def _account_execution(tmp_path):
+    database = migrated_webui_database(tmp_path / "workspace.db")
+    with execution_context(seed_execution_owner(database, "owner-a")):
+        yield
 
 
 _NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)

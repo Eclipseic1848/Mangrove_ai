@@ -49,6 +49,7 @@ import {
   publishCandidateVerification,
   refreshWorkspaceSource,
   restoreWorkspaceTask,
+  resumeAccountWorkspaceTask,
   sendWorkspaceTurn,
   streamWorkspaceTask,
 } from "@/lib/semanticWorkspaceApi";
@@ -342,7 +343,13 @@ export function SemanticWorkspacePage() {
     fingerprint: string;
     key: string;
   } | null>(null);
+  const accountResumeFlight = useRef<string | null>(null);
+  const [accountResumeBusy, setAccountResumeBusy] = useState<string | null>(null);
+  const [accountResumeError, setAccountResumeError] = useState<{ key: string; message: string; unknown: boolean } | null>(null);
+  const [accountResumeConfirmed, setAccountResumeConfirmed] = useState<string | null>(null);
   const { user } = useAuth();
+  const accountResumeOwner = useRef(user?.user_id);
+  accountResumeOwner.current = user?.user_id;
   const [searchParams, setSearchParams] = useSearchParams();
   const selectionParams = useRef(searchParams);
   selectionParams.current = searchParams;
@@ -447,13 +454,47 @@ export function SemanticWorkspacePage() {
       const verificationStatus = query.state.data?.agentic_runtime
         ?.latest_verification_attempt?.status;
       return (
-        status && ["queued", "running", "cancelling"].includes(status)
+        status && ["queued", "running", "cancelling", "pausing"].includes(status)
       ) || ["requested", "running"].includes(verificationStatus ?? "")
         ? 2_000
         : false;
     },
   });
   const task = detail.data;
+  const accountResumeKey = JSON.stringify([user?.user_id, task?.task_id, task?.current_revision ?? task?.active_revision, task?.account_resume?.generation]);
+  const accountResumeFeedback = accountResumeError?.key === accountResumeKey ? accountResumeError : null;
+  const accountResumeStrategy = task?.viewing_revision === task?.current_revision ? task?.account_resume?.strategy : undefined;
+  const accountResumeExternal = accountResumeStrategy === "new_revision" && Boolean(task?.model_connection_id);
+  const resumeAccountTask = async () => {
+    if (!task?.account_resume || accountResumeFlight.current || accountResumeFeedback?.unknown) return;
+    const key = accountResumeKey;
+    const owner = user?.user_id;
+    const selection = selectionParams.current.toString();
+    const isCurrent = () => accountResumeOwner.current === owner && selectionParams.current.toString() === selection;
+    accountResumeFlight.current = key;
+    setAccountResumeBusy(key);
+    setAccountResumeError(null);
+    try {
+      await resumeAccountWorkspaceTask(task.task_id, task.account_resume.generation, task.current_revision ?? task.active_revision, accountResumeConfirmed === key);
+      if (!isCurrent()) return;
+      setSelectedRevision(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-task", task.task_id] }),
+        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-tasks"] }),
+      ]);
+    } catch (error) {
+      if (!isCurrent()) return;
+      const unknown = !(error instanceof ApiError) || error.status >= 500;
+      setAccountResumeError({ key, unknown, message: unknown
+        ? "恢复结果未确认，请刷新任务状态；不会自动重发。"
+        : "任务当前无法恢复，请刷新后确认暂停状态。" });
+    } finally {
+      if (accountResumeFlight.current === key) {
+        accountResumeFlight.current = null;
+        setAccountResumeBusy(null);
+      }
+    }
+  };
   const resultIdentity = JSON.stringify([
     task?.task_id,
     task?.viewing_revision,
@@ -1074,6 +1115,31 @@ export function SemanticWorkspacePage() {
                   ) : (
                     <>
                       <div className="min-h-0 flex-1 overflow-y-auto">
+                        {["pausing", "paused"].includes(task.current_status ?? task.status) && (
+                          <section className="mx-auto max-w-4xl border-b px-6 py-4 text-sm" aria-label="账号暂停恢复">
+                            <p className="font-medium">{(task.current_status ?? task.status) === "pausing" ? "任务正在暂停，等待执行停止确认。" : "任务已因账号状态变化暂停，重新启用账号不会自动继续。"}</p>
+                            {accountResumeStrategy && (
+                              <>
+                                <p className="mt-2 text-muted-foreground">{accountResumeStrategy === "waiting"
+                                  ? "原问题与执行记录已保留；恢复后仍需你确认，不会自动回答。"
+                                  : accountResumeStrategy === "unstarted"
+                                    ? "此任务尚未开始；恢复后按原版本重新排队。"
+                                    : "原执行已停止；恢复将按原要求创建新版本，保留旧版本记录。"}</p>
+                                {accountResumeExternal && (
+                                  <label className="mt-3 flex items-start gap-2">
+                                    <input type="checkbox" checked={accountResumeConfirmed === accountResumeKey} onChange={(event) => setAccountResumeConfirmed(event.target.checked ? accountResumeKey : null)} />
+                                    确认本次新版本继续使用已选外部模型连接，并外发本任务必要数据
+                                  </label>
+                                )}
+                                <button type="button" className="mt-3 rounded-md border px-3 py-2 disabled:opacity-50" disabled={accountResumeBusy !== null || Boolean(accountResumeFeedback?.unknown) || (accountResumeExternal && accountResumeConfirmed !== accountResumeKey)} onClick={() => void resumeAccountTask()}>
+                                  {accountResumeStrategy === "waiting" ? "恢复原问题" : accountResumeStrategy === "unstarted" ? "恢复原任务" : "创建新版本恢复"}
+                                </button>
+                              </>
+                            )}
+                            {accountResumeFeedback && <p role="alert" className="mt-2 text-destructive">{accountResumeFeedback.message}</p>}
+                            {accountResumeFeedback && <button type="button" className="ml-3 mt-3 underline" onClick={() => void detail.refetch()}>刷新任务状态</button>}
+                          </section>
+                        )}
                         <TaskTimeline
                           task={task}
                           liveEvents={liveEvents}

@@ -2,6 +2,9 @@
 """Phase 4B 批次 7：正式数据工作台 API。"""
 from __future__ import annotations
 
+from src.api.auth import get_execution_user
+from src.account_execution import ExecutionDenied
+
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,6 +18,7 @@ import zipfile
 from typing import Any, Callable, Literal
 
 import duckdb
+from filelock import Timeout as ExecutionLockTimeout
 from fastapi import (
     APIRouter,
     Depends,
@@ -55,6 +59,7 @@ from src.capability_catalog import (
 )
 from src.config.settings import settings
 from src.candidate_verification import (
+    CandidateUnavailableError,
     HistoricalAuthorityRecoveryConfirmation,
     ReverificationContractError,
     ReverificationUnavailableError,
@@ -161,6 +166,7 @@ _NEGATED_COMPLETENESS_PATTERN = re.compile(
     r"允许遗漏|可以遗漏"
 )
 _TERMINAL = {
+    "paused",
     "completed",
     "candidate_ready",
     "failed",
@@ -496,6 +502,14 @@ class WorkspaceRevisionDecisionIn(BaseModel):
     external_api_confirmed: bool = False
 
 
+class WorkspaceAccountResumeIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    expected_generation: int = Field(ge=0)
+    expected_active_revision: int = Field(ge=1)
+    external_api_confirmed: bool = False
+
+
 class WorkspaceRevisionIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -741,7 +755,7 @@ def list_context_options(
 @router.post("/context-preview")
 def preview_task_context(
     payload: WorkspaceContextPreviewIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """启动前生成可检查草案；本接口不创建或修改 TaskRevision。"""
 
@@ -856,6 +870,8 @@ def _public_runtime(
     user_id: str,
     task_id: str,
     revision: int,
+    *,
+    inspect_offer: bool = True,
 ) -> dict[str, Any]:
     repository = _runtime_repository()
     row = repository.get(user_id, task_id, revision)
@@ -962,7 +978,7 @@ def _public_runtime(
             else None
         ),
     }
-    if candidate_visible:
+    if candidate_visible and inspect_offer:
         try:
             offer = (
                 get_semantic_workspace_manager().inspect_candidate_reverification(
@@ -971,6 +987,9 @@ def _public_runtime(
                     revision,
                 )
             )
+        except CandidateUnavailableError:
+            # 两次读取之间 Worker 可结束；只刷新一次投影，不重试执行或掩盖契约损坏。
+            return _public_runtime(user_id, task_id, revision, inspect_offer=False)
         except ReverificationContractError:
             history = SqliteCandidateVerificationRepository(
                 settings.webui_db_path
@@ -1485,6 +1504,18 @@ def _task_detail(
 ) -> dict[str, Any]:
     store = get_store()
     task = _task_or_404(user_id, task_id)
+    task["account_resume"] = None
+    if task["status"] == "paused":
+        binding = store.account_execution_binding(user_id, "workspace", task_id)
+        if binding is not None and binding["state"] == "paused":
+            try:
+                task["account_resume"] = {
+                    "generation": binding["generation"],
+                    "strategy": get_semantic_workspace_manager().account_resume_strategy(user_id, task_id),
+                }
+            except ExecutionDenied:
+                # 并发恢复已使读取事实过期；只隐藏旧操作提示，不把 GET 当成执行。
+                pass
     task["current_status"] = task["status"]
     task["current_revision"] = task["active_revision"]
     task["revisions"] = store.list_semantic_workspace_revisions(
@@ -1628,7 +1659,7 @@ async def create_task(
         default=None,
         alias="Idempotency-Key",
     ),
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     user_id = user["user_id"]
     user_objective = payload.objective_text
@@ -2445,7 +2476,7 @@ async def steer_task(
         default=None,
         alias="Idempotency-Key",
     ),
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """理解运行中追问；在用户确认前绝不修改活动 revision。"""
 
@@ -2557,7 +2588,7 @@ def list_steering_turns(
 def reject_steering_revision(
     task_id: str,
     proposal_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """拒绝草案只改变草案状态，绝不取消或改写当前 Run。"""
 
@@ -2802,7 +2833,7 @@ async def decide_steering_revision(
     task_id: str,
     proposal_id: str,
     payload: WorkspaceRevisionDecisionIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     user_id = user["user_id"]
     store = get_store()
@@ -3086,7 +3117,7 @@ async def answer_task(
     task_id: str,
     payload: WorkspaceAnswerIn,
     request: Request,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     try:
         return await get_semantic_workspace_manager().answer(
@@ -3102,7 +3133,7 @@ async def answer_task(
 @router.post("/tasks/{task_id}/cancel")
 async def cancel_task(
     task_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     try:
         return await get_semantic_workspace_manager().cancel(
@@ -3115,7 +3146,7 @@ async def cancel_task(
 @router.post("/tasks/{task_id}/candidate-verification/retry")
 async def retry_candidate_verification(
     task_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """旧同步入口已退役，避免绕过外发确认与独立发布门。"""
 
@@ -3142,7 +3173,7 @@ async def request_candidate_reverification(
         max_length=240,
         alias="Idempotency-Key",
     ),
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """创建完整候选重验 Attempt；执行与正式发布均不在 HTTP 连接内完成。"""
 
@@ -3213,7 +3244,7 @@ async def publish_candidate_verification(
         max_length=240,
         alias="Idempotency-Key",
     ),
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """显式发布精确 passed Attempt；不会隐式重新执行 Pi 或 Provider。"""
 
@@ -3237,6 +3268,39 @@ async def publish_candidate_verification(
     return delivery.model_dump(mode="json", exclude={"user_id"})
 
 
+@router.post("/tasks/{task_id}/account-resume", openapi_extra={"x-mangrove-task-control": True})
+async def resume_account_task(task_id: str, payload: WorkspaceAccountResumeIn, user=Depends(get_execution_user)):
+    store = get_store()
+    user_id = user["user_id"]
+    task = _task_or_404(user_id, task_id)
+    binding = store.account_execution_binding(user_id, "workspace", task_id)
+    if task["active_revision"] != payload.expected_active_revision or binding is None or binding["generation"] != payload.expected_generation:
+        raise HTTPException(status_code=409, detail="暂停任务已变化，请刷新后再决定是否恢复")
+    manager = get_semantic_workspace_manager()
+    strategy = manager.account_resume_strategy(user_id, task_id)
+    if strategy == "new_revision":
+        # 硬停执行保留原取消标记；复用既有 Revision 的外发确认、来源和路由事务。
+        revision = await _create_revision(
+            task_id,
+            WorkspaceRevisionIn(instruction="恢复账号后，按原要求创建新版本执行", expected_active_revision=payload.expected_active_revision, external_api_confirmed=payload.external_api_confirmed),
+            user,
+            account_resume_generation=payload.expected_generation,
+        )
+        return {"strategy": strategy, "revision": revision}
+    try:
+        store.resume_account_workspace_execution(
+            user_id, task_id, expected_generation=payload.expected_generation,
+            expected_active_revision=payload.expected_active_revision,
+            status="needs_input" if strategy == "waiting" else "queued",
+        )
+    except ExecutionLockTimeout as exc:
+        raise HTTPException(status_code=409, detail="执行仍在停止，请稍后重试") from exc
+    # 等待中的原问题须由用户继续确认；恢复操作本身不能充当回答。
+    if strategy == "unstarted":
+        manager.enqueue(user_id, task_id)
+    return {"strategy": strategy, "revision": None}
+
+
 @router.post(
     "/tasks/{task_id}/revisions",
     status_code=status.HTTP_202_ACCEPTED,
@@ -3245,12 +3309,12 @@ async def publish_candidate_verification(
 async def create_revision(
     task_id: str,
     payload: WorkspaceRevisionIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     return await _create_revision(task_id, payload, user)
 
 
-async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, expected_cancel_generation: int | None = None):
+async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, expected_cancel_generation: int | None = None, account_resume_generation: int | None = None):
     user_id = user["user_id"]
     store = get_store()
     task = _task_or_404(user_id, task_id)
@@ -3406,7 +3470,7 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="模型连接不存在或无权访问",
             ) from exc
-    if task["status"] not in {
+    if account_resume_generation is None and task["status"] not in {
         "completed",
         "candidate_ready",
         "failed",
@@ -3567,7 +3631,10 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
             expected_revision=expected_revision,
             transaction_hook=transaction_hook,
             expected_cancel_generation=expected_cancel_generation,
+            account_resume_generation=account_resume_generation,
         )
+    except ExecutionLockTimeout as exc:
+        raise HTTPException(status_code=409, detail="执行仍在停止，请稍后重试") from exc
     except RuntimeError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -3611,7 +3678,7 @@ async def decide_candidate_gap(
         max_length=200,
         alias="Idempotency-Key",
     ),
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """记录 Owner 的单一缺口动作；只有接受缺口会创建新 Revision。"""
 
@@ -3795,7 +3862,7 @@ async def refresh_task_source(
         max_length=200,
         alias="Idempotency-Key",
     ),
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     """按旧版本冻结范围获取新快照，成功后才切换到新 Revision。"""
 
@@ -4075,7 +4142,7 @@ def download_candidate(
 @router.delete("/tasks/{task_id}")
 async def move_to_recycle_bin(
     task_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     user_id = user["user_id"]
     task = _task_or_404(user_id, task_id)
@@ -4089,7 +4156,7 @@ async def move_to_recycle_bin(
 @router.post("/tasks/{task_id}/restore")
 def restore_task(
     task_id: str,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     task = _task_or_404(user["user_id"], task_id)
     if task["deleted_at"] is None:

@@ -30,6 +30,7 @@ from src.conversation_steering import (
 )
 from src.config.settings import settings
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
 
 
 class _FakePiRuntime:
@@ -62,6 +63,7 @@ def _client(
     )
     monkeypatch.setattr(settings, "pi_capability_host_enabled", True)
     migrated_webui_database(settings.webui_db_path)
+    seed_execution_owner(settings.webui_db_path, "user-a")
     monkeypatch.setattr(auth_mod, "_store", None)
     auth_mod.get_store()
     from tests.runtime_routing_test_support import enable_admin_gray_routing
@@ -90,7 +92,7 @@ def _client(
     app = FastAPI(lifespan=lifespan)
     app.include_router(semantic_workspace.router)
     app.dependency_overrides[get_current_user] = lambda: {
-        "user_id": "user-a",
+        "user_id": "user-a", "execution_generation": 0,
         "role": role,
     }
     return TestClient(app)

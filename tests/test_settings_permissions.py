@@ -26,7 +26,7 @@ def _client(
         }
     if store is not None:
         app.dependency_overrides[settings_routes.get_settings_store] = lambda: store
-    return TestClient(app)
+    return TestClient(app, base_url="https://testserver")
 
 
 def test_model_catalog_requires_authentication():

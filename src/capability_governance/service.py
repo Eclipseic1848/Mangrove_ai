@@ -8,6 +8,9 @@ from pathlib import Path
 import threading
 from typing import Callable, Literal, Protocol
 
+from src.account_execution import ExecutionDenied
+from .sqlite_repository import validation_checkpoint
+
 from src.capability_catalog import (
     CapabilityCatalog,
     CapabilityPackRef,
@@ -1733,6 +1736,41 @@ class CapabilityGovernance:
         )
 
     def execute_validation(
+        self, actor: CatalogActor, run_id: str, *, worker_id: str,
+        executor: CapabilityValidationExecutor,
+        lease_guarded_preflight: Callable[[CapabilityValidationRun], None] | None = None,
+        now: datetime | None = None, lease_seconds: int = 60,
+    ) -> CapabilityValidationRun:
+        run = self.get_validation(actor, run_id)
+        if run.owner_id != actor.owner_id:
+            raise PermissionError('只有能力 Owner 可以执行验证运行')
+        context = getattr(self._repository, 'validation_execution', None)
+        arguments = dict(worker_id=worker_id, executor=executor, lease_guarded_preflight=lease_guarded_preflight, now=now, lease_seconds=lease_seconds)
+        if context is None:
+            return self._execute_validation(actor, run_id, **arguments)
+        with context(run):
+            try:
+                validation_checkpoint()
+                result = self._execute_validation(actor, run_id, **arguments)
+                if result.status in {ValidationRunStatus.SUCCEEDED, ValidationRunStatus.FAILED, ValidationRunStatus.CANCELLED}:
+                    self._repository.finish_validation_execution(result)
+                return result
+            except ExecutionDenied:
+                # 原子步骤已返回或未启动；先真实清理，再确认旧绑定停止。
+                if not self._repository.validation_cleanup_available(run, worker_id):
+                    raise
+                try:
+                    evidence = executor.execute(run, ValidationStep.CLEANUP)
+                    if evidence.step is not ValidationStep.CLEANUP or evidence.status is not ValidationStepStatus.PASSED:
+                        raise RuntimeError('验证资源清理未完成')
+                except Exception:
+                    self._repository.confirm_validation_stopped(run, cleanup_failed=True)
+                    raise
+                self._repository.confirm_validation_stopped(run)
+                self._repository.release_validation_lease(run_id, worker_id)
+                raise
+
+    def _execute_validation(
         self,
         actor: CatalogActor,
         run_id: str,
@@ -1806,7 +1844,9 @@ class CapabilityGovernance:
             heartbeat.start()
         try:
             if lease_guarded_preflight is not None and not run.cancel_requested:
+                validation_checkpoint()
                 lease_guarded_preflight(run)
+                validation_checkpoint()
             completed = {item.step for item in run.evidence}
             failed = any(
                 item.status is ValidationStepStatus.FAILED
@@ -1824,6 +1864,8 @@ class CapabilityGovernance:
                 if failed and step is not ValidationStep.CLEANUP:
                     continue
                 try:
+                    if step is not ValidationStep.CLEANUP:
+                        validation_checkpoint()
                     if (
                         self._task_resolver is not None
                         and step is not ValidationStep.CLEANUP
@@ -1831,6 +1873,10 @@ class CapabilityGovernance:
                         # 每一步执行前都重新打开冻结事实；授权撤销或来源/输出变化必须立即失败关闭。
                         self._task_resolver.verify(actor, run.target, run.task_ref)
                     evidence = executor.execute(run, step)
+                    if step is not ValidationStep.CLEANUP:
+                        validation_checkpoint()
+                except ExecutionDenied:
+                    raise
                 except Exception as error:
                     evidence = _executor_failure_evidence(run, step, error)
                 if evidence.step is not step:

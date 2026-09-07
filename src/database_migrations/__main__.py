@@ -76,11 +76,21 @@ def _parser() -> argparse.ArgumentParser:
     verify = subparsers.add_parser("verify-restore")
     verify.add_argument("--receipt", required=True)
     verify.add_argument("--restored", required=True)
+    backfill = subparsers.add_parser("backfill-schedules")
+    for option in ("webui", "scheduler", "manifest", "expected-webui-sha256", "expected-scheduler-sha256", "expected-manifest-sha256", "backup-dir"):
+        backfill.add_argument("--" + option, required=True)
+    backfill.add_argument("--apply", action="store_true")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
+    if arguments.command == "backfill-schedules":
+        from .scheduler_backfill import backfill_schedules
+        fields = vars(arguments).copy()
+        fields.pop("command")
+        _print_json(backfill_schedules(**fields))
+        return 0
     if arguments.command == "status":
         _print_json(_status_payload(arguments))
         return 0

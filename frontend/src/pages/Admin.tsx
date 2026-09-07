@@ -9,8 +9,25 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
 import { useAuth, roleLevel, roleLabel, ROLE_LEVEL } from "@/lib/auth";
+
+interface ExecutionHold {
+  operation_id: string;
+  generation: number;
+  status: "processing" | "completed" | "failed";
+  affected_count: number;
+  pending_count: number;
+  error_code: string | null;
+  retryable: boolean;
+  updated_at: string;
+}
+
+const holdErrors: Record<string, string> = {
+  resource_cleanup_pending: "资源清理尚未确认。",
+  worker_unavailable: "执行服务暂不可用。",
+  state_read_failed: "执行状态暂时无法核对。",
+};
 
 interface AdminUser {
   user_id: string;
@@ -20,6 +37,7 @@ interface AdminUser {
   disabled: number;
   pending: number;
   created_at: string;
+  execution_hold: ExecutionHold | null;
 }
 
 const PAGE_SIZE = 20;
@@ -40,6 +58,12 @@ export function Admin() {
   const [pendingTotal, setPendingTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const [pollError, setPollError] = useState(false);
+  const [accountErrors, setAccountErrors] = useState<Record<string, string>>({});
+  const [changing, setChanging] = useState<Set<string>>(new Set());
+  const changingRef = useRef(new Set<string>());
+  const listVersion = useRef(0);
+  const quietRefresh = useRef(false);
   const [refresh, setRefresh] = useState(0);
   const [allowReg, setAllowReg] = useState<boolean | null>(null);
   // 搜索/筛选/分页
@@ -73,7 +97,8 @@ export function Admin() {
   // 用旧 page 多打一次请求（那次请求可能因网络时序覆盖正确结果，是真实竞态而非无害浪费）
   const prevFiltersRef = useRef({ debouncedQ, roleFilter, statusFilter });
   // 操作完成时只发刷新信号，避免异步闭包把旧筛选或页码带回请求。
-  const load = () => setRefresh((value) => value + 1);
+  const load = () => { quietRefresh.current = false; setRefresh((value) => value + 1); };
+  const loadQuietly = () => { quietRefresh.current = true; setRefresh((value) => value + 1); };
   useEffect(() => {
     const prev = prevFiltersRef.current;
     const filtersChanged =
@@ -84,29 +109,62 @@ export function Admin() {
       return;
     }
     let active = true;
-    setLoading(true);
-    setLoadError(false);
+    let reading = false;
+    let hasProcessing = false;
+    let pollingAllowed = true;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const background = quietRefresh.current && !filtersChanged;
+    quietRefresh.current = false;
+    setPollError(false);
     const params = new URLSearchParams({
       q: debouncedQ, role: roleFilter, status: statusFilter,
       page: String(page), page_size: String(PAGE_SIZE),
     });
-    api.get(`/api/admin/users?${params}`)
-      .then((d) => {
-        if (!active) return;
-        setUsers(d.users || []);
+    const schedule = () => {
+      clearTimeout(timer);
+      if (active && !reading && pollingAllowed && hasProcessing && !document.hidden) {
+        timer = setTimeout(() => { void read(true); }, 5000);
+      }
+    };
+    const read = async (quiet: boolean) => {
+      if (!active || reading) return;
+      reading = true;
+      const version = ++listVersion.current;
+      if (!quiet) setLoading(true);
+      setLoadError(false);
+      try {
+        const d = await api.get(`/api/admin/users?${params}`);
+        if (!active || version !== listVersion.current) return;
+        const nextUsers: AdminUser[] = d.users || [];
+        hasProcessing = nextUsers.some((u) => u.execution_hold?.status === "processing");
+        setUsers(nextUsers);
         setTotal(d.total || 0);
         setPendingTotal(d.pending_total || 0);
-      })
-      .catch(() => {
-        if (!active) return;
-        setUsers([]);
-        setTotal(0);
-        setPendingTotal(0);
-        setLoadError(true);
-      })
-      .finally(() => { if (active) setLoading(false); });
-    // 筛选、分页、刷新、卸载和 StrictMode 重放都使上一轮结果与 finally 失效。
-    return () => { active = false; };
+        setAccountErrors((current) => {
+          const next = { ...current };
+          nextUsers.forEach((u) => { delete next[u.user_id]; });
+          return next;
+        });
+      } catch {
+        if (!active || version !== listVersion.current) return;
+        // 查询失败不是持久收口失败；停止自动重试，等待管理员显式刷新。
+        pollingAllowed = false;
+        if (quiet) setPollError(true);
+        else {
+          setUsers([]);
+          setTotal(0);
+          setPendingTotal(0);
+          setLoadError(true);
+        }
+      } finally {
+        reading = false;
+        if (active && version === listVersion.current) { setLoading(false); schedule(); }
+      }
+    };
+    void read(background);
+    document.addEventListener("visibilitychange", schedule);
+    // 筛选、分页、刷新、卸载和 StrictMode 重放都使旧结果、finally 与轮询失效。
+    return () => { active = false; clearTimeout(timer); document.removeEventListener("visibilitychange", schedule); };
   }, [debouncedQ, roleFilter, statusFilter, page, refresh]);
   useEffect(() => {
     api.get("/api/admin/registration").then((d) => setAllowReg(d.enabled)).catch(() => {});
@@ -124,9 +182,45 @@ export function Admin() {
 
   const toggleRole = (u: AdminUser) =>
     patch(u, { role: u.role === "admin" ? "user" : "admin" }, "已更新角色");
-  const toggleDisabled = (u: AdminUser) =>
-    patch(u, { disabled: !u.disabled }, u.disabled ? "已启用账号" : "已禁用账号");
-  const approve = (u: AdminUser) => patch(u, { pending: false }, "已通过审批");
+  const changeAccount = async (u: AdminUser, body: Record<string, unknown>, message: string, retry = false) => {
+    // ref 在同一事件轮次内去重，不能仅依赖下一次渲染后的 disabled。
+    if (changingRef.current.has(u.user_id)) return;
+    changingRef.current.add(u.user_id);
+    setChanging(new Set(changingRef.current));
+    setAccountErrors((current) => { const next = { ...current }; delete next[u.user_id]; return next; });
+    try {
+      const response = retry
+        ? await api.post(`/api/admin/users/${u.user_id}/execution-hold/retry`, body)
+        : await api.patch(`/api/admin/users/${u.user_id}`, body);
+      listVersion.current += 1;
+      if (response.user?.user_id === u.user_id) {
+        setUsers((current) => current.map((item) => {
+          if (item.user_id !== u.user_id) return item;
+          const currentHold = item.execution_hold;
+          const receivedHold = response.user.execution_hold;
+          if ((currentHold?.generation ?? -1) > (receivedHold?.generation ?? -1)) return item;
+          if (currentHold && receivedHold && currentHold.generation === receivedHold.generation
+            && Date.parse(currentHold.updated_at) > Date.parse(receivedHold.updated_at)) return item;
+          return response.user;
+        }));
+      }
+      toast.success(message);
+      loadQuietly();
+    } catch (error) {
+      const message = error instanceof ApiError && error.status < 500
+        ? error.status === 403 ? "无权管理该账号。" : "操作未完成，请点击刷新核对账号状态。"
+        : "提交结果尚未确认，请点击刷新核对账号状态。";
+      setAccountErrors((current) => ({ ...current, [u.user_id]: message }));
+    } finally {
+      changingRef.current.delete(u.user_id);
+      setChanging(new Set(changingRef.current));
+    }
+  };
+  const toggleDisabled = (u: AdminUser) => changeAccount(u, { disabled: !u.disabled },
+    u.disabled ? "账号已启用；历史任务不会自动继续。" : "账号已停用，新操作已拒绝；后台处理状态请查看账号行。",
+  );
+  const approve = (u: AdminUser) => changeAccount(u, { pending: false }, "已通过审批；历史任务不会自动继续。");
+
 
   const resetPwd = async () => {
     if (!pwdTarget || newPwd.length < 6) return;
@@ -273,6 +367,7 @@ export function Admin() {
               </div>
             </CardHeader>
             <CardContent className="space-y-2">
+              {pollError && <p role="alert" className="text-sm text-destructive">当前处理状态无法确认，自动更新已停止，请点击刷新。以下为上次确认的状态。</p>}
               {loading ? (
                 <p className="text-sm text-muted-foreground">加载中…</p>
               ) : loadError ? (
@@ -286,6 +381,7 @@ export function Admin() {
                   return (
                     <div
                       key={u.user_id}
+                      role="group" aria-label={`账号 ${u.username}`}
                       className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-border/60 px-3 py-2.5"
                     >
                       <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/15 text-sm font-medium text-primary">
@@ -316,7 +412,7 @@ export function Admin() {
                         </span>
                       ) : u.pending ? (
                         <div className="flex gap-1.5">
-                          <Button size="sm" className="h-7 gap-1" onClick={() => approve(u)}>
+                          <Button size="sm" className="h-7 gap-1" disabled={changing.has(u.user_id)} onClick={() => approve(u)}>
                             <UserCheck className="h-3.5 w-3.5" /> 通过
                           </Button>
                           <Button variant="outline" size="sm" className="h-7 gap-1 text-destructive"
@@ -338,6 +434,7 @@ export function Admin() {
                           <Button
                             variant="ghost" size="icon" className="h-7 w-7"
                             title={u.disabled ? "启用账号" : "禁用账号"}
+                            disabled={changing.has(u.user_id)}
                             onClick={() => toggleDisabled(u)}
                           >
                             {u.disabled ? <CheckCircle2 className="h-4 w-4" /> : <Ban className="h-4 w-4" />}
@@ -364,6 +461,25 @@ export function Admin() {
                           >
                             <Trash2 className="h-4 w-4" />
                           </Button>
+                        </div>
+                      )}
+                      {changing.has(u.user_id) && <p role="status" className="w-full text-xs text-muted-foreground">正在提交账号操作…</p>}
+                      {accountErrors[u.user_id] && <p role="alert" className="w-full text-sm text-destructive">{accountErrors[u.user_id]}</p>}
+                      {u.execution_hold && (
+                        <div role="status" aria-live="polite" className="w-full space-y-1 text-xs text-muted-foreground">
+                          <p>{u.disabled || u.pending ? "新操作已拒绝。" : "账号已启用；历史任务不会自动继续。"}</p>
+                          <p>{u.execution_hold.status === "processing"
+                            ? `后台处理进行中，尚有 ${u.execution_hold.pending_count} 项待确认。`
+                            : u.execution_hold.status === "completed"
+                              ? "后台执行处理已完成；历史任务不会自动继续。"
+                              : u.execution_hold.status === "failed"
+                                ? `后台处理未完成。${holdErrors[u.execution_hold.error_code || ""] || "请刷新或重试处理。"}`
+                                : "后台处理状态无法确认，请刷新。"}</p>
+                          {canManage && u.execution_hold.status === "failed" && u.execution_hold.retryable && (
+                            <Button size="sm" variant="outline" disabled={changing.has(u.user_id)} onClick={() => changeAccount(u,
+                              { operation_id: u.execution_hold!.operation_id }, "已提交处理重试，请查看后台处理状态。", true,
+                            )}>重试处理</Button>
+                          )}
                         </div>
                       )}
                     </div>

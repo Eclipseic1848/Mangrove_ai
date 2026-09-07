@@ -1,6 +1,8 @@
 import type { UploadItem } from "@/types/dataPrep";
 
 export type WorkspaceTaskStatus =
+  | "pausing"
+  | "paused"
   | "queued"
   | "running"
   | "needs_input"
@@ -352,6 +354,7 @@ export interface AgenticRuntimeInfo {
 }
 
 export interface WorkspaceTask {
+  account_resume?: { generation: number; strategy: "waiting" | "unstarted" | "new_revision" } | null;
   task_id: string;
   title: string;
   objective_text: string;

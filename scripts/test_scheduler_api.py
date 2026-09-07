@@ -43,7 +43,7 @@ def _fresh_store(tmp_dir: str):
     )
     store = ScheduleStore(str(database))
     service = SchedulerService(store, poll_interval=1.0, runner=AsyncMock(wraps=_stub_runner))
-    with patch.object(services_module, "_store", store), patch.object(services_module, "_service", service):
+    with scheduler_owner(Path(tmp_dir) / "api-users.db") as owner, patch.dict(USER, owner, clear=True), patch.object(services_module, "_store", store), patch.object(services_module, "_service", service):
         yield store
 
 
@@ -114,7 +114,7 @@ def test_create_manual_task_past_once_rejected():
 def test_create_task_from_pending_sets_auto_name_source():
     """既有语义自动创建链路：落库应补 source='auto'，name 取 planner 概括的 intent。"""
     with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
-        pending_store.put("u1", "task123", {"schedule": {
+        pending_store.put(USER["user_id"], "task123", {"schedule": {
             "schedule": "cron@0 8 * * *", "user_input": "每天8点抓新闻",
             "provider": "deepseek", "model": "deepseek-chat", "intent": "每日新闻抓取",
         }})
@@ -128,7 +128,7 @@ def test_patch_pause_resume():
     with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         tid = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
-                         next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1")
+                         next_run_at=datetime.now() + timedelta(days=1), owner_user_id=USER["user_id"])
         tasks_routes.update_task(tid, TaskPatchIn(status="paused"), user=USER)
         assert store.get(tid)["status"] == "paused"
         tasks_routes.update_task(tid, TaskPatchIn(status="active"), user=USER)
@@ -139,7 +139,7 @@ def test_patch_pause_other_user_forbidden():
     with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         tid = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
-                         next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1")
+                         next_run_at=datetime.now() + timedelta(days=1), owner_user_id=USER["user_id"])
         try:
             tasks_routes.update_task(tid, TaskPatchIn(status="paused"), user=OTHER)
         except Exception as e:
@@ -152,7 +152,7 @@ def test_patch_edit_fields():
     with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         tid = store.add(user_input="旧文案", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
-                         next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1",
+                         next_run_at=datetime.now() + timedelta(days=1), owner_user_id=USER["user_id"],
                          name="旧名称")
         body = TaskPatchIn(name="新名称", prompt="新文案",
                             trigger=TriggerIn(type="interval", interval_seconds=1800))
@@ -174,7 +174,7 @@ def test_recent_runs():
     with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         tid = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
-                         next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1",
+                         next_run_at=datetime.now() + timedelta(days=1), owner_user_id=USER["user_id"],
                          name="任务A")
         store.add_run(tid, success=True, summary="ok")
         res = tasks_routes.recent_runs(user=USER)
@@ -186,11 +186,11 @@ def test_recent_runs_filters_and_pagination():
     with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         tid1 = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                           cron_expr="0 8 * * *", run_at=None,
-                          next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1",
+                          next_run_at=datetime.now() + timedelta(days=1), owner_user_id=USER["user_id"],
                           name="任务A")
         tid2 = store.add(user_input="y", provider=None, model=None, trigger_type="cron",
                           cron_expr="0 9 * * *", run_at=None,
-                          next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1",
+                          next_run_at=datetime.now() + timedelta(days=1), owner_user_id=USER["user_id"],
                           name="任务B")
         store.add_run(tid1, success=True, summary="report=x.md")
         store.add_run(tid1, success=False, summary="采集失败：超时")
@@ -226,7 +226,7 @@ def test_run_now_not_owned_forbidden():
     with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         tid = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
-                         next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1")
+                         next_run_at=datetime.now() + timedelta(days=1), owner_user_id=USER["user_id"])
         try:
             asyncio.run(tasks_routes.run_task_now_endpoint(tid, user=OTHER))
         except Exception as e:
@@ -239,7 +239,7 @@ def test_run_now_running_conflict():
     with tempfile.TemporaryDirectory() as d, _fresh_store(d) as store:
         tid = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
-                         next_run_at=datetime.now() + timedelta(days=1), owner_user_id="u1")
+                         next_run_at=datetime.now() + timedelta(days=1), owner_user_id=USER["user_id"])
         services_module.get_scheduler_service()._running_ids.add(tid)
         try:
             asyncio.run(tasks_routes.run_task_now_endpoint(tid, user=USER))

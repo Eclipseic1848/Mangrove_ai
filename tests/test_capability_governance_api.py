@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
 from fastapi.testclient import TestClient
 
 from src.api.auth import get_current_user
@@ -33,6 +34,22 @@ from src.conversation_steering import (
     ProcedureScope,
 )
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
+from src.api.store import WebUIStore
+
+
+@pytest.fixture(autouse=True)
+def execution_users(tmp_path, monkeypatch):
+    from src.api import auth
+    database = migrated_webui_database(tmp_path / "webui.db")
+    for owner in ("owner-a", "owner-b", "admin-a", "super-a"):
+        seed_execution_owner(database, owner)
+    store = WebUIStore(str(database))
+    with store._conn() as connection:
+        connection.execute("UPDATE users SET role='admin' WHERE user_id='admin-a'")
+        connection.execute("UPDATE users SET role='super_admin' WHERE user_id='super-a'")
+    monkeypatch.setattr(auth, "_store", store)
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
 
 
 def _seed_catalog(db_path: str) -> None:
@@ -66,14 +83,25 @@ def _seed_catalog(db_path: str) -> None:
     )
 
 
+def _use_read_governance(monkeypatch, db_path) -> None:
+    # 读取投影使用真实临时库，不初始化本测试不会调用的发布签名工具。
+    governance = CapabilityGovernance(
+        CapabilityCatalog(SqliteCapabilityCatalogRepository(db_path)),
+        SqliteCapabilityGovernanceRepository(db_path),
+    )
+    monkeypatch.setattr(governance_routes, "_governance", lambda: governance)
+
+
 def test_governance_api_projects_user_and_admin_fields(
     tmp_path,
     monkeypatch,
 ) -> None:
     db_path = tmp_path / "webui.db"
     _seed_catalog(str(db_path))
+    _use_read_governance(monkeypatch, db_path)
     monkeypatch.setattr(settings, "webui_db_path", str(db_path))
     app.dependency_overrides[get_current_user] = lambda: {
+        "execution_generation": 0,
         "user_id": "owner-a",
         "role": "user",
     }
@@ -92,6 +120,7 @@ def test_governance_api_projects_user_and_admin_fields(
     assert user_response.json()["items"][1]["digest"].startswith("sha256:")
 
     app.dependency_overrides[get_current_user] = lambda: {
+        "execution_generation": 0,
         "user_id": "admin-a",
         "role": "admin",
     }
@@ -157,6 +186,7 @@ def test_owner_starts_and_reads_validation_without_supplying_hashes(
     )
     monkeypatch.setattr(governance_routes, "_governance", lambda: governance)
     app.dependency_overrides[get_current_user] = lambda: {
+        "execution_generation": 0,
         "user_id": "owner-a",
         "role": "user",
     }
@@ -198,8 +228,10 @@ def test_packs_endpoint_serializes_sanitized_promotion_gaps(
     db_path = tmp_path / "webui.db"
     _seed_catalog(str(db_path))
     migrate_capability_governance(db_path, tmp_path / "backup.db")
+    _use_read_governance(monkeypatch, db_path)
     monkeypatch.setattr(settings, "webui_db_path", str(db_path))
     app.dependency_overrides[get_current_user] = lambda: {
+        "execution_generation": 0,
         "user_id": "owner-a",
         "role": "user",
     }
@@ -263,6 +295,7 @@ def test_owner_and_admin_read_sanitized_supply_chain_summary(monkeypatch) -> Non
     governance = CapabilityGovernance(catalog, repository)
     monkeypatch.setattr(governance_routes, "_governance", lambda: governance)
     app.dependency_overrides[get_current_user] = lambda: {
+        "execution_generation": 0,
         "user_id": "owner-a",
         "role": "user",
     }
@@ -274,6 +307,7 @@ def test_owner_and_admin_read_sanitized_supply_chain_summary(monkeypatch) -> Non
 
     owner_response = client.get(url)
     app.dependency_overrides[get_current_user] = lambda: {
+        "execution_generation": 0,
         "user_id": "admin-a",
         "role": "admin",
     }
@@ -402,6 +436,7 @@ def test_admin_review_endpoints_enforce_admin_and_serialize_sanitized(
 ) -> None:
     _audit_governance_fixture(monkeypatch)
     app.dependency_overrides[get_current_user] = lambda: {
+        "execution_generation": 0,
         "user_id": "owner-a",
         "role": "user",
     }
@@ -413,6 +448,7 @@ def test_admin_review_endpoints_enforce_admin_and_serialize_sanitized(
     assert forbidden_log.status_code == 403
 
     app.dependency_overrides[get_current_user] = lambda: {
+        "execution_generation": 0,
         "user_id": "admin-a",
         "role": "admin",
     }
@@ -450,6 +486,7 @@ def test_admin_review_endpoints_enforce_admin_and_serialize_sanitized(
 
     # 超级管理员与管理员同一治理类型（ADR-0029 决策 7）。
     app.dependency_overrides[get_current_user] = lambda: {
+        "execution_generation": 0,
         "user_id": "super-a",
         "role": "super_admin",
     }
@@ -474,6 +511,7 @@ def test_audit_view_endpoint_requires_reason_idempotency_and_admin(
         "reason": "排障：核对验证任务原始正文",
     }
     app.dependency_overrides[get_current_user] = lambda: {
+        "execution_generation": 0,
         "user_id": "owner-a",
         "role": "user",
     }
@@ -486,6 +524,7 @@ def test_audit_view_endpoint_requires_reason_idempotency_and_admin(
     assert forbidden.status_code == 403
 
     app.dependency_overrides[get_current_user] = lambda: {
+        "execution_generation": 0,
         "user_id": "admin-a",
         "role": "admin",
     }
@@ -633,6 +672,7 @@ def test_platform_candidate_endpoints_enforce_admin_and_serialize(
 ) -> None:
     _platform_candidate_governance(monkeypatch)
     app.dependency_overrides[get_current_user] = lambda: {
+        "execution_generation": 0,
         "user_id": "owner-a",
         "role": "user",
     }
@@ -650,6 +690,7 @@ def test_platform_candidate_endpoints_enforce_admin_and_serialize(
     assert forbidden.status_code == 403
 
     app.dependency_overrides[get_current_user] = lambda: {
+        "execution_generation": 0,
         "user_id": "admin-a",
         "role": "admin",
     }

@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 import sqlite3
 
 import pytest
+from src.account_execution import ExecutionAuthorization, execution_context
+from tests.account_execution_helpers import seed_execution_owner
 
 from src.capability_catalog import (
     CapabilityCatalog,
@@ -37,6 +39,12 @@ from src.capability_governance import (
     migrate_capability_governance,
 )
 from src.conversation_steering import ProcedureScope
+
+
+@pytest.fixture
+def frozen_sqlite_owner():
+    with execution_context(ExecutionAuthorization("owner-a", 0)):
+        yield
 
 
 def _target(
@@ -238,6 +246,7 @@ def test_promotion_outcome_shapes() -> None:
 def test_generic_save_event_rejects_promotion_events(tmp_path) -> None:
     db_path = tmp_path / "webui.db"
     migrate_capability_governance(db_path, tmp_path / "backup.db")
+    seed_execution_owner(db_path, "owner-a")
     sqlite_repository = SqliteCapabilityGovernanceRepository(str(db_path))
     with pytest.raises(ValueError):
         sqlite_repository.save_event(_promoted_event(_target()))
@@ -272,6 +281,7 @@ def test_sqlite_migration_installs_promotion_gate_and_replays(tmp_path) -> None:
 def test_sqlite_allows_only_one_promotion_event_per_digest(tmp_path) -> None:
     db_path = tmp_path / "webui.db"
     migrate_capability_governance(db_path, tmp_path / "backup.db")
+    seed_execution_owner(db_path, "owner-a")
     repository = SqliteCapabilityGovernanceRepository(str(db_path))
     target = _target()
     first = repository.save_promotion_event(
@@ -346,10 +356,11 @@ def test_latest_succeeded_validation_run_queries_by_target() -> None:
 
 
 def test_sqlite_latest_succeeded_validation_run_queries_by_target(
-    tmp_path,
+    tmp_path, frozen_sqlite_owner,
 ) -> None:
     db_path = tmp_path / "webui.db"
     migrate_capability_governance(db_path, tmp_path / "backup.db")
+    seed_execution_owner(db_path, "owner-a")
     repository = SqliteCapabilityGovernanceRepository(str(db_path))
     target = _target()
     repository.create_validation_run(
@@ -952,11 +963,12 @@ def test_mcp_frozen_fixture_promotion_and_failure_paths() -> None:
     assert repository.get_latest_promotion_event(stale_target) is None
 
 
-def test_python_tool_fixture_promotion_persists_in_sqlite(tmp_path) -> None:
+def test_python_tool_fixture_promotion_persists_in_sqlite(tmp_path, frozen_sqlite_owner) -> None:
     from src.capability_catalog import SqliteCapabilityCatalogRepository
 
     db_path = tmp_path / "webui.db"
     migrate_capability_governance(db_path, tmp_path / "backup.db")
+    seed_execution_owner(db_path, "owner-a")
     catalog = CapabilityCatalog(SqliteCapabilityCatalogRepository(str(db_path)))
     repository = SqliteCapabilityGovernanceRepository(str(db_path))
     governance = CapabilityGovernance(catalog, repository)
@@ -995,13 +1007,14 @@ def test_python_tool_fixture_promotion_persists_in_sqlite(tmp_path) -> None:
     assert event.source_validation_run_id == run.run_id
 
 
-def test_concurrent_maybe_promote_writes_single_event_sqlite(tmp_path) -> None:
+def test_concurrent_maybe_promote_writes_single_event_sqlite(tmp_path, frozen_sqlite_owner) -> None:
     from concurrent.futures import ThreadPoolExecutor
 
     from src.capability_catalog import SqliteCapabilityCatalogRepository
 
     db_path = tmp_path / "webui.db"
     migrate_capability_governance(db_path, tmp_path / "backup.db")
+    seed_execution_owner(db_path, "owner-a")
     catalog = CapabilityCatalog(SqliteCapabilityCatalogRepository(str(db_path)))
     repository = SqliteCapabilityGovernanceRepository(str(db_path))
     governance = CapabilityGovernance(catalog, repository)

@@ -23,6 +23,7 @@ from src.agentic_runtime.models import (
     VerificationStatus,
 )
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
 
 
 @pytest.mark.parametrize(
@@ -260,6 +261,7 @@ def test_run_case_keeps_real_publisher_after_injected_model_boundary(
     driver.FORMAL_DELIVERY_DB = driver.RUNS_DIR / "delivery.db"
     driver.FORMAL_DELIVERY_ROOT = driver.RUNS_DIR / "deliveries"
     migrated_webui_database(driver.FORMAL_DELIVERY_DB)
+    seed_execution_owner(driver.FORMAL_DELIVERY_DB, "owner-a")
     result = asyncio.run(
         driver.run_case(
             {
@@ -389,6 +391,21 @@ def test_functional_batch_runs_formal_case_then_adapts_output(tmp_path: Path) ->
     assert results[0]["outcome"] == "formal_delivery"
 
 
+def _isolate_safety_sources(runner, case: dict, root: Path) -> None:
+    # 正式冻结绑定 CRLF 字节；仅临时夹具还原，不能改冻结哈希或放宽真实校验。
+    original_root = runner.INDEPENDENT_ROOT
+    for binding in case["source_bindings"]:
+        source = original_root / binding["path"]
+        data = source.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+        assert hashlib.sha256(data).hexdigest() == binding["sha256"]
+        destination = root / binding["path"]
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+    for name in ("assertions.py", "artifact_io.py"):
+        (root / name).write_bytes((original_root / name).read_bytes())
+    runner.INDEPENDENT_ROOT = root
+
+
 def test_cross_owner_probe_keeps_owner_delivery_hidden_from_attacker(
     tmp_path: Path,
 ) -> None:
@@ -397,15 +414,17 @@ def test_cross_owner_probe_keeps_owner_delivery_hidden_from_attacker(
     case = next(
         item for item in manifest["cases"] if item["safety_tags"] == ["cross_owner"]
     )
+    _isolate_safety_sources(runner, case, tmp_path / "frozen-sources")
     repository = runner.DeliveryPublishingRepository(
         migrated_webui_database(tmp_path / "delivery.db")
     )
 
-    result = runner.run_safety_probe(
+    seed_execution_owner(repository.db_path, case["owner_id"])
+    result = asyncio.run(runner.run_safety_probe(
         case,
         repository=repository,
         output_root=tmp_path / "deliveries",
-    )
+    ))
 
     attempt = result["attempts"][0]
     assert result["passed"] is True
@@ -439,15 +458,17 @@ def test_remaining_safety_probes_reject_without_attacker_delivery(
     case = next(
         item for item in manifest["cases"] if item["safety_tags"] == [safety_tag]
     )
+    _isolate_safety_sources(runner, case, tmp_path / "frozen-sources")
     repository = runner.DeliveryPublishingRepository(
         migrated_webui_database(tmp_path / f"{safety_tag}.db")
     )
 
-    result = runner.run_safety_probe(
+    seed_execution_owner(repository.db_path, case["owner_id"])
+    result = asyncio.run(runner.run_safety_probe(
         case,
         repository=repository,
         output_root=tmp_path / safety_tag / "deliveries",
-    )
+    ))
     adapted = runner.adapt_run_result(case, result, repository)
 
     assert result["passed"] is True

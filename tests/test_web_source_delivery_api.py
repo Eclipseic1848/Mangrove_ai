@@ -796,7 +796,9 @@ def test_web_task_permanent_delete_retains_immutable_contract(
         assert created.status_code == 202, created.text
         task_id = created.json()["task_id"]
         _wait_for_delivery(client, task_id)
-        get_store().soft_delete_semantic_workspace_task("user-a", task_id)
+        from src.account_execution import execution_context
+        with execution_context(get_store().capture_account_execution("user-a")):
+            get_store().soft_delete_semantic_workspace_task("user-a", task_id)
         assert get_store().purge_semantic_workspace_task("user-a", task_id)
 
     with sqlite3.connect(settings.webui_db_path) as connection:
@@ -899,6 +901,42 @@ def test_permanent_publisher_rejection_fails_closed_without_hot_retry(
 
     assert publish_calls == 1
     assert runtime.start_calls == 1
+
+
+def test_candidate_projection_refreshes_when_worker_finishes_between_reads(tmp_path, monkeypatch):
+    from src.account_execution import execution_context
+    from src.agentic_runtime.models import RuntimeStatus, RuntimeTaskConfig, RuntimeVersion
+
+    client = _client(tmp_path, monkeypatch, role="admin")
+    store = get_store()
+    auth = store.capture_account_execution("user-a")
+    repository = AgenticRuntimeRepository(settings.webui_db_path)
+    with execution_context(auth):
+        store.create_semantic_workspace_task("user-a", task_id="projection-race",
+            title="虚构", objective_text="虚构", upload_ids=[], output_formats=[],
+            provider="local", model=None, external_api_confirmed=False)
+        repository.register(RuntimeTaskConfig(user_id="user-a", task_id="projection-race",
+            revision=1, runtime_version=RuntimeVersion.PI))
+        repository.update("user-a", "projection-race", 1,
+            status=RuntimeStatus.CANDIDATE_READY, run_id="synthetic-run")
+    manager = runtime_mod.get_semantic_workspace_manager()
+    original = manager.inspect_candidate_reverification
+    reads = []
+
+    def finish_before_offer(owner, task, revision):
+        reads.append(task)
+        with execution_context(auth):
+            repository.update(owner, task, revision, status=RuntimeStatus.FAILED)
+        return original(owner, task, revision)
+
+    monkeypatch.setattr(manager, "inspect_candidate_reverification", finish_before_offer)
+    response = client.get("/api/semantic-workspace/tasks/projection-race")
+    assert response.status_code == 200, response.text
+    projection = response.json()["agentic_runtime"]
+    assert projection["status"] == "failed"
+    assert projection["candidates"] == []
+    assert projection.get("reverification_offer") is None
+    assert reads == ["projection-race"]
 
 
 @pytest.mark.parametrize(

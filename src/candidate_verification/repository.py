@@ -8,6 +8,8 @@ import json
 from pathlib import Path
 import sqlite3
 
+from src import account_execution as execution
+
 from .models import (
     AttemptReason,
     AttemptStatus,
@@ -407,6 +409,7 @@ class SqliteCandidateVerificationRepository:
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            execution.require_authorized(connection, self._execution_auth(owner_id))
             connection.execute(
                 "UPDATE agentic_runtime_runs SET run_id=? "
                 "WHERE user_id=? AND task_id=? AND revision=? "
@@ -523,6 +526,7 @@ class SqliteCandidateVerificationRepository:
         values = authority.model_dump(mode="json")
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            execution.require_authorized(connection, self._execution_auth(authority.owner_id))
             by_idempotency = connection.execute(
                 "SELECT * FROM candidate_reverification_authorities "
                 "WHERE owner_id=? AND idempotency_key=?",
@@ -630,10 +634,36 @@ class SqliteCandidateVerificationRepository:
             raise ValueError("requested Attempt 状态字段不一致")
 
     @staticmethod
+    def _execution_auth(owner_id: str):
+        auth = execution.current_authorization()
+        if auth.owner_user_id != owner_id:
+            raise execution.ExecutionDenied("候选执行上下文不属于 Owner")
+        return auth
+
+    def require_account_execution(self, owner_id: str, attempt_id: str) -> None:
+        with self._connect() as connection:
+            connection.execute("BEGIN")
+            execution.require_binding(connection, self._execution_auth(owner_id), "candidate", attempt_id)
+
+    @staticmethod
+    def _finish_account_binding(connection, owner_id, attempt_id, status, finished_at):
+        auth = SqliteCandidateVerificationRepository._execution_auth(owner_id)
+        if status in {AttemptStatus.CANCELLED, AttemptStatus.OUTCOME_UNKNOWN}:
+            if not execution.confirm_execution_stopped(
+                connection, owner_id, "candidate", attempt_id, expected_generation=auth.generation,
+                cleanup_failed=status is AttemptStatus.OUTCOME_UNKNOWN, now=finished_at.timestamp(),
+            ):
+                raise execution.ExecutionDenied("候选停止回调不属于原执行代数")
+        else:
+            execution.set_execution_state(connection, auth, "candidate", attempt_id, state="idle", now=finished_at.timestamp())
+
+    @staticmethod
     def _create_with_connection(
         connection: sqlite3.Connection,
         attempt: VerificationAttempt,
     ) -> VerificationAttempt:
+        auth = SqliteCandidateVerificationRepository._execution_auth(attempt.owner_id)
+        execution.require_authorized(connection, auth)
         values = attempt.model_dump(mode="json")
         columns = tuple(values)
         existing_row = connection.execute(
@@ -645,6 +675,7 @@ class SqliteCandidateVerificationRepository:
             existing = VerificationAttempt.model_validate(dict(existing_row))
             if existing.request_hash != attempt.request_hash:
                 raise ValueError("幂等键已绑定其他候选验证请求")
+            execution.require_binding(connection, auth, "candidate", existing.attempt_id)
             return existing
         if attempt.previous_attempt_id is not None:
             # 前序链同时是权限与审计边界，绝不能只依赖全局外键串接其他 Owner。
@@ -753,6 +784,7 @@ class SqliteCandidateVerificationRepository:
         ).fetchone()
         if active is not None:
             raise RuntimeError("该 CandidateSet 已有活动 Attempt")
+        execution.bind_execution(connection, auth, "candidate", attempt.attempt_id, now=attempt.created_at.timestamp())
         connection.execute(
             "INSERT INTO candidate_verification_attempts ("
             + ", ".join(columns)
@@ -819,6 +851,7 @@ class SqliteCandidateVerificationRepository:
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            execution.require_binding(connection, self._execution_auth(owner_id), "candidate", attempt_id)
             row = connection.execute(
                 "SELECT * FROM candidate_verification_attempts "
                 "WHERE owner_id=? AND attempt_id=?",
@@ -834,6 +867,7 @@ class SqliteCandidateVerificationRepository:
             def cancel_requested() -> tuple[VerificationAttempt, bool, bool]:
                 # Schema 只允许 requested→running→终态；同一事务内跨过 running，
                 # 但不释放事务锁，也不执行任何候选读取、Verifier 或外发。
+                self._finish_account_binding(connection, owner_id, attempt_id, AttemptStatus.CANCELLED, started_at)
                 connection.execute(
                     "UPDATE candidate_verification_attempts "
                     "SET status='running', started_at=? "
@@ -1100,6 +1134,7 @@ class SqliteCandidateVerificationRepository:
                 (finished_at.isoformat(), owner_id, attempt_id),
             )
             if started.rowcount == 1:
+                self._finish_account_binding(connection, owner_id, attempt_id, AttemptStatus.CANCELLED, finished_at)
                 connection.execute(
                     "UPDATE candidate_verification_attempts "
                     "SET status='cancelled', finished_at=? "
@@ -1172,6 +1207,7 @@ class SqliteCandidateVerificationRepository:
     ) -> VerificationAttempt:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            execution.require_binding(connection, self._execution_auth(owner_id), "candidate", attempt_id)
             updated = connection.execute(
                 "UPDATE candidate_verification_attempts "
                 "SET status='running', started_at=? "
@@ -1237,6 +1273,7 @@ class SqliteCandidateVerificationRepository:
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._finish_account_binding(connection, owner_id, attempt_id, status, finished_at)
             updated = connection.execute(
                 "UPDATE candidate_verification_attempts "
                 "SET status=?, report_json=?, report_hash=?, finished_at=? "
@@ -1301,6 +1338,7 @@ class SqliteCandidateVerificationRepository:
 
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._finish_account_binding(connection, owner_id, attempt_id, status, finished_at)
             attempt_row = connection.execute(
                 "SELECT task_id, revision, run_id, candidate_set_hash, reason_code "
                 "FROM candidate_verification_attempts "

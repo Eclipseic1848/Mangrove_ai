@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from src.database_migrations import DatabaseTarget, inspect_database
+from src import account_execution as execution
 
 
 
@@ -1046,6 +1047,11 @@ class ModelConnectionRepository:
         """只保存 Grant 哈希和冻结连接版本，不保存可用 Token。"""
 
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            authorization = execution.current_authorization()
+            if authorization.owner_user_id != owner_user_id:
+                raise execution.ExecutionDenied("Grant 发行上下文不属于 Owner")
+            execution.require_authorized(conn, authorization)
             conn.execute(
                 """
                 INSERT INTO model_connection_grants (
@@ -1088,6 +1094,8 @@ class ModelConnectionRepository:
                 FROM model_connection_grants AS g
                 JOIN model_connections AS c
                     ON c.connection_id=g.connection_id
+                JOIN users AS u
+                    ON u.user_id=g.owner_user_id AND u.disabled=0 AND u.pending=0
                 LEFT JOIN model_connection_secrets AS s
                     ON s.secret_id=g.secret_id
                 WHERE g.token_hash=?

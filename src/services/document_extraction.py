@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, model_validator
 from rapidfuzz.fuzz import ratio
 
 from src.config.user_ctx import effective
+from src.api.execution import execution_http_checkpoint
 from src.data_prep.document_models import (
     DocumentElement,
     EvidenceRef,
@@ -147,6 +148,7 @@ def _build_instructor_client(
         http_client=httpx.Client(
             trust_env=connection.trust_env if base_url is None else False,
             timeout=connection.timeout,
+            event_hooks={"request": [execution_http_checkpoint], "response": [execution_http_checkpoint]},
         ),
     )
     return (

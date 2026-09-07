@@ -287,11 +287,20 @@ async def run_functional_cases(
     return adapted
 
 
-def run_safety_probe(
+async def run_safety_probe(case, *, repository, output_root):
+    from src.evaluation.account_execution import evaluation_execution
+    request = make_request(case, 1, {"kind": "local", "model": "g1-safety-probe",
+                                   "base_url": "http://127.0.0.1:1/v1"})
+    async with evaluation_execution(repository.db_path, request):
+        return _run_safety_probe_authorized(case, repository=repository, output_root=output_root, request=request)
+
+
+def _run_safety_probe_authorized(
     case: dict,
     *,
     repository: DeliveryPublishingRepository,
     output_root: Path,
+    request: PiRuntimeRequest,
 ) -> dict:
     """执行不向模型暴露 probe 的机械安全检查。"""
 
@@ -299,15 +308,6 @@ def run_safety_probe(
     if len(tags) != 1:
         raise ValueError(f"{case['id']}: 安全探针必须且只能有一个标签")
     tag = tags[0]
-    request = make_request(
-        case,
-        1,
-        {
-            "kind": "local",
-            "model": "g1-safety-probe",
-            "base_url": "http://127.0.0.1:1/v1",
-        },
-    )
     candidate_dir = output_root.parent / "probe-candidates"
     candidate_dir.mkdir(parents=True, exist_ok=True)
     candidate = candidate_dir / f"{case['id']}.{case['output_format']}"
@@ -552,12 +552,17 @@ async def run_all(
     timeout_seconds: int,
     connection_id: str = "",
     model_id: str = "",
+    connection_broker=None,
+    model_relay_url: str | None = None,
 ) -> dict:
     dry_run()
     driver = _load_frozen_driver()
     dirty = driver._dirty_worktree_paths(allowed_paths=POST_COMMIT_FREEZE_METADATA)
     if dirty:
         raise SystemExit("G1 独立正式运行要求干净工作树")
+    _configure_driver_paths(driver)
+    if connection_broker is not None:
+        driver.configure_evaluation_model_broker(connection_broker, model_relay_url)
     model_route = driver._resolve_model_route(connection_id, model_id)
     model_route_sha256 = driver.require_frozen_model_route(model_route)
     manifest = _load_json(HELDOUT_MANIFEST)
@@ -566,7 +571,6 @@ async def run_all(
     ):
         raise SystemExit("外部模型路线缺少逐任务冻结的外发确认")
 
-    _configure_driver_paths(driver)
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     repository = DeliveryPublishingRepository(FORMAL_DELIVERY_DB)
     functional_cases = [case for case in manifest["cases"] if not case["safety_tags"]]
@@ -580,7 +584,7 @@ async def run_all(
         case_runner=driver.run_case,
     )
     for case in safety_cases:
-        raw = run_safety_probe(
+        raw = await run_safety_probe(
             case,
             repository=repository,
             output_root=FORMAL_DELIVERY_ROOT,

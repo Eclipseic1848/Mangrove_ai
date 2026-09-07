@@ -23,6 +23,7 @@ from src.semantic_harness.models import (
     TaskFamily,
 )
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
 
 
 class ApiFakeGenerator:
@@ -84,6 +85,7 @@ def _make_client(
 ) -> TestClient:
     database = migrated_webui_database(tmp_path / "semantic.db")
     monkeypatch.setattr(settings, "webui_db_path", str(database))
+    seed_execution_owner(database, user_id)
     auth_mod._store = None
     monkeypatch.setattr(
         semantic_plans,
@@ -92,7 +94,7 @@ def _make_client(
     )
     app = FastAPI()
     app.include_router(semantic_plans.router)
-    app.dependency_overrides[get_current_user] = lambda: {"user_id": user_id}
+    app.dependency_overrides[get_current_user] = lambda: {"user_id": user_id, "execution_generation": 0}
     return TestClient(app)
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from contextvars import copy_context
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -42,6 +43,15 @@ from src.candidate_verification import (
     VerifierRulesetBinding,
 )
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import ExecutionAuthorization, execution_context
+
+
+@pytest.fixture(autouse=True)
+def frozen_execution_owner():
+    # 临时库在准备函数中显式创建同一 Owner，测试请求固定初始代数。
+    with execution_context(ExecutionAuthorization("owner-a", 0)):
+        yield
 
 
 _NOW = datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc)
@@ -289,6 +299,7 @@ def _prepare_candidate(
     valid_manifest: bool = True,
 ):
     database = migrated_webui_database(tmp_path / "workspace.db")
+    seed_execution_owner(database, "owner-a")
     runtime_repository = AgenticRuntimeRepository(database)
     runtime_repository.register(
         RuntimeTaskConfig(
@@ -519,6 +530,7 @@ def _prepare_legacy_candidate(
     omit_external_confirmation: bool = False,
 ):
     database = migrated_webui_database(tmp_path / "workspace.db")
+    seed_execution_owner(database, "owner-a")
     runtime_repository = AgenticRuntimeRepository(database)
     runtime_repository.register(
         RuntimeTaskConfig(
@@ -1423,7 +1435,7 @@ def test_same_legacy_rebaseline_idempotency_key_converges_under_concurrency(
         )
 
     with ThreadPoolExecutor(max_workers=2) as executor:
-        attempts = tuple(executor.map(lambda _index: request_once(), range(2)))
+        attempts = tuple(executor.map(lambda context: context.run(request_once), [copy_context(), copy_context()]))
 
     assert attempts[0].attempt_id == attempts[1].attempt_id
     assert len(

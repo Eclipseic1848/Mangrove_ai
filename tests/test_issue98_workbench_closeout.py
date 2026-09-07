@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 import httpx
 
 from src.api.auth import get_current_user
+from tests.account_execution_helpers import seed_execution_owner
 from src.api import semantic_workspace_runtime as runtime_mod
 from src.api.routes import semantic_deliveries, semantic_workspace, source_acquisition
 from src.api.semantic_workspace_runtime import SemanticWorkspaceManager
@@ -70,6 +71,7 @@ def _restart_client(monkeypatch, runtime, candidate_verification) -> TestClient:
     app.dependency_overrides[get_current_user] = lambda: {
         "user_id": "user-a",
         "role": "admin",
+        "execution_generation": 0,
     }
     return TestClient(app)
 
@@ -242,9 +244,11 @@ def test_other_owner_cannot_operate_or_reuse_web_task_facts(
         candidate_id = runtime["candidates"][0]["artifact_id"]
         output_id = completed["delivery"]["outputs"][0]["output_id"]
 
+        seed_execution_owner(settings.webui_db_path, "user-b")
         client.app.dependency_overrides[get_current_user] = lambda: {
             "user_id": "user-b",
             "role": "user",
+            "execution_generation": 0,
         }
         denied = (
             (client.get(f"/api/semantic-workspace/tasks/{task_id}"), {404}),

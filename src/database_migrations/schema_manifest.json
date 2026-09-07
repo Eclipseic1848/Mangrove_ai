@@ -35,6 +35,7 @@
   },
   "webui": {
     "objects": {
+      "index:idx_account_execution_generation": "291c6dd16df8fd96ade9088b8f956f413d5f8cb5606cf7d137d41e9138eb6489",
       "index:idx_agentic_runtime_events_owner": "60f8328f7121f3bf3a55a277c764648de7ea38608b24fe5ade40fb4cff6589ad",
       "index:idx_automation_procedure_digest": "2503206ed1086302f65255c7e1de9db79ce85881bc655b882f9270288ff9af0d",
       "index:idx_candidate_coverage_owner_run": "3edb87cf36aec94209a2328347f5444f128fee14247e4ff113af06fbc76f2f48",
@@ -131,8 +132,10 @@
       "trigger:web_task_contracts_no_delete": "087edf8a00b0d641049f16b71fecb82ea57f2a29480ea1d532b25ae89f5f93a4",
       "trigger:web_task_contracts_no_update": "f70469242d490e4d28c884d7d2669bf72b3d3cd123ebefce630f33aab25274c0"
     },
-    "revision": "webui_0011",
+    "revision": "webui_0012",
     "tables": {
+      "account_execution_bindings": "792d18e3f5416745c405e022cc798847f4a44d9c1123e58e3900e724c60e0cfd",
+      "account_execution_holds": "985dd26ff02bf54e43557d05f72b11d5c97c3f3f18294bb3451afd2748e64db3",
       "agentic_runtime_coverage": "74c52319a68a7d681d3b2bbdebd68ff5a9114dba18fcb4b77c4f53d771d45ad8",
       "agentic_runtime_events": "305c83f3aaa22aceaaabeaade973623f806dd8089afeb986f591f076f36f517a",
       "agentic_runtime_idempotency": "67c071ee0c5e11954a65bde40f9496ed56c0c9ffb2d84f0844a3ce143012ee1d",
@@ -168,7 +171,7 @@
       "data_prep_task_uploads": "5b379ae3fd252019b765f2491993f5928345e961f3e8209dce733f225f8b0019",
       "data_prep_tasks": "870fd1d11941fc77ed33ec51da394718f6ec267ffefb3b7df4beaa69cfcef80f",
       "db_connections": "d9d7d144ebfb6fb69ea1ab44d20aed1e222bbfc32378f3a1c8aa64809f339715",
-      "delivery_publish_intents": "012b870a8a8c23b9f781475fd8767829ff8a3c25ca29e963def56af537ed7173",
+      "delivery_publish_intents": "7d185e5714a9f7fe58acdf993f7a498190bb0dbac826866117161e62e67a7d4b",
       "document_execution_runs": "fdb98be15ba8d07ddcef85406f59e23781c26f12a34b36ccf103abfd1c7f12f7",
       "document_task_unit_members": "5147dc077d32f94485a4c20f420fb80f5294d9395ebbb5e1f626efa7fc6465fb",
       "document_task_units": "82115a9d279af5e96b0324f367cfd7958587bb9b3690337b332fb8e485f15cb2",
@@ -222,7 +225,7 @@
       "task_templates": "a7921db303223b9e1409ee09ed67a9bd151e9c96f67e0cc58483f67d103b147c",
       "user_memory": "e1bfd5b266fa24edcb77ca839b6720ae36d2c5b0d8cfee978c8b569638e6f05d",
       "user_ui_state": "888c5edf2b614dbe4a7f182c0387adb2ca41817268e3402597f430d8f593de52",
-      "users": "49d4c6bc3961763fe91fb009eb66264a165ff1f9a8dfad6c9fdb113831235609",
+      "users": "d2b56f4abf511db2fe2aa490ae7f2c6995315016ccb6ff040f556076c5d0786e",
       "web_task_contracts": "0e507fbef5813ef63eb6b5ea66e3e91bfada909afd0f1ef5ef7a8ed5336756a5"
     }
   }

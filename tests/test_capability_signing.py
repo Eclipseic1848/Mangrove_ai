@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import stat
 import sys
@@ -64,15 +65,20 @@ def test_cancellable_command_runner_reaps_process_when_callback_raises(
 
     assert time.monotonic() - started < 5
     child_pid = pid_path.read_text(encoding="utf-8")
-    listed = subprocess.run(
-        ["tasklist", "/FI", f"PID eq {child_pid}", "/FO", "CSV", "/NH"],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
-    assert child_pid not in listed.stdout
+    if os.name == "nt":
+        listed = subprocess.run(
+            ["tasklist", "/FI", f"PID eq {child_pid}", "/FO", "CSV", "/NH"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=True,
+        )
+        assert child_pid not in listed.stdout
+    else:
+        # POSIX 信号 0 仅检查存活；必须确认实际子进程消失，不能只看启动器退出。
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(child_pid), 0)
 
 
 class RecordingRunner:

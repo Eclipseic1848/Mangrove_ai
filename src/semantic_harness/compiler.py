@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 import httpx
+from src.api.execution import execution_http_checkpoint_async
 import instructor
 from openai import AsyncOpenAI
 
@@ -129,6 +130,7 @@ class InstructorPlanDraftGenerator:
         http_client = httpx.AsyncClient(
             trust_env=self._connection.trust_env,
             timeout=timeout,
+            event_hooks={"request": [execution_http_checkpoint_async], "response": [execution_http_checkpoint_async]},
         )
         raw_client = AsyncOpenAI(
             api_key=self._connection.api_key,

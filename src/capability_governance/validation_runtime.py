@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 import hashlib
 import json
 import logging
@@ -12,6 +13,7 @@ import shutil
 import subprocess
 from typing import Callable, Protocol
 import uuid
+from filelock import Timeout as FileLockTimeout
 
 from src.agentic_runtime.document_retrieval import DocumentRetrievalModule
 from src.agentic_runtime.document_tools import DocumentToolBroker
@@ -22,6 +24,8 @@ from src.capability_catalog import CatalogActor
 from src.capability_host import CapabilityHost, CapabilityHostLease, CapabilityHostRequest
 from src.config.settings import settings
 from src.model_connections import get_default_broker
+from src.account_execution import ExecutionDenied, execution_context
+from src.api.execution import execution_to_thread
 
 from .models import (
     CapabilityGovernanceTarget,
@@ -34,6 +38,7 @@ from .models import (
 )
 from .service import CapabilityGovernance, CapabilityValidationExecutor
 from .task_replay import ValidationTaskResolver
+from .sqlite_repository import validation_checkpoint
 
 
 logger = logging.getLogger(__name__)
@@ -96,6 +101,7 @@ class PiTaskReplayRunner:
         cleanup_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
         grant_revoker: Callable[[str, str, int, str], object] | None = None,
         replay_guard: Callable[[CapabilityValidationRun], None] | None = None,
+        execution_authorizer: Callable[[CapabilityValidationRun], None] | None = None,
     ) -> None:
         self._task_resolver = task_resolver
         self._capability_mounts = capability_mounts
@@ -104,6 +110,7 @@ class PiTaskReplayRunner:
         self._cleanup_runner = cleanup_runner or self._docker_cleanup
         self._grant_revoker = grant_revoker or self._revoke_grants
         self._replay_guard = replay_guard
+        self._execution_authorizer = execution_authorizer
 
     @staticmethod
     def _actor(run: CapabilityValidationRun) -> CatalogActor:
@@ -228,6 +235,12 @@ class PiTaskReplayRunner:
         self.cleanup(run)
         replay_root.mkdir(parents=True, exist_ok=False)
         replay_request = request
+        def authorize_document(authorization):
+            if self._execution_authorizer is None:
+                raise ExecutionDenied("验证执行授权未配置")
+            with execution_context(authorization):
+                self._execution_authorizer(run)
+
         runtime = PiRuntime(
             execution_root=replay_root,
             capability_mount_resolver=lambda *_args: tuple(mounts),
@@ -238,6 +251,7 @@ class PiTaskReplayRunner:
             document_tool_broker=DocumentToolBroker(
                 retriever=DocumentRetrievalModule(),
                 ttl_seconds=settings.pi_runtime_timeout_seconds,
+                execution_authorizer=authorize_document,
             ),
             configure_as_default_document_broker=False,
         )
@@ -612,6 +626,8 @@ class TaskEvidenceValidationExecutor(CapabilityValidationExecutor):
         run: CapabilityValidationRun,
         step: ValidationStep,
     ) -> ValidationEvidence:
+        if step is not ValidationStep.CLEANUP:
+            validation_checkpoint()
         actor = self._actor(run)
         if step is ValidationStep.SYNTHETIC_SMOKE:
             # 恢复时先精确清理同一 Run 的旧资源；名称均由 run_id 与冻结任务身份确定。
@@ -629,6 +645,7 @@ class TaskEvidenceValidationExecutor(CapabilityValidationExecutor):
                 raise RuntimeError("冻结能力制品无法装载或缺少运行清单")
             network_name = self._network_name(run)
             self._docker("network", "create", "--internal", network_name, check=True)
+            validation_checkpoint()
             self._lease = asyncio.run(
                 self._capability_host.start(
                     CapabilityHostRequest(
@@ -646,6 +663,7 @@ class TaskEvidenceValidationExecutor(CapabilityValidationExecutor):
             mcp_calls = []
             for item in manifests:
                 if item.manifest.kind == "mcp_local":
+                    validation_checkpoint()
                     echoed = self._smoke_mcp_invoke(
                         self._lease.container_name,
                         item.manifest.name,
@@ -668,6 +686,7 @@ class TaskEvidenceValidationExecutor(CapabilityValidationExecutor):
             )
         if step is ValidationStep.OWNER_TASK_REPLAY:
             current = self._task_resolver.verify(actor, run.target, run.task_ref)
+            validation_checkpoint()
             replay = self._task_replay(run)
             if replay.get("cancelled"):
                 return ValidationEvidence(
@@ -827,16 +846,20 @@ class CapabilityValidationManager:
                             current.task_ref.revision,
                         ),
                     )
+                    validation_checkpoint()
                     self._supply_chain_evidence.collect(current.target, mounts[0])
+                    validation_checkpoint()
                     # 供应链证据落库是晋级判定的第二触发时点；验证未完成时
                     # 命令保持 held 且不写事件，终态时点会再次判定。
                     self._governance.maybe_promote(current.target, actor=actor)
+                except ExecutionDenied:
+                    raise
                 except Exception:
                     # 供应链证据是独立硬门；采集失败留待晋级门处理，不篡改五步运行结果。
                     logger.exception("能力供应链证据采集失败：%s", current.run_id)
 
             try:
-                completed = await asyncio.to_thread(
+                completed = await execution_to_thread(
                     self._governance.execute_validation,
                     actor,
                     run.run_id,
@@ -846,11 +869,49 @@ class CapabilityValidationManager:
                 )
                 if completed.status is ValidationRunStatus.SUCCEEDED:
                     # 验证终态是晋级判定的第一触发时点；全部证据通过时确定性晋级。
-                    self._governance.maybe_promote(completed.target, actor=actor)
+                    context = getattr(self._governance._repository, 'validation_execution', None)
+                    with context(completed) if context else nullcontext():
+                        validation_checkpoint()
+                        self._governance.maybe_promote(completed.target, actor=actor)
+            except ExecutionDenied:
+                # 已持久阻断，后续轮询仅可核对清理，不能按普通失败继续晋级。
+                continue
             except Exception:
                 # 单条坏记录不能杀死恢复循环；运行本身仍保持持久化状态供下一轮接管。
                 logger.exception("能力验证运行执行失败：%s", run.run_id)
         return len(pending)
+
+    async def reconcile_account_execution(self, owner_id: str, resource_id: str, expected_generation: int) -> bool:
+        repository = self._governance._repository
+        run = repository.get_validation_run(resource_id)
+        if run is None or run.owner_id != owner_id:
+            return False
+        binding = repository.get_validation_binding(run)
+        if binding is None or binding['generation'] != expected_generation:
+            return False
+        if binding['state'] == 'paused':
+            return True
+        if not repository.validation_cleanup_available(run, self._worker_id):
+            return False
+
+        def cleanup():
+            # 协调器没有当前请求身份；上下文内只持久恢复旧绑定并执行真实清理。
+            try:
+                with repository.validation_execution(run):
+                    current = repository.get_validation_binding(run)
+                    if current is None or current['generation'] != expected_generation:
+                        return False
+                    try:
+                        result = self._executor_factory(run).execute(run, ValidationStep.CLEANUP)
+                        success = result.step is ValidationStep.CLEANUP and result.status is ValidationStepStatus.PASSED
+                    except Exception:
+                        success = False
+                    repository.confirm_validation_stopped(run, cleanup_failed=not success)
+                    return success
+            except (ExecutionDenied, FileLockTimeout):
+                return False
+
+        return await execution_to_thread(cleanup)
 
     async def _run(self) -> None:
         while True:

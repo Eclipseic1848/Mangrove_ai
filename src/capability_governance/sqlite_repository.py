@@ -2,11 +2,17 @@
 """能力治理事件的显式迁移与 SQLite Adapter。"""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from contextlib import closing, contextmanager
+from contextvars import ContextVar
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import time
+from types import SimpleNamespace
+
+from src import account_execution as execution
 
 from .models import (
     CapabilityGovernanceEvent,
@@ -16,6 +22,14 @@ from .models import (
     PlatformValidationRun,
     ValidationRunStatus,
 )
+
+_validation_check = ContextVar('validation_execution_check', default=None)
+
+
+def validation_checkpoint():
+    check = _validation_check.get()
+    if check is not None:
+        check()
 
 
 def _validation_request_hash(run: CapabilityValidationRun) -> str:
@@ -62,6 +76,107 @@ class SqliteCapabilityGovernanceRepository:
         connection.execute("PRAGMA foreign_keys=ON")
         connection.execute("PRAGMA busy_timeout=5000")
         return connection
+
+    @staticmethod
+    def _execution_identity(run):
+        return (run.actor_id, 'platform:' + run.run_id) if isinstance(run, PlatformValidationRun) else (run.owner_id, run.run_id)
+
+    def _require_validation(self, connection, run, *, creating=False):
+        owner, resource_id = self._execution_identity(run)
+        auth = execution.current_authorization()
+        if auth.owner_user_id != owner:
+            raise execution.ExecutionDenied('验证 Owner 与冻结授权不符')
+        if creating:
+            execution.require_authorized(connection, auth)
+        else:
+            execution.require_binding(connection, auth, 'validation', resource_id)
+        return auth
+
+    def check_validation_execution(self, run):
+        with closing(self._connect()) as connection:
+            connection.execute('BEGIN')
+            self._require_validation(connection, run)
+
+    def get_validation_binding(self, run):
+        owner, resource_id = self._execution_identity(run)
+        with closing(self._connect()) as connection:
+            row = connection.execute("SELECT * FROM account_execution_bindings WHERE owner_user_id=? AND resource_kind='validation' AND resource_id=?", (owner, resource_id)).fetchone()
+            return dict(row) if row else None
+
+    def validation_cleanup_available(self, run, worker_id):
+        table = 'capability_platform_validation_leases' if isinstance(run, PlatformValidationRun) else 'capability_validation_leases'
+        with closing(self._connect()) as connection:
+            row = connection.execute(f'SELECT worker_id,expires_at FROM {table} WHERE run_id=?', (run.run_id,)).fetchone()
+        return row is None or row['worker_id'] == worker_id or datetime.fromisoformat(row['expires_at']) <= datetime.now(timezone.utc)
+
+    def validation_never_started(self, run, worker_id):
+        binding = self.get_validation_binding(run)
+        # 迁移回填的未知在途不能凭空闲锁或 queued 状态推断从未开始。
+        return bool(binding and binding['updated_at'] > 0 and run.status is ValidationRunStatus.QUEUED and not run.evidence and self.validation_cleanup_available(run, worker_id))
+
+    def finish_validation_execution(self, run):
+        with closing(self._connect()) as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            auth = self._require_validation(connection, run)
+            _, resource_id = self._execution_identity(run)
+            execution.set_execution_state(connection, auth, 'validation', resource_id, state='idle', now=time.time())
+            connection.commit()
+
+    def begin_validation_execution(self, run):
+        """已完成验证的运行可能后续才签名；外部动作前必须重新持久标为在途。"""
+        with closing(self._connect()) as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            auth = self._require_validation(connection, run)
+            _, resource_id = self._execution_identity(run)
+            execution.set_execution_state(connection, auth, 'validation', resource_id, state='active', now=time.time())
+            connection.commit()
+
+    @contextmanager
+    def validation_execution(self, run):
+        """后台只读取已绑定的代数；缺绑定绝不补成最新授权。"""
+        from src.api.execution import execution_lock
+
+        owner, resource_id = self._execution_identity(run)
+        with execution_lock(SimpleNamespace(db_path=self._db_path), owner, 'validation', resource_id):
+            with closing(self._connect()) as connection:
+                binding = connection.execute('SELECT generation,state FROM account_execution_bindings WHERE owner_user_id=? AND resource_kind=\'validation\' AND resource_id=?', (owner, resource_id)).fetchone()
+            if binding is None:
+                raise execution.ExecutionDenied('验证执行绑定缺失')
+            if binding['state'] == 'paused' or (isinstance(run, PlatformValidationRun) and binding['state'] == 'cleanup_failed'):
+                raise execution.ExecutionDenied('验证已停止或仍缺少清理证明')
+            auth = execution.ExecutionAuthorization(owner, binding['generation'])
+            inherited = execution.current_authorization(required=False)
+            if inherited is not None and inherited != auth:
+                raise execution.ExecutionDenied('验证执行不能替换调用方旧授权')
+            with execution.execution_context(auth):
+                token = _validation_check.set(lambda: self.check_validation_execution(run))
+                try:
+                    yield auth
+                finally:
+                    _validation_check.reset(token)
+
+    def confirm_validation_stopped(self, run, *, cleanup_failed=False):
+        """只写取消事实及停止证明；不接收迟到验证或签名证据。"""
+        owner, resource_id = self._execution_identity(run)
+        auth = execution.current_authorization()
+        if auth.owner_user_id != owner:
+            raise execution.ExecutionDenied('验证 Owner 与冻结授权不符')
+        platform = isinstance(run, PlatformValidationRun)
+        table = 'capability_platform_validation_runs' if platform else 'capability_validation_runs'
+        model = PlatformValidationRun if platform else CapabilityValidationRun
+        with closing(self._connect()) as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            changed = execution.confirm_execution_stopped(connection, owner, 'validation', resource_id, expected_generation=auth.generation, cleanup_failed=cleanup_failed, now=time.time())
+            if changed and not cleanup_failed:
+                row = connection.execute(f'SELECT payload_json FROM {table} WHERE run_id=?', (run.run_id,)).fetchone()
+                current = model.model_validate_json(row['payload_json'])
+                if current.status in {ValidationRunStatus.QUEUED, ValidationRunStatus.RUNNING, ValidationRunStatus.CANCELLING}:
+                    updates = {'status': ValidationRunStatus.CANCELLED, 'updated_at': datetime.now(current.updated_at.tzinfo)}
+                    if not platform:
+                        updates['cancel_requested'] = True
+                    current = current.model_copy(update=updates)
+                    connection.execute(f'UPDATE {table} SET status=?,payload_json=?,updated_at=? WHERE run_id=?', (current.status.value, current.model_dump_json(), current.updated_at.isoformat(), run.run_id))
+            connection.commit()
 
     @staticmethod
     def _schema_exists(connection: sqlite3.Connection) -> bool:
@@ -186,6 +301,7 @@ class SqliteCapabilityGovernanceRepository:
             if table is None:
                 raise RuntimeError("能力验证数据库尚未执行带备份迁移")
             connection.execute("BEGIN IMMEDIATE")
+            auth = self._require_validation(connection, run, creating=True)
             alias = connection.execute(
                 "SELECT run_id, request_sha256 FROM capability_validation_idempotency "
                 "WHERE owner_id=? AND digest=? AND idempotency_key=?",
@@ -202,6 +318,7 @@ class SqliteCapabilityGovernanceRepository:
                 )
                 if alias["request_sha256"] != _validation_request_hash(run):
                     raise ValueError("同一验证幂等键不得改写请求")
+                self._require_validation(connection, existing)
                 return existing
             active = connection.execute(
                 "SELECT payload_json FROM capability_validation_runs "
@@ -225,6 +342,7 @@ class SqliteCapabilityGovernanceRepository:
                         _validation_request_hash(run),
                     ),
                 )
+                self._require_validation(connection, existing)
                 return existing
             connection.execute(
                 "INSERT OR IGNORE INTO capability_validation_runs "
@@ -265,6 +383,7 @@ class SqliteCapabilityGovernanceRepository:
                     _validation_request_hash(run),
                 ),
             )
+            execution.bind_execution(connection, auth, 'validation', saved.run_id, now=time.time())
             return saved
 
     def get_validation_run(self, run_id: str) -> CapabilityValidationRun | None:
@@ -332,6 +451,10 @@ class SqliteCapabilityGovernanceRepository:
             if row is None:
                 raise ValueError("能力验证运行不存在")
             existing = CapabilityValidationRun.model_validate_json(row["payload_json"])
+            # 仅原证据不变的取消请求可绕过业务授权；清理由独立停止原语确认。
+            cancellation_only = run.cancel_requested and run.status is ValidationRunStatus.CANCELLING and existing.model_copy(update={'status': run.status, 'cancel_requested': True, 'updated_at': run.updated_at}) == run
+            if not cancellation_only:
+                self._require_validation(connection, run)
             if existing.target != run.target:
                 raise ValueError("能力验证目标身份不一致")
             if existing.status in {
@@ -424,6 +547,8 @@ class SqliteCapabilityGovernanceRepository:
         target = evidence.target
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            if _validation_check.get() is not None:
+                execution.require_authorized(connection, execution.current_authorization())
             connection.execute(
                 "INSERT OR IGNORE INTO capability_supply_chain_evidence "
                 "(evidence_id, owner_key, scope, pack_id, version, digest, "
@@ -492,6 +617,8 @@ class SqliteCapabilityGovernanceRepository:
             if not self._schema_exists(connection):
                 raise RuntimeError("能力治理数据库尚未执行带备份迁移")
             connection.execute("BEGIN IMMEDIATE")
+            if _validation_check.get() is not None:
+                execution.require_authorized(connection, execution.current_authorization())
             existing = connection.execute(
                 "SELECT payload_json FROM capability_governance_events "
                 "WHERE owner_key=? AND pack_id=? AND version=? AND digest=? "
@@ -904,6 +1031,7 @@ class SqliteCapabilityGovernanceRepository:
             if table is None:
                 raise RuntimeError("平台验证数据库尚未执行带备份迁移")
             connection.execute("BEGIN IMMEDIATE")
+            auth = self._require_validation(connection, run, creating=True)
             # 幂等键按能力身份（pack/version）+ 键查重；同键换 digest 是请求改写。
             row = connection.execute(
                 "SELECT payload_json FROM capability_platform_validation_runs "
@@ -920,6 +1048,7 @@ class SqliteCapabilityGovernanceRepository:
                 )
                 if existing.target != target:
                     raise ValueError("同一平台验证幂等键不得改写请求")
+                self._require_validation(connection, existing)
                 return existing
             connection.execute(
                 "INSERT INTO capability_platform_validation_runs "
@@ -938,6 +1067,7 @@ class SqliteCapabilityGovernanceRepository:
                     run.updated_at.isoformat(),
                 ),
             )
+            execution.bind_execution(connection, auth, 'validation', 'platform:' + run.run_id, now=time.time())
             saved = connection.execute(
                 "SELECT payload_json FROM capability_platform_validation_runs "
                 "WHERE run_id=?",
@@ -992,6 +1122,7 @@ class SqliteCapabilityGovernanceRepository:
         target = run.target
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            self._require_validation(connection, run)
             row = connection.execute(
                 "SELECT payload_json FROM capability_platform_validation_runs "
                 "WHERE run_id=?",

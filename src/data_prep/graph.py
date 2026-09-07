@@ -14,6 +14,8 @@ CLI 仍可预构建 spec 直接跑（run_data_prep）；chat API 走完整图（
 """
 from __future__ import annotations
 
+from src.api.execution import execution_to_thread
+
 import asyncio
 import logging
 import time
@@ -114,8 +116,11 @@ def _traced(name: str):
     """节点计时包装：记录耗时与摘要到 state.trace（与旧 graph.py 一致的可观测性）。"""
     def decorator(fn):
         async def wrapper(state: DataPrepState) -> Dict[str, Any]:
+            from src.api.execution import execution_checkpoint
+            execution_checkpoint()
             t0 = time.perf_counter()
             result = await fn(state) or {}
+            execution_checkpoint()
             ms = round((time.perf_counter() - t0) * 1000)
             result.setdefault("trace", []).append({"node": name, "ms": ms})
             return result
@@ -318,7 +323,7 @@ async def parse_node(state: DataPrepState) -> Dict[str, Any]:
             continue
         # PDF OCR 等解析可能包含较长的同步 HTTP/CPU 工作，移出事件循环，
         # 避免一个扫描件阻塞同进程的 SSE、健康检查和其他任务。
-        recs, rejects = await asyncio.to_thread(parser.parse, art, raw_bytes)
+        recs, rejects = await execution_to_thread(parser.parse, art, raw_bytes)
         for rec in recs:
             batch.append(rec.model_dump(mode="json"))
             if len(batch) >= batch_size:

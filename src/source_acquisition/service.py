@@ -6,13 +6,15 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, closing, suppress
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import time
 from typing import Any, Callable
 from urllib.parse import urljoin, urlsplit, urlunsplit
 import uuid
@@ -22,6 +24,7 @@ from filelock import FileLock, Timeout as FileLockTimeout
 import httpx
 
 from src.connectors.http_security import HttpSecurityGuard, SsrfError
+from src import account_execution as execution
 from src.database_migrations import DatabaseTarget, inspect_database
 from src.model_connections.pinned_transport import PinnedAsyncHTTPTransport
 
@@ -30,6 +33,13 @@ _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _HTML_MEDIA_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 _MAX_DISCOVERED_LINKS_PER_PAGE = 500
 _MAX_SCOPE_FAILURE_SAMPLES = 100
+_execution_check: ContextVar[Callable[[], None] | None] = ContextVar('source_execution_check', default=None)
+
+
+def _check_read_authorization() -> None:
+    check = _execution_check.get()
+    if check is not None:
+        check()
 
 
 def _now() -> str:
@@ -238,6 +248,55 @@ class SourceAcquisitionRepository:
             f"{self.database.name}.source-{identity}.lock"
         )))
 
+    def _require_execution(self, connection, owner_id, attempt_id=None):
+        auth = execution.current_authorization()
+        if auth.owner_user_id != owner_id:
+            raise execution.ExecutionDenied('来源 Owner 与冻结授权不符')
+        if attempt_id is None:
+            execution.require_authorized(connection, auth)
+        else:
+            execution.require_binding(connection, auth, 'source', attempt_id)
+        return auth
+
+    def check_execution(self, owner_id: str, attempt_id: str) -> None:
+        with closing(self._connect()) as connection:
+            connection.execute('BEGIN')
+            self._require_execution(connection, owner_id, attempt_id)
+
+    def cancel_for_account(self, owner_id: str, attempt_id: str, expected_generation: int) -> bool:
+        """旧协调快照只能请求同代来源取消；不在取消请求阶段宣告静默。"""
+        execution.ExecutionAuthorization(owner_id, expected_generation)
+        with closing(self._connect()) as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            current = connection.execute(
+                "SELECT 1 FROM account_execution_bindings b JOIN source_acquisition_attempts a "
+                "ON a.owner_id=b.owner_user_id AND a.attempt_id=b.resource_id "
+                "WHERE b.owner_user_id=? AND b.resource_kind='source' AND b.resource_id=? AND b.generation=?",
+                (owner_id, attempt_id, expected_generation),
+            ).fetchone()
+            if current is None:
+                return False
+            connection.execute(
+                "UPDATE source_acquisition_attempts SET cancel_requested_at=COALESCE(cancel_requested_at,?) "
+                "WHERE owner_id=? AND attempt_id=? AND status='acquiring'",
+                (_now(), owner_id, attempt_id),
+            )
+            connection.commit()
+            return True
+
+    def confirm_account_stop(self, owner_id: str, attempt_id: str) -> bool:
+        """仅在读取协程及其关闭已结束后确认；不能把取消请求当停止证明。"""
+        auth = execution.current_authorization()
+        if auth.owner_user_id != owner_id:
+            raise execution.ExecutionDenied('来源 Owner 与冻结授权不符')
+        with closing(self._connect()) as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            confirmed = execution.confirm_execution_stopped(connection, owner_id, 'source', attempt_id, expected_generation=auth.generation, now=time.time())
+            if confirmed:
+                connection.execute("UPDATE source_acquisition_attempts SET status='canceled',finished_at=?,cancel_requested_at=COALESCE(cancel_requested_at,?) WHERE owner_id=? AND attempt_id=? AND status='acquiring'", (_now(), _now(), owner_id, attempt_id))
+            connection.commit()
+            return confirmed
+
     def cancellation_requested(self, owner_id: str, attempt_id: str) -> bool:
         connection = self._connect()
         try:
@@ -312,12 +371,14 @@ class SourceAcquisitionRepository:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            auth = self._require_execution(connection, owner_id)
             existing = connection.execute(
                 "SELECT * FROM source_acquisition_attempts "
                 "WHERE owner_id=? AND idempotency_key=?",
                 (owner_id, key),
             ).fetchone()
             if existing is not None:
+                self._require_execution(connection, owner_id, str(existing['attempt_id']))
                 compatible_hashes = {request_hash}
                 legacy_hash = normalized.legacy_exact_page_hash()
                 if legacy_hash:
@@ -330,6 +391,7 @@ class SourceAcquisitionRepository:
                 return self._row(existing) or {}, False
             attempt_id = f"source_attempt_{uuid.uuid4().hex}"
             started_at = _now()
+            execution.bind_execution(connection, auth, 'source', attempt_id, now=time.time())
             connection.execute(
                 "INSERT INTO source_acquisition_attempts "
                 "(attempt_id, owner_id, idempotency_key, request_hash, "
@@ -446,6 +508,7 @@ class SourceAcquisitionRepository:
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            auth = self._require_execution(connection, owner_id, attempt_id)
             row = connection.execute(
                 "SELECT status, allowed_scope_json, cancel_requested_at FROM source_acquisition_attempts "
                 "WHERE owner_id=? AND attempt_id=?",
@@ -531,6 +594,7 @@ class SourceAcquisitionRepository:
                 "error_message=NULL WHERE owner_id=? AND attempt_id=?",
                 (finished_at, snapshot_id, owner_id, attempt_id),
             )
+            execution.set_execution_state(connection, auth, 'source', attempt_id, state='idle', now=time.time())
             connection.commit()
         except Exception:
             connection.rollback()
@@ -551,13 +615,17 @@ class SourceAcquisitionRepository:
         error_message: str,
     ) -> dict[str, Any]:
         with self._connect() as connection:
-            connection.execute(
+            connection.execute('BEGIN IMMEDIATE')
+            auth = self._require_execution(connection, owner_id, attempt_id)
+            changed = connection.execute(
                 "UPDATE source_acquisition_attempts SET status='failed', "
                 "finished_at=?, error_code=?, error_message=? "
                 "WHERE owner_id=? AND attempt_id=? AND status='acquiring' "
                 "AND cancel_requested_at IS NULL",
                 (_now(), error_code, error_message[:500], owner_id, attempt_id),
             )
+            if changed.rowcount:
+                execution.set_execution_state(connection, auth, 'source', attempt_id, state='idle', now=time.time())
         saved = self.get_attempt(owner_id, attempt_id)
         if saved is None:
             raise RuntimeError("来源获取记录不存在")
@@ -713,6 +781,8 @@ class SourceAcquisitionRepository:
             - timedelta(seconds=stale_after_seconds)
         ).isoformat()
         with self._connect() as connection:
+            connection.execute('BEGIN IMMEDIATE')
+            self._require_execution(connection, owner_id, attempt_id)
             cursor = connection.execute(
                 "UPDATE source_acquisition_attempts SET started_at=?, "
                 "finished_at=NULL, error_code=NULL, error_message=NULL "
@@ -782,8 +852,10 @@ class AnonymousWebFetcher:
 
     @asynccontextmanager
     async def _stream(self, client, url):
+        _check_read_authorization()
         response = await client.send(client.build_request("GET", url), stream=True)
         try:
+            _check_read_authorization()
             yield response
         finally:
             await self._close_safely(response.stream.aclose)
@@ -951,6 +1023,7 @@ class AnonymousWebFetcher:
                                 pass
                         content = bytearray()
                         async for chunk in response.aiter_bytes():
+                            _check_read_authorization()
                             content.extend(chunk)
                             if len(content) > self._max_bytes:
                                 raise _FetchFailure(
@@ -1110,9 +1183,17 @@ class SourceAcquisitionService:
                         return self.repository.get_attempt(owner_id, attempt_id) or result
                     return result
                 except asyncio.CancelledError:
+                    try:
+                        self.repository.check_execution(owner_id, attempt_id)
+                    except execution.ExecutionDenied:
+                        self.repository.confirm_account_stop(owner_id, attempt_id)
+                        raise
                     if self.repository.cancellation_requested(owner_id, attempt_id):
                         self.repository._confirm_cancel(owner_id, attempt_id)
                         return self.repository.get_attempt(owner_id, attempt_id) or saved
+                    raise
+                except execution.ExecutionDenied:
+                    self.repository.confirm_account_stop(owner_id, attempt_id)
                     raise
                 finally:
                     watcher.cancel()
@@ -1124,12 +1205,30 @@ class SourceAcquisitionService:
     async def _watch_cancel(self, owner_id: str, attempt_id: str, reading: asyncio.Task) -> None:
         # 独立监视器可中断等待下一块内容的慢流，不依赖 chunk 或下一页到达。
         while not reading.done():
+            try:
+                self.repository.check_execution(owner_id, attempt_id)
+            except execution.ExecutionDenied:
+                authorization = execution.current_authorization()
+                self.repository.cancel_for_account(owner_id, attempt_id, authorization.generation)
+                reading.cancel()
+                return
             if self.repository.cancellation_requested(owner_id, attempt_id):
                 reading.cancel()
                 return
             await asyncio.sleep(0.05)
 
     async def _read(
+        self, owner_id: str, attempt: dict[str, Any], normalized: SourceAcquisitionRequest,
+    ) -> dict[str, Any]:
+        check = lambda: self.repository.check_execution(owner_id, str(attempt['attempt_id']))
+        token = _execution_check.set(check)
+        try:
+            check()
+            return await self._read_authorized(owner_id, attempt, normalized)
+        finally:
+            _execution_check.reset(token)
+
+    async def _read_authorized(
         self, owner_id: str, attempt: dict[str, Any], normalized: SourceAcquisitionRequest,
     ) -> dict[str, Any]:
         try:
@@ -1167,6 +1266,8 @@ class SourceAcquisitionService:
                     ),
                 )
             page = await self.fetcher.fetch(str(attempt["normalized_url"]))
+        except execution.ExecutionDenied:
+            raise
         except asyncio.CancelledError:
             self.repository.complete_failure(
                 owner_id,

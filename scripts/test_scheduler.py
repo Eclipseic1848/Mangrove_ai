@@ -105,11 +105,11 @@ def test_compute_next_run():
 
 
 def test_store_crud():
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         db = Path(d) / "sched.db"
         store = _migrated_store(db)
         # 新增一个 cron 任务
-        tid = store.add(
+        tid = store.add(owner_user_id=owner["user_id"],
             user_input="抓某招投标网标讯并提炼摘要",
             provider="deepseek",
             model="deepseek-chat",
@@ -176,9 +176,9 @@ def test_compute_next_run_date_range_clamp():
 
 def test_store_add_with_name_source_and_new_fields():
     """手动/模板创建需要落 name/source/interval_seconds/start_date/end_date。"""
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         store = _migrated_store(Path(d) / "s.db")
-        tid = store.add(
+        tid = store.add(owner_user_id=owner["user_id"],
             user_input="每2小时抓一次新闻", provider=None, model=None,
             trigger_type="interval", cron_expr=None, run_at=None,
             next_run_at=datetime(2026, 7, 13, 10, 0),
@@ -192,7 +192,7 @@ def test_store_add_with_name_source_and_new_fields():
         assert row["start_date"] == "2026-07-13"
         assert row["end_date"] == "2026-08-13"
         # 旧调用方式（无新字段）仍要能用，source 应有默认值 'auto'
-        tid2 = store.add(user_input="老式自动创建", provider=None, model=None,
+        tid2 = store.add(owner_user_id=owner["user_id"], user_input="老式自动创建", provider=None, model=None,
                           trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                           next_run_at=datetime(2026, 7, 14, 8, 0))
         row2 = store.get(tid2)
@@ -202,9 +202,9 @@ def test_store_add_with_name_source_and_new_fields():
 
 def test_store_list_active_includes_paused():
     """暂停中的任务仍属于“进行中”，应出现在任务中心列表（前端靠 status 渲染开关）。"""
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         store = _migrated_store(Path(d) / "s.db")
-        tid = store.add(user_input="任务A", provider=None, model=None,
+        tid = store.add(owner_user_id=owner["user_id"], user_input="任务A", provider=None, model=None,
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 14, 8, 0))
         store.set_status(tid, "paused")
@@ -217,9 +217,9 @@ def test_store_list_active_includes_paused():
 
 def test_store_set_status_pause_resume():
     """暂停：只改 status，不动 next_run_at；恢复：改回 active 并可带新的 next_run_at。"""
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         store = _migrated_store(Path(d) / "s.db")
-        tid = store.add(user_input="任务B", provider=None, model=None,
+        tid = store.add(owner_user_id=owner["user_id"], user_input="任务B", provider=None, model=None,
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 14, 8, 0))
         assert store.set_status(tid, "paused") is True
@@ -236,9 +236,9 @@ def test_store_set_status_pause_resume():
 
 def test_store_edit_replaces_fields():
     """编辑：整体替换触发方式/文案/生效区间，重算的 next_run_at 一并写入。"""
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         store = _migrated_store(Path(d) / "s.db")
-        tid = store.add(user_input="旧文案", provider=None, model=None,
+        tid = store.add(owner_user_id=owner["user_id"], user_input="旧文案", provider=None, model=None,
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 14, 8, 0), name="旧名称")
         ok = store.edit(
@@ -260,19 +260,19 @@ def test_store_edit_replaces_fields():
 
 def test_store_list_recent_runs():
     """运行记录 Tab：跨任务聚合执行历史，新→旧，带任务名便于展示。"""
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         store = _migrated_store(Path(d) / "s.db")
         tid1 = store.add(user_input="任务A", provider=None, model=None,
                           trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                           next_run_at=datetime(2026, 7, 14, 8, 0), name="任务A",
-                          owner_user_id="u1")
+                          owner_user_id=owner["user_id"])
         tid2 = store.add(user_input="任务B", provider=None, model=None,
                           trigger_type="cron", cron_expr="0 9 * * *", run_at=None,
                           next_run_at=datetime(2026, 7, 14, 9, 0), name="任务B",
-                          owner_user_id="u1")
+                          owner_user_id=owner["user_id"])
         store.add_run(tid1, success=True, summary="ok1")
         store.add_run(tid2, success=False, summary="fail1")
-        recent = store.list_recent_runs(owner_user_id="u1")
+        recent = store.list_recent_runs(owner_user_id=owner["user_id"])
         assert len(recent) == 2
         assert recent[0]["run_id"] > recent[1]["run_id"], "应按新→旧排序"
         names = {r["task_name"] for r in recent}
@@ -283,43 +283,43 @@ def test_store_list_recent_runs():
 
 def test_list_recent_runs_filters_and_pagination():
     """运行记录筛选（按任务/按成败/按摘要关键词）+ 分页（limit/offset）+ 配套计数。"""
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         store = _migrated_store(Path(d) / "s.db")
         tid1 = store.add(user_input="任务A", provider=None, model=None,
                           trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                           next_run_at=datetime(2026, 7, 14, 8, 0), name="任务A",
-                          owner_user_id="u1")
+                          owner_user_id=owner["user_id"])
         tid2 = store.add(user_input="任务B", provider=None, model=None,
                           trigger_type="cron", cron_expr="0 9 * * *", run_at=None,
                           next_run_at=datetime(2026, 7, 14, 9, 0), name="任务B",
-                          owner_user_id="u1")
+                          owner_user_id=owner["user_id"])
         store.add_run(tid1, success=True, summary="report=x.md")
         store.add_run(tid1, success=False, summary="采集失败：连接超时")
         store.add_run(tid2, success=True, summary="report=y.md")
 
         # 按任务筛选
-        only_tid1 = store.list_recent_runs(owner_user_id="u1", task_id=tid1)
+        only_tid1 = store.list_recent_runs(owner_user_id=owner["user_id"], task_id=tid1)
         assert len(only_tid1) == 2 and all(r["task_id"] == tid1 for r in only_tid1)
 
         # 按成败筛选
-        only_failed = store.list_recent_runs(owner_user_id="u1", success=False)
+        only_failed = store.list_recent_runs(owner_user_id=owner["user_id"], success=False)
         assert len(only_failed) == 1 and "超时" in only_failed[0]["summary"]
 
         # 按摘要关键词
-        matched = store.list_recent_runs(owner_user_id="u1", q="超时")
+        matched = store.list_recent_runs(owner_user_id=owner["user_id"], q="超时")
         assert len(matched) == 1
-        assert store.list_recent_runs(owner_user_id="u1", q="不存在的词") == []
+        assert store.list_recent_runs(owner_user_id=owner["user_id"], q="不存在的词") == []
 
         # 分页：limit/offset
-        page1 = store.list_recent_runs(owner_user_id="u1", limit=2, offset=0)
-        page2 = store.list_recent_runs(owner_user_id="u1", limit=2, offset=2)
+        page1 = store.list_recent_runs(owner_user_id=owner["user_id"], limit=2, offset=0)
+        page2 = store.list_recent_runs(owner_user_id=owner["user_id"], limit=2, offset=2)
         assert len(page1) == 2 and len(page2) == 1
         assert {r["run_id"] for r in page1} & {r["run_id"] for r in page2} == set()
 
         # 计数：与筛选条件同构
-        assert store.count_recent_runs(owner_user_id="u1") == 3
-        assert store.count_recent_runs(owner_user_id="u1", task_id=tid1) == 2
-        assert store.count_recent_runs(owner_user_id="u1", success=False) == 1
+        assert store.count_recent_runs(owner_user_id=owner["user_id"]) == 3
+        assert store.count_recent_runs(owner_user_id=owner["user_id"], task_id=tid1) == 2
+        assert store.count_recent_runs(owner_user_id=owner["user_id"], success=False) == 1
         assert store.count_recent_runs(owner_user_id="u2") == 0
 
 
@@ -348,9 +348,9 @@ def test_get_template():
 
 def test_store_mark_run_keep_schedule():
     """立即执行专用：只记 last_*/run_count，不动 next_run_at/status（供 run_task_now 使用）。"""
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         store = _migrated_store(Path(d) / "s.db")
-        tid = store.add(user_input="任务C", provider=None, model=None,
+        tid = store.add(owner_user_id=owner["user_id"], user_input="任务C", provider=None, model=None,
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 14, 8, 0))
         store.set_status(tid, "paused")  # 暂停中的任务也可能被立即执行一次
@@ -380,7 +380,7 @@ def test_run_one_interval_reschedule():
             return {"reply": "done"}
 
         svc = SchedulerService(store=store, poll_interval=1.0, runner=stub_runner)
-        asyncio.run(svc._run_one(store.get(tid), datetime(2026, 7, 13, 10, 0, 5)))
+        asyncio.run(svc._run_one(store.due_tasks(datetime(2026, 7, 13, 10, 0, 5))[0], datetime(2026, 7, 13, 10, 0, 5)))
         assert len(calls) == 1
         row = store.get(tid)
         assert row["status"] == "active"
@@ -405,7 +405,7 @@ def test_run_one_end_date_expiry():
             return {"reply": "done"}
 
         svc = SchedulerService(store=store, poll_interval=1.0, runner=stub_runner)
-        asyncio.run(svc._run_one(store.get(tid), datetime(2026, 7, 13, 8, 0, 5)))
+        asyncio.run(svc._run_one(store.due_tasks(datetime(2026, 7, 13, 8, 0, 5))[0], datetime(2026, 7, 13, 8, 0, 5)))
         assert len(calls) == 1
         row = store.get(tid)
         assert row["status"] == "done", row["status"]
@@ -444,7 +444,7 @@ def test_run_task_now_not_found():
     import asyncio
 
     from src.scheduler.service import SchedulerService
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         store = _migrated_store(Path(d) / "s.db")
         svc = SchedulerService(store=store, poll_interval=1.0, runner=lambda *a, **k: None)
         assert asyncio.run(svc.run_task_now("no_such_id")) == "not_found"
@@ -455,9 +455,9 @@ def test_run_task_now_concurrent_guard():
     import asyncio
 
     from src.scheduler.service import SchedulerService
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         store = _migrated_store(Path(d) / "s.db")
-        tid = store.add(user_input="任务E", provider=None, model=None,
+        tid = store.add(owner_user_id=owner["user_id"], user_input="任务E", provider=None, model=None,
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 20, 8, 0))
         svc = SchedulerService(store=store, poll_interval=1.0, runner=lambda *a, **k: None)
@@ -531,7 +531,7 @@ def test_run_one_marks_failure_and_catchup():
                 return runner_result
 
             svc = SchedulerService(store=store, poll_interval=1.0, runner=stub_runner)
-            task = store.get(tid)
+            task = store.due_tasks(now)[0]
             await svc._run_one(task, now)
             assert len(calls) == 1
             return store.get(tid)
@@ -572,8 +572,8 @@ def test_run_history():
             return {"outputs": {"report_md": "downloads/x/report.md", "json": "downloads/x/data.json"}}
 
         svc = SchedulerService(store=store, poll_interval=1.0, runner=stub_runner)
-        asyncio.run(svc._run_one(store.get(tid), datetime(2026, 7, 6, 8, 0, 30)))
-        asyncio.run(svc._run_one(store.get(tid), datetime(2026, 7, 7, 8, 0, 30)))
+        asyncio.run(svc._run_one(store.due_tasks(datetime(2026, 7, 6, 8, 0, 30))[0], datetime(2026, 7, 6, 8, 0, 30)))
+        asyncio.run(svc._run_one(store.due_tasks(datetime(2026, 7, 7, 8, 0, 30))[0], datetime(2026, 7, 7, 8, 0, 30)))
 
         assert len(calls) == 2
         runs = store.list_runs(tid)
@@ -593,7 +593,7 @@ def test_run_history_backfill():
 
     from src.scheduler.store import ScheduleStore
 
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory() as d, scheduler_owner(Path(d) / "users.db") as owner:
         db = Path(d) / "s.db"
         tid = "legacy-task"
         # 真实构造 runs 表上线前的旧 Schema，不借 Repository 代建表。

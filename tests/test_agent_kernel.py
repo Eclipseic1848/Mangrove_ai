@@ -39,6 +39,27 @@ from tests.test_coremind_agent_kernel_adapter import (
     _InteractiveCoreMindClient,
     _PassingCandidateService,
 )
+from src.account_execution import execution_context
+from tests.account_execution_helpers import seed_execution_owner
+from src.api.store import WebUIStore
+
+
+@pytest.fixture
+def execution_owner(tmp_path, monkeypatch):
+    from src.api import auth
+    from src.config.settings import settings
+    database = migrated_webui_database(tmp_path / "webui.db")
+    authorization = seed_execution_owner(database, "user-a")
+    store = WebUIStore(str(database))
+    monkeypatch.setattr(auth, "_store", store)
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
+    with execution_context(authorization):
+        store.create_semantic_workspace_task(
+            "user-a", task_id="task-a", title="虚构任务", objective_text="读取来源", upload_ids=[],
+            output_formats=["txt"], provider="local", model=None, external_api_confirmed=False,
+        )
+        yield
+
 
 
 class _NeverStartedAdapter:
@@ -664,7 +685,7 @@ async def test_kernel_freezes_exact_binding_before_adapter_start(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("adapter_kind", ["fake", "pi", "coremind"])
 async def test_adapters_share_kernel_event_contract(
-    tmp_path: Path,
+    execution_owner, tmp_path: Path,
     adapter_kind: str,
 ) -> None:
     repository = _registered_repository(tmp_path)
@@ -692,7 +713,7 @@ async def test_adapters_share_kernel_event_contract(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("adapter_kind", ["fake", "pi", "coremind"])
 async def test_resume_reuses_binding_without_duplicate_start_input(
-    tmp_path: Path,
+    execution_owner, tmp_path: Path,
     adapter_kind: str,
 ) -> None:
     repository = _registered_repository(tmp_path)

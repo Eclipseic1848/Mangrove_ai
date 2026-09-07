@@ -99,36 +99,37 @@ def test_scheduler_task_timeout():
     """定时任务执行卡死 → 超时记为失败（success=False），不抛出、不冻住循环。"""
     from src.scheduler.service import SchedulerService
 
-    captured = {}
-
-    class _FakeStore:
-        def mark_run(self, task_id, *, success, result=None, error=None, next_run_at=None):
-            captured["task_id"] = task_id
-            captured["success"] = success
-            captured["error"] = error
-
-        def add_run(self, task_id, *, success, summary, report_path="", json_path=""):
-            captured["history_task_id"] = task_id
-            captured["history_success"] = success
-            captured["history_summary"] = summary
+    import tempfile
+    from src.scheduler.store import ScheduleStore
+    from tests.database_migration_helpers import migrated_profile_database
+    from tests.scheduler_helpers import scheduler_owner
 
     async def _hang_runner(user_input, **kwargs):
         await asyncio.sleep(10)
         return {"reply": "不该完成"}
 
-    svc = SchedulerService(store=_FakeStore(), runner=_hang_runner)
-    old = settings.scheduler_task_timeout_seconds
-    settings.scheduler_task_timeout_seconds = 0.05
-    try:
-        task = {"task_id": "t1", "trigger_type": "once", "user_input": "x"}
-        asyncio.run(svc._run_one(task, datetime.now()))
-    finally:
-        settings.scheduler_task_timeout_seconds = old
+    with tempfile.TemporaryDirectory() as directory, scheduler_owner(Path(directory) / "users.db") as owner:
+        store = ScheduleStore(str(migrated_profile_database(Path(directory) / "scheduler.db", profile="scheduler")))
+        now = datetime.now()
+        task_id = store.add(owner_user_id=owner["user_id"], user_input="x", provider=None, model=None,
+                            trigger_type="once", cron_expr=None, run_at=now, next_run_at=now)
+        svc = SchedulerService(store=store, runner=_hang_runner)
+        old = settings.scheduler_task_timeout_seconds
+        settings.scheduler_task_timeout_seconds = 0.05
+        try:
+            asyncio.run(svc._run_one(store.due_tasks(now)[0], now))
+        finally:
+            settings.scheduler_task_timeout_seconds = old
+        task = store.get(task_id)
+        history = store.list_runs(task_id)[0]
+        captured = {"task_id": task["task_id"], "success": bool(task["last_success"]),
+                    "error": task["last_error"], "history_task_id": history["task_id"],
+                    "history_success": bool(history["success"]), "history_summary": history["summary"]}
 
-    assert captured.get("task_id") == "t1"
+    assert captured.get("task_id") == task_id
     assert captured.get("success") is False
     assert "超时" in (captured.get("error") or "")
-    assert captured.get("history_task_id") == "t1"
+    assert captured.get("history_task_id") == task_id
     assert captured.get("history_success") is False
     assert "超时" in (captured.get("history_summary") or "")
 

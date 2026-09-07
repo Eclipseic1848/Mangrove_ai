@@ -28,7 +28,25 @@ from src.runtime_routing import (
     SqliteRuntimeRoutingRepository,
     runtime_routing_is_p0_blocked,
 )
-from tests.database_migration_helpers import migrated_webui_database
+from tests.database_migration_helpers import migrated_webui_database as _migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import ExecutionAuthorization, execution_context
+
+
+def migrated_webui_database(path):
+    database = _migrated_webui_database(path)
+    auth = seed_execution_owner(database)
+    store = WebUIStore(str(database))
+    with execution_context(auth):
+        if store.get_semantic_workspace_task('owner-a', 'task-a') is None:
+            store.create_semantic_workspace_task('owner-a', task_id='task-a', title='虚构发布任务', objective_text='虚构目标', upload_ids=[], output_formats=['json'], provider='local', model=None, external_api_confirmed=False)
+    return database
+
+
+@pytest.fixture(autouse=True)
+def publishing_authorization():
+    with execution_context(ExecutionAuthorization('owner-a', 0)):
+        yield
 
 
 def _sha256(path: Path) -> str:

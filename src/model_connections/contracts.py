@@ -1,6 +1,8 @@
 """模型连接 Grant 与 Relay 的公开契约。"""
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime
 
@@ -47,6 +49,7 @@ class RelayResponse:
         client: httpx.AsyncClient,
         finalize: Callable[[bytes], None],
         max_usage_bytes: int = 2 * 1024 * 1024,
+        check_active: Callable[[], None] | None = None,
     ) -> None:
         self.status_code = response.status_code
         self.headers = {
@@ -69,6 +72,7 @@ class RelayResponse:
         self._finalize = finalize
         self._max_usage_bytes = max_usage_bytes
         self._finished = False
+        self._check_active = check_active or (lambda: None)
 
     async def iter_bytes(self) -> AsyncIterator[bytes]:
         """逐块透传；正文只在当前调用内用于抽取 Usage，不写普通日志。"""
@@ -86,6 +90,7 @@ class RelayResponse:
             observed.extend(chunk)
 
         try:
+            self._check_active()
             if self._response.is_stream_consumed:
                 chunk = self._response.content
                 observe(chunk)
@@ -93,9 +98,30 @@ class RelayResponse:
                     yield chunk
             else:
                 # 使用解压后的字节；Relay 不透传 Content-Encoding，二者必须一致。
-                async for chunk in self._response.aiter_bytes():
+                chunks = self._response.aiter_bytes()
+                while True:
+                    self._check_active()
+                    pending = asyncio.create_task(anext(chunks))
+                    try:
+                        while not pending.done():
+                            await asyncio.wait({pending}, timeout=0.25)
+                            # Provider暂不出块时也复核撤销，不能无限保留连接。
+                            self._check_active()
+                        try:
+                            chunk = pending.result()
+                        except StopAsyncIteration:
+                            break
+                    finally:
+                        if not pending.done():
+                            pending.cancel()
+                        with suppress(asyncio.CancelledError, Exception):
+                            await pending
                     observe(chunk)
                     yield chunk
+        except BaseException:
+            # 被撤销或中断的流不能把部分正文误计为完整、已知的Provider用量。
+            observed = None
+            raise
         finally:
             await self._finish(
                 bytes(observed) if observed is not None else b""
@@ -113,5 +139,7 @@ class RelayResponse:
         try:
             self._finalize(body)
         finally:
-            await self._response.aclose()
-            await self._client.aclose()
+            try:
+                await self._response.aclose()
+            finally:
+                await self._client.aclose()

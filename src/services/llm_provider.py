@@ -12,6 +12,7 @@ from langchain_openai import ChatOpenAI
 from openai import AsyncOpenAI, OpenAI
 
 from src.config import settings
+from src.api.execution import execution_http_checkpoint, execution_http_checkpoint_async
 
 logger = logging.getLogger(__name__)
 
@@ -59,10 +60,10 @@ class LLMProvider:
                 max_tokens=settings.llm_max_tokens,
                 timeout=settings.llm_timeout,
             )
-            if _is_lan(settings.llm_base_url):
-                # 局域网/本机模型绕过系统代理，否则 Clash 等会拦截 LAN 请求导致 502/超时
-                kwargs["http_client"] = httpx.Client(trust_env=False, timeout=settings.llm_timeout)
-                kwargs["http_async_client"] = httpx.AsyncClient(trust_env=False, timeout=settings.llm_timeout)
+            kwargs["http_client"] = httpx.Client(trust_env=not _is_lan(settings.llm_base_url), timeout=settings.llm_timeout,
+                event_hooks={"request": [execution_http_checkpoint], "response": [execution_http_checkpoint]})
+            kwargs["http_async_client"] = httpx.AsyncClient(trust_env=not _is_lan(settings.llm_base_url), timeout=settings.llm_timeout,
+                event_hooks={"request": [execution_http_checkpoint_async], "response": [execution_http_checkpoint_async]})
             self._llm = ChatOpenAI(**kwargs)
             logger.info(f"LLM 初始化成功: {settings.llm_model_name}")
         except Exception as e:
@@ -86,8 +87,8 @@ class LLMProvider:
         if self._openai is None:
             kwargs = dict(base_url=settings.llm_base_url, api_key=settings.llm_api_key,
                           timeout=settings.llm_timeout)
-            if _is_lan(settings.llm_base_url):
-                kwargs["http_client"] = httpx.Client(trust_env=False, timeout=settings.llm_timeout)
+            kwargs["http_client"] = httpx.Client(trust_env=not _is_lan(settings.llm_base_url), timeout=settings.llm_timeout,
+                event_hooks={"request": [execution_http_checkpoint], "response": [execution_http_checkpoint]})
             self._openai = OpenAI(**kwargs)
         return self._openai
 
@@ -97,8 +98,8 @@ class LLMProvider:
         if self._async_openai is None:
             kwargs = dict(base_url=settings.llm_base_url, api_key=settings.llm_api_key,
                           timeout=settings.llm_timeout)
-            if _is_lan(settings.llm_base_url):
-                kwargs["http_client"] = httpx.AsyncClient(trust_env=False, timeout=settings.llm_timeout)
+            kwargs["http_client"] = httpx.AsyncClient(trust_env=not _is_lan(settings.llm_base_url), timeout=settings.llm_timeout,
+                event_hooks={"request": [execution_http_checkpoint_async], "response": [execution_http_checkpoint_async]})
             self._async_openai = AsyncOpenAI(**kwargs)
         return self._async_openai
 

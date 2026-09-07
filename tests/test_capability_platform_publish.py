@@ -10,6 +10,15 @@ from datetime import datetime, timezone
 import json
 
 import pytest
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import ExecutionAuthorization, execution_context
+
+
+@pytest.fixture
+def sqlite_execution_context():
+    with execution_context(ExecutionAuthorization('admin-a', 0)):
+        yield
+
 from pydantic import ValidationError
 
 from src.capability_catalog import (
@@ -541,6 +550,7 @@ class TestS2PlatformRepository:
         assert second == first
         assert repository.list_platform_events(target) == (first,)
 
+    @pytest.mark.usefixtures("sqlite_execution_context")
     def test_sqlite_platform_validation_run_crud(self, tmp_path) -> None:
         import sqlite3 as sqlite3_module
 
@@ -551,6 +561,7 @@ class TestS2PlatformRepository:
 
         db_path = tmp_path / "webui.db"
         migrate_capability_governance(db_path, tmp_path / "backup.db")
+        seed_execution_owner(db_path, 'admin-a')
         with sqlite3_module.connect(db_path) as connection:
             tables = {
                 row[0]
@@ -1651,6 +1662,7 @@ class TestS6PlatformWorker:
             lease_seconds=60,
         )
 
+    @pytest.mark.usefixtures("sqlite_execution_context")
     def test_lease_in_sqlite(self, tmp_path) -> None:
         from src.capability_governance import (
             SqliteCapabilityGovernanceRepository,
@@ -1659,6 +1671,7 @@ class TestS6PlatformWorker:
 
         db_path = tmp_path / "webui.db"
         migrate_capability_governance(db_path, tmp_path / "backup.db")
+        seed_execution_owner(db_path, 'admin-a')
         repository = SqliteCapabilityGovernanceRepository(str(db_path))
         target = _platform_target()
         repository.create_platform_validation_run(

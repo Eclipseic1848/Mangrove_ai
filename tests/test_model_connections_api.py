@@ -19,7 +19,22 @@ from src.model_connections import ConnectionBroker, ConnectionError, GrantError
 from src.model_connections.storage import ModelConnectionRepository
 from src.model_connections.vault import FernetCredentialVault
 from src.config.settings import settings
-from tests.database_migration_helpers import migrated_webui_database
+from tests.database_migration_helpers import migrated_webui_database as _migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import ExecutionAuthorization, execution_context
+
+
+def migrated_webui_database(path):
+    database = _migrated_webui_database(path)
+    for owner_id in ("user-a", "user-b", "member-a", "admin-a"):
+        seed_execution_owner(database, owner_id)
+    return database
+
+
+@pytest.fixture(autouse=True)
+def _execution_authorization():
+    with execution_context(ExecutionAuthorization("user-a", 0)):
+        yield
 
 
 def _connection_version(
@@ -761,15 +776,16 @@ async def test_only_manager_controls_platform_models_and_disabling_revokes_grant
         json={"enabled": False},
     )
     binding = broker.freeze_connection("member-a", connection_id)
-    grant = broker.issue_grant(
-        owner_user_id="member-a",
-        connection_id=connection_id,
-        connection_version=binding.connection_version,
-        task_id="task-platform",
-        revision=1,
-        run_id="run-platform",
-        purpose="agent_inference",
-    )
+    with execution_context(ExecutionAuthorization("member-a", 0)):
+        grant = broker.issue_grant(
+            owner_user_id="member-a",
+            connection_id=connection_id,
+            connection_version=binding.connection_version,
+            task_id="task-platform",
+            revision=1,
+            run_id="run-platform",
+            purpose="agent_inference",
+        )
 
     disabled = admin.patch(
         f"/api/model-connections/{connection_id}",
@@ -804,16 +820,17 @@ async def test_only_manager_controls_platform_models_and_disabling_revokes_grant
     assert reenabled.json()["status"] == "verified"
     assert member.get("/api/model-connections").json()["items"][0]["connection_id"] == connection_id
     next_binding = broker.freeze_connection("member-a", connection_id)
-    next_grant = broker.issue_grant(
-        owner_user_id="member-a",
-        connection_id=connection_id,
-        connection_version=next_binding.connection_version,
-        model_id=next_binding.model,
-        task_id="task-platform-delete",
-        revision=1,
-        run_id="run-platform-delete",
-        purpose="agent_inference",
-    )
+    with execution_context(ExecutionAuthorization("member-a", 0)):
+        next_grant = broker.issue_grant(
+            owner_user_id="member-a",
+            connection_id=connection_id,
+            connection_version=next_binding.connection_version,
+            model_id=next_binding.model,
+            task_id="task-platform-delete",
+            revision=1,
+            run_id="run-platform-delete",
+            purpose="agent_inference",
+        )
     assert admin.delete(f"/api/model-connections/{connection_id}").status_code == 200
     with pytest.raises(GrantError, match="无效"):
         await broker.relay(

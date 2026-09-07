@@ -32,6 +32,7 @@ from src.conversation_steering import (
 )
 from src.config.settings import settings
 from tests.database_migration_helpers import migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
 
 
 def _personal_pack(owner: str = "owner-a") -> CapabilityPack:
@@ -293,6 +294,7 @@ class TestD9CreateTaskApi:
         )
         monkeypatch.setattr(settings, "pi_capability_host_enabled", True)
         migrated_webui_database(settings.webui_db_path)
+        seed_execution_owner(settings.webui_db_path, owner_id)
         monkeypatch.setattr(auth_mod, "_store", None)
         auth_mod.get_store()
         from tests.runtime_routing_test_support import (
@@ -315,7 +317,7 @@ class TestD9CreateTaskApi:
         )
         repository.save_pack(pack)
         app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": owner_id,
+            "user_id": owner_id, "execution_generation": 0,
             "role": "admin",
         }
         client = TestClient(app)

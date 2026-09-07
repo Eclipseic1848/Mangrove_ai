@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext, suppress
+from src import account_execution as execution
+from src.api.execution import execution_validation
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -72,6 +75,7 @@ class _GrantState:
     purpose: str
     expires_at: datetime
     sources: dict[str, SourceInput]
+    authorization: execution.ExecutionAuthorization | None = None
     inspected_units: dict[str, tuple[str, ...]] = field(default_factory=dict)
     contract: CoverageContract | None = None
     ledger: CoverageLedger | None = None
@@ -143,11 +147,13 @@ class DocumentToolBroker:
         clock: Callable[[], datetime] | None = None,
         ttl_seconds: int = 900,
         state_store: CoverageStateStore | None = None,
+        execution_authorizer: Callable[[execution.ExecutionAuthorization], None] | None = None,
     ) -> None:
         self._retriever = retriever
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._ttl_seconds = ttl_seconds
         self._state_store = state_store
+        self._execution_authorizer = execution_authorizer or getattr(state_store, "authorize_execution", None)
         self._grants: dict[str, _GrantState] = {}
         self._grant_keys: dict[str, str] = {}
         self._active_tasks: dict[str, set[asyncio.Task[Any]]] = {}
@@ -165,6 +171,8 @@ class DocumentToolBroker:
     ) -> DocumentToolGrant:
         if revision < 1 or not sources:
             raise DocumentToolError("文档工具 Grant 缺少有效来源或 revision")
+        authorization = execution.current_authorization(required=False)
+        self._authorize(authorization, owner_user_id)
         effective_ttl = ttl_seconds or self._ttl_seconds
         if effective_ttl <= 0:
             raise DocumentToolError("文档工具 Grant TTL 必须大于 0")
@@ -187,6 +195,7 @@ class DocumentToolBroker:
         )
         self._grants[token_key] = _GrantState(
             grant_id=grant_id,
+            authorization=authorization,
             owner_user_id=owner_user_id,
             owner_binding=owner_binding,
             task_id=task_id,
@@ -209,6 +218,24 @@ class DocumentToolBroker:
             owner_binding=owner_binding,
             expires_at=expires_at,
         )
+
+    def _authorize(
+        self, authorization: execution.ExecutionAuthorization | None, owner_user_id: str
+    ) -> None:
+        if authorization is None:
+            return
+        try:
+            # 内部 Relay 没有 Cookie；只使用签发时冻结的授权，不能换成当前新代。
+            if authorization.owner_user_id != owner_user_id or self._execution_authorizer is None:
+                raise execution.ExecutionDenied("文档授权不匹配")
+            self._execution_authorizer(authorization)
+        except execution.ExecutionDenied as exc:
+            raise DocumentToolError("文档工具账号授权已失效") from exc
+
+    def _check_grant(self, grant: _GrantState) -> None:
+        if grant.revoked or grant.expires_at <= self._clock():
+            raise DocumentToolError("文档工具 Grant 无效或已撤销")
+        self._authorize(grant.authorization, grant.owner_user_id)
 
     def revoke_grant(self, grant_id: str, reason: str) -> None:
         """撤销指定 Grant；重复撤销保持幂等且不泄露其是否曾存在。"""
@@ -444,7 +471,10 @@ class DocumentToolBroker:
         async def run_bound_operation() -> dict[str, object]:
             token = bind_document_retrieval_cancel_event(cancel_event)
             try:
-                return await operation
+                self._check_grant(grant)
+                with execution.execution_context(grant.authorization) if grant.authorization else nullcontext():
+                    with execution_validation(self._execution_authorizer) if self._execution_authorizer else nullcontext():
+                        return await operation
             finally:
                 reset_document_retrieval_cancel_event(token)
 
@@ -454,8 +484,27 @@ class DocumentToolBroker:
         active.add(task)
         events.add(cancel_event)
         try:
-            return await task
+            while not task.done():
+                await asyncio.wait({task}, timeout=0.25)
+                if grant.revoked:
+                    raise asyncio.CancelledError
+                self._check_grant(grant)
+            result = task.result()
+            self._check_grant(grant)
+            return result
+        except BaseException:
+            cancel_event.set()
+            task.cancel()
+            # 检索器负责真实线程结束；重复取消也必须等待资源收敛。
+            while not task.done():
+                with suppress(asyncio.CancelledError):
+                    await asyncio.shield(task)
+            with suppress(asyncio.CancelledError, Exception):
+                task.result()
+            raise
         finally:
+            if hasattr(operation, "close"):
+                operation.close()
             active.discard(task)
             events.discard(cancel_event)
 
@@ -490,6 +539,7 @@ class DocumentToolBroker:
         self._persist(grant)
 
     def _persist(self, grant: _GrantState) -> None:
+        self._check_grant(grant)
         if self._state_store is None:
             return
         contract = grant.contract
@@ -498,14 +548,18 @@ class DocumentToolBroker:
             ledger, CoverageLedger
         ):
             return
-        self._state_store.save_coverage(
-            user_id=grant.owner_user_id,
-            task_id=grant.task_id,
-            revision=grant.revision,
-            run_id=grant.run_id,
-            contract=contract,
-            ledger=ledger,
-        )
+        try:
+            with execution.execution_context(grant.authorization) if grant.authorization else nullcontext():
+                self._state_store.save_coverage(
+                    user_id=grant.owner_user_id,
+                    task_id=grant.task_id,
+                    revision=grant.revision,
+                    run_id=grant.run_id,
+                    contract=contract,
+                    ledger=ledger,
+                )
+        except execution.ExecutionDenied as exc:
+            raise DocumentToolError("文档工具账号授权已失效") from exc
 
     def _freeze_coverage(
         self,
@@ -737,6 +791,7 @@ class DocumentToolBroker:
             or claims.purpose != grant.purpose
         ):
             raise DocumentToolError("文档工具 Grant 与当前 Run 绑定不一致")
+        self._check_grant(grant)
         return grant
 
 

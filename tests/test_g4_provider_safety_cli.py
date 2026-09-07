@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from src.account_execution import ExecutionAuthorization, execution_context
+
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -63,7 +65,11 @@ from tests.database_migration_helpers import (
 
 
 def _model_repository(path: str | Path) -> ModelConnectionRepository:
-    return ModelConnectionRepository(str(migrated_webui_database(path)))
+    database = migrated_webui_database(path)
+    from tests.account_execution_helpers import seed_execution_owner
+    for owner_id in ("user-a", "g4_provider_qualification", "g4-synthetic-owner", "g4-ordinary-synthetic-user"):
+        seed_execution_owner(database, owner_id)
+    return ModelConnectionRepository(str(database))
 
 
 def _qualification_ledger(path: str | Path) -> QualificationBatchLedger:
@@ -164,6 +170,66 @@ SCRIPT = PROJECT_ROOT / "scripts" / "verify_g4_provider_safety.py"
 
 
 @pytest.fixture
+def compatible_provider_history(tmp_path, monkeypatch):
+    # 使用独立小型历史，避免当前提交内容或 CI 浅克隆决定测试语义。
+    root = tmp_path / "provider-history"
+    root.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-c", "user.name=G4 Test", "-c",
+             "user.email=g4@example.invalid", "-c", "commit.gpgsign=false",
+             "-c", f"core.hooksPath={root / '.git' / 'no-hooks'}", *args],
+            cwd=root, capture_output=True, text=True, encoding="utf-8", check=True,
+        ).stdout.strip()
+
+    def commit(path, source):
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(source, encoding="utf-8")
+        git("add", "--", path)
+        git("commit", "-m", "G4 fixture")
+        return git("rev-parse", "HEAD")
+
+    git("init")
+    provider_commit = commit(
+        "scripts/verify_g4_provider_safety.py",
+        "def execute_qualification():\n    return 1\n",
+    )
+    current_commit = commit("README.md", "G4 fixture documentation\n")
+    assert provider_commit != current_commit
+    monkeypatch.setattr("scripts.verify_g4_provider_safety.PROJECT_ROOT", root)
+    return provider_commit, current_commit, commit
+
+
+@pytest.mark.parametrize("path", [
+    "src/model_connections/broker.py",
+    "scripts/verify_g4_provider_safety.py",
+])
+def test_provider_runtime_compatibility_rejects_protected_changes(
+    compatible_provider_history, path,
+):
+    provider_commit, current_commit, commit = compatible_provider_history
+    assert _provider_runtime_compatibility(
+        provider_evidence_commit=provider_commit, current_commit=current_commit,
+    )["compatible"] is True
+    changed_commit = commit(path, "def execute_qualification():\n    return 2\n")
+    result = _provider_runtime_compatibility(
+        provider_evidence_commit=provider_commit, current_commit=changed_commit,
+    )
+    assert result["compatible"] is False
+    assert result["reason"] == "provider_runtime_changed"
+    unavailable = _provider_runtime_compatibility(
+        provider_evidence_commit="0" * 40, current_commit=current_commit,
+    )
+    assert unavailable == {"compatible": False, "reason": "git_commit_unavailable"}
+    reversed_history = _provider_runtime_compatibility(
+        provider_evidence_commit=current_commit, current_commit=provider_commit,
+    )
+    assert reversed_history["reason"] == "provider_commit_not_ancestor"
+
+
+@pytest.fixture
 def authoritative_ledger_path(tmp_path, monkeypatch) -> Path:
     path = tmp_path / "authoritative" / "qualification-ledger.sqlite3"
     monkeypatch.setattr(
@@ -204,7 +270,8 @@ def _create_inventory_database(path: Path) -> None:
                 created_at TEXT NOT NULL,
                 role TEXT NOT NULL,
                 disabled INTEGER NOT NULL,
-                pending INTEGER NOT NULL
+                pending INTEGER NOT NULL,
+                execution_generation INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE app_settings (
                 key TEXT PRIMARY KEY,
@@ -225,6 +292,9 @@ def _create_inventory_database(path: Path) -> None:
                 ("ordinary-user", "ordinary-user", "user", 0, 0),
                 ("disabled-root", "disabled-root", "super_admin", 1, 0),
                 ("pending-root", "pending-root", "super_admin", 0, 1),
+                ("g4_provider_qualification", "g4_provider_qualification", "user", 0, 0),
+                ("g4-synthetic-owner", "g4-synthetic-owner", "user", 0, 0),
+                ("g4-ordinary-synthetic-user", "g4-ordinary-synthetic-user", "user", 0, 0),
             ],
         )
         connection.executemany(
@@ -1430,6 +1500,7 @@ def test_qualification_batch_requires_secret_free_exact_relay_url(
 def test_qualification_batch_is_idempotent_under_concurrent_requests(
     tmp_path,
     authoritative_ledger_path,
+    monkeypatch,
 ) -> None:
     database = tmp_path / "webui.db"
     manifest_path = tmp_path / "manifest.json"
@@ -1465,8 +1536,29 @@ def test_qualification_batch_is_idempotent_under_concurrent_requests(
             git_identity={"git_commit": "commit-a", "git_dirty": False},
         )
 
+    from scripts import verify_g4_provider_safety as script
+    from concurrent.futures import TimeoutError as FutureTimeout
+    entered, release = threading.Event(), threading.Event()
+    original_sync = script._sync_qualification_ledger_anchor
+
+    def blocked_sync(**kwargs):
+        if not entered.is_set():
+            entered.set()
+            assert release.wait(5)
+        return original_sync(**kwargs)
+
+    monkeypatch.setattr(script, "_sync_qualification_ledger_anchor", blocked_sync)
     with ThreadPoolExecutor(max_workers=2) as executor:
-        results = list(executor.map(lambda _index: create(), range(2)))
+        first = executor.submit(create)
+        assert entered.wait(5)
+        second = executor.submit(create)
+        try:
+            # 台账已提交但锚点尚未同步；第二请求必须等待同一文件锁。
+            with pytest.raises(FutureTimeout):
+                second.result(timeout=0.2)
+        finally:
+            release.set()
+        results = [first.result(timeout=5), second.result(timeout=5)]
 
     assert results[0]["batch_id"] == results[1]["batch_id"]
     with sqlite3.connect(ledger_path) as connection:
@@ -1490,6 +1582,105 @@ def test_qualification_batch_is_idempotent_under_concurrent_requests(
             previous_report_paths=(),
             git_identity={"git_commit": "commit-a", "git_dirty": False},
         )
+
+
+@pytest.mark.parametrize("operation", ["create", "authorize", "authorize_sync_failure",
+    "create_disabled", "authorize_disabled", "create_demoted", "authorize_demoted"])
+def test_qualification_writes_wait_for_shared_execution_lock(tmp_path, authoritative_ledger_path, monkeypatch, operation):
+    from scripts import verify_g4_provider_safety as script
+    from contextlib import contextmanager
+    from concurrent.futures import TimeoutError as FutureTimeout
+    database, manifest_path = tmp_path / "webui.db", tmp_path / "manifest.json"
+    _create_inventory_database(database)
+    manifest = freeze_manifest(db_path=database, presets=["deepseek"])
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    batch = _create_test_qualification_batch(database=database, ledger_path=authoritative_ledger_path,
+        manifest=manifest, owner_user_id="g4-synthetic-owner")
+    ledger = _qualification_ledger(authoritative_ledger_path)
+    provider = dict(manifest["providers"][0])
+    ledger.begin_attempt(batch_id=batch["batch_id"], provider=provider, attempt_context={"task_id_sha256": "a" * 64})
+    _sync_qualification_ledger_anchor(db_path=database, ledger=ledger)
+    ledger.finish_attempt(batch_id=batch["batch_id"], provider=provider, check={"outcome": "failed", "error_code": "synthetic"})
+    _sync_qualification_ledger_anchor(db_path=database, ledger=ledger)
+    before_receipt = ledger.state_receipt()
+    before_anchor = _load_qualification_ledger_anchor(db_path=database)
+    actor_invalidated = operation.endswith(("_disabled", "_demoted"))
+    reached = threading.Event()
+    original_lock = script._exclusive_file_lock
+
+    @contextmanager
+    def observed_lock(path, message, **kwargs):
+        assert kwargs["timeout_seconds"] == 30
+        reached.set()
+        with original_lock(path, message, **kwargs):
+            yield
+
+    monkeypatch.setattr(script, "_exclusive_file_lock", observed_lock)
+    if operation == "authorize_sync_failure":
+        def fail_sync(**kwargs):
+            raise OSError("虚构锚点同步失败")
+        monkeypatch.setattr(script, "_sync_qualification_ledger_anchor", fail_sync)
+    identity = {"git_commit": "commit-a", "git_dirty": False}
+
+    def invoke():
+        if operation.startswith("authorize"):
+            return authorize_qualification_batch_retry(db_path=database, manifest_path=manifest_path,
+                ledger_path=authoritative_ledger_path, batch_id=batch["batch_id"],
+                connection_id=provider["connection_id"], authorized_by="super-admin",
+                authorization_reason="虚构用户明确决定重试", confirm_duplicate_request_and_cost=True,
+                git_identity=identity)
+        return create_qualification_batch(db_path=database, manifest_path=manifest_path,
+            ledger_path=authoritative_ledger_path, owner_user_id="g4-synthetic-owner",
+            relay_base_url="http://127.0.0.1:8088/internal/model-relay", timeout_seconds=1800,
+            expected_commit="commit-a", authorized_by="super-admin", authorization_reason="虚构新请求",
+            idempotency_key="different-request", confirm_initial_batch=True,
+            confirm_new_batch_after_exhausted_history=False, previous_report_paths=(), git_identity=identity)
+
+    lock_path = script._qualification_ledger_lock_path(authoritative_ledger_path)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with original_lock(lock_path, "真实执行已占锁"):
+            future = executor.submit(invoke)
+            assert reached.wait(5)
+            with pytest.raises(FutureTimeout):
+                future.result(timeout=0.2)
+            if actor_invalidated:
+                # 请求已通过初始鉴权并开始等锁；随后账号变化必须在锁内重新拒绝。
+                with sqlite3.connect(database) as connection:
+                    if operation.endswith("_disabled"):
+                        connection.execute("UPDATE users SET disabled=1 WHERE user_id='super-admin'")
+                    else:
+                        connection.execute("UPDATE users SET role='admin' WHERE user_id='super-admin'")
+        if actor_invalidated:
+            with pytest.raises(QualificationError, match="授权人必须是启用且已审批的超级管理员"):
+                future.result(timeout=5)
+            assert ledger.state_receipt() == before_receipt
+            assert _load_qualification_ledger_anchor(db_path=database) == before_anchor
+        elif operation == "authorize":
+            assert future.result(timeout=5)["retry_number"] == 1
+        else:
+            with pytest.raises(QualificationError):
+                future.result(timeout=5)
+    # 成功或业务拒绝都释放原锁，且锚点仍严格匹配。
+    with original_lock(lock_path, "锁未释放"):
+        if operation == "authorize_sync_failure":
+            with pytest.raises(QualificationError, match="状态与外部锚点不一致"):
+                script._anchored_qualification_ledger(db_path=database, ledger_path=authoritative_ledger_path)
+        else:
+            script._anchored_qualification_ledger(db_path=database, ledger_path=authoritative_ledger_path)
+
+
+def test_qualification_lock_timeout_preserves_default_nonblocking_and_releases(tmp_path):
+    from scripts import verify_g4_provider_safety as script
+    lock_path = tmp_path / "ledger.lock"
+    with script._exclusive_file_lock(lock_path, "outer"):
+        with pytest.raises(QualificationError, match="immediate"):
+            with script._exclusive_file_lock(lock_path, "immediate"):
+                pytest.fail("不能进入已有锁")
+        with pytest.raises(QualificationError, match="bounded"):
+            with script._exclusive_file_lock(lock_path, "bounded", timeout_seconds=0.05):
+                pytest.fail("不能进入已有锁")
+    with script._exclusive_file_lock(lock_path, "released"):
+        pass
 
 
 def test_qualification_batch_blocks_concurrent_distinct_requests(
@@ -2105,16 +2296,17 @@ def test_pi_provider_chain_uses_standard_ordinary_owner_and_never_claims_g4(
     class FakeRuntime:
         async def start(self, request, *, on_event):
             seen_requests.append(request)
-            grant = broker.issue_grant(
-                owner_user_id=request.user_id,
-                connection_id=request.model_connection_id,
-                connection_version=request.model_connection_version,
-                model_id=request.model_connection_model,
-                task_id=request.task_id,
-                revision=request.revision,
-                run_id="pi_run_1234567890abcdef",
-                purpose="agent_inference",
-            )
+            with execution_context(ExecutionAuthorization(request.user_id, 0)):
+                grant = broker.issue_grant(
+                    owner_user_id=request.user_id,
+                    connection_id=request.model_connection_id,
+                    connection_version=request.model_connection_version,
+                    model_id=request.model_connection_model,
+                    task_id=request.task_id,
+                    revision=request.revision,
+                    run_id="pi_run_1234567890abcdef",
+                    purpose="agent_inference",
+                )
             response = await broker.relay(
                 grant_token=grant.token,
                 protocol_path="chat/completions",
@@ -2628,8 +2820,10 @@ def test_g4_assessment_requires_pi_transport_and_scoped_rotation_evidence(
 
 def test_retained_vault_safety_report_preserves_production_key_and_database(
     tmp_path,
+    compatible_provider_history,
     monkeypatch,
 ):
+    provider_commit, current_commit, _ = compatible_provider_history
     database = tmp_path / "webui.db"
     key_path = tmp_path / "webui.db.model-connections.key"
     backup_root = tmp_path / "backups"
@@ -2674,22 +2868,6 @@ def test_retained_vault_safety_report_preserves_production_key_and_database(
     report_path = tmp_path / "retention-report.json"
     key_before = key_path.read_bytes()
     database_before = database.read_bytes()
-    current_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    ).stdout.strip()
-    provider_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD^"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    ).stdout.strip()
 
     report = verify_vault_retention_safety(
         db_path=database,
@@ -2969,24 +3147,10 @@ def test_retained_vault_safety_has_explicit_cli_contract(tmp_path):
 
 def test_g4_assessment_accepts_compatible_provider_report_with_retained_key(
     tmp_path,
+    compatible_provider_history,
     authoritative_ledger_path,
 ):
-    provider_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD^"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    ).stdout.strip()
-    current_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    ).stdout.strip()
+    provider_commit, current_commit, _ = compatible_provider_history
     provider_runtime_compatibility = _provider_runtime_compatibility(
         provider_evidence_commit=provider_commit,
         current_commit=current_commit,
@@ -3183,25 +3347,11 @@ def test_g4_assessment_accepts_compatible_provider_report_with_retained_key(
 @pytest.mark.parametrize("shared_provider_commit", [False, True])
 def test_g4_assessment_combines_independent_provider_batches(
     tmp_path,
+    compatible_provider_history,
     authoritative_ledger_path,
     shared_provider_commit,
 ):
-    old_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD^"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    ).stdout.strip()
-    current_commit = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    ).stdout.strip()
+    old_commit, current_commit, _ = compatible_provider_history
     database = tmp_path / "webui.db"
     _create_inventory_database(database)
     combined_manifest = freeze_manifest(
@@ -3449,15 +3599,16 @@ def test_provider_relay_pins_validated_ip_and_preserves_tls_identity(tmp_path):
             "user-a",
             str(connection["connection_id"]),
         )
-        grant = broker.issue_grant(
-            owner_user_id="user-a",
-            connection_id=binding.connection_id,
-            connection_version=binding.connection_version,
-            task_id="g4-dns-pin",
-            revision=1,
-            run_id="g4-dns-pin-run",
-            purpose="agent_inference",
-        )
+        with execution_context(ExecutionAuthorization("user-a", 0)):
+            grant = broker.issue_grant(
+                owner_user_id="user-a",
+                connection_id=binding.connection_id,
+                connection_version=binding.connection_version,
+                task_id="g4-dns-pin",
+                revision=1,
+                run_id="g4-dns-pin-run",
+                purpose="agent_inference",
+            )
         response = await broker.relay(
             grant_token=grant.token,
             protocol_path="chat/completions",
@@ -3523,15 +3674,16 @@ def test_provider_relay_does_not_follow_redirect_or_repeat_dns(tmp_path):
             "user-a",
             str(connection["connection_id"]),
         )
-        grant = broker.issue_grant(
-            owner_user_id="user-a",
-            connection_id=binding.connection_id,
-            connection_version=binding.connection_version,
-            task_id="g4-no-redirect",
-            revision=1,
-            run_id="g4-no-redirect-run",
-            purpose="agent_inference",
-        )
+        with execution_context(ExecutionAuthorization("user-a", 0)):
+            grant = broker.issue_grant(
+                owner_user_id="user-a",
+                connection_id=binding.connection_id,
+                connection_version=binding.connection_version,
+                task_id="g4-no-redirect",
+                revision=1,
+                run_id="g4-no-redirect-run",
+                purpose="agent_inference",
+            )
         response = await broker.relay(
             grant_token=grant.token,
             protocol_path="chat/completions",
@@ -3808,15 +3960,16 @@ def test_two_phase_vault_rotation_keeps_live_secret_and_erases_database_backup(
             "user-a",
             str(connection["connection_id"]),
         )
-        grant = broker.issue_grant(
-            owner_user_id="user-a",
-            connection_id=binding.connection_id,
-            connection_version=binding.connection_version,
-            task_id=task_id,
-            revision=1,
-            run_id=f"{task_id}-run",
-            purpose="agent_inference",
-        )
+        with execution_context(ExecutionAuthorization("user-a", 0)):
+            grant = broker.issue_grant(
+                owner_user_id="user-a",
+                connection_id=binding.connection_id,
+                connection_version=binding.connection_version,
+                task_id=task_id,
+                revision=1,
+                run_id=f"{task_id}-run",
+                purpose="agent_inference",
+            )
         response = await broker.relay(
             grant_token=grant.token,
             protocol_path="chat/completions",

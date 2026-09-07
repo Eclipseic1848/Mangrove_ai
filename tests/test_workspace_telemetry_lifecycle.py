@@ -15,11 +15,28 @@ from src.observability import workspace_telemetry as telemetry
 
 
 @pytest.mark.parametrize("enabled", [True, False])
-def test_real_lifespan_yields_during_telemetry_shutdown(monkeypatch, enabled):
+def test_real_lifespan_yields_during_telemetry_shutdown(monkeypatch, enabled, tmp_path):
     from src.api import auth, main, capability_governance_runtime, semantic_workspace_runtime
     from src.config import runtime_config
 
+    from src.api import services, account_execution_runtime
+    from src.scheduler import SchedulerService
+    from tests.database_migration_helpers import migrated_profile_database
+
     calls = []
+    monkeypatch.setattr(main.settings, "scheduler_db_path", str(migrated_profile_database(tmp_path / "scheduler.db", profile="scheduler")))
+    monkeypatch.setattr(services, "_store", None)
+    monkeypatch.setattr(services, "_service", None)
+
+    class AccountManager(account_execution_runtime.AccountExecutionManager):
+        def start(self):
+            assert isinstance(self.scheduler, SchedulerService)
+            calls.append("account_start")
+
+        async def stop(self):
+            calls.append("account_stop")
+
+    monkeypatch.setattr(account_execution_runtime, "AccountExecutionManager", AccountManager)
 
     class Manager:
         def start(self):
@@ -66,6 +83,7 @@ def test_real_lifespan_yields_during_telemetry_shutdown(monkeypatch, enabled):
     asyncio.run(run())
     assert calls.count("configure") == int(enabled)
     assert calls.count("start") == calls.count("stop") == 3
+    assert calls.count("account_start") == calls.count("account_stop") == 1
     assert observed == [True], "真实 lifespan 同步等待遥测，事件循环无法释放关闭屏障"
 
 

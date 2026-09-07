@@ -2,6 +2,8 @@
 """Phase 4B 批次 5 后端灰度 API；不替换 Phase 4A 正式入口。"""
 from __future__ import annotations
 
+from src.api.auth import get_execution_user
+
 from pathlib import Path
 import uuid
 
@@ -178,7 +180,9 @@ async def invoke_run_record(
 ):
     """从持久化 run 和 checkpoint 执行或恢复。"""
 
-    async with AsyncSqliteSaver.from_conn_string(
+    from src.api.execution import running_execution
+
+    async with running_execution(get_store(), "harness", run_id), AsyncSqliteSaver.from_conn_string(
         str(_checkpoint_path())
     ) as saver:
         return await invoke_harness(
@@ -193,7 +197,7 @@ async def invoke_run_record(
 @router.post("/runs", openapi_extra={"x-mangrove-task-control": True})
 async def create_run(
     payload: HarnessRunCreateIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     run = create_run_record(user["user_id"], payload)
     return await invoke_run_record(user["user_id"], run["run_id"])
@@ -244,7 +248,7 @@ def get_attempts(
 async def resume_run(
     run_id: str,
     payload: HarnessResumeIn,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
 ):
     row = get_store().get_semantic_harness_run(
         user["user_id"], run_id

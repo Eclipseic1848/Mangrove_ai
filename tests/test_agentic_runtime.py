@@ -65,7 +65,21 @@ from src.model_connections import (
 )
 from src.model_connections.storage import ModelConnectionRepository
 from src.model_connections.vault import FernetCredentialVault
-from tests.database_migration_helpers import migrated_webui_database
+from tests.database_migration_helpers import migrated_webui_database as _migrated_webui_database
+from tests.account_execution_helpers import seed_execution_owner
+from src.account_execution import ExecutionAuthorization, execution_context
+
+
+def migrated_webui_database(path):
+    database = _migrated_webui_database(path)
+    seed_execution_owner(database, "user-a")
+    return database
+
+
+@pytest.fixture(autouse=True)
+def _execution_authorization():
+    with execution_context(ExecutionAuthorization("user-a", 0)):
+        yield
 
 
 def test_unified_scripts_manage_pi_egress_runtime() -> None:

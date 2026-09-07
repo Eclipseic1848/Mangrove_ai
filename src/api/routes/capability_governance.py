@@ -2,6 +2,8 @@
 """能力治理三轴状态的认证产品 Interface；管理员审核视图与审计查看命令见 admin_router。"""
 from __future__ import annotations
 
+from src.api.auth import get_execution_user, require_execution_admin
+
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -93,7 +95,7 @@ def _http_error(error: Exception) -> HTTPException:
 @router.post("/validations", status_code=202, openapi_extra={"x-mangrove-task-control": True})
 async def request_capability_validation(
     body: ValidationRequest,
-    user=Depends(get_current_user),
+    user=Depends(get_execution_user),
     idempotency_key: str = Header(
         min_length=1,
         max_length=200,
@@ -302,7 +304,7 @@ class PlatformPublishRequest(BaseModel):
 @admin_router.post("/platform-candidates")
 def submit_platform_candidate(
     body: PlatformCandidateRequest,
-    admin=Depends(require_admin),
+    admin=Depends(require_execution_admin),
     idempotency_key: str = Header(
         min_length=1,
         max_length=200,
