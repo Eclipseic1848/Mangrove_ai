@@ -124,20 +124,7 @@ def _build_result(
             "source": (getattr(spec, "db_target", "") if spec else "") or "",
         }
         actions.append("db")
-    if outputs.get("email_pending"):
-        pending["email"] = {
-            "to": outputs.get("email_to") or [],
-            "subject": f"【数据采集分析报告】{getattr(spec, 'intent', '') if spec else ''}"[:120],
-            "body": outputs.get("report_text") or reply,
-            "attachments": [p for p in (outputs.get("report_md"), outputs.get("json")) if p],
-        }
-        actions.append("email")
-    if outputs.get("slack_pending"):
-        pending["slack"] = {
-            "title": f"数据采集分析报告：{getattr(spec, 'intent', '') if spec else ''}",
-            "body": analysis or reply,
-        }
-        actions.append("slack")
+    # 历史外部投递标记不再生成可执行动作，也不领取旧 pending。
     if outputs.get("template_suggest") and analysis:
         pending["template"] = {
             "intent": getattr(spec, "intent", "") if spec else "",

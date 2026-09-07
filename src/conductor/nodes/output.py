@@ -11,11 +11,6 @@ from src.config.settings import PROJECT_ROOT, settings
 
 from ..anomaly import detect_anomalies
 from ..db_writer import write_items
-from ..email_sender import is_email_configured, parse_recipients, send_report
-from ..email_sender import unavailable_reason as email_unavailable_reason
-from ..slack_sender import is_slack_configured
-from ..slack_sender import unavailable_reason as slack_unavailable_reason
-from ..slack_sender import send_report as send_slack
 from ..state import ConductorState
 from ..task_spec import OutputFormat, TaskSpec
 
@@ -128,7 +123,9 @@ async def output_node(state: ConductorState) -> Dict[str, Any]:
 
     # 3) 入库（HITL 门控）：未确认则挂起，由前端按钮触发实际写入
     if spec.needs_db_write():
-        if state.get("approved_db_write"):
+        if (settings.db_backend or "sqlite").lower() == "mysql":
+            outputs["db"] = "平台遵守外部只读边界，不支持写入外部数据库；本机报告已保留。"
+        elif state.get("approved_db_write"):
             try:
                 n = write_items(task_id, data, source=spec.db_target or spec.intent)
                 outputs["db"] = f"已写入 {n} 条到本地 SQLite"
@@ -137,38 +134,10 @@ async def output_node(state: ConductorState) -> Dict[str, Any]:
         else:
             outputs["db_pending"] = True
 
-    # 3.5) 邮件发送（HITL 门控）：未确认则挂起，由前端按钮触发实际发送
-    if spec.needs_email():
-        recipients = parse_recipients(spec.email_to)
-        if not is_email_configured():
-            outputs["email"] = f"{email_unavailable_reason()}，已跳过发送"
-        elif not recipients:
-            outputs["email"] = "未识别到有效收件人邮箱，已跳过发送"
-        elif state.get("approved_email"):
-            try:
-                subject = f"【数据采集分析报告】{spec.intent}"[:120]
-                attaches = [p for p in (outputs.get("report_md"), outputs.get("json")) if p]
-                send_report(recipients, subject, report_text, attachments=attaches)
-                outputs["email"] = f"已发送报告邮件至 {', '.join(recipients)}"
-            except Exception as e:
-                outputs["email"] = f"邮件发送失败：{e}"
-        else:
-            outputs["email_pending"] = True
-            outputs["email_to"] = recipients
-
-    # 3.6) Slack 推送（HITL 门控）：未确认则挂起，由前端按钮触发实际推送
-    if spec.needs_slack():
-        if not is_slack_configured():
-            outputs["slack"] = f"{slack_unavailable_reason()}，已跳过推送"
-        elif state.get("approved_slack"):
-            try:
-                title = f"数据采集分析报告：{spec.intent}"
-                await send_slack(title, state.get("analysis") or report_text)
-                outputs["slack"] = "已推送报告到 Slack 频道"
-            except Exception as e:
-                outputs["slack"] = f"Slack 推送失败：{e}"
-        else:
-            outputs["slack_pending"] = True
+    # 旧批准标记与恢复的 pending 都不能重新开放外部结果投递。
+    prior_outputs = state.get("outputs") or {}
+    if spec.needs_email() or spec.needs_slack() or prior_outputs.get("email_pending") or prior_outputs.get("slack_pending"):
+        outputs["external_delivery"] = "平台遵守外部只读边界，不支持邮件或 Slack 投递；本机报告已保留。"
 
     # 4) 用户回复
     reply_lines = (["未生成视频内容结论：未取得足够的可验证证据。"] if state.get("analysis_source") == "video_evidence_blocked" else [f"已完成采集与分析，共 {len(data)} 条数据（采集引擎：{state.get('collector_used') or '—'}）。"])
@@ -178,20 +147,11 @@ async def output_node(state: ConductorState) -> Dict[str, Any]:
     if OutputFormat.REPORT_MD in spec.outputs:
         reply_lines.append("已生成 Markdown 分析报告。")
     if outputs.get("db_pending"):
-        reply_lines.append("⚠️ 你要求入库——这是敏感操作，请点击下方「确认入库」按钮后我再写入数据库。")
+        reply_lines.append("请点击下方「确认入库」后写入平台内部 SQLite 结果库。")
     elif outputs.get("db"):
         reply_lines.append(outputs["db"])
-    if outputs.get("email_pending"):
-        reply_lines.append(
-            f"⚠️ 你要求发邮件给 {', '.join(outputs.get('email_to') or [])}——这是外向敏感操作，"
-            "请点击下方「确认发送邮件」按钮后我再发送。"
-        )
-    elif outputs.get("email"):
-        reply_lines.append(outputs["email"])
-    if outputs.get("slack_pending"):
-        reply_lines.append("⚠️ 你要求推送到 Slack——这是外向敏感操作，请点击下方「确认推送 Slack」按钮后我再推送。")
-    elif outputs.get("slack"):
-        reply_lines.append(outputs["slack"])
+    if outputs.get("external_delivery"):
+        reply_lines.append(outputs["external_delivery"])
 
     # 质量评估（Checker）：通过给分，未通过附问题清单（仅提示，不重跑）
     quality = state.get("quality")

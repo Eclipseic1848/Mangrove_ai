@@ -247,75 +247,17 @@ const SEARCH_ENTRIES: GuideEntry[] = [
   },
 ];
 
-/** 邮箱厂商开启 SMTP 后会生成一个"授权码/应用专用密码"——面板里作为一张卡片展示整体流程。 */
-function emailSteps(): GuideStep[] {
-  return [
-    { text: "常见邮箱：QQ邮箱/163邮箱在「设置-账户」里开启 SMTP 服务后会生成一个「授权码」（不是邮箱登录密码）；Gmail 需开启两步验证后生成「应用专用密码」" },
-    { text: "服务器地址与端口按邮箱服务商填写，常见：QQ邮箱 smtp.qq.com:465(SSL)，163邮箱 smtp.163.com:465(SSL)，Gmail smtp.gmail.com:587(STARTTLS)" },
-    { text: "「SMTP 账号」填完整邮箱地址，「SMTP 密码/授权码」填上一步生成的授权码/应用专用密码，不是登录密码" },
-    { text: "「发件人」留空则自动用账号本身；「SSL」端口 465 选 True，端口 587(STARTTLS) 选 False" },
-  ];
-}
-
-/** 编辑弹窗内嵌用：每个字段只展示对该字段本身有用的一句话，不重复整套 SMTP 流程。 */
+/** 历史外发配置只供查看，不引导新增凭据或恢复发送。 */
 const EMAIL_FIELD_ENTRIES: GuideEntry[] = [
-  {
-    key: "smtp_enabled", title: "启用邮件发送",
-    steps: [{ text: "总开关：关闭后即使下面已配置服务器/账号/密码，任务里也不会真的发送邮件；凭证不会被清空，随时可以重新开启" }],
-  },
-  {
-    key: "smtp_host", title: "SMTP 服务器",
-    steps: [{ text: "按邮箱服务商填写，常见：QQ邮箱 smtp.qq.com、163邮箱 smtp.163.com、Gmail smtp.gmail.com" }],
-  },
-  {
-    key: "smtp_port", title: "SMTP 端口",
-    steps: [{ text: "和「SSL」开关配套：填 465 选 True（SSL）；填 587(STARTTLS) 选 False" }],
-  },
-  {
-    key: "smtp_user", title: "SMTP 账号",
-    steps: [{ text: "填完整邮箱地址，如 example@qq.com" }],
-  },
-  {
-    key: "smtp_password", title: "SMTP 密码/授权码",
-    steps: [{ text: "不是邮箱登录密码！QQ/163邮箱在「设置-账户」开启SMTP服务后生成「授权码」；Gmail 需开启两步验证后生成「应用专用密码」" }],
-  },
-  {
-    key: "smtp_from", title: "发件人",
-    steps: [{ text: "留空则自动使用「SMTP 账号」本身作为发件人地址" }],
-  },
-  {
-    key: "smtp_use_ssl", title: "SSL 开关",
-    steps: [{ text: "端口填 465 选 True（SSL）；端口填 587(STARTTLS) 选 False" }],
-  },
-];
-
-/** 面板里合并成一张卡片：6 个字段本来就要一起配置，拆开逐条重复反而难读。 */
+  "smtp_enabled", "smtp_host", "smtp_port", "smtp_user", "smtp_password", "smtp_from", "smtp_use_ssl",
+].map((key) => ({ key, title: "历史 SMTP 配置（只读）", steps: [{ text: "历史凭据保留，不开放编辑、启用、验证或邮件发送。" }] }));
 const EMAIL_GROUP_ENTRY: GuideEntry = {
-  key: "email_group", title: "邮件 SMTP（服务器/端口/账号/密码/发件人/SSL 一起配置）", steps: emailSteps(),
+  key: "email_group", title: "历史 SMTP 配置（只读）", steps: EMAIL_FIELD_ENTRIES[0].steps,
 };
-
-/** 总开关单独一张卡片：这是"要不要用"的开关，和"怎么配置"是两件事，不合并进上面那张卡片。 */
-const SMTP_ENABLE_ENTRY: GuideEntry = {
-  key: "smtp_enabled", title: "启用邮件发送",
-  steps: [{ text: "关闭后即使已配置服务器/账号/密码，任务里也不会真的发送邮件；凭证不会被清空，随时可以重新开启。设置页「连接器/增强」卡片里也有同一个开关" }],
-};
-
-const SLACK_ENTRIES: GuideEntry[] = [
-  {
-    key: "slack_enabled", title: "启用 Slack 通知",
-    steps: [{ text: "关闭后即使已配置 Webhook，任务里也不会真的推送消息；Webhook 不会被清空，随时可以重新开启。设置页「连接器/增强」卡片里也有同一个开关" }],
-  },
-  {
-    key: "slack_webhook_url",
-    title: "Slack Webhook URL",
-    steps: [
-      { text: "打开 Slack API 网站创建一个 App（或使用已有 App）", link: { label: "api.slack.com/apps", url: "https://api.slack.com/apps" } },
-      { text: "左侧菜单进入「Incoming Webhooks」，开启开关" },
-      { text: "点击「Add New Webhook to Workspace」，选择要接收通知的频道并授权" },
-      { text: "复制生成的 Webhook URL（形如 https://hooks.slack.com/services/...），回到本页粘贴保存" },
-    ],
-  },
-];
+const SMTP_ENABLE_ENTRY = EMAIL_FIELD_ENTRIES[0];
+const SLACK_ENTRIES: GuideEntry[] = ["slack_enabled", "slack_webhook_url"].map((key) => ({
+  key, title: "历史 Slack 配置（只读）", steps: [{ text: "历史 Webhook 保留，不开放编辑、启用、验证或消息发送。" }],
+}));
 
 function embeddingSteps(): GuideStep[] {
   return [

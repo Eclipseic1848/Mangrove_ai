@@ -1159,3 +1159,52 @@ test("管理员提交平台候选并发布到管理员灰度", async ({ page }) 
     platform_digest: platformDigest,
   });
 });
+
+
+for (const role of ["admin", "super_admin"] as const) {
+  test(`外部只读边界：${role} 历史通知无编辑验证入口，搜索与内部增强保留`, async ({ page }) => {
+    await mockSettings(page, role);
+    const errors: string[] = [];
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
+    await page.route("**/api/config/domain-health", (route) => route.fulfill({ json: { flagged: {} } }));
+    await page.setViewportSize(role === "admin" ? { width: 1366, height: 768 } : { width: 390, height: 844 });
+    const writes: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() !== "GET") writes.push(request.url());
+    });
+    await page.route("**/api/config?*", (route) => route.fulfill({ json: { groups: [
+      ...["email", "slack"].map((key) => ({ key, label: `历史 ${key}`, items: [{
+        key: key === "email" ? "smtp_enabled" : "slack_webhook_url",
+        label: `历史 ${key} 值`, value: "已保留", source: "override", secret: true,
+      }] })),
+      { key: "search", label: "搜索与采集服务", items: [{ key: "tavily_api_key", label: "Tavily API Key", value: "虚构值", source: "override", secret: true }] },
+    ] } }));
+    await page.goto("/settings?section=platform");
+    await expect(page).toHaveURL(/settings\?section=platform/);
+    await expect(page).toHaveTitle(/Mangrove/);
+    await expect(page.getByRole("main")).not.toBeEmpty();
+    await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+    for (const key of ["email", "slack"]) {
+      const group = page.getByRole("button", { name: `历史 ${key}`, exact: false }).locator("..");
+      await group.getByRole("button").click();
+      await expect(group).toContainText("外部只读边界");
+      await expect(group).toContainText("已保留");
+      await expect(group.getByRole("button", { name: /修改|重置|验证|启用|发送/ })).toHaveCount(0);
+    }
+    await page.screenshot({ path: `../.artifacts/issue-126/ui-${role}.png`, fullPage: true });
+    await page.getByRole("button", { name: "搜索与采集服务", exact: false }).click();
+    await expect(page.getByRole("button", { name: "修改", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "验证", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "使用指南", exact: true }).click();
+    await expect(page.getByRole("dialog")).not.toContainText("随时可以重新开启");
+    await page.keyboard.press("Escape");
+    await page.getByRole("tab", { name: "运行与诊断" }).click();
+    await expect(page.getByText("邮件和 Slack 外发已关闭", { exact: false })).toBeVisible();
+    await expect(page.getByText("语义召回 (embedding)", { exact: true })).toBeVisible();
+    await expect(page.getByText("断点续跑 (checkpoint)", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "测试", exact: true })).toHaveCount(2);
+    expect(writes).toEqual([]);
+    expect(errors).toEqual([]);
+  });
+}

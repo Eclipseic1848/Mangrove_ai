@@ -567,9 +567,8 @@ class Settings(BaseSettings):
     mysql_password: str = Field(default="", description="MySQL 密码（放 .env）")
     mysql_database: str = Field(default="mangrove", description="MySQL 数据库名")
 
-    # ===== 邮件连接器（期4）：报告生成后可发邮件，走 HITL 确认 =====
-    # 用 SMTP 发送；未配 smtp_host/smtp_user 时邮件产出不可用（output 会提示未配置）。
-    smtp_enabled: bool = Field(default=True, description="是否启用邮件发送；关闭后即使已配置凭证也不会真的发送")
+    # 历史连接配置保留，不迁移凭据；外部只读门不允许开启邮件投递。
+    smtp_enabled: bool = Field(default=True, description="历史邮件开关，仅保留配置，不授权发送")
     smtp_host: str = Field(default="", description="SMTP 服务器地址，如 smtp.qq.com / smtp.gmail.com")
     smtp_port: int = Field(default=465, description="SMTP 端口：SSL 用 465，STARTTLS 用 587")
     smtp_user: str = Field(default="", description="SMTP 登录账号（通常即发件邮箱）")
@@ -577,9 +576,8 @@ class Settings(BaseSettings):
     smtp_from: str = Field(default="", description="发件人地址，留空则用 smtp_user")
     smtp_use_ssl: bool = Field(default=True, description="True 用 SSL(465)；False 用 STARTTLS(587)")
 
-    # Slack 连接器（期4）：报告推送到 Slack 频道，走 HITL 确认。
-    # 用 Incoming Webhook（频道由 Webhook 本身绑定）；留空则 Slack 产出不可用。
-    slack_enabled: bool = Field(default=True, description="是否启用 Slack 通知；关闭后即使已配置 Webhook 也不会真的发送")
+    # 历史 Webhook 不清除；配置值不能越过外部只读投递门。
+    slack_enabled: bool = Field(default=True, description="历史 Slack 开关，仅保留配置，不授权投递")
     slack_webhook_url: str = Field(default="", description="Slack Incoming Webhook URL（放 .env）；空则不用")
 
     # Agent 配置

@@ -102,7 +102,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     "pdd_cookie": {"label": "拼多多 Cookie", "group": "cookies", "secret": True, "user": True},
     # 邮件
     "smtp_enabled": {
-        "label": "启用邮件发送", "group": "email", "secret": False, "user": False,
+        "label": "历史邮件开关（不开放发送）", "group": "email", "secret": False, "user": False,
         "type": "select", "choices": ["True", "False"],
     },
     "smtp_host": {"label": "SMTP 服务器", "group": "email", "secret": False, "user": False},
@@ -117,7 +117,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     # Slack
     "slack_enabled": {
-        "label": "启用 Slack 通知", "group": "slack", "secret": False, "user": False,
+        "label": "历史 Slack 开关（不开放投递）", "group": "slack", "secret": False, "user": False,
         "type": "select", "choices": ["True", "False"],
     },
     "slack_webhook_url": {"label": "Slack Webhook URL", "group": "slack", "secret": True, "user": False},
