@@ -153,7 +153,7 @@ def progressive_rewriter(args):
     connection = ResolvedModelConnection(provider=provider_name, requested_model=args.model,
         model=args.model, base_url=args.base_url.rstrip("/"),
         api_key=api_key or "local-evaluation",
-        trust_env=False, timeout=90, extra_body=None)
+        trust_env=False, timeout=getattr(args, "timeout_seconds", 90), extra_body=None)
     provider = SimpleNamespace(resolve_model=lambda *unused, **kwargs: connection)
     with patch.object(implementation, "get_provider", return_value=provider):
         return implementation.InstructorContextRewriter(provider=provider_name, model=args.model)
@@ -162,6 +162,9 @@ def progressive_rewriter(args):
 async def run_progressive(args: argparse.Namespace) -> int:
     """合成资料经真实检查器及产品转写器；语义仍须逐项审阅实际输出。"""
     from src.model_connections.catalog import model_max_output_tokens
+    timeout_seconds = getattr(args, "timeout_seconds", 90)
+    if type(timeout_seconds) is not int or not 10 <= timeout_seconds <= 600:
+        raise ValueError("评测单次超时必须为10到600秒的有限整数")
     fixture_bytes = args.fixture.read_bytes()
     fixture = json.loads(fixture_bytes)
     cases = fixture["cases"]
@@ -193,7 +196,7 @@ async def run_progressive(args: argparse.Namespace) -> int:
         "provider": provider_name, "model": args.model, "endpoint": endpoint, "max_calls": 24,
         "max_output_tokens": model_max_output_tokens(args.model), "max_input_bytes": 65536,
         "output_limit_policy": "verified_model_max_or_deployment_default",
-        "timeout_seconds": 90, "sdk_retries": 0, "requests_sent": 0,
+        "timeout_seconds": timeout_seconds, "sdk_retries": 0, "requests_sent": 0,
         "semantic_review_required": True, "all_passed": False, "results": [],
         "status": "prepared" if not args.execute else "running",
     }
@@ -247,6 +250,7 @@ async def run_progressive(args: argparse.Namespace) -> int:
             active["responded_at"] = datetime.now(timezone.utc).isoformat()
             response_bytes = await message.aread()
             active["response_received"] = True
+            active["response_body_received_at"] = datetime.now(timezone.utc).isoformat()
             try:
                 payload = json.loads(response_bytes)
                 active["usage"] = payload.get("usage")
@@ -275,7 +279,9 @@ async def run_progressive(args: argparse.Namespace) -> int:
                 raise ValueError("合成来源未完成真实检查，禁止模型评测")
             report["source_findings"] = findings
             language = progressive_rewriter(args)
-            with patch.object(implementation, "AsyncOpenAI", client_without_retries), \
+            # 只在隔离评测进程中对齐既有编译超时设置，防止客户端被较小默认值截断。
+            with patch.object(implementation.settings, "semantic_compiler_timeout_seconds", timeout_seconds), \
+                    patch.object(implementation, "AsyncOpenAI", client_without_retries), \
                     patch.object(implementation, "execution_http_checkpoint_async", checkpoint):
                 for case in cases:
                     history, previous = [], None
@@ -293,7 +299,7 @@ async def run_progressive(args: argparse.Namespace) -> int:
                             relevant_turns=tuple(history), prior_delta=previous,
                             clarification_question=previous.open_questions[0] if previous and previous.open_questions else None,
                             clarification_round_id=f"evaluation-round-{index}" if previous and previous.open_questions else None)
-                        async with asyncio.timeout(90):
+                        async with asyncio.timeout(timeout_seconds):
                             delta = await language.rewrite(turn, request)
                         action = SemanticDiffGate.classify(delta).value
                         expected = row["expected"]
@@ -333,6 +339,7 @@ def main() -> int:
     parser.add_argument("--base-url")
     parser.add_argument("--provider", choices=("local", "deepseek"), default="local")
     parser.add_argument("--model")
+    parser.add_argument("--timeout-seconds", type=int, default=90)
     parser.add_argument("--execute", action="store_true")
     parser.add_argument(
         "--fixture",

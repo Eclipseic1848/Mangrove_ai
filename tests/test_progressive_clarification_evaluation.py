@@ -12,6 +12,18 @@ from scripts.evaluate_conversation_steering import check_progressive_request, pr
 from src.model_connections.text_protocol import structured_request
 
 
+@pytest.mark.parametrize("timeout", [0, 601, False])
+def test_evaluation_rejects_unbounded_timeout_before_journal(tmp_path, timeout):
+    args = argparse.Namespace(
+        fixture=Path("tests/fixtures/conversation_steering/progressive_clarification_cases.json"),
+        rounds=1, concurrency=1, base_url="http://127.0.0.1:9/v1", model="synthetic-local",
+        timeout_seconds=timeout, output=tmp_path / "invalid.json", execute=False,
+    )
+    with pytest.raises(ValueError):
+        asyncio.run(run_progressive(args))
+    assert not args.output.exists()
+
+
 @pytest.mark.parametrize("endpoint,allowed", [
     ("https://api.deepseek.com", True),
     ("http://api.deepseek.com", False),
@@ -104,6 +116,7 @@ def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_ex
     args = argparse.Namespace(
         fixture=Path("tests/fixtures/conversation_steering/progressive_clarification_cases.json"),
         rounds=1, concurrency=1, provider=provider_name,
+        timeout_seconds=300,
         base_url="https://api.deepseek.com" if provider_name == "deepseek" else "http://127.0.0.1:9/v1",
         model="deepseek-v4-pro" if provider_name == "deepseek" else "synthetic-local",
         output=tmp_path / "transport.json", execute=True,
@@ -131,12 +144,14 @@ def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_ex
 
     class IsolatedClient(original_client):
         def __init__(self, **kwargs):
+            assert kwargs["timeout"] == 300
             super().__init__(**kwargs, transport=httpx.MockTransport(respond))
 
     with patch("src.conversation_steering.rewriter.httpx.AsyncClient", IsolatedClient):
         assert asyncio.run(run_progressive(args)) == 1
     assert "synthetic-test-key" not in args.output.read_text(encoding="utf-8")
     report = json.loads(args.output.read_text(encoding="utf-8"))
+    assert report["timeout_seconds"] == 300
     if response_mode != "complete":
         assert len(requests) == report["requests_sent"] == 1
         assert report["status"] == "stopped"
@@ -169,3 +184,36 @@ def test_responses_does_not_misuse_answer_limit_for_thinking_total():
 def test_unknown_compatible_model_leaves_output_to_deployment():
     _, body, _ = structured_request(api_format="openai_chat_completions", model="custom-local", grant_token="synthetic", system_prompt="JSON", payload={})
     assert "max_tokens" not in body
+
+
+def test_headers_without_body_stop_at_total_deadline_without_retry(tmp_path):
+    args = argparse.Namespace(
+        fixture=Path("tests/fixtures/conversation_steering/progressive_clarification_cases.json"),
+        rounds=1, concurrency=1, base_url="http://127.0.0.1:9/v1", model="synthetic-local",
+        timeout_seconds=300, output=tmp_path / "body-timeout.json", execute=True,
+    )
+    class PendingBody(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            await asyncio.sleep(10)
+            yield b"{}"
+    original_client, original_timeout = httpx.AsyncClient, asyncio.timeout
+    deadlines = []
+    def deadline(seconds):
+        deadlines.append(seconds)
+        return original_timeout(0.05)
+    class IsolatedClient(original_client):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs, transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, stream=PendingBody())))
+    from src.conversation_steering import rewriter
+    previous_timeout = rewriter.settings.semantic_compiler_timeout_seconds
+    with patch.object(rewriter.httpx, "AsyncClient", IsolatedClient), patch("asyncio.timeout", deadline):
+        assert asyncio.run(run_progressive(args)) == 1
+    assert deadlines == [300]
+    assert rewriter.settings.semantic_compiler_timeout_seconds == previous_timeout
+    report = json.loads(args.output.read_text(encoding="utf-8"))
+    assert report["requests_sent"] == 1 and len(report["not_run"]) == 23
+    assert report["error_type"] == "TimeoutError"
+    assert report["results"][0]["http_status"] == 200
+    assert report["results"][0]["outcome"] == "unknown"
+    assert not report["results"][0].get("response_received")
