@@ -12,10 +12,13 @@
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import io
 import json
 import shutil
 import uuid
+import warnings
 from pathlib import Path
 from typing import Any, Optional
 
@@ -35,7 +38,42 @@ _EXT_MIME: dict[str, str] = {
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     ".zip": "application/zip",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".webp": "image/webp",
 }
+
+IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+MAX_IMAGE_PIXELS = 16_000_000
+
+
+def inspect_uploaded_image(data: bytes | Path) -> dict[str, int]:
+    """只读解码原件；像素和帧数限额约束压缩炸弹，不改 EXIF 或原件。"""
+    from PIL import Image
+
+    def source():
+        return io.BytesIO(data) if isinstance(data, bytes) else data
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(source(), formats=("PNG", "JPEG", "WEBP")) as image:
+                if image.width * image.height > MAX_IMAGE_PIXELS:
+                    raise ValueError("图片超过 1600 万像素上限")
+                if getattr(image, "n_frames", 1) != 1:
+                    raise ValueError("当前仅支持静态单帧图片")
+                result = {"image_width": image.width, "image_height": image.height}
+                image.verify()
+            # verify 检查容器，load 检查真实像素解码；两者都不得改写原件。
+            with Image.open(source(), formats=("PNG", "JPEG", "WEBP")) as image:
+                image.load()
+                result["image_orientation"] = int(image.getexif().get(274, 1))
+                if result["image_orientation"] not in range(1, 9):
+                    raise ValueError("图片方向元数据无效")
+            return result
+    except (OSError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise ValueError("图片损坏或超过安全解码上限") from exc
 
 # zip 容器族：filetype 对 xlsx/docx 可能返回 application/zip，与扩展名期望需互认
 _ZIP_FAMILY = {
@@ -101,6 +139,10 @@ class UploadStore:
         detected = kind.mime if kind else None
         ext = Path(original_name).suffix.lower()
         expected = _EXT_MIME.get(ext)
+        if ext in IMAGE_EXTENSIONS:
+            if detected != expected:
+                raise ValueError("图片魔数与扩展名不一致")
+            inspect_uploaded_image(data_or_path)
         if not _magic_matches(detected, expected, ext):
             raise ValueError(
                 f"魔数 {detected} 与扩展名 {ext} 期望 {expected} 不一致，疑似伪造文件类型"
@@ -168,6 +210,8 @@ class UploadStore:
         """保存字节流为已验证上传。超限拒绝并清理 staging。"""
         if verify_magic:
             self._verify_magic(data, original_name)
+            if Path(original_name).suffix.lower() in IMAGE_EXTENSIONS:
+                media_type = _EXT_MIME[Path(original_name).suffix.lower()]
         upload_id = uuid.uuid4().hex
         staging_dir = self._user_dir(user_id, "staging")
         staging_path = staging_dir / upload_id
@@ -234,12 +278,14 @@ class UploadStore:
                     size += len(chunk)
                     if size > self.max_bytes:
                         raise ValueError(f"上传大小 {size} 超过上限 {self.max_bytes} 字节")
-        except Exception:
+            if verify_magic:
+                self._verify_magic(staging_path, original_name)
+                if Path(original_name).suffix.lower() in IMAGE_EXTENSIONS:
+                    media_type = _EXT_MIME[Path(original_name).suffix.lower()]
+        except (Exception, asyncio.CancelledError):
+            # 取消和内容校验失败都不得留下未登记的原件。
             staging_path.unlink(missing_ok=True)
             raise
-
-        if verify_magic:
-            self._verify_magic(staging_path, original_name)
 
         objects_dir = self._user_dir(user_id, "objects")
         object_path = objects_dir / upload_id

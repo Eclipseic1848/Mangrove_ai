@@ -13,6 +13,7 @@ from src.data_prep.document_models import BoundingBox, DocumentElement, ElementT
 from src.data_prep.models import RawArtifact, RecordEnvelope
 from src.services.document_parser_contracts import DocumentParserClient
 from src.services.document_parser_factory import configured_document_parser_clients
+from src.services.upload_store import inspect_uploaded_image
 
 from .registry import Parser
 
@@ -45,6 +46,12 @@ class ImageParser(Parser):
         artifact: RawArtifact,
         raw_bytes: bytes,
     ) -> Tuple[List[RecordEnvelope], List[Dict]]:
+        try:
+            if hashlib.sha256(raw_bytes).hexdigest() != artifact.sha256:
+                raise ValueError("图片原件哈希不一致")
+            dimensions = inspect_uploaded_image(raw_bytes)
+        except ValueError:
+            return [], [{"artifact_id": artifact.artifact_id, "reason": "invalid_image"}]
         errors: list[str] = []
         for client in self.document_clients:
             provider = getattr(client, "provider", "document_parser")
@@ -56,6 +63,7 @@ class ImageParser(Parser):
                     raw_bytes,
                     filename=Path(artifact.uri).name or "image.png",
                 )
+                source_coordinates = dimensions["image_orientation"] == 1 and result.source_coordinates_verified
                 raw_ref = self.artifact_store.write_json_if_absent(
                     artifact.task_id,
                     (
@@ -91,11 +99,16 @@ class ImageParser(Parser):
                             x1=block.bbox[2],
                             y1=block.bbox[3],
                             coordinate_space=block.coordinate_space,
-                        ),
+                        ) if source_coordinates else None,
                         reading_order=order,
                         extractor=provider,
                         extractor_version=result.version,
                         confidence=block.confidence,
+                        # 服务自动旋转与原件 EXIF 的映射未获证明时，只保留页级证据。
+                        review_required=not block.confidence_known or not source_coordinates,
+                        metadata={"confidence_known": block.confidence_known,
+                                  "source_orientation": dimensions["image_orientation"],
+                                  "coordinate_mapping": "source" if source_coordinates else "unverified"},
                         raw_result_ref=str(raw_ref).replace("\\", "/"),
                     )
                     elements.append(element.model_dump(mode="json"))

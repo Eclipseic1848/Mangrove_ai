@@ -61,13 +61,18 @@ export async function uploadFile(file: File): Promise<UploadItem> {
 export function uploadFileWithProgress(
   file: File,
   onProgress: (percent: number) => void,
+  signal?: AbortSignal,
 ): Promise<UploadItem> {
   const body = new FormData();
   body.append("file", file);
   return authenticatedFetch("/api/data-sources/uploads", {
-    method: "POST", body,
+    method: "POST", body, signal,
   }, (path, init = {}) => new Promise<Response>((resolve, reject) => {
+    if (init.signal?.aborted) { reject(new DOMException("上传已中止", "AbortError")); return; }
     const request = new XMLHttpRequest();
+    const abort = () => request.abort();
+    init.signal?.addEventListener("abort", abort, { once: true });
+    request.addEventListener("loadend", () => init.signal?.removeEventListener("abort", abort), { once: true });
     request.open("POST", String(path));
     new Headers(init.headers).forEach((value, key) => request.setRequestHeader(key, value));
     request.upload.addEventListener("progress", (event) => {
@@ -85,6 +90,7 @@ export function uploadFileWithProgress(
     request.addEventListener("abort", () => reject(new DOMException("上传已中止", "AbortError")));
     request.send(body);
   })).then(async (response) => {
+    if (signal?.aborted) throw new DOMException("上传已中止", "AbortError");
     const payload = await readAuthenticatedJson(response);
     if (!response.ok) throw new ApiError(response.status, payload.detail || "上传失败");
     onProgress(100);

@@ -300,6 +300,36 @@ def test_csv_source_window_and_executor_preserve_identical_multiline_records(can
     assert rows[0]["values"]["note"] == "line one\nline two"
 
 
+def test_image_source_preview_is_original_without_ocr(canvas, tmp_path, monkeypatch):
+    import io
+    from PIL import Image
+    from src.services.upload_store import UploadStore
+    from src.parsers.image import ImageParser
+
+    client, _, task_id, _, _ = canvas
+    buffer = io.BytesIO()
+    picture = Image.new("RGB", (12, 8), "white")
+    exif = Image.Exif()
+    exif[274] = 6
+    picture.save(buffer, format="JPEG", exif=exif)
+    payload = buffer.getvalue()
+    uploads = UploadStore(root=str(tmp_path / "uploads"), max_bytes=4096)
+    upload = uploads.save_bytes("user-a", "rotated.jpg", payload, verify_magic=True)
+    monkeypatch.setattr(routes, "_frozen_canvas_sources", lambda *args: {upload.upload_id: {"sha256": upload.sha256}})
+    monkeypatch.setattr(ImageParser, "parse", lambda *args: pytest.fail("原件预览禁止触发 OCR"))
+    url = f"/api/semantic-workspace/tasks/{task_id}/sources/{upload.upload_id}/preview"
+    response = client.get(url, params={"revision": 1})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["kind"] == "image"
+    assert (result["image_width"], result["image_height"], result["image_orientation"]) == (12, 8, 6)
+    assert result["representation"]["kind"] == "source"
+    assert result["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert result["elements"] == [] and result["page_count"] == 1
+    assert client.get(url, params={"revision": 1, "page": 2}).json()["location_status"] == "not_found"
+    assert client.get(url, params={"revision": 1, "element_id": "unverified"}).json()["location_status"] == "not_found"
+
+
 def test_published_representation_does_not_follow_latest_attempt(canvas, monkeypatch):
     from src.api.auth import get_store
 

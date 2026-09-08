@@ -20,6 +20,7 @@ import uuid
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from src.config.settings import settings
+from src.services.upload_store import IMAGE_EXTENSIONS
 from src.candidate_verification import CandidateVerificationService
 from src.capability_catalog.models import PublicCapabilityDescriptor
 from src.capability_adapters import load_runtime_manifests
@@ -751,7 +752,7 @@ class PiRuntime:
         document_sources = tuple(
             source
             for source in request.sources
-            if Path(source.original_name).suffix.lower() == ".pdf"
+            if Path(source.original_name).suffix.lower() in IMAGE_EXTENSIONS | {".pdf"}
         )
         if not document_sources:
             return None
@@ -802,7 +803,7 @@ class PiRuntime:
             return None
         state = self._document_tool_broker.completion_state(grant.grant_id)
         if state is None:
-            return "PDF 任务尚未冻结覆盖契约"
+            return "文档任务尚未冻结覆盖契约"
         decision = verify_coverage(*state)
         if decision.passed:
             return None
@@ -813,7 +814,7 @@ class PiRuntime:
         request: PiRuntimeRequest,
         output_dir: Path,
     ) -> str | None:
-        """候选清单只能引用本 Run 已权威读取的 PDF 内容单元。"""
+        """候选清单只能引用本 Run 已权威读取的文档内容单元。"""
 
         run_key = (request.user_id, request.task_id, request.revision)
         grant = self._document_grants.get(run_key)
@@ -821,7 +822,7 @@ class PiRuntime:
             return None
         state = self._document_tool_broker.completion_state(grant.grant_id)
         if state is None:
-            return "PDF 任务缺少覆盖状态"
+            return "文档任务缺少覆盖状态"
         _, ledger = state
         try:
             manifest = json.loads(
@@ -833,7 +834,7 @@ class PiRuntime:
             return None
         source_ids: dict[str, str] = {}
         for source in request.sources:
-            if Path(source.original_name).suffix.lower() != ".pdf":
+            if Path(source.original_name).suffix.lower() not in IMAGE_EXTENSIONS | {".pdf"}:
                 continue
             # Prompt 要求候选清单优先写不可变 upload_id；兼容旧清单中的原文件名。
             source_ids[source.upload_id] = source.upload_id
@@ -854,7 +855,7 @@ class PiRuntime:
                     )
         read_units = set(ledger.authoritatively_read_unit_ids)
         if not manifested_units <= read_units:
-            return "候选证据引用了未经过文档工具权威读取的 PDF 页面"
+            return "候选证据引用了未经过文档工具权威读取的页面"
         proposed = {
             unit_id
             for result in ledger.proposed_results
@@ -2183,7 +2184,8 @@ Mangrove 只会在不挂载用户来源的独立依赖获取阶段处理已批�
 不要为单个业务问法编写专属分支。
 大型文件先做结构探测和关键词检索，再定向读取目标页、段落、表或行；不要把全文、
 整份工作簿或大段二进制内容一次性打印到工具输出，以免挤占本地模型上下文。
-对于 PDF，不要先遍历整份文件或自行做整份 OCR。先调用 inspect_source 观察结构，
+对于 PDF 和静态图片，不要先遍历整份文件或自行做整份 OCR。图片是 page:1 单元。
+先调用 inspect_source 观察结构，
 再调用 freeze_coverage 冻结你对范围、结果数量、完整性和停止条件的理解。之后按目标自主
 选择 discover_content 和 read_evidence；发现结果只能用于召回，最终结果必须来自
 read_evidence 返回的权威证据。你认为完成时必须调用 propose_completion；若完成门返回

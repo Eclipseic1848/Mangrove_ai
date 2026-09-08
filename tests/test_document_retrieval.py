@@ -69,6 +69,7 @@ class CountingOcrClient:
             backend=self.backend,
             version="test-1",
             provider=self.provider,
+            source_coordinates_verified=True,
             blocks=(
                 DocumentPageBlock(
                     page=1,
@@ -104,6 +105,73 @@ class SequenceDiscoveryClient:
         if self.calls in self._fail_calls:
             raise TimeoutError("模拟低成本发现超时")
         return text, 0.95
+
+
+def _uploaded_image(path: Path, *, orientation: int = 1) -> SourceInput:
+    image = Image.new("RGB", (320, 200), "white")
+    exif = Image.Exif()
+    exif[274] = orientation
+    image.save(path, exif=exif)
+    return SourceInput(
+        upload_id="upload-image", original_name=path.name, host_path=path,
+        sha256=hashlib.sha256(path.read_bytes()).hexdigest(), media_type="image/png",
+    )
+
+
+class ImageOcrClient(CountingOcrClient):
+    def parse_image(self, raw_bytes: bytes, *, filename: str) -> DocumentParseResult:
+        self.image_bytes = raw_bytes
+        self.calls += 1
+        return self.parse_response({"filename": "page-1.pdf"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", ["png", "jpg", "jpeg", "webp"])
+async def test_image_source_reuses_discovery_and_authoritative_cache(tmp_path: Path, suffix: str) -> None:
+    source = _uploaded_image(tmp_path / f"source.{suffix}")
+    client = ImageOcrClient()
+    discovery = SequenceDiscoveryClient(("结算金额",))
+    module = DocumentRetrievalModule(document_clients=(client,), discovery_client=discovery, execution_root=tmp_path / "cache")
+    inspected = await module.inspect(source)
+    assert inspected["unit_count"] == 1
+    assert inspected["units"][0]["unit_id"] == "upload-image:page:1"
+    found = await module.discover(source, owner_key="a", query="金额", unit_ids=())
+    assert found["candidate_unit_ids"] == ["upload-image:page:1"]
+    first = await module.read(source, owner_key="a", unit_ids=())
+    second = await module.read(source, owner_key="a", unit_ids=())
+    await module.read(source, owner_key="b", unit_ids=())
+    assert first["quality_status"] == "trusted"
+    assert first["items"][0]["page"] == 1
+    assert second["cache_hits"] == 1
+    assert client.calls == 2
+    assert client.image_bytes == source.host_path.read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_image_source_rejects_changed_original_before_ocr(tmp_path: Path) -> None:
+    from src.agentic_runtime.document_retrieval import DocumentRetrievalError
+    source = _uploaded_image(tmp_path / "source.png")
+    source.host_path.write_bytes(b"changed")
+    client = ImageOcrClient()
+    module = DocumentRetrievalModule(document_clients=(client,), execution_root=tmp_path / "cache")
+    with pytest.raises(DocumentRetrievalError, match="SHA"):
+        await module.read(source, owner_key="a", unit_ids=())
+    assert client.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_rotated_image_preserves_page_without_unmapped_bbox(tmp_path: Path) -> None:
+    source = _uploaded_image(tmp_path / "source.jpg", orientation=6)
+    module = DocumentRetrievalModule(document_clients=(ImageOcrClient(),), execution_root=tmp_path / "cache")
+    result = await module.read(source, owner_key="a", unit_ids=())
+    element = result["items"][0]["elements"][0]
+    assert result["items"][0]["page"] == 1
+    assert element["bbox"] is None
+    assert element["location_gap"]
+    assert result["quality_status"] == "insufficient"
+    assert element["review_required"] is True
+    assert element["source_orientation"] == 6
+    assert element["coordinate_mapping"] == "unverified"
 
 
 @pytest.mark.asyncio
@@ -355,14 +423,18 @@ async def test_low_confidence_ocr_is_not_marked_as_trusted(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("suffix", ["pdf", "png"])
 async def test_cancelled_threaded_ocr_cannot_write_cache_or_ledger(
-    tmp_path: Path,
+    tmp_path: Path, suffix: str,
 ) -> None:
     started = threading.Event()
     release = threading.Event()
     finished = threading.Event()
 
     class BlockingOcrClient(CountingOcrClient):
+        def parse_image(self, raw_bytes: bytes, *, filename: str) -> DocumentParseResult:
+            return self.parse_pdf(raw_bytes, filename="page-1.pdf")
+
         def parse_pdf(
             self,
             raw_bytes: bytes,
@@ -379,8 +451,8 @@ async def test_cancelled_threaded_ocr_cannot_write_cache_or_ledger(
                 finished.set()
 
     image = Image.new("RGB", (300, 200), "white")
-    pdf = tmp_path / "cancelled.pdf"
-    image.save(pdf, format="PDF")
+    pdf = tmp_path / f"cancelled.{suffix}"
+    image.save(pdf)
     source = SourceInput(
         upload_id="upload-cancelled",
         original_name=pdf.name,
@@ -389,9 +461,11 @@ async def test_cancelled_threaded_ocr_cannot_write_cache_or_ledger(
         media_type="application/pdf",
     )
     cache_root = tmp_path / "cache"
+    fallback = ImageOcrClient()
+    fallback.provider = "fallback"
     broker = DocumentToolBroker(
         retriever=DocumentRetrievalModule(
-            document_clients=(BlockingOcrClient(),),
+            document_clients=(BlockingOcrClient(), fallback),
             execution_root=cache_root,
         )
     )
@@ -441,6 +515,74 @@ async def test_cancelled_threaded_ocr_cannot_write_cache_or_ledger(
     assert await asyncio.to_thread(finished.wait, 2)
 
     assert list(cache_root.rglob("*.json")) == []
+    assert fallback.calls == 0
     state = broker.completion_state(grant.grant_id)
     assert state is not None
     assert state[1].authoritatively_read_unit_ids == ()
+
+
+@pytest.mark.asyncio
+async def test_unknown_image_block_score_prevents_trusted_page(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    class UnknownScoreClient(ImageOcrClient):
+        def parse_response(self, raw_response: dict) -> DocumentParseResult:
+            result = super().parse_response(raw_response)
+            block = result.blocks[0]
+            return replace(result, blocks=(block, block, replace(block, text="未知分数", confidence_known=False)))
+
+    source = _uploaded_image(tmp_path / "source.png")
+    module = DocumentRetrievalModule(document_clients=(UnknownScoreClient(),), execution_root=tmp_path / "cache")
+    result = await module.read(source, owner_key="a", unit_ids=())
+    assert result["quality_status"] == "insufficient"
+    unknown = result["items"][0]["elements"][-1]
+    assert unknown["confidence_known"] is False
+    assert unknown["confidence"] is None
+
+
+@pytest.mark.asyncio
+async def test_image_broker_records_only_authoritative_read(tmp_path: Path) -> None:
+    source = _uploaded_image(tmp_path / "source.png")
+    broker = DocumentToolBroker(retriever=DocumentRetrievalModule(
+        document_clients=(ImageOcrClient(),), discovery_client=SequenceDiscoveryClient(("金额",)),
+        execution_root=tmp_path / "cache",
+    ))
+    grant = broker.issue_grant(owner_user_id="a", task_id="task", revision=1, run_id="run", sources=(source,))
+    await broker.call(grant_token=grant.token, operation="inspect_source", payload={"source_id": source.upload_id})
+    await broker.call(grant_token=grant.token, operation="freeze_coverage", payload={
+        "authorized_scope": {"source_ids": [source.upload_id]}, "result_cardinality": "first",
+        "completeness": "strict", "ordering": "页码升序", "required_fields": [],
+        "object_boundary": "单页记录", "stop_semantics": "首个记录已读",
+        "interpretation": "读取金额", "confidence": "high",
+    })
+    await broker.call(grant_token=grant.token, operation="discover_content", payload={"source_id": source.upload_id, "query": "金额"})
+    assert broker.completion_state(grant.grant_id)[1].authoritatively_read_unit_ids == ()
+    await broker.call(grant_token=grant.token, operation="read_evidence", payload={"source_id": source.upload_id, "unit_ids": ["upload-image:page:1"]})
+    assert broker.completion_state(grant.grant_id)[1].authoritatively_read_unit_ids == ("upload-image:page:1",)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_image_discovery_does_not_become_unknown_or_cache(tmp_path: Path) -> None:
+    from src.agentic_runtime.document_retrieval import (
+        DocumentRetrievalCancelled, bind_document_retrieval_cancel_event,
+        reset_document_retrieval_cancel_event,
+    )
+    event = threading.Event()
+
+    class CancelDiscovery:
+        provider = "cancel"
+        version = "1"
+
+        def extract_text(self, _data):
+            event.set()
+            raise TimeoutError("取消后才返回")
+
+    source = _uploaded_image(tmp_path / "source.png")
+    module = DocumentRetrievalModule(document_clients=(), discovery_client=CancelDiscovery(), execution_root=tmp_path / "cache")
+    token = bind_document_retrieval_cancel_event(event)
+    try:
+        with pytest.raises(DocumentRetrievalCancelled):
+            await module.discover(source, owner_key="a", query="金额", unit_ids=())
+    finally:
+        reset_document_retrieval_cancel_event(token)
+    assert list((tmp_path / "cache").rglob("*.json")) == []

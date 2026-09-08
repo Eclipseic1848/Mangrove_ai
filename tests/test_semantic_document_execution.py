@@ -40,6 +40,7 @@ def test_document_capability_is_explicitly_registered() -> None:
 
     assert set(manifest.accepts) == {
         "pdf", "docx", "pptx", "html", "markdown", "txt", "xml",
+        "png", "jpg", "jpeg", "webp",
     }
     assert {"verbatim", "compare", "audit", "translate"}.issubset(
         manifest.operations

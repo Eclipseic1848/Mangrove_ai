@@ -25,6 +25,7 @@ from src.services.document_parser_contracts import (
 from src.services.document_parser_factory import (
     configured_document_parser_clients,
 )
+from src.services.upload_store import IMAGE_EXTENSIONS, inspect_uploaded_image
 
 
 _CANCEL_EVENT: ContextVar[threading.Event | None] = ContextVar(
@@ -87,7 +88,7 @@ class RapidOcrPageDiscoveryClient:
         scores = tuple(float(value) for value in (result.scores or ()))
         text = "\n".join(value for value in texts if value)
         # 发现层按页面判断可用性；单个印章或手写噪声块不应让整页变成盲区。
-        # 权威读取层仍使用更严格的逐块最低置信度门。
+        # 权威读取层仍使用更严格的页级置信度门。
         confidence = float(median(scores)) if scores else 0.0
         return text, confidence
 
@@ -204,9 +205,7 @@ class DocumentRetrievalModule:
         owner_key: str,
     ) -> dict[str, object]:
         del owner_key
-        if Path(source.original_name).suffix.lower() != ".pdf":
-            raise DocumentRetrievalError("当前文档工具只支持 PDF 来源")
-        source_map, _ = self._inspect_pdf(source)
+        source_map, _ = self._inspect_source(source)
         return source_map.model_dump(mode="json")
 
     async def discover(
@@ -234,7 +233,7 @@ class DocumentRetrievalModule:
     ) -> dict[str, object]:
         if not query.strip():
             raise DocumentRetrievalError("候选发现必须提供检索目标")
-        source_map, native_text = self._inspect_pdf(source)
+        source_map, native_text = self._inspect_source(source)
         selected = self._select_units(source_map, unit_ids)
         hits: list[DiscoveryHit] = []
         observed: list[str] = []
@@ -268,6 +267,8 @@ class DocumentRetrievalModule:
                         owner_key=owner_key,
                         page=unit.page,
                     )
+            except DocumentRetrievalCancelled:
+                raise
             except DocumentRetrievalError:
                 unknown.append(unit.unit_id)
                 continue
@@ -322,7 +323,7 @@ class DocumentRetrievalModule:
         needs: tuple[str, ...],
     ) -> dict[str, object]:
         del needs
-        source_map, native_text = self._inspect_pdf(source)
+        source_map, native_text = self._inspect_source(source)
         selected = self._select_units(source_map, unit_ids)
         items: list[EvidenceItem] = []
         cache_hits = 0
@@ -378,6 +379,7 @@ class DocumentRetrievalModule:
             owner_key=owner_key,
             page=page,
         )
+        _raise_if_cancelled()
         if legacy is not None:
             return (*legacy, True)
         client = self._configured_discovery_client()
@@ -396,6 +398,7 @@ class DocumentRetrievalModule:
         )
         if cache_path.is_file():
             payload = json.loads(cache_path.read_text(encoding="utf-8"))
+            _raise_if_cancelled()
             return (
                 str(payload.get("text") or ""),
                 str(payload.get("quality_status") or "insufficient"),
@@ -403,20 +406,29 @@ class DocumentRetrievalModule:
                 True,
             )
         try:
-            document = pdfium.PdfDocument(str(source.host_path))
-            page_handle = document[page - 1]
-            # 90 DPI 足以供小模型做关键词召回，候选仍须进入权威解析。
-            bitmap = page_handle.render(scale=1.25, grayscale=False)
-            image = bitmap.to_pil()
+            if Path(source.original_name).suffix.lower() in IMAGE_EXTENSIONS:
+                from PIL import Image, ImageOps
+
+                raw_bytes, _ = self._image_input(source)
+                with Image.open(io.BytesIO(raw_bytes)) as original:
+                    image = ImageOps.exif_transpose(original)
+                    image.thumbnail((1600, 1600))
+            else:
+                document = pdfium.PdfDocument(str(source.host_path))
+                page_handle = document[page - 1]
+                # 90 DPI 足以供小模型做关键词召回，候选仍须进入权威解析。
+                bitmap = page_handle.render(scale=1.25, grayscale=False)
+                image = bitmap.to_pil()
             buffer = io.BytesIO()
             image.save(buffer, format="PNG", optimize=True)
             text, confidence = client.extract_text(buffer.getvalue())
         except Exception as exc:
+            _raise_if_cancelled()
             raise DocumentRetrievalError(
                 f"第 {page} 页低成本发现失败：{type(exc).__name__}: {exc}"
             ) from exc
         finally:
-            for resource_name in ("bitmap", "page_handle", "document"):
+            for resource_name in ("image", "bitmap", "page_handle", "document"):
                 resource = locals().get(resource_name)
                 close = getattr(resource, "close", None)
                 if callable(close):
@@ -484,6 +496,7 @@ class DocumentRetrievalModule:
                 quality = (
                     "trusted"
                     if scores and median(scores) >= _DISCOVERY_CONFIDENCE_THRESHOLD
+                    and all(getattr(block, "confidence_known", True) for block in result.blocks if block.text.strip())
                     else "insufficient"
                 )
                 return (
@@ -512,15 +525,46 @@ class DocumentRetrievalModule:
         return tuple(by_id[unit_id] for unit_id in selected_ids)
 
     @staticmethod
+    def _image_input(source: SourceInput) -> tuple[bytes, dict[str, int]]:
+        _raise_if_cancelled()
+        raw_bytes = source.host_path.read_bytes()
+        if hashlib.sha256(raw_bytes).hexdigest() != source.sha256:
+            raise DocumentRetrievalError("图片来源 SHA 校验失败")
+        try:
+            metadata = inspect_uploaded_image(raw_bytes)
+        except ValueError as exc:
+            raise DocumentRetrievalError(str(exc)) from exc
+        _raise_if_cancelled()
+        return raw_bytes, metadata
+
+    def _inspect_source(self, source: SourceInput) -> tuple[SourceMap, dict[int, str]]:
+        suffix = Path(source.original_name).suffix.lower()
+        if suffix == ".pdf":
+            return self._inspect_pdf(source)
+        if suffix not in IMAGE_EXTENSIONS:
+            raise DocumentRetrievalError("当前文档工具只支持 PDF 和静态图片来源")
+        self._image_input(source)
+        return SourceMap(
+            source_id=source.upload_id, name=source.original_name, sha256=source.sha256,
+            unit_count=1, units=(ContentUnit(
+                unit_id=f"{source.upload_id}:page:1", page=1, page_kind="scanned",
+                text_chars=0, image_coverage=1.0,
+            ),),
+        ), {1: ""}
+
+    @staticmethod
     def _inspect_pdf(
         source: SourceInput,
     ) -> tuple[SourceMap, dict[int, str]]:
         import pdfplumber
+        from src.parsers.pdf_render import validate_pdf_source
 
         raw_bytes = source.host_path.read_bytes()
         units: list[ContentUnit] = []
         native_text: dict[int, str] = {}
         try:
+            validate_pdf_source(raw_bytes)
+            _raise_if_cancelled()
             with pdfplumber.open(io.BytesIO(raw_bytes)) as document:
                 for page_number, page in enumerate(document.pages, start=1):
                     text = (page.extract_text() or "").strip()
@@ -550,6 +594,8 @@ class DocumentRetrievalModule:
                             image_coverage=coverage,
                         )
                     )
+        except DocumentRetrievalCancelled:
+            raise
         except Exception as exc:
             raise DocumentRetrievalError(
                 f"PDF 来源无法可靠检查：{type(exc).__name__}: {exc}"
@@ -615,7 +661,14 @@ class DocumentRetrievalModule:
     ) -> tuple[EvidenceItem, bool]:
         from pypdf import PdfReader, PdfWriter
 
-        clients = self._clients()
+        is_image = Path(source.original_name).suffix.lower() in IMAGE_EXTENSIONS
+        image_bytes, image_metadata = (
+            self._image_input(source) if is_image else (None, {})
+        )
+        clients = tuple(
+            client for client in self._clients()
+            if not is_image or callable(getattr(client, "parse_image", None))
+        )
         healthy: list[tuple[DocumentParserClient, str]] = []
         preloaded: dict[str, DocumentParseResult] = {}
         errors: list[str] = []
@@ -651,10 +704,12 @@ class DocumentRetrievalModule:
                 else:
                     errors.append(f"{provider}: {health.status}")
             except Exception as exc:
+                _raise_if_cancelled()
                 errors.append(f"{provider}: {exc}")
+            _raise_if_cancelled()
         if not healthy:
             raise DocumentRetrievalError(
-                "扫描 PDF OCR 服务不可用：" + "；".join(errors)[:500]
+                "文档 OCR 服务不可用：" + "；".join(errors)[:500]
             )
         page_bytes: bytes | None = None
         for client, version in healthy:
@@ -695,7 +750,9 @@ class DocumentRetrievalModule:
                     result = preloaded[provider]
                     cached = True
                 else:
-                    if page_bytes is None:
+                    if is_image:
+                        result = client.parse_image(image_bytes, filename=source.original_name)
+                    elif page_bytes is None:
                         raw_bytes = source.host_path.read_bytes()
                         _raise_if_cancelled()
                         reader = PdfReader(io.BytesIO(raw_bytes))
@@ -704,10 +761,11 @@ class DocumentRetrievalModule:
                         buffer = io.BytesIO()
                         writer.write(buffer)
                         page_bytes = buffer.getvalue()
-                    result = client.parse_pdf(
-                        page_bytes,
-                        filename=f"page-{page}.pdf",
-                    )
+                    if not is_image:
+                        result = client.parse_pdf(
+                            page_bytes,
+                            filename=f"page-{page}.pdf",
+                        )
                     _raise_if_cancelled()
                     cache_path.parent.mkdir(parents=True, exist_ok=True)
                     _raise_if_cancelled()
@@ -720,22 +778,36 @@ class DocumentRetrievalModule:
                         encoding="utf-8",
                     )
             except Exception as exc:
+                _raise_if_cancelled()
                 errors.append(f"{provider}: {exc}")
                 continue
+            _raise_if_cancelled()
             parts = [native_text] if native_text else []
             elements: list[dict[str, object]] = []
+            unmapped_orientation = is_image and (
+                image_metadata.get("image_orientation", 1) != 1 or not result.source_coordinates_verified
+            )
             for block in result.blocks:
                 text = block.text.strip()
                 if text and text not in parts:
                     parts.append(text)
                 if text:
+                    confidence_known = getattr(block, "confidence_known", True)
                     elements.append(
                         {
                             "text": text,
-                            "bbox": list(block.bbox),
-                            "coordinate_space": block.coordinate_space,
+                            # 未建立 EXIF 到原件的坐标映射时只保留页定位。
+                            "bbox": None if unmapped_orientation else list(block.bbox),
+                            "coordinate_space": "page" if unmapped_orientation else block.coordinate_space,
+                            **({
+                                "location_gap": "图片方向或服务坐标尚未核实为原件位置",
+                                "source_orientation": image_metadata["image_orientation"],
+                                "coordinate_mapping": "unverified",
+                            } if unmapped_orientation else {}),
                             "element_type": block.element_type,
-                            "confidence": block.confidence,
+                            "confidence": block.confidence if confidence_known else None,
+                            "confidence_known": confidence_known,
+                            "review_required": unmapped_orientation or not confidence_known or block.confidence < _EVIDENCE_CONFIDENCE_THRESHOLD,
                         }
                     )
             text = "\n".join(parts).strip()
@@ -752,7 +824,9 @@ class DocumentRetrievalModule:
             quality_status = (
                 "trusted"
                 if confidence_values
+                and not unmapped_orientation
                 and median(confidence_values) >= _EVIDENCE_CONFIDENCE_THRESHOLD
+                and all(getattr(block, "confidence_known", True) for block in result.blocks if block.text.strip())
                 else "insufficient"
             )
             digest = hashlib.sha256(

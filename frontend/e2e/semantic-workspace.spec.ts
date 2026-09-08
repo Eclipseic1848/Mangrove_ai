@@ -4392,3 +4392,94 @@ test.describe("#127 输入与导航边界", () => {
     });
   }
 });
+
+
+test("统一图片草稿保留混合附件，移除上传会中止且迟到不复活", async ({ page }) => {
+  await mockWorkspace(page);
+  await page.addInitScript(() => {
+    const original = XMLHttpRequest.prototype.abort;
+    (window as unknown as { uploadAborts: number }).uploadAborts = 0;
+    XMLHttpRequest.prototype.abort = function () {
+      (window as unknown as { uploadAborts: number }).uploadAborts++;
+      return original.call(this);
+    };
+  });
+  const originalImage = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAABQAAAAeCAIAAACjcKk8AAAANElEQVR4nO3LoQEAMAgDwTT7z4nuCJXFPpacv1O3NOXxVDJmXr5kyDR0yZBp6JIh06Dl+QFlNgL4Ku76ZQAAAABJRU5ErkJggg==", "base64");
+  let releaseUpload!: () => void;
+  const gate = new Promise<void>(resolve => { releaseUpload = resolve; });
+  let waiting = false;
+  let documentReads = 0;
+  await page.route("**/api/data-sources/uploads", async route => {
+    const slow = route.request().postDataBuffer()?.includes(Buffer.from("slow.png"));
+    if (slow) { waiting = true; await gate; }
+    await route.fulfill({ json: { upload_id: slow ? "slow-image" : "good-image", original_name: slow ? "slow.png" : "good.png", media_type: "image/png", size_bytes: originalImage.length, sha256: "0".repeat(64) } });
+  });
+  await page.route("**/api/data-sources/uploads/good-image/content", route => route.fulfill({ contentType: "image/png", body: originalImage }));
+  await page.route("**/api/data-sources/uploads/good-image/document-preview", route => { documentReads++; return route.abort(); });
+  await page.goto("/data-prep");
+  await page.locator('input[type="file"]').setInputFiles({ name: "good.png", mimeType: "image/png", buffer: originalImage });
+  await expect(page.getByRole("img", { name: "good.png原件" })).toBeVisible();
+  expect(documentReads).toBe(0);
+  await page.getByRole("textbox", { name: "任务要求", exact: true }).fill("核对原件内容");
+  await page.locator('input[type="file"]').setInputFiles({ name: "slow.png", mimeType: "image/png", buffer: originalImage });
+  await expect.poll(() => waiting).toBe(true);
+  await page.getByRole("button", { name: "移除 slow.png", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { uploadAborts: number }).uploadAborts)).toBe(1);
+  releaseUpload();
+  await expect(page.getByRole("button", { name: "移除 slow.png", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "移除 good.png", exact: true })).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "任务要求", exact: true })).toHaveValue("核对原件内容");
+  await page.route("**/api/data-sources/uploads", route => route.fulfill({ json: { upload_id: "good-table", original_name: "good.csv", media_type: "text/csv", size_bytes: 8, sha256: "0".repeat(64) } }));
+  await page.locator('input[type="file"]').setInputFiles({ name: "good.csv", mimeType: "text/csv", buffer: Buffer.from("a,b\n1,2") });
+  await expect(page.getByRole("button", { name: "移除 good.csv", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "移除 good.png", exact: true })).toBeVisible();
+  await page.route("**/api/data-sources/uploads", route => route.fulfill({ status: 422, json: { detail: "合成图片解码失败" } }));
+  await page.locator('input[type="file"]').setInputFiles({ name: "bad.jpg", mimeType: "image/jpeg", buffer: Buffer.from("损坏") });
+  await expect(page.getByText("合成图片解码失败", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "开始执行", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "移除 good.png", exact: true })).toBeVisible();
+  let releaseLeaving!: () => void;
+  const leavingGate = new Promise<void>(resolve => { releaseLeaving = resolve; });
+  let leavingStarted = false;
+  await page.route("**/api/data-sources/uploads", async route => { leavingStarted = true; await leavingGate; await route.abort(); });
+  await page.locator('input[type="file"]').setInputFiles({ name: "leaving.png", mimeType: "image/png", buffer: originalImage });
+  await expect.poll(() => leavingStarted).toBe(true);
+  await page.getByRole("button", { name: "回收站", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { uploadAborts: number }).uploadAborts)).toBe(2);
+  releaseLeaving();
+});
+
+
+for (const sample of [{"extension": "jpg", "mime": "image/jpeg", "base64": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAeABQDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD2yiiioMwooooAKKKKACiiigD/2Q=="}, {"extension": "jpeg", "mime": "image/jpeg", "base64": "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAeABQDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD2yiiioMwooooAKKKKACiiigD/2Q=="}, {"extension": "webp", "mime": "image/webp", "base64": "UklGRjYAAABXRUJQVlA4ICoAAADQAgCdASoUAB4APm00lUekIyIhKAgAgA2JaQAAPaOgAP75iK71fpZgAAA="}]) test(`统一入口可解码 ${sample.extension} 原件`, async ({ page }) => {
+  await mockWorkspace(page);
+  const body = Buffer.from(sample.base64, "base64");
+  const name = `实际图片.${sample.extension}`;
+  await page.route("**/api/data-sources/uploads", route => route.fulfill({ json: {
+    upload_id: "image-format", original_name: name, media_type: sample.mime, size_bytes: body.length, sha256: "0".repeat(64),
+  } }));
+  await page.route("**/api/data-sources/uploads/image-format/content", route => route.fulfill({ contentType: sample.mime, body }));
+  await page.goto("/data-prep");
+  await page.locator('input[type="file"]').setInputFiles({ name, mimeType: sample.mime, buffer: body });
+  const image = page.getByRole("img", { name: `${name}原件` });
+  await expect(image).toBeVisible();
+  await expect.poll(() => image.evaluate(node => (node as HTMLImageElement).naturalWidth)).toBe(20);
+  await expect(page.getByText("此预览仅显示原件，不执行文字识别。", { exact: true })).toBeVisible();
+});
+
+
+test("JPEG 原件按 EXIF 方向显示而不改写上传", async ({ page }) => {
+  await mockWorkspace(page);
+  const original = Buffer.from("/9j/4AAQSkZJRgABAQAAAQABAAD/4QAiRXhpZgAATU0AKgAAAAgAAQESAAMAAAABAAYAAAAAAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAeABQDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDaooor5A/KwooooAKKKKACiiigD//Z", "base64");
+  let uploadedOriginal = false;
+  await page.route("**/api/data-sources/uploads", route => {
+    uploadedOriginal = Boolean(route.request().postDataBuffer()?.includes(original));
+    return route.fulfill({ json: { upload_id: "rotated-image", original_name: "旋转.jpg", media_type: "image/jpeg", size_bytes: original.length, sha256: "0".repeat(64) } });
+  });
+  await page.route("**/api/data-sources/uploads/rotated-image/content", route => route.fulfill({ contentType: "image/jpeg", body: original }));
+  await page.goto("/data-prep");
+  await page.locator('input[type="file"]').setInputFiles({ name: "旋转.jpg", mimeType: "image/jpeg", buffer: original });
+  const image = page.getByRole("img", { name: "旋转.jpg原件" });
+  await expect(image).toBeVisible();
+  await expect.poll(() => image.evaluate(node => [(node as HTMLImageElement).naturalWidth, (node as HTMLImageElement).naturalHeight])).toEqual([30, 20]);
+  expect(uploadedOriginal).toBe(true);
+});

@@ -8,6 +8,7 @@ OpenAI/vLLM 兼容端点只负责 VLM 识别阶段，不能冒充完整解析服
 from __future__ import annotations
 
 import base64
+import math
 from typing import Any, Dict, Mapping, Optional
 
 import httpx
@@ -29,19 +30,11 @@ def _bbox(value: Any) -> Optional[tuple[float, float, float, float]]:
         x0, y0, x1, y1 = (float(item) for item in value)
     except (TypeError, ValueError):
         return None
+    if not all(math.isfinite(item) for item in (x0, y0, x1, y1)):
+        raise DocumentParserServiceError("OCR 坐标必须为有限数")
     if min(x0, y0) < 0 or x1 <= x0 or y1 <= y0:
         return None
     return x0, y0, x1, y1
-
-
-def _confidence(value: Any) -> float:
-    if value is None:
-        return 1.0
-    try:
-        score = float(value)
-    except (TypeError, ValueError):
-        return 1.0
-    return max(0.0, min(score, 1.0))
 
 
 def _page_dimensions(
@@ -62,6 +55,8 @@ def _page_dimensions(
         height = float(page.get("height"))
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(width) or not math.isfinite(height):
+        raise DocumentParserServiceError("OCR 页面尺寸必须为有限数")
     if width <= 0 or height <= 0:
         return None
     return width, height
@@ -197,6 +192,8 @@ class PaddleOCRVLDocumentClient:
         payload = {
             "file": base64.b64encode(raw_bytes).decode("ascii"),
             "fileType": file_type,
+            "useDocOrientationClassify": False,
+            "useDocUnwarping": False,
             "useLayoutDetection": True,
             "useSealRecognition": True,
             "useOcrForImageBlock": True,
@@ -268,9 +265,7 @@ class PaddleOCRVLDocumentClient:
                     text=text,
                     bbox=normalized_box,
                     coordinate_space=coordinate_space,
-                    confidence=_confidence(
-                        block.get("score", block.get("confidence"))
-                    ),
+                    confidence=block.get("score", block.get("confidence")),
                     element_type=label,
                 ))
 
@@ -281,4 +276,11 @@ class PaddleOCRVLDocumentClient:
             blocks=tuple(blocks),
             raw_response=dict(raw_response),
             provider=self.provider,
+            source_coordinates_verified=bool(pages) and all(
+                isinstance(page, Mapping)
+                and isinstance(page.get("prunedResult"), Mapping)
+                and isinstance(page["prunedResult"].get("model_settings"), Mapping)
+                and page["prunedResult"].get("model_settings", {}).get("use_doc_preprocessor") is False
+                for page in pages
+            ),
         )

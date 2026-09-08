@@ -51,7 +51,7 @@ TABLE_DUCKDB_MANIFEST = CapabilityManifest(
 DOCUMENT_EVIDENCE_MANIFEST = CapabilityManifest(
     capability_id="document.evidence",
     version="1.0.0",
-    accepts=("pdf", "docx", "pptx", "html", "markdown", "txt", "xml"),
+    accepts=("pdf", "docx", "pptx", "html", "markdown", "txt", "xml", "png", "jpg", "jpeg", "webp"),
     produces=("document_ast", "evidence_graph", "verification_report"),
     operations=(
         "verbatim",

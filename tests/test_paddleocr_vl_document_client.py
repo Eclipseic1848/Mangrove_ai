@@ -52,6 +52,40 @@ def _success_payload() -> dict:
     }
 
 
+@pytest.mark.parametrize("settings", [None, [], "invalid", 3, {}, {"use_doc_preprocessor": True}, {"use_doc_preprocessor": 0}, {"use_doc_preprocessor": False}])
+def test_paddle_coordinate_confirmation_requires_typed_explicit_settings(settings):
+    payload = _success_payload()
+    payload["result"]["layoutParsingResults"][0]["prunedResult"]["model_settings"] = settings
+    result = PaddleOCRVLDocumentClient(base_url="http://paddle.test").parse_response(payload)
+    assert result.source_coordinates_verified is (isinstance(settings, dict) and settings.get("use_doc_preprocessor") is False)
+
+
+def test_paddle_coordinate_confirmation_rejects_mixed_pages():
+    payload = _success_payload()
+    pages = payload["result"]["layoutParsingResults"]
+    pages[0]["prunedResult"]["model_settings"] = {"use_doc_preprocessor": False}
+    pages.append({"prunedResult": {"model_settings": {"use_doc_preprocessor": True}}})
+    assert not PaddleOCRVLDocumentClient(base_url="http://paddle.test").parse_response(payload).source_coordinates_verified
+
+
+@pytest.mark.parametrize("score", [None, "invalid", float("nan"), float("inf"), -0.1, 1.1])
+def test_paddle_unknown_confidence_is_not_full_confidence(score):
+    payload = _success_payload()
+    payload["result"]["layoutParsingResults"][0]["prunedResult"]["parsing_res_list"][0]["score"] = score
+    result = PaddleOCRVLDocumentClient(base_url="http://paddle.test").parse_response(payload)
+    assert result.blocks[0].confidence == 0.0
+    assert result.blocks[0].confidence_known is False
+    assert result.blocks[1].confidence_known is False
+
+
+@pytest.mark.parametrize("coordinate", [float("nan"), float("inf")])
+def test_paddle_rejects_nonfinite_geometry(coordinate):
+    payload = _success_payload()
+    payload["result"]["layoutParsingResults"][0]["prunedResult"]["parsing_res_list"][0]["block_bbox"][2] = coordinate
+    with pytest.raises(DocumentParserServiceError):
+        PaddleOCRVLDocumentClient(base_url="http://paddle.test").parse_response(payload)
+
+
 def test_paddleocr_vl_client_uses_official_layout_parsing_protocol() -> None:
     captured: dict[str, object] = {}
 
