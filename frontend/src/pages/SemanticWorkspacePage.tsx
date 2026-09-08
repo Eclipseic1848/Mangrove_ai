@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { nanoid } from "nanoid/non-secure";
@@ -28,6 +28,7 @@ import {
 } from "@/components/workspace/ResultPreview";
 import { SourcePreviewPanel } from "@/components/workspace/SourcePreviewPanel";
 import { TaskTimeline } from "@/components/workspace/TaskTimeline";
+import { Markdown } from "@/components/Markdown";
 import { WorkspaceTaskSidebar } from "@/components/workspace/WorkspaceTaskSidebar";
 import { WebSourceIntake } from "@/components/workspace/WebSourceIntake";
 import {
@@ -59,6 +60,7 @@ import type {
 } from "@/types/dataPrep";
 import type {
   WorkspaceEvent,
+  WorkspaceMessage,
   WorkspaceGuidance,
   SteeringResult,
   WorkspaceTask,
@@ -422,7 +424,15 @@ export function SemanticWorkspacePage() {
   } | null>(null);
   const [draftUploads, setDraftUploads] = useState<UploadItem[]>([]);
 
-  const [liveEvents, setLiveEvents] = useState<WorkspaceEvent[]>([]);
+  const [liveFeed, setLiveFeed] = useState<{ identity: string; events: WorkspaceEvent[] }>({ identity: "", events: [] });
+  const setLiveEvents = (events: WorkspaceEvent[]) => setLiveFeed({ identity: "", events });
+  const [messageFeed, setMessageFeed] = useState<{ identity: string; messages: WorkspaceMessage[] }>({ identity: "", messages: [] });
+  const [streamFeedback, setStreamFeedback] = useState<{ identity: string; text: string } | null>(null);
+  const [streamAttempt, setStreamAttempt] = useState(0);
+  const conversationScroller = useRef<HTMLDivElement>(null);
+  const followLatest = useRef(true);
+  const [awayFromLatest, setAwayFromLatest] = useState(false);
+  const scrollPositions = useRef(new Map<string, { top: number; follow: boolean }>());
   const [helpOpen, setHelpOpen] = useState(false);
   const [exampleSeed, setExampleSeed] = useState<{
     key: string;
@@ -476,7 +486,7 @@ export function SemanticWorkspacePage() {
     refetchInterval: 15_000,
   });
   const detail = useQuery({
-    queryKey: ["semantic-workspace-task", selectedTaskId, selectedRevision],
+    queryKey: ["semantic-workspace-task", selectedTaskId, selectedRevision, user?.user_id],
     queryFn: () => getWorkspaceTask(selectedTaskId!, selectedRevision),
     enabled: Boolean(selectedTaskId),
     refetchInterval: (query) => {
@@ -500,6 +510,33 @@ export function SemanticWorkspacePage() {
     enabled: Boolean(selectedTaskId && detail.data),
   });
   const task = detail.data;
+  const viewingRevision = task?.viewing_revision ?? task?.current_revision ?? task?.active_revision;
+  const runId = task?.agentic_runtime?.run_id ?? task?.work_session?.run_id ?? task?.run_id ?? (typeof task?.run?.run_id === "string" ? task.run.run_id : null);
+  const subscriptionIdentity = JSON.stringify([user?.user_id, selectedTaskId, selectedRevision, viewingRevision, runId]);
+  const selectedSubscription = useRef(subscriptionIdentity);
+  // 同步阻断上一身份的迟到回调和首帧缓存，不能等 effect 清理。
+  selectedSubscription.current = subscriptionIdentity;
+  const liveEvents = liveFeed.identity === subscriptionIdentity ? liveFeed.events : [];
+  const messagesById = new Map<string, WorkspaceMessage>();
+  for (const message of [...(task?.messages ?? []), ...(messageFeed.identity === subscriptionIdentity ? messageFeed.messages : [])]) {
+    if (message.task_id === selectedTaskId && message.revision === viewingRevision
+      && (message.run_id === null || message.run_id === runId) && !messagesById.has(message.message_id)) messagesById.set(message.message_id, message);
+  }
+  const messages = [...messagesById.values()].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.message_id.localeCompare(b.message_id));
+  const messageSignature = JSON.stringify([messages.map(message => message.message_id), conversation.data?.results?.map(result => result.result_id)]);
+  const readingIdentity = JSON.stringify([user?.user_id, selectedTaskId, viewingRevision]);
+  useLayoutEffect(() => {
+    const scroller = conversationScroller.current;
+    if (!scroller) return;
+    const position = scrollPositions.current.get(readingIdentity);
+    followLatest.current = position?.follow ?? true;
+    scroller.scrollTop = followLatest.current ? scroller.scrollHeight : position?.top ?? 0;
+    setAwayFromLatest(!followLatest.current);
+    return () => { scrollPositions.current.set(readingIdentity, { top: scroller.scrollTop, follow: followLatest.current }); };
+  }, [readingIdentity, settingsOpen, fullInspector, inspectorOpen]);
+  useLayoutEffect(() => {
+    if (followLatest.current && conversationScroller.current) conversationScroller.current.scrollTop = conversationScroller.current.scrollHeight;
+  }, [messageSignature]);
   const accountResumeKey = JSON.stringify([user?.user_id, task?.task_id, task?.current_revision ?? task?.active_revision, task?.account_resume?.generation]);
   const accountResumeFeedback = accountResumeError?.key === accountResumeKey ? accountResumeError : null;
   const accountResumeStrategy = task?.viewing_revision === task?.current_revision ? task?.account_resume?.strategy : undefined;
@@ -554,35 +591,51 @@ export function SemanticWorkspacePage() {
 
   useEffect(() => {
     if (!selectedTaskId || !task) return;
+    if (viewingRevision !== (task.current_revision ?? task.active_revision)) return;
     if (!["queued", "running", "cancelling"].includes(task.status)) return;
+    const identity = subscriptionIdentity;
+    const current = (event?: { revision?: number; run_id?: string | null; task_id?: string }) => selectedSubscription.current === identity
+      && (!event || (event.revision === viewingRevision && (!event.task_id || event.task_id === selectedTaskId)
+        && (event.run_id === null || event.run_id === runId)));
+    const refresh = () => {
+      void queryClient.invalidateQueries({ queryKey: ["semantic-workspace-task", selectedTaskId] });
+      void queryClient.invalidateQueries({ queryKey: ["semantic-workspace-tasks"] });
+    };
     return streamWorkspaceTask(selectedTaskId, {
-      onProgress: (event) =>
-        setLiveEvents((current) =>
-          current.some((item) => item.event_id === event.event_id)
-            ? current
-            : [...current, event],
-        ),
-      onStatus: () => {
-        void queryClient.invalidateQueries({
-          queryKey: ["semantic-workspace-task", selectedTaskId],
-        });
-        void queryClient.invalidateQueries({
-          queryKey: ["semantic-workspace-tasks"],
+      onProgress: (event) => {
+        if (!current(event)) return;
+        setLiveFeed(previous => {
+          const events = previous.identity === identity ? previous.events : [];
+          return { identity, events: events.some(item => item.event_id === event.event_id) ? events : [...events, event] };
         });
       },
-      onDone: () => {
-        void queryClient.invalidateQueries({
-          queryKey: ["semantic-workspace-task", selectedTaskId],
+      onMessage: (message) => {
+        if (!current(message)) return;
+        setStreamFeedback(null);
+        setMessageFeed(previous => {
+          const saved = previous.identity === identity ? previous.messages : [];
+          return { identity, messages: saved.some(item => item.message_id === message.message_id) ? saved : [...saved, message] };
         });
-        void queryClient.invalidateQueries({
-          queryKey: ["semantic-workspace-tasks"],
-        });
-        void queryClient.invalidateQueries({
-          queryKey: ["semantic-workspace-storage"],
-        });
+        void queryClient.invalidateQueries({ queryKey: ["workspace-turns", user?.user_id, selectedTaskId] });
       },
-    });
-  }, [queryClient, selectedTaskId, task?.status]);
+      onStatus: (event) => {
+        if (!current(event)) return;
+        setStreamFeedback(previous => previous?.identity === identity && previous.text ? { identity, text: "连接已恢复" } : previous);
+        refresh();
+      },
+      onDone: (event) => {
+        if (!current(event)) return;
+        refresh();
+        void queryClient.invalidateQueries({ queryKey: ["workspace-turns", user?.user_id, selectedTaskId] });
+        void queryClient.invalidateQueries({ queryKey: ["semantic-workspace-storage"] });
+      },
+      onError: (error) => {
+        if (!current()) return;
+        setStreamFeedback({ identity, text: error instanceof ApiError && [401, 403, 404, 409, 429].includes(error.status)
+          ? "更新连接不可用，请重新读取任务。" : "连接中断，正在恢复已保存的记录。" });
+      },
+    }, viewingRevision, runId);
+  }, [queryClient, selectedTaskId, task?.status, subscriptionIdentity, viewingRevision, runId, user?.user_id, streamAttempt]);
 
 
 
@@ -1095,7 +1148,11 @@ export function SemanticWorkspacePage() {
                     </div>
                   ) : (
                     <>
-                      <div className="min-h-0 flex-1 overflow-y-auto">
+                      <div ref={conversationScroller} data-testid="workspace-conversation-scroll" className="min-h-0 flex-1 overflow-y-auto" onScroll={event => {
+                        const scroller = event.currentTarget;
+                        followLatest.current = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
+                        setAwayFromLatest(!followLatest.current);
+                      }}>
                         {["pausing", "paused"].includes(task.current_status ?? task.status) && (
                           <section className="mx-auto max-w-4xl border-b px-6 py-4 text-sm" aria-label="账号暂停恢复">
                             <p className="font-medium">{(task.current_status ?? task.status) === "pausing" ? "任务正在暂停，等待执行停止确认。" : "任务已因账号状态变化暂停，重新启用账号不会自动继续。"}</p>
@@ -1123,6 +1180,7 @@ export function SemanticWorkspacePage() {
                         )}
                         <TaskTimeline
                           task={task}
+                          connectionLabel={modelConnections.data?.items.find(connection => connection.connection_id === (task.agentic_runtime?.model_connection_id ?? task.model_connection_id))?.display_name}
                           liveEvents={liveEvents}
                           onAnswer={async (answer) => {
                             try {
@@ -1369,16 +1427,21 @@ export function SemanticWorkspacePage() {
                             )
                           }
                         />
-                        <section className="mb-5 space-y-4" aria-label="对话记录">
+                        <section className="mx-auto mb-5 max-w-4xl space-y-4 px-6" aria-label="对话记录">
                           {conversation.isLoading && <p role="status" className="text-sm text-muted-foreground">正在恢复对话…</p>}
                           {conversation.isError && <button type="button" className="rounded-lg border px-3 py-2 text-sm" onClick={() => void conversation.refetch()}>对话读取失败，重试</button>}
                           {conversation.data?.turns?.filter(turn => turn.revision <= (task.viewing_revision ?? task.current_revision ?? task.active_revision)).map(turn => {
-                            const response = conversation.data?.results?.find(item => item.turn_id === turn.turn_id);
+                            const response = conversation.data?.results?.find(item => item.turn_id === turn.turn_id && item.revision <= viewingRevision!);
+                            const answer = messages.find(message => message.turn_id === turn.turn_id)?.content ?? response?.answer;
                             return <article key={turn.turn_id} className="space-y-2 border-b pb-4 text-sm leading-7">
                               <p className="whitespace-pre-wrap font-medium">{turn.text}</p>
-                              {response && <><p>{response.acknowledgement}</p>{response.answer && <p className="whitespace-pre-wrap">{response.answer}</p>}</>}
+                              {response && <p className="text-muted-foreground">{response.acknowledgement}</p>}
+                              {answer && <div aria-label="Mangrove 回答"><Markdown safeResources>{answer}</Markdown></div>}
                             </article>;
                           })}
+                          {messages.filter(message => !conversation.data?.turns?.some(turn => turn.turn_id === message.turn_id)).map(message => (
+                            <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown></article>
+                          ))}
                         </section>
                         {task.status === "completed" && (
                           <p className="text-sm text-muted-foreground">正式结果已生成，可在文件侧栏核对并下载。</p>
@@ -1470,6 +1533,18 @@ export function SemanticWorkspacePage() {
                       </div>
                       <div className="shrink-0 border-t bg-background/95 px-6 py-3 backdrop-blur">
                         <div className="mx-auto max-w-4xl">
+                          <p role="status" aria-label="对话更新" aria-live="polite" aria-atomic="true" className="text-xs text-muted-foreground">
+                            {streamFeedback?.identity === subscriptionIdentity ? streamFeedback.text : messages.length ? `已收到 ${messages.length} 条完整回答` : ""}
+                          </p>
+                          {streamFeedback?.identity === subscriptionIdentity && streamFeedback.text !== "连接已恢复" && <button type="button" className="my-2 rounded-lg border px-3 py-2 text-xs" onClick={() => {
+                            void detail.refetch();
+                            setStreamAttempt(attempt => attempt + 1);
+                          }}>重新读取任务</button>}
+                          {awayFromLatest && <button type="button" className="mb-2 rounded-lg border px-3 py-2 text-xs focus-visible:ring-2 focus-visible:ring-ring" onClick={() => {
+                            followLatest.current = true;
+                            setAwayFromLatest(false);
+                            conversationScroller.current?.scrollTo({ top: conversationScroller.current.scrollHeight, behavior: "instant" });
+                          }}>回到最新</button>}
                           {task.viewing_revision !== task.current_revision && (
                             <button
                               type="button"
@@ -1480,7 +1555,7 @@ export function SemanticWorkspacePage() {
                             </button>
                           )}
                           <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                            <span>本任务模型：{task.model || "任务冻结配置"}</span>
+                            <span>本任务模型：{task.agentic_runtime?.model_connection_model || task.web_source?.runtime_binding.model || task.model || "任务冻结配置"}</span>
                             <button type="button" className="rounded-lg border px-3 py-2 hover:bg-muted" onClick={() => setSettingsOpen(true)}>模型设置</button>
                             <span>设置用于新任务，当前版本保持原模型。</span>
                           </div>

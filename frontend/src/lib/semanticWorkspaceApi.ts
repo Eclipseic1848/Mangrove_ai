@@ -2,6 +2,7 @@ import { fetchEventSource } from "@microsoft/fetch-event-source";
 import { api, downloadFile, authenticatedFetch, getAuthGeneration, revalidateStreamSession, ApiError } from "@/lib/api";
 import type {
   WorkspaceEvent,
+  WorkspaceMessage,
   WorkspaceGuidance,
   WorkspacePreview,
   WorkspaceStorage,
@@ -373,26 +374,32 @@ export function streamWorkspaceTask(
   taskId: string,
   handlers: {
     onProgress?: (event: WorkspaceEvent) => void;
+    onMessage?: (event: WorkspaceMessage) => void;
     onStatus?: (event: {
       task_id: string;
+      revision?: number;
+      run_id?: string | null;
       status: WorkspaceTask["status"];
       question: WorkspaceTask["question"];
       error: string | null;
       failure: WorkspaceTask["failure"];
     }) => void;
-    onDone?: (event: { status: WorkspaceTask["status"] }) => void;
+    onDone?: (event: { task_id?: string; revision?: number; run_id?: string | null; status: WorkspaceTask["status"] }) => void;
     onError?: (error: Error) => void;
   },
+  revision?: number,
+  runId?: string | null,
 ): () => void {
   const generation = getAuthGeneration();
   let stopped = false;
   let controller: AbortController;
   let lastEventId = "";
+  const seenMessages = new Map<string, string>();
   const connect = () => {
     if (stopped || generation !== getAuthGeneration()) return;
     const connection = new AbortController();
     controller = connection;
-    void fetchEventSource(`${BASE}/tasks/${taskId}/stream`, {
+    void fetchEventSource(`${BASE}/tasks/${encodeURIComponent(taskId)}/stream${revision === undefined ? "" : `?revision=${revision}`}`, {
       method: "GET",
       headers: lastEventId ? { "Last-Event-ID": lastEventId } : {},
       fetch: (path, init) => {
@@ -412,7 +419,14 @@ export function streamWorkspaceTask(
         if (generation !== getAuthGeneration()) { connection.abort(); return; }
         if (message.id) lastEventId = message.id;
         if (!message.data) return;
-        const payload = JSON.parse(message.data);
+        let payload;
+        try { payload = JSON.parse(message.data); }
+        catch { handlers.onError?.(new Error("收到无法读取的更新，正在恢复任务记录")); return; }
+        if (!payload || typeof payload !== "object") return;
+        if (["progress", "message", "status", "done"].includes(message.event) && revision !== undefined) {
+          if (payload.revision !== revision || (payload.task_id && payload.task_id !== taskId)
+            || (runId !== undefined && payload.run_id !== runId && !(["message", "progress"].includes(message.event) && payload.run_id === null))) return;
+        }
         if (message.event === "auth-expired") {
           connection.abort();
           // 只复核会话并重新订阅 GET；不能把连接过期转换为任务取消或重复执行。
@@ -422,6 +436,24 @@ export function streamWorkspaceTask(
             if (!stopped) handlers.onError?.(error as Error);
           });
         }
+        else if (message.event === "message") {
+          // 只接受公开且完整的持久回答；不能把未知载荷当正文渲染。
+          if (typeof payload.message_id !== "string" || !payload.message_id
+            || payload.version !== 1 || payload.task_id !== taskId
+            || !Number.isSafeInteger(payload.revision) || payload.revision < 1
+            || (revision !== undefined && payload.revision !== revision)
+            || !(payload.run_id === null || typeof payload.run_id === "string")
+            || typeof payload.turn_id !== "string" || typeof payload.created_at !== "string"
+            || payload.role !== "assistant" || payload.kind !== "answer"
+            || payload.status !== "completed" || typeof payload.content !== "string") return;
+          const previous = seenMessages.get(payload.message_id);
+          if (previous !== undefined) {
+            if (previous !== payload.content) handlers.onError?.(new Error("回答记录版本冲突，请重新读取任务"));
+            return;
+          }
+          seenMessages.set(payload.message_id, payload.content);
+          handlers.onMessage?.(payload);
+        }
         else if (message.event === "progress") handlers.onProgress?.(payload);
         else if (message.event === "status") handlers.onStatus?.(payload);
         else if (message.event === "done") {
@@ -430,9 +462,13 @@ export function streamWorkspaceTask(
           handlers.onDone?.(payload);
         }
       },
+      onclose() {
+        // 没有 done 的断流只恢复只读订阅，不能误称任务完成。
+        if (!stopped && !connection.signal.aborted) throw new Error("更新连接中断");
+      },
       onerror(error) {
         if (connection.signal.aborted || stopped) throw error;
-        if (error instanceof ApiError && (error.status === 401 || error.status === 429)) {
+        if (error instanceof ApiError && [401, 403, 404, 409, 429].includes(error.status)) {
           connection.abort();
           handlers.onError?.(error);
           throw error;

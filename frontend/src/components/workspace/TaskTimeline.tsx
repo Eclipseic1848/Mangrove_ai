@@ -499,6 +499,7 @@ export function TaskTimeline({
   onRefreshSource,
   onGapAction,
   onRevisionChange,
+  connectionLabel,
 }: {
   task: WorkspaceTask;
   liveEvents: WorkspaceEvent[];
@@ -511,6 +512,7 @@ export function TaskTimeline({
     action: "accept_gap" | "reject_gap" | "supplement_source" | "refresh_source",
   ) => Promise<void>;
   onRevisionChange: (revision: number) => void;
+  connectionLabel?: string;
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [progressOpen, setProgressOpen] = useState(false);
@@ -557,7 +559,7 @@ export function TaskTimeline({
   useEffect(() => {
     setProgressOpen(false);
     setEventsOpen(true);
-  }, [task.task_id, task.status, task.viewing_revision]);
+  }, [task.task_id, task.viewing_revision, task.work_session?.run_id]);
 
   const workSession = task.work_session;
   const ownerActionIndex = workSession?.entries.reduce(
@@ -584,9 +586,11 @@ export function TaskTimeline({
   const pendingOwnerAction = ownerActionIndex >= 0 && !ownerActionResolved
     ? workSession?.entries[ownerActionIndex]
     : undefined;
-  const usageLabel = workSession
-    ? `${workSession.usage.unknown_call_count > 0 ? "至少 " : ""}${workSession.usage.total_tokens.toLocaleString("zh-CN")} Tokens · ${workSession.usage.call_count} 次调用${workSession.usage.unknown_call_count > 0 ? ` · ${workSession.usage.unknown_call_count} 次未知` : ""}`
-    : "0 Tokens · 0 次调用";
+  const usageLabel = !workSession ? "尚无执行用量记录"
+    : workSession.usage.unknown_call_count > 0 && workSession.usage.unknown_call_count >= workSession.usage.call_count
+      ? `总用量未知 · ${workSession.usage.unknown_call_count} 次调用未报告`
+      : `${workSession.usage.unknown_call_count > 0 ? "已知 " : ""}${workSession.usage.total_tokens.toLocaleString("zh-CN")} Tokens · ${workSession.usage.call_count} 次调用${workSession.usage.unknown_call_count > 0 ? ` · 另 ${workSession.usage.unknown_call_count} 次未知` : ""}`;
+  const tokens = (value: number | null | undefined) => value == null ? "未知" : value.toLocaleString("zh-CN");
   const detailEventCount = workSession?.entries.length
     || task.progress?.events.length
     || 0;
@@ -642,7 +646,9 @@ export function TaskTimeline({
                       <AlertDialog.Action
                         onClick={() => {
                           setRefreshingSource(true);
-                          void onRefreshSource(true).finally(() => setRefreshingSource(false));
+                          void onRefreshSource(true).catch(() => {
+                            // 父级已展示失败原因；事件入口接住拒绝，避免未处理异常。
+                          }).finally(() => setRefreshingSource(false));
                         }}
                         className="rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground"
                       >
@@ -658,7 +664,9 @@ export function TaskTimeline({
                 disabled={refreshingSource}
                 onClick={() => {
                   setRefreshingSource(true);
-                  void onRefreshSource(false).finally(() => setRefreshingSource(false));
+                  void onRefreshSource(false).catch(() => {
+                    // 父级已展示失败原因；事件入口接住拒绝，避免未处理异常。
+                  }).finally(() => setRefreshingSource(false));
                 }}
                 className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -685,7 +693,7 @@ export function TaskTimeline({
                     ? "bg-destructive/10 text-destructive"
                     : task.status === "needs_input"
                       ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
-                      : "bg-primary/10 text-primary",
+                      : "bg-primary/10 text-accent-foreground",
               )}
             >
               {workspaceStatusLabel(task.status)}
@@ -1043,15 +1051,8 @@ export function TaskTimeline({
           >
             <h2 className="text-sm font-semibold">工作记录</h2>
             <span className="flex flex-wrap items-center justify-end gap-x-2 gap-y-1 text-xs text-muted-foreground">
-              <span>{workSession?.ended_at ? "已完成" : "进行中"}</span>
-              {workSession?.started_at && <span>开始 {formatTime(workSession.started_at)}</span>}
-              {workSession?.ended_at && <span>完成 {formatTime(workSession.ended_at)}</span>}
-              <span>工作 {formatElapsed(workSession?.work_duration_ms || 0)}</span>
-              <span>等待 {formatElapsed(workSession?.waiting_duration_ms || 0)}</span>
-              <span>{workSession?.action_count || 0} 个行动</span>
-              <span>{workSession?.tool_call_count || 0} 次工具</span>
-              <span>{usageLabel}</span>
-              <span>已处理 {workSession?.handled_retry_count || 0} 次重试</span>
+              <span>{workspaceStatusLabel(task.status)}</span>
+              {workSession && <span>{workSession.action_count} 个行动</span>}
               <ChevronDown
                 className={cn(
                   "h-4 w-4 transition-transform motion-reduce:transition-none",
@@ -1061,6 +1062,45 @@ export function TaskTimeline({
             </span>
           </button>
         </Collapsible.Trigger>
+        <Dialog.Root key={`${task.task_id}:${task.viewing_revision}:${workSession?.run_id}`}>
+          <Dialog.Trigger asChild>
+            <button type="button" className="mb-4 rounded-lg border px-3 py-2 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">查看本次用量</button>
+          </Dialog.Trigger>
+          <Dialog.Portal>
+            <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
+            <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[85dvh] w-[min(92vw,600px)] -translate-x-1/2 -translate-y-1/2 flex-col rounded-2xl border bg-background p-5 shadow-2xl">
+              <div className="flex items-center justify-between gap-3">
+                <Dialog.Title className="font-semibold">本次执行用量</Dialog.Title>
+                <Dialog.Close aria-label="关闭用量" className="rounded-lg p-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"><X className="h-4 w-4" /></Dialog.Close>
+              </div>
+              <Dialog.Description className="mt-2 text-xs text-muted-foreground">当前查看版本的执行记录。未报告的用量显示未知。</Dialog.Description>
+              <div tabIndex={0} role="region" aria-label="执行用量详情" className="mt-4 min-h-0 space-y-4 overflow-y-auto text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <p>{usageLabel}</p>
+                <p>模型：{task.agentic_runtime?.model_connection_model || task.web_source?.runtime_binding.model || task.model || "型号未记录"}<br />连接：{connectionLabel || (task.model_connection_id ? "原连接不可用" : "任务冻结配置")}</p>
+                {workSession && <>
+                  <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2">
+                    <dt>状态</dt><dd>{workspaceStatusLabel(task.status)}</dd>
+                    <dt>开始时间</dt><dd>{workSession.started_at ? new Date(workSession.started_at).toLocaleString("zh-CN") : "时间未记录"}</dd>
+                    <dt>结束时间</dt><dd>{workSession.ended_at ? new Date(workSession.ended_at).toLocaleString("zh-CN") : ["completed", "cancelled", "failed", "candidate_ready"].includes(task.status) ? "时间未记录" : "尚未结束"}</dd>
+                    <dt>工作耗时</dt><dd>{workSession.started_at ? formatElapsed(workSession.work_duration_ms) : "时间未记录"}</dd>
+                    <dt>等待耗时</dt><dd>{workSession.started_at ? formatElapsed(workSession.waiting_duration_ms) : "时间未记录"}</dd>
+                    <dt>行动记录</dt><dd>{workSession.action_count} 个行动 · {workSession.tool_call_count} 次工具 · 已处理 {workSession.handled_retry_count} 次重试</dd>
+                    <dt>输入 / 输出</dt><dd>{tokens(workSession.usage.input_tokens)} / {tokens(workSession.usage.output_tokens)}</dd>
+                    <dt>缓存 Token</dt><dd>{tokens(workSession.usage.cache_tokens)}</dd>
+                  </dl>
+                  {!!workSession.provider_usage?.length && <ol className="space-y-3 border-t pt-3" aria-label="模型调用明细">
+                    {workSession.provider_usage.map((usage, index) => <li key={index} className="break-words text-xs leading-6">
+                      <p className="font-medium">{usage.model} · {usage.purpose}</p>
+                      <p>{new Date(usage.created_at).toLocaleString("zh-CN")} · {usage.request_count} 次请求</p>
+                      <p>输入 {tokens(usage.input_tokens)} · 输出 {tokens(usage.output_tokens)} · 缓存 {tokens(usage.cache_tokens)} · 总计 {tokens(usage.total_tokens)}</p>
+                    </li>)}
+                  </ol>}
+                </>}
+                <p className="text-xs text-muted-foreground">参考费用未提供</p>
+              </div>
+            </Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
         <Collapsible.Content>
           {events.length ? (
             milestones.map((milestone, index) => (
@@ -1092,24 +1132,6 @@ export function TaskTimeline({
                 />
               </Collapsible.Trigger>
               <Collapsible.Content>
-                {(workSession?.provider_usage?.length || 0) > 0 && (
-                  <div className="mb-3 border-b pb-3 text-xs leading-5">
-                    <p className="font-medium">模型调用</p>
-                    {workSession?.provider_usage?.map((usage, index) => (
-                      <p
-                        key={`${usage.run_id}:${usage.purpose}:${index}`}
-                        className="mt-1 text-muted-foreground"
-                      >
-                        {usage.model} · {usage.purpose} · {usage.total_tokens === null
-                          ? "Token 未知"
-                          : `${usage.total_tokens.toLocaleString("zh-CN")} Tokens`}
-                        {usage.cache_tokens === null
-                          ? " · 缓存用量未知"
-                          : ` · 缓存 ${usage.cache_tokens.toLocaleString("zh-CN")}`}
-                      </p>
-                    ))}
-                  </div>
-                )}
                 {workSession?.entries.length ? (
                   <ol className="mb-3 space-y-2 border-b pb-3">
                     {workSession.entries.map((entry) => (

@@ -33,6 +33,8 @@ export interface WorkspaceQuestion {
 }
 
 export interface WorkspaceEvent {
+  revision?: number;
+  run_id?: string | null;
   event_id: string;
   sequence: number;
   stage: string;
@@ -84,8 +86,8 @@ export interface WorkSessionView {
   tool_call_count: number;
   handled_retry_count: number;
   usage: {
-    input_tokens: number;
-    output_tokens: number;
+    input_tokens: number | null;
+    output_tokens: number | null;
     cache_tokens: number | null;
     total_tokens: number;
     call_count: number;
@@ -285,6 +287,8 @@ export interface LegacyRebaselineConfirmation {
 }
 
 export interface AgenticRuntimeInfo {
+  model_connection_id?: string | null;
+  model_connection_model?: string | null;
   runtime_version: "legacy" | "pi";
   permission_profile: "standard" | "extended" | "host_dev";
   status: string | null;
@@ -353,7 +357,22 @@ export interface AgenticRuntimeInfo {
   awaiting_publication?: boolean;
 }
 
+export interface WorkspaceMessage {
+  message_id: string;
+  version: 1;
+  task_id: string;
+  revision: number;
+  run_id: string | null;
+  turn_id: string;
+  role: "assistant";
+  kind: "answer";
+  content: string;
+  status: "completed";
+  created_at: string;
+}
+
 export interface WorkspaceTask {
+  messages?: WorkspaceMessage[];
   account_resume?: { generation: number; strategy: "waiting" | "unstarted" | "new_revision" } | null;
   task_id: string;
   title: string;

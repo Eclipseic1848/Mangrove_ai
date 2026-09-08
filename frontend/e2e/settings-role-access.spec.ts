@@ -514,14 +514,14 @@ test("普通用户可创建并区分同一 Provider 的多套命名连接", asyn
   await page.getByLabel("连接名称").fill("DeepSeek 日常");
   await page.getByLabel("API Key").fill("sk-personal-primary-1111");
   await page.getByRole("button", { name: "测试并保存所选模型" }).click();
-  await expect(page.getByText("DeepSeek 日常")).toBeVisible();
+  await expect(page.locator("#model-connection-list").getByText("DeepSeek 日常", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "添加个人连接" }).click();
   await page.getByLabel("连接名称").fill("DeepSeek 备用");
   await page.getByLabel("API Key").fill("sk-personal-backup-2222");
   await page.getByRole("button", { name: "测试并保存所选模型" }).click();
 
-  await expect(page.getByText("DeepSeek 日常")).toBeVisible();
+  await expect(page.locator("#model-connection-list").getByText("DeepSeek 日常", { exact: true })).toBeVisible();
   await expect(page.locator("#model-connection-list").getByText("DeepSeek 备用", { exact: true })).toBeVisible();
   await expect(page.getByText("Key •••• 1111")).toBeVisible();
   await expect(page.getByText("Key •••• 2222")).toBeVisible();

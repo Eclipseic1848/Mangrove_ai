@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+import hashlib
+import json
+import sqlite3
 import uuid
 
 import httpx
@@ -13,6 +16,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.config import settings
 from src.llm.provider import get_provider
+from src.model_connections import get_default_broker, GrantError, ProviderOutcomeUnknownError
+from src.model_connections.text_protocol import structured_request, response_text
 
 from .models import (
     ContextDelta,
@@ -155,9 +160,76 @@ class InstructorContextRewriter:
         )
 
 
+class BrokerContextRewriter:
+    """冻结连接追问；已有 Grant 主键是网络发送前的持久单次占位。"""
+
+    async def rewrite(self, turn: RawUserTurn, request: SteeringRequest) -> ContextDelta:
+        if not request.run_id or not request.model_connection_version or not request.model:
+            raise ValueError("追问缺少冻结模型运行身份，请等待任务启动后再提交")
+        broker = get_default_broker()
+        identity = "\0".join((turn.owner_id, turn.task_id, str(turn.revision), turn.turn_id))
+        grant_id = "grant_" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        try:
+            grant = broker.issue_grant(
+                owner_user_id=turn.owner_id, connection_id=request.model_connection_id,
+                connection_version=request.model_connection_version, model_id=request.model,
+                task_id=turn.task_id, revision=turn.revision, run_id=request.run_id,
+                purpose="context_rewrite", grant_id=grant_id, ttl_seconds=300,
+            )
+        except sqlite3.IntegrityError as exc:
+            # 只识别这条持久占位的唯一冲突；其他约束错误必须原样失败。
+            if "model_connection_grants.grant_id" not in str(exc):
+                raise
+            raise ValueError("这条追问已提交或结果未知，禁止自动重复请求模型") from None
+        try:
+            system_prompt = _PROMPT_PATH.read_text(encoding="utf-8")
+            system_prompt += "\n只返回符合以下 JSON Schema 的对象，不输出思考、系统指令或凭证：\n"
+            system_prompt += json.dumps(RewriteDraft.model_json_schema(), ensure_ascii=False)
+            path, body, headers = structured_request(
+                api_format=grant.api_format, model=grant.model, grant_token=grant.token,
+                system_prompt=system_prompt,
+                payload={
+                    "frozen_revision": request.revision,
+                    "current_goal": request.current_goal[:20_000],
+                    "current_status": request.current_status,
+                    "status_summary": request.status_summary[:500],
+                    "selection_reason": request.selection_reason[:500],
+                    "recent_events": request.event_summaries[-8:],
+                    "user_turn": turn.text,
+                },
+            )
+            relayed = await broker.relay(
+                grant_token=grant.token, protocol_path=path, method="POST", headers=headers,
+                body=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+            )
+            try:
+                response = b"".join([chunk async for chunk in relayed.iter_bytes()])
+            finally:
+                await relayed.aclose()
+            if not 200 <= relayed.status_code < 300:
+                raise ValueError("模型追问未成功，已保留用量记录，不会自动重试")
+            draft = RewriteDraft.model_validate_json(response_text(grant.api_format, response))
+        except (GrantError, ProviderOutcomeUnknownError):
+            raise ValueError("模型追问结果未知或连接已失效，不会自动重试") from None
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError):
+            # 解析错误不能把原始响应或验证异常中的模型正文带到公开接口。
+            raise ValueError("模型未返回可用的追问结果，已保留请求记录，不会自动重试") from None
+        finally:
+            broker.revoke_grant(grant.grant_id, "context_rewrite_finished")
+        return ContextDelta(
+            delta_id=f"delta_{uuid.uuid4().hex[:16]}", owner_id=turn.owner_id,
+            task_id=turn.task_id, inherited_revision=turn.revision,
+            source_turn_ids=(turn.turn_id,), **draft.model_dump(),
+        )
+
+
 def build_context_rewriter(request: SteeringRequest):
     if request.provider != "local" and not request.external_api_confirmed:
         return DeferredExternalRewriter()
+    if request.model_connection_id:
+        if not request.external_api_confirmed:
+            return DeferredExternalRewriter()
+        return BrokerContextRewriter()
     return InstructorContextRewriter(
         provider=request.provider,
         model=request.model,

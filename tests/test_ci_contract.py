@@ -258,6 +258,8 @@ def test_heavy_ci_is_manual_only_and_never_receives_secrets() -> None:
     # 只允许已审计的配置测试及强制 MockTransport 的撤权回归，仍拒绝真实 Provider 接线。
     offline = workflow.lower().replace("tests/test_llm_provider.py", "")
     offline = offline.replace("tests/test_account_execution_providers.py", "")
+    # 候选重验只用临时库和 Verifier/Broker 替身，真实 Broker 仅查询合成账本。
+    offline = offline.replace("tests/test_candidate_reverification_provider.py", "")
     assert "provider" not in offline
     assert "if: always()" in workflow
 
@@ -281,11 +283,16 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     assert "commits =" not in config
     assert "tests/.*" not in config
     assert "evals/.*" not in config
-    assert len(ignored) == 10
+    assert len(ignored) == 11
     assert (
         "8f23acbdcb69890cc94c733bb47baa3a75d5de22:"
         "tests/test_source_account_generation.py:generic-api-key:19"
     ) in ignored
+    # 新例外必须精确到已审计提交、测试文件、规则与行号，且只出现一次。
+    assert ignored.count(
+        "6268599f307d327e0015f8e78df1606b4b565ff8:"
+        "tests/test_workspace_conversation_stream.py:generic-api-key:121"
+    ) == 1
     assert all("*" not in fingerprint for fingerprint in ignored)
     assert all(fingerprint.count(":") >= 3 for fingerprint in ignored)
 
