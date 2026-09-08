@@ -1531,8 +1531,8 @@ def test_qwen_preset_uses_shared_china_responses_route_and_frozen_model(tmp_path
         seen,
         "https://dashscope.aliyuncs.com/compatible-mode/v1/responses",
     )
-    assert '"model":"qwen3.7-plus-2026-05-26"' in str(seen["json"])
-    assert response.json()["model"] == "qwen3.7-plus-2026-05-26"
+    assert '"model":"qwen3.8-flash"' in str(seen["json"])
+    assert response.json()["model"] == "qwen3.8-flash"
     assert response.json()["api_format"] == "openai_responses"
 
 
@@ -1798,7 +1798,7 @@ def test_broker_relay_uses_scoped_grant_and_records_native_stream_usage(
             "qwen",
             "responses",
             {
-                "model": "qwen3.7-plus-2026-05-26",
+                "model": "qwen3.8-flash",
                 "input": "hello",
                 "stream": False,
             },

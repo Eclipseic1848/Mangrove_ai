@@ -50,6 +50,7 @@ for (const id of ids) {
     expect(calls).toHaveLength(1);
     expect(calls[0]).toMatchObject({ model: `${id}-selected`, api_key: "fictional-key" });
     expect(calls[0]).not.toHaveProperty("verify_all", true);
+    await expect(page.getByText(/所选模型接口已连通/)).toContainText("不代表完整文本生成或工具任务已验证");
     await page.getByRole("button", { name: "用于新任务", exact: true }).click();
     expect(preference).toEqual({ connection_id: "new-connection", model_id: `${id}-selected` });
     expect(errors).toEqual([]);

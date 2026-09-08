@@ -779,7 +779,7 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
       </div>}
       {savedConnection && <div role="status" className="space-y-2 rounded-lg border border-primary/30 p-4 text-sm">
         <p>已保存：{savedConnection.display_name} · {savedConnection.default_model || savedConnection.model}</p>
-        <p>所选模型已通过文本连接测试；工具任务能力需要另外验证。其他目录模型未自动启用。</p>
+        <p>所选模型接口已连通；极小测试可能在生成正文前耗尽输出额度，不代表完整文本生成或工具任务已验证。其他目录模型未自动启用。</p>
         <Button disabled={!!modelAction} onClick={() => { const model = savedConnection.models?.find((item) => item.is_default); if (model) void setUserDefault(savedConnection, model); }}>用于新任务</Button>
       </div>}
 
@@ -1034,7 +1034,7 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
                 <div className="mt-1 break-all font-medium">{selectedModel || "—"}</div>
               </div>
               <p className="text-xs leading-5 text-muted-foreground">
-                仅向所选模型发送一次简短测试，可能按服务商标准计费；不发送任务正文或附件。连接测试不代表工具任务资格。
+                仅向所选模型发送一次简短测试，可能按服务商标准计费；不发送任务正文或附件。这里只验证接口连通，不代表完整文本生成或工具任务资格。
               </p>
             </CardContent>
           </Card>
@@ -1470,7 +1470,7 @@ export function ModelConnectionsPanel({ isManager }: { isManager: boolean }) {
               </p>
             </div>
             <p className="text-xs leading-5 text-amber-700 dark:text-amber-300 md:col-span-2">
-              仅连接上方明确指定的地址。保存时发送所选模型的简短文本测试；高级多模型会逐项测试，可能产生用量。通过文本测试不代表工具任务资格。
+              仅连接上方明确指定的地址。保存时发送所选模型的简短请求；高级多模型会逐项测试，可能产生用量。这里只验证接口连通，完整文本生成和工具能力需另外验证。
             </p>
             <div className="flex flex-wrap items-center gap-2 md:col-span-2">
               <Button

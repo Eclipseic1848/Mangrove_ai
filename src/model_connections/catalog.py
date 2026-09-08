@@ -139,19 +139,19 @@ _PRESETS = (
     ),
     ProviderPreset(
         preset_id="qwen",
-        version=_CATALOG_VERSION,
+        version="2026-09-07.2",
         display_name="阿里百炼 Qwen",
         description="中国站默认入口，兼顾中文、工具调用和成本",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         api_format="openai_responses",
-        recommended_model="qwen3.7-plus-2026-05-26",
+        recommended_model="qwen3.8-flash",
         model_catalog=(
-            _model("qwen3.7-plus-2026-05-26", "Qwen 3.7 Plus", "balanced"),
+            _model("qwen3.8-27b", "Qwen 3.8 27B", "balanced"),
             _model("qwen3.8-max-0902", "Qwen 3.8 Max（0902）", "quality"),
             _model("qwen3.8-flash", "Qwen 3.8 Flash", "efficiency"),
         ),
         help_url="https://help.aliyun.com/zh/model-studio/first-api-call-to-qwen",
-        source_url="https://help.aliyun.com/zh/model-studio/text-generation-model/",
+        source_url="https://help.aliyun.com/zh/model-studio/compatibility-with-openai-responses-api",
         key_url="https://help.aliyun.com/zh/model-studio/get-api-key",
         region_note="按量付费 API：密钥、地域与业务空间须对应。Token Plan / Coding Plan 不等于此入口。不同地域的模型权限以实测为准。",
         regions=(

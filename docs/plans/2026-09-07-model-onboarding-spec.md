@@ -27,14 +27,14 @@
 
 不下载、部署或训练模型，不安装运行时，不扫描设备，不改防火墙，不操作生产秘密与迁移。localhost 指 Mangrove 后端的电脑或容器；跨设备必须填写后端可达且获准的地址。无鉴权私网模型允许 Key 为空，公网仍要求 HTTPS 与 Key。架构决策见 [ADR-0041](../adr/0041-selected-model-onboarding-and-local-discovery.md)。
 
-## 官方目录核验：2026-09-07，版本 2026-09-07.1
+## 官方目录核验：2026-09-07，版本 2026-09-07.1（百炼修订为 2026-09-07.2）
 
 “当前”指官方当前目录/价格表仍列出，不保证任意地域和账户权限。日期未由本轮材料明确给出时不猜测；已有日期写在型号或说明中。推荐由平台根据官方定位给出用途起点，未经用户任务评测，不保证性能或最低费用。
 
 | 服务商 | 精确 API 型号 | 资料与状态 | 使用协议/适用范围 |
 | --- | --- | --- | --- |
 | DeepSeek | `deepseek-v4-flash`、`deepseek-v4-pro`、`deepseek-v4-flash-vision-exp` | [官方文档](https://api-docs.deepseek.com/)；Flash 0731、Pro 0813；Vision 明确实验版 | Chat Completions；官方 API 账户 |
-| 阿里百炼 | `qwen3.7-plus-2026-05-26`、`qwen3.8-max-0902`、`qwen3.8-flash` | [官方文本模型](https://help.aliyun.com/zh/model-studio/text-generation-model/)；三个独立模型，不用别名凑数 | Responses；[按量地域与业务空间地址](https://help.aliyun.com/zh/model-studio/base-url)，北京/新加坡；不混用 Token Plan / Coding Plan |
+| 阿里百炼 | `qwen3.8-27b`、`qwen3.8-max-0902`、`qwen3.8-flash` | [官方 Responses 模型目录](https://help.aliyun.com/zh/model-studio/compatibility-with-openai-responses-api)；三个独立模型，不用别名凑数 | Responses；[按量地域与业务空间地址](https://help.aliyun.com/zh/model-studio/base-url)，北京/新加坡；不混用 Token Plan / Coding Plan |
 | OpenAI | `gpt-6-astra`、`gpt-5.6-terra`、`gpt-5.6-sol`、`gpt-5.6-luna` | [官方模型目录](https://developers.openai.com/api/docs/models/all)；当前目录型号 | 原生 Responses；API 账户与聊天订阅分开 |
 | Anthropic | `claude-fable-5-1`、`claude-sonnet-5`、`claude-opus-5`、`claude-haiku-4-5-20251001` | [官方模型概览](https://platform.claude.com/docs/en/models/overview)；当前目录型号 | 原生 Messages；Claude API 控制台 |
 | Google Gemini | `gemini-3.8-flash`、`gemini-3.7-flash`、`gemini-3.6-flash`、`gemini-3.5-flash-lite` | [官方模型目录](https://ai.google.dev/gemini-api/docs/models)；稳定型号 | generateContent；AI Studio Gemini API，非 Vertex 自动切换 |

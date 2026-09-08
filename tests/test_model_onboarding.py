@@ -188,3 +188,10 @@ def test_failure_guidance_never_exposes_provider_body_or_retries(setup_connectio
     assert hint in result.json()["detail"]
     assert "SENSITIVE" not in result.text
     assert len(calls) == 1
+
+
+def test_qwen_catalog_uses_three_distinct_current_generation_models():
+    preset = PRESETS_BY_ID["qwen"]
+    assert set(preset.models) == {"qwen3.8-max-0902", "qwen3.8-flash", "qwen3.8-27b"}
+    assert preset.recommended_model == "qwen3.8-flash"
+    assert preset.version == "2026-09-07.2"
