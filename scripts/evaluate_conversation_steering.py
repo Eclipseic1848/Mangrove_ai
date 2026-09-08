@@ -182,10 +182,12 @@ async def run_progressive(args: argparse.Namespace) -> int:
             local = ipaddress.ip_address(url.hostname or "").is_private
         except ValueError:
             local = False
-    if provider_name == "deepseek":
+    if provider_name in {"deepseek", "qwen"}:
         # 云端只允许本轮明确选定的官方端点，不能把凭据发送到任意兼容地址。
-        if args.base_url.rstrip("/") != "https://api.deepseek.com":
-            raise ValueError("DeepSeek评测仅允许明确的官方HTTPS端点")
+        endpoint = {"deepseek": "https://api.deepseek.com",
+                    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1"}[provider_name]
+        if args.base_url.rstrip("/") != endpoint:
+            raise ValueError("云端评测仅允许明确的官方HTTPS端点")
     elif (provider_name != "local" or not local or url.scheme not in {"http", "https"}
             or url.username or url.password or url.query or url.fragment or url.path.rstrip("/") != "/v1"):
         raise ValueError("须提供明确本地OpenAI兼容/v1端点，不接受凭据或查询串")
@@ -337,7 +339,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("legacy", "progressive"), default="legacy")
     parser.add_argument("--base-url")
-    parser.add_argument("--provider", choices=("local", "deepseek"), default="local")
+    parser.add_argument("--provider", choices=("local", "deepseek", "qwen"), default="local")
     parser.add_argument("--model")
     parser.add_argument("--timeout-seconds", type=int, default=90)
     parser.add_argument("--execute", action="store_true")

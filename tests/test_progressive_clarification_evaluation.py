@@ -24,23 +24,27 @@ def test_evaluation_rejects_unbounded_timeout_before_journal(tmp_path, timeout):
     assert not args.output.exists()
 
 
-@pytest.mark.parametrize("endpoint,allowed", [
-    ("https://api.deepseek.com", True),
-    ("http://api.deepseek.com", False),
-    ("https://api.deepseek.com.evil.test", False),
-    ("https://api.deepseek.com/other", False),
+@pytest.mark.parametrize("provider_name,official,model", [
+    ("deepseek", "https://api.deepseek.com", "deepseek-v4-pro"),
+    ("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3.8-max-0902"),
 ])
-def test_explicit_cloud_preparation_is_exact_and_never_sends(tmp_path, endpoint, allowed):
+@pytest.mark.parametrize("variant", ["exact", "http", "host", "path"])
+def test_explicit_cloud_preparation_is_exact_and_never_sends(tmp_path, variant, provider_name, official, model):
+    from urllib.parse import urlsplit
+    endpoint = {"exact": official, "http": official.replace("https:", "http:"),
+                "host": official.replace(urlsplit(official).netloc, urlsplit(official).netloc + ".evil.test"),
+                "path": official + "/other"}[variant]
+    allowed = variant == "exact"
     args = argparse.Namespace(
         fixture=Path("tests/fixtures/conversation_steering/progressive_clarification_cases.json"),
-        rounds=1, concurrency=1, provider="deepseek", base_url=endpoint, model="deepseek-v4-pro",
+        rounds=1, concurrency=1, provider=provider_name, base_url=endpoint, model=model,
         output=tmp_path / "cloud.json", execute=False,
     )
     with patch("src.conversation_steering.rewriter.AsyncOpenAI", side_effect=AssertionError("准备不发送")):
         if allowed:
             assert asyncio.run(run_progressive(args)) == 0
             report = json.loads(args.output.read_text(encoding="utf-8"))
-            assert report["provider"] == "deepseek" and report["requests_sent"] == 0
+            assert report["provider"] == provider_name and report["requests_sent"] == 0
             assert report["endpoint"] == endpoint + "/chat/completions"
         else:
             with pytest.raises(ValueError):
@@ -110,22 +114,22 @@ def test_explicit_connection_does_not_resolve_global_profiles():
 
 
 @pytest.mark.parametrize("response_mode", ["complete", "timeout", "unavailable", "invalid_json"])
-@pytest.mark.parametrize("provider_name", ["local", "deepseek"])
+@pytest.mark.parametrize("provider_name", ["local", "deepseek", "qwen"])
 def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_expected_answers(tmp_path, monkeypatch, response_mode, provider_name):
     monkeypatch.setenv("MANGROVE_EVAL_API_KEY", "synthetic-test-key")
     args = argparse.Namespace(
         fixture=Path("tests/fixtures/conversation_steering/progressive_clarification_cases.json"),
         rounds=1, concurrency=1, provider=provider_name,
         timeout_seconds=300,
-        base_url="https://api.deepseek.com" if provider_name == "deepseek" else "http://127.0.0.1:9/v1",
-        model="deepseek-v4-pro" if provider_name == "deepseek" else "synthetic-local",
+        base_url={"deepseek": "https://api.deepseek.com", "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1", "local": "http://127.0.0.1:9/v1"}[provider_name],
+        model={"deepseek": "deepseek-v4-pro", "qwen": "qwen3.8-max-0902", "local": "synthetic-local"}[provider_name],
         output=tmp_path / "transport.json", execute=True,
     )
     requests = []
 
     def respond(request):
         body = json.loads(request.content)
-        assert body.get("max_tokens") == (384000 if provider_name == "deepseek" else None)
+        assert body.get("max_tokens") == {"deepseek": 384000, "qwen": 131072, "local": None}[provider_name]
         requests.append(body)
         if response_mode == "timeout":
             raise httpx.ReadTimeout("合成响应未知", request=request)
