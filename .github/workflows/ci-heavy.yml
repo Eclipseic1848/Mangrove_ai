@@ -19,6 +19,7 @@ on:
           - telemetry-control
           - external-readonly
           - model-onboarding
+          - unified-workspace
           - g1-frozen-contracts
           - docker-build
           - dependency-groups
@@ -32,7 +33,7 @@ defaults:
 
 jobs:
   python-heavy:
-    if: inputs.gate == 'full-regression' || inputs.gate == 'account-execution' || inputs.gate == 'g1-frozen-contracts' || inputs.gate == 'entry-auth' || inputs.gate == 'platform-sessions' || inputs.gate == 'cancellation' || inputs.gate == 'database-pagination' || inputs.gate == 'scheduler-owner' || inputs.gate == 'telemetry-control' || inputs.gate == 'external-readonly' || inputs.gate == 'model-onboarding'
+    if: inputs.gate == 'full-regression' || inputs.gate == 'account-execution' || inputs.gate == 'g1-frozen-contracts' || inputs.gate == 'entry-auth' || inputs.gate == 'platform-sessions' || inputs.gate == 'cancellation' || inputs.gate == 'database-pagination' || inputs.gate == 'scheduler-owner' || inputs.gate == 'telemetry-control' || inputs.gate == 'external-readonly' || inputs.gate == 'model-onboarding' || inputs.gate == 'unified-workspace'
     runs-on: ubuntu-latest
     timeout-minutes: 180
     env:
@@ -86,6 +87,9 @@ jobs:
               tests/test_data_task_api.py tests/test_source_acquisition_api.py tests/test_scheduler_owner.py \
               scripts/test_scheduler_api.py \
               --randomly-seed=0 --timeout=120 --junitxml=.artifacts/heavy/platform-sessions.xml
+          elif [[ "${{ inputs.gate }}" == "unified-workspace" ]]; then
+            python -m pytest -q tests/test_semantic_workspace_api.py \
+              --randomly-seed=0 --timeout=120 --junitxml=.artifacts/heavy/unified-workspace.xml
           elif [[ "${{ inputs.gate }}" == "model-onboarding" ]]; then
             python -m pytest -q tests/test_model_onboarding.py tests/test_model_connections_api.py \
               tests/test_http_security.py tests/test_runtime_config_secret_refs.py \
@@ -202,7 +206,7 @@ jobs:
           retention-days: 14
 
   frontend-e2e:
-    if: inputs.gate == 'full-regression' || inputs.gate == 'account-execution' || inputs.gate == 'cancellation' || inputs.gate == 'frontend-e2e' || inputs.gate == 'platform-sessions' || inputs.gate == 'external-readonly' || inputs.gate == 'model-onboarding'
+    if: inputs.gate == 'full-regression' || inputs.gate == 'account-execution' || inputs.gate == 'cancellation' || inputs.gate == 'frontend-e2e' || inputs.gate == 'platform-sessions' || inputs.gate == 'external-readonly' || inputs.gate == 'model-onboarding' || inputs.gate == 'unified-workspace'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     defaults:

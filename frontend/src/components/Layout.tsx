@@ -1,3 +1,4 @@
+import * as Dialog from "@radix-ui/react-dialog";
 import { useEffect, useState } from "react";
 import { LayoutDashboard, MessagesSquare, CalendarClock, Moon, Sun, LogOut, Library, Brain, Settings, Users, BarChart3, Database, Menu, X } from "lucide-react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
@@ -8,8 +9,8 @@ import { cn } from "@/lib/utils";
 
 const NAV = [
   { to: "/", label: "概览", icon: LayoutDashboard, end: true },
-  { to: "/chat", label: "对话工作区", icon: MessagesSquare, end: false },
-  { to: "/data-prep", label: "数据工作台", icon: Database, end: false },
+  { to: "/chat", label: "旧版对话", icon: MessagesSquare, end: false },
+  { to: "/data-prep", label: "任务工作台", icon: Database, end: false },
   { to: "/tasks", label: "自动化任务", icon: CalendarClock, end: false },
   { to: "/templates", label: "模板库", icon: Library, end: false },
   { to: "/memory", label: "记忆", icon: Brain, end: false },
@@ -29,6 +30,7 @@ export function Layout() {
   const location = useLocation();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const taskWorkspace = location.pathname === "/data-prep" && new URLSearchParams(location.search).get("legacy") !== "1";
   const compactDataPrep = location.pathname === "/data-prep" || location.pathname === "/settings";
 
   useEffect(() => {
@@ -44,22 +46,13 @@ export function Layout() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [mobileNavOpen]);
 
-  return (
-    <div className="flex h-screen w-screen overflow-hidden bg-background">
-      {compactDataPrep && mobileNavOpen && (
-        <button
-          type="button"
-          aria-label="关闭导航背景"
-          onClick={() => setMobileNavOpen(false)}
-          className="fixed inset-0 z-40 bg-foreground/20 md:hidden"
-        />
-      )}
-      {/* 左侧导航 */}
+  const navigation = (
       <aside className={cn(
         "flex w-60 shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground",
-        compactDataPrep && !mobileNavOpen && "max-md:hidden",
-        compactDataPrep && mobileNavOpen && "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50",
+        compactDataPrep && !mobileNavOpen && (taskWorkspace ? "hidden" : "max-md:hidden"),
+        compactDataPrep && mobileNavOpen && (taskWorkspace ? "fixed inset-y-0 left-0 z-50" : "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50"),
       )}>
+        {taskWorkspace && <Dialog.Title className="sr-only">全局导航</Dialog.Title>}
         <div className="flex items-center gap-2.5 px-5 py-5">
           <img src="/logo.svg" alt="howso@Mangrove" className="h-8 w-8" />
           <div className="leading-tight">
@@ -71,14 +64,14 @@ export function Layout() {
               type="button"
               aria-label="关闭导航"
               onClick={() => setMobileNavOpen(false)}
-              className="ml-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:hidden"
+              className="ml-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               <X className="h-4 w-4" />
             </button>
           )}
         </div>
 
-        <nav className="flex-1 space-y-1 px-3 py-2">
+        <nav className="min-h-0 flex-1 space-y-1 overflow-y-auto px-3 py-2">
           {NAV.map((item) => (
             <NavLink
               key={item.to}
@@ -164,11 +157,35 @@ export function Layout() {
           </div>
         </div>
       </aside>
+  );
+
+  return (
+    <div className="flex h-screen w-screen overflow-hidden bg-background">
+      {!taskWorkspace && compactDataPrep && mobileNavOpen && (
+        <button
+          type="button"
+          aria-label="关闭导航背景"
+          onClick={() => setMobileNavOpen(false)}
+          className={cn("fixed inset-0 z-40 bg-foreground/20", !taskWorkspace && "md:hidden")}
+        />
+      )}
+      {/* 左侧导航 */}
+      {taskWorkspace ? (
+        <Dialog.Root open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
+          <Dialog.Portal>
+            <Dialog.Overlay className="fixed inset-0 z-40 bg-foreground/20" />
+            <Dialog.Content asChild aria-label="全局导航" aria-describedby={undefined} onCloseAutoFocus={event => {
+              event.preventDefault();
+              document.querySelector<HTMLButtonElement>('[aria-label="打开导航"]')?.focus();
+            }}>{navigation}</Dialog.Content>
+          </Dialog.Portal>
+        </Dialog.Root>
+      ) : navigation}
 
       {/* 主内容 */}
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {compactDataPrep && (
-          <div className="hidden h-11 shrink-0 items-center justify-between border-b bg-background px-3 max-md:flex">
+          <div className={cn("h-11 shrink-0 items-center justify-between border-b bg-background px-3", taskWorkspace ? "flex" : "hidden max-md:flex")}>
             <button
               type="button"
               aria-label={mobileNavOpen ? "关闭导航" : "打开导航"}

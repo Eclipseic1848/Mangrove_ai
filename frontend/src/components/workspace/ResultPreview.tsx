@@ -967,7 +967,7 @@ export function ResultPreview({
                 {output.format === "markdown" ? "MD" : output.format}
               </div>
               <div className="min-w-0 flex-1">
-                <p className="truncate text-sm font-medium">{output.filename}</p>
+                <p className="break-all text-sm font-medium">{output.filename}</p>
                 <p className="mt-0.5 flex items-center gap-1 text-[11px] text-muted-foreground">
                   <CheckCircle2 className="h-3 w-3 text-emerald-500" />
                   可打开 · {formatBytes(output.size_bytes)}
