@@ -36,8 +36,8 @@ class RewriteDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     open_questions: tuple[str, ...] = Field(
-        default=(),
-        description="先独立判断完整业务要求是否充分。未决时仅问一个关键决策；没有delta也保留问题。已明确的语义不因存在其他理论操作而重复询问。",
+        max_length=1,
+        description="必须显式给出问题列表；条件充分时为空数组。先独立判断完整业务要求是否充分。未决时仅问一个关键决策；没有delta也保留问题。已明确的语义不因存在其他理论操作而重复询问。",
     )
     intent: TurnIntent
     confidence: DeltaConfidence
@@ -67,7 +67,6 @@ class RewriteDraft(BaseModel):
         "source_scope_delta",
         "output_delta",
         "permission_delta",
-        "open_questions",
         mode="before",
     )
     @classmethod

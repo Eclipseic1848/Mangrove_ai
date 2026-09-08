@@ -138,7 +138,7 @@ def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_ex
         if response_mode == "invalid_json":
             return httpx.Response(200, text="合成无效JSON")
         # 替身只验证产品请求接线，刻意不给正确业务语义，不能获得验收通过。
-        draft = {"intent": "normalization", "confidence": "high", "normalized_text": "仅测试结构接线"}
+        draft = {"intent": "normalization", "confidence": "high", "normalized_text": "仅测试结构接线", "open_questions": []}
         return httpx.Response(200, json={"id": "synthetic", "object": "chat.completion", "created": 0,
             "model": args.model, "choices": [{"index": 0, "finish_reason": "stop",
                 "message": {"role": "assistant", "content": json.dumps(draft, ensure_ascii=False)}}],
@@ -230,7 +230,19 @@ def test_generated_output_formats_match_confirmation_boundary():
 
     schema = RewriteDraft.model_json_schema()
     assert set(schema["properties"]["output_delta"]["items"]["enum"]) == _FORMATS
-    draft = RewriteDraft(intent="task_refinement", confidence="high", normalized_text="输出JSON", output_delta=("json",))
+    draft = RewriteDraft(intent="task_refinement", confidence="high", normalized_text="输出JSON", open_questions=(), output_delta=("json",))
     assert draft.output_delta == ("json",)
     with pytest.raises(ValidationError):
-        RewriteDraft(intent="task_refinement", confidence="high", normalized_text="输出JSON", output_delta=("输出为JSON",))
+        RewriteDraft(intent="task_refinement", confidence="high", normalized_text="输出JSON", open_questions=(), output_delta=("输出为JSON",))
+
+
+@pytest.mark.parametrize("questions", [None, ["问题一", "问题二"], "missing"])
+def test_generated_questions_require_explicit_single_decision(questions):
+    from pydantic import ValidationError
+    from src.conversation_steering.rewriter import RewriteDraft
+    value = {"intent": "normalization", "confidence": "high", "normalized_text": "保持当前要求"}
+    if questions != "missing":
+        value["open_questions"] = questions
+    with pytest.raises(ValidationError):
+        RewriteDraft.model_validate(value)
+    assert RewriteDraft.model_validate({**value, "open_questions": []}).open_questions == ()
