@@ -15,6 +15,8 @@ import re
 import sqlite3
 import uuid
 import zipfile
+import tempfile
+import errno
 from typing import Annotated, Any, Callable, Literal
 
 import duckdb
@@ -37,7 +39,6 @@ from pydantic import (
     model_validator,
 )
 from sse_starlette.sse import EventSourceResponse
-from starlette.background import BackgroundTask
 
 from src.agentic_runtime.models import (
     PermissionProfile,
@@ -5375,6 +5376,94 @@ def _safe_archive_name(name: str) -> str:
     return value or "file"
 
 
+class _TemporaryBundleResponse(FileResponse):
+    async def __call__(self, scope, receive, send):
+        # 客户端断开和非法 Range 会跳过普通后台任务；临时包始终清理，原件不动。
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            Path(self.path).unlink(missing_ok=True)
+
+
+def _write_frozen_source_exports(archive, user_id, task_id, selected, sources, table_format="none"):
+    from src.source_acquisition.export import write_source_entries
+
+    entries = []
+    snapshots = {}
+    repository = SourceAcquisitionRepository(settings.webui_db_path)
+    # 网页字节只在本次临时目录物化；下载不重新采集，也不改来源库。
+    with tempfile.TemporaryDirectory(prefix="source-export-", dir=Path(archive.filename).parent) as temporary:
+        for artifact_id, source in sources.items():
+            if source.get("web"):
+                web = repository.get_artifact(user_id, artifact_id, include_content=True)
+                if not web or web["snapshot_id"] != source["web"]["snapshot_id"] or web["content_sha256"] != source["sha256"]:
+                    raise HTTPException(409, "冻结网页来源已不可用")
+                snapshot_id = web["snapshot_id"]
+                if snapshot_id not in snapshots:
+                    snapshot = repository.get_snapshot(user_id, snapshot_id)
+                    if not snapshot:
+                        raise HTTPException(409, "冻结来源快照已不可用")
+                    snapshots[snapshot_id] = {
+                        key: snapshot.get(key) for key in ("snapshot_id", "valid_page_count", "failed_page_count", "coverage")
+                    }
+                    snapshots[snapshot_id]["failures"] = [
+                        {key: failure.get(key) for key in ("request_url", "final_url", "error_code", "failed_at")}
+                        for failure in snapshot.get("failures", [])
+                    ]
+                path = Path(temporary) / f"{len(entries)}.html"
+                path.write_bytes(bytes(web["content_blob"]))
+                metadata = {
+                    "artifact_id": artifact_id, "original_name": f"{web['title'] or artifact_id}.html",
+                    "media_type": web["media_type"], "sha256": source["sha256"], "size_bytes": web["size_bytes"],
+                    "provenance": {key: web[key] for key in ("snapshot_id", "request_url", "final_url", "read_at")},
+                }
+            else:
+                upload = _canvas_upload(user_id, artifact_id, source)
+                path = Path(upload.storage_path)
+                metadata = {
+                    "artifact_id": artifact_id, "original_name": upload.original_name, "media_type": upload.media_type,
+                    "sha256": source["sha256"], "size_bytes": upload.size_bytes, "provenance": {"source_kind": "upload"},
+                }
+            entries.append(write_source_entries(archive, path=path, source=metadata, table_format=table_format))
+    return {"schema_version": 1, "task_id": task_id, "revision": selected["revision"],
+            "sources": entries, "snapshots": list(snapshots.values())}
+
+
+@router.get("/tasks/{task_id}/source-bundle")
+def download_source_bundle(
+    task_id: str, revision: int = Query(ge=1),
+    artifact_id: str | None = Query(default=None, max_length=160),
+    table_format: Literal["none", "csv", "xlsx"] = "none",
+    user=Depends(get_current_user),
+):
+    user_id = user["user_id"]
+    task, selected = _canvas_revision(user_id, task_id, revision)
+    sources = _frozen_canvas_sources(user_id, task_id, selected)
+    if artifact_id:
+        if artifact_id not in sources:
+            raise HTTPException(404, "来源不属于所选版本")
+        sources = {artifact_id: sources[artifact_id]}
+    if not sources:
+        raise HTTPException(409, "该版本尚无可下载的冻结来源")
+    root = (Path(settings.semantic_execution_root) / "_bundles").resolve()
+    bundle = root / f"{uuid.uuid4().hex}.zip"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            manifest = _write_frozen_source_exports(archive, user_id, task_id, selected, sources, table_format)
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2))
+    except ValueError:
+        bundle.unlink(missing_ok=True)
+        raise HTTPException(409, "冻结来源完整性校验失败") from None
+    except OSError as exc:
+        bundle.unlink(missing_ok=True)
+        raise HTTPException(507 if exc.errno == errno.ENOSPC else 409, "资料包无法写入，请检查可用存储") from None
+    except Exception:
+        bundle.unlink(missing_ok=True)
+        raise
+    return _TemporaryBundleResponse(bundle, media_type="application/zip", filename=f"{_safe_archive_name(task['title'])}-完整资料.zip")
+
+
 @router.get("/tasks/{task_id}/bundle")
 def download_bundle(
     task_id: str, include_sources: bool = False,
@@ -5392,6 +5481,7 @@ def download_bundle(
         raise HTTPException(404, "正式交付不存在")
     entries = []
     mapping = {"outputs": {}, "sources": {}}
+    sources = {}
     for output in manifest["outputs"]:
         _, path = _verified_canvas_output(user_id, run_id, manifest, output)
         name = f"outputs/{_safe_archive_name(output['output_id'])}-{_safe_archive_name(output['filename'])}"
@@ -5404,14 +5494,6 @@ def download_bundle(
             raise HTTPException(409, "冻结原件清单不完整，无法打包来源")
         if set(expected) != set(sources):
             raise HTTPException(409, "交付原件清单与冻结修订来源不完整一致")
-        for artifact_id in expected:
-            source = sources.get(artifact_id)
-            if not source or source.get("web"):
-                raise HTTPException(409, "该冻结来源尚无可打包原件")
-            upload = _canvas_upload(user_id, artifact_id, source)
-            name = f"sources/{_safe_archive_name(artifact_id)}-{_safe_archive_name(upload.original_name)}"
-            entries.append((Path(upload.storage_path), name, upload.model_dump()))
-            mapping["sources"][artifact_id] = name
     events = _revision_events(store.list_semantic_workspace_events(user_id, task_id), selected["revision"])
     safe_events = _structured_progress_events({"task_id": task_id, "run_id": run_id, "viewing_revision": selected["revision"], "status": selected["status"], "events": events,
                                               "harness_events": store.list_semantic_harness_events(user_id, run_id)})
@@ -5429,6 +5511,11 @@ def download_bundle(
     bundle_path = bundle_root / f"{uuid.uuid4().hex}.zip"
     try:
         with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            if include_sources:
+                source_exports = _write_frozen_source_exports(archive, user_id, task_id, selected, sources)
+                public_manifest["source_exports"] = source_exports
+                for source in source_exports["sources"]:
+                    mapping["sources"][source["artifact_id"]] = next(file["path"] for file in source["files"] if file["role"] == "original")
             for path, name, expected in entries:
                 digest = hashlib.sha256()
                 size = 0
@@ -5441,10 +5528,13 @@ def download_bundle(
                     raise HTTPException(409, "打包期间制品发生变化，已取消本次下载")
             for name, payload in (("manifest", public_manifest), ("qa", qa), ("trace", trace)):
                 archive.writestr(f"{name}.json", json.dumps(payload, ensure_ascii=False, indent=2))
+    except ValueError:
+        bundle_path.unlink(missing_ok=True)
+        raise HTTPException(409, "冻结来源完整性校验失败") from None
     except Exception:
         bundle_path.unlink(missing_ok=True)
         raise
-    return FileResponse(bundle_path, media_type="application/zip", filename=f"{_safe_archive_name(task['title'])}.zip", background=BackgroundTask(bundle_path.unlink, missing_ok=True))
+    return _TemporaryBundleResponse(bundle_path, media_type="application/zip", filename=f"{_safe_archive_name(task['title'])}.zip")
 
 
 @router.get("/storage")

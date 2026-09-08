@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import io
 import json
 from pathlib import Path
 import sqlite3
 import threading
+import zipfile
 
 import httpx
 import pytest
@@ -319,6 +321,16 @@ def test_exact_web_snapshot_reaches_formal_delivery_without_refetch(
         ).list_events("user-a", task_id, 1)
         assert binding_events[0]["event_type"] == "kernel.binding.frozen"
         assert binding_events[0]["details"]["preallocated_run"] is True
+        bundle = client.get(f"/api/semantic-workspace/tasks/{task_id}/bundle", params={"revision": 1, "include_sources": True})
+        assert bundle.status_code == 200, bundle.text
+        with zipfile.ZipFile(io.BytesIO(bundle.content)) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            original_path = manifest["archive_entries"]["sources"][request.sources[0].upload_id]
+            assert archive.read(original_path) == source_content
+            assert manifest["source_exports"]["sources"][0]["provenance"]["snapshot_id"] == snapshot_id
+            for output in manifest["outputs"]:
+                content = archive.read(manifest["archive_entries"]["outputs"][output["output_id"]])
+                assert hashlib.sha256(content).hexdigest() == output["sha256"]
 
 
 def test_source_refresh_creates_new_snapshot_and_revision_idempotently(

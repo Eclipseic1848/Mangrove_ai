@@ -1003,7 +1003,7 @@ export function ResultPreview({
                 onChange={(event) => setIncludeSources(event.target.checked)}
                 className="h-4 w-4 rounded border"
               />
-              ZIP 包含原始文件
+              ZIP 包含来源资料
             </label>
             <button
               type="button"
