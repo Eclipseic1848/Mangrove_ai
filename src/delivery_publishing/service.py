@@ -261,7 +261,8 @@ class DeliveryPublisher:
                 user_id=command.owner_id,
                 status=DeliveryStatus.SUCCEEDED,
                 source_artifact_hashes={
-                    ref.split(":", 1)[0]: ref.split(":", 1)[1]
+                    # 网页引用多一段快照 ID；原件身份与摘要始终是最后两段。
+                    ref.rsplit(":", 2)[-2]: ref.rsplit(":", 2)[-1]
                     for ref in command.source_snapshot_refs
                     if ":" in ref
                 },

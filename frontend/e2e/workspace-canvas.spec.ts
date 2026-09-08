@@ -76,6 +76,185 @@ async function mockCanvas(page: Page) {
   return { queries, setMessages: (value: Array<Record<string, unknown>>) => { messages = value; } };
 }
 
+test("完整资料包无需正式结果，绑定历史版本并支持表格副本", async ({ page }) => {
+  await mockCanvas(page);
+  await page.route(/\/api\/semantic-workspace\/tasks\/canvas-task(?:\?.*)?$/, route => route.fulfill({ json: {
+    ...canvasTask(1), status: "failed", delivery: null,
+  } }));
+  const queries: URL[] = [];
+  await page.route("**/api/semantic-workspace/tasks/canvas-task/source-bundle?*", route => {
+    queries.push(new URL(route.request().url()));
+    expect(route.request().headers()["x-mangrove-owner"]).toBe("canvas-owner");
+    return route.fulfill({ contentType: "application/zip", body: "synthetic-complete-source-package" });
+  });
+  await page.goto("/data-prep?task=canvas-task&revision=1");
+  await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+  await expect(page.getByText("当前版本全部已保存来源", { exact: true })).toBeVisible();
+  for (const format of ["none", "csv", "xlsx"]) {
+    await page.getByLabel("附加表格副本").selectOption(format);
+    const download = page.waitForEvent("download");
+    await page.getByRole("button", { name: "下载完整资料包", exact: true }).click();
+    expect((await download).suggestedFilename()).toBe("画布往返任务-V1-完整资料包.zip");
+    await expect(page.getByRole("status").filter({ hasText: "已交给浏览器下载" })).toBeVisible();
+    expect(Object.fromEntries(queries.at(-1)!.searchParams)).toEqual({ revision: "1", table_format: format });
+  }
+  await expect(page.getByRole("button", { name: "查看结果", exact: true })).toHaveCount(0);
+});
+
+test("完整资料包下载错误明确且可重试，预览失败不阻止原件导出", async ({ page }) => {
+  await mockCanvas(page);
+  await page.route("**/api/semantic-workspace/tasks/canvas-task/sources/canvas-source/preview?*", route => route.fulfill({ status: 409, json: { detail: "预览表示不可用" } }));
+  let status = 409;
+  await page.route("**/api/semantic-workspace/tasks/canvas-task/source-bundle?*", route => status === 200
+    ? route.fulfill({ contentType: "application/zip", body: "synthetic" })
+    : route.fulfill({ status, json: { detail: "内部路径不应直接进入下载错误" } }));
+  await page.goto("/data-prep?task=canvas-task");
+  await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+  for (const [code, message] of [[409, "来源已变化、已删除或没有可用的冻结来源"], [404, "资料或版本不存在，或无权访问"], [422, "下载参数无效"], [507, "存储空间不足"]] as const) {
+    status = code;
+    await page.getByRole("button", { name: "下载完整资料包", exact: true }).click();
+    await expect(page.getByRole("alert").filter({ hasText: message })).toBeVisible();
+    await expect(page.getByText("内部路径不应直接进入下载错误", { exact: true })).toHaveCount(0);
+  }
+  status = 200;
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载完整资料包", exact: true }).click();
+  await download;
+});
+
+test("完整资料包拒绝错误MIME时释放未结束流，零保存且可重试", async ({ page }) => {
+  await mockCanvas(page);
+  await page.route("**/api/semantic-workspace/tasks/canvas-task/source-bundle?*", route => route.fulfill({ contentType: "application/zip", body: "synthetic-valid-package" }));
+  const downloads: string[] = [];
+  page.on("download", download => downloads.push(download.suggestedFilename()));
+  await page.goto("/data-prep?task=canvas-task");
+  await page.evaluate(() => {
+    const originalFetch = window.fetch;
+    const observation = { requests: 0, cancelled: 0 };
+    (window as Window & { sourceStreamTest?: typeof observation }).sourceStreamTest = observation;
+    window.fetch = async (input, init) => {
+      if (String(input).includes("/source-bundle?") && observation.requests++ < 2) {
+        return new Response(new ReadableStream({
+          start(controller) { controller.enqueue(new TextEncoder().encode("<html>未结束的错误响应")); },
+          cancel() {
+            observation.cancelled += 1;
+            // 第二次释放失败也应保留产品错误，不泄漏取消机制的内部异常。
+            if (observation.cancelled === 2) return Promise.reject(new Error("内部取消错误"));
+          },
+        }), { headers: { "Content-Type": "text/html" } });
+      }
+      return originalFetch(input, init);
+    };
+  });
+  await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+  for (const count of [1, 2]) {
+    await page.getByRole("button", { name: "下载完整资料包", exact: true }).click();
+    await expect(page.getByRole("alert").filter({ hasText: "下载内容格式无效，请稍后重试。" })).toBeVisible();
+    await expect.poll(() => page.evaluate(() => (window as Window & { sourceStreamTest?: { cancelled: number } }).sourceStreamTest?.cancelled)).toBe(count);
+    await expect(page.getByRole("button", { name: "下载完整资料包", exact: true })).toBeEnabled();
+    expect(downloads).toEqual([]);
+  }
+  const downloaded = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载完整资料包", exact: true }).click();
+  await downloaded;
+  expect(downloads).toHaveLength(1);
+});
+
+test("完整资料包可取消，关闭来源画布阻断迟到下载", async ({ page }) => {
+  await mockCanvas(page);
+  let release: (() => void) | undefined;
+  let requests = 0;
+  const downloads: string[] = [];
+  page.on("download", value => downloads.push(value.suggestedFilename()));
+  await page.route("**/api/semantic-workspace/tasks/canvas-task/source-bundle?*", async route => {
+    requests += 1;
+    await new Promise<void>(resolve => { release = resolve; });
+    await route.fulfill({ contentType: "application/zip", body: "late-source-package" }).catch(() => {});
+  });
+  await page.goto("/data-prep?task=canvas-task");
+  await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+  await page.getByRole("button", { name: "下载完整资料包", exact: true }).click();
+  await expect.poll(() => requests).toBe(1);
+  await expect(page.getByRole("button", { name: "正在准备下载…", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "取消下载", exact: true }).click();
+  release!();
+  await expect(page.getByRole("status").filter({ hasText: "已取消下载" })).toBeVisible();
+  await page.getByRole("button", { name: "下载完整资料包", exact: true }).click();
+  await expect.poll(() => requests).toBe(2);
+  await page.getByRole("button", { name: "关闭原文件预览", exact: true }).click();
+  release!();
+  await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+  await expect(page.getByRole("button", { name: "下载完整资料包", exact: true })).toBeEnabled();
+  await page.waitForEvent("download", { timeout: 500 }).then(() => { throw new Error("已取消资料包仍触发下载"); }, error => { expect(error.name).toBe("TimeoutError"); });
+  expect(downloads).toEqual([]);
+});
+
+test("网页摘要与完整资料包分开，窄屏键盘下载可达", async ({ page }, testInfo) => {
+  await mockCanvas(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.route(/\/api\/semantic-workspace\/tasks\/canvas-task(?:\?.*)?$/, route => route.fulfill({ json: {
+    ...canvasTask(2), status: "failed", delivery: null, upload_ids: [], uploads: [],
+    web_source: { runtime_binding: { model: "fixture-model" }, snapshot: { snapshot_id: "frozen-web", created_at: "2026-09-08T00:00:00Z", valid_page_count: 1,
+      allowed_scope: { kind: "current_page", normalized_url: "https://synthetic.invalid/source", page_limit: 1 },
+      artifacts: [{ artifact_id: "saved-web", title: "完整网页资料", final_url: "https://synthetic.invalid/source" }] } },
+  } }));
+  await page.route("**/api/semantic-workspace/tasks/canvas-task/sources/saved-web/preview?*", route => route.fulfill({ json: {
+    task_id: "canvas-task", revision: 2, artifact_id: "saved-web", upload_id: null, sha256: sourceHash,
+    original_name: "完整网页资料", media_type: "text/html", content_url: null, kind: "web", text_preview: "摘".repeat(4000),
+    representation: { kind: "source", parser_or_inspector_version: "frozen-parser" }, is_complete: false, truncated: true,
+  } }));
+  const requests: URL[] = [];
+  await page.route("**/api/semantic-workspace/tasks/canvas-task/source-bundle?*", route => {
+    requests.push(new URL(route.request().url()));
+    return route.fulfill({ contentType: "application/zip", body: "synthetic-saved-web-package" });
+  });
+  await page.goto("/data-prep?task=canvas-task");
+  await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+  await expect(page.getByText("仅展示已保存摘要，内容可能截断，完整性未确认。", { exact: true })).toBeVisible();
+  const region = page.getByRole("region", { name: "完整资料包下载" });
+  const button = region.getByRole("button", { name: "下载完整资料包", exact: true });
+  await expect(button).toBeInViewport();
+  const box = await region.boundingBox();
+  expect(box!.x).toBeGreaterThanOrEqual(0); expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+  await page.getByLabel("附加表格副本").focus();
+  await page.keyboard.press("Tab");
+  await expect(button).toBeFocused();
+  const downloaded = page.waitForEvent("download");
+  await page.keyboard.press("Enter");
+  await downloaded;
+  expect(Object.fromEntries(requests[0].searchParams)).toEqual({ revision: "2", table_format: "none" });
+  expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+  await page.screenshot({ path: testInfo.outputPath("source-download-web-390.png"), fullPage: true });
+});
+
+test("资料包下载换版本和换Owner均丢弃旧响应", async ({ page }) => {
+  await mockCanvas(page);
+  let release: (() => void) | undefined;
+  let requests = 0;
+  const downloads: string[] = [];
+  page.on("download", download => downloads.push(download.suggestedFilename()));
+  await page.route("**/api/semantic-workspace/tasks/canvas-task/source-bundle?*", async route => {
+    requests += 1;
+    await new Promise<void>(resolve => { release = resolve; });
+    await route.fulfill({ contentType: "application/zip", body: "old-owner-source" }).catch(() => {});
+  });
+  await page.goto("/data-prep?task=canvas-task");
+  await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+  await page.getByRole("button", { name: "下载完整资料包", exact: true }).click();
+  await expect.poll(() => requests).toBe(1);
+  await page.getByLabel("结果版本").selectOption("1");
+  release!();
+  await expect(page.getByRole("button", { name: "下载完整资料包", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "下载完整资料包", exact: true }).click();
+  await expect.poll(() => requests).toBe(2);
+  await page.route("**/api/auth/me", route => route.fulfill({ json: { user_id: "new-owner", username: "new-owner", display_name: "新用户", role: "admin" } }));
+  await page.evaluate(async modulePath => { const api = await import(modulePath); await api.bootstrapSession(); }, "/src/lib/api.ts");
+  release!();
+  await page.waitForEvent("download", { timeout: 500 }).then(() => { throw new Error("旧身份仍触发下载"); }, error => { expect(error.name).toBe("TimeoutError"); });
+  expect(downloads).toEqual([]);
+});
+
 test("同身份画布往返和关闭保留筛选分页，跨修订仍重置", async ({ page }) => {
   const { queries } = await mockCanvas(page);
   await page.goto("/data-prep?task=canvas-task");

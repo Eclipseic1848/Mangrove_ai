@@ -259,10 +259,18 @@ export const api = {
 };
 
 /** 下载产出文件（带鉴权），触发浏览器保存。 */
-export async function downloadFile(url: string, filename: string) {
-  const res = await authenticatedFetch(url, { headers: authHeaders() });
+export async function downloadFile(url: string, filename: string, signal?: AbortSignal, expectedMediaType?: string) {
+  signal?.throwIfAborted();
+  const res = await authenticatedFetch(url, { headers: authHeaders(), signal });
   if (!res.ok) throw new ApiError(res.status, "下载失败");
+  if (expectedMediaType && res.headers.get("content-type")?.split(";")[0].trim() !== expectedMediaType) {
+    // 拒绝的正文不再读取，先释放传输；清理失败也不能覆盖产品错误。
+    await res.body?.cancel().catch(() => {});
+    throw new ApiError(502, "下载内容格式无效，请稍后重试");
+  }
   const blob = await readAuthenticatedBlob(res);
+  // 关闭画布或切换版本后，迟到的下载不能在新任务中触发保存。
+  signal?.throwIfAborted();
   const a = document.createElement("a");
   const objectUrl = URL.createObjectURL(blob);
   a.href = objectUrl;

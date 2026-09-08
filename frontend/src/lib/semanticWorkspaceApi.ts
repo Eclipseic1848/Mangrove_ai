@@ -406,6 +406,31 @@ export function getWorkspaceSourcePreview(taskId: string, artifactId: string, pa
   return api.get(`${BASE}/tasks/${encodeURIComponent(taskId)}/sources/${encodeURIComponent(artifactId)}/preview?${query}`);
 }
 
+export async function downloadWorkspaceSourceBundle(
+  taskId: string, filename: string, revision: number,
+  tableFormat: "none" | "csv" | "xlsx", signal: AbortSignal,
+) {
+  const query = new URLSearchParams({ revision: String(revision), table_format: tableFormat });
+  try {
+    await downloadFile(`${BASE}/tasks/${encodeURIComponent(taskId)}/source-bundle?${query}`, filename, signal, "application/zip");
+  } catch (error) {
+    if (signal.aborted) throw error;
+    // 下载错误只展示产品说明，避免把服务端路径或内部细节带入界面。
+    const messages: Record<number, string> = {
+      401: "登录已失效或身份已变化，请重新登录后打开任务。",
+      403: "没有权限下载这份资料，请核对当前登录账号。",
+      404: "资料或版本不存在，或无权访问，请刷新任务核对。",
+      409: "来源已变化、已删除或没有可用的冻结来源，请刷新任务核对。",
+      413: "资料包超出下载限制，请联系管理员。",
+      422: "下载参数无效，请重新选择表格格式后重试。",
+      502: "下载内容格式无效，请稍后重试。",
+      507: "存储空间不足，请稍后重试或联系管理员。",
+    };
+    throw new Error(error instanceof ApiError && messages[error.status]
+      ? messages[error.status] : "资料包下载失败，请检查网络后重试。");
+  }
+}
+
 export function downloadWorkspaceBundle(
   taskId: string,
   filename: string,

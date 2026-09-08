@@ -26,7 +26,7 @@ import {
 } from "@/lib/dataPrepApi";
 import type { UploadItem } from "@/types/dataPrep";
 import type { WorkspaceTask } from "@/types/semanticWorkspace";
-import { getWorkspaceSourcePreview } from "@/lib/semanticWorkspaceApi";
+import { downloadWorkspaceSourceBundle, getWorkspaceSourcePreview } from "@/lib/semanticWorkspaceApi";
 import { downloadFile } from "@/lib/api";
 import { toast } from "sonner";
 
@@ -86,6 +86,27 @@ export function SourcePreviewPanel({
     ?? (!selectedUploadId ? uploads[0] : null)
     ?? null;
   const [localView, setLocalView] = useState(initialSourceView);
+  const [tableFormat, setTableFormat] = useState<"none" | "csv" | "xlsx">("none");
+  const [downloadBusy, setDownloadBusy] = useState(false);
+  const [downloadError, setDownloadError] = useState("");
+  const [downloadStatus, setDownloadStatus] = useState("");
+  const downloadRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => { downloadRequest.current?.abort(); }, [task?.task_id, task?.viewing_revision]);
+  const downloadSources = async () => {
+    if (!task || downloadRequest.current) return;
+    const request = new AbortController();
+    downloadRequest.current = request;
+    setDownloadBusy(true); setDownloadError(""); setDownloadStatus("正在准备下载…");
+    try {
+      const revision = task.viewing_revision ?? task.current_revision ?? task.active_revision;
+      await downloadWorkspaceSourceBundle(task.task_id, `${task.title}-V${revision}-完整资料包.zip`, revision, tableFormat, request.signal);
+      if (!request.signal.aborted) setDownloadStatus("已交给浏览器下载；资料缺口请查看包内清单。");
+    } catch (error) {
+      if (!request.signal.aborted) { setDownloadError(error instanceof Error ? error.message : "资料包下载失败，请重试。"); setDownloadStatus(""); }
+    } finally {
+      if (downloadRequest.current === request) { downloadRequest.current = null; setDownloadBusy(false); }
+    }
+  };
   const currentView = viewState ?? localView;
   const { page, zoom } = currentView;
   const updateView = (patch: Partial<SourceViewState>) => {
@@ -356,6 +377,26 @@ export function SourcePreviewPanel({
         {source.data?.content_url && <button type="button" className="rounded border px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => void downloadFile(source.data!.content_url!, source.data!.original_name).catch(error => toast.error(error instanceof Error ? error.message : "原件下载失败"))}>下载原件</button>}
         {source.data?.kind === "web" && <p>仅展示已保存摘要，内容可能截断，完整性未确认。</p>}
       </div>}
+
+      {task && <section aria-label="完整资料包下载" className="shrink-0 space-y-2 border-b px-3 py-2 text-xs">
+        <p className="font-medium">当前版本全部已保存来源</p>
+        <p className="text-muted-foreground">包含原件、Markdown、JSON/JSONL 和清单；未保存或未生成的内容会注明缺口。下载不会重新采集、识别或生成回答。</p>
+        <div className="flex flex-wrap items-center gap-2">
+          <label className="flex min-w-0 items-center gap-2">附加表格副本
+            <select aria-label="附加表格副本" value={tableFormat} disabled={downloadBusy} onChange={event => setTableFormat(event.target.value as typeof tableFormat)} className="min-w-0 rounded border bg-background px-2 py-1.5 focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
+              <option value="none">不附加</option><option value="csv">CSV（适用表格）</option><option value="xlsx">XLSX（适用表格）</option>
+            </select>
+          </label>
+          <button type="button" disabled={downloadBusy || !(task.upload_ids.length || task.web_source?.snapshot?.artifacts.length)} onClick={() => void downloadSources()}
+            className="inline-flex min-w-36 items-center justify-center gap-2 rounded border px-3 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50">
+            {downloadBusy && <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />}{downloadBusy ? "正在准备下载…" : "下载完整资料包"}
+          </button>
+          {downloadBusy && <button type="button" onClick={() => { downloadRequest.current?.abort(); downloadRequest.current = null; setDownloadBusy(false); setDownloadStatus("已取消下载"); }} className="rounded border px-3 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring">取消下载</button>}
+        </div>
+        {!(task.upload_ids.length || task.web_source?.snapshot?.artifacts.length) && <p>当前版本没有可下载的已保存来源。</p>}
+        {downloadError && <p role="alert" className="text-destructive">{downloadError}</p>}
+        {downloadStatus && <p role="status" className="text-muted-foreground">{downloadStatus}</p>}
+      </section>}
 
       {source.data?.kind === "table" && <div className="shrink-0 space-y-2 border-b px-3 py-2 text-xs">
         <label className="flex items-center gap-2">工作表<select aria-label="来源工作表" className="min-w-0 flex-1 rounded border bg-background p-2" value={source.data.selected_table_ref ?? ""} onChange={event => updateView({ tableRef: event.target.value, offset: 0, scrollTop: 0, locationStatus: "当前仅浏览来源" })}>

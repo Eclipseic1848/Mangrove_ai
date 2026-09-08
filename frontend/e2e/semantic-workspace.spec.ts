@@ -380,7 +380,7 @@ test.describe("结果缓存身份隔离", () => {
       await page.getByRole("button", { name: `下载 A-V${revision}.xlsx`, exact: true }).click();
       expect((await file).suggestedFilename()).toBe(`A-V${revision}.xlsx`);
       expect(downloads.at(-1)).toContain(`/A-V${revision}-output`);
-      await page.getByRole("checkbox", { name: "ZIP 包含原始文件" }).setChecked(revision === 1);
+      await page.getByRole("checkbox", { name: "ZIP 包含来源资料" }).setChecked(revision === 1);
       const zip = page.waitForEvent("download");
       await page.getByRole("button", { name: "下载全部", exact: true }).click();
       await zip;
