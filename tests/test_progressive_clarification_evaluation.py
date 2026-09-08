@@ -11,6 +11,41 @@ import pytest
 from scripts.evaluate_conversation_steering import check_progressive_request, progressive_rewriter, run_progressive
 
 
+@pytest.mark.parametrize("endpoint,allowed", [
+    ("https://api.deepseek.com", True),
+    ("http://api.deepseek.com", False),
+    ("https://api.deepseek.com.evil.test", False),
+    ("https://api.deepseek.com/other", False),
+])
+def test_explicit_cloud_preparation_is_exact_and_never_sends(tmp_path, endpoint, allowed):
+    args = argparse.Namespace(
+        fixture=Path("tests/fixtures/conversation_steering/progressive_clarification_cases.json"),
+        rounds=1, concurrency=1, provider="deepseek", base_url=endpoint, model="deepseek-v4-pro",
+        output=tmp_path / "cloud.json", execute=False,
+    )
+    with patch("src.conversation_steering.rewriter.AsyncOpenAI", side_effect=AssertionError("准备不发送")):
+        if allowed:
+            assert asyncio.run(run_progressive(args)) == 0
+            report = json.loads(args.output.read_text(encoding="utf-8"))
+            assert report["provider"] == "deepseek" and report["requests_sent"] == 0
+            assert report["endpoint"] == endpoint + "/chat/completions"
+        else:
+            with pytest.raises(ValueError):
+                asyncio.run(run_progressive(args))
+            assert not args.output.exists()
+
+
+def test_cloud_rewriter_requires_explicit_secret_and_preserves_provider(monkeypatch):
+    args = argparse.Namespace(provider="deepseek", base_url="https://api.deepseek.com", model="deepseek-v4-pro")
+    monkeypatch.delenv("MANGROVE_EVAL_API_KEY", raising=False)
+    with pytest.raises(ValueError):
+        progressive_rewriter(args)
+    monkeypatch.setenv("MANGROVE_EVAL_API_KEY", "synthetic-test-key")
+    language = progressive_rewriter(args)
+    assert language._connection.provider == "deepseek"
+    assert language._connection.api_key == "synthetic-test-key"
+
+
 def test_preparation_never_constructs_model_client_and_preserves_old_evidence(tmp_path):
     args = argparse.Namespace(
         fixture=Path("tests/fixtures/conversation_steering/progressive_clarification_cases.json"),
@@ -62,10 +97,13 @@ def test_explicit_connection_does_not_resolve_global_profiles():
 
 
 @pytest.mark.parametrize("response_mode", ["complete", "timeout", "unavailable", "invalid_json"])
-def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_expected_answers(tmp_path, response_mode):
+@pytest.mark.parametrize("provider_name", ["local", "deepseek"])
+def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_expected_answers(tmp_path, monkeypatch, response_mode, provider_name):
+    monkeypatch.setenv("MANGROVE_EVAL_API_KEY", "synthetic-test-key")
     args = argparse.Namespace(
         fixture=Path("tests/fixtures/conversation_steering/progressive_clarification_cases.json"),
-        rounds=1, concurrency=1, base_url="http://127.0.0.1:9/v1", model="synthetic-local",
+        rounds=1, concurrency=1, provider=provider_name,
+        base_url="https://api.deepseek.com" if provider_name == "deepseek" else "http://127.0.0.1:9/v1", model="synthetic-local",
         output=tmp_path / "transport.json", execute=True,
     )
     requests = []
@@ -94,6 +132,7 @@ def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_ex
 
     with patch("src.conversation_steering.rewriter.httpx.AsyncClient", IsolatedClient):
         assert asyncio.run(run_progressive(args)) == 1
+    assert "synthetic-test-key" not in args.output.read_text(encoding="utf-8")
     report = json.loads(args.output.read_text(encoding="utf-8"))
     if response_mode != "complete":
         assert len(requests) == report["requests_sent"] == 1

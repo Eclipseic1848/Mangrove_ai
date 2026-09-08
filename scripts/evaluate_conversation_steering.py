@@ -145,13 +145,17 @@ def progressive_rewriter(args):
     from src.conversation_steering import rewriter as implementation
     from src.llm.provider import ResolvedModelConnection
 
-    connection = ResolvedModelConnection(provider="local", requested_model=args.model,
+    provider_name = getattr(args, "provider", "local")
+    api_key = os.environ.get("MANGROVE_EVAL_API_KEY")
+    if provider_name != "local" and not api_key:
+        raise ValueError("云端评测必须显式注入本轮获准的API Key")
+    connection = ResolvedModelConnection(provider=provider_name, requested_model=args.model,
         model=args.model, base_url=args.base_url.rstrip("/"),
-        api_key=os.environ.get("MANGROVE_EVAL_API_KEY") or "local-evaluation",
+        api_key=api_key or "local-evaluation",
         trust_env=False, timeout=90, extra_body=None)
     provider = SimpleNamespace(resolve_model=lambda *unused, **kwargs: connection)
     with patch.object(implementation, "get_provider", return_value=provider):
-        return implementation.InstructorContextRewriter(provider="local", model=args.model)
+        return implementation.InstructorContextRewriter(provider=provider_name, model=args.model)
 
 
 async def run_progressive(args: argparse.Namespace) -> int:
@@ -164,7 +168,8 @@ async def run_progressive(args: argparse.Namespace) -> int:
             or args.rounds != 1 or args.concurrency != 1):
         raise ValueError("本票固定评测须为18例24轮，单轮且串行")
     if not args.base_url or not args.model:
-        raise ValueError("必须明确本地模型和端点，不能采用全局默认")
+        raise ValueError("必须明确模型和端点，不能采用全局默认")
+    provider_name = getattr(args, "provider", "local")
     url = urlsplit(args.base_url)
     local = url.hostname == "localhost"
     if not local:
@@ -172,14 +177,18 @@ async def run_progressive(args: argparse.Namespace) -> int:
             local = ipaddress.ip_address(url.hostname or "").is_private
         except ValueError:
             local = False
-    if (not local or url.scheme not in {"http", "https"} or url.username or url.password
-            or url.query or url.fragment or url.path.rstrip("/") != "/v1"):
+    if provider_name == "deepseek":
+        # 云端只允许本轮明确选定的官方端点，不能把凭据发送到任意兼容地址。
+        if args.base_url.rstrip("/") != "https://api.deepseek.com":
+            raise ValueError("DeepSeek评测仅允许明确的官方HTTPS端点")
+    elif (provider_name != "local" or not local or url.scheme not in {"http", "https"}
+            or url.username or url.password or url.query or url.fragment or url.path.rstrip("/") != "/v1"):
         raise ValueError("须提供明确本地OpenAI兼容/v1端点，不接受凭据或查询串")
     endpoint = args.base_url.rstrip("/") + "/chat/completions"
     report = {
         "mode": "progressive", "fixture_sha256": hashlib.sha256(fixture_bytes).hexdigest(),
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "model": args.model, "endpoint": endpoint, "max_calls": 24,
+        "provider": provider_name, "model": args.model, "endpoint": endpoint, "max_calls": 24,
         "max_output_tokens": 2048, "max_input_bytes": 65536,
         "timeout_seconds": 90, "sdk_retries": 0, "requests_sent": 0,
         "semantic_review_required": True, "all_passed": False, "results": [],
@@ -274,7 +283,8 @@ async def run_progressive(args: argparse.Namespace) -> int:
                             task_id=f"evaluation-{case['id']}", revision=1, text=row["text"])
                         request = SteeringRequest(owner_id=owner, task_id=turn.task_id, revision=1,
                             run_id="evaluation-run", text=turn.text, current_status="needs_input",
-                            current_goal=case["current_goal"], provider="local", model=args.model,
+                            current_goal=case["current_goal"], provider=provider_name, model=args.model,
+                            external_api_confirmed=provider_name != "local",
                             source_findings=tuple(value for name in case["sources"] for value in findings[name]),
                             relevant_turns=tuple(history), prior_delta=previous,
                             clarification_question=previous.open_questions[0] if previous and previous.open_questions else None,
@@ -317,6 +327,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("legacy", "progressive"), default="legacy")
     parser.add_argument("--base-url")
+    parser.add_argument("--provider", choices=("local", "deepseek"), default="local")
     parser.add_argument("--model")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument(
