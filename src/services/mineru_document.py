@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import json
+import math
+import mimetypes
 from typing import Any, Dict, Iterable, Mapping, Optional, Tuple
 
 import httpx
@@ -50,6 +52,8 @@ def _bbox(value: Any) -> Optional[Tuple[float, float, float, float]]:
         x0, y0, x1, y1 = (float(item) for item in value)
     except (TypeError, ValueError):
         return None
+    if not all(math.isfinite(item) for item in (x0, y0, x1, y1)):
+        raise MinerUServiceError("OCR 坐标必须为有限数")
     if min(x0, y0) < 0 or x1 <= x0 or y1 <= y0:
         return None
     return x0, y0, x1, y1
@@ -66,6 +70,8 @@ def _normalize_bbox(
         page_height = float(height)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(page_width) or not math.isfinite(page_height):
+        raise MinerUServiceError("OCR 页面尺寸必须为有限数")
     if page_width <= 0 or page_height <= 0:
         return None
     x0, y0, x1, y1 = box
@@ -75,14 +81,6 @@ def _normalize_bbox(
         x1 * 1000.0 / page_width,
         y1 * 1000.0 / page_height,
     )
-
-
-def _confidence(value: Any) -> float:
-    try:
-        score = float(value)
-    except (TypeError, ValueError):
-        return 1.0
-    return max(0.0, min(score, 1.0))
 
 
 def _result_items(payload: Mapping[str, Any]) -> Iterable[Mapping[str, Any]]:
@@ -140,7 +138,7 @@ def _blocks_from_model_output(item: Mapping[str, Any]) -> list[MinerUPageBlock]:
                 coordinate_space=(
                     "normalized_1000" if normalized_box else "image_pixels"
                 ),
-                confidence=_confidence(detection.get("score", 1.0)),
+                confidence=detection.get("score"),
                 element_type="text",
             ))
     return blocks
@@ -176,7 +174,7 @@ def _blocks_from_content_list(item: Mapping[str, Any]) -> list[MinerUPageBlock]:
             text=text,
             bbox=box,
             coordinate_space="normalized_1000",
-            confidence=_confidence(content.get("score", 1.0)),
+            confidence=content.get("score"),
             element_type=content_type,
         ))
     return blocks
@@ -219,7 +217,7 @@ def _blocks_from_middle_json(item: Mapping[str, Any]) -> list[MinerUPageBlock]:
                         text=text,
                         bbox=box,
                         coordinate_space="pdf_points",
-                        confidence=_confidence(span.get("score", 1.0)),
+                        confidence=span.get("score"),
                         element_type=element_type,
                     ))
     return blocks
@@ -285,11 +283,23 @@ class MinerUDocumentClient:
         )
 
     def parse_pdf(self, raw_bytes: bytes, *, filename: str) -> MinerUParseResult:
+        return self._parse_file(raw_bytes, filename=filename, media_type="application/pdf")
+
+    def parse_image(self, raw_bytes: bytes, *, filename: str) -> MinerUParseResult:
+        from pathlib import Path
+        from src.services.upload_store import IMAGE_EXTENSIONS, inspect_uploaded_image
+
+        if Path(filename).suffix.lower() not in IMAGE_EXTENSIONS:
+            raise MinerUServiceError("仅支持 PNG、JPEG 和 WEBP 静态图片")
+        inspect_uploaded_image(raw_bytes)
+        return self._parse_file(raw_bytes, filename=filename, media_type=mimetypes.guess_type(filename)[0] or "application/octet-stream")
+
+    def _parse_file(self, raw_bytes: bytes, *, filename: str, media_type: str) -> MinerUParseResult:
         with document_parser_request_slot():
             response = self._request(
                 "POST",
                 "/file_parse",
-                files={"files": (filename, raw_bytes, "application/pdf")},
+                files={"files": (filename, raw_bytes, media_type)},
                 data={
                     "backend": self.backend,
                     "parse_method": "ocr",
@@ -319,11 +329,57 @@ class MinerUDocumentClient:
 
         blocks: list[MinerUPageBlock] = []
         items = tuple(_result_items(raw_response))
+        coordinates_verified = (
+            raw_response.get("backend") == "pipeline"
+            and raw_response.get("version") == "3.4.4"
+            and len(items) == 1
+        )
         for item in items:
             item_blocks = _blocks_from_model_output(item)
+            model_pages = _json_value(item.get("model_output"), default=[])
+            page_info = (
+                model_pages[0].get("page_info")
+                if isinstance(model_pages, list) and len(model_pages) == 1
+                and isinstance(model_pages[0], Mapping) else None
+            )
+            model_verified = (
+                isinstance(page_info, Mapping)
+                and type(page_info.get("page_no")) is int
+                and page_info["page_no"] == 0
+                and all(
+                    type(page_info.get(key)) in (int, float)
+                    and math.isfinite(page_info[key]) and page_info[key] > 0
+                    for key in ("width", "height")
+                )
+                and all(
+                    block.coordinate_space == "normalized_1000"
+                    and all(0 <= value <= 1000 for value in block.bbox)
+                    for block in item_blocks
+                )
+            )
+            if item_blocks:
+                coordinates_verified = coordinates_verified and model_verified
             if not item_blocks:
                 item_blocks = _blocks_from_middle_json(item)
-            item_blocks.extend(_blocks_from_content_list(item))
+                if item_blocks:
+                    coordinates_verified = False
+            content_blocks = _blocks_from_content_list(item)
+            if content_blocks:
+                content_entries = _json_value(item.get("content_list"), default=[])
+                # 已核旧版表格父框按原页尺寸归一化；不承诺图片或单元格坐标。
+                coordinates_verified = coordinates_verified and all(
+                    entry.get("type") == "table"
+                    and type(entry.get("page_idx")) is int and entry["page_idx"] == 0
+                    and isinstance(entry.get("bbox"), (list, tuple))
+                    and len(entry["bbox"]) == 4
+                    and all(type(value) in (int, float) and math.isfinite(value) for value in entry["bbox"])
+                    and 0 <= entry["bbox"][0] < entry["bbox"][2] <= 1000
+                    and 0 <= entry["bbox"][1] < entry["bbox"][3] <= 1000
+                    for entry in content_entries
+                    if isinstance(entry, Mapping)
+                    and str(entry.get("type") or "").lower() in {"table", "image"}
+                )
+            item_blocks.extend(content_blocks)
             blocks.extend(item_blocks)
 
         return MinerUParseResult(
@@ -333,4 +389,6 @@ class MinerUDocumentClient:
             blocks=tuple(blocks),
             raw_response=dict(raw_response),
             provider=self.provider,
+            # 单图已核模型文本/旧版表格区域；调用方仍须核 EXIF 和内容分数。
+            source_coordinates_verified=coordinates_verified and bool(blocks),
         )

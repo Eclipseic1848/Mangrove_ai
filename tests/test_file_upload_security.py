@@ -199,3 +199,73 @@ def test_save_upload_detects_mismatched_magic(tmp_path: Path):
     store = UploadStore(root=str(tmp_path), max_bytes=1024)
     with pytest.raises(ValueError, match="魔数"):
         store.save_bytes("user-a", "fake.csv", png_header, verify_magic=True)
+
+
+def test_failed_stream_validation_removes_staging(tmp_path: Path):
+    store = UploadStore(root=str(tmp_path), max_bytes=1024)
+    payload = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+    with pytest.raises(ValueError):
+        asyncio.run(store.save_upload("user-a", "fake.csv", _AsyncStream(payload)))
+    assert not list(tmp_path.rglob("staging/*"))
+    assert not list(tmp_path.rglob("objects/*"))
+
+
+def test_cancelled_upload_removes_staging(tmp_path: Path):
+    class CancelledStream(_AsyncStream):
+        async def read(self, size: int = -1) -> bytes:
+            chunk = await super().read(size)
+            if not chunk:
+                raise asyncio.CancelledError()
+            return chunk
+
+    store = UploadStore(root=str(tmp_path), max_bytes=1024)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(store.save_upload("user-a", "cancel.csv", CancelledStream(b"id\n1\n")))
+    assert not list(tmp_path.rglob("staging/*"))
+    assert not list(tmp_path.rglob("objects/*"))
+
+
+@pytest.mark.parametrize("payload", [b"not an image", b"\x89PNG\r\n\x1a\n" + b"\x00" * 32])
+def test_image_upload_requires_decodable_content(tmp_path: Path, payload: bytes):
+    store = UploadStore(root=str(tmp_path), max_bytes=1024)
+    with pytest.raises(ValueError):
+        asyncio.run(store.save_upload("user-a", "scan.png", _AsyncStream(payload)))
+    assert not list(tmp_path.rglob("staging/*"))
+    assert not list(tmp_path.rglob("objects/*"))
+
+
+@pytest.mark.parametrize("extension,format_name,mime", [
+    ("png", "PNG", "image/png"), ("jpg", "JPEG", "image/jpeg"),
+    ("jpeg", "JPEG", "image/jpeg"), ("webp", "WEBP", "image/webp"),
+])
+def test_image_upload_preserves_original_and_records_verified_type(tmp_path: Path, extension, format_name, mime):
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 6), "white").save(buffer, format=format_name)
+    payload = buffer.getvalue()
+    store = UploadStore(root=str(tmp_path), max_bytes=4096)
+    item = asyncio.run(store.save_upload("user-a", f"scan.{extension}", _AsyncStream(payload)))
+    restored = store.resolve("user-a", item.upload_id)
+    assert restored.media_type == mime
+    assert Path(restored.storage_path).read_bytes() == payload
+    assert restored.sha256 == hashlib.sha256(payload).hexdigest()
+
+
+@pytest.mark.parametrize("streamed", [True, False])
+def test_oversized_image_header_is_rejected_before_decode(tmp_path: Path, streamed):
+    import struct
+    import zlib
+
+    header = struct.pack(">IIBBBBB", 4001, 4001, 8, 2, 0, 0, 0)
+    chunk = b"IHDR" + header
+    payload = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", len(header)) + chunk + struct.pack(">I", zlib.crc32(chunk))
+    payload += b"\x00\x00\x00\x00IDAT" + struct.pack(">I", zlib.crc32(b"IDAT"))
+    store = UploadStore(root=str(tmp_path), max_bytes=4096)
+    with pytest.raises(ValueError, match="像素上限"):
+        if streamed:
+            asyncio.run(store.save_upload("user-a", "large.png", _AsyncStream(payload)))
+        else:
+            store.save_bytes("user-a", "large.png", payload, verify_magic=True)
+    assert not list(tmp_path.rglob("staging/*"))
+    assert not list(tmp_path.rglob("objects/*"))

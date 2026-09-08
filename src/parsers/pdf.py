@@ -260,6 +260,7 @@ class PdfParser(Parser):
                     bbox=block.bbox,
                     coordinate_space=block.coordinate_space,
                     confidence=block.confidence,
+                    confidence_known=block.confidence_known,
                     element_type=block.element_type,
                 )
                 for block in result.blocks
@@ -277,6 +278,8 @@ class PdfParser(Parser):
         records: List[RecordEnvelope] = []
         rejects: List[Dict] = []
         try:
+            from src.parsers.pdf_render import validate_pdf_source
+            validate_pdf_source(raw_bytes)
             with pdfplumber.open(io.BytesIO(raw_bytes)) as pdf:
                 page_results: List[Dict[str, Any]] = []
                 table_no = 0
@@ -545,6 +548,7 @@ class PdfParser(Parser):
                             metadata = {
                                 "document_parser_provider": provider,
                                 "source_element_type": block.element_type,
+                                "confidence_known": block.confidence_known,
                             }
                             if block_type == ElementType.TABLE:
                                 next_table_no += 1
@@ -580,6 +584,7 @@ class PdfParser(Parser):
                                 extractor=provider,
                                 extractor_version=block_result.version,
                                 confidence=block.confidence,
+                                review_required=not block.confidence_known,
                                 raw_result_ref=raw_result_ref,
                                 metadata=metadata,
                             )

@@ -2199,12 +2199,13 @@ def test_pi_json_output_contract_ignores_system_manifest(
     assert _output_contract_issue(output, ("json",)) is None
 
 
+@pytest.mark.parametrize("suffix", ["pdf", "png", "jpg", "jpeg", "webp"])
 def test_pdf_manifest_accepts_canonical_upload_id_as_evidence_source(
-    tmp_path: Path,
+    tmp_path: Path, suffix: str,
 ) -> None:
     """系统要求 Pi 写规范来源 ID 时，完成门必须按同一契约识别。"""
 
-    source = tmp_path / "source.pdf"
+    source = tmp_path / f"source.{suffix}"
     source.write_bytes(b"pdf")
     output = tmp_path / "output"
     output.mkdir()
@@ -2248,6 +2249,10 @@ def test_pdf_manifest_accepts_canonical_upload_id_as_evidence_source(
 
     class Broker:
         @staticmethod
+        def issue_grant(**kwargs):
+            return SimpleNamespace(sources=kwargs["sources"])
+
+        @staticmethod
         def completion_state(_grant_id: str) -> tuple[object, CoverageLedger]:
             return object(), ledger
 
@@ -2267,7 +2272,7 @@ def test_pdf_manifest_accepts_canonical_upload_id_as_evidence_source(
         sources=(
             SourceInput(
                 upload_id="upload-a",
-                original_name="source.pdf",
+                original_name=source.name,
                 host_path=source,
                 sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
                 media_type="application/pdf",
@@ -2282,6 +2287,14 @@ def test_pdf_manifest_accepts_canonical_upload_id_as_evidence_source(
     )
 
     assert runtime._document_manifest_coverage_issue(request, output) is None
+    assert runtime._issue_document_grant(request, run_id="run-a").sources == request.sources
+    ledger.authoritatively_read_unit_ids = ()
+    assert runtime._document_manifest_coverage_issue(request, output) is not None
+
+
+def test_document_evidence_manifest_accepts_static_images() -> None:
+    from src.semantic_harness.capabilities import DOCUMENT_EVIDENCE_MANIFEST
+    assert {"png", "jpg", "jpeg", "webp"} <= set(DOCUMENT_EVIDENCE_MANIFEST.accepts)
 
 
 def test_rpc_trace_compacts_repeated_message_snapshot_without_losing_audit_fields() -> None:

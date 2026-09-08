@@ -86,7 +86,7 @@ from src.model_connections import GrantError, get_default_broker
 from src.conversation_steering.models import FrozenResultContext, ResultSelection
 from src.conversation_steering.repository import ResultContextConflict
 from src.delivery_publishing.models import TableOutputContract
-from src.services.upload_store import UploadStore
+from src.services.upload_store import IMAGE_EXTENSIONS, UploadStore
 from src.source_acquisition import (
     AcquisitionConflictError,
     AnonymousWebFetcher,
@@ -129,7 +129,7 @@ _FORMATS = {
     "txt",
     "pptx",
 }
-_DOCUMENT_INPUTS = {".docx", ".pdf"}
+_DOCUMENT_INPUTS = {".docx", ".pdf"} | IMAGE_EXTENSIONS
 _TABLE_INPUTS = {".xlsx", ".csv", ".tsv", ".json", ".jsonl", ".parquet"}
 _OUTPUT_FORMAT_PATTERN = re.compile(
     r"(?:输出|导出|生成)(?:为|成)?\s*"
@@ -5310,10 +5310,20 @@ def preview_task_source(
             return {**common, "kind": "table", "tables": [{key: item[key] for key in ("table_ref", "table_index", "name", "header_row")} for item in tables],
                     "selected_table_ref": table["table_ref"], "columns": columns, "rows": [{"row_number": int(number), "values": values} for number, values in pairs[offset:offset + limit]],
                     "offset": offset, "limit": limit, "total": len(pairs), "is_complete": True}
+        if suffix in {".png", ".jpg", ".jpeg", ".webp"}:
+            from src.services.upload_store import inspect_uploaded_image
+
+            dimensions = inspect_uploaded_image(path)
+            # 原件预览不启动 OCR；没有已核元素时不能声称区域已经定位。
+            if element_id or (page is not None and page != 1):
+                common["location_status"] = "not_found"
+            elif page == 1:
+                common["location_status"] = "located"
+            return {**common, **dimensions, "kind": "image", "elements": [], "page_count": 1,
+                    "offset": 0, "limit": limit, "total": 0, "is_complete": True}
         if suffix == ".pdf":
-            from pypdf import PdfReader
-            with path.open("rb") as source_file:
-                page_count = len(PdfReader(source_file).pages)
+            from src.parsers.pdf_render import validate_pdf_source
+            page_count = validate_pdf_source(path.read_bytes())
             if page is not None:
                 common["location_status"] = "located" if page <= page_count else "not_found"
             elif element_id:

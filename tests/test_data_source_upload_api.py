@@ -88,6 +88,33 @@ def test_mismatched_magic_returns_413(tmp_path: Path, monkeypatch):
     assert response.status_code == 413
 
 
+def test_image_upload_download_keeps_verified_mime_bytes_and_owner(tmp_path: Path, monkeypatch):
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 6), "white").save(buffer, format="PNG")
+    payload = buffer.getvalue()
+    client = _make_client(tmp_path, monkeypatch)
+    response = client.post("/api/data-sources/uploads", files={"file": ("scan.png", payload, "text/html")})
+    assert response.status_code == 200, response.text
+    item = response.json()
+    assert item["media_type"] == "image/png"
+    content_url = f"/api/data-sources/uploads/{item['upload_id']}/content"
+    original = client.get(content_url)
+    assert original.content == payload
+    assert original.headers["content-type"] == "image/png"
+    other = _make_client(tmp_path, monkeypatch, user_id="user-b")
+    assert other.get(content_url).status_code == 404
+
+
+def test_corrupt_image_http_rejection_does_not_leave_partial_upload(tmp_path: Path, monkeypatch):
+    client = _make_client(tmp_path, monkeypatch)
+    response = client.post("/api/data-sources/uploads", files={"file": ("scan.png", b"not an image", "image/png")})
+    assert response.status_code == 413
+    assert not list(tmp_path.rglob("staging/*"))
+    assert not list(tmp_path.rglob("objects/*"))
+
+
 def test_docx_upload_has_structured_preview(tmp_path: Path, monkeypatch):
     """上传后的 DOCX 可立即预览，元素 ID 可重复解析且保持稳定。"""
     from docx import Document

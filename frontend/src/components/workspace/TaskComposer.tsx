@@ -55,6 +55,7 @@ const TABLE_EXTENSIONS = new Set([
   "jsonl",
 ]);
 const DOCUMENT_EXTENSIONS = new Set([
+  "png", "jpg", "jpeg", "webp",
   "pdf",
   "docx",
   "pptx",
@@ -311,6 +312,11 @@ export function TaskComposer({
   const [formats, setFormats] = useState<string[]>(initialFormats);
   const [items, setItems] = useState<UploadDraft[]>([]);
   const submittingRef = useRef(false);
+  const uploadControllers = useRef(new Map<string, AbortController>());
+  useEffect(() => () => {
+    for (const controller of uploadControllers.current.values()) controller.abort();
+    uploadControllers.current.clear();
+  }, []);
   const [submitting, setSubmitting] = useState(false);
   const [selectedModel, setSelectedModel] = useState("");
   const [runtimeSelection, setRuntimeSelection] =
@@ -488,14 +494,19 @@ export function TaskComposer({
 
   const uploadDraft = useCallback(
     async (draft: UploadDraft) => {
+      const controller = new AbortController();
+      uploadControllers.current.get(draft.id)?.abort();
+      uploadControllers.current.set(draft.id, controller);
       try {
         const upload = await uploadFileWithProgress(draft.file, (progress) => {
+          if (controller.signal.aborted) return;
           setItems((current) =>
             current.map((item) =>
               item.id === draft.id ? { ...item, progress } : item,
             ),
           );
-        });
+        }, controller.signal);
+        if (controller.signal.aborted) return;
         setItems((current) =>
           current.map((item) =>
             item.id === draft.id
@@ -504,6 +515,7 @@ export function TaskComposer({
           ),
         );
       } catch (error) {
+        if (controller.signal.aborted) return;
         setItems((current) =>
           current.map((item) =>
             item.id === draft.id
@@ -515,6 +527,8 @@ export function TaskComposer({
               : item,
           ),
         );
+      } finally {
+        if (uploadControllers.current.get(draft.id) === controller) uploadControllers.current.delete(draft.id);
       }
     },
     [],
@@ -539,7 +553,7 @@ export function TaskComposer({
         }));
       if (supported.length < files.length) {
         setFileNotice(
-          "部分文件格式不受支持。可上传表格、PDF、Word、PPT、HTML、Markdown、TXT 和 XML。",
+          "部分文件格式不受支持。可上传表格、PDF、Word、PPT、PNG/JPG/WEBP 图片、HTML、Markdown、TXT 和 XML。",
         );
       } else if (!drafts.length && supported.length > 0) {
         setFileNotice("同名且大小相同的文件已经添加，本次没有重复上传。");
@@ -563,7 +577,7 @@ export function TaskComposer({
     onDrop: addFiles,
     onDropRejected: () => {
       setFileNotice(
-        "文件格式不受支持。可上传表格、PDF、Word、PPT、HTML、Markdown、TXT 和 XML。",
+        "文件格式不受支持。可上传表格、PDF、Word、PPT、PNG/JPG/WEBP 图片、HTML、Markdown、TXT 和 XML。",
       );
     },
     accept: {
@@ -579,6 +593,9 @@ export function TaskComposer({
         ".htm",
         ".xml",
       ],
+      "image/png": [".png"],
+      "image/jpeg": [".jpg", ".jpeg"],
+      "image/webp": [".webp"],
       "application/pdf": [".pdf"],
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
@@ -887,11 +904,10 @@ export function TaskComposer({
                 <SortableFileCard
                   key={item.id}
                   item={item}
-                  onRemove={() =>
-                    setItems((current) =>
-                      current.filter((candidate) => candidate.id !== item.id),
-                    )
-                  }
+                  onRemove={() => {
+                    uploadControllers.current.get(item.id)?.abort();
+                    setItems((current) => current.filter((candidate) => candidate.id !== item.id));
+                  }}
                   onRetry={() => {
                     setItems((current) =>
                       current.map((candidate) =>

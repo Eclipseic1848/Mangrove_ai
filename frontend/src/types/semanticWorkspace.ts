@@ -599,7 +599,10 @@ export interface WorkspaceSourcePreview {
   media_type: string;
   content_url: string | null;
   representation: { kind: "source"; parser_or_inspector_version: string | null };
-  kind: "table" | "document" | "web";
+  kind: "table" | "document" | "web" | "image";
+  image_width?: number;
+  image_height?: number;
+  image_orientation?: number;
   location_status?: "not_requested" | "located" | "not_found" | "version_mismatch";
   tables?: Array<{ table_ref: string; table_index: number; name: string; header_row: number }>;
   selected_table_ref?: string;

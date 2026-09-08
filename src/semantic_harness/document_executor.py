@@ -265,6 +265,9 @@ def load_document_elements(
 
 
 def _evidence(element: DocumentElement) -> EvidenceRef:
+    # 全文和指定片段共用此门，防止全文绕过绑定阶段的待复核标记。
+    if element.review_required or element.confidence < 0.90:
+        raise ValueError("选中内容的识别质量或原件定位尚待复核，不能形成正式证据")
     quote = (element.text or "").strip()
     return EvidenceRef(
         artifact_id=element.artifact_id,

@@ -52,6 +52,104 @@ def _completed_payload() -> dict:
     }
 
 
+@pytest.mark.parametrize("case", ["verified", "version", "missing_version", "backend", "content", "middle", "missing_size", "invalid_size", "page", "empty"])
+def test_mineru_coordinate_confirmation_only_covers_verified_model_output(case):
+    payload = _completed_payload()
+    item = payload["results"]["scan"]
+    model = json.loads(item["model_output"])
+    model[0]["page_info"]["page_no"] = 0
+    item["model_output"] = model
+    if case != "content":
+        item["content_list"] = []
+    if case == "version":
+        payload["version"] = "3.4.5"
+    elif case == "missing_version":
+        payload.pop("version")
+    elif case == "backend":
+        payload["backend"] = "vlm"
+    elif case in {"middle", "empty"}:
+        item["model_output"] = []
+        if case == "middle":
+            item["middle_json"] = {"pdf_info": [{"page_idx": 0, "para_blocks": [{"lines": [{"spans": [{"content": "回退正文", "bbox": [1, 2, 3, 4], "score": 0.99}]}]}]}]}
+    elif case == "missing_size":
+        model[0]["page_info"].pop("width")
+    elif case == "invalid_size":
+        model[0]["page_info"]["width"] = True
+    elif case == "page":
+        model[0]["page_info"]["page_no"] = 1
+    result = MinerUDocumentClient(base_url="http://mineru.test").parse_response(payload)
+    assert result.source_coordinates_verified is (case == "verified")
+    if case in {"content", "middle"}:
+        assert result.blocks
+
+
+@pytest.mark.parametrize("case", ["verified", "missing_page", "invalid_page", "negative_page", "outside", "image", "middle", "version", "backend", "model"])
+def test_mineru_verified_table_region_keeps_unknown_score(case):
+    payload = _completed_payload()
+    item = payload["results"]["scan"]
+    item["model_output"] = []
+    table = {"type": "table", "page_idx": 0, "bbox": [30, 72, 966, 855], "table_body": "<table><tr><td>金额</td><td>100</td></tr></table>"}
+    item["content_list"] = [table]
+    if case == "missing_page":
+        table.pop("page_idx")
+    elif case == "invalid_page":
+        table["page_idx"] = False
+    elif case == "negative_page":
+        table["page_idx"] = -1
+    elif case == "outside":
+        table["bbox"][2] = 1001
+    elif case == "image":
+        item["content_list"].append({"type": "image", "page_idx": 0, "bbox": [1, 2, 3, 4], "image_caption": "未核图片"})
+    elif case == "middle":
+        item["middle_json"] = {"pdf_info": [{"page_idx": 0, "para_blocks": [{"lines": [{"spans": [{"content": "未核回退", "bbox": [1, 2, 3, 4], "score": 0.99}]}]}]}]}
+    elif case == "version":
+        payload["version"] = "unknown"
+    elif case == "backend":
+        payload["backend"] = "vlm"
+    elif case == "model":
+        model = json.loads(_completed_payload()["results"]["scan"]["model_output"])
+        model[0]["page_info"]["page_no"] = 0
+        item["model_output"] = model
+    result = MinerUDocumentClient(base_url="http://mineru.test").parse_response(payload)
+    assert result.source_coordinates_verified is (case in {"verified", "model"})
+    block = next(block for block in result.blocks if block.element_type == "table")
+    assert block.confidence_known is False
+    assert block.confidence == 0
+    if case == "verified":
+        assert block.bbox == (30, 72, 966, 855)
+
+
+@pytest.mark.parametrize("score", [None, "invalid", float("nan"), float("inf"), -0.1, 1.1])
+def test_mineru_unknown_confidence_is_not_full_confidence(score):
+    payload = _completed_payload()
+    detections = json.loads(payload["results"]["scan"]["model_output"])
+    detections[0]["layout_dets"][0]["score"] = score
+    payload["results"]["scan"]["model_output"] = detections
+    result = MinerUDocumentClient(base_url="http://mineru.test").parse_response(payload)
+    assert result.blocks[0].confidence == 0.0
+    assert result.blocks[0].confidence_known is False
+    assert result.blocks[1].confidence_known is False
+
+
+def test_mineru_image_reuses_file_parse_with_original_bytes():
+    import io
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (30, 20), "white").save(buffer, format="PNG")
+    payload = buffer.getvalue()
+    captured = []
+    def handler(request):
+        captured.append(request)
+        return httpx.Response(200, json=_completed_payload())
+    with httpx.Client(transport=httpx.MockTransport(handler), trust_env=False) as transport:
+        result = MinerUDocumentClient(base_url="http://mineru.test", http_client=transport).parse_image(payload, filename="scan.png")
+    assert result.blocks
+    assert len(captured) == 1 and captured[0].url.path == "/file_parse"
+    assert payload in captured[0].content
+    assert b"image/png" in captured[0].content and b'filename="scan.png"' in captured[0].content
+
+
 def test_mineru_client_uses_pipeline_and_parses_bbox_blocks() -> None:
     captured: dict[str, bytes | str] = {}
 
