@@ -35,6 +35,10 @@ _PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "rewrite-v1.md"
 class RewriteDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    open_questions: tuple[str, ...] = Field(
+        default=(),
+        description="先独立判断完整业务要求是否充分。未决时仅问一个关键决策；没有delta也保留问题。已明确的语义不因存在其他理论操作而重复询问。",
+    )
     intent: TurnIntent
     confidence: DeltaConfidence
     normalized_text: str
@@ -46,7 +50,6 @@ class RewriteDraft(BaseModel):
     field_semantics_delta: dict[str, Any] = Field(default_factory=dict)
     output_delta: tuple[str, ...] = ()
     permission_delta: tuple[str, ...] = ()
-    open_questions: tuple[str, ...] = ()
 
     @field_validator(
         "selection_delta",

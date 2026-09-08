@@ -273,7 +273,7 @@ def public_source_findings(reports: tuple[SourceInspectionReport, ...]) -> tuple
                 columns.append(f"{column.raw_name}（样例：{samples}）")
             findings.append({
                 **base, "table_ref": table.table_ref,
-                "summary": (f"工作表 {report.original_name if table.name == report.artifact_id else table.name}；抽样 {table.sampled_rows} 行；" + "；".join(columns))[:500],
+                "summary": (f"各列独立样例，无行对应关系；工作表 {report.original_name if table.name == report.artifact_id else table.name}；抽样 {table.sampled_rows} 行；" + "；".join(columns))[:500],
             })
         for target in report.document_targets if report.status is InspectionStatus.READY else ():
             findings.append({

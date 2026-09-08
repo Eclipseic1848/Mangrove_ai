@@ -40,6 +40,21 @@ def test_source_findings_are_bounded_real_observations(tmp_path):
         uploads.UploadSourceInspector(user_id="owner-b", upload_store=store).inspect_artifacts((item.upload_id,))
 
 
+
+def test_column_samples_do_not_claim_row_alignment(tmp_path):
+    store = UploadStore(tmp_path / "uploads", max_bytes=1024 * 1024)
+    item = store.save_bytes(
+        "owner-a", "样例.csv", "对象,数值\n甲,10\n甲,\n乙,20\n丙,10\n".encode("utf-8"),
+    )
+    reports = uploads.UploadSourceInspector(user_id="owner-a", upload_store=store).inspect_artifacts((item.upload_id,))
+    columns = reports[0].tables[0].columns
+    assert columns[0].sample_values == ("甲", "乙", "丙")
+    assert columns[1].sample_values == ("10", "20")
+    summary = uploads.public_source_findings(reports)[0]["summary"]
+    assert summary.startswith("各列独立样例，无行对应关系；")
+    assert len(summary) <= 500
+
+
 def test_question_round_and_answer_are_persisted_once(tmp_path):
     database = migrated_webui_database(tmp_path / "workspace.db")
     seed_execution_owner(database, "owner-a")
