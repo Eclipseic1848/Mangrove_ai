@@ -18,6 +18,7 @@ class ProviderModelPreset:
     display_name: str
     role: str
     context_window: int | None = None
+    max_output_tokens: int | None = None
 
     def public_dict(self) -> dict[str, str]:
         return {
@@ -98,17 +99,19 @@ def _model(
     role: str,
     *,
     context_window: int | None = None,
+    max_output_tokens: int | None = None,
 ) -> ProviderModelPreset:
     return ProviderModelPreset(
         model_id=model_id,
         display_name=display_name,
         role=role,
         context_window=context_window,
+        max_output_tokens=max_output_tokens,
     )
 
 
 _CATALOG_VERSION = "2026-09-07.1"
-_DEEPSEEK_CATALOG_VERSION = "2026-09-07.1"
+_DEEPSEEK_CATALOG_VERSION = "2026-09-08.1"
 
 _PRESETS = (
     ProviderPreset(
@@ -125,12 +128,14 @@ _PRESETS = (
                 "DeepSeek V4 Flash（0731 正式版）",
                 "balanced",
                 context_window=1_000_000,
+                max_output_tokens=384_000,
             ),
             _model(
                 "deepseek-v4-pro",
                 "DeepSeek V4 Pro",
                 "quality",
                 context_window=1_000_000,
+                max_output_tokens=384_000,
             ),
             _model("deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision（实验版）", "vision"),
         ),
@@ -139,16 +144,16 @@ _PRESETS = (
     ),
     ProviderPreset(
         preset_id="qwen",
-        version="2026-09-07.2",
+        version="2026-09-08.1",
         display_name="阿里百炼 Qwen",
         description="中国站默认入口，兼顾中文、工具调用和成本",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         api_format="openai_responses",
         recommended_model="qwen3.8-flash",
         model_catalog=(
-            _model("qwen3.8-27b", "Qwen 3.8 27B", "balanced"),
-            _model("qwen3.8-max-0902", "Qwen 3.8 Max（0902）", "quality"),
-            _model("qwen3.8-flash", "Qwen 3.8 Flash", "efficiency"),
+            _model("qwen3.8-27b", "Qwen 3.8 27B", "balanced", context_window=1_000_000, max_output_tokens=131_072),
+            _model("qwen3.8-max-0902", "Qwen 3.8 Max（0902）", "quality", context_window=1_000_000, max_output_tokens=131_072),
+            _model("qwen3.8-flash", "Qwen 3.8 Flash", "efficiency", context_window=1_000_000, max_output_tokens=131_072),
         ),
         help_url="https://help.aliyun.com/zh/model-studio/first-api-call-to-qwen",
         source_url="https://help.aliyun.com/zh/model-studio/compatibility-with-openai-responses-api",
@@ -270,6 +275,15 @@ _PRESETS = (
 )
 
 PRESETS_BY_ID = {preset.preset_id: preset for preset in _PRESETS}
+
+
+def model_max_output_tokens(model_id: str) -> int | None:
+    """只返回已核实的输出上限；上下文总窗口不能冒充输出额度。"""
+    for preset in _PRESETS:
+        for model in preset.model_catalog:
+            if model.model_id == model_id:
+                return model.max_output_tokens
+    return None
 
 
 def runtime_context_window(model_id: str, *, fallback: int) -> int:

@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from scripts.evaluate_conversation_steering import check_progressive_request, progressive_rewriter, run_progressive
+from src.model_connections.text_protocol import structured_request
 
 
 @pytest.mark.parametrize("endpoint,allowed", [
@@ -67,23 +68,23 @@ def test_preparation_never_constructs_model_client_and_preserves_old_evidence(tm
 @pytest.mark.parametrize("change", ["endpoint", "method", "model", "output", "input", "count"])
 def test_real_send_guard_rejects_drift_and_exhausted_budget(change):
     endpoint = "http://127.0.0.1:9/v1/chat/completions"
-    body = {"model": "synthetic-local", "max_tokens": 2048}
+    body = {"model": "deepseek-v4-pro", "max_tokens": 384000}
     if change == "model":
         body["model"] = "other"
     if change == "output":
-        body["max_tokens"] = 2049
+        body["max_tokens"] = 384001
     if change == "input":
         body["messages"] = "x" * 65536
     request = httpx.Request("GET" if change == "method" else "POST",
         endpoint + "/other" if change == "endpoint" else endpoint, json=body)
     with pytest.raises(ValueError):
-        check_progressive_request(request, endpoint=endpoint, model="synthetic-local",
+        check_progressive_request(request, endpoint=endpoint, model="deepseek-v4-pro",
                                   sent=24 if change == "count" else 0, max_calls=24)
 
 
 def test_real_send_guard_accepts_exact_frozen_request():
     endpoint = "http://127.0.0.1:9/v1/chat/completions"
-    request = httpx.Request("POST", endpoint, json={"model": "synthetic-local", "max_tokens": 2048})
+    request = httpx.Request("POST", endpoint, json={"model": "synthetic-local"})
     check_progressive_request(request, endpoint=endpoint, model="synthetic-local", sent=23, max_calls=24)
 
 
@@ -103,13 +104,15 @@ def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_ex
     args = argparse.Namespace(
         fixture=Path("tests/fixtures/conversation_steering/progressive_clarification_cases.json"),
         rounds=1, concurrency=1, provider=provider_name,
-        base_url="https://api.deepseek.com" if provider_name == "deepseek" else "http://127.0.0.1:9/v1", model="synthetic-local",
+        base_url="https://api.deepseek.com" if provider_name == "deepseek" else "http://127.0.0.1:9/v1",
+        model="deepseek-v4-pro" if provider_name == "deepseek" else "synthetic-local",
         output=tmp_path / "transport.json", execute=True,
     )
     requests = []
 
     def respond(request):
         body = json.loads(request.content)
+        assert body.get("max_tokens") == (384000 if provider_name == "deepseek" else None)
         requests.append(body)
         if response_mode == "timeout":
             raise httpx.ReadTimeout("合成响应未知", request=request)
@@ -120,7 +123,7 @@ def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_ex
         # 替身只验证产品请求接线，刻意不给正确业务语义，不能获得验收通过。
         draft = {"intent": "normalization", "confidence": "high", "normalized_text": "仅测试结构接线"}
         return httpx.Response(200, json={"id": "synthetic", "object": "chat.completion", "created": 0,
-            "model": "synthetic-local", "choices": [{"index": 0, "finish_reason": "stop",
+            "model": args.model, "choices": [{"index": 0, "finish_reason": "stop",
                 "message": {"role": "assistant", "content": json.dumps(draft, ensure_ascii=False)}}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}})
 
@@ -151,3 +154,18 @@ def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_ex
     assert "eval-correction-grain-1" in requests[-1]["messages"][-1]["content"]
     assert "eval-correction-grain-2" in requests[-1]["messages"][-1]["content"]
     assert all(row["semantic_review"] == "pending" for row in report["results"])
+
+
+def test_structured_protocol_uses_catalog_output_not_small_task_cap():
+    _, body, _ = structured_request(api_format="openai_chat_completions", model="deepseek-v4-pro", grant_token="synthetic", system_prompt="JSON", payload={})
+    assert body["max_tokens"] == 384000
+
+
+def test_responses_does_not_misuse_answer_limit_for_thinking_total():
+    _, body, _ = structured_request(api_format="openai_responses", model="qwen3.8-flash", grant_token="synthetic", system_prompt="JSON", payload={})
+    assert "max_output_tokens" not in body
+
+
+def test_unknown_compatible_model_leaves_output_to_deployment():
+    _, body, _ = structured_request(api_format="openai_chat_completions", model="custom-local", grant_token="synthetic", system_prompt="JSON", payload={})
+    assert "max_tokens" not in body

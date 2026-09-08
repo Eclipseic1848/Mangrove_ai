@@ -194,7 +194,7 @@ def test_user_configures_and_lists_personal_preset_connection(tmp_path):
     assert saved.status_code == 200
     assert saved.json()["owner_scope"] == "user_personal"
     assert saved.json()["preset_id"] == "deepseek"
-    assert saved.json()["preset_version"] == "2026-09-07.1"
+    assert saved.json()["preset_version"] == "2026-09-08.1"
     assert saved.json()["display_name"] == "DeepSeek"
     assert saved.json()["model"] == "deepseek-v4-pro"
     assert saved.json()["default_model"] == "deepseek-v4-pro"
@@ -347,7 +347,7 @@ def test_personal_connection_keeps_independent_model_results_and_available_defau
             "model_id": "deepseek-v4-flash",
             "display_name": "DeepSeek V4 Flash（0731 正式版）",
             "catalog_role": "balanced",
-            "catalog_version": "2026-09-07.1",
+            "catalog_version": "2026-09-08.1",
             "status": "available",
             "enabled": True,
             "is_default": True,
@@ -359,7 +359,7 @@ def test_personal_connection_keeps_independent_model_results_and_available_defau
             "model_id": "deepseek-v4-pro",
             "display_name": "DeepSeek V4 Pro",
             "catalog_role": "quality",
-            "catalog_version": "2026-09-07.1",
+            "catalog_version": "2026-09-08.1",
             "status": "model_access_denied",
             "enabled": False,
             "is_default": False,
@@ -646,7 +646,7 @@ def test_admin_publishes_provider_preset_with_required_key(tmp_path):
     assert saved.status_code == 201
     assert saved.json()["owner_scope"] == "platform_shared"
     assert saved.json()["preset_id"] == "deepseek"
-    assert saved.json()["preset_version"] == "2026-09-07.1"
+    assert saved.json()["preset_version"] == "2026-09-08.1"
     assert saved.json()["display_name"] == "平台 DeepSeek"
     assert saved.json()["model"] == "deepseek-v4-pro"
     assert saved.json()["key_hint"] == "2468"

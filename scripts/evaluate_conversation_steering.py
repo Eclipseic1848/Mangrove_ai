@@ -131,12 +131,13 @@ async def run(args: argparse.Namespace) -> int:
 
 def check_progressive_request(request, *, endpoint, model, sent, max_calls):
     """在真实 HTTP 发送前核精确目的地和预算，重复尝试不获得新额度。"""
+    from src.model_connections.catalog import model_max_output_tokens
     if str(request.url) != endpoint or request.method != "POST":
         raise ValueError("评测请求偏离已冻结端点")
     if sent >= max_calls or len(request.content) > 65536:
         raise ValueError("评测请求超出冻结预算")
     body = json.loads(request.content)
-    if body.get("model") != model or not 1 <= body.get("max_tokens", 0) <= 2048:
+    if body.get("model") != model or body.get("max_tokens") != model_max_output_tokens(model):
         raise ValueError("评测请求模型或输出预算不一致")
 
 
@@ -160,6 +161,7 @@ def progressive_rewriter(args):
 
 async def run_progressive(args: argparse.Namespace) -> int:
     """合成资料经真实检查器及产品转写器；语义仍须逐项审阅实际输出。"""
+    from src.model_connections.catalog import model_max_output_tokens
     fixture_bytes = args.fixture.read_bytes()
     fixture = json.loads(fixture_bytes)
     cases = fixture["cases"]
@@ -189,7 +191,8 @@ async def run_progressive(args: argparse.Namespace) -> int:
         "mode": "progressive", "fixture_sha256": hashlib.sha256(fixture_bytes).hexdigest(),
         "created_at": datetime.now(timezone.utc).isoformat(),
         "provider": provider_name, "model": args.model, "endpoint": endpoint, "max_calls": 24,
-        "max_output_tokens": 2048, "max_input_bytes": 65536,
+        "max_output_tokens": model_max_output_tokens(args.model), "max_input_bytes": 65536,
+        "output_limit_policy": "verified_model_max_or_deployment_default",
         "timeout_seconds": 90, "sdk_retries": 0, "requests_sent": 0,
         "semantic_review_required": True, "all_passed": False, "results": [],
         "status": "prepared" if not args.execute else "running",
@@ -213,6 +216,7 @@ async def run_progressive(args: argparse.Namespace) -> int:
             "scripts/evaluate_conversation_steering.py",
             "src/conversation_steering/rewriter.py", "src/conversation_steering/models.py",
             "src/conversation_steering/service.py", "src/conversation_steering/prompts/rewrite-v1.md",
+            "src/model_connections/catalog.py", "src/model_connections/text_protocol.py",
             "src/semantic_harness/inspectors/uploads.py",
         )
     }

@@ -18,6 +18,7 @@ from src.config import settings
 from src.llm.provider import get_provider
 from src.model_connections import get_default_broker, GrantError, ProviderOutcomeUnknownError
 from src.model_connections.text_protocol import structured_request, response_text
+from src.model_connections.catalog import model_max_output_tokens
 
 from .models import (
     ContextDelta,
@@ -142,12 +143,13 @@ class InstructorContextRewriter:
         try:
             if self._before_call:
                 self._before_call()
+            output_limit = model_max_output_tokens(self._connection.model)
             draft = await client.chat.completions.create(
                 model=self._connection.model,
                 response_model=RewriteDraft,
                 max_retries=0,
                 temperature=0,
-                max_tokens=2048,
+                **({"max_tokens": output_limit} if output_limit is not None else {}),
                 messages=[
                     {
                         "role": "system",
