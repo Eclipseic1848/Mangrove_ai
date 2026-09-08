@@ -101,6 +101,10 @@ def conversation(tmp_path, monkeypatch):
         body = json.loads(request.content)
         is_rewrite = "JSON Schema" in str(body)
         if is_rewrite:
+            context = json.loads(body["messages"][-1]["content"])
+            assert list(context)[-1] == "user_turn"
+            if context["prior_delta"]:
+                assert context["prior_delta"]["status"] == "unconfirmed_model_draft"
             calls.append(body)
             await asyncio.sleep(0.02)
         return httpx.Response(200, json={
@@ -251,3 +255,21 @@ def test_old_revision_subscription_cannot_receive_late_new_revision_state(conver
         assert json.loads(rest[-1]["data"])["revision"] == 1
         assert routes._steering_messages("user-a", "task-1", 2) == []
     asyncio.run(scenario())
+
+
+def test_broker_keeps_unconfirmed_draft_separate_from_raw_history(conversation):
+    from src.conversation_steering.models import ContextDelta, RawUserTurn
+    database, _, _, calls, _, _, request = conversation
+    turn = RawUserTurn(turn_id="prior-turn", owner_id="user-a", task_id="task-1", revision=1, text="不排除作废")
+    prior = ContextDelta(delta_id="prior-draft", owner_id="user-a", task_id="task-1", inherited_revision=1,
+        source_turn_ids=(turn.turn_id,), intent="task_refinement", confidence="medium", normalized_text="错误猜测：排除作废",
+        selection_delta={"exclude": "作废"})
+    repository = SqliteSteeringRepository(database)
+    repository.save_turn(turn)
+    repository.save_delta(turn.turn_id, prior)
+    request = request.model_copy(update={"relevant_turns": (turn,), "prior_delta": prior})
+    asyncio.run(ConversationSteering(SqliteSteeringRepository(database), rewriter.BrokerContextRewriter()).handle_turn(request))
+    context = json.loads(calls[0]["messages"][-1]["content"])
+    assert context["prior_delta"] == {"status": "unconfirmed_model_draft", "value": prior.model_dump(mode="json")}
+    assert context["relevant_turns"] == [{"turn_id": turn.turn_id, "text": turn.text}]
+    assert context["user_turn"] == request.text

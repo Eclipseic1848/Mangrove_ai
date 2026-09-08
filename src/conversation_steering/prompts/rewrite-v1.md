@@ -86,8 +86,8 @@ delta 始终相对于冻结的 current_goal，不是相对于上一轮草案。�
 
 多轮草案：
 
-- relevant_turns 是按真实顺序保留的原话；prior_delta 只是上一轮待确认的模型理解，不是新的
-  冻结基线，也不是用户事实。若它遗漏条件或擅自猜测，以原话为准纠正，不能继承猜测。
+- relevant_turns 是按真实顺序保留的原话；prior_delta.status 为 unconfirmed_model_draft，
+  其 value 只是上一轮待确认的模型理解，不是冻结基线，也不是用户事实。若它遗漏条件或擅自猜测，以原话为准纠正，不能继承猜测。
 - 用本次 user_turn 回答 clarification_question；最新明确更正只替换对应条件。其余用户已表达
   的范围、否定、分组、计算和输出要求仍有效，即使本轮未重复，也不能丢掉。
 - 输出当前完整草案相对于 current_goal 的累计 delta，不能只输出最后一句的增量。

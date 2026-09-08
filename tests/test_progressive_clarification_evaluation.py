@@ -170,6 +170,11 @@ def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_ex
     assert report["all_passed"] is False
     for body in requests:
         payload = body["messages"][-1]["content"]
+        decoded = json.loads(payload)
+        assert list(decoded)[-1] == "user_turn"
+        if decoded["prior_delta"]:
+            assert decoded["prior_delta"]["status"] == "unconfirmed_model_draft"
+            assert decoded["prior_delta"]["value"]["normalized_text"] == "仅测试结构接线"
         assert "source_findings" in payload and "source_sha256" in payload
         assert "required_semantics" not in payload and "forbidden_assumptions" not in payload
     assert "eval-correction-grain-1" in requests[-1]["messages"][-1]["content"]
