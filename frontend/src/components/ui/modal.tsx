@@ -76,7 +76,7 @@ export function Modal({
         aria-labelledby={title ? titleId : undefined}
         tabIndex={-1}
         onKeyDown={handleDialogKeyDown}
-        className={`relative w-full ${wide ? "max-w-3xl" : "max-w-sm"} animate-fade-in rounded-xl border border-border bg-card p-5 shadow-xl`}
+        className={`relative max-h-[calc(100dvh-2rem)] w-full overflow-y-auto ${wide ? "max-w-3xl" : "max-w-sm"} animate-fade-in rounded-xl border border-border bg-card p-5 shadow-xl`}
       >
         {title && <h3 id={titleId} className="mb-3 text-base font-semibold">{title}</h3>}
         {children}

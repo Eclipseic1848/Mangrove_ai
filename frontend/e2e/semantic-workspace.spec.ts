@@ -2553,6 +2553,8 @@ test.describe("统一数据工作台", () => {
       page.getByRole("heading", { name: "需要确认一项信息" }),
     ).toBeVisible();
     await page.getByRole("button", { name: "稍后回答" }).click();
+    // 等待弹窗退出后再检查页面焦点，避免与关闭时的焦点归还竞争。
+    await expect(page.getByRole("dialog")).toHaveCount(0);
     await ownerAction.focus();
     await expect(ownerAction).toBeFocused();
     await expect(page.getByRole("button", { name: /继续回答/ })).toBeVisible();

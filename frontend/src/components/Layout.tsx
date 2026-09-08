@@ -29,7 +29,7 @@ export function Layout() {
   const location = useLocation();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
-  const compactDataPrep = location.pathname === "/data-prep";
+  const compactDataPrep = location.pathname === "/data-prep" || location.pathname === "/settings";
 
   useEffect(() => {
     setMobileNavOpen(false);
@@ -178,7 +178,7 @@ export function Layout() {
             >
               {mobileNavOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
             </button>
-            <span className="text-xs font-medium text-muted-foreground">Mangrove 数据工作台</span>
+            <span className="text-xs font-medium text-muted-foreground">{location.pathname === "/settings" ? "Mangrove 设置" : "Mangrove 数据工作台"}</span>
           </div>
         )}
         <Outlet />

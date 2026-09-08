@@ -674,13 +674,15 @@ test.describe("文档智能抽取工作台", () => {
   test("文件勾选只用于组合，独立文件仍按自己的任务单元执行", async ({ page }) => {
     await mockSession(page);
     await page.unroute("**/api/data-sources/uploads");
-    let uploadIndex = 0;
     await page.route("**/api/data-sources/uploads", (route) => {
-      uploadIndex += 1;
+      // 多文件并发上传无到达顺序保证，模拟响应必须绑定请求内的文件名。
+      const filename = route.request().postDataBuffer()?.toString("utf8").match(/filename="([ab]\.png)"/)?.[1];
+      expect(filename).toBeTruthy();
+      const uploadIndex = filename === "a.png" ? 1 : 2;
       return route.fulfill({
         json: {
           upload_id: `upload-${uploadIndex}`,
-          original_name: uploadIndex === 1 ? "a.png" : "b.png",
+          original_name: filename,
           media_type: "image/png",
           size_bytes: 4,
           sha256: String(uploadIndex).repeat(64),

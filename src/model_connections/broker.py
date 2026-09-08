@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import ipaddress
@@ -16,7 +17,7 @@ import httpx
 from src.config.settings import settings
 from src.connectors.http_security import HostResolver, HttpSecurityGuard, SsrfError
 
-from .catalog import PRESETS_BY_ID, ProviderPreset, public_presets
+from .catalog import PRESETS_BY_ID, ProviderModelPreset, ProviderPreset, public_presets
 from .contracts import AccessGrant, ConnectionBinding, RelayResponse
 from .pinned_transport import PinnedAsyncHTTPTransport
 from .storage import ModelConnectionRepository
@@ -42,7 +43,17 @@ class ConnectionValidationError(ConnectionError):
         message: str,
         model_results: list[dict[str, object]],
     ) -> None:
-        super().__init__(message)
+        hints = {
+            "credentials_invalid": "密钥无效：请核对所选站点/地域并从该服务商 API 控制台重新复制密钥",
+            "model_access_denied": "模型不存在或无权限：请核对模型 ID、账户权限和地域",
+            "balance_insufficient": "API 额度不足：请到服务商控制台检查余额或配额后手动重试",
+            "rate_limited": "请求过于频繁：请稍后手动重试",
+            "network_unreachable": "服务无法连接：请检查服务是否启动、地址及网络",
+            "result_unknown": "请求结果未知，可能已产生用量；请先检查连接列表和服务商记录，不要立即重复提交",
+            "protocol_incompatible": "接口不匹配：请确认服务类型、地址和模型支持的接口",
+        }
+        explanations = list(dict.fromkeys(hints[item["error_code"]] for item in model_results if item.get("error_code") in hints))
+        super().__init__(message + ("；" + "；".join(explanations) if explanations else ""))
         self.model_results = model_results
 
 
@@ -231,7 +242,7 @@ class ConnectionBroker:
             for item in context["models"]
         }
         for model_id in requested:
-            if model_id not in states or (preset is not None and model_id not in preset.models):
+            if model_id not in states:
                 raise ConnectionError("待重验模型不属于当前连接")
             if states[model_id] in {"available", "disabled"}:
                 raise ConnectionError("只允许重试验证失败的模型")
@@ -239,7 +250,11 @@ class ConnectionBroker:
         secret = self._vault.decrypt(str(ciphertext)) if ciphertext else ""
         if preset is not None:
             results = await self._verify_preset_models(
-                preset=preset,
+                # 重验使用连接内冻结的白名单和地址，不受新目录移除旧型号影响。
+                preset=replace(
+                    preset, base_url=str(context["base_url"]), api_format=str(context["api_format"]),
+                    model_catalog=tuple(ProviderModelPreset(model_id, model_id, "") for model_id in requested),
+                ),
                 api_key=secret,
                 model_ids=requested,
             )
@@ -596,6 +611,7 @@ class ConnectionBroker:
         try:
             target = HttpSecurityGuard(
                 allow_private=allow_private,
+                loopback_host_allowlist=("localhost", "127.0.0.1", "::1"),
                 proxy_fake_ip_host_allowlist=_OFFICIAL_PRESET_HTTPS_HOSTS,
                 resolver=self._resolver,
             ).validate(endpoint)
@@ -763,6 +779,9 @@ class ConnectionBroker:
         preset_id: str,
         api_key: str,
         model: str | None = None,
+        verify_all: bool = False,
+        region: str | None = None,
+        workspace_id: str = "",
     ) -> dict[str, object]:
         """创建一套独立命名个人连接；不覆盖同 Provider 的其他连接。"""
 
@@ -774,6 +793,10 @@ class ConnectionBroker:
         preset = PRESETS_BY_ID.get(preset_id)
         if preset is None:
             raise ConnectionError("未知的 Provider 预设")
+        try:
+            preset = preset.for_region(region, workspace_id)
+        except ValueError as exc:
+            raise ConnectionError(str(exc)) from exc
         selected_model = model or preset.recommended_model
         if selected_model not in preset.models:
             raise ConnectionError("所选默认模型不在当前平台目录中")
@@ -783,20 +806,19 @@ class ConnectionBroker:
         model_results = await self._verify_preset_models(
             preset=preset,
             api_key=secret,
+            model_ids=None if verify_all else [selected_model],
         )
         available_models = [
             str(item["model_id"])
             for item in model_results
             if item["status"] == "available" and bool(item["enabled"])
         ]
-        if not available_models:
+        if selected_model not in available_models:
             raise ConnectionValidationError(
-                "所有推荐模型验证失败，连接未保存",
+                "所选模型验证失败，连接未保存；请根据模型结果检查密钥、权限或连接，再手动重试",
                 model_results,
             )
-        if selected_model not in available_models:
-            # 创建阶段帮助新手选中首个真实可用模型，并通过响应明确展示调整结果。
-            selected_model = available_models[0]
+        self._append_pending_models(preset, model_results)
         verified_at = datetime.now().isoformat(timespec="seconds")
         return self._repository.create_personal(
             owner_user_id=owner_user_id,
@@ -811,6 +833,18 @@ class ConnectionBroker:
             verified_at=verified_at,
             model_results=model_results,
         )
+
+    @staticmethod
+    def _append_pending_models(preset: ProviderPreset, results: list[dict[str, object]]) -> None:
+        # 未选型号只记录待验证，不因目录新增而额外调用或授予资格。
+        tested = {item["model_id"] for item in results}
+        results.extend({
+            "model_id": item.model_id, "display_name": item.display_name,
+            "catalog_role": item.role, "catalog_version": preset.version,
+            "status": "pending_validation", "enabled": False,
+            "verified_at": None, "error_code": None, "usage_status": "unknown",
+            "native_usage_json": "{}",
+        } for item in preset.model_catalog if item.model_id not in tested)
 
     async def _verify_preset_models(
         self,
@@ -964,6 +998,7 @@ class ConnectionBroker:
         try:
             target = HttpSecurityGuard(
                 allow_private=True,
+                loopback_host_allowlist=("localhost", "127.0.0.1", "::1"),
                 resolver=self._resolver,
             ).validate(endpoint_root)
         except SsrfError as exc:
@@ -1023,10 +1058,8 @@ class ConnectionBroker:
         available = [
             str(item["model_id"]) for item in results if item["status"] == "available"
         ]
-        if not available:
-            raise ConnectionValidationError("全部模型验证失败，连接未发布", results)
         if selected_model not in available:
-            selected_model = available[0]
+            raise ConnectionValidationError("所选模型验证失败，连接未发布", results)
         verified_at = datetime.now().isoformat(timespec="seconds")
         return self._repository.create_managed(
             created_by=actor_user_id,
@@ -1078,12 +1111,14 @@ class ConnectionBroker:
         base_url: str,
         api_key: str,
         model_ids: list[str] | None = None,
+        probe_protocols: bool = False,
     ) -> dict[str, object]:
         """发现模型并分别探测四种协议；模型列表成功本身不代表协议可用。"""
 
         endpoint_root = base_url.strip().rstrip("/")
         target = HttpSecurityGuard(
             allow_private=True,
+            loopback_host_allowlist=("localhost", "127.0.0.1", "::1"),
             resolver=self._resolver,
         ).validate(endpoint_root)
         private_flags = tuple(ipaddress.ip_address(item).is_private for item in target.ips)
@@ -1111,21 +1146,35 @@ class ConnectionBroker:
                     f"{endpoint_root}/models",
                     headers={"Authorization": f"Bearer {secret}"} if secret else {},
                 )
-                if response.status_code == 200:
-                    payload = response.json()
-                    candidates = payload.get("data") or payload.get("models") or []
-                    for item in candidates:
-                        value = item.get("id") or item.get("name") if isinstance(item, dict) else None
-                        if value:
-                            discovered.append(str(value).removeprefix("models/"))
-        except (httpx.HTTPError, ValueError, json.JSONDecodeError):
-            discovered = []
+        except httpx.HTTPError as exc:
+            raise ConnectionError("无法读取模型列表：请确认服务已启动，且地址可从 Mangrove 服务所在环境访问") from exc
+        # 只有接口明确不支持列表时才引导手填，不能把鉴权或网络故障伪装成缺少列表。
+        if response.status_code in {401, 403}:
+            raise ConnectionError("模型列表鉴权失败或无权限：请检查该服务的密钥与访问权限")
+        if response.status_code == 429:
+            raise ConnectionError("读取模型列表过于频繁，请稍后手动重试")
+        if 300 <= response.status_code < 400:
+            raise ConnectionError("模型服务返回重定向：请填写最终服务地址后重试")
+        if response.status_code not in {200, 404, 405, 501}:
+            raise ConnectionError("模型列表服务暂时不可用，请检查服务状态后手动重试")
+        if response.status_code == 200:
+            try:
+                payload = response.json()
+                candidates = payload.get("data") or payload.get("models") or []
+                if not isinstance(candidates, list):
+                    raise ValueError("invalid-list")
+                for item in candidates:
+                    value = (item.get("id") or item.get("name")) if isinstance(item, dict) else None
+                    if isinstance(value, str) and value.strip():
+                        discovered.append(value.removeprefix("models/"))
+            except (ValueError, AttributeError) as exc:
+                raise ConnectionError("模型列表格式不兼容：请确认接口地址，或手动填写模型 ID") from exc
         requested = list(dict.fromkeys(
             item.strip() for item in (model_ids or discovered) if item.strip()
         ))[:8]
         detected: list[str] = []
         failures: dict[str, str] = {}
-        if requested:
+        if requested and probe_protocols:
             for api_format in (
                 "anthropic_messages",
                 "openai_chat_completions",
@@ -1163,12 +1212,19 @@ class ConnectionBroker:
         preset_id: str,
         api_key: str,
         model: str | None = None,
+        region: str | None = None,
+        workspace_id: str = "",
+        verify_all: bool = False,
     ) -> dict[str, object]:
         """验证并发布平台共享 Preset；API Key 对所有公网 Provider 必填。"""
 
         preset = PRESETS_BY_ID.get(preset_id)
         if preset is None:
             raise ConnectionError("未知的 Provider 预设")
+        try:
+            preset = preset.for_region(region, workspace_id)
+        except ValueError as exc:
+            raise ConnectionError(str(exc)) from exc
         name = display_name.strip()
         if not name:
             raise ConnectionError("连接名称不能为空")
@@ -1182,21 +1238,20 @@ class ConnectionBroker:
         results = await self._verify_preset_models(
             preset=preset,
             api_key=secret,
-            model_ids=list(preset.models),
+            model_ids=list(preset.models) if verify_all else [selected_model],
         )
         available = [
             str(item["model_id"])
             for item in results
             if item["status"] == "available"
         ]
-        if not available:
+        if selected_model not in available:
             raise ConnectionValidationError(
-                "全部推荐模型验证失败，平台连接未发布",
+                "所选模型验证失败，平台连接未发布",
                 results,
             )
-        if selected_model not in available:
-            selected_model = available[0]
 
+        self._append_pending_models(preset, results)
         verified_at = datetime.now().isoformat(timespec="seconds")
         return self._repository.create_managed(
             created_by=actor_user_id,
@@ -1348,6 +1403,7 @@ class ConnectionBroker:
         try:
             target = HttpSecurityGuard(
                 allow_private=allow_private,
+                loopback_host_allowlist=("localhost", "127.0.0.1", "::1"),
                 proxy_fake_ip_host_allowlist=_OFFICIAL_PRESET_HTTPS_HOSTS,
                 resolver=self._resolver,
             ).validate(endpoint)
@@ -1372,6 +1428,8 @@ class ConnectionBroker:
                     headers=headers,
                     json=body,
                 )
+        except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError) as exc:
+            raise ProviderVerificationError("result_unknown", "测试结果未知，请先核对连接和服务商记录再决定是否重试") from exc
         except httpx.HTTPError as exc:
             raise ProviderVerificationError(
                 "network_unreachable",
@@ -1380,10 +1438,19 @@ class ConnectionBroker:
         if response.status_code < 200 or response.status_code >= 300:
             if response.status_code == 401:
                 code = "credentials_invalid"
+            elif response.status_code == 402:
+                code = "balance_insufficient"
             elif response.status_code in {403, 404}:
                 code = "model_access_denied"
             elif response.status_code == 429:
                 code = "rate_limited"
+                # 部分服务商用 429 表示账户额度耗尽，只读取稳定分类，不透传错误正文。
+                try:
+                    error = response.json().get("error", {})
+                    if isinstance(error, dict) and error.get("code") == "insufficient_quota":
+                        code = "balance_insufficient"
+                except (ValueError, AttributeError):
+                    pass
             elif response.status_code >= 500:
                 code = "network_unreachable"
             else:

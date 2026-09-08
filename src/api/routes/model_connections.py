@@ -27,6 +27,9 @@ class PersonalConnectionIn(BaseModel):
 
 class NamedPersonalConnectionIn(PersonalConnectionIn):
     display_name: str = Field(min_length=1, max_length=80)
+    verify_all: bool = False
+    region: str | None = None
+    workspace_id: str = Field(default="", max_length=63)
 
 
 class ManagedConnectionIn(BaseModel):
@@ -42,6 +45,9 @@ class PlatformPresetConnectionIn(BaseModel):
     display_name: str = Field(min_length=1, max_length=80)
     api_key: str
     model: str | None = None
+    region: str | None = None
+    workspace_id: str = Field(default="", max_length=63)
+    verify_all: bool = False
 
 
 class RetryModelsIn(BaseModel):
@@ -69,6 +75,7 @@ class ManagedDiscoveryIn(BaseModel):
     base_url: str = Field(min_length=1, max_length=500)
     api_key: str = ""
     model_ids: list[str] = Field(default_factory=list, max_length=8)
+    probe_protocols: bool = False
 
 
 def get_connection_broker() -> ConnectionBroker:
@@ -249,6 +256,9 @@ async def create_personal_preset(
             preset_id=preset_id,
             api_key=body.api_key,
             model=body.model,
+            verify_all=body.verify_all,
+            region=body.region,
+            workspace_id=body.workspace_id,
         )
     except ConnectionValidationError as exc:
         return JSONResponse(
@@ -313,6 +323,7 @@ async def discover_managed_connection(
             base_url=body.base_url,
             api_key=body.api_key,
             model_ids=body.model_ids,
+            probe_protocols=body.probe_protocols,
         )
     except (ConnectionError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -334,6 +345,9 @@ async def publish_platform_preset_connection(
             preset_id=preset_id,
             api_key=body.api_key,
             model=body.model,
+            region=body.region,
+            workspace_id=body.workspace_id,
+            verify_all=body.verify_all,
         )
     except ConnectionValidationError as exc:
         return JSONResponse(
