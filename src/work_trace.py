@@ -13,8 +13,8 @@ from src.conversation_steering import StructuredProgressEvent
 class UsageSummary(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    input_tokens: int = Field(ge=0)
-    output_tokens: int = Field(ge=0)
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
     cache_tokens: int | None = Field(default=None, ge=0)
     total_tokens: int = Field(ge=0)
     call_count: int = Field(ge=0)
@@ -131,7 +131,8 @@ class WorkTraceProjection:
         observed_at: datetime | None = None,
     ) -> WorkSessionView:
         selected = sorted(
-            (event for event in events if event.run_id == run_id),
+            (event for event in events if event.run_id == run_id
+             and event.task_id == task_id and event.revision == revision),
             key=lambda event: (event.sequence, event.event_id),
         )
         started_at = next(
@@ -164,7 +165,11 @@ class WorkTraceProjection:
             waiting_ms += _milliseconds(waiting_since, calculation_end)
         span_ms = _milliseconds(started_at, calculation_end) if started_at else 0
 
-        selected_usage = [item for item in provider_usage if item.get("run_id") == run_id]
+        selected_usage = [
+            item for item in provider_usage if item.get("run_id") == run_id
+            and item.get("task_id", task_id) == task_id
+            and item.get("revision", revision) == revision
+        ]
         observed_call_count = sum(
             1
             for event in selected
@@ -215,6 +220,11 @@ class WorkTraceProjection:
             for item in usage_rows
             if item.get("total_tokens") is None
         )
+        def complete_tokens(field: str) -> int | None:
+            # 单维原生缺失不能借另一维或 total 补零；总量另保留已知下限。
+            if not usage_rows or any(item.get(field) is None for item in usage_rows):
+                return None
+            return sum(int(item[field]) for item in usage_rows)
         entries = tuple(
             WorkTraceEntry(
                 event_id=event.event_id,
@@ -270,13 +280,9 @@ class WorkTraceProjection:
             ),
             handled_retry_count=handled_retry_count,
             usage=UsageSummary(
-                input_tokens=sum(int(item.get("input_tokens") or 0) for item in known),
-                output_tokens=sum(int(item.get("output_tokens") or 0) for item in known),
-                cache_tokens=(
-                    sum(int(item["cache_tokens"]) for item in known)
-                    if known and all(item.get("cache_tokens") is not None for item in known)
-                    else None
-                ),
+                input_tokens=complete_tokens("input_tokens"),
+                output_tokens=complete_tokens("output_tokens"),
+                cache_tokens=complete_tokens("cache_tokens"),
                 total_tokens=sum(int(item["total_tokens"]) for item in known),
                 call_count=calls,
                 unknown_call_count=unknown_calls,

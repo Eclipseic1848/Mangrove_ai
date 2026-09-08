@@ -423,7 +423,7 @@ class ConnectionBroker:
     ) -> AccessGrant:
         """为一个 Run 的单一用途签发短期权利，不返回 Provider Secret。"""
 
-        if purpose not in {"agent_inference", "candidate_verify"}:
+        if purpose not in {"agent_inference", "candidate_verify", "context_rewrite"}:
             raise GrantError("未知的模型连接 Grant 用途")
         if revision < 1:
             raise GrantError("Grant revision 必须大于等于 1")

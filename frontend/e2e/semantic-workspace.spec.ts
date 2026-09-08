@@ -64,7 +64,7 @@ async function mockWorkspace(
       },
     }));
   await page.route("**/api/model-connections/presets", route => route.fulfill({ json: { presets: [] } }));
-  await page.route("**/api/semantic-workspace/tasks/*/stream", route => route.fulfill({ contentType: "text/event-stream", body: "" }));
+  await page.route("**/api/semantic-workspace/tasks/*/stream*", route => route.fulfill({ contentType: "text/event-stream", body: "" }));
   await page.route("**/api/settings/onboarding/model-connections", route => route.fulfill({ json: { completed: true } }));
   await page.route("**/api/semantic-workspace/tasks/*/turns", route => route.fulfill({ json: { turns: [], results: [], proposals: [] } }));
   await page.route("**/api/models", (route) => route.fulfill({
@@ -2872,14 +2872,17 @@ test.describe("统一数据工作台", () => {
     await expect(page.getByRole("heading", { name: "工作量筛选" })).toBeVisible();
 
     const progressToggle = page.getByRole("button", { name: /工作记录/ });
-    await expect(progressToggle).toContainText("工作 7.0 秒");
-    await expect(progressToggle).toContainText("等待 1.0 秒");
-    await expect(progressToggle).toContainText("开始");
-    await expect(progressToggle).toContainText("完成");
     await expect(progressToggle).toContainText("9 个行动");
-    await expect(progressToggle).toContainText("2 次工具");
-    await expect(progressToggle).toContainText("至少 8,420 Tokens · 4 次调用 · 1 次未知");
-    await expect(progressToggle).toContainText("已处理 1 次重试");
+    await page.getByRole("button", { name: "查看本次用量" }).click();
+    const usageDialog = page.getByRole("dialog", { name: "本次执行用量" });
+    await expect(usageDialog).toContainText("工作耗时7.0 秒");
+    await expect(usageDialog).toContainText("等待耗时1.0 秒");
+    await expect(usageDialog).toContainText("开始时间");
+    await expect(usageDialog).toContainText("结束时间");
+    await expect(usageDialog).toContainText("2 次工具");
+    await expect(usageDialog).toContainText("已知 8,420 Tokens · 4 次调用 · 另 1 次未知");
+    await expect(usageDialog).toContainText("已处理 1 次重试");
+    await page.getByRole("button", { name: "关闭用量" }).click();
     await expect(page.locator('[data-testid="progress-stage"]')).toHaveCount(0);
     if (process.env.MANGROVE_VISUAL_CAPTURE === "1") {
       await page.screenshot({
@@ -3463,7 +3466,7 @@ test.describe("统一数据工作台", () => {
     await page.getByRole("button", { name: /旧版候选结果/ }).click();
 
     await expect(page.getByText("历史结果.json")).toBeVisible();
-    await expect(page.getByRole("status")).toContainText(
+    await expect(page.getByRole("status").filter({ hasText: "该历史任务缺少可证明的冻结运行信息" })).toContainText(
       "该历史任务缺少可证明的冻结运行信息，暂不能重新验证。",
     );
     await expect(
@@ -3978,7 +3981,7 @@ test.describe("统一数据工作台", () => {
     attemptStatus = "passed";
     await page.reload();
     await page.getByRole("button", { name: /候选重验状态/ }).click();
-    await expect(page.getByRole("status")).toContainText("还不是正式交付");
+    await expect(page.getByRole("status").filter({ hasText: "还不是正式交付" })).toContainText("还不是正式交付");
     await page.getByRole("button", { name: "发布正式结果" }).click();
     const dialog = page.getByRole("alertdialog");
     await expect(dialog).toContainText("不会重新运行任务或模型");

@@ -15,7 +15,7 @@ import re
 import sqlite3
 import uuid
 import zipfile
-from typing import Any, Callable, Literal
+from typing import Annotated, Any, Callable, Literal
 
 import duckdb
 from filelock import Timeout as ExecutionLockTimeout
@@ -866,6 +866,50 @@ def _steering_repository() -> SqliteSteeringRepository:
     return SqliteSteeringRepository(settings.webui_db_path)
 
 
+def _public_answer_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    # 只公开明确答复；带内部通道标记的整段拒绝，不能把思考标签去掉后当正文。
+    if re.search(r"(?i)<\s*/?\s*(think|reasoning|analysis|system)\b|\[\s*(system|analysis)\s*\]|系统\s*(?:prompt|提示词)\s*[:：]|system\s*(?:prompt|message)\s*:|[\"']reasoning_content[\"']\s*:", value):
+        return "这条回复包含不可公开的内部内容，已隐藏。"
+    text = _TRACE_SECRET_PATTERN.sub(lambda match: f"{match.group(1)}=[已隐藏]", value)
+    text = re.sub(r'''(?i)(["'](?:api[_-]?key|secret|token|cookie|password|authorization)["']\s*:\s*)["'][^"'\r\n]*["']''', r'\1"[已隐藏]"', text)
+    text = re.sub(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [已隐藏]", text)
+    # 盘符必须独立，不能从 https:// 的末尾 s:/ 开始误匹配正常引用链接。
+    text = re.sub(r"(?<![A-Za-z0-9_/])[A-Za-z]:[\\/][^\s\n\r<>\"'`]+|(?i:file://)[^\s\n\r<>\"'`]+|\\\\[^\s\n\r<>\"'`]+|(?<![:/\w])/(?!api/)[^\s\n\r<>\"'`]+", "[路径已隐藏]", text)
+    return text
+
+
+def _public_steering_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {key: _public_steering_payload(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_public_steering_payload(item) for item in value]
+    return _public_answer_text(value) if isinstance(value, str) else value
+
+
+def _public_steering_message(result) -> dict[str, Any] | None:
+    if not result.answer:
+        return None
+    return {
+        "message_id": result.result_id, "version": 1, "task_id": result.task_id,
+        "revision": result.revision, "run_id": result.run_id, "turn_id": result.turn_id,
+        "role": "assistant", "kind": "answer", "content": _public_answer_text(result.answer),
+        "status": "completed", "created_at": result.created_at.isoformat(),
+    }
+
+
+def _steering_messages(user_id: str, task_id: str, revision: int) -> list[dict[str, Any]]:
+    repository = SqliteSteeringRepository(get_store().db_path)
+    return [
+        message
+        for turn in repository.list_turns(user_id, task_id, revision=revision)
+        if (result := repository.get_result_for_turn(user_id, turn.turn_id)) is not None
+        and result.task_id == task_id and result.revision == revision
+        and (message := _public_steering_message(result)) is not None
+    ]
+
+
 def _public_runtime(
     user_id: str,
     task_id: str,
@@ -1279,6 +1323,7 @@ def _revision_events(
         for event in events
         if event["sequence"] >= start
         and (end is None or event["sequence"] < end)
+        and (event.get("details", {}).get("revision") in (None, revision))
     ]
 
 
@@ -1649,6 +1694,7 @@ def _task_detail(
         if runtime_run_id
         else None
     )
+    task["messages"] = _steering_messages(user_id, task_id, int(selected_revision["revision"]))
     return task
 
 
@@ -2320,6 +2366,7 @@ def get_task_events(
 def stream_task(
     task_id: str,
     request: Request,
+    revision: Annotated[int | None, Query(ge=1)] = None,
     user=Depends(get_current_user),
 ):
     user_id = user["user_id"]
@@ -2330,116 +2377,58 @@ def stream_task(
         else ProgressAudience.USER
     )
 
-    def safe_progress_event(
-        task: dict[str, Any],
-        event: dict[str, Any],
-        *,
-        harness: bool = False,
-    ) -> dict[str, Any] | None:
-        projection_task = {
-            **task,
-            "viewing_revision": int(task["active_revision"]),
-            "events": [] if harness else [event],
-            "harness_events": [event] if harness else [],
-        }
-        projected = ProgressProjection().project(
-            _structured_progress_events(projection_task),
-            audience=audience,
-            task_status=task["status"],
-        )
-        if not projected.events:
-            return None
-        return projected.events[0].model_dump(mode="json")
+    # 每条订阅固定修订；重连全量重放稳定事实，不重发执行请求。
+    initial = _task_or_404(user_id, task_id)
+    selected_revision = revision if revision is not None else int(initial["active_revision"])
+    if get_store().get_semantic_workspace_revision(user_id, task_id, selected_revision) is None:
+        raise HTTPException(status_code=404, detail="结果版本不存在")
 
     async def event_gen():
         store = get_store()
-        existing_events = store.list_semantic_workspace_events(
-            user_id, task_id
-        )
-        revision_boundaries = [
-            event["sequence"]
-            for event in existing_events
-            if event["event_type"] == "revision_created"
-        ]
-        workspace_after = (
-            revision_boundaries[-1] - 1 if revision_boundaries else 0
-        )
-        harness_after = 0
+        sent_events: set[str] = set()
+        sent_messages: set[str] = set()
         last_status = ""
         while True:
             if not platform_session_valid(request):
                 yield {"event": "auth-expired", "data": json.dumps({"message": "登录已失效，请重新登录"}, ensure_ascii=False)}
                 return
             task = store.get_semantic_workspace_task(user_id, task_id)
-            if task is None:
-                yield {
-                    "event": "error",
-                    "data": json.dumps(
-                        {"message": "任务不存在"}, ensure_ascii=False
-                    ),
-                }
-                break
-            for event in store.list_semantic_workspace_events(
-                user_id, task_id, after=workspace_after
-            ):
-                workspace_after = max(workspace_after, event["sequence"])
-                public_event = safe_progress_event(task, event)
-                if public_event is None:
-                    continue
-                yield {
-                    "id": event["event_id"],
-                    "event": "progress",
-                    "data": json.dumps(
-                        public_event,
-                        ensure_ascii=False,
-                    ),
-                }
-            if task["run_id"]:
-                for event in store.list_semantic_harness_events(
-                    user_id, task["run_id"]
-                ):
-                    if event["sequence"] <= harness_after:
-                        continue
-                    harness_after = event["sequence"]
-                    public_event = safe_progress_event(
-                        task,
-                        event,
-                        harness=True,
-                    )
-                    if public_event is None:
-                        continue
-                    yield {
-                        "id": event["event_id"],
-                        "event": "progress",
-                        "data": json.dumps(
-                            public_event,
-                            ensure_ascii=False,
-                        ),
-                    }
-            if task["status"] != last_status:
-                last_status = task["status"]
-                yield {
-                    "event": "status",
-                    "data": json.dumps(
-                        {
-                            "task_id": task_id,
-                            "status": task["status"],
-                            "question": task["question"],
-                            "error": task["error"],
-                            "failure": task["failure"],
-                        },
-                        ensure_ascii=False,
-                    ),
-                }
-            if task["status"] in _TERMINAL:
-                yield {
-                    "event": "done",
-                    "data": json.dumps(
-                        {"status": task["status"]},
-                        ensure_ascii=False,
-                    ),
-                }
-                break
+            frozen = store.get_semantic_workspace_revision(user_id, task_id, selected_revision)
+            if task is None or frozen is None:
+                yield {"event": "error", "data": json.dumps({"message": "任务不存在"}, ensure_ascii=False)}
+                return
+            historical = int(task["active_revision"]) != selected_revision
+            if historical:
+                task = {**task, **{key: frozen[key] for key in ("status", "run_id", "summary")}}
+            task["viewing_revision"] = selected_revision
+            task["events"] = _revision_events(store.list_semantic_workspace_events(user_id, task_id), selected_revision)
+            task["harness_events"] = store.list_semantic_harness_events(user_id, task["run_id"]) if task.get("run_id") else []
+            projected = ProgressProjection().project(
+                _structured_progress_events(task), audience=audience, task_status=task["status"],
+            )
+            runtime = AgenticRuntimeRepository(store.db_path).get(user_id, task_id, selected_revision)
+            identity = {"task_id": task_id, "revision": selected_revision, "run_id": (runtime or {}).get("run_id") or task.get("run_id")}
+            for event in projected.events:
+                if event.event_id not in sent_events:
+                    sent_events.add(event.event_id)
+                    yield {"id": event.event_id, "event": "progress", "data": event.model_dump_json()}
+            for message in _steering_messages(user_id, task_id, selected_revision):
+                if message["message_id"] not in sent_messages:
+                    sent_messages.add(message["message_id"])
+                    yield {"id": message["message_id"], "event": "message", "data": json.dumps(message, ensure_ascii=False)}
+            state = {
+                **identity, "status": task["status"],
+                "question": None if historical else task.get("question"),
+                "error": None if historical else task.get("error"),
+                "failure": None if historical else task.get("failure"),
+            }
+            encoded_status = json.dumps(state, ensure_ascii=False)
+            if encoded_status != last_status:
+                last_status = encoded_status
+                yield {"event": "status", "data": encoded_status}
+            if historical or task["status"] in _TERMINAL:
+                yield {"event": "done", "data": json.dumps({**identity, "status": task["status"]}, ensure_ascii=False)}
+                return
             await asyncio.sleep(0.5)
 
     async def authenticated_events():
@@ -2483,21 +2472,24 @@ async def steer_task(
     user_id = user["user_id"]
     task = _task_or_404(user_id, task_id)
     events = get_store().list_semantic_workspace_events(user_id, task_id)
+    runtime = _runtime_repository().get(user_id, task_id, int(task["active_revision"])) or {}
     request = SteeringRequest(
         owner_id=user_id,
         task_id=task_id,
         revision=int(task["active_revision"]),
-        run_id=task.get("run_id"),
+        run_id=(runtime.get("run_id") if runtime.get("model_connection_id") else task.get("run_id")),
         text=payload.text,
         idempotency_key=idempotency_key,
         current_status=task["status"],
         status_summary=task.get("summary") or "",
         current_goal=task.get("objective_text") or "",
         event_summaries=tuple(
-            str(event.get("summary") or "") for event in events[-8:]
+            _progress_summary(event, event.get("details") or {}) for event in events[-8:]
         ),
         provider=task.get("provider") or "local",
-        model=task.get("model"),
+        model=runtime.get("model_connection_model") or task.get("model"),
+        model_connection_id=runtime.get("model_connection_id"),
+        model_connection_version=runtime.get("model_connection_version"),
         external_api_confirmed=bool(
             task.get("external_api_confirmed")
             or payload.external_api_confirmed
@@ -2509,7 +2501,7 @@ async def steer_task(
             build_context_rewriter(request),
         )
         result = await service.handle_turn(request)
-    except ValueError as exc:
+    except (ValueError, GrantError) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
@@ -2534,7 +2526,7 @@ async def steer_task(
             task_id,
             stage=current_stage,
             event_type=event_type,
-            summary=result.answer or result.acknowledgement,
+            summary=_public_answer_text(result.answer) or result.acknowledgement,
             details={
                 "steering_result_id": result.result_id,
                 "proposal_id": result.proposal_id,
@@ -2542,7 +2534,7 @@ async def steer_task(
                 "run_id": result.run_id,
             },
         )
-    return result.model_dump(mode="json")
+    return _public_steering_payload(result.model_dump(mode="json"))
 
 
 @router.get("/tasks/{task_id}/turns")
@@ -2564,18 +2556,18 @@ def list_steering_turns(
             proposal = repository.update_proposal(
                 proposal.model_copy(update={"status": RevisionProposalStatus.EXPIRED})
             )
-        proposals.append(proposal.model_dump(mode="json"))
+        proposals.append(_public_steering_payload(proposal.model_dump(mode="json")))
     turns = repository.list_turns(user_id, task_id)
     return {
         "turns": [turn.model_dump(mode="json") for turn in turns],
         "deltas": [
-            delta.model_dump(mode="json")
+            _public_steering_payload(delta.model_dump(mode="json"))
             for turn in turns
             if (delta := repository.get_delta_for_turn(user_id, turn.turn_id))
             is not None
         ],
         "results": [
-            result.model_dump(mode="json")
+            _public_steering_payload(result.model_dump(mode="json"))
             for turn in turns
             if (result := repository.get_result_for_turn(user_id, turn.turn_id))
             is not None

@@ -258,6 +258,8 @@ def test_heavy_ci_is_manual_only_and_never_receives_secrets() -> None:
     # 只允许已审计的配置测试及强制 MockTransport 的撤权回归，仍拒绝真实 Provider 接线。
     offline = workflow.lower().replace("tests/test_llm_provider.py", "")
     offline = offline.replace("tests/test_account_execution_providers.py", "")
+    # 候选重验只用临时库和 Verifier/Broker 替身，真实 Broker 仅查询合成账本。
+    offline = offline.replace("tests/test_candidate_reverification_provider.py", "")
     assert "provider" not in offline
     assert "if: always()" in workflow
 

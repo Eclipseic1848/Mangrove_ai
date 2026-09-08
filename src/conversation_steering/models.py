@@ -201,6 +201,8 @@ class SteeringRequest(BaseModel):
     event_summaries: tuple[str, ...] = ()
     provider: str = "local"
     model: str | None = None
+    model_connection_id: str | None = None
+    model_connection_version: str | None = None
     external_api_confirmed: bool = False
 
 

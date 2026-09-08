@@ -1239,30 +1239,42 @@ class ModelConnectionRepository:
                 SELECT u.owner_user_id, u.task_id, u.revision, u.run_id,
                        u.connection_id, g.model, u.purpose, u.status,
                        u.input_tokens, u.output_tokens, u.total_tokens,
-                       u.request_count, u.native_json, u.created_at
+                       u.request_count, u.native_json, u.created_at, u.usage_id AS ordering_id
                 FROM model_provider_usage AS u
                 JOIN model_connection_grants AS g ON g.grant_id=u.grant_id
                 WHERE u.owner_user_id=? AND u.task_id=? AND u.revision=?
-                ORDER BY u.created_at, u.usage_id
+                UNION ALL
+                SELECT g.owner_user_id, g.task_id, g.revision, g.run_id,
+                       g.connection_id, g.model, g.purpose, 'unknown',
+                       NULL, NULL, NULL, 1, '{}', g.created_at, g.grant_id
+                FROM model_connection_grants AS g
+                WHERE g.owner_user_id=? AND g.task_id=? AND g.revision=?
+                  AND g.purpose='context_rewrite'
+                  AND NOT EXISTS (SELECT 1 FROM model_provider_usage AS u WHERE u.grant_id=g.grant_id)
+                ORDER BY created_at, ordering_id
                 """,
-                (owner_user_id, task_id, revision),
+                (owner_user_id, task_id, revision, owner_user_id, task_id, revision),
             ).fetchall()
         items = []
         for row in rows:
             item = dict(row)
+            item.pop("ordering_id")
             native = json.loads(str(item.pop("native_json") or "{}"))
             cache_tokens = None
             if isinstance(native, dict):
-                for key in (
-                    "cache_tokens",
-                    "cached_tokens",
-                    "cache_read_input_tokens",
-                    "cachedContentTokenCount",
-                ):
-                    value = native.get(key)
-                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
-                        cache_tokens = value
-                        break
+                # Relay 保存 observed 列表；只读取原生缓存计数，不从总量推算。
+                for usage in [native, *native.get("observed", [])]:
+                    if not isinstance(usage, dict):
+                        continue
+                    values = [usage, usage.get("prompt_tokens_details"), usage.get("input_tokens_details")]
+                    for value_map in values:
+                        if not isinstance(value_map, dict):
+                            continue
+                        for key in ("cache_tokens", "cached_tokens", "cache_read_input_tokens", "cachedContentTokenCount"):
+                            value = value_map.get(key)
+                            if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                                cache_tokens = value
+                                break
             item["cache_tokens"] = cache_tokens
             if not include_identity:
                 item = {
