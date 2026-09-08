@@ -95,7 +95,7 @@ def conversation(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "webui_db_path", str(database))
     monkeypatch.setattr(auth, "_store", None)
     calls = []
-    draft = {"intent": "status_question", "confidence": "high", "normalized_text": "查询进度", "direct_answer": "中文答复\n\n```python\nprint('好')"}
+    draft = {"open_questions": [], "intent": "status_question", "confidence": "high", "normalized_text": "查询进度", "direct_answer": "中文答复\n\n```python\nprint('好')"}
 
     async def provider(request):
         body = json.loads(request.content)

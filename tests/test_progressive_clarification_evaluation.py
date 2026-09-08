@@ -114,13 +114,13 @@ def test_explicit_connection_does_not_resolve_global_profiles():
 
 
 @pytest.mark.parametrize("response_mode", ["complete", "timeout", "unavailable", "invalid_json"])
-@pytest.mark.parametrize("provider_name", ["local", "deepseek", "qwen"])
-def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_expected_answers(tmp_path, monkeypatch, response_mode, provider_name):
+@pytest.mark.parametrize("provider_name,disable_thinking", [("local", False), ("deepseek", False), ("qwen", False), ("qwen", True)])
+def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_expected_answers(tmp_path, monkeypatch, response_mode, provider_name, disable_thinking):
     monkeypatch.setenv("MANGROVE_EVAL_API_KEY", "synthetic-test-key")
     args = argparse.Namespace(
         fixture=Path("tests/fixtures/conversation_steering/progressive_clarification_cases.json"),
         rounds=1, concurrency=1, provider=provider_name,
-        timeout_seconds=300,
+        timeout_seconds=300, disable_thinking=disable_thinking,
         base_url={"deepseek": "https://api.deepseek.com", "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1", "local": "http://127.0.0.1:9/v1"}[provider_name],
         model={"deepseek": "deepseek-v4-pro", "qwen": "qwen3.8-max-0902", "local": "synthetic-local"}[provider_name],
         output=tmp_path / "transport.json", execute=True,
@@ -130,6 +130,7 @@ def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_ex
     def respond(request):
         body = json.loads(request.content)
         assert body.get("max_tokens") == {"deepseek": 384000, "qwen": 131072, "local": None}[provider_name]
+        assert (body.get("enable_thinking") is False) if disable_thinking else "enable_thinking" not in body
         requests.append(body)
         if response_mode == "timeout":
             raise httpx.ReadTimeout("合成响应未知", request=request)
@@ -155,6 +156,7 @@ def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_ex
         assert asyncio.run(run_progressive(args)) == 1
     assert "synthetic-test-key" not in args.output.read_text(encoding="utf-8")
     report = json.loads(args.output.read_text(encoding="utf-8"))
+    assert report["qwen_thinking_policy"] == ("disabled" if disable_thinking else "provider_default")
     assert report["timeout_seconds"] == 300
     if response_mode != "complete":
         assert len(requests) == report["requests_sent"] == 1
@@ -246,3 +248,35 @@ def test_generated_questions_require_explicit_single_decision(questions):
     with pytest.raises(ValidationError):
         RewriteDraft.model_validate(value)
     assert RewriteDraft.model_validate({**value, "open_questions": []}).open_questions == ()
+
+
+@pytest.mark.parametrize("value", [None, True, 0, "false"])
+def test_disabled_thinking_guard_rejects_non_false(value):
+    endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    request = httpx.Request("POST", endpoint, json={"model": "qwen3.8-max-0902", "max_tokens": 131072, "enable_thinking": value})
+    with pytest.raises(ValueError):
+        check_progressive_request(request, endpoint=endpoint, model="qwen3.8-max-0902", sent=0, max_calls=24, disable_thinking=True)
+
+
+def test_non_qwen_cannot_disable_thinking_before_journal(tmp_path):
+    args = argparse.Namespace(
+        fixture=Path("tests/fixtures/conversation_steering/progressive_clarification_cases.json"),
+        rounds=1, concurrency=1, provider="deepseek", base_url="https://api.deepseek.com",
+        model="deepseek-v4-pro", disable_thinking=True, output=tmp_path / "invalid-mode.json", execute=False,
+    )
+    with pytest.raises(ValueError):
+        asyncio.run(run_progressive(args))
+    assert not args.output.exists()
+
+
+def test_default_thinking_guard_requires_absent_parameter():
+    endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+    request = httpx.Request("POST", endpoint, json={"model": "qwen3.8-max-0902", "max_tokens": 131072, "enable_thinking": False})
+    with pytest.raises(ValueError):
+        check_progressive_request(request, endpoint=endpoint, model="qwen3.8-max-0902", sent=0, max_calls=24)
+
+
+def test_legacy_mode_rejects_disable_thinking():
+    from scripts.evaluate_conversation_steering import run
+    with pytest.raises(ValueError):
+        asyncio.run(run(argparse.Namespace(mode="legacy", disable_thinking=True)))

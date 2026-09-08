@@ -96,6 +96,8 @@ async def evaluate_case(case: dict, semaphore: asyncio.Semaphore) -> dict:
 
 
 async def run(args: argparse.Namespace) -> int:
+    if getattr(args, "disable_thinking", False) and args.mode != "progressive":
+        raise ValueError("关闭思考仅用于progressive百炼评测")
     if args.mode == "progressive":
         return await run_progressive(args)
     cases = json.loads(args.fixture.read_text(encoding="utf-8"))
@@ -129,7 +131,7 @@ async def run(args: argparse.Namespace) -> int:
     return 0 if report["all_passed"] else 1
 
 
-def check_progressive_request(request, *, endpoint, model, sent, max_calls):
+def check_progressive_request(request, *, endpoint, model, sent, max_calls, disable_thinking=False):
     """在真实 HTTP 发送前核精确目的地和预算，重复尝试不获得新额度。"""
     from src.model_connections.catalog import model_max_output_tokens
     if str(request.url) != endpoint or request.method != "POST":
@@ -137,6 +139,8 @@ def check_progressive_request(request, *, endpoint, model, sent, max_calls):
     if sent >= max_calls or len(request.content) > 65536:
         raise ValueError("评测请求超出冻结预算")
     body = json.loads(request.content)
+    if (body.get("enable_thinking") is not False if disable_thinking else "enable_thinking" in body):
+        raise ValueError("评测请求思考模式偏离冻结配置")
     if body.get("model") != model or body.get("max_tokens") != model_max_output_tokens(model):
         raise ValueError("评测请求模型或输出预算不一致")
 
@@ -147,13 +151,17 @@ def progressive_rewriter(args):
     from src.llm.provider import ResolvedModelConnection
 
     provider_name = getattr(args, "provider", "local")
+    disable_thinking = getattr(args, "disable_thinking", False)
+    if disable_thinking and provider_name != "qwen":
+        raise ValueError("关闭思考仅用于百炼评测")
     api_key = os.environ.get("MANGROVE_EVAL_API_KEY")
     if provider_name != "local" and not api_key:
         raise ValueError("云端评测必须显式注入本轮获准的API Key")
     connection = ResolvedModelConnection(provider=provider_name, requested_model=args.model,
         model=args.model, base_url=args.base_url.rstrip("/"),
         api_key=api_key or "local-evaluation",
-        trust_env=False, timeout=getattr(args, "timeout_seconds", 90), extra_body=None)
+        trust_env=False, timeout=getattr(args, "timeout_seconds", 90),
+        extra_body={"enable_thinking": False} if disable_thinking else None)
     provider = SimpleNamespace(resolve_model=lambda *unused, **kwargs: connection)
     with patch.object(implementation, "get_provider", return_value=provider):
         return implementation.InstructorContextRewriter(provider=provider_name, model=args.model)
@@ -175,6 +183,9 @@ async def run_progressive(args: argparse.Namespace) -> int:
     if not args.base_url or not args.model:
         raise ValueError("必须明确模型和端点，不能采用全局默认")
     provider_name = getattr(args, "provider", "local")
+    disable_thinking = getattr(args, "disable_thinking", False)
+    if disable_thinking and provider_name != "qwen":
+        raise ValueError("关闭思考仅用于百炼评测")
     url = urlsplit(args.base_url)
     local = url.hostname == "localhost"
     if not local:
@@ -197,6 +208,7 @@ async def run_progressive(args: argparse.Namespace) -> int:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "provider": provider_name, "model": args.model, "endpoint": endpoint, "max_calls": 24,
         "max_output_tokens": model_max_output_tokens(args.model), "max_input_bytes": 65536,
+        "qwen_thinking_policy": "disabled" if disable_thinking else "provider_default",
         "output_limit_policy": "verified_model_max_or_deployment_default",
         "timeout_seconds": timeout_seconds, "sdk_retries": 0, "requests_sent": 0,
         "semantic_review_required": True, "all_passed": False, "results": [],
@@ -239,7 +251,7 @@ async def run_progressive(args: argparse.Namespace) -> int:
             if active.get("sent"):
                 raise ValueError("同一评测回合禁止再次发送")
             check_progressive_request(message, endpoint=endpoint, model=args.model,
-                                      sent=report["requests_sent"], max_calls=24)
+                                      sent=report["requests_sent"], max_calls=24, disable_thinking=disable_thinking)
             active["sent"] = True
             active["request_sha256"] = hashlib.sha256(message.content).hexdigest()
             active["started_at"] = datetime.now(timezone.utc).isoformat()
@@ -342,6 +354,7 @@ def main() -> int:
     parser.add_argument("--provider", choices=("local", "deepseek", "qwen"), default="local")
     parser.add_argument("--model")
     parser.add_argument("--timeout-seconds", type=int, default=90)
+    parser.add_argument("--disable-thinking", action="store_true")
     parser.add_argument("--execute", action="store_true")
     parser.add_argument(
         "--fixture",
