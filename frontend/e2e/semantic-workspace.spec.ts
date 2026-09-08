@@ -664,21 +664,44 @@ function sourceAttempt(
 }
 
 test.describe("统一数据工作台", () => {
-  test("已完成任务的长来源刷新仍可停止且不提前确认", async ({ page }) => {
+  for (const externalConnection of [false, true]) {
+  test(`已完成任务的长来源刷新仍可停止且不提前确认${externalConnection ? "（外部连接）" : ""}`, async ({ page }) => {
+    // 页面异常应直接定位到渲染错误，不能退化为后续按钮的长超时。
+    page.on("pageerror", error => { throw new Error(`任务详情渲染异常：${error.message}`); });
     // 拦住所有未声明的 API，隔离开发入口不会转发到真实服务。
     await page.route("**/api/**", (route) => route.fulfill({ status: 404, json: {} }));
     await mockWorkspace(page);
     let status = "completed";
     let refreshing: Route | undefined;
-    const task = workspaceTask("task-refresh-stop", status, "停止网页刷新");
+    const task = {
+      ...workspaceTask("task-refresh-stop", status, "停止网页刷新"),
+      model_connection_id: externalConnection ? "connection-refresh-stop" : null,
+    };
     const snapshot = sourceAttempt("succeeded").snapshot!;
     await page.route("**/api/semantic-workspace/tasks?*", (route) =>
       route.fulfill({ json: [{ ...task, status }] }));
     await page.route("**/api/semantic-workspace/tasks/task-refresh-stop", (route) =>
       route.fulfill({ json: workspaceDetail({ ...task, status }, {
-        web_source: { source_snapshot_id: snapshot.snapshot_id, snapshot },
+        web_source: {
+          source_snapshot_id: snapshot.snapshot_id,
+          snapshot,
+          goal_contract: {
+            objective: task.objective_text, must_include: [], explicit_exclusions: [],
+            quantity_requirement: "", completeness_requirement: "探索范围",
+          },
+          delivery_spec: { formats: task.output_formats },
+          runtime_binding: {
+            adapter_id: "pi", adapter_version: "1", runtime_artifact: "fixture",
+            protocol_version: "1", event_schema_version: "1", capability_digest: "a".repeat(64),
+            external_run_id: "run-refresh-stop", model_connection_id: task.model_connection_id,
+            model_connection_version: externalConnection ? "version-refresh-stop" : null,
+            model: "synthetic-frozen-web-model",
+          },
+          created_at: snapshot.created_at,
+        },
       }) }));
     await page.route("**/api/semantic-workspace/tasks/task-refresh-stop/source-refresh", (route) => {
+      expect(route.request().postDataJSON().external_api_confirmed).toBe(externalConnection);
       refreshing = route;
     });
     await page.route("**/api/semantic-workspace/tasks/task-refresh-stop/cancel", (route) => {
@@ -687,8 +710,16 @@ test.describe("统一数据工作台", () => {
     });
     await page.goto("/data-prep");
     await page.getByRole("button", { name: /停止网页刷新/ }).click();
+    await expect(page.getByText("本任务模型：synthetic-frozen-web-model", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "查看本次用量" }).click();
+    await expect(page.getByRole("dialog", { name: "本次执行用量" })).toContainText("模型：synthetic-frozen-web-model");
+    await page.getByRole("button", { name: "关闭用量" }).click();
     await expect(page.getByRole("button", { name: "取消任务", exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "获取最新网页", exact: true }).click();
+    if (externalConnection) {
+      await expect.poll(() => Boolean(refreshing)).toBe(false);
+      await page.getByRole("button", { name: "确认获取并创建新版本", exact: true }).click();
+    }
     await expect.poll(() => Boolean(refreshing)).toBe(true);
     await page.getByRole("button", { name: "取消任务", exact: true }).click();
     await page.getByRole("button", { name: "确认取消", exact: true }).click();
@@ -698,7 +729,9 @@ test.describe("统一数据工作台", () => {
     await refreshing!.fulfill({ status: 409, json: { detail: "来源刷新已请求停止" } });
     await expect(page.getByText("来源刷新已请求停止", { exact: true })).toBeVisible();
     await expect(page.getByText("正在停止，等待读取和资源清理完成。", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "获取最新网页", exact: true })).toBeEnabled();
   });
+  }
 
   test("来源请求被拒绝后仍可修改网址", async ({ page }) => {
     await mockWorkspace(page);

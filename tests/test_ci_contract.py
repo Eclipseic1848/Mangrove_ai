@@ -283,11 +283,16 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     assert "commits =" not in config
     assert "tests/.*" not in config
     assert "evals/.*" not in config
-    assert len(ignored) == 10
+    assert len(ignored) == 11
     assert (
         "8f23acbdcb69890cc94c733bb47baa3a75d5de22:"
         "tests/test_source_account_generation.py:generic-api-key:19"
     ) in ignored
+    # 新例外必须精确到已审计提交、测试文件、规则与行号，且只出现一次。
+    assert ignored.count(
+        "6268599f307d327e0015f8e78df1606b4b565ff8:"
+        "tests/test_workspace_conversation_stream.py:generic-api-key:121"
+    ) == 1
     assert all("*" not in fingerprint for fingerprint in ignored)
     assert all(fingerprint.count(":") >= 3 for fingerprint in ignored)
 

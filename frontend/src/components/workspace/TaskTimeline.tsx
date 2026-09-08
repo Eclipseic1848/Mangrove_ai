@@ -646,7 +646,9 @@ export function TaskTimeline({
                       <AlertDialog.Action
                         onClick={() => {
                           setRefreshingSource(true);
-                          void onRefreshSource(true).finally(() => setRefreshingSource(false));
+                          void onRefreshSource(true).catch(() => {
+                            // 父级已展示失败原因；事件入口接住拒绝，避免未处理异常。
+                          }).finally(() => setRefreshingSource(false));
                         }}
                         className="rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground"
                       >
@@ -662,7 +664,9 @@ export function TaskTimeline({
                 disabled={refreshingSource}
                 onClick={() => {
                   setRefreshingSource(true);
-                  void onRefreshSource(false).finally(() => setRefreshingSource(false));
+                  void onRefreshSource(false).catch(() => {
+                    // 父级已展示失败原因；事件入口接住拒绝，避免未处理异常。
+                  }).finally(() => setRefreshingSource(false));
                 }}
                 className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -689,7 +693,7 @@ export function TaskTimeline({
                     ? "bg-destructive/10 text-destructive"
                     : task.status === "needs_input"
                       ? "bg-amber-500/10 text-amber-700 dark:text-amber-300"
-                      : "bg-primary/10 text-primary",
+                      : "bg-primary/10 text-accent-foreground",
               )}
             >
               {workspaceStatusLabel(task.status)}

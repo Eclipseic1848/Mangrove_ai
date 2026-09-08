@@ -220,6 +220,9 @@ for (const theme of ["light", "dark"] as const) {
     await page.emulateMedia({ reducedMotion: "reduce", colorScheme: theme });
     await page.addInitScript(value => localStorage.setItem("mangrove_theme", value), theme);
     await mockPage(page, () => ({ ...baseTask, messages: [answer], work_session: session }));
+    // 先检查未被弹窗遮罩的任务状态，避免隐藏背景让对比度缺陷漏测。
+    await page.getByTestId("workspace-conversation-scroll").evaluate(element => { element.scrollTop = 0; });
+    expect((await new AxeBuilder({ page }).include('[data-testid="workspace-conversation-scroll"]').analyze()).violations).toEqual([]);
     await page.getByRole("button", { name: "查看本次用量" }).click();
     await expect(page.getByRole("dialog", { name: "本次执行用量" })).toBeVisible();
     expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
