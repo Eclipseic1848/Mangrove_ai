@@ -6,7 +6,9 @@ import asyncio
 import json
 from pathlib import Path
 import sqlite3
+from types import SimpleNamespace
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -42,6 +44,39 @@ from src.conversation_steering import (
 @pytest.fixture(autouse=True)
 def _migrated_database(tmp_path: Path) -> None:
     migrated_webui_database(tmp_path / "steering.db")
+
+
+@pytest.mark.parametrize("failure", ["timeout", "503"])
+def test_clarification_without_result_context_has_one_real_http_attempt(monkeypatch, failure):
+    from src.conversation_steering import rewriter as implementation
+
+    calls = []
+
+    def respond(request):
+        calls.append(request.url.path)
+        if failure == "timeout":
+            raise httpx.ReadTimeout("合成响应未知", request=request)
+        return httpx.Response(503, json={"error": {"message": "合成服务不可用"}})
+
+    original_client = httpx.AsyncClient
+
+    class IsolatedClient(original_client):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs, transport=httpx.MockTransport(respond))
+
+    connection = SimpleNamespace(provider="local", requested_model="synthetic-model", model="synthetic-model",
+        base_url="http://127.0.0.1:9/v1", api_key="synthetic", timeout=2, trust_env=False, extra_body=None)
+    monkeypatch.setattr(implementation, "get_provider", lambda: SimpleNamespace(resolve_model=lambda *args, **kwargs: connection))
+    monkeypatch.setattr(implementation.httpx, "AsyncClient", IsolatedClient)
+    turn = RawUserTurn(turn_id="turn-answer", owner_id="user-a", task_id="task-a", revision=1, text="按到账日期")
+    request = SteeringRequest(owner_id="user-a", task_id="task-a", revision=1, text=turn.text,
+        current_status="needs_input", clarification_round_id="clarification-test",
+        clarification_question="使用哪种日期？", provider="local")
+    assert turn.result_context is None
+    # 不注入评测器的SDK配置；验证产品自身在无结果引用的澄清路径禁止重试。
+    with pytest.raises(Exception):
+        asyncio.run(implementation.InstructorContextRewriter(provider="local", model=None).rewrite(turn, request))
+    assert calls == ["/v1/chat/completions"]
 
 
 def test_capability_scope_and_raw_turn_are_immutable_contracts() -> None:
@@ -203,9 +238,30 @@ def test_material_change_creates_proposal_without_mutating_run(tmp_path) -> None
     assert proposal.material_changes == ("field_semantics",)
 
 
-def test_after_safe_point_decision_survives_restart(tmp_path) -> None:
+def test_open_business_question_does_not_create_confirmable_proposal(tmp_path) -> None:
+    class AmbiguousRewriter(_FieldChangeRewriter):
+        async def rewrite(self, turn, request):
+            delta = await super().rewrite(turn, request)
+            return delta.model_copy(update={"open_questions": ("部门指提交部门还是审批部门？",)})
+
+    repository = SqliteSteeringRepository(str(tmp_path / "steering.db"))
+    result = asyncio.run(ConversationSteering(repository, AmbiguousRewriter()).handle_turn(
+        SteeringRequest(
+            owner_id="user-a", task_id="workspace-1", revision=1,
+            text="再加部门", current_status="running", current_goal="提取审批记录",
+        ),
+    ))
+    assert result.action is SteeringAction.NORMALIZED_NO_MATERIAL_CHANGE
+    assert result.proposal_id is None
+    assert result.clarification["prompt"] == "部门指提交部门还是审批部门？"
+    assert result.clarification["origin_turn_id"] == result.turn_id
+
+
+@pytest.mark.parametrize("late_worker", [False, True])
+@pytest.mark.parametrize("backend", ["sqlite", "memory"])
+def test_after_safe_point_decision_survives_restart(tmp_path, monkeypatch, late_worker, backend) -> None:
     db_path = str(tmp_path / "steering.db")
-    repository = SqliteSteeringRepository(db_path)
+    repository = SqliteSteeringRepository(db_path) if backend == "sqlite" else InMemorySteeringRepository()
     steering = ConversationSteering(repository, _FieldChangeRewriter())
     result = asyncio.run(
         steering.handle_turn(
@@ -225,10 +281,21 @@ def test_after_safe_point_decision_survives_restart(tmp_path) -> None:
         result.proposal_id or "",
         RevisionSwitchMode.AFTER_SAFE_POINT,
     )
-    reopened = SqliteSteeringRepository(db_path)
+    if backend == "sqlite":
+        # 旧版本持久 JSON 没有新增可空字段，不能因补默认值而失去恢复能力。
+        with sqlite3.connect(db_path) as connection:
+            legacy = waiting.model_dump(mode="json", exclude={"applied_revision", "applied_task_id"})
+            connection.execute("UPDATE conversation_revision_decisions SET payload_json=? WHERE decision_id=?", (json.dumps(legacy, ensure_ascii=False), waiting.decision_id))
+    reopened = SqliteSteeringRepository(db_path) if backend == "sqlite" else repository
 
     assert waiting.status is RevisionDecisionStatus.WAITING_SAFE_POINT
     assert reopened.get_decision("user-a", waiting.decision_id) == waiting
+
+    if late_worker:
+        changed = waiting.model_copy(update={"mode": RevisionSwitchMode.CANCEL_NOW, "status": RevisionDecisionStatus.READY_TO_APPLY})
+        assert reopened.update_decision(changed, expected=waiting) == changed
+        # 模拟旧 worker 已取得 WAITING 快照，稍后才处理其安全点。
+        monkeypatch.setattr(reopened, "waiting_decision", lambda *args: waiting)
 
     ready = ConversationSteering(reopened, _FieldChangeRewriter()).mark_safe_point(
         "user-a",
@@ -236,6 +303,10 @@ def test_after_safe_point_decision_survives_restart(tmp_path) -> None:
         revision=1,
         safe_point="inspect.completed",
     )
+    if late_worker:
+        assert ready is None
+        assert reopened.get_decision("user-a", waiting.decision_id) == changed
+        return
     assert ready is not None
     assert ready.status is RevisionDecisionStatus.READY_TO_APPLY
     assert ready.safe_point == "inspect.completed"

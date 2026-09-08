@@ -379,16 +379,15 @@ def _preserve_clarification_context(
     ):
         updates["evidence_policy"] = prior.evidence_policy
 
-    current_ambiguities = [
-        item
-        for item in draft.ambiguities
-        if item.ambiguity_id != clarification.ambiguity_id
-    ]
+    current_ambiguities = list(draft.ambiguities)
     current_ids = {item.ambiguity_id for item in current_ambiguities}
     current_questions = {item.question.strip() for item in current_ambiguities}
     preserved_ambiguities = []
     for item in prior.ambiguities:
         if item.ambiguity_id == clarification.ambiguity_id:
+            # 生成结果仍保留该歧义时，以实际解歧状态为准；提交回答不等于解决。
+            if item.ambiguity_id in current_ids:
+                continue
             preserved_ambiguities.append(
                 item.model_copy(
                     update={
@@ -707,6 +706,9 @@ async def compile_semantic_plan(
     """编译一个不可变 revision；外部模型未确认时在调用前阻断。"""
 
     resolved_plan_id = plan_id or _new_plan_id()
+    if request.clarification is not None:
+        # 已接受的补充只有一次发送资格；图级 repair 也不能重发未知调用。
+        request = request.model_copy(update={"max_repair_attempts": 0})
     if request.provider != "local" and not request.external_api_confirmed:
         return _external_confirmation_result(
             request,

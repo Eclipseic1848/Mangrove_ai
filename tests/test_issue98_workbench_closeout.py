@@ -255,7 +255,8 @@ def test_other_owner_cannot_operate_or_reuse_web_task_facts(
             (client.get(f"/api/semantic-workspace/tasks/{task_id}/events"), {404}),
             (client.post(
                 f"/api/semantic-workspace/tasks/{task_id}/answer",
-                json={"answer": "继续"},
+                headers={"Idempotency-Key": "owner-b-answer"},
+                json={"answer": "继续", "expected_revision": 1, "question_round_id": "clarification_" + "0" * 32},
             ), {404}),
             (client.post(f"/api/semantic-workspace/tasks/{task_id}/cancel"), {404}),
             (client.post(

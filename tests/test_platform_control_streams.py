@@ -234,13 +234,13 @@ def test_answer_cancel_only_external_question_bypasses_full_control_bucket(strea
     manager = SemanticWorkspaceManager()
     monkeypatch.setattr(semantic_workspace, "get_semantic_workspace_manager", lambda: manager)
     store.create_semantic_workspace_task(user["user_id"], task_id="synthetic-answer", title="虚构任务", objective_text="虚构目标", upload_ids=[], output_formats=[], provider="local", model=None, external_api_confirmed=False)
-    store.update_semantic_workspace_task(user["user_id"], "synthetic-answer", status="needs_input", question={"kind": kind, "question_id": "synthetic-question", "options": [{"value": "cancel", "label": "取消"}], "allow_free_text": kind != "external"})
+    question = store.publish_workspace_question(user["user_id"], "synthetic-answer", {"kind": kind, "prompt": "请选择虚构操作", "question_id": "synthetic-question", "options": [{"value": "cancel", "label": "取消"}], "allow_free_text": kind != "external"})
     for _ in range(10):
         assert store.platform_request_limit(owner_user_id=user["user_id"], control=True, now=auth.time.time()) == 0
     app = FastAPI()
     app.include_router(semantic_workspace.router)
     with TestClient(app, base_url="https://testserver", headers={"Origin": "https://testserver", "X-Mangrove-CSRF": "1", "Cookie": request.headers["cookie"]}) as client:
-        response = client.post("/api/semantic-workspace/tasks/synthetic-answer/answer", json={"answer": "cancel"})
+        response = client.post("/api/semantic-workspace/tasks/synthetic-answer/answer", headers={"Idempotency-Key": "synthetic-answer-cancel"}, json={"answer": "cancel", "expected_revision": question["revision"], "question_round_id": question["round_id"]})
     assert response.status_code == (200 if kind == "external" else 429), response.text
     task = store.get_semantic_workspace_task(user["user_id"], "synthetic-answer")
     assert task["status"] == ("cancelled" if kind == "external" else "needs_input")
@@ -261,10 +261,10 @@ def test_answer_cancel_classification_preserves_question_and_owner_guards(stream
     manager = SemanticWorkspaceManager()
     monkeypatch.setattr(semantic_workspace, "get_semantic_workspace_manager", lambda: manager)
     owner = store.create_user("synthetic-other-owner", auth.hash_password("synthetic-password"), pending=False) if scenario == "other_owner" else user
-    question = {"kind": "external", "question_id": "synthetic-question", "options": [{"value": "confirm" if scenario == "disallowed_answer" else "cancel", "label": "虚构选项"}], "allow_free_text": False}
+    question = {"kind": "external", "prompt": "请选择虚构操作", "question_id": "synthetic-question", "options": [{"value": "confirm" if scenario == "disallowed_answer" else "cancel", "label": "虚构选项"}], "allow_free_text": False}
     with execution_context(ExecutionAuthorization(owner['user_id'], owner['execution_generation'])):
         store.create_semantic_workspace_task(owner["user_id"], task_id="synthetic-answer-guard", title="虚构任务", objective_text="虚构目标", upload_ids=[], output_formats=[], provider="local", model=None, external_api_confirmed=False)
-        store.update_semantic_workspace_task(owner["user_id"], "synthetic-answer-guard", status="needs_input", question=question)
+        question = store.publish_workspace_question(owner["user_id"], "synthetic-answer-guard", question)
     if scenario == "question_changed":
         consume = store.platform_request_limit
 
@@ -278,7 +278,7 @@ def test_answer_cancel_classification_preserves_question_and_owner_guards(stream
     app = FastAPI()
     app.include_router(semantic_workspace.router)
     with TestClient(app, base_url="https://testserver", headers={"Origin": "https://testserver", "X-Mangrove-CSRF": "1", "Cookie": request.headers["cookie"]}) as client:
-        response = client.post("/api/semantic-workspace/tasks/synthetic-answer-guard/answer", json={"answer": " cancel "})
+        response = client.post("/api/semantic-workspace/tasks/synthetic-answer-guard/answer", headers={"Idempotency-Key": "synthetic-answer-guard-cancel"}, json={"answer": " cancel ", "expected_revision": question["revision"], "question_round_id": question["round_id"]})
     assert response.status_code == (404 if scenario == "other_owner" else 409), response.text
     assert store.get_semantic_workspace_task(owner["user_id"], "synthetic-answer-guard")["status"] == "needs_input"
     assert manager._queue.empty()

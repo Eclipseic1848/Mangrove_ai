@@ -35,7 +35,7 @@ const STATUS: Record<
   needs_input: {
     label: "需要确认",
     icon: AlertCircle,
-    className: "text-amber-600 dark:text-amber-400",
+    className: "text-accent-foreground",
   },
   cancelling: {
     label: "正在停止",

@@ -2509,6 +2509,8 @@ test.describe("统一数据工作台", () => {
     const question = {
       kind: "plan",
       question_id: "q1",
+      round_id: `clarification_${"3".repeat(32)}`,
+      revision: 1, purpose: "business", continuation: "resume", origin_turn_id: null, outbound_purpose: null,
       prompt: "“本月”指自然月还是最近 30 天？",
       reason: "时间范围会改变筛选结果",
       affected_scope: "结果行数",
@@ -2617,20 +2619,18 @@ test.describe("统一数据工作台", () => {
     const ownerAction = page.getByLabel("需要你处理后才能继续");
     await expect(ownerAction).toContainText(`原因：${question.reason}`);
     await expect(ownerAction).toContainText(`影响：${question.affected_scope}`);
-    await expect(
-      page.getByRole("heading", { name: "需要确认一项信息" }),
-    ).toBeVisible();
-    await page.getByRole("button", { name: "稍后回答" }).click();
-    // 等待弹窗退出后再检查页面焦点，避免与关闭时的焦点归还竞争。
+    await expect(page.getByLabel("当前业务问题")).toContainText(question.prompt);
+    await page.getByRole("button", { name: "收起问题" }).click();
+    // 业务问题就地收起，保留既有待办、重开和取消旅程。
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await ownerAction.focus();
     await expect(ownerAction).toBeFocused();
     await expect(page.getByRole("button", { name: /继续回答/ })).toBeVisible();
     await page.getByRole("button", { name: /继续回答/ }).click();
     await expect(
-      page.getByRole("dialog").getByText(question.prompt),
+      page.getByLabel("当前业务问题").getByText(question.prompt),
     ).toBeVisible();
-    await page.getByRole("button", { name: "稍后回答" }).click();
+    await page.getByRole("button", { name: "收起问题" }).click();
     await page.getByRole("button", { name: "取消任务" }).click();
     await page.getByRole("button", { name: "确认取消" }).click();
     await expect(page.getByText("任务已停止，未发布新的正式交付。你可以从原要求创建新版本。")).toBeVisible();

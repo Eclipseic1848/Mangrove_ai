@@ -192,8 +192,12 @@ class UploadSourceInspector:
             )
 
     def inspect(self, plan: SemanticTaskPlan) -> tuple[SourceInspectionReport, ...]:
+        return self.inspect_artifacts(plan.source_scope.artifact_ids)
+
+    def inspect_artifacts(self, artifact_ids: tuple[str, ...]) -> tuple[SourceInspectionReport, ...]:
+        """从已获准的真实上传观察结构，不要求先虚构可执行计划。"""
         reports = []
-        for upload_id in plan.source_scope.artifact_ids:
+        for upload_id in artifact_ids:
             item = self._upload_store.resolve(self._user_id, upload_id)
             suffix = Path(item.original_name).suffix.lower()
             inspector_version = (
@@ -207,6 +211,10 @@ class UploadSourceInspector:
                 inspector_version,
             )
             if cached is not None:
+                if (cached.artifact_id, cached.artifact_sha256, cached.inspector_version) != (
+                    upload_id, item.sha256, inspector_version,
+                ):
+                    raise ValueError("缓存观察与当前来源或检查器版本不一致")
                 reports.append(cached)
                 continue
             if suffix in _TABULAR_EXTENSIONS:
@@ -235,3 +243,43 @@ class UploadSourceInspector:
                     )
                 )
         return tuple(reports)
+
+
+def public_source_findings(reports: tuple[SourceInspectionReport, ...]) -> tuple[dict[str, object], ...]:
+    """公开可核验的有限发现；不把解析诊断、路径或抽样当成完整业务结论。"""
+    findings = []
+    failures = {
+        "unsupported": "当前检查器不支持此来源",
+        "corrupt": "来源损坏，未取得可用观察",
+        "encrypted": "来源已加密，未取得可用观察",
+        "over_limit": "来源超过读取限额，未取得可用观察",
+        "needs_user": "来源还需明确读取条件",
+    }
+    for report in reports:
+        base = {
+            "artifact_id": report.artifact_id,
+            "source_sha256": report.artifact_sha256,
+            "inspection_id": report.inspection_id,
+            "inspection_sha256": report.canonical_hash(),
+            "inspector_version": report.inspector_version,
+            "status": report.status.value,
+        }
+        if report.status is not InspectionStatus.READY:
+            findings.append({**base, "summary": failures[report.status.value]})
+        for table in report.tables if report.status is InspectionStatus.READY else ():
+            columns = []
+            for column in table.columns[:12]:
+                samples = "、".join(value[:120] for value in column.sample_values[:3])
+                columns.append(f"{column.raw_name}（样例：{samples}）")
+            findings.append({
+                **base, "table_ref": table.table_ref,
+                "summary": (f"各列独立样例，无行对应关系；工作表 {report.original_name if table.name == report.artifact_id else table.name}；抽样 {table.sampled_rows} 行；" + "；".join(columns))[:500],
+            })
+        for target in report.document_targets if report.status is InspectionStatus.READY else ():
+            findings.append({
+                **base, "element_id": target.element_ids[0],
+                "summary": f"已读取文档片段 {target.label}：{target.text_excerpt[:400]}"[:500],
+            })
+        if len(findings) >= 20:
+            break
+    return tuple(findings[:20])

@@ -59,6 +59,9 @@ class SemanticDiffGate:
 
     @classmethod
     def classify(cls, delta: ContextDelta) -> SteeringAction:
+        if delta.open_questions and delta.intent is not TurnIntent.PERMISSION_REQUEST:
+            # 未决业务条件不能因为已提取某些差异，就成为可执行的确认草案。
+            return SteeringAction.NORMALIZED_NO_MATERIAL_CHANGE
         if delta.intent is TurnIntent.NEW_TASK:
             return SteeringAction.NEW_TASK_PROPOSAL
         if delta.intent is TurnIntent.PERMISSION_REQUEST:
@@ -87,6 +90,11 @@ class ConversationSteering:
     async def handle_turn(self, request: SteeringRequest) -> SteeringResult:
         if self._rewriter is None:
             raise RuntimeError("ConversationSteering 未配置 ContextRewriter")
+        for previous in request.relevant_turns:
+            if self._repository.get_turn(request.owner_id, previous.turn_id) != previous:
+                raise ValueError("历史回合与持久原话不一致")
+        if request.prior_delta and self._repository.get_delta(request.owner_id, request.prior_delta.delta_id) != request.prior_delta:
+            raise ValueError("先前理解与持久差异不一致")
         submitted = RawUserTurn(
             turn_id=f"turn_{uuid.uuid4().hex[:16]}",
             owner_id=request.owner_id,
@@ -103,16 +111,19 @@ class ConversationSteering:
         )
         if existing is not None:
             return existing
-        if turn.result_context:
+        if request.clarification_round_id and self._before_result_call is None:
+            raise ValueError("澄清回答缺少持久发送授权")
+        if turn.result_context or request.clarification_round_id:
             if self._before_result_call:
                 self._before_result_call()
-            self._repository.claim_result_context(turn.owner_id, turn.turn_id)
+            if turn.result_context:
+                self._repository.claim_result_context(turn.owner_id, turn.turn_id)
 
         delta = await self._rewriter.rewrite(turn, request)
         if (
             delta.owner_id != turn.owner_id
             or delta.task_id != turn.task_id
-            or delta.source_turn_ids != (turn.turn_id,)
+            or delta.source_turn_ids != (*[item.turn_id for item in request.relevant_turns], turn.turn_id)
             or delta.inherited_revision != turn.revision
         ):
             raise ValueError("ContextDelta 与原始回合或冻结 revision 不一致")
@@ -138,6 +149,18 @@ class ConversationSteering:
             SteeringAction.NEW_TASK_PROPOSAL: "检测到独立目标，建议创建新任务",
             SteeringAction.PERMISSION_REQUEST: "需要新的权限或外部数据处理授权",
         }[action]
+        clarification = None
+        if delta.open_questions and action is SteeringAction.NORMALIZED_NO_MATERIAL_CHANGE:
+            acknowledgement = "仍需澄清，尚未形成可执行修改"
+            clarification = {
+                "kind": "plan", "question_id": delta.delta_id,
+                "round_id": f"clarification_{uuid.uuid4().hex}", "revision": turn.revision,
+                "purpose": "business", "outbound_purpose": None,
+                "continuation": "steering", "origin_turn_id": turn.turn_id,
+                "prompt": delta.open_questions[0], "reason": "这项条件会影响修改后的结果",
+                "affected_scope": "、".join({"goal": "任务目标", "source_scope": "来源范围", "selection": "筛选条件", "coverage": "覆盖范围", "field_semantics": "字段含义", "output": "输出要求", "permission": "权限范围"}[item] for item in SemanticDiffGate.material_changes(delta)) or "任务理解",
+                "options": [], "allow_free_text": True,
+            }
         result = SteeringResult(
             result_id=f"steering_{uuid.uuid4().hex[:16]}",
             owner_id=turn.owner_id,
@@ -146,6 +169,7 @@ class ConversationSteering:
             delta_id=delta.delta_id,
             action=action,
             acknowledgement=acknowledgement,
+            clarification=clarification,
             answer=delta.direct_answer,
             proposal_id=proposal.proposal_id if proposal else None,
             run_id=request.run_id,
@@ -208,4 +232,5 @@ class ConversationSteering:
                 "updated_at": datetime.now(timezone.utc),
             }
         )
-        return self._repository.update_decision(ready)
+        # 迟到的安全点不能覆盖用户在等待结束后明确作出的新选择。
+        return self._repository.update_decision(ready, expected=decision)

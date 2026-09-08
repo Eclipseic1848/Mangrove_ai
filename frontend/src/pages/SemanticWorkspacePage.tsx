@@ -67,6 +67,7 @@ import type {
   WorkspaceGuidance,
   SteeringResult,
   WorkspaceTask,
+  WorkspaceQuestion,
   ResultSelection,
   PublicResultContext,
 } from "@/types/semanticWorkspace";
@@ -118,6 +119,9 @@ function taskRecoveryError(error: unknown) {
 
 function FollowupComposer({
   task,
+  scopeIdentity,
+  onAnswer,
+  onRefreshQuestion,
   onSubmit,
   onDecision,
   pendingResults,
@@ -126,6 +130,9 @@ function FollowupComposer({
   onBusyChange,
 }: {
   task: WorkspaceTask;
+  scopeIdentity: string;
+  onAnswer: (question: WorkspaceQuestion, answer: string, key: string) => Promise<WorkspaceTask>;
+  onRefreshQuestion: () => void;
   pendingResults: SteeringResult[];
   onSubmit: (text: string, idempotencyKey: string, context?: ResultSelection) => Promise<SteeringResult>;
   resultContext: (ResultSelection & { label: string }) | null;
@@ -138,65 +145,195 @@ function FollowupComposer({
   ) => Promise<void>;
 }) {
   const [text, setText] = useState("");
-  const inFlight = useRef(false);
+  const [answerDraft, setAnswerDraft] = useState({ identity: "", text: "" });
+  const [answerMode, setAnswerMode] = useState<string | null>(null);
+  const [questionExpanded, setQuestionExpanded] = useState(true);
+  const [answerFeedback, setAnswerFeedback] = useState<{ identity: string; scope: string; text: string; unknown: boolean } | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const inFlight = useRef<object | null>(null);
+  const answerAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const submitAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const [confirmedProposal, setConfirmedProposal] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const contextExpired = Boolean(resultContext && (resultContext.revision !== task.current_revision || task.viewing_revision !== task.current_revision));
+  const question = task.question ?? task.understanding?.question;
+  const businessQuestion = question?.purpose === "business" ? question : null;
+  const questionIdentity = JSON.stringify([scopeIdentity, question?.round_id, question?.origin_turn_id]);
+  const isAnswer = answerMode !== null;
+  const answerTargetCurrent = Boolean(businessQuestion && answerMode === questionIdentity);
+  const currentIdentity = JSON.stringify([scopeIdentity, questionIdentity, answerMode]);
+  const latestIdentity = useRef<string | null>(currentIdentity);
+  latestIdentity.current = currentIdentity;
+  const latestQuestionScope = useRef({ scopeIdentity, question });
+  latestQuestionScope.current = { scopeIdentity, question };
+  const latestContext = useRef(resultContext);
+  latestContext.current = resultContext;
+  const answerText = answerDraft.text;
+  const latestAnswerDraft = useRef(answerDraft);
+  latestAnswerDraft.current = answerDraft;
+  const questionAvailable = Boolean(businessQuestion?.round_id && businessQuestion.revision === (task.current_revision ?? task.active_revision)
+    && (task.viewing_revision ?? task.current_revision ?? task.active_revision) === businessQuestion.revision
+    && businessQuestion.continuation && businessQuestion.continuation !== "unavailable");
+  const feedback = answerFeedback && (answerFeedback.identity === questionIdentity
+    || (answerFeedback.unknown && answerFeedback.scope === scopeIdentity && !question)) ? answerFeedback : null;
   const usesExternalConnection = Boolean(task.model_connection_id);
   useEffect(() => {
     setText("");
     setConfirmedProposal(null);
   }, [task.task_id]);
+  useEffect(() => { latestIdentity.current = currentIdentity; return () => { latestIdentity.current = null; }; }, []);
+  useLayoutEffect(() => {
+    // 新轮次可继续编辑；旧请求不能清理新一轮的忙碌状态。
+    inFlight.current = null;
+    setBusy(false);
+    setQuestionExpanded(true);
+    if (question) setAnswerFeedback(current => current?.identity === questionIdentity ? current : null);
+    onBusyChange(false);
+  }, [scopeIdentity, questionIdentity]);
+  const chooseMode = (answering: boolean) => {
+    if (answering) setAnswerDraft(current => ({ identity: questionIdentity, text: current.text }));
+    setAnswerMode(answering ? questionIdentity : null);
+    inputRef.current?.focus();
+  };
+  const submitAnswer = async (value: string) => {
+    if (!businessQuestion || !questionAvailable || !value.trim() || value.trim().length > 10000 || inFlight.current || feedback?.unknown) return;
+    const capturedIdentity = currentIdentity;
+    const submitted = value;
+    const fingerprint = JSON.stringify([scopeIdentity, businessQuestion.round_id, businessQuestion.revision, businessQuestion.origin_turn_id, submitted.trim()]);
+    if (answerAttempt.current?.fingerprint !== fingerprint) answerAttempt.current = { fingerprint, key: nanoid() };
+    const pending = {};
+    inFlight.current = pending;
+    setBusy(true);
+    onBusyChange(true);
+    try {
+      const result = await onAnswer(businessQuestion, submitted.trim(), answerAttempt.current.key);
+      const receipt = result.answer_receipt;
+      // 已接收轮次可退出待答；同版本没有新问题时仍保留真实未知收据提示。
+      const latest = latestQuestionScope.current;
+      if (latestIdentity.current !== null && receipt?.status === "unknown" && receipt.round_id === businessQuestion.round_id
+        && receipt.revision === businessQuestion.revision && latest.scopeIdentity === scopeIdentity
+        && (!latest.question || latest.question.round_id === businessQuestion.round_id)) {
+        setAnswerFeedback({ identity: questionIdentity, scope: scopeIdentity, text: "回答结果未知，请刷新任务核对；不会自动重发。", unknown: true });
+        return;
+      }
+      // 仅清除已接收且未再编辑的原稿；新轮次或在途编辑都保留。
+      if (latestIdentity.current !== null && receipt?.status === "accepted" && receipt.round_id === businessQuestion.round_id && receipt.revision === businessQuestion.revision
+        && latestAnswerDraft.current.identity === questionIdentity && latestAnswerDraft.current.text === submitted) {
+        setAnswerDraft(current => current.identity === questionIdentity && current.text === submitted ? { ...current, text: "" } : current);
+        setAnswerMode(current => current === questionIdentity ? null : current);
+      }
+      if (latestIdentity.current !== capturedIdentity) return;
+      if (!receipt || receipt.round_id !== businessQuestion.round_id || receipt.revision !== businessQuestion.revision || receipt.status === "unknown") {
+        setAnswerFeedback({ identity: questionIdentity, scope: scopeIdentity, text: "回答结果未知，请刷新任务核对；不会自动重发。", unknown: true });
+        return;
+      }
+      setAnswerFeedback({ identity: questionIdentity, scope: scopeIdentity, text: "回答已接收，正在核对后续状态。", unknown: false });
+    } catch (error) {
+      if (latestIdentity.current === capturedIdentity) setAnswerFeedback({ identity: questionIdentity, scope: scopeIdentity, text: error instanceof Error ? error.message : "回答提交失败，原稿已保留。", unknown: false });
+    } finally {
+      if (latestIdentity.current !== null && inFlight.current === pending) {
+        inFlight.current = null;
+        setBusy(false);
+        onBusyChange(false);
+      }
+    }
+  };
   const submit = async () => {
+    if (isAnswer) {
+      if (businessQuestion?.allow_free_text && answerTargetCurrent) await submitAnswer(answerText);
+      return;
+    }
     if (!text.trim() || inFlight.current) return;
+    const capturedIdentity = currentIdentity;
+    const capturedContext = resultContext;
     const submitted = text;
     const context = resultContext ? { revision: resultContext.revision, output_id: resultContext.output_id,
       representation_sha256: resultContext.representation_sha256, item_ref: resultContext.item_ref } : undefined;
     if (context && (context.revision !== task.current_revision || task.viewing_revision !== task.current_revision)) return;
     const fingerprint = JSON.stringify([task.task_id, submitted.trim(), context]);
     if (submitAttempt.current?.fingerprint !== fingerprint) submitAttempt.current = { fingerprint, key: nanoid() };
-    inFlight.current = true;
+    const pending = {};
+    inFlight.current = pending;
     setBusy(true);
     onBusyChange(true);
     try {
       await onSubmit(submitted.trim(), submitAttempt.current.key, context);
+      if (latestIdentity.current !== capturedIdentity) return;
       submitAttempt.current = null;
       setText(current => current === submitted ? "" : current);
-      if (context) onClearResultContext();
+      if (context && latestContext.current === capturedContext) onClearResultContext();
     } catch {
       // 父级展示请求错误；失败保留原稿，不自动重复发送。
     } finally {
-      inFlight.current = false;
-      setBusy(false);
-      onBusyChange(false);
+      if (latestIdentity.current !== null && inFlight.current === pending) {
+        inFlight.current = null;
+        setBusy(false);
+        onBusyChange(false);
+      }
     }
   };
   const decide = async (proposalId: string, mode: "cancel_now" | "after_safe_point" | "new_task") => {
     if (inFlight.current) return;
-    inFlight.current = true;
+    const capturedIdentity = currentIdentity;
+    const pending = {};
+    inFlight.current = pending;
     setBusy(true);
     try {
       await onDecision(proposalId, mode, confirmedProposal === proposalId);
-      setConfirmedProposal(null);
+      if (latestIdentity.current === capturedIdentity) setConfirmedProposal(null);
     } catch {
       // 父级保留服务端错误，用户可核对状态后重新决定。
     } finally {
-      inFlight.current = false;
-      setBusy(false);
+      if (latestIdentity.current !== null && inFlight.current === pending) {
+        inFlight.current = null;
+        setBusy(false);
+      }
     }
   };
   return (
     <div className="rounded-2xl border bg-background p-3 shadow-[0_14px_45px_-32px_hsl(var(--primary)/0.7)]">
+      {businessQuestion && <section aria-label="当前业务问题" className="mb-3 rounded-xl border bg-muted/20 p-3 text-sm">
+        <p className="font-medium">{businessQuestion.prompt}</p>
+        <button type="button" aria-expanded={questionExpanded} onClick={() => setQuestionExpanded(current => !current)} className="mt-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-accent">{questionExpanded ? "收起问题" : "继续回答"}</button>
+        <div hidden={!questionExpanded}>
+        {businessQuestion.reason && <p className="mt-1 text-xs leading-5 text-muted-foreground">{businessQuestion.reason}</p>}
+        {businessQuestion.affected_scope && <p className="text-xs leading-5 text-muted-foreground">影响：{businessQuestion.affected_scope}</p>}
+        {businessQuestion.continuation === "confirm_revision" && <p className="mt-2 text-xs leading-5">补充后需确认“按补充要求重新开始”，将在同一任务创建新版本和新的执行。</p>}
+        {!questionAvailable && <p role="status" className="mt-2 text-xs">当前问题无法直接提交，请回到最新版本或刷新任务核对；仍可继续对话提出更正。</p>}
+        {questionAvailable && <div className="mt-2 flex flex-wrap gap-2">
+          {businessQuestion.options.map(option => <button key={option.value} type="button" disabled={busy || feedback?.unknown} onClick={() => void submitAnswer(option.value)} className="max-w-full rounded-lg border bg-background px-3 py-2 text-left text-xs leading-5 hover:bg-accent disabled:opacity-50">
+            {option.label}{option.description && <span className="mt-1 block text-muted-foreground">{option.description}</span>}
+          </button>)}
+        </div>}
+        <div className="mt-3 flex flex-wrap gap-2" aria-label="输入用途">
+          <button type="button" aria-pressed={!isAnswer} disabled={busy} onClick={() => chooseMode(false)} className="rounded-lg border px-3 py-2 text-xs aria-pressed:bg-accent aria-pressed:text-accent-foreground">继续对话</button>
+          {businessQuestion.allow_free_text && <button type="button" aria-pressed={answerTargetCurrent} disabled={busy || !questionAvailable} onClick={() => chooseMode(true)} className="rounded-lg border px-3 py-2 text-xs aria-pressed:bg-accent aria-pressed:text-accent-foreground">回答这项问题</button>}
+        </div>
+        {feedback && <p id="clarification-feedback" role="status" className="mt-2 text-xs leading-5">{feedback.text}</p>}
+        {(!questionAvailable || feedback) && <button type="button" onClick={onRefreshQuestion} className="mt-2 rounded-lg border px-3 py-2 text-xs">刷新问题状态</button>}
+        </div>
+      </section>}
+      {!businessQuestion && feedback && <div className="mb-2 text-xs leading-5">
+        <p id="clarification-feedback" role="status">{feedback.text}</p>
+        <button type="button" onClick={onRefreshQuestion} className="mt-2 rounded-lg border px-3 py-2">刷新问题状态</button>
+      </div>}
+      {isAnswer && !answerTargetCurrent && <div role="status" className="mb-2 text-xs leading-5">
+        问题已更新或结束，补充原稿已保留；请明确选择回答当前问题或继续对话。
+        {!businessQuestion && <button type="button" onClick={() => chooseMode(false)} className="ml-2 rounded border px-2 py-1">继续对话</button>}
+      </div>}
       {resultContext && <div className="mb-2 flex items-start gap-2 rounded-lg border bg-accent p-2 text-xs text-accent-foreground" aria-label="本次追问引用的结果">
         <span className="min-w-0 flex-1 break-words">本次追问引用的结果：{resultContext.label} · V{resultContext.revision}</span>
         <button type="button" disabled={busy} className="shrink-0 rounded px-2 py-1 hover:bg-background focus-visible:ring-2 focus-visible:ring-ring" onClick={onClearResultContext}>移除引用</button>
       </div>}
-      {contextExpired && <p role="alert" className="mb-2 text-xs text-destructive">所选结果已过期，请回到最新版本重新选择，或移除引用后继续。</p>}
+      {resultContext && isAnswer && <p className="mb-2 text-xs text-muted-foreground">引用与普通对话草稿已保留；本次只回答当前问题。</p>}
+      {contextExpired && !isAnswer && <p role="alert" className="mb-2 text-xs text-destructive">所选结果已过期，请回到最新版本重新选择，或移除引用后继续。</p>}
       <textarea
-        aria-label="继续对话"
-        value={text}
-        onChange={(event) => setText(event.target.value)}
+        ref={inputRef}
+        aria-label={isAnswer ? "回答这项问题" : "继续对话"}
+        aria-describedby={isAnswer && feedback ? "clarification-feedback" : undefined}
+        value={isAnswer ? answerText : text}
+        onChange={(event) => isAnswer ? setAnswerDraft({ identity: questionIdentity, text: event.target.value }) : setText(event.target.value)}
+        maxLength={isAnswer ? 10000 : undefined}
         onKeyDown={(event) => {
           if (!event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
@@ -204,7 +341,7 @@ function FollowupComposer({
           }
         }}
         rows={2}
-        placeholder="可询问进度和原因，也可提出修改；系统会先说明是否影响当前任务"
+        placeholder={isAnswer ? "补充这项问题需要的信息；不会替代外发或修改确认" : "可询问进度和原因，也可提出修改；系统会先说明是否影响当前任务"}
         className="w-full min-h-16 max-h-40 [field-sizing:content] resize-none overflow-y-auto bg-transparent px-1 text-sm leading-6 outline-none placeholder:text-muted-foreground/70"
       />
       <div className="mt-2 flex items-center gap-3 border-t pt-2">
@@ -213,11 +350,11 @@ function FollowupComposer({
         </span>
         <button
           type="button"
-          disabled={!text.trim() || busy || contextExpired}
+          disabled={busy || (isAnswer ? !answerText.trim() || !answerTargetCurrent || !questionAvailable || feedback?.unknown : !text.trim() || contextExpired)}
           onClick={() => void submit()}
           className="ml-auto rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground disabled:opacity-45"
         >
-          {busy ? "正在理解" : "发送"}
+          {busy ? "正在理解" : isAnswer ? "提交回答" : "发送"}
         </button>
       </div>
       {pendingResults.map(result => (
@@ -227,6 +364,7 @@ function FollowupComposer({
           className="mt-3 rounded-xl border bg-muted/25 px-3 py-2 text-xs leading-5"
         >
           <p className="font-medium">待确认修改</p>
+          {task.clarification_history?.some(entry => entry.turn_id === result.turn_id && entry.question.continuation === "confirm_revision") && <p className="mt-1">按补充要求重新开始：确认后将在本任务创建新版本和新的执行，不恢复原执行。</p>}
           {result.action === "revision_proposal" && result.proposal_id && (
             <div className="mt-3">
               {usesExternalConnection && (
@@ -567,6 +705,28 @@ export function SemanticWorkspacePage() {
   const messages = [...messagesById.values()].sort((a, b) => a.created_at.localeCompare(b.created_at) || a.message_id.localeCompare(b.message_id));
   const messageSignature = JSON.stringify([messages.map(message => message.message_id), conversation.data?.results?.map(result => result.result_id)]);
   const readingIdentity = JSON.stringify([user?.user_id, selectedTaskId, viewingRevision]);
+  const answerScope = useRef(readingIdentity);
+  answerScope.current = readingIdentity;
+  const answerRound = useRef<string | undefined>(undefined);
+  answerRound.current = (task?.question ?? task?.understanding?.question)?.round_id;
+  const answerQuestion = async (question: WorkspaceQuestion, answer: string, key: string) => {
+    if (!task || !question.round_id || !question.revision || question.revision !== (task.current_revision ?? task.active_revision)
+      || viewingRevision !== question.revision) throw new Error("问题版本已失效，请刷新任务核对；原稿已保留。");
+    const capturedScope = readingIdentity;
+    try {
+      const result = await answerWorkspaceTask(task.task_id, { answer, expected_revision: question.revision, question_round_id: question.round_id }, key);
+      // 仅重新读取原任务的权威投影，不把旧回答结果直接写进当前会话。
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-task", task.task_id] }),
+        queryClient.invalidateQueries({ queryKey: ["workspace-turns", user?.user_id, task.task_id] }),
+        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-tasks"] }),
+      ]);
+      return result;
+    } catch (error) {
+      if (answerScope.current === capturedScope && answerRound.current === question.round_id) toast.error(error instanceof Error ? error.message : "提交回答失败");
+      throw error;
+    }
+  };
   useLayoutEffect(() => {
     const scroller = conversationScroller.current;
     if (!scroller) return;
@@ -1254,30 +1414,10 @@ export function SemanticWorkspacePage() {
                         <TaskTimeline
                           task={task}
                           connectionLabel={modelConnections.data?.items.find(connection => connection.connection_id === (task.agentic_runtime?.model_connection_id ?? task.model_connection_id))?.display_name}
+                          clarificationTurnIds={conversation.data?.turns.map(turn => turn.turn_id)}
                           liveEvents={liveEvents}
-                          onAnswer={async (answer) => {
-                            try {
-                              await answerWorkspaceTask(task.task_id, answer);
-                              await Promise.all([
-                                queryClient.invalidateQueries({
-                                  queryKey: [
-                                    "semantic-workspace-task",
-                                    task.task_id,
-                                  ],
-                                }),
-                                queryClient.invalidateQueries({
-                                  queryKey: ["semantic-workspace-tasks"],
-                                }),
-                              ]);
-                            } catch (error) {
-                              toast.error(
-                                error instanceof Error
-                                  ? error.message
-                                  : "提交确认失败",
-                              );
-                              throw error;
-                            }
-                          }}
+                          onAnswer={answerQuestion}
+                          onRefreshQuestion={() => { void detail.refetch(); }}
                           onCancel={async () => {
                             try {
                               await cancelWorkspaceTask(task.task_id);
@@ -1508,7 +1648,9 @@ export function SemanticWorkspacePage() {
                             const message = messages.find(message => message.turn_id === turn.turn_id);
                             const answer = message?.content ?? response?.answer;
                             const context = readPublicResultContext(message?.result_context ?? response?.result_context);
+                            const clarification = task.clarification_history?.find(entry => entry.turn_id === turn.turn_id);
                             return <article key={turn.turn_id} className="space-y-2 border-b pb-4 text-sm leading-7">
+                              {clarification && <p className="text-muted-foreground">{clarification.question.prompt}</p>}
                               <p className="whitespace-pre-wrap font-medium">{turn.text}</p>
                               {response && <p className="text-muted-foreground">{response.acknowledgement}</p>}
                               {answer && <div aria-label="Mangrove 回答"><Markdown safeResources>{answer}</Markdown></div>}
@@ -1636,8 +1778,11 @@ export function SemanticWorkspacePage() {
                             <span>设置用于新任务，当前版本保持原模型。</span>
                           </div>
                           <FollowupComposer
-                            key={task.task_id}
+                            key={`${user?.user_id}:${task.task_id}`}
                             task={task}
+                            scopeIdentity={readingIdentity}
+                            onAnswer={answerQuestion}
+                            onRefreshQuestion={() => { void detail.refetch(); }}
                             resultContext={resultDraft?.identity === resultIdentity ? resultDraft.context : null}
                             onClearResultContext={() => setResultDraft(current => current?.identity === resultIdentity ? null : current)}
                             onBusyChange={busy => { if (canvasIdentityRef.current === resultIdentity) setFollowupBusy(busy); }}
@@ -1649,6 +1794,7 @@ export function SemanticWorkspacePage() {
                               ),
                             )}
                             onSubmit={async (text, idempotencyKey, context) => {
+                              const capturedScope = readingIdentity;
                               try {
                                 const result = await sendWorkspaceTurn(
                                   task.task_id,
@@ -1665,7 +1811,7 @@ export function SemanticWorkspacePage() {
                                 await queryClient.invalidateQueries({ queryKey: ["workspace-turns", user?.user_id, task.task_id] });
                                 return result;
                               } catch (error) {
-                                toast.error(
+                                if (answerScope.current === capturedScope) toast.error(
                                   error instanceof Error
                                     ? error.message
                                     : "追问处理失败",
@@ -1674,6 +1820,7 @@ export function SemanticWorkspacePage() {
                               }
                             }}
                             onDecision={async (proposalId, mode, externalConfirmed) => {
+                              const capturedScope = readingIdentity;
                               try {
                                 await decideWorkspaceRevision(
                                   task.task_id,
@@ -1681,6 +1828,7 @@ export function SemanticWorkspacePage() {
                                   mode,
                                   externalConfirmed,
                                 );
+                                if (answerScope.current !== capturedScope) return;
                                 setLiveEvents([]);
                                 setSelectedRevision(null);
                                 await Promise.all([
@@ -1703,11 +1851,12 @@ export function SemanticWorkspacePage() {
                                       : "已登记为独立任务",
                                 );
                               } catch (error) {
-                                toast.error(
+                                if (answerScope.current === capturedScope) toast.error(
                                   error instanceof Error
                                     ? error.message
                                     : "确认修改失败",
                                 );
+                                throw error;
                               }
                             }}
                           />

@@ -385,6 +385,8 @@ class CountingFullVerifier:
 
 class ClarifyingPiRuntime(FakePiRuntime):
     async def start(self, request, *, on_event, run_id=None):
+        if request.revision > 1:
+            return await super().start(request, on_event=on_event, run_id=run_id)
         self.start_calls += 1
         self.requests.append(request)
         await on_event(
@@ -1221,6 +1223,17 @@ def test_pi_material_ambiguity_becomes_one_reopenable_question(
         pi_runtime=runtime,
     )
     document, _ = _uploads(tmp_path)
+    from src.conversation_steering import ContextDelta, DeltaConfidence, TurnIntent
+    from src.api.routes import semantic_workspace as route
+    class ClarificationRewriter:
+        async def rewrite(self, turn, request):
+            assert request.clarification_question == "你需要第一条记录，还是全部记录？"
+            assert request.model == runtime.requests[0].model
+            assert request.model != "other-default-model"
+            return ContextDelta(delta_id="delta-pi-answer", owner_id=turn.owner_id, task_id=turn.task_id,
+                inherited_revision=turn.revision, source_turn_ids=(turn.turn_id,), intent=TurnIntent.TASK_REFINEMENT,
+                confidence=DeltaConfidence.HIGH, normalized_text="提取全部记录，保留既有来源范围", goal_delta="全部记录")
+    monkeypatch.setattr(route, "build_context_rewriter", lambda request, **kwargs: ClarificationRewriter())
 
     with client:
         created = client.post(
@@ -1240,24 +1253,44 @@ def test_pi_material_ambiguity_becomes_one_reopenable_question(
             created.json()["task_id"],
             "needs_input",
         )
+        monkeypatch.setattr(settings, "llm_model_name", "other-default-model")
         answered = client.post(
             f"/api/semantic-workspace/tasks/{task['task_id']}/answer",
-            json={"answer": "全部记录"},
+            json={"answer": "全部记录", "expected_revision":1, "question_round_id":task["question"]["round_id"]},
+            headers={"Idempotency-Key":"pi-answer"},
         )
         assert answered.status_code == 200, answered.text
+        assert runtime.start_calls == 1 and not runtime.resume_calls
+        assert answered.json()["active_revision"] == 1
+        proposal = client.get(f"/api/semantic-workspace/tasks/{task['task_id']}/turns").json()["proposals"][-1]
+        confirmed = client.post(f"/api/semantic-workspace/tasks/{task['task_id']}/revision-proposals/{proposal['proposal_id']}/decision", json={"mode":"cancel_now"})
+        assert confirmed.status_code == 202, confirmed.text
         completed = _wait_for_delivery(client, task["task_id"])
+        assert completed["active_revision"] == 2
+        replay = client.post(f"/api/semantic-workspace/tasks/{task['task_id']}/revision-proposals/{proposal['proposal_id']}/decision", json={"mode":"cancel_now"})
+        assert replay.status_code == 202, replay.text
+        assert replay.json()["revision"]["revision"] == 2
+        historical = client.get(f"/api/semantic-workspace/tasks/{task['task_id']}?revision=1").json()
+
 
     assert task["question"]["kind"] == "plan"
     assert task["question"]["allow_free_text"] is True
     assert task["question"]["prompt"] == (
         "你需要第一条记录，还是全部记录？"
     )
-    assert runtime.start_calls == 1
-    assert len(runtime.resume_calls) == 1
+    assert runtime.requests[-1].model == runtime.requests[0].model
+    assert runtime.requests[-1].model != "other-default-model"
+    assert runtime.start_calls == 2
+    assert len(runtime.resume_calls) == 0
     assert completed["status"] == "completed"
+    # 完成状态不能代替真实输入；用户补充必须到达实际 Runtime 边界。
+    supplied_text = runtime.requests[-1].model_dump_json(
+        include={"objective_text", "compiled_context", "goal_contract", "clarification"},
+    )
+    assert "全部记录" in supplied_text
     owner_action_entries = [
         entry
-        for entry in completed["work_session"]["entries"]
+        for entry in historical["work_session"]["entries"]
         if entry["event_type"] in {"question_required", "question_answered"}
     ]
     assert [entry["action_id"] for entry in owner_action_entries] == [
@@ -4213,3 +4246,22 @@ def test_capability_gray_selection_is_admin_only_and_fails_closed(
         disabled = admin.get("/api/semantic-workspace/capabilities")
     assert disabled.status_code == 409
     assert disabled.json()["detail"] == "任务级能力 Sidecar 灰度尚未启用"
+
+
+def test_runtime_control_wait_does_not_publish_business_clarification(tmp_path, monkeypatch):
+    class ControlWait(ClarifyingPiRuntime):
+        async def start(self, request, *, on_event, run_id=None):
+            result = await super().start(request, on_event=on_event, run_id=run_id)
+            return result.model_copy(update={"clarification":None})
+    runtime = ControlWait()
+    client = _client(tmp_path, monkeypatch, role="admin", pi_runtime=runtime)
+    document, _ = _uploads(tmp_path)
+    with client:
+        created = client.post("/api/semantic-workspace/tasks", json={"objective_text":"统计记录", "upload_ids":[document], "output_formats":["json"], "runtime_version":"pi", "provider":"local"})
+        assert created.status_code == 202, created.text
+        task = _wait_for_status(client, created.json()["task_id"], "needs_input")
+        question = task["question"]
+        assert question["purpose"] == "control" and question["continuation"] == "unavailable"
+        response = client.post(f"/api/semantic-workspace/tasks/{task['task_id']}/answer", json={"answer":"继续", "expected_revision":1,"question_round_id":question["round_id"]}, headers={"Idempotency-Key":"control-answer"})
+        assert response.status_code == 409
+        assert runtime.start_calls == 1 and not runtime.resume_calls

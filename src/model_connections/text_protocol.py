@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from .catalog import model_max_output_tokens
 
 
 def structured_request(
@@ -12,6 +13,7 @@ def structured_request(
     system_prompt: str,
     payload: dict[str, object],
 ) -> tuple[str, dict[str, object], dict[str, str]]:
+    output_limit = model_max_output_tokens(model)
     user_text = json.dumps(
         payload,
         ensure_ascii=False,
@@ -27,7 +29,7 @@ def structured_request(
                     {"role": "user", "content": user_text},
                 ],
                 "temperature": 0,
-                "max_tokens": 2000,
+                **({"max_tokens": output_limit} if output_limit is not None else {}),
                 "stream": False,
             },
             {"authorization": f"Bearer {grant_token}"},
@@ -41,7 +43,7 @@ def structured_request(
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_text},
                 ],
-                "max_output_tokens": 2000,
+                # 回答额度不等于此协议的思考加回答总额；未核总额时沿服务端默认。
                 "store": False,
                 "stream": False,
             },
@@ -55,6 +57,7 @@ def structured_request(
                 "system": system_prompt,
                 "messages": [{"role": "user", "content": user_text}],
                 "temperature": 0,
+                # 此协议必须填额度，未知模型保持兼容值，不伪称模型最大值。
                 "max_tokens": 2000,
                 "stream": False,
             },
@@ -74,7 +77,6 @@ def structured_request(
                 ],
                 "generationConfig": {
                     "temperature": 0,
-                    "maxOutputTokens": 2000,
                     "responseMimeType": "application/json",
                 },
             },

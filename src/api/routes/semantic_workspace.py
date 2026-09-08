@@ -453,6 +453,8 @@ class WorkspaceAnswerIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     answer: str = Field(min_length=1, max_length=10_000)
+    expected_revision: int = Field(ge=1)
+    question_round_id: str = Field(pattern=r"^clarification_[0-9a-f]{32}$")
 
 
 class WorkspaceTurnIn(BaseModel):
@@ -687,6 +689,7 @@ def _inherit_web_contract_hook(
     output_formats: tuple[str, ...],
     runtime_binding: Any,
     capability_manifest: Any,
+    semantic_delta: Any = None,
 ) -> Callable[[sqlite3.Connection], None] | None:
     """网页修订沿用冻结来源边界，并只更新用户确认的目标与格式。"""
 
@@ -701,6 +704,29 @@ def _inherit_web_contract_hook(
         json.dumps(contract["goal_contract"], ensure_ascii=False)
     )
     goal_contract["objective"] = objective_text
+    if semantic_delta is not None:
+        if semantic_delta.source_scope_delta or semantic_delta.field_semantics_delta:
+            raise HTTPException(422, "当前网页合同无法表达新的来源或字段含义，请重新澄清")
+        selection = semantic_delta.selection_delta
+        coverage = semantic_delta.coverage_delta
+        if set(selection) - {"must_include", "explicit_exclusions"} or set(coverage) - {"quantity_requirement", "completeness_requirement"}:
+            raise HTTPException(422, "修改包含当前网页合同无法表达的条件，请重新澄清")
+        if selection or coverage:
+            snapshot = SourceAcquisitionRepository(settings.webui_db_path).get_snapshot(owner_id, contract["source_snapshot_id"])
+            if snapshot is None:
+                raise HTTPException(409, "冻结来源快照已缺失")
+            try:
+                typed = WorkspaceTaskCreateIn(
+                    objective_text=objective_text, source_snapshot_id=contract["source_snapshot_id"],
+                    output_formats=list(output_formats), runtime_version=RuntimeVersion.PI,
+                    must_include=selection.get("must_include", goal_contract.get("must_include", [])),
+                    explicit_exclusions=selection.get("explicit_exclusions", goal_contract.get("explicit_exclusions", [])),
+                    quantity_requirement=coverage.get("quantity_requirement", goal_contract.get("quantity_requirement")),
+                    completeness_requirement=coverage.get("completeness_requirement", goal_contract.get("completeness_requirement")),
+                )
+            except ValueError as exc:
+                raise HTTPException(422, "修改后的网页条件不完整或不受支持，请重新澄清") from exc
+            goal_contract = _freeze_goal_contract(typed, objective=objective_text, source_snapshot=snapshot)
     delivery_spec = json.loads(
         json.dumps(contract["delivery_spec"], ensure_ascii=False)
     )
@@ -901,6 +927,31 @@ def _public_steering_message(result) -> dict[str, Any] | None:
         "status": "completed", "created_at": result.created_at.isoformat(),
         "result_context": _public_steering_payload(result.result_context.model_dump(mode="json")) if result.result_context else None,
     }
+
+
+def _public_workspace_question(question):
+    if not question:
+        return None
+    keys = {"kind", "question_id", "prompt", "reason", "affected_scope", "allow_free_text", "round_id", "revision", "purpose", "continuation", "origin_turn_id", "outbound_purpose", "external_service", "outbound_data", "risk"}
+    public = {key: value for key, value in question.items() if key in keys}
+    public["options"] = [{key: option[key] for key in ("value", "label", "description") if key in option} for option in question.get("options", [])]
+    return _public_steering_payload(public)
+
+
+def _public_workspace_events(events):
+    public = []
+    for event in events:
+        # 本票的消费占位是内部恢复事实，不是用户进度或业务正文。
+        if event.get("event_type") in {"clarification.accepted", "clarification.send_claimed", "clarification.consumed"}:
+            continue
+        projected = {**event, "details": dict(event.get("details") or {})}
+        if projected["details"].get("question"):
+            projected["details"]["question"] = _public_workspace_question(projected["details"]["question"])
+        if event.get("event_type") == "question_answered" and projected["details"].get("round_id"):
+            projected["details"].pop("cancel_generation", None)
+            projected["details"].pop("owner_id", None)
+        public.append(projected)
+    return public
 
 
 def _steering_messages(user_id: str, task_id: str, revision: int) -> list[dict[str, Any]]:
@@ -1237,6 +1288,60 @@ def _task_or_404(user_id: str, task_id: str) -> dict[str, Any]:
     return task
 
 
+def _workspace_source_findings(user_id: str, task: dict[str, Any]):
+    from src.semantic_harness.inspectors.uploads import UploadSourceInspector, public_source_findings, TABULAR_INSPECTOR_VERSION, DOCUMENT_INSPECTOR_VERSION
+
+    revision = int(task["active_revision"])
+    frozen = get_store().get_semantic_workspace_revision(user_id, task["task_id"], revision)
+    expected = {item["upload_id"]: item["sha256"] for item in (frozen or {}).get("source_refs", []) if item.get("upload_id")}
+    artifact_ids = []
+    inspected_sources = []
+    for upload_id in task.get("upload_ids", []):
+        item = _uploads().resolve(user_id, upload_id)
+        if expected.get(upload_id) != item.sha256:
+            raise ValueError("来源与冻结版本不一致，不能用于理解")
+        # 语言理解只前置已有轻量读取；不能把 PDF/OCR 变成每次追问的强制成本。
+        if Path(item.original_name).suffix.lower() in {".csv", ".tsv", ".xlsx", ".json", ".jsonl", ".txt", ".md", ".markdown", ".docx", ".html", ".htm"}:
+            _canvas_size_limit(Path(item.storage_path))
+            artifact_ids.append(upload_id)
+            inspector_version = TABULAR_INSPECTOR_VERSION if Path(item.original_name).suffix.lower() in {".csv", ".tsv", ".xlsx", ".json", ".jsonl"} else DOCUMENT_INSPECTOR_VERSION
+            inspected_sources.append({"artifact_id":upload_id, "source_sha256":item.sha256, "inspector_version":inspector_version})
+    if not artifact_ids:
+        return ()
+    for event in reversed(get_store().list_semantic_workspace_events(user_id, task["task_id"])):
+        facts = event.get("details") or {}
+        if event["event_type"] == "source.observed" and facts.get("revision") == revision and facts.get("inspected_sources") == inspected_sources:
+            return tuple(facts["source_findings"])
+    reports = UploadSourceInspector(
+        user_id=user_id, upload_store=_uploads(),
+        cache_lookup=lambda artifact_id, artifact_sha256, inspector_version: get_store().cached_source_inspection_report(
+            user_id, artifact_id=artifact_id, artifact_sha256=artifact_sha256, inspector_version=inspector_version,
+        ),
+    ).inspect_artifacts(tuple(artifact_ids))
+    findings = public_source_findings(reports)
+    get_store().append_semantic_workspace_event(
+        user_id, task["task_id"], stage="understand", event_type="source.observed",
+        summary="已读取用于理解的有界来源结构", details={"revision": revision, "source_findings": findings, "inspected_sources": inspected_sources},
+        event_id="source-findings:" + hashlib.sha256(json.dumps([task["task_id"], revision, findings], ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
+    )
+    return findings
+
+
+def _workspace_question(user_id, task):
+    question = dict(task.get("question") or {})
+    if not question or task["status"] != "needs_input":
+        return question or None
+    runtime = _runtime_repository().get(user_id, task["task_id"], int(task["active_revision"])) or {}
+    if question.get("kind") != "external" and question.get("purpose") != "control" and runtime.get("runtime_version") is RuntimeVersion.PI:
+        question["continuation"] = "confirm_revision"
+    if not question.get("round_id"):
+        frozen = next((event.get("details", {}).get("binding") for event in _runtime_repository().list_events(user_id, task["task_id"], int(task["active_revision"])) if event["event_type"] == "kernel.binding.frozen"), None)
+        if frozen and frozen.get("adapter_id") == "coremind-runtime" and str(question.get("question_id", "")).startswith("pi:"):
+            question.update(purpose="control", continuation="unavailable")
+        question = get_store().publish_workspace_question(user_id, task["task_id"], question, expected_revision=task["active_revision"], legacy=True)
+    return question
+
+
 @router.get("/capabilities")
 def list_gray_capabilities(user=Depends(get_current_user)):
     """只列出已验证的平台能力；草稿和执行配置不进入灰度选择界面。"""
@@ -1455,7 +1560,7 @@ def _progress_summary(event: dict[str, Any], details: dict[str, Any]) -> str:
 
 def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgressEvent, ...]:
     projected: list[StructuredProgressEvent] = []
-    raw_events = list(task["events"])
+    raw_events = _public_workspace_events(task["events"])
     raw_events.extend(
         {
             **event,
@@ -1553,6 +1658,8 @@ def _task_detail(
 ) -> dict[str, Any]:
     store = get_store()
     task = _task_or_404(user_id, task_id)
+    if revision is None or revision == task["active_revision"]:
+        task["question"] = _workspace_question(user_id, task)
     task["account_resume"] = None
     if task["status"] == "paused":
         binding = store.account_execution_binding(user_id, "workspace", task_id)
@@ -1699,6 +1806,27 @@ def _task_detail(
         else None
     )
     task["messages"] = _steering_messages(user_id, task_id, int(selected_revision["revision"]))
+    selected = int(selected_revision["revision"])
+    history = store.workspace_clarification_history(user_id, task_id, selected)
+    task["clarification_history"] = _public_steering_payload([{**item, "question": _public_workspace_question(item["question"])} for item in history])
+    steering_rounds = [item for item in history if item["question"].get("continuation") == "steering"]
+    pending = [steering_rounds[-1]["question"]] if steering_rounds and steering_rounds[-1]["answer"] is None else []
+    findings = next((event.get("details", {}).get("source_findings", []) for event in reversed(task["events"]) if event.get("event_type") == "source.observed" and "source_findings" in event.get("details", {})), [])
+    results = [result for turn in _steering_repository().list_turns(user_id, task_id, revision=selected) if (result := _steering_repository().get_result_for_turn(user_id, turn.turn_id)) is not None]
+    business_results = [item for item in results if item.action in {SteeringAction.NORMALIZED_NO_MATERIAL_CHANGE, SteeringAction.REVISION_PROPOSAL}]
+    latest = business_results[-1] if business_results else None
+    unfinished_answer = any(item["turn_id"] and _steering_repository().get_result_for_turn(user_id, item["turn_id"]) is None and not any(event["event_id"] == f"answer-done:{item['turn_id']}" for event in task["events"]) for item in history)
+    delta = _steering_repository().get_delta(user_id, latest.delta_id) if latest else None
+    current_question = task.get("question")
+    if current_question and (current_question.get("answer") or current_question.get("revision") != selected):
+        task["question"] = None
+    task["understanding"] = _public_steering_payload({
+        "revision": selected, "summary": delta.normalized_text if delta else (task.get("plan") or {}).get("summary") or task.get("objective_text") or "尚未取得可用理解",
+        "status": "unavailable" if unfinished_answer else "needs_clarification" if pending or (task.get("question") or {}).get("purpose") == "business" else ("ready" if delta or task.get("plan") else "unavailable"),
+        "findings": findings, "question": _public_workspace_question(pending[-1]) if pending else None,
+    })
+    task["question"] = _public_workspace_question(task.get("question"))
+    task["events"] = _public_workspace_events(task["events"])
     return task
 
 
@@ -2361,9 +2489,8 @@ def get_task_events(
     user=Depends(get_current_user),
 ):
     _task_or_404(user["user_id"], task_id)
-    return get_store().list_semantic_workspace_events(
-        user["user_id"], task_id, after=after
-    )
+    events = get_store().list_semantic_workspace_events(user["user_id"], task_id, after=after)
+    return _public_workspace_events(events)
 
 
 @router.get("/tasks/{task_id}/stream")
@@ -2473,16 +2600,56 @@ async def steer_task(
 ):
     """理解运行中追问；在用户确认前绝不修改活动 revision。"""
 
+    return await _steer_task(user, task_id, payload, idempotency_key)
+
+
+async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context=None):
+
     user_id = user["user_id"]
     task = _task_or_404(user_id, task_id)
     events = get_store().list_semantic_workspace_events(user_id, task_id)
     runtime = _runtime_repository().get(user_id, task_id, int(task["active_revision"])) or {}
+    frozen_binding = next((event.get("details", {}).get("binding") for event in _runtime_repository().list_events(user_id, task_id, int(task["active_revision"])) if event["event_type"] == "kernel.binding.frozen"), None)
     result_context = _resolve_result_context(user_id, task_id, payload.result_context) if payload.result_context else None
+    relevant_turns = ()
+    prior_delta = None
+    if answer_context and answer_context.get("origin_turn_id"):
+        origin_result = _steering_repository().get_result_for_turn(user_id, answer_context["origin_turn_id"])
+        if origin_result is None or origin_result.revision != task["active_revision"]:
+            raise ValueError("原澄清回合已失效")
+        prior_delta = _steering_repository().get_delta(user_id, origin_result.delta_id)
+        relevant_turns = tuple(_steering_repository().get_turn(user_id, turn_id) for turn_id in prior_delta.source_turn_ids)
+        if any(item is None for item in relevant_turns):
+            raise ValueError("原澄清回合数据不完整")
+        if result_context is None:
+            result_context = next((item.result_context for item in reversed(relevant_turns) if item.result_context), None)
+    if answer_context:
+        answer_turn = _steering_repository().get_turn(user_id, answer_context["answer_turn_id"])
+        result_context = answer_turn.result_context
+    selection = ResultSelection.model_validate(result_context.model_dump(include={"revision", "output_id", "representation_sha256", "item_ref"})) if result_context else None
+    def verify_current():
+        current = _task_or_404(user_id, task_id)
+        if int(current["active_revision"]) != int(task["active_revision"]) or current.get("cancel_requested"):
+            raise ValueError("任务版本或停止状态已变化")
+        if selection:
+            _resolve_result_context(user_id, task_id, selection)
+    def claim_answer():
+        verify_current()
+        if answer_context:
+            get_store().claim_workspace_answer(user_id, task_id, answer_context["answer_turn_id"])
+    if not answer_context:
+        business_result = next((result for turn in reversed(_steering_repository().list_turns(user_id, task_id, revision=int(task["active_revision"]))) if (result := _steering_repository().get_result_for_turn(user_id, turn.turn_id)) is not None and result.action in {SteeringAction.NORMALIZED_NO_MATERIAL_CHANGE, SteeringAction.REVISION_PROPOSAL}), None)
+        if business_result:
+            prior_delta = _steering_repository().get_delta(user_id, business_result.delta_id)
+            relevant_turns = tuple(_steering_repository().get_turn(user_id, turn_id) for turn_id in prior_delta.source_turn_ids)
+            if any(item is None for item in relevant_turns):
+                raise HTTPException(409, "原业务回合数据不完整")
+    findings = _workspace_source_findings(user_id, task)
     request = SteeringRequest(
         owner_id=user_id,
         task_id=task_id,
         revision=int(task["active_revision"]),
-        run_id=(runtime.get("run_id") if runtime.get("model_connection_id") else task.get("run_id")),
+        run_id=runtime.get("run_id") or task.get("run_id"),
         text=payload.text,
         idempotency_key=idempotency_key,
         current_status=task["status"],
@@ -2492,10 +2659,13 @@ async def steer_task(
             _progress_summary(event, event.get("details") or {}) for event in events[-8:]
         ),
         provider=task.get("provider") or "local",
-        model=runtime.get("model_connection_model") or task.get("model"),
+        model=runtime.get("model_connection_model") or (frozen_binding or {}).get("model") or task.get("model"),
         model_connection_id=runtime.get("model_connection_id"),
         model_connection_version=runtime.get("model_connection_version"),
         result_context=result_context,
+        source_findings=findings, relevant_turns=relevant_turns, prior_delta=prior_delta,
+        clarification_question=answer_context.get("prompt") if answer_context else None,
+        clarification_round_id=answer_context.get("round_id") if answer_context else None,
         external_api_confirmed=bool(
             task.get("external_api_confirmed")
             or payload.external_api_confirmed
@@ -2504,15 +2674,19 @@ async def steer_task(
     try:
         service = ConversationSteering(
             _steering_repository(),
-            build_context_rewriter(request, before_call=lambda: _require_active_result(user_id, task_id, payload.result_context)) if payload.result_context else build_context_rewriter(request),
-            before_result_call=(lambda: _require_active_result(user_id, task_id, payload.result_context)) if payload.result_context else None,
+            build_context_rewriter(request, before_call=verify_current) if selection or answer_context else build_context_rewriter(request),
+            before_result_call=claim_answer if answer_context or selection else None,
         )
         result = await service.handle_turn(request)
     except (ValueError, GrantError) as exc:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT if payload.result_context or isinstance(exc, ResultContextConflict) else status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_409_CONFLICT if answer_context or payload.result_context or isinstance(exc, ResultContextConflict) else status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
+    except Exception as exc:
+        if answer_context and any(event["event_id"] == f"answer-send:{answer_context['answer_turn_id']}" for event in get_store().list_semantic_workspace_events(user_id, task_id)):
+            raise HTTPException(409, "本轮回答已发送，结果未知；禁止自动重发") from exc
+        raise
 
     # HTTP 幂等重放不能制造重复进度事件；结果 ID 是同一语义回合的稳定边界。
     if not any(
@@ -2619,6 +2793,8 @@ async def _apply_confirmed_steering_revision(
     decision = repository.get_decision(user_id, decision_id)
     if decision is None or decision.task_id != task_id:
         raise HTTPException(status_code=404, detail="Revision 决策不存在或无权访问")
+    if decision.status is RevisionDecisionStatus.APPLIED and decision.applied_revision:
+        return {"decision": decision.model_dump(mode="json"), "revision": get_store().get_semantic_workspace_revision(user_id, task_id, decision.applied_revision)}
     if decision.status is not RevisionDecisionStatus.READY_TO_APPLY:
         raise HTTPException(status_code=409, detail="Revision 决策尚未到可应用状态")
     proposal = repository.get_proposal(user_id, decision.proposal_id)
@@ -2645,6 +2821,8 @@ async def _apply_confirmed_steering_revision(
         ),
     )
     selected_runtime = routing_plan.selected_runtime
+    if previous_runtime and selected_runtime != previous_runtime["runtime_version"]:
+        raise HTTPException(409, "冻结的执行路线已不可用，禁止自动切换")
     if (
         selected_runtime is not RuntimeVersion.PI
         and task.get("table_output_contracts")
@@ -2675,6 +2853,8 @@ async def _apply_confirmed_steering_revision(
                 detail="模型连接不存在或无权访问",
             ) from exc
 
+    if connection_binding and connection_binding.connection_version != previous_runtime["model_connection_version"]:
+        raise HTTPException(409, "冻结的模型连接版本已变化，请重新确认")
     formats = list(task["output_formats"])
     if delta.output_delta:
         normalized = [item.strip().lower() for item in delta.output_delta]
@@ -2690,6 +2870,10 @@ async def _apply_confirmed_steering_revision(
         "已确认的上下文变更（仅应用下列差异，其余语义继承）：\n"
         f"{delta.normalized_text}"
     )
+    original_turns = [repository.get_turn(user_id, turn_id) for turn_id in delta.source_turn_ids]
+    if any(item is None or item.task_id != task_id or item.revision != decision.base_revision for item in original_turns):
+        raise HTTPException(409, "确认草案的原始回合不完整")
+    objective += "\n已确认补充的原话（保留否定与范围约束）：\n" + "\n".join(item.text for item in original_turns)
     # 路由分配是新 Revision 的线性化点；所有可预见校验必须先完成。
     runtime_config = RuntimeTaskConfig(
         user_id=user_id,
@@ -2721,9 +2905,12 @@ async def _apply_confirmed_steering_revision(
         task_id,
         decision.base_revision,
     )
+    old_binding = next((item.get("details", {}).get("binding") for item in reversed(_runtime_repository().list_events(user_id, task_id, decision.base_revision)) if item["event_type"] == "kernel.binding.frozen"), None) if previous_runtime else None
+    if source_web_contract:
+        old_binding = source_web_contract["runtime_binding"]
     prepared_binding = None
     prepared_manifest = None
-    if source_web_contract is not None:
+    if old_binding is not None:
         if selected_runtime is not RuntimeVersion.PI:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -2735,10 +2922,11 @@ async def _apply_confirmed_steering_revision(
                 model_connection_version=runtime_config.model_connection_version,
                 model=(
                     runtime_config.model_connection_model
-                    or source_web_contract["runtime_binding"].get("model")
+                    or old_binding.get("model")
                     or task["model"]
                     or settings.llm_model_name
                 ),
+                expected_binding=old_binding,
             )
         )
         runtime_config = runtime_config.model_copy(
@@ -2762,7 +2950,18 @@ async def _apply_confirmed_steering_revision(
             output_formats=tuple(formats),
             runtime_binding=prepared_binding,
             capability_manifest=prepared_manifest,
+            semantic_delta=delta,
         )
+    if prepared_binding is not None and source_web_contract is None:
+        runtime_hook = transaction_hook
+        def bind_frozen_runtime(connection):
+            if runtime_hook:
+                runtime_hook(connection)
+            _runtime_repository().freeze_runtime_binding(user_id, task_id, decision.base_revision + 1,
+                run_id=prepared_binding.external_run_id, binding=prepared_binding.model_dump(mode="json"),
+                capability_manifest=prepared_manifest.model_dump(mode="json"), adopted_existing_run=False,
+                preallocated_run=True, connection=connection)
+        transaction_hook = bind_frozen_runtime
     transaction_hook = _inherit_task_context_hook(
         transaction_hook,
         owner_id=user_id,
@@ -2773,6 +2972,28 @@ async def _apply_confirmed_steering_revision(
         objective_text=objective,
         output_formats=tuple(formats),
     )
+    # 可预见合同/冻结身份错误均已拒绝，之后才允许停止旧 Run。
+    generation = int(task["cancel_generation"])
+    if decision.mode is RevisionSwitchMode.CANCEL_NOW and task["status"] not in {"completed", "candidate_ready", "failed", "cancelled"}:
+        stopped = await get_semantic_workspace_manager().cancel(user_id, task_id)
+        generation = int(stopped["cancel_generation"])
+        if stopped.get("status") not in {"completed", "candidate_ready", "failed", "cancelled"}:
+            raise HTTPException(409, "旧执行尚未停止，不能创建新版本")
+    stopped = _task_or_404(user_id, task_id)
+    if decision.mode is RevisionSwitchMode.CANCEL_NOW and stopped["status"] not in {"completed", "candidate_ready", "failed", "cancelled"}:
+        raise HTTPException(409, "旧执行尚未静止")
+    if int(stopped["cancel_generation"]) != generation:
+        raise HTTPException(409, "任务已收到新的停止请求")
+    applied = decision.model_copy(update={"status": RevisionDecisionStatus.APPLIED, "applied_revision": decision.base_revision + 1, "applied_task_id": task_id, "updated_at": datetime.now(timezone.utc)})
+    prepared_hook = transaction_hook
+    def commit_decision(connection):
+        if prepared_hook:
+            prepared_hook(connection)
+        changed = connection.execute("UPDATE conversation_revision_decisions SET status=?,payload_json=?,updated_at=? WHERE owner_id=? AND decision_id=? AND status=?",
+            (applied.status.value, applied.model_dump_json(), applied.updated_at.isoformat(), user_id, applied.decision_id, RevisionDecisionStatus.READY_TO_APPLY.value)).rowcount
+        if changed != 1:
+            raise RuntimeError("确认决策已被处理，禁止重复创建版本")
+    transaction_hook = commit_decision
     try:
         revision = get_store().create_semantic_workspace_revision(
             user_id,
@@ -2781,6 +3002,7 @@ async def _apply_confirmed_steering_revision(
             output_formats=formats,
             change_summary=delta.normalized_text,
             expected_revision=decision.base_revision + 1,
+            expected_cancel_generation=generation,
             transaction_hook=transaction_hook,
         )
     except RuntimeError as exc:
@@ -2796,14 +3018,6 @@ async def _apply_confirmed_steering_revision(
             target_task_id=task_id,
             target_revision=int(revision["revision"]),
         )
-    applied = repository.update_decision(
-        decision.model_copy(
-            update={
-                "status": RevisionDecisionStatus.APPLIED,
-                "updated_at": datetime.now().astimezone(),
-            }
-        )
-    )
     get_store().append_semantic_workspace_event(
         user_id,
         task_id,
@@ -2841,6 +3055,16 @@ async def decide_steering_revision(
     proposal = repository.get_proposal(user_id, proposal_id)
     if proposal is None or proposal.task_id != task_id:
         raise HTTPException(status_code=404, detail="Revision 草案不存在或无权访问")
+    existing_decision = repository.get_decision_for_proposal(user_id, proposal_id)
+    replace_waiting = bool(existing_decision and existing_decision.status is RevisionDecisionStatus.WAITING_SAFE_POINT and payload.mode in {RevisionSwitchMode.CANCEL_NOW, RevisionSwitchMode.NEW_TASK})
+    if existing_decision and not replace_waiting and (existing_decision.mode != payload.mode or existing_decision.external_api_confirmed != payload.external_api_confirmed):
+        raise HTTPException(409, "同一决策不能更换切换方式或外发确认")
+    if existing_decision and existing_decision.status is RevisionDecisionStatus.APPLIED and existing_decision.applied_revision:
+        if existing_decision.applied_task_id == task_id:
+            return {"decision": existing_decision.model_dump(mode="json"), "revision": store.get_semantic_workspace_revision(user_id, task_id, existing_decision.applied_revision)}
+        return {"decision": existing_decision.model_dump(mode="json"), "revision": None, "new_task": _task_or_404(user_id, existing_decision.applied_task_id)}
+    if payload.mode is RevisionSwitchMode.AFTER_SAFE_POINT and task["status"] in {"needs_input", "paused", "completed", "candidate_ready", "failed", "cancelled"}:
+        raise HTTPException(409, "当前没有继续运行的原子步骤，请选择立即停止并按补充重新开始，或创建独立任务")
     if int(task["active_revision"]) != proposal.base_revision:
         raise HTTPException(status_code=409, detail="活动版本已变化，请重新确认修改")
     previous_runtime = _runtime_repository().get(
@@ -2860,7 +3084,10 @@ async def decide_steering_revision(
         )
     service = ConversationSteering(_steering_repository(), None)
     try:
-        decision = service.decide_proposal(
+        decision = repository.replace_waiting_decision(
+            existing_decision, payload.mode, external_api_confirmed=payload.external_api_confirmed,
+            expected_cancel_generation=int(task["cancel_generation"]),
+        ) if replace_waiting else service.decide_proposal(
             user_id,
             proposal_id,
             payload.mode,
@@ -2868,6 +3095,8 @@ async def decide_steering_revision(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     if payload.mode is RevisionSwitchMode.NEW_TASK:
         delta = repository.get_delta(user_id, proposal.delta_id) if proposal else None
         if proposal is None or delta is None:
@@ -2893,6 +3122,8 @@ async def decide_steering_revision(
             ),
         )
         selected_runtime = routing_plan.selected_runtime
+        if previous_runtime and selected_runtime != previous_runtime["runtime_version"]:
+            raise HTTPException(409, "冻结的执行路线已不可用，禁止自动切换")
         inherited_contracts = [
             item
             for item in task.get("table_output_contracts", [])
@@ -2927,6 +3158,8 @@ async def decide_steering_revision(
                     status_code=404,
                     detail="模型连接不存在或无权访问",
                 ) from exc
+        if connection_binding and connection_binding.connection_version != previous_runtime["model_connection_version"]:
+            raise HTTPException(409, "冻结的模型连接版本已变化，请重新确认")
         # 新任务的格式、权限与外发确认通过后才冻结 Runtime 分配。
         runtime_config = RuntimeTaskConfig(
             user_id=user_id,
@@ -2960,14 +3193,21 @@ async def decide_steering_revision(
             "已确认的独立任务差异：\n"
             f"{delta.normalized_text}"
         )
+        original_turns = [repository.get_turn(user_id, turn_id) for turn_id in delta.source_turn_ids]
+        if any(item is None or item.task_id != task_id or item.revision != proposal.base_revision for item in original_turns):
+            raise HTTPException(409, "确认草案的原始回合不完整")
+        new_objective += "\n已确认补充的原话：\n" + "\n".join(item.text for item in original_turns)
         source_web_contract = get_store().get_web_task_contract(
             user_id,
             task_id,
             proposal.base_revision,
         )
+        old_binding = next((item.get("details", {}).get("binding") for item in reversed(_runtime_repository().list_events(user_id, task_id, proposal.base_revision)) if item["event_type"] == "kernel.binding.frozen"), None) if previous_runtime else None
+        if source_web_contract:
+            old_binding = source_web_contract["runtime_binding"]
         prepared_binding = None
         prepared_manifest = None
-        if source_web_contract is not None:
+        if old_binding is not None:
             if selected_runtime is not RuntimeVersion.PI:
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -2979,10 +3219,11 @@ async def decide_steering_revision(
                     model_connection_version=runtime_config.model_connection_version,
                     model=(
                         runtime_config.model_connection_model
-                        or source_web_contract["runtime_binding"].get("model")
+                        or old_binding.get("model")
                         or task["model"]
                         or settings.llm_model_name
                     ),
+                    expected_binding=old_binding,
                 )
             )
             runtime_config = runtime_config.model_copy(
@@ -3006,7 +3247,18 @@ async def decide_steering_revision(
                 output_formats=tuple(formats),
                 runtime_binding=prepared_binding,
                 capability_manifest=prepared_manifest,
+                semantic_delta=delta,
             )
+        if prepared_binding is not None and source_web_contract is None:
+            runtime_hook = transaction_hook
+            def bind_frozen_runtime(connection):
+                if runtime_hook:
+                    runtime_hook(connection)
+                _runtime_repository().freeze_runtime_binding(user_id, new_task_id, 1,
+                    run_id=prepared_binding.external_run_id, binding=prepared_binding.model_dump(mode="json"),
+                    capability_manifest=prepared_manifest.model_dump(mode="json"), adopted_existing_run=False,
+                    preallocated_run=True, connection=connection)
+            transaction_hook = bind_frozen_runtime
         transaction_hook = _inherit_task_context_hook(
             transaction_hook,
             owner_id=user_id,
@@ -3017,6 +3269,16 @@ async def decide_steering_revision(
             objective_text=new_objective,
             output_formats=tuple(formats),
         )
+        applied = decision.model_copy(update={"status": RevisionDecisionStatus.APPLIED, "applied_revision": 1, "applied_task_id": new_task_id, "updated_at": datetime.now(timezone.utc)})
+        prepared_hook = transaction_hook
+        def commit_new_task_decision(connection):
+            if prepared_hook:
+                prepared_hook(connection)
+            changed = connection.execute("UPDATE conversation_revision_decisions SET status=?,payload_json=?,updated_at=? WHERE owner_id=? AND decision_id=? AND status=?",
+                (applied.status.value, applied.model_dump_json(), applied.updated_at.isoformat(), user_id, applied.decision_id, RevisionDecisionStatus.NEW_TASK_REQUIRED.value)).rowcount
+            if changed != 1:
+                raise RuntimeError("确认决策已被处理，禁止重复创建任务")
+        transaction_hook = commit_new_task_decision
         try:
             new_task = get_store().create_semantic_workspace_task(
                 user_id,
@@ -3045,14 +3307,6 @@ async def decide_steering_revision(
                 target_task_id=new_task_id,
                 target_revision=1,
             )
-        applied = repository.update_decision(
-            decision.model_copy(
-                update={
-                    "status": RevisionDecisionStatus.APPLIED,
-                    "updated_at": datetime.now().astimezone(),
-                }
-            )
-        )
         get_store().append_semantic_workspace_event(
             user_id,
             new_task_id,
@@ -3085,14 +3339,12 @@ async def decide_steering_revision(
         )
         return {"decision": decision.model_dump(mode="json"), "revision": None}
 
-    if task["status"] not in _TERMINAL:
-        await get_semantic_workspace_manager().cancel(user_id, task_id)
-    response = await _apply_confirmed_steering_revision(
-        user,
-        task_id,
-        decision.decision_id,
-        external_api_confirmed=payload.external_api_confirmed,
-    )
+    try:
+        response = await _apply_confirmed_steering_revision(
+            user, task_id, decision.decision_id, external_api_confirmed=payload.external_api_confirmed,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise HTTPException(409, "冻结条件已变化，不能创建新版本") from exc
     get_semantic_workspace_manager().enqueue(user_id, task_id)
     return response
 
@@ -3118,11 +3370,58 @@ async def answer_task(
     request: Request,
     user=Depends(get_execution_user),
 ):
+    user_id = user["user_id"]
+    key = request.headers.get("Idempotency-Key", "")
+    store = get_store()
+    receipt = None
+    def response_for(saved_receipt):
+        detail = _task_detail(user_id, task_id)
+        detail["answer_receipt"] = saved_receipt
+        return detail
     try:
-        return await get_semantic_workspace_manager().answer(
-            user["user_id"], task_id, payload.answer.strip(),
-            cancel_only=getattr(request.state, "cancel_only", False),
+        task = _task_or_404(user_id, task_id)
+        _workspace_question(user_id, task)
+        history = store.workspace_clarification_history(user_id, task_id, payload.expected_revision)
+        question = next((item["question"] for item in history if item["round_id"] == payload.question_round_id), None)
+        if question is None:
+            raise ValueError("问题轮次不存在或已过期，请刷新当前问题")
+        if getattr(request.state, "cancel_only", False) and (question.get("kind") != "external" or payload.answer.strip() != "cancel"):
+            raise ValueError("当前问题已变化，请重新确认操作")
+        existing = next((turn for turn in _steering_repository().list_turns(user_id, task_id) if turn.idempotency_key == key), None)
+        result_context = None
+        if not existing and question.get("origin_turn_id"):
+            origin = _steering_repository().get_turn(user_id, question["origin_turn_id"])
+            if origin is None or origin.task_id != task_id or origin.revision != payload.expected_revision:
+                raise ValueError("原澄清回合已失效")
+            if origin.result_context:
+                selection = ResultSelection.model_validate(origin.result_context.model_dump(include={"revision", "output_id", "representation_sha256", "item_ref"}))
+                result_context = _resolve_result_context(user_id, task_id, selection)
+        receipt = store.accept_workspace_answer(
+            user_id, task_id, answer=payload.answer, expected_revision=payload.expected_revision,
+            question_round_id=payload.question_round_id, idempotency_key=key,
+            result_context=result_context.model_dump(mode="json") if result_context else None,
         )
+        if receipt["status"] == "unknown":
+            return response_for(receipt)
+        consumed = _steering_repository().get_result_for_turn(user_id, receipt["turn_id"]) is not None or any(
+            event["event_id"] == f"answer-done:{receipt['turn_id']}" for event in store.list_semantic_workspace_events(user_id, task_id)
+        )
+        if not consumed:
+            if question.get("continuation") in {"steering", "confirm_revision"}:
+                await _steer_task(user, task_id, WorkspaceTurnIn(text=payload.answer), key, answer_context={**question, "answer_turn_id": receipt["turn_id"]})
+            else:
+                await get_semantic_workspace_manager().answer(
+                    user_id, task_id, payload.answer.strip(), accepted_turn_id=receipt["turn_id"],
+                    cancel_only=getattr(request.state, "cancel_only", False),
+                )
+        return response_for(receipt)
+    except HTTPException:
+        if receipt is not None:
+            current = store.accept_workspace_answer(user_id, task_id, answer=payload.answer,
+                expected_revision=payload.expected_revision, question_round_id=payload.question_round_id, idempotency_key=key)
+            if current["status"] == "unknown":
+                return response_for(current)
+        raise
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
