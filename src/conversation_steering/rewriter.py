@@ -32,22 +32,17 @@ from .models import (
 _PROMPT_PATH = Path(__file__).resolve().parent / "prompts" / "rewrite-v1.md"
 
 
-class RewriteUnderstanding(BaseModel):
+class RewriteDraft(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    normalized_text: str
     open_questions: tuple[str, ...] = Field(
         max_length=1,
         description="必须显式给出问题列表；条件充分时为空数组。先独立判断完整业务要求是否充分。未决时仅问一个关键决策；没有delta也保留问题。已明确的语义不因存在其他理论操作而重复询问。",
     )
-    direct_answer: str | None = None
-
-
-class RewriteChanges(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
     intent: TurnIntent
     confidence: DeltaConfidence
+    normalized_text: str
+    direct_answer: str | None = None
     goal_delta: str | None = None
     source_scope_delta: tuple[str, ...] = ()
     selection_delta: dict[str, Any] = Field(default_factory=dict)
@@ -77,17 +72,6 @@ class RewriteChanges(BaseModel):
     @classmethod
     def normalize_empty_sequence(cls, value):
         return tuple(value or ())
-
-
-class RewriteDraft(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    understanding: RewriteUnderstanding = Field(description="当前完整理解和下一问题，独立于是否修改冻结目标。")
-    changes: RewriteChanges = Field(description="相对于冻结current_goal的累计差异，不决定目标是否充分。")
-
-    def context_fields(self) -> dict[str, Any]:
-        # 理解问题独立于差异分类，持久合同仍使用原有平铺字段。
-        return {**self.understanding.model_dump(), **self.changes.model_dump()}
 
 
 class DeferredExternalRewriter:
@@ -188,7 +172,7 @@ class InstructorContextRewriter:
             task_id=turn.task_id,
             inherited_revision=request.revision,
             source_turn_ids=(*[item.turn_id for item in request.relevant_turns], turn.turn_id),
-            **draft.context_fields(),
+            **draft.model_dump(),
         )
 
 
@@ -262,7 +246,7 @@ class BrokerContextRewriter:
         return ContextDelta(
             delta_id=f"delta_{uuid.uuid4().hex[:16]}", owner_id=turn.owner_id,
             task_id=turn.task_id, inherited_revision=turn.revision,
-            source_turn_ids=(*[item.turn_id for item in request.relevant_turns], turn.turn_id), **draft.context_fields(),
+            source_turn_ids=(*[item.turn_id for item in request.relevant_turns], turn.turn_id), **draft.model_dump(),
         )
 
 

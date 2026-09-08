@@ -139,7 +139,7 @@ def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_ex
         if response_mode == "invalid_json":
             return httpx.Response(200, text="合成无效JSON")
         # 替身只验证产品请求接线，刻意不给正确业务语义，不能获得验收通过。
-        draft = {"understanding": {"normalized_text": "仅测试结构接线", "open_questions": []}, "changes": {"intent": "normalization", "confidence": "high"}}
+        draft = {"intent": "normalization", "confidence": "high", "normalized_text": "仅测试结构接线", "open_questions": []}
         return httpx.Response(200, json={"id": "synthetic", "object": "chat.completion", "created": 0,
             "model": args.model, "choices": [{"index": 0, "finish_reason": "stop",
                 "message": {"role": "assistant", "content": json.dumps(draft, ensure_ascii=False)}}],
@@ -236,24 +236,23 @@ def test_generated_output_formats_match_confirmation_boundary():
     from src.conversation_steering.rewriter import RewriteDraft
 
     schema = RewriteDraft.model_json_schema()
-    assert set(schema["$defs"]["RewriteChanges"]["properties"]["output_delta"]["items"]["enum"]) == _FORMATS
-    draft = RewriteDraft(understanding={"normalized_text": "输出JSON", "open_questions": []}, changes={"intent": "task_refinement", "confidence": "high", "output_delta": ["json"]})
-    assert draft.changes.output_delta == ("json",)
+    assert set(schema["properties"]["output_delta"]["items"]["enum"]) == _FORMATS
+    draft = RewriteDraft(intent="task_refinement", confidence="high", normalized_text="输出JSON", open_questions=(), output_delta=("json",))
+    assert draft.output_delta == ("json",)
     with pytest.raises(ValidationError):
-        RewriteDraft(understanding={"normalized_text": "输出JSON", "open_questions": []}, changes={"intent": "task_refinement", "confidence": "high", "output_delta": ["输出为JSON"]})
+        RewriteDraft(intent="task_refinement", confidence="high", normalized_text="输出JSON", open_questions=(), output_delta=("输出为JSON",))
 
 
 @pytest.mark.parametrize("questions", [None, ["问题一", "问题二"], "missing"])
 def test_generated_questions_require_explicit_single_decision(questions):
     from pydantic import ValidationError
     from src.conversation_steering.rewriter import RewriteDraft
-    value = {"changes": {"intent": "normalization", "confidence": "high"}, "understanding": {"normalized_text": "保持当前要求"}}
+    value = {"intent": "normalization", "confidence": "high", "normalized_text": "保持当前要求"}
     if questions != "missing":
-        value["understanding"]["open_questions"] = questions
+        value["open_questions"] = questions
     with pytest.raises(ValidationError):
         RewriteDraft.model_validate(value)
-    value["understanding"]["open_questions"] = []
-    assert RewriteDraft.model_validate(value).understanding.open_questions == ()
+    assert RewriteDraft.model_validate({**value, "open_questions": []}).open_questions == ()
 
 
 @pytest.mark.parametrize("value", [None, True, 0, "false"])
@@ -293,10 +292,10 @@ def test_understanding_question_survives_empty_material_changes():
     from src.conversation_steering.models import ContextDelta
     from src.conversation_steering.service import SemanticDiffGate
     draft = RewriteDraft.model_validate({
-        "understanding": {"normalized_text": "资料可读取，处理目标待定", "open_questions": ["需要怎样处理这些资料？"]},
-        "changes": {"intent": "normalization", "confidence": "medium"},
+        "normalized_text": "资料可读取，处理目标待定", "open_questions": ["需要怎样处理这些资料？"],
+        "intent": "normalization", "confidence": "medium",
     })
-    fields = draft.context_fields()
+    fields = draft.model_dump()
     assert fields["open_questions"] == ("需要怎样处理这些资料？",)
     assert fields["goal_delta"] is None and fields["output_delta"] == ()
     delta = ContextDelta(delta_id="synthetic-draft", owner_id="owner", task_id="task", inherited_revision=1,
