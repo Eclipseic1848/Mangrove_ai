@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 import sqlite3
 import threading
+import json
 
 from .models import (
     ContextDelta,
@@ -15,6 +16,10 @@ from .models import (
     SteeringResult,
 )
 from src.database_migrations import DatabaseTarget, inspect_database
+
+
+class ResultContextConflict(ValueError):
+    """同一回合不得更换或移除已冻结的结果引用。"""
 
 
 
@@ -47,6 +52,7 @@ class SqliteSteeringRepository:
             revision=row["revision"],
             text=row["text"],
             idempotency_key=row["idempotency_key"],
+            result_context=json.loads(row["result_context_json"]) if row["result_context_json"] else None,
             created_at=row["created_at"],
         )
 
@@ -64,6 +70,8 @@ class SqliteSteeringRepository:
             if existing is not None:
                 saved = self._turn(existing)
                 assert saved is not None
+                if saved.result_context != turn.result_context:
+                    raise ResultContextConflict("相同幂等键不能更换结果引用上下文")
                 if (
                     saved.revision != turn.revision
                     or saved.text != turn.text
@@ -74,7 +82,7 @@ class SqliteSteeringRepository:
                 connection.execute(
                     "INSERT INTO conversation_raw_turns "
                     "(turn_id, owner_id, task_id, revision, text, "
-                    "idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "idempotency_key, created_at, result_context_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         turn.turn_id,
                         turn.owner_id,
@@ -83,6 +91,7 @@ class SqliteSteeringRepository:
                         turn.text,
                         turn.idempotency_key,
                         turn.created_at.isoformat(),
+                        turn.result_context.model_dump_json() if turn.result_context else None,
                     ),
                 )
             except sqlite3.IntegrityError as exc:
@@ -99,6 +108,17 @@ class SqliteSteeringRepository:
                 (owner_id, turn_id),
             ).fetchone()
         return self._turn(row)
+
+    def claim_result_context(self, owner_id: str, turn_id: str) -> None:
+        """提交后再发送；取消或进程重建均不回收，避免未知调用重复收费。"""
+        with self._connect() as connection:
+            updated = connection.execute(
+                "UPDATE conversation_raw_turns SET result_context_claimed=1 "
+                "WHERE owner_id=? AND turn_id=? AND result_context_json IS NOT NULL AND result_context_claimed=0",
+                (owner_id, turn_id),
+            ).rowcount
+        if updated != 1:
+            raise ResultContextConflict("这条结果追问已提交或结果未知，禁止自动重复请求模型")
 
     def list_turns(
         self,

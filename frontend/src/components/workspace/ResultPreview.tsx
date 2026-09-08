@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -37,9 +37,40 @@ import type {
   HistoricalAuthorityRecoveryConfirmation,
   LegacyRebaselineConfirmation,
   WorkspaceTask,
+  ResultSelection,
 } from "@/types/semanticWorkspace";
 
 const PAGE_SIZE = 100;
+
+function SourceLinks({ refs, onViewSource }: { refs: Array<Record<string, unknown>>; onViewSource: (evidence: Record<string, unknown>) => void }) {
+  if (!refs.length) return <span className="text-muted-foreground">未附来源</span>;
+  if (refs.length === 1) return <button type="button" onClick={() => onViewSource(refs[0])} className="whitespace-nowrap text-xs font-medium text-primary hover:underline focus-visible:ring-2 focus-visible:ring-ring">查看来源</button>;
+  return <select aria-label="选择结果来源" value="" className="max-w-full rounded border bg-background px-2 py-1 text-xs focus-visible:ring-2 focus-visible:ring-ring" onChange={event => onViewSource(refs[Number(event.target.value)])}>
+    <option value="" disabled>查看 {refs.length} 处来源</option>
+    {refs.map((ref, index) => <option key={index} value={index}>来源 {index + 1}{ref.page ? ` · 第${ref.page}页` : ref.row_number ? ` · 第${ref.row_number}行` : ""}</option>)}
+  </select>;
+}
+
+type ResultActions = {
+  onAskResult: (index: number, label: string) => void;
+  canAskResult: (index: number) => boolean;
+  askUnavailable: string;
+};
+
+export type ResultViewState = {
+  page: number;
+  searchInput: string;
+  search: string;
+  sorting: SortingState;
+  scrollTop: number;
+  scrollLeft: number;
+  bodyTop?: number;
+  representationHash?: string;
+};
+
+export const initialResultView: ResultViewState = {
+  page: 0, searchInput: "", search: "", sorting: [], scrollTop: 0, scrollLeft: 0,
+};
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -697,14 +728,29 @@ function VirtualTable({
   sorting,
   onSortingChange,
   onViewSource,
+  viewState,
+  onViewStateChange,
+  onAskResult,
+  canAskResult,
+  askUnavailable,
 }: {
   columns: string[];
   rows: Array<Record<string, unknown>>;
   sorting: SortingState;
   onSortingChange: (state: SortingState) => void;
   onViewSource: (evidence: Record<string, unknown>) => void;
-}) {
+  viewState: ResultViewState;
+  onViewStateChange: (patch: Partial<ResultViewState>) => void;
+} & ResultActions) {
   const parentRef = useRef<HTMLDivElement>(null);
+  const headerRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    if (parentRef.current) {
+      parentRef.current.scrollTop = viewState.scrollTop;
+      parentRef.current.scrollLeft = viewState.scrollLeft;
+      if (headerRef.current) headerRef.current.style.transform = `translateX(${-parentRef.current.scrollLeft}px)`;
+    }
+  }, [rows]);
   const definitions = useMemo<ColumnDef<Record<string, unknown>>[]>(
     () => [
       ...columns.map<ColumnDef<Record<string, unknown>>>((column) => ({
@@ -727,20 +773,18 @@ function VirtualTable({
           const lineage = row.original.__lineage as
             | Array<Record<string, unknown>>
             | undefined;
-          if (!lineage?.length) return <span className="text-muted-foreground">—</span>;
           return (
-            <button
-              type="button"
-              onClick={() => onViewSource(lineage[0])}
-              className="whitespace-nowrap text-xs font-medium text-primary hover:underline"
-            >
-              查看来源
-            </button>
+            <div className="space-y-1 py-1">
+              <SourceLinks refs={lineage ?? []} onViewSource={onViewSource} />
+              <button type="button" disabled={!canAskResult(row.index)} title={!canAskResult(row.index) ? askUnavailable : undefined}
+                onClick={() => onAskResult(row.index, columns.map(column => String(row.original[column] ?? "")).join(" · ").slice(0, 120))}
+                className="whitespace-nowrap text-xs text-primary hover:underline focus-visible:ring-2 focus-visible:ring-ring disabled:text-muted-foreground disabled:cursor-not-allowed">围绕此结果追问</button>
+            </div>
           );
         },
       },
     ],
-    [columns, onViewSource],
+    [columns, onViewSource, onAskResult, canAskResult, askUnavailable],
   );
   const table = useReactTable({
     data: rows,
@@ -757,17 +801,18 @@ function VirtualTable({
   const virtualizer = useVirtualizer({
     count: tableRows.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 42,
+    estimateSize: () => 66,
     overscan: 8,
   });
 
   return (
     <div className="overflow-hidden rounded-xl border">
       <div
+        ref={headerRef}
         className="grid border-b bg-muted/50 text-xs font-medium"
         style={{
-          gridTemplateColumns: `repeat(${columns.length}, minmax(150px, 1fr)) 90px`,
-          minWidth: `${columns.length * 150 + 90}px`,
+          gridTemplateColumns: `repeat(${columns.length}, minmax(150px, 1fr)) 160px`,
+          minWidth: `${columns.length * 150 + 160}px`,
         }}
       >
         {table.getFlatHeaders().map((header) => (
@@ -784,12 +829,16 @@ function VirtualTable({
           </button>
         ))}
       </div>
-      <div ref={parentRef} className="max-h-[460px] overflow-auto">
+      <div ref={parentRef} tabIndex={0} aria-label="结果表格" className="max-h-[460px] overflow-auto focus-visible:ring-2 focus-visible:ring-ring"
+        onScroll={event => {
+          if (headerRef.current) headerRef.current.style.transform = `translateX(${-event.currentTarget.scrollLeft}px)`;
+          onViewStateChange({ scrollTop: event.currentTarget.scrollTop, scrollLeft: event.currentTarget.scrollLeft });
+        }}>
         <div
           className="relative"
           style={{
             height: `${virtualizer.getTotalSize()}px`,
-            minWidth: `${columns.length * 150 + 90}px`,
+            minWidth: `${columns.length * 150 + 160}px`,
           }}
         >
           {virtualizer.getVirtualItems().map((virtualRow) => {
@@ -797,16 +846,18 @@ function VirtualTable({
             return (
               <div
                 key={row.id}
+                data-index={virtualRow.index}
+                ref={virtualizer.measureElement}
                 className="absolute left-0 top-0 grid w-full border-b bg-background text-xs hover:bg-muted/30"
                 style={{
                   transform: `translateY(${virtualRow.start}px)`,
-                  gridTemplateColumns: `repeat(${columns.length}, minmax(150px, 1fr)) 90px`,
+                  gridTemplateColumns: `repeat(${columns.length}, minmax(150px, 1fr)) 160px`,
                 }}
               >
                 {row.getVisibleCells().map((cell) => (
                   <div
                     key={cell.id}
-                    className="flex h-[42px] min-w-0 items-center truncate border-r px-3 last:border-r-0"
+                    className="flex min-h-[66px] min-w-0 items-center border-r px-3 last:border-r-0"
                   >
                     {flexRender(cell.column.columnDef.cell, cell.getContext())}
                   </div>
@@ -823,13 +874,16 @@ function VirtualTable({
 function DocumentResult({
   items,
   onViewSource,
+  onAskResult,
+  canAskResult,
+  askUnavailable,
 }: {
   items: DocumentPreviewItem[];
   onViewSource: (evidence: Record<string, unknown>) => void;
-}) {
+} & ResultActions) {
   return (
     <div className="space-y-3">
-      {items.map((item) => (
+      {items.map((item, index) => (
         <article key={item.id} className="rounded-xl border bg-background p-4">
           <div className="flex items-start justify-between gap-4">
             <div>
@@ -838,19 +892,13 @@ function DocumentResult({
               </span>
               <h3 className="mt-1 text-sm font-semibold">{item.label}</h3>
             </div>
-            {item.evidence_refs.length > 0 && (
-              <button
-                type="button"
-                onClick={() => onViewSource(item.evidence_refs[0])}
-                className="shrink-0 text-xs font-medium text-primary hover:underline"
-              >
-                查看来源
-              </button>
-            )}
+            <SourceLinks refs={item.evidence_refs} onViewSource={onViewSource} />
           </div>
           <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-muted-foreground">
             {item.content}
           </p>
+          <button type="button" disabled={!canAskResult(index)} title={!canAskResult(index) ? askUnavailable : undefined} onClick={() => onAskResult(index, item.label)}
+            className="mt-3 rounded-lg border px-3 py-2 text-xs text-primary hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:text-muted-foreground disabled:cursor-not-allowed">围绕此结果追问</button>
         </article>
       ))}
     </div>
@@ -860,14 +908,23 @@ function DocumentResult({
 export function ResultPreview({
   task,
   onViewSource,
+  viewState,
+  onViewStateChange,
+  outputId,
+  onSelectOutput,
+  onSelectResult,
+  selectionDisabled = false,
 }: {
   task: WorkspaceTask;
   onViewSource: (evidence: Record<string, unknown>) => void;
+  viewState: ResultViewState;
+  onViewStateChange: (patch: Partial<ResultViewState>) => void;
+  outputId: string | null;
+  onSelectOutput: (outputId: string) => void;
+  onSelectResult: (selection: ResultSelection, label: string) => void;
+  selectionDisabled?: boolean;
 }) {
-  const [page, setPage] = useState(0);
-  const [searchInput, setSearchInput] = useState("");
-  const [search, setSearch] = useState("");
-  const [sorting, setSorting] = useState<SortingState>([]);
+  const { page, searchInput, search, sorting } = viewState;
   const [includeSources, setIncludeSources] = useState(false);
   const [bundleBusy, setBundleBusy] = useState(false);
   const preview = useQuery({
@@ -876,22 +933,45 @@ export function ResultPreview({
       task.task_id,
       task.viewing_revision,
       task.delivery?.delivery_id,
+      outputId,
       page,
       search,
       sorting,
     ],
-    queryFn: () =>
-      getWorkspacePreview(task.task_id, {
+    queryFn: async () => {
+      const response = await getWorkspacePreview(task.task_id, {
         offset: page * PAGE_SIZE,
         limit: PAGE_SIZE,
         search,
         sortBy: sorting[0]?.id,
         sortDirection: sorting[0]?.desc ? "desc" : "asc",
         revision: task.viewing_revision,
-      }),
+        outputId: outputId ?? undefined,
+      });
+      // 历史无身份响应仅兼容浏览；新响应必须对应所选结果，不能借另一输出正文。
+      if (response.task_id !== undefined && (response.task_id !== task.task_id || response.revision !== task.viewing_revision
+        || response.delivery_id !== task.delivery?.delivery_id || response.output_id !== outputId
+        || response.representation?.associated_output_id !== outputId)) throw new Error("结果身份已变化，请重新选择输出");
+      return response;
+    },
     enabled: task.status === "completed",
   });
   const delivery = task.delivery;
+  const representationChanged = Boolean(viewState.representationHash && preview.data?.representation?.sha256
+    && viewState.representationHash !== preview.data.representation.sha256);
+  useLayoutEffect(() => {
+    if (!viewState.representationHash && preview.data?.representation?.sha256) onViewStateChange({ representationHash: preview.data.representation.sha256 });
+  }, [preview.data?.representation?.sha256]);
+  const currentRevision = task.viewing_revision === (task.current_revision ?? task.active_revision);
+  const askUnavailable = selectionDisabled ? "正在处理本次追问，请稍候" : currentRevision ? "该结果尚无可核验的选择身份" : "历史结果不能用于新追问，请返回最新版本";
+  const canAskResult = (index: number) => Boolean(!selectionDisabled && !representationChanged && currentRevision && outputId && preview.data?.task_id === task.task_id
+    && preview.data?.representation && /^[0-9a-f]{64}$/.test(preview.data.representation.sha256)
+    && preview.data.item_refs?.length === (preview.data.kind === "table" ? preview.data.rows.length : preview.data.items.length)
+    && /^item_[0-9a-f]{64}$/.test(preview.data.item_refs?.[index] ?? ""));
+  const askResult = (index: number, label: string) => {
+    if (!canAskResult(index) || !preview.data?.representation || !outputId) return;
+    onSelectResult({ revision: task.viewing_revision ?? task.current_revision ?? task.active_revision, output_id: outputId, representation_sha256: preview.data.representation.sha256, item_ref: preview.data.item_refs![index]! }, label);
+  };
   const hasWarnings = Boolean(
     delivery?.outputs.some((output) => output.qa.warnings?.length),
   );
@@ -963,7 +1043,7 @@ export function ResultPreview({
               key={output.output_id}
               className="flex items-center gap-3 rounded-xl border bg-background p-3"
             >
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-xs font-bold uppercase text-primary">
+              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-xs font-bold uppercase text-accent-foreground">
                 {output.format === "markdown" ? "MD" : output.format}
               </div>
               <div className="min-w-0 flex-1">
@@ -993,28 +1073,35 @@ export function ResultPreview({
         </div>
 
         <div className="p-5">
+          <div className="mb-3 space-y-2 text-xs text-muted-foreground">
+            <label className="flex flex-wrap items-center gap-2">预览输出<select aria-label="预览输出" value={outputId ?? ""} onChange={event => onSelectOutput(event.target.value)} className="min-w-0 max-w-full rounded-lg border bg-background px-2 py-2 text-foreground">
+              {delivery.outputs.map(output => <option key={output.output_id} value={output.output_id}>{output.filename}</option>)}
+            </select></label>
+            <p>版本 V{task.viewing_revision} · {preview.data?.representation?.kind === "derived_result" ? "同次交付的结构化结果" : preview.data?.representation?.kind === "output" ? "正式输出解析预览" : "未提供表示身份"} · 生成时间：{delivery.created_at ? new Date(delivery.created_at).toLocaleString() : "未提供"}</p>
+            {!currentRevision && <p>历史结果不能用于新追问，请返回最新版本。</p>}
+          </div>
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex min-w-[280px] flex-1 items-center gap-2">
+            <div className="flex min-w-0 basis-full items-center gap-2">
               <div className="relative max-w-md flex-1">
                 <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                 <input
                   value={searchInput}
-                  onChange={(event) => setSearchInput(event.target.value)}
+                  onChange={(event) => onViewStateChange({ searchInput: event.target.value })}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      setPage(0);
-                      setSearch(searchInput.trim());
+                    if (event.key === "Enter" && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) {
+                      onViewStateChange({ page: 0, search: searchInput.trim(), scrollTop: 0 });
                     }
                   }}
                   placeholder="在全部结果中搜索"
+                  aria-label="在全部结果中搜索"
                   className="h-9 w-full rounded-lg border bg-background pl-9 pr-3 text-sm outline-none focus:border-primary"
                 />
               </div>
+              {searchInput && <button type="button" aria-label="清除结果搜索" className="h-9 rounded-lg border px-3 text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onViewStateChange({ searchInput: "", search: "", page: 0, scrollTop: 0 })}>清除</button>}
               <button
                 type="button"
                 onClick={() => {
-                  setPage(0);
-                  setSearch(searchInput.trim());
+                  onViewStateChange({ page: 0, search: searchInput.trim(), scrollTop: 0 });
                 }}
                 className="h-9 rounded-lg border px-3 text-xs font-medium hover:bg-muted"
               >
@@ -1028,7 +1115,8 @@ export function ResultPreview({
               <button
                 type="button"
                 disabled={page === 0}
-                onClick={() => setPage((value) => Math.max(0, value - 1))}
+                aria-label="上一页结果"
+                onClick={() => onViewStateChange({ page: Math.max(0, page - 1), scrollTop: 0 })}
                 className="rounded border p-1.5 hover:bg-muted disabled:opacity-35"
               >
                 <ChevronLeft className="h-3.5 w-3.5" />
@@ -1036,7 +1124,8 @@ export function ResultPreview({
               <button
                 type="button"
                 disabled={end >= total}
-                onClick={() => setPage((value) => value + 1)}
+                aria-label="下一页结果"
+                onClick={() => onViewStateChange({ page: page + 1, scrollTop: 0 })}
                 className="rounded border p-1.5 hover:bg-muted disabled:opacity-35"
               >
                 <ChevronRight className="h-3.5 w-3.5" />
@@ -1049,25 +1138,33 @@ export function ResultPreview({
               <Loader2 className="h-5 w-5 animate-spin" />
               正在读取结果预览
             </div>
-          ) : preview.isError ? (
+          ) : preview.isError || representationChanged ? (
             <div className="rounded-xl border border-destructive/20 bg-destructive/[0.04] p-4 text-sm text-destructive">
-              预览失败：{preview.error.message}
+              预览失败：{preview.error?.message ?? "结果表示已变化，请重新打开任务"}
             </div>
-          ) : preview.data?.kind === "table" ? (
+          ) : preview.data && total === 0 ? <p className="rounded-xl border p-4 text-sm text-muted-foreground">没有匹配的结果，请调整筛选。</p>
+          : preview.data?.kind === "table" ? (
             <VirtualTable
               columns={preview.data.columns}
               rows={preview.data.rows}
               sorting={sorting}
               onSortingChange={(state) => {
-                setPage(0);
-                setSorting(state.slice(0, 1));
+                onViewStateChange({ page: 0, sorting: state.slice(0, 1), scrollTop: 0 });
               }}
               onViewSource={onViewSource}
+              viewState={viewState}
+              onViewStateChange={onViewStateChange}
+              onAskResult={askResult}
+              canAskResult={canAskResult}
+              askUnavailable={askUnavailable}
             />
           ) : preview.data?.kind === "document" ? (
             <DocumentResult
               items={preview.data.items}
               onViewSource={onViewSource}
+              onAskResult={askResult}
+              canAskResult={canAskResult}
+              askUnavailable={askUnavailable}
             />
           ) : null}
         </div>

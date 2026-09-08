@@ -14,9 +14,48 @@ import type {
   HistoricalAuthorityRecoveryConfirmation,
   LegacyRebaselineConfirmation,
   SourceAcquisitionAttempt,
+  ResultSelection,
+  PublicResultContext,
+  WorkspaceSourcePreview,
 } from "@/types/semanticWorkspace";
 
 const BASE = "/api/semantic-workspace";
+
+/** 只接收公开引用身份；未知内部字段不能随消息进入画布。 */
+export function readPublicResultContext(value: unknown): PublicResultContext | null {
+  if (!value || typeof value !== "object") return null;
+  const data = value as Record<string, unknown>;
+  if (!Number.isSafeInteger(data.revision) || Number(data.revision) < 1
+    || typeof data.output_id !== "string" || !data.output_id
+    || typeof data.representation_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(data.representation_sha256)
+    || typeof data.item_ref !== "string" || !/^item_[0-9a-f]{64}$/.test(data.item_ref)
+    || typeof data.label !== "string" || !Array.isArray(data.source_refs)) return null;
+  const refs: PublicResultContext["source_refs"] = [];
+  for (const value of data.source_refs) {
+    if (!value || typeof value !== "object") return null;
+    const ref = value as Record<string, unknown>;
+    if (typeof ref.artifact_id !== "string" || !ref.artifact_id || typeof ref.source_sha256 !== "string" || !/^[0-9a-f]{64}$/.test(ref.source_sha256)) return null;
+    const source: PublicResultContext["source_refs"][number] = { artifact_id: ref.artifact_id, source_sha256: ref.source_sha256 };
+    for (const key of ["snapshot_id", "table_ref", "element_id", "extractor", "extractor_version", "read_at"] as const) {
+      if (typeof ref[key] === "string") source[key] = ref[key];
+    }
+    for (const key of ["row_number", "page"] as const) {
+      if (Number.isSafeInteger(ref[key]) && Number(ref[key]) > 0) source[key] = Number(ref[key]);
+    }
+    const box = ref.bbox as Record<string, unknown> | undefined;
+    if (box && [box.x0, box.y0, box.x1, box.y1].every(value => typeof value === "number" && Number.isFinite(value))
+      && Number(box.x1) > Number(box.x0) && Number(box.y1) > Number(box.y0)
+      && ["pdf_points", "image_pixels", "normalized_1000"].includes(String(box.coordinate_space))) {
+      source.bbox = { x0: Number(box.x0), y0: Number(box.y0), x1: Number(box.x1), y1: Number(box.y1), coordinate_space: box.coordinate_space as NonNullable<typeof source.bbox>["coordinate_space"] };
+    }
+    const location = ref.location as Record<string, unknown> | undefined;
+    if (location?.kind === "docx_paragraph" && Number.isSafeInteger(location.paragraph) && Number(location.paragraph) >= 1) source.location = { kind: "docx_paragraph", paragraph: Number(location.paragraph) };
+    if (location?.kind === "docx_table_row" && Number.isSafeInteger(location.table) && Number(location.table) >= 1 && Number.isSafeInteger(location.row) && Number(location.row) >= 0) source.location = { kind: "docx_table_row", table: Number(location.table), row: Number(location.row) };
+    if (location?.kind === "text_line" && Number.isSafeInteger(location.line) && Number(location.line) >= 1) source.location = { kind: "text_line", line: Number(location.line) };
+    refs.push(source);
+  }
+  return { revision: Number(data.revision), output_id: data.output_id, representation_sha256: data.representation_sha256, item_ref: data.item_ref, label: data.label, source_refs: refs };
+}
 
 export type TaskTemplateOption = {
   template_id: string;
@@ -291,10 +330,11 @@ export function sendWorkspaceTurn(
   taskId: string,
   text: string,
   idempotencyKey: string,
+  resultContext?: ResultSelection | null,
 ): Promise<SteeringResult> {
   return api.post(
     `${BASE}/tasks/${taskId}/turns`,
-    { text },
+    { text, ...(resultContext ? { result_context: resultContext } : {}) },
     { "Idempotency-Key": idempotencyKey },
   );
 }
@@ -337,6 +377,7 @@ export function getWorkspacePreview(
     sortBy?: string;
     sortDirection?: "asc" | "desc";
     revision?: number;
+    outputId?: string;
   },
 ): Promise<WorkspacePreview> {
   const query = new URLSearchParams({
@@ -347,11 +388,21 @@ export function getWorkspacePreview(
   });
   if (params.sortBy) query.set("sort_by", params.sortBy);
   if (params.revision) query.set("revision", String(params.revision));
+  if (params.outputId) query.set("output_id", params.outputId);
   return api.get(`${BASE}/tasks/${taskId}/preview?${query}`);
 }
 
 export function getWorkspaceStorage(): Promise<WorkspaceStorage> {
   return api.get(`${BASE}/storage`);
+}
+
+export function getWorkspaceSourcePreview(taskId: string, artifactId: string, params: {
+  revision: number; offset?: number; limit?: number; table_ref?: string; search?: string;
+  sort_by?: string; sort_direction?: "asc" | "desc"; row_number?: number; element_id?: string; extractor_version?: string; page?: number;
+}): Promise<WorkspaceSourcePreview> {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) if (value !== undefined && value !== "") query.set(key, String(value));
+  return api.get(`${BASE}/tasks/${encodeURIComponent(taskId)}/sources/${encodeURIComponent(artifactId)}/preview?${query}`);
 }
 
 export function downloadWorkspaceBundle(
@@ -452,7 +503,7 @@ export function streamWorkspaceTask(
             return;
           }
           seenMessages.set(payload.message_id, payload.content);
-          handlers.onMessage?.(payload);
+          handlers.onMessage?.({ ...payload, result_context: readPublicResultContext(payload.result_context) });
         }
         else if (message.event === "progress") handlers.onProgress?.(payload);
         else if (message.event === "status") handlers.onStatus?.(payload);

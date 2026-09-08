@@ -60,7 +60,7 @@ const STATUS: Record<
   completed: {
     label: "已完成",
     icon: CheckCircle2,
-    className: "text-emerald-600 dark:text-emerald-400",
+    className: "text-accent-foreground",
   },
 };
 

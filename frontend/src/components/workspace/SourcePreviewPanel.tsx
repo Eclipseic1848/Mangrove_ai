@@ -1,5 +1,6 @@
 import {
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -25,6 +26,10 @@ import {
   previewTask,
 } from "@/lib/dataPrepApi";
 import type { UploadItem } from "@/types/dataPrep";
+import type { WorkspaceTask } from "@/types/semanticWorkspace";
+import { getWorkspaceSourcePreview } from "@/lib/semanticWorkspaceApi";
+import { downloadFile } from "@/lib/api";
+import { toast } from "sonner";
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
   "pdfjs-dist/build/pdf.worker.min.mjs",
@@ -44,6 +49,14 @@ function extension(name: string) {
   return name.split(".").pop()?.toLowerCase() ?? "";
 }
 
+export type SourceViewState = {
+  page: number; zoom: number; scrollTop: number; scrollLeft: number;
+  offset?: number; tableRef?: string; searchInput?: string; search?: string; sortBy?: string; sortDirection?: "asc" | "desc";
+  evidenceKey?: string; locationStatus?: string;
+  parserVersion?: string | null;
+};
+export const initialSourceView: SourceViewState = { page: 1, zoom: 0.95, scrollTop: 0, scrollLeft: 0 };
+
 export function SourcePreviewPanel({
   uploads,
   selectedUploadId,
@@ -52,6 +65,9 @@ export function SourcePreviewPanel({
   onClose,
   expanded = false,
   onToggleExpand,
+  viewState,
+  onViewStateChange,
+  task,
 }: {
   uploads: UploadItem[];
   selectedUploadId: string | null;
@@ -60,21 +76,66 @@ export function SourcePreviewPanel({
   onClose: () => void;
   expanded?: boolean;
   onToggleExpand?: () => void;
+  viewState?: SourceViewState;
+  onViewStateChange?: (patch: Partial<SourceViewState>) => void;
+  task?: WorkspaceTask;
 }) {
-  const selected =
+  const selectedUpload =
     uploads.find((upload) => upload.upload_id === selectedUploadId)
-    ?? uploads[0]
+    ?? (!selectedUploadId ? uploads[0] : null)
     ?? null;
-  const [page, setPage] = useState(1);
+  const [localView, setLocalView] = useState(initialSourceView);
+  const currentView = viewState ?? localView;
+  const { page, zoom } = currentView;
+  const updateView = (patch: Partial<SourceViewState>) => {
+    if (onViewStateChange) onViewStateChange(patch);
+    else setLocalView(current => ({ ...current, ...patch }));
+  };
+  const setPage = (value: number | ((page: number) => number)) => updateView({ page: typeof value === "function" ? value(page) : value });
   const [pageCount, setPageCount] = useState(0);
-  const [zoom, setZoom] = useState(0.95);
   const [pageSize, setPageSize] = useState({ width: 612, height: 792 });
+  const [loadedPage, setLoadedPage] = useState(0);
+  const [pdfError, setPdfError] = useState<string | null>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const evidenceKey = evidence ? JSON.stringify(evidence) : "";
+  const locate = Boolean(evidence && currentView.evidenceKey !== evidenceKey);
+  const sourceParams = {
+    revision: task?.viewing_revision ?? 1, offset: currentView.offset ?? 0, limit: 100,
+    table_ref: locate && typeof evidence?.table_ref === "string" ? evidence.table_ref : currentView.tableRef,
+    search: locate ? "" : currentView.search, sort_by: locate ? undefined : currentView.sortBy,
+    sort_direction: currentView.sortDirection,
+    ...(locate ? { row_number: typeof evidence?.row_number === "number" ? evidence.row_number : undefined,
+      page: typeof evidence?.page === "number" ? evidence.page : undefined,
+      element_id: typeof evidence?.element_id === "string" ? evidence.element_id : undefined,
+      extractor_version: typeof evidence?.extractor_version === "string" ? evidence.extractor_version : undefined } : {}),
+  };
+  const source = useQuery({
+    queryKey: ["workspace-task-source", task?.task_id, task?.viewing_revision, selectedUploadId, evidence?.source_sha256, sourceParams],
+    // 同一来源定位完成后切换到所在窗口时，保留内容，避免卸载造成滚动归零。
+    placeholderData: (previous, query) => query && query.queryKey[1] === task?.task_id
+      && query.queryKey[2] === task?.viewing_revision && query.queryKey[3] === selectedUploadId
+      && query.queryKey[4] === evidence?.source_sha256 ? previous : undefined,
+    queryFn: async () => {
+      const data = await getWorkspaceSourcePreview(task!.task_id, selectedUploadId!, sourceParams);
+      if (data.task_id !== task!.task_id || data.revision !== task!.viewing_revision || data.artifact_id !== selectedUploadId
+        || (typeof evidence?.source_sha256 === "string" && evidence.source_sha256 !== data.sha256)
+        || (selectedUpload && data.sha256 !== selectedUpload.sha256)) throw new Error("来源身份或版本不匹配，请重新选择来源");
+      if (data.content_url && (!data.upload_id || data.content_url !== `/api/data-sources/uploads/${data.upload_id}/content`)) throw new Error("来源原件地址不可用");
+      return data;
+    },
+    enabled: Boolean(task && selectedUploadId), retry: false,
+  });
+  const selected = selectedUpload ?? (source.data ? { upload_id: source.data.upload_id ?? source.data.artifact_id,
+    original_name: source.data.original_name, media_type: source.data.media_type, sha256: source.data.sha256, size_bytes: 0 } : null);
+  const parserVersion = source.data?.representation.parser_or_inspector_version;
+  const parserChanged = Boolean(source.data && !source.isPlaceholderData && currentView.parserVersion != null && currentView.parserVersion !== parserVersion);
+  const evidenceLocated = !locate && !parserChanged && currentView.locationStatus === "已定位来源";
   const file = useQuery({
-    queryKey: ["workspace-source-file", selected?.upload_id],
+    queryKey: ["workspace-source-file", selected?.upload_id, task?.task_id, task?.viewing_revision, source.data?.sha256],
     queryFn: () => getUploadFile(selected!),
     enabled: Boolean(
       selected
+      && (!task || Boolean(source.data?.content_url))
       && extension(selected.original_name) === "pdf",
     ),
   });
@@ -102,33 +163,64 @@ export function SourcePreviewPanel({
         },
         30,
       ),
-    enabled: Boolean(selected && table),
+    enabled: Boolean(!task && selected && table),
   });
   const documentPreview = useQuery({
     queryKey: ["workspace-source-document", selected?.upload_id],
     queryFn: () => getDocumentPreview(selected!.upload_id),
     enabled: Boolean(
       selected
+      && !task
       && !table
       && extension(selected.original_name) !== "pdf",
     ),
     retry: false,
   });
 
-  useEffect(() => {
-    const evidencePage = Number(evidence?.page || 0);
-    if (evidencePage > 0) setPage(evidencePage);
-    const elementId = String(evidence?.element_id || "");
-    if (elementId) {
-      window.setTimeout(() => {
-        contentRef.current
-          ?.querySelector(`[data-element-id="${CSS.escape(elementId)}"]`)
-          ?.scrollIntoView({ block: "center", behavior: "smooth" });
-      }, 50);
+  useLayoutEffect(() => {
+    // PDF 的真实页在异步解析后才有高度，提前恢复会被浏览器裁成零。
+    if (selected && extension(selected.original_name) === "pdf" && loadedPage !== page) return;
+    if (contentRef.current) {
+      contentRef.current.scrollTop = currentView.scrollTop;
+      contentRef.current.scrollLeft = currentView.scrollLeft;
     }
-  }, [evidence]);
+  }, [file.data, tablePreview.data, documentPreview.data, source.data, loadedPage]);
 
-  if (!selected) {
+  useLayoutEffect(() => {
+    if (!source.data || source.isPlaceholderData || currentView.parserVersion === parserVersion) return;
+    if (parserChanged) {
+      // 同一原件的新解析表示不继承旧元素位置，首次取得版本只记录身份。
+      if (contentRef.current) { contentRef.current.scrollTop = 0; contentRef.current.scrollLeft = 0; }
+      updateView({ ...initialSourceView, offset: 0, tableRef: undefined, searchInput: "", search: "", sortBy: undefined,
+        parserVersion, evidenceKey, locationStatus: "解析版本已变化，无法定位" });
+    } else updateView({ parserVersion });
+  }, [source.data, source.isPlaceholderData]);
+
+  useLayoutEffect(() => {
+    if (!locate || parserChanged || source.isPlaceholderData || (task && !source.data) || (!task && !documentPreview.data && !file.data && !tablePreview.data)) return;
+    const data = source.data;
+    const failure = data?.location_status === "version_mismatch" ? "解析版本已变化，无法定位" : data?.location_status === "not_found" ? "未找到对应位置" : null;
+    if (failure) { updateView({ evidenceKey, locationStatus: failure }); return; }
+    const evidencePage = Number(evidence?.page || 0);
+    if (selected && extension(selected.original_name) === "pdf") {
+      if (!pageCount) return;
+      if (evidencePage < 1 || evidencePage > pageCount) { updateView({ evidenceKey, locationStatus: "未找到对应页" }); return; }
+      if (page !== evidencePage) { updateView({ page: evidencePage }); return; }
+      if (loadedPage !== page) return;
+      updateView({ evidenceKey, locationStatus: "已定位来源" }); return;
+    }
+    const selector = evidence?.element_id ? `[data-element-id="${CSS.escape(String(evidence.element_id))}"]`
+      : evidence?.row_number ? `[data-source-row="${Number(evidence.row_number)}"]` : null;
+    const target = selector ? contentRef.current?.querySelector<HTMLElement>(selector) : null;
+    if (!task && !documentPreview.data && !tablePreview.data) return;
+    if (target && contentRef.current) {
+      contentRef.current.scrollTop += target.getBoundingClientRect().top - contentRef.current.getBoundingClientRect().top - contentRef.current.clientHeight / 3;
+      updateView({ evidenceKey, locationStatus: "已定位来源", scrollTop: contentRef.current.scrollTop,
+        ...(data ? { offset: data.offset ?? 0, tableRef: data.selected_table_ref, search: "", searchInput: "", sortBy: undefined } : {}) });
+    } else updateView({ evidenceKey, locationStatus: "缺少可核验位置，当前仅浏览来源" });
+  }, [locate, evidenceKey, parserChanged, source.data, source.isPlaceholderData, documentPreview.data, tablePreview.data, pageCount, loadedPage, page]);
+
+  if (!selected && !task) {
     return (
       <div className="flex h-full flex-col items-center justify-center p-6 text-center text-sm text-muted-foreground">
         <FileText className="mb-3 h-7 w-7 opacity-40" />
@@ -137,8 +229,11 @@ export function SourcePreviewPanel({
     );
   }
 
-  const ext = extension(selected.original_name);
-  const sourceColumns = tablePreview.data?.schema.fields.map((item) => item.name) || [];
+  const ext = extension(selected?.original_name ?? "");
+  const sourceColumns = source.data?.columns ?? tablePreview.data?.schema.fields.map((item) => item.name) ?? [];
+  const elements = task ? source.data?.elements : documentPreview.data?.elements;
+  const sourceRows = task ? source.data?.rows : tablePreview.data?.sample.map((values, index) => ({ row_number: index + (["csv", "tsv", "xlsx"].includes(ext) ? 2 : 1), values }));
+  const readError = source.error ?? file.error ?? tablePreview.error ?? documentPreview.error;
   const highlightedRow = Number(evidence?.row_number || 0);
   const evidenceValues =
     evidence?.values && typeof evidence.values === "object"
@@ -175,25 +270,12 @@ export function SourcePreviewPanel({
     }
     return null;
   })();
-  const isEvidenceRow = (
-    row: Record<string, unknown>,
-    index: number,
-  ) => {
-    if (evidenceValues.length > 0) {
-      return evidenceValues.every(
-        ([key, value]) => String(row[key] ?? "") === String(value ?? ""),
-      );
-    }
-    const sourceOffset = ["csv", "tsv", "xlsx"].includes(ext) ? 2 : 1;
-    return highlightedRow === index + sourceOffset;
-  };
-
   return (
     <div className="flex h-full min-h-0 flex-col bg-muted/20">
       <div className="flex h-12 shrink-0 items-center gap-2 border-b bg-background px-3">
         <select
           aria-label="预览文件"
-          value={selected.upload_id}
+          value={selectedUploadId ?? selected?.upload_id ?? ""}
           onChange={(event) => onSelectUpload(event.target.value)}
           className="min-w-0 flex-1 truncate rounded-lg border bg-background px-2 py-1.5 text-xs"
         >
@@ -202,6 +284,8 @@ export function SourcePreviewPanel({
               {upload.original_name}
             </option>
           ))}
+          {task?.web_source?.snapshot?.artifacts.map(artifact => <option key={artifact.artifact_id} value={artifact.artifact_id}>{artifact.title || artifact.final_url}</option>)}
+          {selectedUploadId && !uploads.some(upload => upload.upload_id === selectedUploadId) && !task?.web_source?.snapshot?.artifacts.some(artifact => artifact.artifact_id === selectedUploadId) && <option value={selectedUploadId}>引用来源</option>}
         </select>
         {ext === "pdf" && (
           <>
@@ -209,7 +293,7 @@ export function SourcePreviewPanel({
               type="button"
               aria-label="上一页"
               disabled={page <= 1}
-              onClick={() => setPage((value) => Math.max(1, value - 1))}
+              onClick={() => updateView({ page: Math.max(1, page - 1), locationStatus: "当前仅浏览来源" })}
               className="rounded p-1.5 hover:bg-muted disabled:opacity-30"
             >
               <ChevronLeft className="h-4 w-4" />
@@ -221,7 +305,7 @@ export function SourcePreviewPanel({
               type="button"
               aria-label="下一页"
               disabled={!pageCount || page >= pageCount}
-              onClick={() => setPage((value) => value + 1)}
+              onClick={() => updateView({ page: page + 1, locationStatus: "当前仅浏览来源" })}
               className="rounded p-1.5 hover:bg-muted disabled:opacity-30"
             >
               <ChevronRight className="h-4 w-4" />
@@ -229,7 +313,7 @@ export function SourcePreviewPanel({
             <button
               type="button"
               aria-label="缩小"
-              onClick={() => setZoom((value) => Math.max(0.5, value - 0.1))}
+              onClick={() => updateView({ zoom: Math.max(0.5, zoom - 0.1) })}
               className="rounded p-1.5 hover:bg-muted"
             >
               <ZoomOut className="h-4 w-4" />
@@ -237,7 +321,7 @@ export function SourcePreviewPanel({
             <button
               type="button"
               aria-label="放大"
-              onClick={() => setZoom((value) => Math.min(1.8, value + 0.1))}
+              onClick={() => updateView({ zoom: Math.min(1.8, zoom + 0.1) })}
               className="rounded p-1.5 hover:bg-muted"
             >
               <ZoomIn className="h-4 w-4" />
@@ -255,12 +339,37 @@ export function SourcePreviewPanel({
         </button>
       </div>
 
+      {task && <div className="shrink-0 space-y-1 border-b px-3 py-2 text-xs text-muted-foreground">
+        <p>版本 V{task.viewing_revision} · {ext === "pdf" ? "PDF 原件" : source.data?.kind === "web" ? "网页摘要预览" : "解析预览"}</p>
+        <p>读取时间：{source.data?.read_at ? new Date(source.data.read_at).toLocaleString() : "未提供"} · 解析版本：{source.data?.representation.parser_or_inspector_version || "未提供"}</p>
+        {source.data?.content_url && <button type="button" className="rounded border px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => void downloadFile(source.data!.content_url!, source.data!.original_name).catch(error => toast.error(error instanceof Error ? error.message : "原件下载失败"))}>下载原件</button>}
+        {source.data?.kind === "web" && <p>仅展示已保存摘要，内容可能截断，完整性未确认。</p>}
+      </div>}
+
+      {source.data?.kind === "table" && <div className="shrink-0 space-y-2 border-b px-3 py-2 text-xs">
+        <label className="flex items-center gap-2">工作表<select aria-label="来源工作表" className="min-w-0 flex-1 rounded border bg-background p-2" value={source.data.selected_table_ref ?? ""} onChange={event => updateView({ tableRef: event.target.value, offset: 0, scrollTop: 0, locationStatus: "当前仅浏览来源" })}>
+          {source.data.tables?.map(item => <option key={item.table_ref} value={item.table_ref}>{item.name}</option>)}
+        </select></label>
+        <div className="flex gap-2"><input aria-label="搜索完整来源表" placeholder="搜索完整来源表" className="min-w-0 flex-1 rounded border bg-background p-2" value={currentView.searchInput ?? ""} onChange={event => updateView({ searchInput: event.target.value })}
+          onKeyDown={event => { if (event.key === "Enter" && !event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229) updateView({ search: currentView.searchInput?.trim() ?? "", offset: 0, scrollTop: 0, locationStatus: "当前仅浏览来源" }); }} />
+          <button type="button" className="rounded border px-2 hover:bg-muted" onClick={() => updateView({ search: currentView.searchInput?.trim() ?? "", offset: 0, scrollTop: 0, locationStatus: "当前仅浏览来源" })}>搜索来源</button>
+          {currentView.searchInput && <button type="button" aria-label="清除来源搜索" className="rounded border px-2 hover:bg-muted" onClick={() => updateView({ search: "", searchInput: "", offset: 0, scrollTop: 0, locationStatus: "当前仅浏览来源" })}>清除</button>}
+        </div>
+      </div>}
+
+      {source.data && (source.data.kind === "table" || (source.data.kind === "document" && ext !== "pdf")) && <div className="shrink-0 space-y-2 border-b px-3 py-2 text-xs">
+        <p>仅显示当前窗口 · 共 {source.data.total ?? "未知"} 条{source.data.is_complete ? "" : " · 内容不完整"}</p>
+        <div className="flex flex-wrap items-center gap-2"><button type="button" aria-label="上一页来源" disabled={!source.data.offset || source.isFetching} className="rounded border px-2 py-1 disabled:opacity-40" onClick={() => updateView({ offset: Math.max(0, (source.data!.offset ?? 0) - 100), scrollTop: 0, locationStatus: "当前仅浏览来源" })}>上一页</button>
+          <span>{source.data.total ? (source.data.offset ?? 0) + 1 : 0}–{(source.data.offset ?? 0) + (source.data.rows?.length ?? source.data.elements?.length ?? 0)}</span>
+          <button type="button" aria-label="下一页来源" disabled={source.isFetching || (source.data.offset ?? 0) + (source.data.rows?.length ?? source.data.elements?.length ?? 0) >= (source.data.total ?? 0)} className="rounded border px-2 py-1 disabled:opacity-40" onClick={() => updateView({ offset: (source.data!.offset ?? 0) + 100, scrollTop: 0, locationStatus: "当前仅浏览来源" })}>下一页</button></div>
+      </div>}
+
       {evidence && (
         <div className="shrink-0 border-b bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200">
           <div className="flex items-start gap-2">
             <LocateFixed className="mt-0.5 h-3.5 w-3.5 shrink-0" />
             <span>
-              已定位来源
+              {readError || pdfError ? "来源不可用，无法定位" : locate ? "正在定位来源" : currentView.locationStatus || "当前仅浏览来源"}
               {evidence.page ? ` · 第 ${String(evidence.page)} 页` : ""}
               {evidence.row_number ? ` · 原文件第 ${String(evidence.row_number)} 行` : ""}
             </span>
@@ -280,8 +389,10 @@ export function SourcePreviewPanel({
         </div>
       )}
 
-      <div ref={contentRef} className="min-h-0 flex-1 overflow-auto p-4">
-        {file.isLoading || tablePreview.isLoading || documentPreview.isLoading ? (
+      <div ref={contentRef} tabIndex={0} aria-label="来源内容" className="min-h-0 flex-1 overflow-auto p-4 focus-visible:ring-2 focus-visible:ring-ring"
+        onScroll={event => updateView({ scrollTop: event.currentTarget.scrollTop, scrollLeft: event.currentTarget.scrollLeft })}>
+        {readError || pdfError ? <div role="alert" className="rounded-lg border border-destructive/30 p-4 text-sm text-destructive">来源预览失败：{readError?.message ?? pdfError}<button type="button" className="ml-2 rounded border px-2 py-1" onClick={() => { setPdfError(null); void (source.isError ? source.refetch() : file.isError || ext === "pdf" ? file.refetch() : task ? source.refetch() : table ? tablePreview.refetch() : documentPreview.refetch()); }}>重试</button></div>
+        : source.isLoading || file.isLoading || tablePreview.isLoading || documentPreview.isLoading ? (
           <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-5 w-5 animate-spin" />
             正在读取原文件
@@ -289,6 +400,7 @@ export function SourcePreviewPanel({
         ) : ext === "pdf" && fileUrl ? (
           <Document
             file={fileUrl}
+            onLoadError={error => setPdfError(error.message)}
             onLoadSuccess={({ numPages }) => {
               setPageCount(numPages);
               setPage((value) => Math.min(Math.max(1, value), numPages));
@@ -305,6 +417,7 @@ export function SourcePreviewPanel({
             >
               <Page
                 pageNumber={page}
+                onLoadError={error => setPdfError(error.message)}
                 scale={zoom}
                 onLoadSuccess={(loadedPage) => {
                   const viewport = loadedPage.getViewport({ scale: 1 });
@@ -312,9 +425,10 @@ export function SourcePreviewPanel({
                     width: viewport.width,
                     height: viewport.height,
                   });
+                  setLoadedPage(page);
                 }}
               />
-              {Number(evidence?.page || page) === page && evidenceBoxStyle && (
+              {evidenceLocated && Number(evidence?.page || page) === page && evidenceBoxStyle && (
                 <div
                   aria-label="证据高亮"
                   className="pointer-events-none absolute border-2 border-amber-500 bg-amber-300/25"
@@ -323,8 +437,9 @@ export function SourcePreviewPanel({
               )}
             </div>
           </Document>
-        ) : table && tablePreview.data ? (
-          <div className="overflow-hidden rounded-xl border bg-background">
+        ) : source.data?.total === 0 ? <p className="p-4 text-sm text-muted-foreground">没有匹配的来源内容，请调整筛选。</p>
+        : (table || source.data?.kind === "table") && sourceRows ? (
+          <div className="w-max min-w-full rounded-xl border bg-background">
             <div
               className="grid border-b bg-muted/50 text-[11px] font-medium"
               style={{
@@ -334,16 +449,17 @@ export function SourcePreviewPanel({
             >
               {sourceColumns.map((column) => (
                 <div key={column} className="border-r px-3 py-2 last:border-r-0">
-                  {column}
+                  <button type="button" disabled={!task} className="text-left hover:underline focus-visible:ring-2 focus-visible:ring-ring" onClick={() => updateView({ sortBy: column, sortDirection: currentView.sortBy === column && currentView.sortDirection !== "desc" ? "desc" : "asc", offset: 0, scrollTop: 0, locationStatus: "当前仅浏览来源" })}>{column}{currentView.sortBy === column ? currentView.sortDirection === "desc" ? " ↓" : " ↑" : ""}</button>
                 </div>
               ))}
             </div>
-            <div className="max-h-[calc(100vh-190px)] overflow-auto">
-              {tablePreview.data.sample.map((row, index) => (
+            <div>
+              {sourceRows.map(({ values: row, row_number }) => (
                 <div
-                  key={index}
+                  key={row_number}
+                  data-source-row={row_number}
                   className={`grid border-b text-[11px] ${
-                    isEvidenceRow(row, index)
+                    evidenceLocated && highlightedRow === row_number && (!evidence?.table_ref || evidence.table_ref === source.data?.selected_table_ref)
                       ? "bg-amber-100 text-amber-950"
                       : "bg-background"
                   }`}
@@ -365,17 +481,18 @@ export function SourcePreviewPanel({
               ))}
             </div>
           </div>
-        ) : documentPreview.data ? (
+        ) : source.data?.kind === "web" ? <article aria-label="网页摘要预览" className="whitespace-pre-wrap break-words text-sm leading-7">{source.data.text_preview || "未保存可展示摘要"}</article>
+        : elements ? (
           <article
-            aria-label={`${selected.original_name}结构化预览`}
+            aria-label={`${selected?.original_name ?? "来源"}结构化预览`}
             className="mx-auto min-h-full max-w-3xl rounded bg-white px-8 py-7 text-slate-900 shadow"
           >
             <h2 className="border-b pb-3 text-base font-semibold">
-              {selected.original_name}
+              {selected?.original_name}
             </h2>
             <div className="mt-5 space-y-2">
-              {documentPreview.data.elements.map((element) => {
-                const active = evidence?.element_id === element.element_id;
+              {elements.map((element) => {
+                const active = evidenceLocated && evidence?.element_id === element.element_id;
                 return (
                   <section
                     key={element.element_id}

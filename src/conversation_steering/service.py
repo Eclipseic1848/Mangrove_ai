@@ -77,9 +77,12 @@ class ConversationSteering:
         self,
         repository: Any,
         rewriter: ContextRewriter | None,
+        *,
+        before_result_call=None,
     ) -> None:
         self._repository = repository
         self._rewriter = rewriter
+        self._before_result_call = before_result_call
 
     async def handle_turn(self, request: SteeringRequest) -> SteeringResult:
         if self._rewriter is None:
@@ -91,6 +94,7 @@ class ConversationSteering:
             revision=request.revision,
             text=request.text.strip(),
             idempotency_key=request.idempotency_key,
+            result_context=request.result_context,
         )
         turn = self._repository.save_turn(submitted)
         existing = self._repository.get_result_for_turn(
@@ -99,6 +103,10 @@ class ConversationSteering:
         )
         if existing is not None:
             return existing
+        if turn.result_context:
+            if self._before_result_call:
+                self._before_result_call()
+            self._repository.claim_result_context(turn.owner_id, turn.turn_id)
 
         delta = await self._rewriter.rewrite(turn, request)
         if (
@@ -142,6 +150,11 @@ class ConversationSteering:
             proposal_id=proposal.proposal_id if proposal else None,
             run_id=request.run_id,
             revision=request.revision,
+            result_context=(
+                turn.result_context.model_dump(exclude={"content"})
+                if turn.result_context and delta.direct_answer and action is not SteeringAction.PERMISSION_REQUEST
+                else None
+            ),
         )
         return self._repository.save_result(result)
 

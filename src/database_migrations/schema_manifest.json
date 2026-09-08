@@ -135,7 +135,7 @@
       "trigger:web_task_contracts_no_delete": "087edf8a00b0d641049f16b71fecb82ea57f2a29480ea1d532b25ae89f5f93a4",
       "trigger:web_task_contracts_no_update": "f70469242d490e4d28c884d7d2669bf72b3d3cd123ebefce630f33aab25274c0"
     },
-    "revision": "webui_0013",
+    "revision": "webui_0014",
     "tables": {
       "account_execution_bindings": "792d18e3f5416745c405e022cc798847f4a44d9c1123e58e3900e724c60e0cfd",
       "account_execution_holds": "985dd26ff02bf54e43557d05f72b11d5c97c3f3f18294bb3451afd2748e64db3",
@@ -165,7 +165,7 @@
       "capability_validation_runs": "5fc453f47417aa3ace2a609d71985a92fba88c1d34ee7700ccf046e812a4f16a",
       "capability_validations": "c11bd23bf8a57bbdd40249cba7d018d13d615d1a49a175379db820092bd05bad",
       "conversation_context_deltas": "d8de548844e94f6fbf6b6491508c2716ef13c1e3e72660ba88380b58bf0d9319",
-      "conversation_raw_turns": "ce0a94ecb2573a7313a69e911f5a5a9d20b22a569012bb22546537b1042d0b27",
+      "conversation_raw_turns": "a1c475b5c1c04fce3111f069c482498c0ce59cdd2b622be3a3d319eaf098685f",
       "conversation_revision_decisions": "f74558a9033a9f1b9e365367ac796dafca38ee875334fbf737eca79f55625f90",
       "conversation_revision_proposals": "96b521781307e149c665580b7ceea7f80e048c531b4437c2aa886bdb59d098ff",
       "conversation_steering_results": "52e70314ab1db0ee3039e2fe52add829115a3fad44ec3b722710e81165db634f",

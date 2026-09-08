@@ -127,6 +127,7 @@ export interface WorkSessionView {
 }
 
 export interface SteeringResult {
+  result_context?: PublicResultContext | null;
   result_id: string;
   task_id: string;
   turn_id: string;
@@ -358,6 +359,7 @@ export interface AgenticRuntimeInfo {
 }
 
 export interface WorkspaceMessage {
+  result_context?: PublicResultContext | null;
   message_id: string;
   version: 1;
   task_id: string;
@@ -469,7 +471,50 @@ export interface VerificationAttemptReceipt {
   task: WorkspaceTask;
 }
 
-export interface TablePreview {
+export interface ResultSelection {
+  revision: number;
+  output_id: string;
+  representation_sha256: string;
+  item_ref: string;
+}
+
+export interface ResultSourceRef {
+  artifact_id: string;
+  source_sha256: string;
+  snapshot_id?: string;
+  table_ref?: string;
+  row_number?: number;
+  element_id?: string;
+  page?: number;
+  bbox?: { x0: number; y0: number; x1: number; y1: number; coordinate_space: "pdf_points" | "image_pixels" | "normalized_1000" };
+  extractor?: string;
+  extractor_version?: string;
+  location?: { kind: "docx_paragraph"; paragraph: number } | { kind: "docx_table_row"; table: number; row: number } | { kind: "text_line"; line: number };
+  read_at?: string;
+}
+
+export interface PublicResultContext extends ResultSelection {
+  label: string;
+  source_refs: ResultSourceRef[];
+}
+
+export interface PreviewIdentity {
+  task_id?: string;
+  revision?: number;
+  run_id?: string | null;
+  delivery_id?: string | null;
+  output_id?: string | null;
+  representation?: {
+    kind: "output" | "derived_result";
+    sha256: string;
+    media_type: string;
+    associated_output_id: string | null;
+    lineage_available: boolean;
+  };
+  item_refs?: Array<string | null>;
+}
+
+export interface TablePreview extends PreviewIdentity {
   kind: "table";
   columns: string[];
   rows: Array<Record<string, unknown>>;
@@ -488,7 +533,7 @@ export interface DocumentPreviewItem {
   evidence_refs: Array<Record<string, unknown>>;
 }
 
-export interface WorkspaceDocumentPreview {
+export interface WorkspaceDocumentPreview extends PreviewIdentity {
   kind: "document";
   action: string;
   items: DocumentPreviewItem[];
@@ -499,6 +544,34 @@ export interface WorkspaceDocumentPreview {
 }
 
 export type WorkspacePreview = TablePreview | WorkspaceDocumentPreview;
+
+export interface WorkspaceSourcePreview {
+  task_id: string;
+  revision: number;
+  artifact_id: string;
+  upload_id: string | null;
+  sha256: string;
+  original_name: string;
+  media_type: string;
+  content_url: string | null;
+  representation: { kind: "source"; parser_or_inspector_version: string | null };
+  kind: "table" | "document" | "web";
+  location_status?: "not_requested" | "located" | "not_found" | "version_mismatch";
+  tables?: Array<{ table_ref: string; table_index: number; name: string; header_row: number }>;
+  selected_table_ref?: string;
+  columns?: string[];
+  rows?: Array<{ row_number: number; values: Record<string, unknown> }>;
+  elements?: Array<{ element_id: string; artifact_id: string; page: number; element_type: string; text: string | null; extractor: string; extractor_version: string; location?: ResultSourceRef["location"] }>;
+  offset?: number;
+  limit?: number;
+  total?: number | null;
+  is_complete: boolean;
+  page_count?: number;
+  text_preview?: string;
+  read_at?: string;
+  snapshot_id?: string;
+  truncated?: boolean;
+}
 
 export interface WorkspaceGuidance {
   schema_version: string;

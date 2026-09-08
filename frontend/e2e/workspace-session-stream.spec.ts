@@ -232,3 +232,32 @@ for (const theme of ["light", "dark"] as const) {
   });
   }
 }
+
+test("完整回答SSE引用重放一次且仅保留公开来源白名单", async ({ page }) => {
+  await page.route("**/workspace-stream-harness", route => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>结果引用协议</title>" }));
+  await page.goto("/workspace-stream-harness");
+  const context = { revision: 1, output_id: "frozen-output", representation_sha256: "a".repeat(64), item_ref: `item_${"b".repeat(64)}`, label: "本次输入的结果",
+    source_refs: [{ artifact_id: "source-a", source_sha256: "c".repeat(64), table_ref: "sheet-a", row_number: 132, quote: "不应公开", metadata: { internal: true }, values: { private: "不可显示" } }], raw_result_ref: "不应公开" };
+  const result = await page.evaluate(async ({ message, context }) => {
+    const auth = await import("/src/lib/api.ts");
+    const workspace = await import("/src/lib/semanticWorkspaceApi.ts");
+    window.fetch = async () => Response.json({ user_id: "synthetic-owner", username: "测试", role: "user" });
+    await auth.bootstrapSession();
+    const seen: unknown[] = [];
+    let subscriptions = 0;
+    let finish!: () => void;
+    const done = new Promise<void>(resolve => { finish = resolve; });
+    const event = (type: string, payload: unknown) => `event: ${type}\ndata: ${JSON.stringify(payload)}\n\n`;
+    window.fetch = async () => {
+      subscriptions++;
+      return new Response(event("message", { ...message, result_context: context }) + (subscriptions === 1 ? "" : event("message", { ...message, message_id: "free-answer", content: "普通自由回答", result_context: null }) + event("done", { task_id: message.task_id, revision: 1, run_id: "run-1", status: "completed" })), { headers: { "Content-Type": "text/event-stream" } });
+    };
+    const stop = workspace.streamWorkspaceTask(message.task_id, { onMessage: item => seen.push(item.result_context), onDone: finish }, 1, "run-1");
+    await done; stop();
+    return { seen, subscriptions, malformed: workspace.readPublicResultContext({ ...context, source_refs: [{ artifact_id: "missing-hash" }] }) };
+  }, { message: answer, context });
+  expect(result.subscriptions).toBe(2);
+  expect(result.seen).toEqual([{ revision: 1, output_id: "frozen-output", representation_sha256: context.representation_sha256, item_ref: context.item_ref, label: context.label,
+    source_refs: [{ artifact_id: "source-a", source_sha256: "c".repeat(64), table_ref: "sheet-a", row_number: 132 }] }, null]);
+  expect(result.malformed).toBeNull();
+});

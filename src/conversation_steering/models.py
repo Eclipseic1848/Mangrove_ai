@@ -125,6 +125,28 @@ class AcquisitionRun(BaseModel):
     pack_ref: str | None = None
 
 
+class ResultSelection(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    revision: int = Field(ge=1)
+    output_id: str = Field(min_length=1, max_length=160)
+    representation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    item_ref: str = Field(pattern=r"^item_[0-9a-f]{64}$")
+
+
+class PublicResultContext(ResultSelection):
+    """本回合实际选用的结果和来源，不代表逐句验证。"""
+
+    label: str = Field(min_length=1, max_length=200)
+    source_refs: tuple[dict[str, Any], ...] = ()
+
+
+class FrozenResultContext(PublicResultContext):
+    """服务端验证并与用户原话原子冻结的有界模型输入。"""
+
+    content: str = Field(min_length=1, max_length=20_000)
+
+
 class RawUserTurn(BaseModel):
     """用户原话是权威输入，转写不得覆盖。"""
 
@@ -136,6 +158,7 @@ class RawUserTurn(BaseModel):
     revision: int = Field(ge=1)
     text: str = Field(min_length=1, max_length=20_000)
     idempotency_key: str | None = Field(default=None, max_length=200)
+    result_context: FrozenResultContext | None = None
     created_at: datetime = Field(default_factory=_now)
 
 
@@ -204,6 +227,7 @@ class SteeringRequest(BaseModel):
     model_connection_id: str | None = None
     model_connection_version: str | None = None
     external_api_confirmed: bool = False
+    result_context: FrozenResultContext | None = None
 
 
 class SteeringResult(BaseModel):
@@ -220,6 +244,7 @@ class SteeringResult(BaseModel):
     proposal_id: str | None = None
     run_id: str | None = None
     revision: int = Field(ge=1)
+    result_context: PublicResultContext | None = None
     created_at: datetime = Field(default_factory=_now)
 
 

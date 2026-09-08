@@ -241,6 +241,15 @@ def test_alembic_environment_is_not_hidden_by_local_env_ignore_rule() -> None:
     assert tracked.returncode == 0
 
 
+def test_unified_workspace_gate_includes_canvas_migration_and_existing_siblings() -> None:
+    workflow = (PROJECT_ROOT / ".github/workflows/ci-heavy.yml").read_text(encoding="utf-8")
+    selected = workflow.split('elif [[ "${{ inputs.gate }}" == "unified-workspace" ]]; then', 1)[1].split("elif", 1)[0]
+    for name in ("test_workspace_canvas.py", "test_workspace_canvas_migration.py", "test_semantic_table_execution.py", "test_semantic_delivery.py", "test_database_migrations.py", "test_database_migrations_components.py", "test_runtime_config_secret_refs.py", "test_workspace_conversation_stream.py"):
+        assert f"tests/{name}" in selected
+    assert "--randomly-seed=0 --timeout=120" in selected
+    assert "data/webui.db" not in selected
+
+
 def test_heavy_ci_is_manual_only_and_never_receives_secrets() -> None:
     workflow = (PROJECT_ROOT / ".github/workflows/ci-heavy.yml").read_text(
         encoding="utf-8"
