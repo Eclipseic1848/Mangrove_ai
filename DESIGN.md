@@ -1,7 +1,7 @@
 ---
 version: 1
 name: "Mangrove"
-description: "面向数据任务的可信工作台，以红树林青和证据接收单表达可追溯、克制而可靠的操作感。"
+description: "面向数据任务的对话工作台，以红树林青和按需文件侧览表达可追溯、克制而可靠的操作感。"
 colors:
   primary: "#0E7C6F"
   accent: "#E5FAF8"
@@ -36,8 +36,8 @@ components:
 
 ### Creative North Star
 
-Mangrove 像一张清楚填写、逐项盖章的资料接收单：用户先看见来源、范围和用途，再看到读取时间、
-内容摘要与结果。表达来自可核验的工作痕迹，而不是装饰性插画、渐变或成排仪表盘卡片。
+Mangrove 以同一任务的连续对话组织要求、澄清和反馈。文件与正式结果在需要时展开侧览，
+对话和输入同列收窄；来源、范围与证据仍可核对。采用已认可 #124 原型方向，不增加第二套执行系统。
 
 ### Product context and register
 
@@ -46,9 +46,9 @@ Mangrove 像一张清楚填写、逐项盖章的资料接收单：用户先看�
 - **Locale(s) and language policy：** 产品界面使用简体中文；技术身份、网址、摘要和格式名保留原文。
 - **Usage scene：** 桌面端承担高密度资料核对；窄屏仍必须能完成来源输入、状态查看与恢复。
 - **Register：** 工作台优先，品牌表达只用于主色、标识和少量关键状态。
-- **Memorable signature：** 来源接收单把“允许范围—用途—冻结证据”组成一条连续阅读节奏。
+- **Memorable signature：** 同一任务对话旁展开真实文件，保留“允许范围—用途—冻结证据”。
 - **Restraint：** 表单、任务状态、失败恢复和正式交付遵循熟悉控件，不追求新奇交互。
-- **Anti-references：** 不做通用 SaaS 卡片墙、AI 落地页、彩虹渐变或全屏 conversation-first 布局。
+- **Anti-references：** 不做卡片墙、装饰渐变、双层常驻导航或没有真实能力的演示控件。
 - **Token ownership/runtime mapping：** 本文件镜像而不生成运行时 Token；权威实现位于
   `frontend/src/index.css` 的 HSL 变量，并由 Tailwind 配置和 `frontend/src/components/ui/` 消费。
 
@@ -65,9 +65,13 @@ Mangrove 像一张清楚填写、逐项盖章的资料接收单：用户先看�
 
 ## Layout
 
-主工作台内容最大宽度沿用现有 `max-w-5xl`，关键输入收敛到 `max-w-3xl`。来源、用途、范围、状态
-和预览按纵向证据顺序排列。桌面保留全局导航与任务侧栏；`/data-prep` 在小于 `md` 时隐藏两层
-侧栏，使当前任务内容占满视口。三列引导与示例在窄屏变为单列。异步切换不得改变主要按钮宽度。
+主工作台 `/data-prep` 使用一层可收起任务列表；全局导航按需打开，旧版对话与 Legacy 入口保留。
+同列对话与输入使用 `max-w-3xl` / `max-w-4xl` 阅读宽度；原件与正式结果复用既有预览组件，
+由 react-resizable-panels 承担分隔条与键盘调整。模型选择常驻输入旁，配置原位打开，返回保留草稿。
+窄屏同一时刻显示对话或文件；后台结果不抢正在输入的焦点。导航抽屉复用 Radix Dialog，关闭归还焦点。
+新建与追问均 Enter 发送、Shift+Enter 换行，中文输入法组合态不触发发送；长输入自动增高后内部滚动。
+桌面预览支持展开与恢复分栏，展开期间保持对话挂载及草稿。
+异步状态仍保留成功、未知、拒绝和恢复的区别；界面改变不授权修改模型、来源或正式交付的冻结身份。
 
 ## Elevation & Depth
 
@@ -94,7 +98,7 @@ Lucide Loader，且在 `prefers-reduced-motion` 下停止旋转。成功、失�
 
 ### Navigation and data display
 
-来源类型使用原生 radio 语义配合可见标签；当前选择用浅青底和主色文字表达。任务列表保持现有
+统一输入通过附件和明确网址承接来源；精确范围确认沿用既有表单，不在主入口增加来源互斥开关。任务列表保持现有
 侧栏所有权。来源元数据用 definition list，正文预览使用 article，不把事实拆成卡片网格。
 
 ### Forms and overlays

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import hashlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 import io
@@ -24,7 +25,12 @@ import src.api.auth as auth_mod
 import src.api.semantic_workspace_runtime as runtime_mod
 from src.semantic_harness.delivery import service as delivery_service
 from src.api.auth import get_current_user, get_store
-from src.api.routes import semantic_plans, semantic_workspace
+from src.api.routes import (
+    data_sources,
+    semantic_deliveries,
+    semantic_plans,
+    semantic_workspace,
+)
 from src.api.semantic_workspace_runtime import SemanticWorkspaceManager
 from src.api.store import WebUIStore
 from src.config.settings import settings
@@ -193,6 +199,8 @@ def _client(tmp_path, monkeypatch, *, generator=None):
             await manager.stop()
 
     app = FastAPI(lifespan=lifespan)
+    app.include_router(data_sources.router)
+    app.include_router(semantic_deliveries.router)
     app.include_router(semantic_workspace.router)
     app.dependency_overrides[get_current_user] = lambda: {
         "user_id": current_user["value"], "execution_generation": 0
@@ -762,10 +770,6 @@ def test_workspace_completes_four_real_file_delivery_loops(
         / "public"
         / "batch0"
     )
-    upload_store = UploadStore(
-        root=str(tmp_path / "uploads"),
-        max_bytes=10 * 1024 * 1024,
-    )
     scenarios = (
         (
             "documents/contract.docx",
@@ -793,28 +797,28 @@ def test_workspace_completes_four_real_file_delivery_loops(
         outputs: dict[str, bytes] = {}
         for relative_path, objective, formats in scenarios:
             fixture = fixture_root / relative_path
-            uploaded = upload_store.save_bytes(
-                "user-a",
-                fixture.name,
-                fixture.read_bytes(),
-                media_type={
-                    ".docx": (
-                        "application/vnd.openxmlformats-officedocument."
-                        "wordprocessingml.document"
-                    ),
-                    ".pdf": "application/pdf",
-                    ".xlsx": (
-                        "application/vnd.openxmlformats-officedocument."
-                        "spreadsheetml.sheet"
-                    ),
-                    ".csv": "text/csv",
-                }[fixture.suffix],
+            media_type = {
+                ".docx": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "wordprocessingml.document"
+                ),
+                ".pdf": "application/pdf",
+                ".xlsx": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                ".csv": "text/csv",
+            }[fixture.suffix]
+            uploaded = client.post(
+                "/api/data-sources/uploads",
+                files={"file": (fixture.name, fixture.read_bytes(), media_type)},
             )
+            assert uploaded.status_code == 200, uploaded.text
             created = client.post(
                 "/api/semantic-workspace/tasks",
                 json={
                     "objective_text": objective,
-                    "upload_ids": [uploaded.upload_id],
+                    "upload_ids": [uploaded.json()["upload_id"]],
                     "output_formats": formats,
                     "provider": "local",
                     "model": "batch8a-file-scenarios",
@@ -855,6 +859,24 @@ def test_workspace_completes_four_real_file_delivery_loops(
                 item["qa"]["openable"]
                 for item in completed["delivery"]["outputs"]
             )
+            for output in completed["delivery"]["outputs"]:
+                assert output["output_id"]
+                registered = get_store().get_semantic_delivery_output(
+                    "user-a", output["output_id"]
+                )
+                assert registered is not None
+                downloaded = client.get(output["download_url"])
+                assert downloaded.status_code == 200, downloaded.text
+                assert (
+                    len(downloaded.content)
+                    == registered["size_bytes"]
+                    == output["size_bytes"]
+                )
+                assert (
+                    hashlib.sha256(downloaded.content).hexdigest()
+                    == registered["sha256"]
+                    == output["sha256"]
+                )
             bundle = client.get(
                 f"/api/semantic-workspace/tasks/{completed['task_id']}/bundle"
             )

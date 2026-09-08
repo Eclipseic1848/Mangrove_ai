@@ -50,12 +50,16 @@ export function SourcePreviewPanel({
   evidence,
   onSelectUpload,
   onClose,
+  expanded = false,
+  onToggleExpand,
 }: {
   uploads: UploadItem[];
   selectedUploadId: string | null;
   evidence: Record<string, unknown> | null;
   onSelectUpload: (uploadId: string) => void;
   onClose: () => void;
+  expanded?: boolean;
+  onToggleExpand?: () => void;
 }) {
   const selected =
     uploads.find((upload) => upload.upload_id === selectedUploadId)
@@ -188,6 +192,7 @@ export function SourcePreviewPanel({
     <div className="flex h-full min-h-0 flex-col bg-muted/20">
       <div className="flex h-12 shrink-0 items-center gap-2 border-b bg-background px-3">
         <select
+          aria-label="预览文件"
           value={selected.upload_id}
           onChange={(event) => onSelectUpload(event.target.value)}
           className="min-w-0 flex-1 truncate rounded-lg border bg-background px-2 py-1.5 text-xs"
@@ -239,6 +244,7 @@ export function SourcePreviewPanel({
             </button>
           </>
         )}
+        {onToggleExpand && <button type="button" className="shrink-0 rounded-lg border px-2 py-1 text-xs hover:bg-muted" aria-expanded={expanded} onClick={onToggleExpand}>{expanded ? "恢复分栏" : "展开预览"}</button>}
         <button
           type="button"
           onClick={onClose}

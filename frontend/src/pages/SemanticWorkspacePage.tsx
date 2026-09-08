@@ -6,9 +6,7 @@ import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import {
-  BookOpen,
   ArrowLeft,
-  ChevronDown,
   FileSearch,
   HelpCircle,
   LayoutTemplate,
@@ -22,7 +20,8 @@ import {
 import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { isAdminish, useAuth } from "@/lib/auth";
-import { TaskComposer } from "@/components/workspace/TaskComposer";
+import { ModelConnectionsPanel } from "@/pages/settings/ModelConnectionsPanel";
+import { TaskComposer, type WebIntakeDraft } from "@/components/workspace/TaskComposer";
 import {
   CandidatePreview,
   ResultPreview,
@@ -65,7 +64,6 @@ import type {
   WorkspaceTask,
 } from "@/types/semanticWorkspace";
 
-const ONBOARDING_KEY = "mangrove_workspace_onboarding_complete";
 type ModelOption = { provider: string; model: string; label: string };
 type ModelsResponse = {
   options: ModelOption[];
@@ -107,8 +105,10 @@ function FollowupComposer({
   task,
   onSubmit,
   onDecision,
+  pendingResults,
 }: {
   task: WorkspaceTask;
+  pendingResults: SteeringResult[];
   onSubmit: (text: string, idempotencyKey: string) => Promise<SteeringResult>;
   onDecision: (
     proposalId: string,
@@ -117,44 +117,62 @@ function FollowupComposer({
   ) => Promise<void>;
 }) {
   const [text, setText] = useState("");
-  const [result, setResult] = useState<SteeringResult | null>(null);
-  const [externalConfirmed, setExternalConfirmed] = useState(false);
+  const inFlight = useRef(false);
+  const [confirmedProposal, setConfirmedProposal] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const usesExternalConnection = Boolean(task.model_connection_id);
   useEffect(() => {
     setText("");
-    setResult(null);
-    setExternalConfirmed(false);
+    setConfirmedProposal(null);
   }, [task.task_id]);
   const submit = async () => {
-    if (!text.trim() || busy) return;
+    if (!text.trim() || inFlight.current) return;
+    const submitted = text;
+    inFlight.current = true;
     setBusy(true);
     try {
-      const next = await onSubmit(text.trim(), nanoid());
-      setResult(next);
-      setText("");
+      await onSubmit(submitted.trim(), nanoid());
+      setText(current => current === submitted ? "" : current);
+    } catch {
+      // 父级展示请求错误；失败保留原稿，不自动重复发送。
     } finally {
+      inFlight.current = false;
+      setBusy(false);
+    }
+  };
+  const decide = async (proposalId: string, mode: "cancel_now" | "after_safe_point" | "new_task") => {
+    if (inFlight.current) return;
+    inFlight.current = true;
+    setBusy(true);
+    try {
+      await onDecision(proposalId, mode, confirmedProposal === proposalId);
+      setConfirmedProposal(null);
+    } catch {
+      // 父级保留服务端错误，用户可核对状态后重新决定。
+    } finally {
+      inFlight.current = false;
       setBusy(false);
     }
   };
   return (
     <div className="rounded-2xl border bg-background p-3 shadow-[0_14px_45px_-32px_hsl(var(--primary)/0.7)]">
       <textarea
+        aria-label="继续对话"
         value={text}
         onChange={(event) => setText(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+          if (!event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
             void submit();
           }
         }}
         rows={2}
         placeholder="可询问进度和原因，也可提出修改；系统会先说明是否影响当前任务"
-        className="w-full resize-none bg-transparent px-1 text-sm leading-6 outline-none placeholder:text-muted-foreground/70"
+        className="w-full min-h-16 max-h-40 [field-sizing:content] resize-none overflow-y-auto bg-transparent px-1 text-sm leading-6 outline-none placeholder:text-muted-foreground/70"
       />
       <div className="mt-2 flex items-center gap-3 border-t pt-2">
         <span className="text-[11px] text-muted-foreground">
-          Ctrl + Enter 发送
+          Enter 发送 · Shift + Enter 换行
         </span>
         <button
           type="button"
@@ -165,23 +183,21 @@ function FollowupComposer({
           {busy ? "正在理解" : "发送"}
         </button>
       </div>
-      {result && (
+      {pendingResults.map(result => (
         <div
+          key={result.result_id}
           aria-live="polite"
           className="mt-3 rounded-xl border bg-muted/25 px-3 py-2 text-xs leading-5"
         >
-          <p className="font-medium">{result.acknowledgement}</p>
-          {result.answer && (
-            <p className="mt-1 text-muted-foreground">{result.answer}</p>
-          )}
+          <p className="font-medium">待确认修改</p>
           {result.action === "revision_proposal" && result.proposal_id && (
             <div className="mt-3">
               {usesExternalConnection && (
                 <label className="mb-3 flex items-start gap-2 rounded-lg border bg-background p-2.5 text-muted-foreground">
                   <input
                     type="checkbox"
-                    checked={externalConfirmed}
-                    onChange={(event) => setExternalConfirmed(event.target.checked)}
+                    checked={confirmedProposal === result.proposal_id}
+                    onChange={(event) => setConfirmedProposal(event.target.checked ? result.proposal_id : null)}
                     className="mt-0.5"
                   />
                   <span>我确认新版本或独立任务仍会把当前任务范围内的数据发送到已选外部模型连接。</span>
@@ -190,24 +206,24 @@ function FollowupComposer({
               <div className="flex flex-wrap gap-2">
               <button
                 type="button"
-                disabled={usesExternalConnection && !externalConfirmed}
-                onClick={() => void onDecision(result.proposal_id!, "after_safe_point", externalConfirmed)}
+                disabled={busy || (usesExternalConnection && confirmedProposal !== result.proposal_id)}
+                onClick={() => void decide(result.proposal_id!, "after_safe_point")}
                 className="rounded-lg bg-primary px-3 py-2 font-medium text-primary-foreground"
               >
                 当前步骤结束后切换
               </button>
               <button
                 type="button"
-                disabled={usesExternalConnection && !externalConfirmed}
-                onClick={() => void onDecision(result.proposal_id!, "cancel_now", externalConfirmed)}
+                disabled={busy || (usesExternalConnection && confirmedProposal !== result.proposal_id)}
+                onClick={() => void decide(result.proposal_id!, "cancel_now")}
                 className="rounded-lg border px-3 py-2 font-medium hover:bg-muted"
               >
                 立即停止并切换
               </button>
               <button
                 type="button"
-                disabled={usesExternalConnection && !externalConfirmed}
-                onClick={() => void onDecision(result.proposal_id!, "new_task", externalConfirmed)}
+                disabled={busy || (usesExternalConnection && confirmedProposal !== result.proposal_id)}
+                onClick={() => void decide(result.proposal_id!, "new_task")}
                 className="rounded-lg border px-3 py-2 font-medium hover:bg-muted"
               >
                 作为独立任务
@@ -216,7 +232,7 @@ function FollowupComposer({
             </div>
           )}
         </div>
-      )}
+      ))}
     </div>
   );
 }
@@ -256,7 +272,7 @@ function GuidanceDialog({
               <X className="h-4 w-4" />
             </Dialog.Close>
           </div>
-          <div className="grid min-h-0 flex-1 grid-cols-[260px_1fr]">
+          <div className="grid min-h-0 flex-1 overflow-y-auto md:grid-cols-[260px_1fr]">
             <aside className="border-r bg-muted/20 p-5">
               <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                 三步开始
@@ -363,7 +379,7 @@ export function SemanticWorkspacePage() {
     else next.delete("task");
     next.delete("revision");
     selectionParams.current = next;
-    setSearchParams(next, { replace: true });
+    setSearchParams(next);
   };
   const setSelectedRevision = (value: number | null) => {
     const current = selectionParams.current;
@@ -373,15 +389,31 @@ export function SemanticWorkspacePage() {
     if (value === null) next.delete("revision");
     else next.set("revision", String(value));
     selectionParams.current = next;
-    setSearchParams(next, { replace: true });
+    setSearchParams(next);
   };
-  const [showNewTask, setNewTask] = useState(!selectedTaskId);
-  const newTask = !selectedTaskId && showNewTask;
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [navigationOpen, setNavigationOpen] = useState(() => window.innerWidth >= 1024);
+  const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 767px)").matches);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 767px)");
+    const update = () => { setNarrow(media.matches); if (media.matches) setNavigationOpen(false); };
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  const [webPrompt, setWebPrompt] = useState<WebIntakeDraft | null>(null);
+  const [composerDraft, setComposerDraft] = useState<WebIntakeDraft | null>(null);
+  const [webOpen, setWebOpen] = useState(false);
   const [filter, setFilter] = useState<
     "all" | "active" | "needs_input" | "completed"
   >("all");
   const [recycleBin, setRecycleBin] = useState(false);
+  const newTask = !selectedTaskId && !recycleBin;
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [inspectorExpanded, setInspectorExpanded] = useState(false);
+  const fullInspector = narrow || inspectorExpanded;
+  const [inspectorKind, setInspectorKind] = useState<"source" | "result">("source");
+  const previewedDraft = useRef(false);
+  const previewedResults = useRef(new Set<string>());
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
   const [taskSourceSelection, setTaskSourceSelection] = useState<{
     resultIdentity: string;
@@ -389,7 +421,7 @@ export function SemanticWorkspacePage() {
     evidence: Record<string, unknown> | null;
   } | null>(null);
   const [draftUploads, setDraftUploads] = useState<UploadItem[]>([]);
-  const [sourceMode, setSourceMode] = useState<"file" | "web">("file");
+
   const [liveEvents, setLiveEvents] = useState<WorkspaceEvent[]>([]);
   const [helpOpen, setHelpOpen] = useState(false);
   const [exampleSeed, setExampleSeed] = useState<{
@@ -397,9 +429,7 @@ export function SemanticWorkspacePage() {
     prompt: string;
     formats: string[];
   } | null>(null);
-  const [showOnboarding, setShowOnboarding] = useState(
-    () => localStorage.getItem(ONBOARDING_KEY) !== "1",
-  );
+
 
   const tasks = useQuery({
     queryKey: ["semantic-workspace-tasks", recycleBin],
@@ -460,6 +490,15 @@ export function SemanticWorkspacePage() {
         : false;
     },
   });
+  const conversation = useQuery<{
+    turns: Array<{ turn_id: string; text: string; revision: number }>;
+    results: SteeringResult[];
+    proposals: Array<{ proposal_id: string; base_revision: number; status: string }>;
+  }>({
+    queryKey: ["workspace-turns", user?.user_id, selectedTaskId, detail.data?.current_revision],
+    queryFn: () => api.get(`/api/semantic-workspace/tasks/${encodeURIComponent(selectedTaskId!)}/turns`),
+    enabled: Boolean(selectedTaskId && detail.data),
+  });
   const task = detail.data;
   const accountResumeKey = JSON.stringify([user?.user_id, task?.task_id, task?.current_revision ?? task?.active_revision, task?.account_resume?.generation]);
   const accountResumeFeedback = accountResumeError?.key === accountResumeKey ? accountResumeError : null;
@@ -506,6 +545,14 @@ export function SemanticWorkspacePage() {
   const taskUploadId = sourceSelection?.uploadId ?? task?.upload_ids[0] ?? null;
 
   useEffect(() => {
+    if (!task?.delivery || task.status !== "completed" || previewedResults.current.has(resultIdentity)) return;
+    previewedResults.current.add(resultIdentity);
+    if (inspectorOpen || document.activeElement?.tagName === "TEXTAREA") return;
+    setInspectorKind("result");
+    setInspectorOpen(true);
+  }, [resultIdentity, task?.status, task?.delivery, inspectorOpen]);
+
+  useEffect(() => {
     if (!selectedTaskId || !task) return;
     if (!["queued", "running", "cancelling"].includes(task.status)) return;
     return streamWorkspaceTask(selectedTaskId, {
@@ -537,19 +584,17 @@ export function SemanticWorkspacePage() {
     });
   }, [queryClient, selectedTaskId, task?.status]);
 
-  useEffect(() => {
-    if (task?.status === "completed" && showOnboarding) {
-      localStorage.setItem(ONBOARDING_KEY, "1");
-      setShowOnboarding(false);
-    }
-  }, [showOnboarding, task?.status]);
+
 
   const useExample = (example: WorkspaceGuidance["examples"][number]) => {
-    setNewTask(true);
+
     setSelectedTaskId(null);
     setDraftUploads([]);
     setSelectedUploadId(null);
     setInspectorOpen(false);
+    setComposerDraft(null);
+    setWebPrompt(null);
+    setWebOpen(false);
     setExampleSeed({
       key: `${example.id}:${Date.now()}`,
       prompt: example.prompt,
@@ -560,11 +605,17 @@ export function SemanticWorkspacePage() {
   const handleDraftUploadsChange = useCallback((uploads: UploadItem[]) => {
     setDraftUploads(uploads);
     if (!uploads.length) {
+      previewedDraft.current = false;
       setSelectedUploadId(null);
       setInspectorOpen(false);
       return;
     }
-    setInspectorOpen(true);
+    if (!previewedDraft.current) {
+      previewedDraft.current = true;
+      // 上传返回不能切走用户正在输入的内容；预览入口仍常驻。
+      if (document.activeElement?.tagName !== "TEXTAREA") setInspectorOpen(true);
+      setInspectorKind("source");
+    }
     setSelectedUploadId((current) =>
       current && uploads.some((upload) => upload.upload_id === current)
         ? current
@@ -618,7 +669,7 @@ export function SemanticWorkspacePage() {
       );
       createAttemptRef.current = null;
       setSelectedTaskId(created.task_id);
-      setNewTask(false);
+
       setRecycleBin(false);
       setLiveEvents([]);
       await queryClient.invalidateQueries({
@@ -630,6 +681,50 @@ export function SemanticWorkspacePage() {
     }
   };
 
+  const taskNavigation = (
+          <WorkspaceTaskSidebar
+          tasks={tasks.data || []}
+          activeTaskId={selectedTaskId}
+          filter={filter}
+          recycleBin={recycleBin}
+          storage={storage.data}
+          onSelect={(taskId) => {
+            if (narrow) setNavigationOpen(false);
+            setSelectedTaskId(taskId);
+
+            setLiveEvents([]);
+          }}
+          onFilter={(nextFilter) => {
+            setRecycleBin(false);
+            setFilter(nextFilter);
+          }}
+          onNew={() => {
+            setComposerDraft(null);
+            setWebPrompt(null);
+            setWebOpen(false);
+            setExampleSeed(null);
+            if (narrow) setNavigationOpen(false);
+            setRecycleBin(false);
+            setSelectedTaskId(null);
+            setDraftUploads([]);
+            setSelectedUploadId(null);
+            setInspectorOpen(false);
+
+          }}
+          onToggleRecycleBin={() => {
+            setRecycleBin((value) => !value);
+            setSelectedTaskId(null);
+
+          }}
+          />
+  );
+
+  const closeInspector = () => {
+    setInspectorOpen(false);
+    setInspectorExpanded(false);
+    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务要求"], textarea[aria-label="继续对话"]')?.focus());
+  };
+
   const viewSource = (evidence: Record<string, unknown>) => {
     const artifactId = String(evidence.artifact_id || "");
     setTaskSourceSelection({
@@ -637,41 +732,32 @@ export function SemanticWorkspacePage() {
       uploadId: artifactId && task?.upload_ids.includes(artifactId) ? artifactId : taskUploadId,
       evidence,
     });
+    setInspectorKind("source");
     setInspectorOpen(true);
   };
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <header className="flex h-14 shrink-0 items-center justify-between border-b bg-background px-5">
+      <header className="flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-background px-3 py-2">
         <div>
-          <h1 className="text-sm font-semibold">数据工作台</h1>
+          <h1 className="text-sm font-semibold">任务工作台</h1>
           <p className="text-[11px] text-muted-foreground">
             表格与文档的理解、执行、验证和正式交付
           </p>
         </div>
         <div className="flex items-center gap-2">
-          {selectedTaskId && !newTask ? (
-            <button
-              type="button"
-              onClick={() => {
-                setSelectedTaskId(null);
-              }}
-              className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted md:hidden"
-            >
-              <ArrowLeft className="h-3.5 w-3.5" />
-              任务列表
-            </button>
-          ) : null}
+          <button type="button" aria-label="任务列表开关" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(value => !value)} className="rounded-lg border px-3 py-2 text-xs hover:bg-muted">任务列表</button>
           {(newTask ? draftUploads.length > 0 : Boolean(task?.uploads?.length)) ? (
             <button
               type="button"
-              onClick={() => setInspectorOpen((value) => !value)}
+              onClick={() => { setInspectorKind("source"); setInspectorOpen(value => inspectorKind !== "source" || !value); }}
               className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted"
             >
               <FileSearch className="h-3.5 w-3.5" />
               原文件预览
             </button>
           ) : null}
+          {task?.delivery && !newTask && <button type="button" className="rounded-lg border px-3 py-2 text-xs hover:bg-muted" onClick={() => { setInspectorKind("result"); setInspectorOpen(true); }}>查看结果</button>}
           <button
             type="button"
             onClick={() => setHelpOpen(true)}
@@ -690,51 +776,47 @@ export function SemanticWorkspacePage() {
         onUseExample={useExample}
       />
 
-      <div className="flex min-h-0 flex-1">
-        <div className={cn(
-          "shrink-0",
-          selectedTaskId && !newTask && "max-md:hidden",
-        )}>
-          <WorkspaceTaskSidebar
-          tasks={tasks.data || []}
-          activeTaskId={selectedTaskId}
-          filter={filter}
-          recycleBin={recycleBin}
-          storage={storage.data}
-          onSelect={(taskId) => {
-            setSelectedTaskId(taskId);
-            setNewTask(false);
-            setLiveEvents([]);
-          }}
-          onFilter={(nextFilter) => {
-            setRecycleBin(false);
-            setFilter(nextFilter);
-          }}
-          onNew={() => {
-            setRecycleBin(false);
-            setSelectedTaskId(null);
-            setDraftUploads([]);
-            setSelectedUploadId(null);
-            setInspectorOpen(false);
-            setNewTask(true);
-          }}
-          onToggleRecycleBin={() => {
-            setRecycleBin((value) => !value);
-            setSelectedTaskId(null);
-            setNewTask(false);
-          }}
-          />
-        </div>
+      {settingsOpen && (
+        <section className="min-h-0 flex-1 overflow-y-auto p-4" aria-label="模型设置">
+          <div className="mx-auto max-w-4xl">
+            <h2 className="text-lg font-semibold">模型设置</h2>
+            <button type="button" autoFocus className="my-3 rounded-lg border px-3 py-2 text-sm hover:bg-muted" onClick={() => {
+              setSettingsOpen(false);
+              void queryClient.invalidateQueries({ queryKey: ["model-connections"] });
+              void queryClient.invalidateQueries({ queryKey: ["model-connection-preference"] });
+              requestAnimationFrame(() => document.querySelector<HTMLElement>(task ? '[aria-label="继续对话"]' : webOpen ? '#web-task-objective, #web-source-url' : '[data-testid="workspace-model-picker"] button')?.focus());
+            }}>返回当前任务</button>
+            <ModelConnectionsPanel isManager={isAdminish(user?.role)} />
+          </div>
+        </section>
+      )}
+      <div className={cn("relative flex min-h-0 flex-1", settingsOpen && "hidden")}>
+
+        {narrow ? (
+          <Dialog.Root open={navigationOpen} onOpenChange={setNavigationOpen}>
+            <Dialog.Portal>
+              <Dialog.Overlay className="fixed inset-0 z-40 bg-foreground/20" />
+              <Dialog.Content aria-describedby={undefined} className="fixed inset-y-0 left-0 z-50 max-w-[90vw] bg-background" onCloseAutoFocus={event => {
+                event.preventDefault();
+                document.querySelector<HTMLButtonElement>('[aria-label="任务列表开关"]')?.focus();
+              }}>
+                <Dialog.Title className="sr-only">任务列表</Dialog.Title>
+                {taskNavigation}
+              </Dialog.Content>
+            </Dialog.Portal>
+          </Dialog.Root>
+        ) : navigationOpen && taskNavigation}
 
         <div className="min-w-0 flex-1">
           {newTask ? (
-            <div className="flex h-full min-h-0">
-              <div className="min-w-0 flex-1 overflow-y-auto">
+            <Group orientation="horizontal" className="h-full min-h-0" defaultLayout={{ draft: 58, preview: 42 }}>
+              <Panel id="draft" minSize="0px" className={cn("min-w-0", fullInspector && inspectorOpen && draftUploads.length > 0 && "hidden")}>
+              <div className="h-full overflow-y-auto">
                 <div
                   className={cn(
                     "mx-auto max-w-5xl",
                     draftUploads.length
-                      ? "px-4 pb-8 pt-6"
+                      ? "px-3 pb-4 pt-2"
                       : "px-4 pb-12 pt-8 sm:px-8 sm:pt-14",
                   )}
                 >
@@ -748,49 +830,16 @@ export function SemanticWorkspacePage() {
                         想处理什么资料？
                       </h2>
                       <p className="mt-2 text-sm text-muted-foreground">
-                        添加文件并说明目标，明确任务会直接执行；只有结果含义不明确时才会询问。
+                        描述想得到的结果，添加文件或提供具体公开网址。
                       </p>
                     </div>
 
-                    {showOnboarding && guidance.data && (
-                      <div className="mx-auto mt-8 max-w-3xl rounded-2xl border bg-muted/20 p-4">
-                        <div className="flex items-center justify-between">
-                          <span className="flex items-center gap-2 text-sm font-medium">
-                            <BookOpen className="h-4 w-4 text-primary" />
-                            三步完成第一个任务
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => setShowOnboarding(false)}
-                            className="rounded p-1 text-muted-foreground hover:bg-muted"
-                            aria-label="收起新手引导"
-                          >
-                            <ChevronDown className="h-4 w-4" />
-                          </button>
-                        </div>
-                        <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
-                          {guidance.data.onboarding.map((item, index) => (
-                            <div key={item.title} className="flex gap-2">
-                              <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[10px] font-semibold text-primary">
-                                {index + 1}
-                              </span>
-                              <div>
-                                <p className="text-xs font-medium">{item.title}</p>
-                                <p className="mt-1 text-[11px] leading-5 text-muted-foreground">
-                                  {item.description}
-                                </p>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
                   </>
                 ) : (
-                  <div className="mx-auto mb-4 max-w-3xl">
+                  <div className="mx-auto mb-2 hidden max-w-3xl md:block">
                     <h2 className="text-lg font-semibold">核对文件并说明目标</h2>
                     <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                      原文件已在右侧显示。确认内容无误后，用一句话说明要筛选、汇总或提取什么。
+                      文件已添加，可打开预览核对内容，再说明要筛选、汇总或提取什么。
                     </p>
                   </div>
                 )}
@@ -801,40 +850,20 @@ export function SemanticWorkspacePage() {
                     draftUploads.length === 0 && "mt-6",
                   )}
                 >
-                  <fieldset className="mb-3 flex items-center gap-1 border-b pb-3">
-                    <legend className="mr-2 text-xs font-medium text-muted-foreground">
-                      资料来源
-                    </legend>
-                    {(["file", "web"] as const).map((mode) => (
-                      <label
-                        key={mode}
-                        className={cn(
-                          "cursor-pointer rounded-lg px-3 py-1.5 text-xs transition-colors focus-within:ring-2 focus-within:ring-ring",
-                          sourceMode === mode
-                            ? "bg-primary/10 font-medium text-teal-800 dark:text-primary"
-                            : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                        )}
-                      >
-                        <input
-                          type="radio"
-                          name="workspace-source-mode"
-                          value={mode}
-                          checked={sourceMode === mode}
-                          onChange={() => setSourceMode(mode)}
-                          className="sr-only"
-                        />
-                        {mode === "file" ? "文件" : "公开网页"}
-                      </label>
-                    ))}
-                  </fieldset>
-                  {sourceMode === "file" ? (
+                    <div className={webOpen ? "hidden" : undefined}>
                     <TaskComposer
+                    unified
+                    onConfigureModels={() => setSettingsOpen(true)}
+                    draft={composerDraft}
+                    onDraftChange={setComposerDraft}
+                    active={!webOpen && !settingsOpen}
+                    onReadWeb={draft => { setComposerDraft(draft); setWebPrompt(draft); setWebOpen(true); }}
                     key={exampleSeed?.key || "new-task"}
                     initialPrompt={exampleSeed?.prompt}
                     initialFormats={exampleSeed?.formats}
                     modelOptions={models.data?.options}
                     defaultModel={models.data?.default}
-                    allowPiRuntime={canUsePiRuntime}
+                    allowPiRuntime={Boolean(models.data?.pi_runtime_enabled)}
                     allowLocalPiRuntime={canUseLocalPiRuntime}
                     modelConnections={verifiedModelConnections}
                     defaultConnectionId={
@@ -851,32 +880,31 @@ export function SemanticWorkspacePage() {
                     onUploadsChange={handleDraftUploadsChange}
                     onSubmit={submitNew}
                     />
-                  ) : (
+                    </div>
+                  {webPrompt !== null && (
+                    <section className={cn("mt-3 rounded-xl border p-3", !webOpen && "hidden")} aria-label="网页资料">
+                      <button type="button" className="mb-3 rounded-lg border px-3 py-2 text-xs hover:bg-muted" onClick={() => { setWebOpen(false); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('[aria-label="任务要求"]')?.focus()); }}>返回文件输入</button>
+                      <button type="button" className="mb-3 ml-2 rounded-lg border px-3 py-2 text-xs hover:bg-muted" onClick={() => setSettingsOpen(true)}>模型设置</button>
                     <WebSourceIntake
+                      draft={composerDraft}
+                      onDraftChange={setComposerDraft}
+                      active={webOpen && !settingsOpen}
+                      initialPrompt={webPrompt.prompt}
                       ownerId={user?.user_id ?? "current"}
                       allowLocalRuntime={canUseLocalPiRuntime}
                       localModels={(models.data?.options ?? [])
                         .filter((model) => model.provider === "local")
                         .map((model) => ({ model: model.model, label: model.label }))}
-                      defaultLocalModel={
-                        models.data?.default?.provider === "local"
-                          ? models.data.default.model
-                          : null
-                      }
+                      defaultLocalModel={webPrompt.localModel}
                       modelConnections={verifiedModelConnections}
-                      defaultConnectionId={
-                        modelPreference.data?.preference?.available
-                          ? modelPreference.data.preference.connection_id
-                          : null
-                      }
-                      defaultConnectionModel={
-                        modelPreference.data?.preference?.available
-                          ? modelPreference.data.preference.model_id
-                          : null
-                      }
+                      defaultConnectionId={webPrompt.connectionId}
+                      defaultConnectionModel={webPrompt.connectionModel}
                       onTaskCreated={async (created) => {
+                        setWebPrompt(null);
+                        setComposerDraft(null);
+                        setWebOpen(false);
                         setSelectedTaskId(created.task_id);
-                        setNewTask(false);
+
                         setRecycleBin(false);
                         setLiveEvents([]);
                         await queryClient.invalidateQueries({
@@ -884,67 +912,17 @@ export function SemanticWorkspacePage() {
                         });
                       }}
                     />
+                    </section>
                   )}
-                  <p className="mt-2 text-center text-[11px] text-muted-foreground">
-                    {sourceMode === "file"
-                      ? "支持拖放、点击和粘贴文件；上传完成后会立即显示原件预览。"
-                      : "当前只读取一个精确公开页面；来源冻结后可核对要求并启动正式任务。"}
-                  </p>
                 </div>
 
-                {sourceMode === "file" && draftUploads.length === 0 && guidance.data && (
-                  <div className="mt-12">
-                    <div className="flex items-end justify-between">
-                      <div>
-                        <h3 className="text-sm font-semibold">常用场景</h3>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          只展示当前版本已经具备执行和交付能力的示例
-                        </p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setHelpOpen(true)}
-                        className="text-xs font-medium text-teal-700 hover:underline dark:text-teal-300"
-                      >
-                        更多示例
-                      </button>
-                    </div>
-                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
-                      {guidance.data.examples.slice(0, 6).map((example) => (
-                        <button
-                          key={example.id}
-                          type="button"
-                          onClick={() => useExample(example)}
-                          className="group rounded-2xl border bg-background p-4 text-left transition-all hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-md"
-                        >
-                          <span className="text-[10px] font-medium uppercase tracking-wide text-primary">
-                            {example.category}
-                          </span>
-                          <h4 className="mt-2 text-sm font-semibold">
-                            {example.title}
-                          </h4>
-                          <p className="mt-2 line-clamp-2 text-xs leading-5 text-muted-foreground">
-                            {example.description}
-                          </p>
-                          <div className="mt-4 flex gap-1">
-                            {example.output_formats.map((format) => (
-                              <span
-                                key={format}
-                                className="rounded bg-muted px-1.5 py-0.5 text-[9px] font-medium uppercase text-muted-foreground"
-                              >
-                                {format}
-                              </span>
-                            ))}
-                          </div>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
                 </div>
               </div>
+              </Panel>
               {inspectorOpen && draftUploads.length > 0 && (
-                <div className="h-full w-[min(42%,620px)] min-w-[380px] border-l bg-background shadow-[-18px_0_45px_-38px_rgba(15,23,42,0.45)]">
+                <>
+                {!fullInspector && <Separator aria-label="调整文件预览宽度" className="w-1 bg-border focus-visible:bg-primary" />}
+                <Panel id="preview" minSize={fullInspector ? "100%" : "280px"} maxSize={fullInspector ? "100%" : "70%"} className="h-full border-l bg-background">
                   <SourcePreviewPanel
                     key={selectedUploadId}
                     uploads={draftUploads}
@@ -954,11 +932,14 @@ export function SemanticWorkspacePage() {
                       setSelectedUploadId(uploadId);
                       setTaskSourceSelection(null);
                     }}
-                    onClose={() => setInspectorOpen(false)}
+                    onClose={closeInspector}
+                    expanded={inspectorExpanded}
+                    onToggleExpand={narrow ? undefined : () => setInspectorExpanded(value => !value)}
                   />
-                </div>
+                </Panel>
+                </>
               )}
-            </div>
+            </Group>
           ) : selectedTaskId && detail.isLoading ? (
             <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
               <Loader2 className="h-5 w-5 animate-spin" />
@@ -1009,7 +990,7 @@ export function SemanticWorkspacePage() {
                 source: inspectorOpen ? 32 : 0,
               }}
             >
-              <Panel id="content" minSize="0px" className="min-w-0 md:min-w-[560px]">
+              <Panel id="content" minSize="0px" className={cn("min-w-0", fullInspector && inspectorOpen && "hidden")}>
                 <div className="flex h-full min-h-0 flex-col">
                   {recycleBin && task.deleted_at ? (
                     <div className="flex h-full items-center justify-center p-8">
@@ -1388,8 +1369,19 @@ export function SemanticWorkspacePage() {
                             )
                           }
                         />
+                        <section className="mb-5 space-y-4" aria-label="对话记录">
+                          {conversation.isLoading && <p role="status" className="text-sm text-muted-foreground">正在恢复对话…</p>}
+                          {conversation.isError && <button type="button" className="rounded-lg border px-3 py-2 text-sm" onClick={() => void conversation.refetch()}>对话读取失败，重试</button>}
+                          {conversation.data?.turns?.filter(turn => turn.revision <= (task.viewing_revision ?? task.current_revision ?? task.active_revision)).map(turn => {
+                            const response = conversation.data?.results?.find(item => item.turn_id === turn.turn_id);
+                            return <article key={turn.turn_id} className="space-y-2 border-b pb-4 text-sm leading-7">
+                              <p className="whitespace-pre-wrap font-medium">{turn.text}</p>
+                              {response && <><p>{response.acknowledgement}</p>{response.answer && <p className="whitespace-pre-wrap">{response.answer}</p>}</>}
+                            </article>;
+                          })}
+                        </section>
                         {task.status === "completed" && (
-                          <ResultPreview key={resultIdentity} task={task} onViewSource={viewSource} />
+                          <p className="text-sm text-muted-foreground">正式结果已生成，可在文件侧栏核对并下载。</p>
                         )}
                         {task.status === "candidate_ready" && (
                           <CandidatePreview
@@ -1487,8 +1479,21 @@ export function SemanticWorkspacePage() {
                               当前显示历史版本 V{task.viewing_revision}；下面的追问会基于最新版本 V{task.current_revision} 处理
                             </button>
                           )}
+                          <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                            <span>本任务模型：{task.model || "任务冻结配置"}</span>
+                            <button type="button" className="rounded-lg border px-3 py-2 hover:bg-muted" onClick={() => setSettingsOpen(true)}>模型设置</button>
+                            <span>设置用于新任务，当前版本保持原模型。</span>
+                          </div>
                           <FollowupComposer
+                            key={task.task_id}
                             task={task}
+                            pendingResults={(conversation.data?.results ?? []).filter(result =>
+                              conversation.data?.proposals?.some(proposal =>
+                                proposal.proposal_id === result.proposal_id
+                                && proposal.status === "pending"
+                                && proposal.base_revision === (task.current_revision ?? task.active_revision),
+                              ),
+                            )}
                             onSubmit={async (text, idempotencyKey) => {
                               try {
                                 const result = await sendWorkspaceTurn(
@@ -1502,6 +1507,7 @@ export function SemanticWorkspacePage() {
                                     task.task_id,
                                   ],
                                 });
+                                await queryClient.invalidateQueries({ queryKey: ["workspace-turns", user?.user_id, task.task_id] });
                                 return result;
                               } catch (error) {
                                 toast.error(
@@ -1533,6 +1539,7 @@ export function SemanticWorkspacePage() {
                                     queryKey: ["semantic-workspace-tasks"],
                                   }),
                                 ]);
+                                await queryClient.invalidateQueries({ queryKey: ["workspace-turns", user?.user_id, task.task_id] });
                                 toast.success(
                                   mode === "after_safe_point"
                                     ? "已确认，将在当前步骤结束后切换"
@@ -1557,14 +1564,20 @@ export function SemanticWorkspacePage() {
               </Panel>
               {inspectorOpen && (
                 <>
-                  <Separator className="w-1 border-x bg-border/50 transition-colors hover:bg-primary/30" />
+                  {!fullInspector && <Separator className="w-1 border-x bg-border/50 transition-colors hover:bg-primary/30" />}
                   <Panel
                     id="source"
-                    minSize="360px"
-                    maxSize="720px"
+                    minSize={fullInspector ? "100%" : "280px"}
+                    maxSize={fullInspector ? "100%" : "65%"}
                     className="bg-background"
                   >
-                    <SourcePreviewPanel
+                    {inspectorKind === "result" ? (
+                      <div className="h-full overflow-auto p-3">
+                        <button type="button" className="mb-3 rounded-lg border px-3 py-2 text-xs hover:bg-muted" onClick={closeInspector}>关闭结果预览</button>
+                        {!narrow && <button type="button" className="mb-3 ml-2 rounded-lg border px-3 py-2 text-xs hover:bg-muted" aria-expanded={inspectorExpanded} onClick={() => setInspectorExpanded(value => !value)}>{inspectorExpanded ? "恢复分栏" : "展开预览"}</button>}
+                        <ResultPreview key={resultIdentity} task={task} onViewSource={viewSource} />
+                      </div>
+                    ) : <SourcePreviewPanel
                       key={`${resultIdentity}:${taskUploadId}`}
                       uploads={task.uploads || []}
                       selectedUploadId={taskUploadId}
@@ -1572,8 +1585,10 @@ export function SemanticWorkspacePage() {
                       onSelectUpload={(uploadId) => {
                         setTaskSourceSelection({ resultIdentity, uploadId, evidence: null });
                       }}
-                      onClose={() => setInspectorOpen(false)}
-                    />
+                      onClose={closeInspector}
+                    expanded={inspectorExpanded}
+                    onToggleExpand={narrow ? undefined : () => setInspectorExpanded(value => !value)}
+                    />}
                   </Panel>
                 </>
               )}

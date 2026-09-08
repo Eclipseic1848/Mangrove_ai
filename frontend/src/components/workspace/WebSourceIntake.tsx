@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { WebIntakeDraft } from "./TaskComposer";
 import {
   AlertCircle,
   ArrowRight,
@@ -45,6 +46,10 @@ type ModelConnection = {
 };
 
 type WebSourceIntakeProps = {
+  draft?: WebIntakeDraft | null;
+  onDraftChange?: (draft: WebIntakeDraft) => void;
+  active?: boolean;
+  initialPrompt?: string;
   ownerId: string;
   allowLocalRuntime: boolean;
   localModels: Array<{ model: string; label: string }>;
@@ -216,6 +221,10 @@ function formatBytes(bytes: number) {
 }
 
 export function WebSourceIntake({
+  draft,
+  onDraftChange,
+  active = true,
+  initialPrompt = "",
   ownerId,
   allowLocalRuntime,
   localModels,
@@ -239,7 +248,7 @@ export function WebSourceIntake({
     ?? "";
   const storageKey = `mangrove_web_source_attempt_${ownerId}`;
   const taskStorageKey = `mangrove_web_task_attempt_${ownerId}`;
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState(() => initialPrompt.match(/https?:\/\/[^\s<>"，。；）)]+/i)?.[0] ?? "");
   const [purpose, setPurpose] = useState("读取公开网页内容，供当前数据任务分析");
   const [scopeKind, setScopeKind] = useState<"current_page" | "same_site">("current_page");
   const [pageLimit, setPageLimit] = useState(5);
@@ -250,7 +259,7 @@ export function WebSourceIntake({
   const [attempt, setAttempt] = useState<SourceAcquisitionAttempt | null>(null);
   const [loading, setLoading] = useState(false);
   const [starting, setStarting] = useState(false);
-  const [objective, setObjective] = useState("");
+  const [objective, setObjective] = useState(initialPrompt);
   const [mustInclude, setMustInclude] = useState("");
   const [exclusions, setExclusions] = useState("");
   const [quantity, setQuantity] = useState("当前页面中有证据的全部内容");
@@ -262,6 +271,32 @@ export function WebSourceIntake({
     defaultLocalModel ?? localModels[0]?.model ?? "",
   );
   const [egressConfirmed, setEgressConfirmed] = useState(false);
+  const receivedDraft = useRef<WebIntakeDraft | null>(null);
+  useLayoutEffect(() => {
+    if (!active || !draft || receivedDraft.current === draft) return;
+    receivedDraft.current = draft;
+    // 交接不会改动网址、授权范围或获取尝试，也不会重发网络请求。
+    setObjective(draft.prompt);
+    setConnectionId(draft.connectionId ?? "");
+    setConnectionModel(draft.connectionModel ?? "");
+    if (draft.localModel) setLocalModel(draft.localModel);
+    setEgressConfirmed(false);
+  }, [active, draft]);
+  const updateDraft = (change: Partial<WebIntakeDraft>) => {
+    if (!active) return;
+    onDraftChange?.({
+      prompt: objective,
+      connectionId: connectionId || null,
+      connectionModel: connectionId ? connectionModel : null,
+      localModel: connectionId ? null : localModel,
+      ...change,
+    });
+  };
+  const [sourceAcknowledgement, setSourceAcknowledgement] = useState<string | null>(null);
+  const promptUrl = normalizedUrl(objective.match(/https?:\/\/[^\s<>"，。；）)]+/i)?.[0] ?? "");
+  const retainedUrl = attempt?.normalized_url || normalizedUrl(url);
+  const changedSource = Boolean(promptUrl && retainedUrl && promptUrl !== retainedUrl);
+  const sourceChoice = JSON.stringify([objective, attempt?.snapshot_id, retainedUrl]);
   const [contextOptions, setContextOptions] = useState<{
     templates: TaskTemplateOption[];
     memories: OwnerMemoryOption[];
@@ -550,6 +585,8 @@ export function WebSourceIntake({
   const availableModels = selectedConnection?.models?.filter(
     (model) => model.status === "available" && model.enabled,
   ) ?? [];
+  const connectionModelAvailable = availableModels.some(model => model.model_id === connectionModel);
+  const localModelAvailable = localModels.some(model => model.model === localModel);
   const splitLines = (value: string) => value
     .split(/[\n,，]/)
     .map((item) => item.trim())
@@ -561,9 +598,10 @@ export function WebSourceIntake({
     && quantity.trim()
     && completeness.trim()
     && contextPreview
+    && (!changedSource || sourceAcknowledgement === sourceChoice)
     && (
-      (allowLocalRuntime && !connectionId && localModel)
-      || (connectionId && connectionModel && egressConfirmed)
+      (allowLocalRuntime && !connectionId && localModelAvailable)
+      || (selectedConnection && connectionModelAvailable && egressConfirmed)
     ),
   );
 
@@ -636,6 +674,17 @@ export function WebSourceIntake({
       className="overflow-hidden rounded-2xl border bg-background shadow-[0_18px_60px_-38px_hsl(var(--primary)/0.65)]"
     >
       <div className="border-b px-4 py-3">
+        {changedSource && (
+          <div className="mb-3 rounded-lg border border-primary/30 bg-primary/5 p-3 text-xs leading-6" role="status">
+            <p>任务要求包含新网址 {promptUrl}。当前保留的网页仍是 {retainedUrl}，不会自动读取新网址。</p>
+            {attempt?.snapshot_id ? (
+              <label className="mt-2 flex items-start gap-2">
+                <input type="checkbox" checked={sourceAcknowledgement === sourceChoice} onChange={event => setSourceAcknowledgement(event.target.checked ? sourceChoice : null)} className="mt-1" />
+                <span>继续使用当前已读取的网页；如需更换来源，请重新选择网址并确认读取。</span>
+              </label>
+            ) : <p>如需使用新网址，请修改下方网址并确认读取范围。</p>}
+          </div>
+        )}
         <div className="flex items-center justify-between gap-4">
           <div>
             <h3 id="web-source-title" className="text-sm font-semibold">
@@ -941,7 +990,10 @@ export function WebSourceIntake({
               id="web-task-objective"
               rows={3}
               value={objective}
-              onChange={(event) => setObjective(event.target.value)}
+              onChange={(event) => {
+                setObjective(event.target.value);
+                updateDraft({ prompt: event.target.value });
+              }}
               placeholder="例如：根据当前页面生成一份产品能力摘要，并标注每条结论的来源证据"
               className="mt-2 w-full resize-none rounded-xl border bg-background px-3 py-2 text-sm leading-6 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
             />
@@ -1002,16 +1054,20 @@ export function WebSourceIntake({
               <label className="text-xs font-medium">
                 模型连接
                 <select
-                  value={connectionId}
+                  value={connectionId && !selectedConnection ? "__unavailable__" : connectionId}
                   onChange={(event) => {
                     const next = event.target.value;
                     const connection = modelConnections.find((item) => item.connection_id === next);
                     setConnectionId(next);
-                    setConnectionModel(connection?.default_model ?? connection?.models?.find((item) => item.enabled && item.status === "available")?.model_id ?? "");
+                    const model = connection?.default_model ?? connection?.models?.find((item) => item.enabled && item.status === "available")?.model_id ?? "";
+                    setConnectionModel(model);
                     setEgressConfirmed(false);
+                    updateDraft({ connectionId: next || null, connectionModel: next ? model : null, localModel: next ? null : localModel });
                   }}
                   className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
                 >
+                  {connectionId && !selectedConnection && <option value="__unavailable__" disabled>原连接已不可用，请重新选择</option>}
+                  {!allowLocalRuntime && !connectionId && <option value="" disabled>请选择模型连接</option>}
                   {allowLocalRuntime && <option value="">本地模型（不外发）</option>}
                   {modelConnections.map((connection) => (
                     <option key={connection.connection_id} value={connection.connection_id}>
@@ -1026,10 +1082,15 @@ export function WebSourceIntake({
                 <label className="text-xs font-medium">
                   精确模型
                   <select
-                    value={connectionModel}
-                    onChange={(event) => setConnectionModel(event.target.value)}
+                    value={connectionModelAvailable ? connectionModel : ""}
+                    onChange={(event) => {
+                      setConnectionModel(event.target.value);
+                      setEgressConfirmed(false);
+                      updateDraft({ connectionModel: event.target.value });
+                    }}
                     className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal outline-none focus:border-primary focus:ring-2 focus:ring-primary/15"
                   >
+                    {!connectionModelAvailable && <option value="" disabled>原模型已不可用，请重新选择</option>}
                     {availableModels.map((model) => (
                       <option key={model.model_id} value={model.model_id}>{model.display_name}</option>
                     ))}
@@ -1050,10 +1111,14 @@ export function WebSourceIntake({
               <label className="mt-3 block text-xs font-medium">
                 精确模型
                 <select
-                  value={localModel}
-                  onChange={(event) => setLocalModel(event.target.value)}
+                  value={localModelAvailable ? localModel : ""}
+                  onChange={(event) => {
+                    setLocalModel(event.target.value);
+                    updateDraft({ localModel: event.target.value });
+                  }}
                   className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 sm:max-w-[calc(50%-0.375rem)]"
                 >
+                  {!localModelAvailable && <option value="" disabled>原模型已不可用，请重新选择</option>}
                   {localModels.map((model) => (
                     <option key={model.model} value={model.model}>{model.label}</option>
                   ))}
