@@ -13,3 +13,6 @@
 
 # 已核对：账号来源回归的固定幂等键 synthetic 不是真实凭据，仅忽略该历史行。
 8f23acbdcb69890cc94c733bb47baa3a75d5de22:tests/test_source_account_generation.py:generic-api-key:19
+
+# 已核对：统一对话回归使用临时数据库和 MockTransport，命中为静态合成凭据，仅忽略该提交的此行。
+6268599f307d327e0015f8e78df1606b4b565ff8:tests/test_workspace_conversation_stream.py:generic-api-key:121
