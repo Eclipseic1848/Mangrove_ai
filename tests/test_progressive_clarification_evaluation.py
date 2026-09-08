@@ -221,3 +221,16 @@ def test_headers_without_body_stop_at_total_deadline_without_retry(tmp_path):
     assert report["results"][0]["http_status"] == 200
     assert report["results"][0]["outcome"] == "unknown"
     assert not report["results"][0].get("response_received")
+
+
+def test_generated_output_formats_match_confirmation_boundary():
+    from pydantic import ValidationError
+    from src.api.routes.semantic_workspace import _FORMATS
+    from src.conversation_steering.rewriter import RewriteDraft
+
+    schema = RewriteDraft.model_json_schema()
+    assert set(schema["properties"]["output_delta"]["items"]["enum"]) == _FORMATS
+    draft = RewriteDraft(intent="task_refinement", confidence="high", normalized_text="输出JSON", output_delta=("json",))
+    assert draft.output_delta == ("json",)
+    with pytest.raises(ValidationError):
+        RewriteDraft(intent="task_refinement", confidence="high", normalized_text="输出JSON", output_delta=("输出为JSON",))

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 import hashlib
 import json
 import sqlite3
@@ -48,7 +48,9 @@ class RewriteDraft(BaseModel):
     selection_delta: dict[str, Any] = Field(default_factory=dict)
     coverage_delta: dict[str, Any] = Field(default_factory=dict)
     field_semantics_delta: dict[str, Any] = Field(default_factory=dict)
-    output_delta: tuple[str, ...] = ()
+    output_delta: tuple[Literal["json", "jsonl", "csv", "xlsx", "parquet", "docx", "pdf", "html", "markdown", "txt", "pptx"], ...] = Field(
+        default=(), description="仅填写用户明确新增的输出格式标识，不写说明句；格式未改变时为空，不支持的格式不得擅自替换。",
+    )
     permission_delta: tuple[str, ...] = ()
 
     @field_validator(
