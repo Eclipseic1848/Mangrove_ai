@@ -146,8 +146,10 @@ class InMemorySteeringRepository:
         ]
         return max(candidates, key=lambda item: item.updated_at) if candidates else None
 
-    def update_decision(self, decision: RevisionDecision) -> RevisionDecision:
+    def update_decision(self, decision: RevisionDecision, *, expected: RevisionDecision | None = None) -> RevisionDecision | None:
         key = (decision.owner_id, decision.decision_id)
+        if expected is not None and self.decisions.get(key) != expected:
+            return None
         if key not in self.decisions:
             raise KeyError("Revision 决策不存在或无权访问")
         self.decisions[key] = decision

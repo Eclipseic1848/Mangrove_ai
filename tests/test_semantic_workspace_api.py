@@ -956,7 +956,8 @@ def test_workspace_clarification_keeps_scope_and_txt_excludes_other_clauses(
 
         answered = client.post(
             f"/api/semantic-workspace/tasks/{task_id}/answer",
-            json={"answer": "逐字原文"},
+            headers={"Idempotency-Key": "contract-verbatim-answer"},
+            json={"answer": "逐字原文", "expected_revision": waiting["question"]["revision"], "question_round_id": waiting["question"]["round_id"]},
         )
         assert answered.status_code == 200, answered.text
         completed = _wait(client, task_id, {"completed", "failed"})

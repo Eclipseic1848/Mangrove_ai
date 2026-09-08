@@ -749,20 +749,16 @@ class SemanticWorkspaceManager:
         binding = self._agent_kernel.frozen_binding(user_id, task_id, revision)
         return self._kernel(binding.adapter_id if binding is not None else None)
 
-    async def prepare_runtime_binding(
-        self,
-        *,
-        model_connection_id: str | None,
-        model_connection_version: str | None,
-        model: str,
-    ):
-        """在任务聚合事务前解析并验证完整 RuntimeBinding。"""
-
-        return await self._kernel().prepare_binding(
-            model_connection_id=model_connection_id,
-            model_connection_version=model_connection_version,
-            model=model,
+    async def prepare_runtime_binding(self, *, model_connection_id: str | None, model_connection_version: str | None, model: str, expected_binding: dict[str, Any] | None = None):
+        """沿原绑定解析新 Run；全局默认改变不能替换已确认的执行内核。"""
+        binding, manifest = await self._kernel((expected_binding or {}).get("adapter_id")).prepare_binding(
+            model_connection_id=model_connection_id, model_connection_version=model_connection_version, model=model,
         )
+        if expected_binding:
+            current = binding.model_dump(mode="json", exclude={"external_run_id"})
+            if current != type(binding).model_validate(expected_binding).model_dump(mode="json", exclude={"external_run_id"}):
+                raise ValueError("冻结的连接、模型或执行器身份已变化，请重新确认")
+        return binding, manifest
 
     def _candidate_verification_module(self) -> CandidateVerificationService:
         if self._candidate_verification is None:
@@ -1806,94 +1802,27 @@ class SemanticWorkspaceManager:
             return False
         return True
 
-    async def answer(
-        self,
-        user_id: str,
-        task_id: str,
-        answer: str,
-        *,
-        cancel_only: bool = False,
-    ) -> dict[str, Any]:
+    async def answer(self, user_id: str, task_id: str, answer: str, *, accepted_turn_id: str, cancel_only: bool = False) -> dict[str, Any]:
         store = get_store()
         task = store.get_semantic_workspace_task(user_id, task_id)
-        if task is None:
-            raise KeyError("工作台任务不存在或无权访问")
-        question = task["question"]
-        if task["status"] != "needs_input" or not question:
-            raise ValueError("当前任务没有待回答问题")
+        question = (task or {}).get("question") or {}
+        if question.get("answer_turn_id") != accepted_turn_id or question.get("answer") != answer:
+            raise ValueError("回答与当前已接受轮次不一致")
         kind = question.get("kind")
-        # 按停止分类的请求不能因问题在鉴权后变化而免扣启动额并继续执行。
         if cancel_only and (kind != "external" or answer != "cancel"):
             raise ValueError("当前问题已变化，请重新确认操作")
-        allowed = {
-            str(option["value"])
-            for option in question.get("options", [])
-        }
-        if (
-            allowed
-            and answer not in allowed
-            and not question.get("allow_free_text", False)
-        ):
-            raise ValueError("回答不在当前允许选项中")
-
         if kind == "external":
             if answer == "cancel":
-                return await self.cancel(user_id, task_id)
-            changes: dict[str, Any] = {
-                "status": "queued",
-                "question": None,
-                "cancel_requested": False,
-            }
-            if answer == "confirm":
-                changes["external_api_confirmed"] = True
-            elif answer == "local":
-                changes["provider"] = "local"
-                changes["model"] = None
-                changes["external_api_confirmed"] = False
+                result = await self.cancel(user_id, task_id)
             else:
-                raise ValueError("外发问题只接受确认、本地执行或取消")
-            saved = store.update_semantic_workspace_task(
-                user_id, task_id, **changes
-            )
-        elif kind == "plan":
-            objective = (
-                f"{task['objective_text']}\n用户补充：{answer.strip()}"
-            )
-            next_question = dict(question)
-            next_question["answer"] = answer.strip()
-            saved = store.update_semantic_workspace_task(
-                user_id,
-                task_id,
-                objective_text=objective,
-                status="queued",
-                question=next_question,
-                cancel_requested=False,
-            )
-        elif kind in {"binding", "harness"}:
-            next_question = dict(question)
-            next_question["answer"] = answer
-            saved = store.update_semantic_workspace_task(
-                user_id,
-                task_id,
-                status="queued",
-                question=next_question,
-                cancel_requested=False,
-            )
-        else:
-            raise ValueError("未知的工作台问题类型")
-        store.append_semantic_workspace_event(
-            user_id,
-            task_id,
-            stage="needs_input",
-            event_type="question_answered",
-            summary="已收到补充信息，继续执行",
-            details={
-                "action": {"action_id": str(question["question_id"])},
-                "recovery_status": "handled",
-            },
-        )
+                result = store.consume_workspace_external_answer(user_id, task_id, accepted_turn_id, answer)
+                self.enqueue(user_id, task_id)
+            store.finish_workspace_answer(user_id, task_id, accepted_turn_id)
+            return result
+        if question.get("continuation") != "resume":
+            raise ValueError("业务补充必须先确认新的任务版本")
         self.enqueue(user_id, task_id)
-        return saved
+        return task
 
     def _build_retry_semantic_judge(
         self,
@@ -2716,9 +2645,12 @@ class SemanticWorkspaceManager:
                     "api_key": "local-runtime",
                 }
             )
+        kernel = self._kernel_for_run(user_id, task_id, revision)
+        frozen_binding = kernel.frozen_binding(user_id, task_id, revision)
+        if frozen_binding is not None and not runtime["model_connection_id"]:
+            request_values["model"] = frozen_binding.model
         request = PiRuntimeRequest(**request_values)
         self._candidate_verification_module()
-        kernel = self._kernel_for_run(user_id, task_id, revision)
         repository.update(
             user_id,
             task_id,
@@ -2909,14 +2841,16 @@ class SemanticWorkspaceManager:
                 {
                     "kind": "plan",
                     "question_id": f"pi:{result.run_id}",
-                    "prompt": clarification.get("question")
-                    or "请补充会影响结果范围的信息",
+                    "prompt": clarification.get("question") or "执行器正在等待控制操作",
+                    "purpose": "business" if clarification.get("question") else "control",
+                    "continuation": "confirm_revision" if clarification.get("question") else "unavailable",
                     "reason": clarification.get("reason")
                     or "不同解释会改变结果或处理范围",
-                    "affected_scope": ["覆盖范围", "结果数量"],
+                    "affected_scope": "覆盖范围、结果数量" if clarification.get("question") else "执行状态",
                     "options": [],
                     "allow_free_text": True,
                 },
+                expected_revision=revision,
             )
             return
         if result.status is not RuntimeStatus.CANDIDATE_READY:
@@ -3102,6 +3036,11 @@ class SemanticWorkspaceManager:
                     ),
                 }
             )
+        from src.api.routes.semantic_workspace import _workspace_source_findings
+        request = request.model_copy(update={"source_findings": _workspace_source_findings(user_id, task)})
+        answer_turn_id = question.get("answer_turn_id")
+        if answer_turn_id:
+            store.claim_workspace_answer(user_id, task_id, answer_turn_id)
         with workspace_stage_span("compile"):
             row = await compile_and_save(
                 request,
@@ -3116,6 +3055,8 @@ class SemanticWorkspaceManager:
             logical_revision=row["revision"],
             summary=row["summary"],
         )
+        if answer_turn_id and row["status"] in {"ready", "needs_user"}:
+            store.finish_workspace_answer(user_id, task_id, answer_turn_id)
         if row["status"] == "ready":
             store.append_semantic_workspace_event(
                 user_id,
@@ -3173,14 +3114,19 @@ class SemanticWorkspaceManager:
         ):
             resolutions = dict(previous["resolutions"])
             resolutions[question["ambiguity_id"]] = question["answer"]
+        answer_turn_id = question.get("answer_turn_id") if question.get("kind") == "binding" else None
+        if answer_turn_id:
+            store.claim_workspace_answer(user_id, task_id, answer_turn_id)
         with workspace_stage_span("bind"):
             row = await bind_and_save(
                 user_id=user_id,
                 plan=plan,
                 binding_revision=binding_revision,
                 resolutions=resolutions,
-                use_local_semantics=True,
+                use_local_semantics=not bool(answer_turn_id),
             )
+        if answer_turn_id:
+            store.finish_workspace_answer(user_id, task_id, answer_turn_id)
         store.update_semantic_workspace_task(
             user_id,
             task_id,
@@ -3276,6 +3222,8 @@ class SemanticWorkspaceManager:
     ) -> None:
         if not task["run_id"]:
             raise ValueError("待恢复的 Harness run 不存在")
+        if question.get("answer_turn_id"):
+            get_store().claim_workspace_answer(user_id, task_id, question["answer_turn_id"])
         resume = HarnessResume(
             question_id=question["question_id"],
             resume_token=question["resume_token"],
@@ -3293,6 +3241,8 @@ class SemanticWorkspaceManager:
             task["run_id"],
             resume=resume,
         )
+        if question.get("answer_turn_id"):
+            get_store().finish_workspace_answer(user_id, task_id, question["answer_turn_id"])
 
     async def _pause_for_external(
         self,
@@ -3301,6 +3251,7 @@ class SemanticWorkspaceManager:
     ) -> None:
         task = get_store().get_semantic_workspace_task(user_id, task_id)
         assert task is not None
+        revision = int(task["active_revision"])
         question = {
             "kind": "external",
             "question_id": f"external:{task_id}",
@@ -3318,7 +3269,7 @@ class SemanticWorkspaceManager:
             ],
             "allow_free_text": False,
         }
-        self._set_needs_input(user_id, task_id, question)
+        self._set_needs_input(user_id, task_id, question, expected_revision=revision)
 
     async def _pause_for_plan(
         self,
@@ -3351,7 +3302,7 @@ class SemanticWorkspaceManager:
             status="needs_input",
             summary=row["summary"],
         )
-        self._set_needs_input(user_id, task_id, question)
+        self._set_needs_input(user_id, task_id, question, expected_revision=revision)
 
     async def _pause_for_binding(
         self,
@@ -3391,7 +3342,7 @@ class SemanticWorkspaceManager:
             binding_revision=row["binding_revision"],
             status="needs_input",
         )
-        self._set_needs_input(user_id, task_id, question)
+        self._set_needs_input(user_id, task_id, question, expected_revision=revision)
 
     async def _pause_for_harness(
         self,
@@ -3414,46 +3365,19 @@ class SemanticWorkspaceManager:
             revision,
             status="needs_input",
         )
-        self._set_needs_input(user_id, task_id, question)
+        self._set_needs_input(user_id, task_id, question, expected_revision=revision)
 
     def _set_needs_input(
         self,
         user_id: str,
         task_id: str,
         question: dict[str, Any],
+        *, expected_revision: int | None = None,
     ) -> None:
-        store = get_store()
-        affected_scope = question.get("affected_scope")
-        if isinstance(affected_scope, list):
-            affected_scope = "、".join(str(item) for item in affected_scope)
-        task = store.update_semantic_workspace_task(
-            user_id,
-            task_id,
-            status="needs_input",
-            question=question,
-            failure=None,
-        )
-        store.update_semantic_workspace_revision(
-            user_id,
-            task_id,
-            task["active_revision"],
-            status="needs_input",
-        )
-        store.append_semantic_workspace_event(
-            user_id,
-            task_id,
-            stage="needs_input",
-            event_type="question_required",
-            summary=question["prompt"],
-            details={
-                "reason": question.get("reason"),
-                "affected_scope": question.get("affected_scope"),
-                "purpose": question.get("reason"),
-                "result_summary": affected_scope,
-                "action": {"action_id": str(question["question_id"])},
-                "recovery_status": "pending",
-            },
-        )
+        question = dict(question)
+        if isinstance(question.get("affected_scope"), list):
+            question["affected_scope"] = "、".join(str(item) for item in question["affected_scope"])
+        get_store().publish_workspace_question(user_id, task_id, question, expected_revision=expected_revision)
 
     def _mark_cancelled(
         self,

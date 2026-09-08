@@ -97,6 +97,7 @@ class InstructorPlanDraftGenerator:
         ]
         payload = {
             "objective": request.objective_text,
+            "source_findings": request.source_findings,
             "trusted_scope_summary": {
                 "has_artifacts": bool(request.artifact_ids),
                 "has_sources": bool(request.source_ids),
@@ -137,6 +138,8 @@ class InstructorPlanDraftGenerator:
             base_url=self._connection.base_url,
             timeout=timeout,
             http_client=http_client,
+            # 已接收澄清有单次发送占位，SDK 不得在结果未知时悄悄重发。
+            **({"max_retries": 0} if request.clarification else {}),
         )
         client = instructor.from_openai(raw_client, mode=instructor.Mode.JSON)
         extra_body: dict[str, Any] = dict(

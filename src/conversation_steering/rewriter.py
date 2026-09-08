@@ -80,7 +80,7 @@ class DeferredExternalRewriter:
             owner_id=turn.owner_id,
             task_id=turn.task_id,
             inherited_revision=request.revision,
-            source_turn_ids=(turn.turn_id,),
+            source_turn_ids=(*[item.turn_id for item in request.relevant_turns], turn.turn_id),
             intent=TurnIntent.PERMISSION_REQUEST,
             confidence=DeltaConfidence.HIGH,
             normalized_text="需要使用当前外部模型理解这条追问",
@@ -117,7 +117,7 @@ class InstructorContextRewriter:
             timeout=timeout,
             http_client=http_client,
             # 引用回合的持久占位覆盖真实发送；SDK 也不能在响应未知时重发。
-            **({"max_retries": 0} if turn.result_context else {}),
+            **({"max_retries": 0} if turn.result_context or request.clarification_round_id else {}),
         )
         client = instructor.from_openai(raw_client, mode=instructor.Mode.JSON)
         extra_body = dict(self._connection.extra_body or {})
@@ -134,6 +134,10 @@ class InstructorContextRewriter:
             "recent_events": request.event_summaries[-8:],
             "user_turn": turn.text,
             "selected_result": turn.result_context.model_dump(mode="json") if turn.result_context else None,
+            "source_findings": request.source_findings,
+            "relevant_turns": [{"turn_id": item.turn_id, "text": item.text} for item in request.relevant_turns],
+            "prior_delta": request.prior_delta.model_dump(mode="json") if request.prior_delta else None,
+            "clarification_question": request.clarification_question,
         }
         try:
             if self._before_call:
@@ -161,7 +165,7 @@ class InstructorContextRewriter:
             owner_id=turn.owner_id,
             task_id=turn.task_id,
             inherited_revision=request.revision,
-            source_turn_ids=(turn.turn_id,),
+            source_turn_ids=(*[item.turn_id for item in request.relevant_turns], turn.turn_id),
             **draft.model_dump(),
         )
 
@@ -209,6 +213,10 @@ class BrokerContextRewriter:
                     "recent_events": request.event_summaries[-8:],
                     "user_turn": turn.text,
                     "selected_result": turn.result_context.model_dump(mode="json") if turn.result_context else None,
+                    "source_findings": request.source_findings,
+                    "relevant_turns": [{"turn_id": item.turn_id, "text": item.text} for item in request.relevant_turns],
+                    "prior_delta": request.prior_delta.model_dump(mode="json") if request.prior_delta else None,
+                    "clarification_question": request.clarification_question,
                 },
             )
             relayed = await broker.relay(
@@ -232,7 +240,7 @@ class BrokerContextRewriter:
         return ContextDelta(
             delta_id=f"delta_{uuid.uuid4().hex[:16]}", owner_id=turn.owner_id,
             task_id=turn.task_id, inherited_revision=turn.revision,
-            source_turn_ids=(turn.turn_id,), **draft.model_dump(),
+            source_turn_ids=(*[item.turn_id for item in request.relevant_turns], turn.turn_id), **draft.model_dump(),
         )
 
 

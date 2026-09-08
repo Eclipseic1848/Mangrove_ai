@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from datetime import datetime, timezone
 import sqlite3
 import threading
 import json
@@ -12,6 +13,7 @@ from .models import (
     RawUserTurn,
     RevisionDecision,
     RevisionDecisionStatus,
+    RevisionSwitchMode,
     RevisionProposal,
     SteeringResult,
 )
@@ -303,11 +305,17 @@ class SqliteSteeringRepository:
                     (decision.owner_id, decision.proposal_id),
                 ).fetchone()
                 if existing is not None:
-                    return RevisionDecision.model_validate_json(
-                        existing["payload_json"]
-                    )
+                    saved = RevisionDecision.model_validate_json(existing["payload_json"])
+                    if saved.mode != decision.mode or saved.external_api_confirmed != decision.external_api_confirmed:
+                        raise ValueError("同一决策不能更换切换方式或外发确认")
+                    return saved
                 raise ValueError("Revision 决策已存在") from exc
         return decision
+
+    def get_decision_for_proposal(self, owner_id: str, proposal_id: str) -> RevisionDecision | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT payload_json FROM conversation_revision_decisions WHERE owner_id=? AND proposal_id=?", (owner_id, proposal_id)).fetchone()
+        return RevisionDecision.model_validate_json(row[0]) if row else None
 
     def get_decision(
         self,
@@ -350,26 +358,73 @@ class SqliteSteeringRepository:
             else None
         )
 
-    def update_decision(self, decision: RevisionDecision) -> RevisionDecision:
+    def replace_waiting_decision(self, previous: RevisionDecision, mode: RevisionSwitchMode, *, external_api_confirmed: bool, expected_cancel_generation: int) -> RevisionDecision:
+        """只允许静止版本显式改选；原选择审计与新选择在同一事务提交。"""
+        if previous.status is not RevisionDecisionStatus.WAITING_SAFE_POINT or mode not in {RevisionSwitchMode.CANCEL_NOW, RevisionSwitchMode.NEW_TASK}:
+            raise ValueError("该决策不能更换切换方式")
+        decision = previous.model_copy(update={
+            "mode": mode, "external_api_confirmed": external_api_confirmed,
+            "status": RevisionDecisionStatus.READY_TO_APPLY if mode is RevisionSwitchMode.CANCEL_NOW else RevisionDecisionStatus.NEW_TASK_REQUIRED,
+            "updated_at": datetime.now(timezone.utc),
+        })
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            task = connection.execute(
+                "SELECT active_revision,status,cancel_generation FROM semantic_workspace_tasks WHERE user_id=? AND task_id=?",
+                (previous.owner_id, previous.task_id),
+            ).fetchone()
+            if not task or task["active_revision"] != previous.base_revision or task["cancel_generation"] != expected_cancel_generation or task["status"] not in {"needs_input", "paused", "completed", "candidate_ready", "failed", "cancelled"}:
+                raise ValueError("任务状态或停止代际已变化，请重新确认")
+            stored = connection.execute("SELECT payload_json FROM conversation_revision_decisions WHERE owner_id=? AND decision_id=?", (previous.owner_id, previous.decision_id)).fetchone()
+            if not stored or RevisionDecision.model_validate_json(stored[0]) != previous:
+                raise ValueError("决策已被处理，请刷新后确认")
+            cursor = connection.execute(
+                "UPDATE conversation_revision_decisions SET status=?,payload_json=?,updated_at=? WHERE owner_id=? AND decision_id=? AND status=? AND payload_json=?",
+                (decision.status.value, decision.model_dump_json(), decision.updated_at.isoformat(), previous.owner_id, previous.decision_id, previous.status.value, stored[0]),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("决策已被处理，请刷新后确认")
+            from src.api.store import WebUIStore
+            WebUIStore._clarification_event(connection, previous.owner_id, previous.task_id, "revision.choice_changed", {
+                "summary": "已按明确选择更新等待中的版本切换方式",
+                "decision_id": previous.decision_id, "revision": previous.base_revision,
+                "previous_mode": previous.mode.value, "mode": mode.value,
+                "previous_external_api_confirmed": previous.external_api_confirmed,
+                "external_api_confirmed": external_api_confirmed,
+            }, event_id=f"revision-choice:{previous.decision_id}")
+        return decision
+
+    def update_decision(self, decision: RevisionDecision, *, expected: RevisionDecision | None = None) -> RevisionDecision | None:
+        with self._lock, self._connect() as connection:
+            original = None
+            if expected is not None:
+                connection.execute("BEGIN IMMEDIATE")
+                stored = connection.execute("SELECT payload_json FROM conversation_revision_decisions WHERE owner_id=? AND decision_id=?", (decision.owner_id, decision.decision_id)).fetchone()
+                if not stored or RevisionDecision.model_validate_json(stored[0]) != expected:
+                    return None
+                # 旧 JSON 可省略新增可空字段；比较完整语义，再使用原文 CAS。
+                original = stored[0]
             cursor = connection.execute(
                 "UPDATE conversation_revision_decisions "
                 "SET status=?, payload_json=?, updated_at=? "
-                "WHERE owner_id=? AND decision_id=?",
+                "WHERE owner_id=? AND decision_id=?" + (" AND payload_json=?" if expected else ""),
                 (
                     decision.status.value,
                     decision.model_dump_json(),
                     decision.updated_at.isoformat(),
                     decision.owner_id,
                     decision.decision_id,
-                ),
+                ) + ((original,) if expected else ()),
             )
         if cursor.rowcount != 1:
+            if expected is not None:
+                return None
             raise KeyError("Revision 决策不存在或无权访问")
         return decision
 
     def save_result(self, result: SteeringResult) -> SteeringResult:
         with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             try:
                 connection.execute(
                     "INSERT INTO conversation_steering_results "
@@ -393,6 +448,17 @@ class SqliteSteeringRepository:
                 if existing is not None:
                     return existing
                 raise ValueError("对话转向结果已存在，禁止覆盖") from exc
+            if result.clarification and connection.execute(
+                "SELECT 1 FROM semantic_workspace_tasks WHERE user_id=? AND task_id=?",
+                (result.owner_id, result.task_id),
+            ).fetchone():
+                from src.api.store import WebUIStore
+                question = result.clarification
+                WebUIStore._clarification_event(connection, result.owner_id, result.task_id, "question_required", {
+                    "question": question, "round_id": question["round_id"], "revision": result.revision,
+                    "asked_at": result.created_at.isoformat(), "summary": question["prompt"],
+                    "action": {"action_id": question["question_id"]}, "recovery_status": "pending",
+                }, event_id=f"question:{question['round_id']}")
         return result
 
     @staticmethod

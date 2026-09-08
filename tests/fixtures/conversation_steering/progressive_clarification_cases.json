@@ -1,0 +1,659 @@
+{
+  "version": 1,
+  "synthetic_only": true,
+  "review_policy": "自动检查协议与问题数；必需语义、禁止假设及等价组需逐项人工核对实际输出，不将关键词命中当语义通过。",
+  "sources": {
+    "orders": {
+      "filename": "orders.csv",
+      "content": "订单编号,客户编号,状态,实收金额,应收金额,下单日期,付款日期\nO01,C01,已完成,80,100,2026-01-30,2026-02-02\nO02,C01,作废,0,50,2026-02-01,\nO03,C02,退款,-20,20,2026-02-03,2026-02-04\nO04,C02,已完成,60,60,2026-02-05,2026-02-05\n"
+    },
+    "people": {
+      "filename": "people.csv",
+      "content": "员工编号,姓名,部门\nE01,合成人物甲,采购\nE02,合成人物乙,财务\n"
+    },
+    "terms": {
+      "filename": "terms.txt",
+      "content": "合成服务协议\n标准服务：服务期为2026年1月1日至2026年3月31日。\n附加服务：服务期为2026年2月1日至2026年6月30日。\n标准服务和附加服务的期限分别计算。\n"
+    }
+  },
+  "cases": [
+    {
+      "id": "oral-orders",
+      "group": "oral",
+      "sources": [
+        "orders"
+      ],
+      "current_goal": "使用所选订单表分析业务，结果输出CSV；具体分析口径尚未确认。",
+      "equivalence_group": "orders",
+      "turns": [
+        {
+          "text": "把作废的去掉，按客户算实收，给我CSV就行。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "revision_proposal",
+            "required_semantics": [
+              "仅排除作废记录",
+              "按客户编号分组",
+              "汇总实收金额",
+              "CSV"
+            ],
+            "forbidden_assumptions": [
+              "改用应收金额",
+              "额外排除退款",
+              "将所有客户合并成一行"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "paraphrase-orders",
+      "group": "paraphrase",
+      "sources": [
+        "orders"
+      ],
+      "current_goal": "使用所选订单表分析业务，结果输出CSV；具体分析口径尚未确认。",
+      "equivalence_group": "orders",
+      "turns": [
+        {
+          "text": "排除状态为作废的记录，以客户编号分组，对实收金额求和，输出CSV。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "revision_proposal",
+            "required_semantics": [
+              "仅排除作废记录",
+              "按客户编号分组",
+              "汇总实收金额",
+              "CSV"
+            ],
+            "forbidden_assumptions": [
+              "改用应收金额",
+              "额外排除退款",
+              "将所有客户合并成一行"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "oral-people",
+      "group": "oral",
+      "sources": [
+        "people"
+      ],
+      "current_goal": "整理所选员工表，输出CSV；所需字段尚未确认。",
+      "equivalence_group": "people",
+      "turns": [
+        {
+          "text": "就留工号和部门，名字别带上，也不用筛人。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "revision_proposal",
+            "required_semantics": [
+              "仅员工编号和部门两列",
+              "不输出姓名",
+              "所有人员",
+              "CSV"
+            ],
+            "forbidden_assumptions": [
+              "筛选某部门",
+              "包含姓名",
+              "合并员工"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "paraphrase-people",
+      "group": "paraphrase",
+      "sources": [
+        "people"
+      ],
+      "current_goal": "整理所选员工表，输出CSV；所需字段尚未确认。",
+      "equivalence_group": "people",
+      "turns": [
+        {
+          "text": "保留员工编号和部门两列，删除姓名列，保留所有人员，输出CSV。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "revision_proposal",
+            "required_semantics": [
+              "仅员工编号和部门两列",
+              "不输出姓名",
+              "所有人员",
+              "CSV"
+            ],
+            "forbidden_assumptions": [
+              "筛选某部门",
+              "包含姓名",
+              "合并员工"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "oral-terms",
+      "group": "oral",
+      "sources": [
+        "terms"
+      ],
+      "current_goal": "整理所选合成服务协议，输出JSON；具体内容尚未确认。",
+      "equivalence_group": "terms",
+      "turns": [
+        {
+          "text": "标准和附加的服务期都列出来，分开写，JSON就好。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "revision_proposal",
+            "required_semantics": [
+              "标准和附加服务分别列出",
+              "各自起止日期",
+              "JSON"
+            ],
+            "forbidden_assumptions": [
+              "合成单一服务期",
+              "只保留其中一种服务",
+              "推断续约"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "paraphrase-terms",
+      "group": "paraphrase",
+      "sources": [
+        "terms"
+      ],
+      "current_goal": "整理所选合成服务协议，输出JSON；具体内容尚未确认。",
+      "equivalence_group": "terms",
+      "turns": [
+        {
+          "text": "分别提取标准服务与附加服务的起止日期，保留服务类型，输出JSON。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "revision_proposal",
+            "required_semantics": [
+              "标准和附加服务分别列出",
+              "各自起止日期",
+              "JSON"
+            ],
+            "forbidden_assumptions": [
+              "合成单一服务期",
+              "只保留其中一种服务",
+              "推断续约"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "missing-amount",
+      "group": "missing_condition",
+      "sources": [
+        "orders"
+      ],
+      "current_goal": "使用所选订单表分析业务，结果输出CSV；具体分析口径尚未确认。",
+      "equivalence_group": null,
+      "turns": [
+        {
+          "text": "按客户算一下销售额。",
+          "expected": {
+            "requires_clarification": true,
+            "action": "normalized_no_material_change",
+            "required_semantics": [
+              "明确询问实收金额还是应收金额",
+              "一次仅一个关键问题"
+            ],
+            "forbidden_assumptions": [
+              "自选金额列",
+              "擅自排除某状态"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "missing-date",
+      "group": "missing_condition",
+      "sources": [
+        "orders"
+      ],
+      "current_goal": "使用所选订单表分析业务，结果输出CSV；具体分析口径尚未确认。",
+      "equivalence_group": null,
+      "turns": [
+        {
+          "text": "算2026年2月的实收总额，别算作废的。",
+          "expected": {
+            "requires_clarification": true,
+            "action": "normalized_no_material_change",
+            "required_semantics": [
+              "明确询问按下单日期还是付款日期筛月份",
+              "保留实收金额与排除作废"
+            ],
+            "forbidden_assumptions": [
+              "自选日期列",
+              "丢掉排除作废"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "missing-service",
+      "group": "missing_condition",
+      "sources": [
+        "terms"
+      ],
+      "current_goal": "整理所选合成服务协议，输出JSON。",
+      "equivalence_group": null,
+      "turns": [
+        {
+          "text": "只要其中一种服务的到期日，不用两种都列。",
+          "expected": {
+            "requires_clarification": true,
+            "action": "normalized_no_material_change",
+            "required_semantics": [
+              "明确询问标准还是附加服务",
+              "承认两种真实不同期限"
+            ],
+            "forbidden_assumptions": [
+              "自选一种服务",
+              "合并到期日"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "vague-table",
+      "group": "vague",
+      "sources": [
+        "orders"
+      ],
+      "current_goal": "使用所选订单表分析业务，结果输出CSV；具体分析口径尚未确认。",
+      "equivalence_group": null,
+      "turns": [
+        {
+          "text": "帮我看看。",
+          "expected": {
+            "requires_clarification": true,
+            "action": "normalized_no_material_change",
+            "required_semantics": [
+              "以真实订单字段提出可行分析方向",
+              "询问用户关注目标"
+            ],
+            "forbidden_assumptions": [
+              "声称发现经营异常",
+              "假定要算销售额",
+              "声称已经完成分析"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "vague-document",
+      "group": "vague",
+      "sources": [
+        "terms"
+      ],
+      "current_goal": "查看所选合成服务协议，输出JSON。",
+      "equivalence_group": null,
+      "turns": [
+        {
+          "text": "这个帮我看看吧。",
+          "expected": {
+            "requires_clarification": true,
+            "action": "normalized_no_material_change",
+            "required_semantics": [
+              "区分实际两种服务期限",
+              "询问关注内容或处理目标"
+            ],
+            "forbidden_assumptions": [
+              "编造违约条款",
+              "替用户决定法律结论",
+              "声称全文审核完成"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "vague-multiple",
+      "group": "vague",
+      "sources": [
+        "orders",
+        "people"
+      ],
+      "current_goal": "查看所选订单表和员工表，输出CSV。",
+      "equivalence_group": null,
+      "turns": [
+        {
+          "text": "这些一起帮我看下。",
+          "expected": {
+            "requires_clarification": true,
+            "action": "normalized_no_material_change",
+            "required_semantics": [
+              "指出订单与员工资料是不同结构",
+              "先询问处理目标或是否需要关联"
+            ],
+            "forbidden_assumptions": [
+              "把客户编号当员工编号连接",
+              "虚构连接键",
+              "自动合并数据"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "negative-refund",
+      "group": "negation",
+      "sources": [
+        "orders"
+      ],
+      "current_goal": "按客户编号汇总订单实收金额，输出CSV。",
+      "equivalence_group": null,
+      "turns": [
+        {
+          "text": "别算状态为退款的，其他状态照原来的要求算。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "revision_proposal",
+            "required_semantics": [
+              "排除退款状态",
+              "保留按客户编号汇总实收金额",
+              "其他条件继承"
+            ],
+            "forbidden_assumptions": [
+              "把退款纳入",
+              "改用应收金额",
+              "额外排除作废"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "negative-merge",
+      "group": "negation",
+      "sources": [
+        "orders",
+        "people"
+      ],
+      "current_goal": "分别保留所选两个表的所有记录与列，各自输出CSV。",
+      "equivalence_group": null,
+      "turns": [
+        {
+          "text": "不要跨文件合并，还是各自原样导出。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "normalized_no_material_change",
+            "required_semantics": [
+              "两个文件分别导出",
+              "所有记录与列不变",
+              "CSV"
+            ],
+            "forbidden_assumptions": [
+              "建立连接",
+              "合成一张表"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "negative-name",
+      "group": "negation",
+      "sources": [
+        "people"
+      ],
+      "current_goal": "从所选员工表导出员工编号、姓名，保留全部人员，输出CSV。",
+      "equivalence_group": null,
+      "turns": [
+        {
+          "text": "不要姓名，只要编号，人员范围别改。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "revision_proposal",
+            "required_semantics": [
+              "仅员工编号",
+              "不输出姓名",
+              "全部人员"
+            ],
+            "forbidden_assumptions": [
+              "仍输出姓名",
+              "增加部门",
+              "减少人员"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "correction-amount",
+      "group": "multi_turn",
+      "sources": [
+        "orders"
+      ],
+      "current_goal": "使用所选订单表分析业务，结果输出CSV；具体分析口径尚未确认。",
+      "equivalence_group": null,
+      "turns": [
+        {
+          "text": "按客户算销售额，不算退款。",
+          "expected": {
+            "requires_clarification": true,
+            "action": "normalized_no_material_change",
+            "required_semantics": [
+              "询问金额口径",
+              "排除退款",
+              "客户粒度"
+            ],
+            "forbidden_assumptions": [
+              "自选金额列"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        },
+        {
+          "text": "销售额用实收金额。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "revision_proposal",
+            "required_semantics": [
+              "实收金额",
+              "排除退款",
+              "按客户分组"
+            ],
+            "forbidden_assumptions": [
+              "再问已明确金额口径"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        },
+        {
+          "text": "我刚说错了，改用应收金额，退款还是不要。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "revision_proposal",
+            "required_semantics": [
+              "更正为应收金额",
+              "仍排除退款",
+              "按客户分组"
+            ],
+            "forbidden_assumptions": [
+              "沿用实收金额",
+              "丢掉退款排除"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "correction-period",
+      "group": "multi_turn",
+      "sources": [
+        "orders"
+      ],
+      "current_goal": "使用所选订单表分析业务，结果输出CSV；具体分析口径尚未确认。",
+      "equivalence_group": null,
+      "turns": [
+        {
+          "text": "算2026年2月实收，不要作废的。",
+          "expected": {
+            "requires_clarification": true,
+            "action": "normalized_no_material_change",
+            "required_semantics": [
+              "询问下单或付款日期",
+              "实收金额",
+              "排除作废"
+            ],
+            "forbidden_assumptions": [
+              "自选日期列"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        },
+        {
+          "text": "按付款日期算。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "revision_proposal",
+            "required_semantics": [
+              "付款日期",
+              "2026年2月",
+              "实收金额",
+              "排除作废"
+            ],
+            "forbidden_assumptions": [
+              "改用下单日期"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        },
+        {
+          "text": "日期口径不变，月份改成2026年3月。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "revision_proposal",
+            "required_semantics": [
+              "付款日期",
+              "2026年3月",
+              "实收金额",
+              "排除作废"
+            ],
+            "forbidden_assumptions": [
+              "仍用2月",
+              "再次问日期口径"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "correction-grain",
+      "group": "multi_turn",
+      "sources": [
+        "orders"
+      ],
+      "current_goal": "使用所选订单表分析业务，结果输出CSV；具体分析口径尚未确认。",
+      "equivalence_group": null,
+      "turns": [
+        {
+          "text": "实收列统计一下，退款不要，但还没想好怎么分。",
+          "expected": {
+            "requires_clarification": true,
+            "action": "normalized_no_material_change",
+            "required_semantics": [
+              "询问统计粒度",
+              "实收金额",
+              "排除退款"
+            ],
+            "forbidden_assumptions": [
+              "私定分组"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        },
+        {
+          "text": "按客户编号汇总成一行一个客户。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "revision_proposal",
+            "required_semantics": [
+              "按客户编号汇总",
+              "一行一个客户",
+              "实收金额",
+              "排除退款"
+            ],
+            "forbidden_assumptions": [
+              "丢失排除条件"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        },
+        {
+          "text": "别按客户汇总了，改成一行一个订单，仍不要退款。",
+          "expected": {
+            "requires_clarification": false,
+            "action": "revision_proposal",
+            "required_semantics": [
+              "更正为一行一个订单",
+              "实收金额",
+              "排除退款"
+            ],
+            "forbidden_assumptions": [
+              "继续客户汇总",
+              "再次问已明确粒度"
+            ],
+            "source_scope_unchanged": true,
+            "permission_unchanged": true
+          }
+        }
+      ]
+    }
+  ]
+}

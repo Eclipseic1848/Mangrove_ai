@@ -50,7 +50,7 @@ class _ApiStatusRewriter:
             owner_id=turn.owner_id,
             task_id=turn.task_id,
             inherited_revision=request.revision,
-            source_turn_ids=(turn.turn_id,),
+            source_turn_ids=tuple(item.turn_id for item in request.relevant_turns)+(turn.turn_id,),
             intent=TurnIntent.STATUS_QUESTION,
             confidence=DeltaConfidence.HIGH,
             normalized_text="询问当前进度",
@@ -69,7 +69,7 @@ class _ApiMaterialRewriter:
             owner_id=turn.owner_id,
             task_id=turn.task_id,
             inherited_revision=request.revision,
-            source_turn_ids=(turn.turn_id,),
+            source_turn_ids=tuple(item.turn_id for item in request.relevant_turns)+(turn.turn_id,),
             intent=TurnIntent.TASK_REFINEMENT,
             confidence=DeltaConfidence.HIGH,
             normalized_text="输出格式改为 CSV，其余已确认语义保持不变",
@@ -327,6 +327,60 @@ def test_confirmed_cancel_now_applies_semantic_delta_as_v2(
         assert "已确认的上下文变更" in detail["objective_text"]
 
 
+def test_cancel_now_cannot_create_revision_until_old_run_is_stopped(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = migrated_webui_database(tmp_path / "workspace.db")
+    seed_execution_owner(database, "user-a")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
+    auth_mod._store = None
+
+    class CleanupPendingManager(_ApiManager):
+        async def cancel(self, user_id, task_id):
+            self.cancelled.append(task_id)
+            return get_store().update_semantic_workspace_task(
+                user_id, task_id, status="cancelling", cancel_requested=True,
+            )
+
+    manager = CleanupPendingManager()
+    app = FastAPI()
+    app.include_router(semantic_workspace.router)
+    app.dependency_overrides[get_current_user] = lambda: {
+        "user_id": "user-a", "role": "user", "execution_generation": 0,
+    }
+    monkeypatch.setattr(
+        semantic_workspace, "build_context_rewriter", lambda _request: _ApiMaterialRewriter(),
+    )
+    monkeypatch.setattr(
+        semantic_workspace, "get_semantic_workspace_manager", lambda: manager,
+    )
+    store = get_store()
+    store.create_semantic_workspace_task(
+        "user-a", task_id="workspace-cleanup-pending", title="合成报销任务",
+        objective_text="提取全部报销记录", upload_ids=[], output_formats=["json"],
+        provider="local", model="fixture-local", external_api_confirmed=False,
+    )
+    store.update_semantic_workspace_task(
+        "user-a", "workspace-cleanup-pending", status="needs_input", run_id="run-v1",
+    )
+    path = "/api/semantic-workspace/tasks/workspace-cleanup-pending"
+    with TestClient(app) as client:
+        proposed = client.post(f"{path}/turns", json={"text": "改成 CSV"})
+        assert proposed.status_code == 200, proposed.text
+        response = client.post(
+            f"{path}/revision-proposals/{proposed.json()['proposal_id']}/decision",
+            json={"mode": "cancel_now"},
+        )
+        detail = client.get(path).json()
+
+    assert response.status_code == 409, response.text
+    assert detail["active_revision"] == 1
+    assert detail["status"] == "cancelling"
+    assert detail["run_id"] == "run-v1"
+    assert manager.enqueued == []
+
+
 def test_after_safe_point_is_persisted_then_applied_by_worker(
     tmp_path,
     monkeypatch,
@@ -390,6 +444,14 @@ def test_after_safe_point_is_persisted_then_applied_by_worker(
         assert switched["active_revision"] == 2
         assert switched["run_id"] is None
         assert "workspace-4" in manager._deferred_requeue
+        store.update_semantic_workspace_task("user-a", "workspace-4", status="completed")
+        replay = client.post(
+            f"/api/semantic-workspace/tasks/workspace-4/revision-proposals/{proposal_id}/decision",
+            json={"mode": "after_safe_point"},
+        )
+        assert replay.status_code == 202, replay.text
+        assert replay.json()["revision"]["revision"] == 2
+        assert manager._deferred_requeue == {"workspace-4"}
 
 
 def test_new_task_choice_keeps_current_run_and_creates_isolated_task(
@@ -453,6 +515,13 @@ def test_new_task_choice_keeps_current_run_and_creates_isolated_task(
             "run_id"
         ] == "run-v1"
         assert manager.cancelled == []
+        assert manager.enqueued == [new_task["task_id"]]
+        replay = client.post(
+            f"/api/semantic-workspace/tasks/workspace-5/revision-proposals/{proposal_id}/decision",
+            json={"mode": "new_task"},
+        )
+        assert replay.status_code == 202, replay.text
+        assert replay.json()["new_task"]["task_id"] == new_task["task_id"]
         assert manager.enqueued == [new_task["task_id"]]
 
 

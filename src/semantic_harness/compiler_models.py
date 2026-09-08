@@ -68,6 +68,7 @@ class CompileRequest(ContractModel):
     max_repair_attempts: int = Field(default=2, ge=0, le=2)
     prior_plan: Optional[SemanticTaskPlan] = None
     clarification: Optional[ClarificationResolution] = None
+    source_findings: Tuple[dict[str, object], ...] = Field(default=(), max_length=20)
 
     @field_validator("provider")
     @classmethod

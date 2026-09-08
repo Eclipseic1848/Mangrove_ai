@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { nanoid } from "nanoid/non-secure";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Collapsible from "@radix-ui/react-collapsible";
@@ -286,29 +287,46 @@ function formatElapsed(milliseconds: number) {
 function QuestionDialog({
   question,
   onAnswer,
+  onRefreshQuestion,
 }: {
   question: WorkspaceQuestion;
-  onAnswer: (answer: string) => Promise<void>;
+  onAnswer: (question: WorkspaceQuestion, answer: string, key: string) => Promise<WorkspaceTask>;
+  onRefreshQuestion: () => void;
 }) {
   const [answer, setAnswer] = useState("");
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(true);
+  const [feedback, setFeedback] = useState("");
+  const mounted = useRef(true);
+  const inFlight = useRef(false);
+  const attempt = useRef<{ answer: string; key: string } | null>(null);
+  // 外发确认、切本地与取消走专门命令，不借业务续答状态推断授权。
+  const externalAuthorization = question.kind === "external" && question.purpose === "authorization";
+  const available = Boolean(question.round_id && question.revision && (externalAuthorization || (question.continuation && question.continuation !== "unavailable")));
 
   useEffect(() => {
     setOpen(true);
     setAnswer("");
-  }, [question.question_id]);
+  }, [question.round_id]);
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
 
   const submit = async (value: string) => {
-    if (!value.trim() || busy) return;
+    if (!value.trim() || inFlight.current || !available) return;
+    if (attempt.current?.answer !== value.trim()) attempt.current = { answer: value.trim(), key: nanoid() };
+    inFlight.current = true;
     setBusy(true);
     try {
-      await onAnswer(value.trim());
-      setOpen(false);
+      const result = await onAnswer(question, value.trim(), attempt.current.key);
+      if (!mounted.current) return;
+      if (!result.answer_receipt || result.answer_receipt.round_id !== question.round_id || result.answer_receipt.revision !== question.revision || result.answer_receipt.status === "unknown") {
+        setFeedback("回答结果未知，请刷新任务核对；不会自动重发。");
+      } else {
+        setOpen(false);
+      }
     } catch {
-      setOpen(true);
+      if (mounted.current) setOpen(true);
     } finally {
-      setBusy(false);
+      if (mounted.current) { inFlight.current = false; setBusy(false); }
     }
   };
 
@@ -327,7 +345,7 @@ function QuestionDialog({
       )}
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45 backdrop-blur-[2px]" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(92vw,520px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl outline-none">
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 max-h-[85dvh] w-[min(92vw,520px)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-2xl border bg-background p-6 shadow-2xl outline-none">
           <div className="flex items-start justify-between gap-4">
             <div>
               <Dialog.Title className="text-base font-semibold">
@@ -359,7 +377,7 @@ function QuestionDialog({
               </div>
               <div className="grid grid-cols-[86px_1fr] gap-2">
                 <dt className="text-muted-foreground">目的</dt>
-                <dd>{productText(question.purpose)}</dd>
+                <dd>{productText(question.outbound_purpose)}</dd>
               </div>
               <div className="grid grid-cols-[86px_1fr] gap-2">
                 <dt className="text-muted-foreground">风险</dt>
@@ -380,11 +398,14 @@ function QuestionDialog({
           )}
 
           <div className="mt-5 grid gap-2">
+            {!available && <p role="status" className="text-sm">当前问题暂不可提交，请刷新任务核对；可继续对话提出更正。</p>}
+            {feedback && <p role="status" className="text-sm">{feedback}</p>}
+            {(!available || feedback) && <button type="button" onClick={onRefreshQuestion} className="rounded-lg border px-3 py-2 text-sm">刷新问题状态</button>}
             {question.options?.map((option) => (
               <button
                 key={option.value}
                 type="button"
-                disabled={busy}
+                disabled={busy || !available || Boolean(feedback)}
                 onClick={() => void submit(option.value)}
                 className="rounded-xl border px-4 py-3 text-left transition-colors hover:border-primary/40 hover:bg-primary/[0.04] disabled:opacity-50"
               >
@@ -399,17 +420,18 @@ function QuestionDialog({
             {question.allow_free_text && (
               <div className="mt-1 flex gap-2">
                 <input
+                  aria-label="确认补充说明"
                   value={answer}
                   onChange={(event) => setAnswer(event.target.value)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter") void submit(answer);
+                    if (!event.nativeEvent.isComposing && event.nativeEvent.keyCode !== 229 && event.key === "Enter") void submit(answer);
                   }}
                   placeholder="输入你的补充说明"
                   className="h-10 flex-1 rounded-xl border bg-background px-3 text-sm outline-none focus:border-primary"
                 />
                 <button
                   type="button"
-                  disabled={!answer.trim() || busy}
+                  disabled={!answer.trim() || busy || !available || Boolean(feedback)}
                   onClick={() => void submit(answer)}
                   className="rounded-xl bg-primary px-4 text-sm font-medium text-primary-foreground disabled:opacity-50"
                 >
@@ -493,6 +515,7 @@ export function TaskTimeline({
   task,
   liveEvents,
   onAnswer,
+  onRefreshQuestion,
   onCancel,
   onRecycle,
   onRetry,
@@ -500,10 +523,12 @@ export function TaskTimeline({
   onGapAction,
   onRevisionChange,
   connectionLabel,
+  clarificationTurnIds = [],
 }: {
   task: WorkspaceTask;
   liveEvents: WorkspaceEvent[];
-  onAnswer: (answer: string) => Promise<void>;
+  onAnswer: (question: WorkspaceQuestion, answer: string, key: string) => Promise<WorkspaceTask>;
+  onRefreshQuestion: () => void;
   onCancel: () => Promise<void>;
   onRecycle: () => Promise<void>;
   onRetry: (unchanged?: boolean) => void | Promise<void>;
@@ -513,6 +538,7 @@ export function TaskTimeline({
   ) => Promise<void>;
   onRevisionChange: (revision: number) => void;
   connectionLabel?: string;
+  clarificationTurnIds?: string[];
 }) {
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [progressOpen, setProgressOpen] = useState(false);
@@ -597,9 +623,10 @@ export function TaskTimeline({
 
   return (
     <section className="mx-auto w-full max-w-4xl px-6 py-6">
-      {task.status === "needs_input" && task.question && (
-        <QuestionDialog question={task.question} onAnswer={onAnswer} />
+      {task.status === "needs_input" && (task.viewing_revision ?? task.current_revision ?? task.active_revision) === (task.current_revision ?? task.active_revision) && task.question && task.question.purpose !== "business" && task.question.purpose !== "control" && (
+        <QuestionDialog key={`${task.task_id}:${task.viewing_revision}:${task.question.round_id ?? task.question.question_id}`} question={task.question} onAnswer={onAnswer} onRefreshQuestion={onRefreshQuestion} />
       )}
+      {task.question?.purpose === "control" && <p role="status" className="mb-4 rounded-xl border p-4 text-sm leading-6">{task.question.prompt} 仍可继续对话提出更正；补充要求需要明确确认后，以新版本重新开始。</p>}
       {task.web_source && (
         <div className="mb-4 flex flex-wrap items-start gap-3 border-b pb-4 text-sm">
           <Globe2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
@@ -826,7 +853,7 @@ export function TaskTimeline({
         <div className="mt-6 rounded-2xl border bg-muted/20 p-4">
           <div className="flex items-center gap-2 text-sm font-medium">
             <FileCheck2 className="h-4 w-4 text-primary" />
-            系统理解
+            执行状态
           </div>
           <div className="mt-3 grid gap-1 text-sm leading-6 text-muted-foreground">
             {task.summary.split("\n").map((line) => (
@@ -855,6 +882,24 @@ export function TaskTimeline({
         </div>
       )}
 
+      {task.understanding && task.understanding.revision === (task.viewing_revision ?? task.current_revision ?? task.active_revision) && (
+        <section aria-label="当前理解" className="mt-4 rounded-xl border p-4 text-sm leading-6">
+          <h2 className="font-medium">当前理解</h2>
+          <p className="mt-2 whitespace-pre-wrap break-words">{task.understanding.summary}</p>
+          {task.understanding.status === "needs_clarification" && <p className="mt-2 text-xs text-muted-foreground">仍需澄清，尚未形成可执行修改。</p>}
+          {task.understanding.findings.length > 0 && <ul aria-label="来源观察" className="mt-3 grid gap-2 text-xs text-muted-foreground">
+            {task.understanding.findings.map((finding, index) => <li key={`${finding.inspection_id}:${index}`} className="break-words" title={`来源 ${finding.artifact_id} · ${finding.source_sha256} · 检查版本 ${finding.inspector_version}`}>
+              {finding.summary}
+            </li>)}
+          </ul>}
+        </section>
+      )}
+      {(task.clarification_history ?? []).filter(entry => entry.answer !== null && !clarificationTurnIds.includes(entry.turn_id ?? "") && entry.revision === (task.viewing_revision ?? task.current_revision ?? task.active_revision)).map(entry => (
+        <section key={entry.round_id} aria-label="已回答的澄清" className="mt-4 border-l-2 pl-4 text-sm leading-6">
+          <p className="font-medium">{entry.question.prompt}</p>
+          <p className="mt-2 whitespace-pre-wrap break-words">你的回答：{entry.answer}</p>
+        </section>
+      ))}
       {task.agentic_runtime?.coverage && (
         <section
           aria-label="文档覆盖范围"

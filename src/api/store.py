@@ -17,7 +17,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager, nullcontext
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
@@ -3248,6 +3248,239 @@ class WebUIStore:
                 item["user_id"] = row["user_id"]
                 result.append(item)
         return result
+
+    @staticmethod
+    def _clarification_event(conn, user_id, task_id, event_type, details, *, event_id):
+        sequence = conn.execute(
+            "SELECT COALESCE(MAX(sequence),0)+1 FROM semantic_workspace_events WHERE task_id=?",
+            (task_id,),
+        ).fetchone()[0]
+        conn.execute(
+            "INSERT INTO semantic_workspace_events "
+            "(event_id,task_id,user_id,sequence,stage,event_type,summary,details_json,created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (event_id, task_id, user_id, sequence, "needs_input", event_type,
+             str(details.get("summary") or "已更新当前问题")[:500],
+             json.dumps(details, ensure_ascii=False), _now()),
+        )
+
+    def publish_workspace_question(self, user_id, task_id, question, *, expected_revision=None, legacy=False):
+        """问题身份与快照一起提交；兼容读取只补身份，不赋予执行权限。"""
+        with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT * FROM semantic_workspace_tasks WHERE user_id=? AND task_id=?",
+                (user_id, task_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError("任务不存在或无权访问")
+            revision = row["active_revision"]
+            previous = json.loads(row["question_json"] or "null")
+            if legacy:
+                if not previous or previous.get("round_id"):
+                    return previous
+                if previous.get("question_id") != question.get("question_id"):
+                    raise ValueError("当前问题已变化")
+            else:
+                execution.require_binding(conn, self._execution_owner(conn, user_id), "workspace", task_id)
+                if row["cancel_requested"] or row["status"] in {"cancelled", "cancelling", "paused"}:
+                    raise ValueError("任务已停止，不能发布迟到问题")
+            if expected_revision is not None and revision != expected_revision:
+                raise ValueError("活动版本已变化，不能发布旧问题")
+            saved = dict(question)
+            prior_purpose = saved.get("purpose")
+            saved["outbound_purpose"] = saved.get("outbound_purpose") or (
+                prior_purpose if prior_purpose not in {None, "business", "authorization", "control"} else None
+            )
+            saved["purpose"] = prior_purpose if prior_purpose in {"business", "authorization", "control"} else (
+                "authorization" if saved.get("kind") == "external" else "business"
+            )
+            saved.update(round_id=f"clarification_{uuid.uuid4().hex}", revision=revision)
+            saved.setdefault("origin_turn_id", None)
+            saved.setdefault("continuation", "resume" if saved["purpose"] == "business" else "unavailable")
+            asked_at = None
+            if legacy:
+                for event in conn.execute(
+                    "SELECT details_json,created_at FROM semantic_workspace_events "
+                    "WHERE user_id=? AND task_id=? AND event_type='question_required' ORDER BY sequence DESC",
+                    (user_id, task_id),
+                ):
+                    details = json.loads(event["details_json"])
+                    if (details.get("action") or {}).get("action_id") == saved.get("question_id"):
+                        asked_at = event["created_at"]
+                        break
+            else:
+                asked_at = _now()
+            task_status = row["status"] if legacy else "needs_input"
+            encoded = json.dumps(saved, ensure_ascii=False)
+            conn.execute(
+                "UPDATE semantic_workspace_tasks SET question_json=?,status=?,updated_at=? "
+                "WHERE user_id=? AND task_id=? AND active_revision=?",
+                (encoded, task_status, _now(), user_id, task_id, revision),
+            )
+            conn.execute(
+                "UPDATE semantic_workspace_revisions SET status=?,updated_at=? "
+                "WHERE user_id=? AND task_id=? AND revision=?",
+                (task_status, _now(), user_id, task_id, revision),
+            )
+            self._clarification_event(conn, user_id, task_id, "question_required", {
+                "question": saved, "revision": revision, "round_id": saved["round_id"],
+                "asked_at": asked_at, "summary": saved["prompt"],
+                "reason": saved.get("reason"), "purpose": saved.get("reason"),
+                "affected_scope": saved.get("affected_scope"),
+                "result_summary": saved.get("affected_scope") if isinstance(saved.get("affected_scope"), str) else "、".join(saved.get("affected_scope") or []),
+                "action": {"action_id": saved["question_id"]}, "recovery_status": "pending",
+            }, event_id=f"question:{saved['round_id']}")
+        return saved
+
+    @staticmethod
+    def _answer_receipt(conn, details):
+        receipt = {key: details[key] for key in ("round_id", "revision", "turn_id")}
+        claimed = conn.execute("SELECT 1 FROM semantic_workspace_events WHERE event_id=?", (f"answer-send:{receipt['turn_id']}",)).fetchone()
+        completed = conn.execute("SELECT 1 FROM semantic_workspace_events WHERE event_id=?", (f"answer-done:{receipt['turn_id']}",)).fetchone()
+        result = conn.execute("SELECT 1 FROM conversation_steering_results WHERE owner_id=? AND turn_id=?", (details["owner_id"], receipt["turn_id"])).fetchone()
+        return {**receipt, "status": "unknown" if claimed and not completed and not result else "accepted"}
+
+    def accept_workspace_answer(self, user_id, task_id, *, answer, expected_revision, question_round_id, idempotency_key, result_context=None):
+        """核验当前轮次后原子保存原话、收据与允许的下一状态。"""
+        answer = answer.strip()
+        if not answer or len(answer) > 10000 or not idempotency_key or len(idempotency_key) > 200:
+            raise ValueError("回答或幂等键无效")
+        with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM semantic_workspace_tasks WHERE user_id=? AND task_id=?", (user_id, task_id)).fetchone()
+            if row is None:
+                raise KeyError("任务不存在或无权访问")
+            existing = conn.execute(
+                "SELECT * FROM conversation_raw_turns WHERE owner_id=? AND task_id=? AND idempotency_key=?",
+                (user_id, task_id, idempotency_key),
+            ).fetchone()
+            if existing:
+                event = conn.execute("SELECT details_json FROM semantic_workspace_events WHERE event_id=? AND user_id=? AND task_id=?", (f"answer:{existing['turn_id']}", user_id, task_id)).fetchone()
+                details = json.loads(event[0]) if event else {}
+                if existing["text"] != answer or existing["revision"] != expected_revision or details.get("round_id") != question_round_id:
+                    raise ValueError("相同幂等键不能更换回答、版本或轮次")
+                return self._answer_receipt(conn, details)
+            if row["active_revision"] != expected_revision or row["cancel_requested"] or row["status"] in {"cancelled", "cancelling", "paused"}:
+                raise ValueError("任务版本或停止状态已变化")
+            required = conn.execute("SELECT details_json FROM semantic_workspace_events WHERE event_id=? AND user_id=? AND task_id=?", (f"question:{question_round_id}", user_id, task_id)).fetchone()
+            details = json.loads(required[0]) if required else {}
+            question = details.get("question") or {}
+            if question.get("revision") != expected_revision:
+                raise ValueError("当前问题轮次不存在或已过期")
+            current = json.loads(row["question_json"] or "null")
+            if question.get("continuation") != "steering" and (
+                row["status"] != "needs_input" or not current or current.get("round_id") != question_round_id
+            ):
+                raise ValueError("当前问题已变化")
+            if question.get("continuation") == "steering":
+                if current and not current.get("answer") and row["status"] == "needs_input":
+                    raise ValueError("请先处理当前执行问题")
+                latest_round = next((json.loads(item[0]).get("round_id") for item in conn.execute(
+                    "SELECT details_json FROM semantic_workspace_events WHERE user_id=? AND task_id=? AND event_type='question_required' ORDER BY sequence DESC",
+                    (user_id, task_id),
+                ) if (json.loads(item[0]).get("question") or {}).get("continuation") == "steering" and json.loads(item[0]).get("revision") == expected_revision), None)
+                if latest_round != question_round_id:
+                    raise ValueError("当前澄清轮次已变化")
+            answered = conn.execute("SELECT 1 FROM semantic_workspace_events WHERE event_id=?", (f"round-answer:{question_round_id}",)).fetchone()
+            if answered:
+                raise ValueError("该问题已经接收回答")
+            kind = question.get("kind")
+            free_cancel = kind == "external" and answer == "cancel"
+            if not free_cancel:
+                execution.require_binding(conn, self._execution_owner(conn, user_id), "workspace", task_id)
+            allowed = {str(item.get("value")) for item in question.get("options", [])}
+            if allowed and answer not in allowed and not question.get("allow_free_text", False):
+                raise ValueError("回答不在当前允许选项中")
+            if question.get("purpose") == "control" or (question.get("continuation") == "unavailable" and kind != "external"):
+                raise ValueError("当前等待不支持业务回答")
+            if kind == "external" and answer not in {"confirm", "local", "cancel"}:
+                raise ValueError("外发问题只接受确认、本地执行或取消")
+            turn_id = f"turn_{uuid.uuid4().hex[:16]}"
+            now = _now()
+            conn.execute(
+                "INSERT INTO conversation_raw_turns (turn_id,owner_id,task_id,revision,text,idempotency_key,created_at,result_context_json) VALUES (?,?,?,?,?,?,?,?)",
+                (turn_id, user_id, task_id, expected_revision, answer, idempotency_key, datetime.now(timezone.utc).isoformat(), json.dumps(result_context, ensure_ascii=False) if result_context else None),
+            )
+            accepted = {"owner_id": user_id, "round_id": question_round_id, "revision": expected_revision,
+                        "turn_id": turn_id, "cancel_generation": row["cancel_generation"],
+                        "summary": "已收到本轮补充", "action": {"action_id": question["question_id"]}, "recovery_status": "handled"}
+            self._clarification_event(conn, user_id, task_id, "question_answered", accepted, event_id=f"answer:{turn_id}")
+            self._clarification_event(conn, user_id, task_id, "clarification.accepted", accepted, event_id=f"round-answer:{question_round_id}")
+            if current and current.get("round_id") == question_round_id:
+                current.update(answer=answer, answer_turn_id=turn_id)
+                next_status = row["status"]
+                objective = row["objective_text"]
+                if question.get("continuation") == "resume" and kind != "external":
+                    next_status = "queued"
+                    if kind == "plan":
+                        objective += f"\n用户补充：{answer}"
+                conn.execute(
+                    "UPDATE semantic_workspace_tasks SET question_json=?,status=?,objective_text=?,updated_at=? WHERE user_id=? AND task_id=?",
+                    (json.dumps(current, ensure_ascii=False), next_status, objective, now, user_id, task_id),
+                )
+            return self._answer_receipt(conn, accepted)
+
+    def consume_workspace_external_answer(self, user_id, task_id, turn_id, answer):
+        """外发续行与停止代际共用写事务，迟到回答不能撤销用户停止。"""
+        if answer not in {"confirm", "local"}:
+            raise ValueError("外发续行回答无效")
+        with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT * FROM semantic_workspace_tasks WHERE user_id=? AND task_id=?", (user_id, task_id)).fetchone()
+            event = conn.execute("SELECT details_json FROM semantic_workspace_events WHERE event_id=? AND user_id=? AND task_id=?", (f"answer:{turn_id}", user_id, task_id)).fetchone()
+            accepted = json.loads(event[0]) if event else {}
+            question = json.loads(row["question_json"] or "null") if row else None
+            if not row or not question or question.get("kind") != "external" or question.get("answer_turn_id") != turn_id or question.get("answer") != answer or question.get("round_id") != accepted.get("round_id") or accepted.get("revision") != row["active_revision"] or accepted.get("cancel_generation") != row["cancel_generation"] or row["cancel_requested"] or row["status"] != "needs_input":
+                raise ValueError("外发回答或停止状态已变化，禁止继续执行")
+            execution.require_binding(conn, self._execution_owner(conn, user_id), "workspace", task_id)
+            provider = "local" if answer == "local" else row["provider"]
+            model = None if answer == "local" else row["model"]
+            conn.execute("UPDATE semantic_workspace_tasks SET status='queued',question_json=NULL,provider=?,model=?,external_api_confirmed=?,updated_at=? WHERE user_id=? AND task_id=?",
+                (provider, model, int(answer == "confirm"), _now(), user_id, task_id))
+            self._clarification_event(conn, user_id, task_id, "clarification.consumed", accepted, event_id=f"answer-done:{turn_id}")
+        return self.get_semantic_workspace_task(user_id, task_id)
+
+    def claim_workspace_answer(self, user_id, task_id, turn_id):
+        """占位提交后才调用；unknown 不会因重建、超时或新键被自动重发。"""
+        with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT active_revision,cancel_generation,cancel_requested FROM semantic_workspace_tasks WHERE user_id=? AND task_id=?", (user_id, task_id)).fetchone()
+            event = conn.execute("SELECT details_json FROM semantic_workspace_events WHERE event_id=? AND user_id=? AND task_id=?", (f"answer:{turn_id}", user_id, task_id)).fetchone()
+            details = json.loads(event[0]) if event else {}
+            if not row or details.get("revision") != row["active_revision"] or details.get("cancel_generation") != row["cancel_generation"] or row["cancel_requested"]:
+                raise ValueError("回答已失效，禁止执行")
+            execution.require_binding(conn, self._execution_owner(conn, user_id), "workspace", task_id)
+            if conn.execute("SELECT 1 FROM semantic_workspace_events WHERE event_id=?", (f"answer-send:{turn_id}",)).fetchone():
+                raise ValueError("回答已发送或结果未知，禁止自动重发")
+            self._clarification_event(conn, user_id, task_id, "clarification.send_claimed", details, event_id=f"answer-send:{turn_id}")
+
+    def finish_workspace_answer(self, user_id, task_id, turn_id):
+        with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            event = conn.execute("SELECT details_json FROM semantic_workspace_events WHERE event_id=? AND user_id=? AND task_id=?", (f"answer:{turn_id}", user_id, task_id)).fetchone()
+            if event is None:
+                raise ValueError("回答收据不存在")
+            if not conn.execute("SELECT 1 FROM semantic_workspace_events WHERE event_id=?", (f"answer-done:{turn_id}",)).fetchone():
+                self._clarification_event(conn, user_id, task_id, "clarification.consumed", json.loads(event[0]), event_id=f"answer-done:{turn_id}")
+
+    def workspace_clarification_history(self, user_id, task_id, revision):
+        with self._conn() as conn:
+            events = conn.execute("SELECT event_type,details_json,created_at FROM semantic_workspace_events WHERE user_id=? AND task_id=? AND event_type IN ('question_required','question_answered') ORDER BY sequence", (user_id, task_id)).fetchall()
+            history = {}
+            for event in events:
+                details = json.loads(event["details_json"])
+                if details.get("revision") != revision or not details.get("round_id"):
+                    continue
+                if event["event_type"] == "question_required" and details.get("question"):
+                    history[details["round_id"]] = {"round_id": details["round_id"], "revision": revision,
+                        "question": details["question"], "asked_at": details.get("asked_at"),
+                        "answer": None, "turn_id": None, "answered_at": None}
+                elif details["round_id"] in history:
+                    turn = conn.execute("SELECT text FROM conversation_raw_turns WHERE owner_id=? AND task_id=? AND turn_id=?", (user_id, task_id, details["turn_id"])).fetchone()
+                    if turn:
+                        history[details["round_id"]].update(answer=turn[0], turn_id=details["turn_id"], answered_at=event["created_at"])
+            return list(history.values())
 
     def update_semantic_workspace_task(
         self,

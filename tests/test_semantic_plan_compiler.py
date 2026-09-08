@@ -6,6 +6,9 @@ import asyncio
 from types import SimpleNamespace
 from typing import Sequence
 
+import httpx
+import pytest
+
 from src.semantic_harness import compiler as compiler_module
 from src.semantic_harness.compiler import InstructorPlanDraftGenerator
 from src.semantic_harness.compiler import PlanDraftGenerator
@@ -112,6 +115,37 @@ def _request(**overrides) -> CompileRequest:
     }
     values.update(overrides)
     return CompileRequest.model_validate(values)
+
+
+@pytest.mark.parametrize("failure", ["timeout", "503"])
+def test_clarification_compiler_http_is_not_retried_by_sdk_or_graph(monkeypatch, failure):
+    ambiguity = Ambiguity(ambiguity_id="date.basis", question="使用哪种日期？", candidates=("交易日期", "到账日期"))
+    draft = _table_draft().model_copy(update={"ambiguities": (ambiguity,)})
+    first = asyncio.run(compile_semantic_plan(_request(), generator=FakeGenerator([draft])))
+    calls = []
+
+    def respond(request):
+        calls.append(request.url.path)
+        if failure == "timeout":
+            raise httpx.ReadTimeout("合成响应未知", request=request)
+        return httpx.Response(503, json={"error": {"message": "合成服务不可用"}})
+
+    original_client = httpx.AsyncClient
+
+    class IsolatedClient(original_client):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs, transport=httpx.MockTransport(respond))
+
+    connection = SimpleNamespace(provider="local", requested_model="synthetic-model", model="synthetic-model",
+        base_url="http://127.0.0.1:9/v1", api_key="synthetic", timeout=2, trust_env=False, extra_body=None)
+    monkeypatch.setattr(compiler_module, "get_provider", lambda: SimpleNamespace(resolve_model=lambda *args, **kwargs: connection))
+    monkeypatch.setattr(compiler_module.httpx, "AsyncClient", IsolatedClient)
+    request = _request(prior_plan=first.plan, max_repair_attempts=2,
+        clarification=ClarificationResolution(ambiguity_id="date.basis", question="使用哪种日期？", answer="到账日期"))
+    # 真实生成器、SDK和编译图都参与；不能用直接返回结果的生成器证明单次发送。
+    result = asyncio.run(compile_semantic_plan(request, generator=InstructorPlanDraftGenerator(provider="local")))
+    assert calls == ["/v1/chat/completions"]
+    assert result.status is not CompileStatus.READY
 
 
 def test_instructor_compiler_disables_thinking_and_bounds_generation(
@@ -318,6 +352,42 @@ def test_requested_output_formats_override_model_delivery_draft():
     assert result.plan.delivery.requested_file_count == 1
 
 
+def test_clarification_that_remains_unresolved_does_not_become_ready():
+    ambiguity = Ambiguity(
+        ambiguity_id="date.basis",
+        question="按交易日期还是到账日期统计？",
+        candidates=("交易日期", "到账日期"),
+    )
+    draft = _table_draft().model_copy(update={"ambiguities": (ambiguity,)})
+    first = asyncio.run(
+        compile_semantic_plan(_request(), generator=FakeGenerator([draft]))
+    )
+    assert first.status == CompileStatus.NEEDS_USER
+    assert first.plan is not None
+
+    result = asyncio.run(
+        compile_semantic_plan(
+            _request(
+                prior_plan=first.plan,
+                clarification=ClarificationResolution(
+                    ambiguity_id=ambiguity.ambiguity_id,
+                    question=ambiguity.question,
+                    answer="我还不确定这两种日期有什么区别",
+                ),
+            ),
+            generator=FakeGenerator([draft]),
+            plan_id=first.plan.plan_id,
+            revision=2,
+        )
+    )
+
+    assert result.status == CompileStatus.NEEDS_USER
+    assert result.plan is not None
+    assert result.plan.is_executable is False
+    assert result.clarification is not None
+    assert result.clarification.ambiguity_id == "date.basis"
+
+
 def test_clarification_preserves_prior_scope_and_records_resolution():
     ambiguity = Ambiguity(
         ambiguity_id="extract.mode",
@@ -347,7 +417,9 @@ def test_clarification_preserves_prior_scope_and_records_resolution():
         normalized_objective="逐字提取条款原文",
         content_policy=ContentPolicy.VERBATIM,
         delivery=DeliverySpec(formats=(DeliveryFormat.DOCX,)),
-        ambiguities=(ambiguity,),
+        ambiguities=(
+            ambiguity.model_copy(update={"resolved": True, "resolution": "逐字原文"}),
+        ),
     )
 
     result = asyncio.run(

@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Any
+import json
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -222,12 +223,35 @@ class SteeringRequest(BaseModel):
     current_goal: str = ""
     selection_reason: str = ""
     event_summaries: tuple[str, ...] = ()
+    source_findings: tuple[dict[str, Any], ...] = Field(default=(), max_length=20)
+    relevant_turns: tuple[RawUserTurn, ...] = Field(default=(), max_length=16)
+    prior_delta: ContextDelta | None = None
+    clarification_question: str | None = None
+    clarification_round_id: str | None = None
     provider: str = "local"
     model: str | None = None
     model_connection_id: str | None = None
     model_connection_version: str | None = None
     external_api_confirmed: bool = False
     result_context: FrozenResultContext | None = None
+
+    @model_validator(mode="after")
+    def validate_clarification_history(self):
+        identities = tuple(item.turn_id for item in self.relevant_turns)
+        if len(set(identities)) != len(identities) or any(
+            (item.owner_id, item.task_id, item.revision) != (self.owner_id, self.task_id, self.revision)
+            for item in self.relevant_turns
+        ):
+            raise ValueError("相关回合不属于当前 Owner、任务或活动版本")
+        if self.prior_delta is not None and (
+            (self.prior_delta.owner_id, self.prior_delta.task_id, self.prior_delta.inherited_revision) != (self.owner_id, self.task_id, self.revision)
+            or self.prior_delta.source_turn_ids != identities
+        ):
+            raise ValueError("上一轮语义与真实相关回合身份不一致")
+        context = self.model_dump(mode="json", include={"relevant_turns", "prior_delta", "source_findings", "clarification_question"})
+        if len(json.dumps(context, ensure_ascii=False).encode("utf-8")) > 65536:
+            raise ValueError("澄清上下文超过读取预算")
+        return self
 
 
 class SteeringResult(BaseModel):
@@ -245,6 +269,7 @@ class SteeringResult(BaseModel):
     run_id: str | None = None
     revision: int = Field(ge=1)
     result_context: PublicResultContext | None = None
+    clarification: dict[str, Any] | None = None
     created_at: datetime = Field(default_factory=_now)
 
 
@@ -440,6 +465,8 @@ class RevisionDecision(BaseModel):
     mode: RevisionSwitchMode
     status: RevisionDecisionStatus
     safe_point: str | None = None
+    applied_revision: int | None = Field(default=None, ge=1)
+    applied_task_id: str | None = None
     external_api_confirmed: bool = False
     created_at: datetime = Field(default_factory=_now)
     updated_at: datetime = Field(default_factory=_now)

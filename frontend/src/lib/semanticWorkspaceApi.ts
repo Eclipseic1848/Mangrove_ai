@@ -178,9 +178,10 @@ export function createWorkspaceTask(payload: {
 
 export function answerWorkspaceTask(
   taskId: string,
-  answer: string,
+  payload: { answer: string; expected_revision: number; question_round_id: string },
+  idempotencyKey: string,
 ): Promise<WorkspaceTask> {
-  return api.post(`${BASE}/tasks/${taskId}/answer`, { answer });
+  return api.post(`${BASE}/tasks/${taskId}/answer`, payload, { "Idempotency-Key": idempotencyKey });
 }
 
 export function resumeAccountWorkspaceTask(taskId: string, expectedGeneration: number, expectedActiveRevision: number, externalApiConfirmed: boolean): Promise<{ strategy: "waiting" | "unstarted" | "new_revision"; revision: WorkspaceRevision | null }> {

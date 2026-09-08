@@ -5,8 +5,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 from datetime import datetime, timezone
+import hashlib
+import ipaddress
 import json
+import os
 from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+from urllib.parse import urlsplit
+from unittest.mock import patch
 import uuid
 
 from src.conversation_steering import (
@@ -89,6 +96,8 @@ async def evaluate_case(case: dict, semaphore: asyncio.Semaphore) -> dict:
 
 
 async def run(args: argparse.Namespace) -> int:
+    if args.mode == "progressive":
+        return await run_progressive(args)
     cases = json.loads(args.fixture.read_text(encoding="utf-8"))
     rounds: list[dict] = []
     for round_number in range(1, args.rounds + 1):
@@ -120,8 +129,196 @@ async def run(args: argparse.Namespace) -> int:
     return 0 if report["all_passed"] else 1
 
 
+def check_progressive_request(request, *, endpoint, model, sent, max_calls):
+    """在真实 HTTP 发送前核精确目的地和预算，重复尝试不获得新额度。"""
+    if str(request.url) != endpoint or request.method != "POST":
+        raise ValueError("评测请求偏离已冻结端点")
+    if sent >= max_calls or len(request.content) > 65536:
+        raise ValueError("评测请求超出冻结预算")
+    body = json.loads(request.content)
+    if body.get("model") != model or not 1 <= body.get("max_tokens", 0) <= 2048:
+        raise ValueError("评测请求模型或输出预算不一致")
+
+
+def progressive_rewriter(args):
+    """仅注入本次连接配置，不读取全局供应商配置，推理仍用原实现。"""
+    from src.conversation_steering import rewriter as implementation
+    from src.llm.provider import ResolvedModelConnection
+
+    connection = ResolvedModelConnection(provider="local", requested_model=args.model,
+        model=args.model, base_url=args.base_url.rstrip("/"),
+        api_key=os.environ.get("MANGROVE_EVAL_API_KEY") or "local-evaluation",
+        trust_env=False, timeout=90, extra_body=None)
+    provider = SimpleNamespace(resolve_model=lambda *unused, **kwargs: connection)
+    with patch.object(implementation, "get_provider", return_value=provider):
+        return implementation.InstructorContextRewriter(provider="local", model=args.model)
+
+
+async def run_progressive(args: argparse.Namespace) -> int:
+    """合成资料经真实检查器及产品转写器；语义仍须逐项审阅实际输出。"""
+    fixture_bytes = args.fixture.read_bytes()
+    fixture = json.loads(fixture_bytes)
+    cases = fixture["cases"]
+    if (fixture.get("synthetic_only") is not True or len(cases) != 18
+            or sum(len(case["turns"]) for case in cases) != 24
+            or args.rounds != 1 or args.concurrency != 1):
+        raise ValueError("本票固定评测须为18例24轮，单轮且串行")
+    if not args.base_url or not args.model:
+        raise ValueError("必须明确本地模型和端点，不能采用全局默认")
+    url = urlsplit(args.base_url)
+    local = url.hostname == "localhost"
+    if not local:
+        try:
+            local = ipaddress.ip_address(url.hostname or "").is_private
+        except ValueError:
+            local = False
+    if (not local or url.scheme not in {"http", "https"} or url.username or url.password
+            or url.query or url.fragment or url.path.rstrip("/") != "/v1"):
+        raise ValueError("须提供明确本地OpenAI兼容/v1端点，不接受凭据或查询串")
+    endpoint = args.base_url.rstrip("/") + "/chat/completions"
+    report = {
+        "mode": "progressive", "fixture_sha256": hashlib.sha256(fixture_bytes).hexdigest(),
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "model": args.model, "endpoint": endpoint, "max_calls": 24,
+        "max_output_tokens": 2048, "max_input_bytes": 65536,
+        "timeout_seconds": 90, "sdk_retries": 0, "requests_sent": 0,
+        "semantic_review_required": True, "all_passed": False, "results": [],
+        "status": "prepared" if not args.execute else "running",
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    # 每轮使用新证据文件，不能覆盖失败记录后挑选最好结果。
+    with args.output.open("x", encoding="utf-8") as stream:
+        json.dump(report, stream, ensure_ascii=False, indent=2)
+    if not args.execute:
+        print("Prepared: 18 cases / 24 turns; no model requests")
+        return 0
+
+    import httpx
+    from src.conversation_steering import rewriter as implementation
+    from src.semantic_harness.inspectors.uploads import UploadSourceInspector, public_source_findings
+    from src.services.upload_store import UploadStore
+
+    report["source_sha256"] = {
+        name: hashlib.sha256((Path(__file__).resolve().parents[1] / name).read_bytes()).hexdigest()
+        for name in (
+            "scripts/evaluate_conversation_steering.py",
+            "src/conversation_steering/rewriter.py", "src/conversation_steering/models.py",
+            "src/conversation_steering/service.py", "src/conversation_steering/prompts/rewrite-v1.md",
+            "src/semantic_harness/inspectors/uploads.py",
+        )
+    }
+
+    def save():
+        args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    original_checkpoint = implementation.execution_http_checkpoint_async
+    original_client = implementation.AsyncOpenAI
+    active = {}
+
+    async def checkpoint(message):
+        await original_checkpoint(message)
+        if isinstance(message, httpx.Request):
+            if active.get("sent"):
+                raise ValueError("同一评测回合禁止再次发送")
+            check_progressive_request(message, endpoint=endpoint, model=args.model,
+                                      sent=report["requests_sent"], max_calls=24)
+            active["sent"] = True
+            active["request_sha256"] = hashlib.sha256(message.content).hexdigest()
+            active["started_at"] = datetime.now(timezone.utc).isoformat()
+            report["requests_sent"] += 1
+            # 发送前落盘；中断后保留结果未知，不允许自动重跑。
+            active["outcome"] = "unknown"
+            save()
+        else:
+            active["http_status"] = message.status_code
+            active["responded_at"] = datetime.now(timezone.utc).isoformat()
+            response_bytes = await message.aread()
+            active["response_received"] = True
+            try:
+                payload = json.loads(response_bytes)
+                active["usage"] = payload.get("usage")
+                active["response_model"] = payload.get("model")
+            except (ValueError, TypeError):
+                active["usage"] = None
+
+    def client_without_retries(**kwargs):
+        kwargs["max_retries"] = 0
+        return original_client(**kwargs)
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="mangrove-clarification-eval-") as temp:
+            uploads = UploadStore(temp, max_bytes=65536)
+            owner = "evaluation-owner"
+            items = {
+                name: uploads.save_bytes(owner, source["filename"], source["content"].encode("utf-8"),
+                                         media_type="text/csv" if source["filename"].endswith(".csv") else "text/plain",
+                                         verify_magic=True)
+                for name, source in fixture["sources"].items()
+            }
+            inspector = UploadSourceInspector(user_id=owner, upload_store=uploads)
+            findings = {name: public_source_findings(inspector.inspect_artifacts((item.upload_id,)))
+                        for name, item in items.items()}
+            if any(not values or any(value["status"] != "ready" for value in values) for values in findings.values()):
+                raise ValueError("合成来源未完成真实检查，禁止模型评测")
+            report["source_findings"] = findings
+            language = progressive_rewriter(args)
+            with patch.object(implementation, "AsyncOpenAI", client_without_retries), \
+                    patch.object(implementation, "execution_http_checkpoint_async", checkpoint):
+                for case in cases:
+                    history, previous = [], None
+                    for index, row in enumerate(case["turns"]):
+                        active = {"case_id": case["id"], "turn": index + 1, "usage": None,
+                                  "expected": row["expected"], "text": row["text"], "outcome": "not_sent"}
+                        report["results"].append(active)
+                        turn = RawUserTurn(turn_id=f"eval-{case['id']}-{index + 1}", owner_id=owner,
+                            task_id=f"evaluation-{case['id']}", revision=1, text=row["text"])
+                        request = SteeringRequest(owner_id=owner, task_id=turn.task_id, revision=1,
+                            run_id="evaluation-run", text=turn.text, current_status="needs_input",
+                            current_goal=case["current_goal"], provider="local", model=args.model,
+                            source_findings=tuple(value for name in case["sources"] for value in findings[name]),
+                            relevant_turns=tuple(history), prior_delta=previous,
+                            clarification_question=previous.open_questions[0] if previous and previous.open_questions else None,
+                            clarification_round_id=f"evaluation-round-{index}" if previous and previous.open_questions else None)
+                        async with asyncio.timeout(90):
+                            delta = await language.rewrite(turn, request)
+                        action = SemanticDiffGate.classify(delta).value
+                        expected = row["expected"]
+                        active.update(outcome="returned", actual=delta.model_dump(mode="json"),
+                            checks={"action": action == expected["action"],
+                                    "question_count": len(delta.open_questions) == int(expected["requires_clarification"]),
+                                    "no_new_source": not delta.source_scope_delta,
+                                    "no_new_permission": not delta.permission_delta,
+                                    "turn_identity": delta.source_turn_ids == tuple(item.turn_id for item in (*history, turn)),
+                                    "response_model": active.get("response_model") == args.model},
+                            action=action, semantic_review="pending")
+                        history.append(turn)
+                        previous = delta
+                        save()
+        report["status"] = "awaiting_semantic_review"
+        report["automated_passed"] = all(all(row["checks"].values()) for row in report["results"])
+        save()
+        print(f"Returned {len(report['results'])}/24; semantic review required")
+        return 0 if report["automated_passed"] else 1
+    except Exception as exc:
+        # 不输出SDK异常正文，避免将凭据、URL参数或模型原始响应带入日志。
+        report.update(status="stopped", error_type=type(exc).__name__)
+        if active.get("outcome") == "unknown" and active.get("response_received"):
+            active["outcome"] = "unusable_response"
+        attempted = {(row["case_id"], row["turn"]) for row in report["results"] if row.get("sent")}
+        report["not_run"] = [{"case_id": case["id"], "turn": index + 1}
+            for case in cases for index in range(len(case["turns"]))
+            if (case["id"], index + 1) not in attempted]
+        save()
+        print(f"Stopped: {type(exc).__name__}; partial evidence saved; no automatic retry")
+        return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--mode", choices=("legacy", "progressive"), default="legacy")
+    parser.add_argument("--base-url")
+    parser.add_argument("--model")
+    parser.add_argument("--execute", action="store_true")
     parser.add_argument(
         "--fixture",
         type=Path,

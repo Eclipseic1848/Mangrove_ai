@@ -28,8 +28,40 @@ export interface WorkspaceQuestion {
   allow_free_text: boolean;
   external_service?: string;
   outbound_data?: string[];
-  purpose?: string;
+  round_id?: string;
+  revision?: number;
+  purpose?: "business" | "authorization" | "control";
+  continuation?: "resume" | "steering" | "confirm_revision" | "unavailable";
+  origin_turn_id?: string | null;
+  outbound_purpose?: string | null;
   risk?: string;
+}
+
+export interface ClarificationReceipt {
+  round_id: string;
+  revision: number;
+  turn_id: string;
+  status: "accepted" | "unknown";
+}
+
+export interface SourceFinding {
+  artifact_id: string;
+  source_sha256: string;
+  inspection_id: string;
+  inspection_sha256: string;
+  inspector_version: string;
+  status: "ready" | "unsupported" | "corrupt" | "encrypted" | "over_limit" | "needs_user";
+  summary: string;
+  table_ref?: string;
+  element_id?: string;
+}
+
+export interface WorkspaceUnderstanding {
+  revision: number;
+  summary: string;
+  status: "ready" | "needs_clarification" | "unavailable";
+  findings: SourceFinding[];
+  question: WorkspaceQuestion | null;
 }
 
 export interface WorkspaceEvent {
@@ -127,6 +159,7 @@ export interface WorkSessionView {
 }
 
 export interface SteeringResult {
+  clarification?: WorkspaceQuestion | null;
   result_context?: PublicResultContext | null;
   result_id: string;
   task_id: string;
@@ -398,6 +431,17 @@ export interface WorkspaceTask {
   error: string | null;
   failure: WorkspaceFailure | null;
   question: WorkspaceQuestion | null;
+  understanding?: WorkspaceUnderstanding | null;
+  answer_receipt?: ClarificationReceipt;
+  clarification_history?: Array<{
+    round_id: string;
+    revision: number;
+    question: WorkspaceQuestion;
+    answer: string | null;
+    turn_id: string | null;
+    asked_at: string | null;
+    answered_at: string | null;
+  }>;
   work_session?: WorkSessionView | null;
   cancel_requested: boolean;
   deleted_at: string | null;
