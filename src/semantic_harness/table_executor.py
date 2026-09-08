@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
@@ -88,7 +89,7 @@ def _read_text_rows(
     except UnicodeDecodeError:
         encoding = "gb18030"
         text = data.decode(encoding)
-    reader = csv.reader(text.splitlines(), delimiter=delimiter)
+    reader = csv.reader(io.StringIO(text), delimiter=delimiter)
     rows = list(reader)
     return [
         (row_number, row)

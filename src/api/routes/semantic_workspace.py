@@ -83,6 +83,8 @@ from src.conversation_steering import (
     build_context_rewriter,
 )
 from src.model_connections import GrantError, get_default_broker
+from src.conversation_steering.models import FrozenResultContext, ResultSelection
+from src.conversation_steering.repository import ResultContextConflict
 from src.delivery_publishing.models import TableOutputContract
 from src.services.upload_store import UploadStore
 from src.source_acquisition import (
@@ -460,6 +462,7 @@ class WorkspaceTurnIn(BaseModel):
 
     text: str = Field(min_length=1, max_length=20_000)
     external_api_confirmed: bool = False
+    result_context: ResultSelection | None = None
 
     @field_validator("text")
     @classmethod
@@ -896,6 +899,7 @@ def _public_steering_message(result) -> dict[str, Any] | None:
         "revision": result.revision, "run_id": result.run_id, "turn_id": result.turn_id,
         "role": "assistant", "kind": "answer", "content": _public_answer_text(result.answer),
         "status": "completed", "created_at": result.created_at.isoformat(),
+        "result_context": _public_steering_payload(result.result_context.model_dump(mode="json")) if result.result_context else None,
     }
 
 
@@ -2473,6 +2477,7 @@ async def steer_task(
     task = _task_or_404(user_id, task_id)
     events = get_store().list_semantic_workspace_events(user_id, task_id)
     runtime = _runtime_repository().get(user_id, task_id, int(task["active_revision"])) or {}
+    result_context = _resolve_result_context(user_id, task_id, payload.result_context) if payload.result_context else None
     request = SteeringRequest(
         owner_id=user_id,
         task_id=task_id,
@@ -2490,6 +2495,7 @@ async def steer_task(
         model=runtime.get("model_connection_model") or task.get("model"),
         model_connection_id=runtime.get("model_connection_id"),
         model_connection_version=runtime.get("model_connection_version"),
+        result_context=result_context,
         external_api_confirmed=bool(
             task.get("external_api_confirmed")
             or payload.external_api_confirmed
@@ -2498,12 +2504,13 @@ async def steer_task(
     try:
         service = ConversationSteering(
             _steering_repository(),
-            build_context_rewriter(request),
+            build_context_rewriter(request, before_call=lambda: _require_active_result(user_id, task_id, payload.result_context)) if payload.result_context else build_context_rewriter(request),
+            before_result_call=(lambda: _require_active_result(user_id, task_id, payload.result_context)) if payload.result_context else None,
         )
         result = await service.handle_turn(request)
     except (ValueError, GrantError) as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_409_CONFLICT if payload.result_context or isinstance(exc, ResultContextConflict) else status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
 
@@ -2559,7 +2566,7 @@ def list_steering_turns(
         proposals.append(_public_steering_payload(proposal.model_dump(mode="json")))
     turns = repository.list_turns(user_id, task_id)
     return {
-        "turns": [turn.model_dump(mode="json") for turn in turns],
+        "turns": [turn.model_dump(mode="json", exclude={"result_context": {"content"}}) for turn in turns],
         "deltas": [
             _public_steering_payload(delta.model_dump(mode="json"))
             for turn in turns
@@ -4245,6 +4252,7 @@ def _table_preview(
             }
             for row in rows
         ]
+        item_ids = [str(record.get("__mg_output_record_id") or record["__mg_result_index"]) for record in records]
         if lineage_path and lineage_path.is_file() and records:
             output_ids = [
                 str(record["__mg_output_record_id"])
@@ -4285,6 +4293,7 @@ def _table_preview(
             "kind": "table",
             "columns": columns,
             "rows": records,
+            "_item_ids": item_ids,
             "total": total,
             "offset": offset,
             "limit": limit,
@@ -4300,7 +4309,9 @@ def _python_table_preview(
     search: str,
     sort_by: str | None,
     sort_direction: Literal["asc", "desc"],
+    item_ids: list[str] | None = None,
 ) -> dict[str, Any]:
+    identities = {id(row): identity for row, identity in zip(rows, item_ids or [str(index) for index in range(len(rows))])}
     if search:
         keyword = search.casefold()
         rows = [
@@ -4325,6 +4336,7 @@ def _python_table_preview(
         "kind": "table",
         "columns": columns,
         "rows": rows[offset : offset + limit],
+        "_item_ids": [identities[id(row)] for row in rows[offset : offset + limit]],
         "total": len(rows),
         "offset": offset,
         "limit": limit,
@@ -4346,7 +4358,8 @@ def _xlsx_preview(
     try:
         columns = ["工作表"]
         rows: list[dict[str, Any]] = []
-        for sheet in workbook.worksheets:
+        item_ids: list[str] = []
+        for sheet_index, sheet in enumerate(workbook.worksheets):
             iterator = sheet.iter_rows(values_only=True)
             raw_headers = next(iterator, ())
             headers: list[str] = []
@@ -4358,7 +4371,7 @@ def _xlsx_preview(
             for header in headers:
                 if header not in columns:
                     columns.append(header)
-            for values in iterator:
+            for row_number, values in enumerate(iterator, 2):
                 if not any(value is not None for value in values):
                     continue
                 row = {"工作表": sheet.title}
@@ -4369,6 +4382,7 @@ def _xlsx_preview(
                     }
                 )
                 rows.append(row)
+                item_ids.append(f"{sheet_index}:{row_number}")
     finally:
         workbook.close()
     return _python_table_preview(
@@ -4379,6 +4393,7 @@ def _xlsx_preview(
         search=search,
         sort_by=sort_by,
         sort_direction=sort_direction,
+        item_ids=item_ids,
     )
 
 
@@ -4606,7 +4621,7 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _preview_result_file(
+def _read_preview_result_file(
     result_path: Path,
     *,
     lineage_path: Path | None,
@@ -4662,10 +4677,225 @@ def _preview_result_file(
     raise ValueError("当前结果类型不支持在线预览")
 
 
+def _preview_result_file(result_path: Path, **kwargs) -> dict[str, Any]:
+    preview = _read_preview_result_file(result_path, **kwargs)
+    digest = _sha256_file(result_path)
+    if preview["kind"] == "table":
+        identities = [("table", value) for value in preview.pop("_item_ids")]
+    else:
+        identities = [(item["type"], item["id"]) for item in preview["items"]]
+    preview["item_refs"] = [
+        "item_" + hashlib.sha256(json.dumps([digest, kind, identity], ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+        for kind, identity in identities
+    ]
+    return preview
+
+
+def _canvas_revision(user_id: str, task_id: str, revision: int | None):
+    task = _task_or_404(user_id, task_id)
+    selected = get_store().get_semantic_workspace_revision(user_id, task_id, revision or task["active_revision"])
+    if selected is None:
+        raise HTTPException(404, "结果版本不存在")
+    return task, selected
+
+
+def _verified_canvas_output(user_id, run_id, manifest, output):
+    qa = output.get("qa") or {}
+    if manifest.get("status") != "succeeded" or qa.get("openable") is not True or qa.get("sha256") != output["sha256"] or qa.get("size_bytes") != output["size_bytes"]:
+        raise HTTPException(409, "正式输出缺少一致的发布质量证据")
+    record = get_store().get_semantic_delivery_output(user_id, output["output_id"])
+    if record is None or record["run_id"] != run_id or record["delivery_id"] != manifest["delivery_id"]:
+        raise HTTPException(404, "正式输出不属于所选交付")
+    if record["sha256"] != output["sha256"] or record["size_bytes"] != output["size_bytes"]:
+        raise HTTPException(409, "正式输出登记与交付不一致")
+    path = _verified_canvas_path(record["file_path"], record)
+    return record, path
+
+
+def _verified_canvas_path(value, expected):
+    root = Path(settings.semantic_execution_root).resolve()
+    path = Path(value).resolve()
+    if not path.is_relative_to(root) or not path.is_file() or path.stat().st_size != expected["size_bytes"] or _sha256_file(path) != expected["sha256"]:
+        raise HTTPException(409, "预览制品完整性校验失败")
+    return path
+
+
+def _canvas_result(user_id, task_id, selected, output_id=None):
+    run_id = selected.get("run_id")
+    if not run_id:
+        raise HTTPException(409, "任务尚无可预览结果")
+    store = get_store()
+    manifest = store.latest_semantic_delivery(user_id, run_id)
+    output = next((item for item in (manifest or {}).get("outputs", []) if (item["output_id"] == output_id if output_id else item.get("format") in _FORMATS)), None)
+    if output_id and output is None:
+        raise HTTPException(404, "正式输出不属于所选版本")
+    lineage_path = None
+    kind = "output"
+    if output:
+        record, path = _verified_canvas_output(user_id, run_id, manifest, output)
+        authoritative = manifest.get("provenance", {}).get("authoritative_result_sha256")
+        attempt = store.semantic_harness_artifacts_for_result(user_id, run_id, authoritative) if authoritative else None
+        if attempt:
+            refs = attempt["tool_result"]["output_artifacts"]
+            result_ref = next(ref for ref in refs if ref["sha256"] == authoritative and ref.get("kind") != "record_lineage")
+            path = _verified_canvas_path(attempt["artifact_paths"]["result"], result_ref)
+            lineage_ref = next((ref for ref in refs if ref.get("kind") == "record_lineage"), None)
+            if lineage_ref:
+                lineage_path = _verified_canvas_path(attempt["artifact_paths"].get("lineage", ""), lineage_ref)
+            kind = "derived_result"
+    else:
+        # 保留旧中间结果的查看，未发布身份不能获得引用追问资格。
+        paths = store.latest_semantic_harness_artifact_paths(user_id, run_id)
+        root = Path(settings.semantic_execution_root).resolve()
+        path = Path(paths.get("result", "")).resolve()
+        if not path.is_relative_to(root) or not path.is_file():
+            raise HTTPException(404, "预览制品不存在")
+        attempt = store.semantic_harness_artifacts_for_result(user_id, run_id, _sha256_file(path))
+        if attempt:
+            lineage_ref = next((ref for ref in attempt["tool_result"]["output_artifacts"] if ref.get("kind") == "record_lineage"), None)
+            if lineage_ref:
+                lineage_path = _verified_canvas_path(attempt["artifact_paths"].get("lineage", ""), lineage_ref)
+        kind = "intermediate"
+    return path, lineage_path, manifest, {
+        "task_id": task_id, "revision": selected["revision"], "run_id": run_id,
+        "delivery_id": manifest["delivery_id"] if output else None,
+        "output_id": output["output_id"] if output else None,
+        "representation": {"kind": kind, "sha256": _sha256_file(path), "media_type": (output or {}).get("media_type") if kind == "output" else None,
+                           "associated_output_id": output["output_id"] if output else None, "lineage_available": lineage_path is not None},
+    }
+
+
+def _frozen_canvas_sources(user_id, task_id, selected, manifest=None):
+    """只从所选修订的持久来源恢复；绝不回退活动任务 upload_ids。"""
+    sources = {}
+    binding = None
+    if selected.get("plan_id") and selected.get("binding_revision"):
+        binding = get_store().get_semantic_binding_revision(user_id, selected["plan_id"], selected["binding_revision"])
+    for report in (binding or {}).get("reports", []):
+        sources[report["artifact_id"]] = {"sha256": report["artifact_sha256"], "report": report}
+    runtime = _runtime_repository().get(user_id, task_id, selected["revision"]) or {}
+    if runtime.get("run_id") == selected.get("run_id"):
+        for item in (runtime.get("request") or {}).get("sources", []):
+            sources.setdefault(item["upload_id"], {"sha256": item["sha256"]})
+    for artifact_id, digest in (manifest or {}).get("source_artifact_hashes", {}).items():
+        if re.fullmatch(r"[0-9a-f]{64}", digest):
+            if artifact_id in sources and sources[artifact_id]["sha256"] != digest:
+                raise HTTPException(409, "冻结来源与交付摘要不一致")
+            sources.setdefault(artifact_id, {"sha256": digest})
+    for ref in selected.get("source_refs", []):
+        if ref.get("kind") == "web_artifact":
+            artifact = SourceAcquisitionRepository(settings.webui_db_path).get_artifact(user_id, ref["artifact_id"])
+            if not artifact or artifact["snapshot_id"] != ref.get("snapshot_id") or artifact["content_sha256"] != ref.get("sha256"):
+                raise HTTPException(409, "冻结网页来源身份不一致")
+            sources[ref["artifact_id"]] = {"sha256": artifact["content_sha256"], "web": artifact}
+    return sources
+
+
+def _canvas_upload(user_id, artifact_id, source):
+    try:
+        upload = _uploads().resolve(user_id, artifact_id)
+    except (PermissionError, OSError, ValueError):
+        raise HTTPException(409, "冻结来源原件不可用") from None
+    if upload.sha256 != source["sha256"]:
+        raise HTTPException(409, "冻结来源摘要不一致")
+    return upload
+
+
+def _canvas_location(value):
+    fields = {"docx_paragraph": ("paragraph",), "docx_table_row": ("table", "row"), "text_line": ("line",)}
+    if not isinstance(value, dict) or value.get("kind") not in fields:
+        return None
+    keys = fields[value["kind"]]
+    if any(type(value.get(key)) is not int or value[key] < (0 if key == "row" else 1) for key in keys):
+        return None
+    return {"kind": value["kind"], **{key: value[key] for key in keys}}
+
+
+def _canvas_source_refs(user_id, raw_refs, sources):
+    from src.data_prep.document_models import BoundingBox
+    import math
+
+    if len(raw_refs) > 1000:
+        raise HTTPException(413, "所选结果引用超过有界追问上限")
+    result = []
+    checked = set()
+    for ref in raw_refs:
+        artifact_id = ref.get("artifact_id")
+        source = sources.get(artifact_id)
+        if not source or not re.fullmatch(r"[0-9a-f]{64}", source["sha256"]):
+            raise HTTPException(409, "结果引用缺少可信冻结来源")
+        if not source.get("web") and artifact_id not in checked:
+            _canvas_upload(user_id, artifact_id, source)
+            checked.add(artifact_id)
+        public = {"artifact_id": artifact_id, "source_sha256": source["sha256"]}
+        for key in ("table_ref", "element_id", "extractor", "extractor_version"):
+            if ref.get(key):
+                if _public_answer_text(str(ref[key])) != str(ref[key]):
+                    raise HTTPException(409, "结果引用标识不是安全公开身份")
+                public[key] = str(ref[key])
+        if ref.get("table_ref") and not ref["table_ref"].startswith(f"artifact://{artifact_id}/table/"):
+            raise HTTPException(409, "来源表格引用与制品不一致")
+        for key in ("row_number", "page"):
+            if ref.get(key) is not None:
+                if type(ref[key]) is not int or ref[key] < 1:
+                    raise HTTPException(409, "结果引用位置无效")
+                public[key] = ref[key]
+        if ref.get("bbox"):
+            bbox = BoundingBox.model_validate(ref["bbox"])
+            if bbox.coordinate_space in {"pdf_points", "image_pixels", "normalized_1000"} and all(math.isfinite(value) for value in (bbox.x0, bbox.y0, bbox.x1, bbox.y1)):
+                public["bbox"] = bbox.model_dump()
+        if location := _canvas_location(ref.get("location")):
+            public["location"] = location
+        if source.get("web"):
+            public.update({key: source["web"][key] for key in ("snapshot_id", "read_at")})
+        if public not in result:
+            result.append(public)
+    return result
+
+
+def _require_active_result(user_id, task_id, selection):
+    if int(_task_or_404(user_id, task_id)["active_revision"]) != selection.revision:
+        raise HTTPException(409, "结果已不是当前版本，请返回最新版本追问")
+
+
+def _resolve_result_context(user_id, task_id, selection):
+    _require_active_result(user_id, task_id, selection)
+    _, selected = _canvas_revision(user_id, task_id, selection.revision)
+    path, lineage, manifest, identity = _canvas_result(user_id, task_id, selected, selection.output_id)
+    if identity["representation"]["sha256"] != selection.representation_sha256:
+        raise HTTPException(409, "结果表示已变化")
+    _canvas_size_limit(path)
+    # 身份先于筛选分页；只取真实对应记录，不按业务值或当前页序号匹配。
+    preview = _preview_result_file(path, lineage_path=lineage, offset=0, limit=50_001, search="", sort_by=None, sort_direction="asc")
+    if preview["total"] > 50_000:
+        raise HTTPException(413, "结果超出有界追问行数")
+    try:
+        index = preview["item_refs"].index(selection.item_ref)
+    except ValueError:
+        raise HTTPException(409, "所选结果项不存在") from None
+    item = preview.get("rows", preview.get("items"))[index]
+    if preview["kind"] == "table":
+        raw_refs = item.get("__lineage", [])
+        content = json.dumps({key: item.get(key) for key in preview["columns"]}, ensure_ascii=False, default=str)
+        label = "选中的结果行"
+    else:
+        raw_refs = item.get("evidence_refs", [])
+        content = item["content"]
+        label = _public_answer_text(str(item.get("label") or "选中的结果项"))[:200]
+    if not content or len(content) > 20_000:
+        raise HTTPException(413, "所选结果内容为空或超过有界追问长度")
+    sources = _frozen_canvas_sources(user_id, task_id, selected, manifest)
+    refs = _canvas_source_refs(user_id, raw_refs, sources)
+    if len(json.dumps(refs, ensure_ascii=False)) > 64_000:
+        raise HTTPException(413, "所选结果引用超过有界追问长度")
+    return FrozenResultContext(**selection.model_dump(), label=label, source_refs=refs, content=content)
+
+
 @router.get("/tasks/{task_id}/preview")
 def preview_task_result(
     task_id: str,
     revision: int | None = Query(default=None, ge=1),
+    output_id: str | None = Query(default=None, max_length=160),
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
     search: str = Query(default="", max_length=200),
@@ -4673,93 +4903,161 @@ def preview_task_result(
     sort_direction: Literal["asc", "desc"] = "asc",
     user=Depends(get_current_user),
 ):
-    user_id = user["user_id"]
-    task = _task_or_404(user_id, task_id)
-    selected_revision = (
-        get_store().get_semantic_workspace_revision(
-            user_id, task_id, revision
-        )
-        if revision is not None
-        else get_store().get_semantic_workspace_revision(
-            user_id, task_id, task["active_revision"]
-        )
-    )
-    if selected_revision is None:
-        raise HTTPException(status_code=404, detail="结果版本不存在")
-    run_id = selected_revision["run_id"]
-    if not run_id:
-        raise HTTPException(status_code=409, detail="任务尚无可预览结果")
-    store = get_store()
-    delivery = store.latest_semantic_delivery(user_id, run_id)
-    formal_output = next(
-        (
-            output
-            for output in (delivery or {}).get("outputs", [])
-            if output.get("format") in _FORMATS
-        ),
-        None,
-    )
-    root = Path(settings.semantic_execution_root).resolve()
-    paths = store.latest_semantic_harness_artifact_paths(user_id, run_id)
-    legacy_result = Path(paths.get("result", "")).resolve()
-    legacy_available = (
-        legacy_result.is_file()
-        and (legacy_result == root or root in legacy_result.parents)
-    )
-    lineage_value = paths.get("lineage") if legacy_available else None
-    if legacy_available:
-        # Legacy 的 Parquet 携带逐行来源；正式 Excel 只负责下载，不能反过来削弱预览证据。
-        result_path = legacy_result
-    elif formal_output is not None:
-        record = store.get_semantic_delivery_output(
-            user_id,
-            formal_output["output_id"],
-        )
-        if record is None:
-            raise HTTPException(
-                status_code=409,
-                detail="正式交付预览文件登记缺失",
-            )
-        result_path = Path(record["file_path"]).resolve()
-        if (
-            (result_path != root and root not in result_path.parents)
-            or not result_path.is_file()
-            or result_path.stat().st_size != record["size_bytes"]
-            or _sha256_file(result_path) != record["sha256"]
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail="正式交付预览文件完整性校验失败",
-            )
-    else:
-        result_path = legacy_result
-    lineage_path = (
-        Path(lineage_value).resolve() if lineage_value else None
-    )
-    if lineage_path is not None and (
-        not lineage_path.is_file()
-        or lineage_path != root
-        and root not in lineage_path.parents
-    ):
-        lineage_path = None
-    if (
-        not result_path.is_file()
-        or result_path != root
-        and root not in result_path.parents
-    ):
-        raise HTTPException(status_code=404, detail="预览制品不存在")
+    _, selected = _canvas_revision(user["user_id"], task_id, revision)
+    path, lineage, _, identity = _canvas_result(user["user_id"], task_id, selected, output_id)
+    _canvas_size_limit(path)
     try:
-        return _preview_result_file(
-            result_path,
-            lineage_path=lineage_path,
-            offset=offset,
-            limit=limit,
-            search=search,
-            sort_by=sort_by,
-            sort_direction=sort_direction,
-        )
-    except (ValueError, OSError, duckdb.Error, json.JSONDecodeError) as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
+        result = _preview_result_file(path, lineage_path=lineage, offset=offset, limit=limit, search=search, sort_by=sort_by, sort_direction=sort_direction)
+    except (ValueError, OSError, duckdb.Error, KeyError, TypeError):
+        raise HTTPException(409, "结果预览无法读取或查询无效") from None
+    if not identity["output_id"]:
+        result["item_refs"] = [None] * len(result["item_refs"])
+    # 公共预览仅裁剪引用内部字段；实际选择仍读取原始冻结 refs 校验。
+    for item in result.get("items", []):
+        item["evidence_refs"] = [_public_preview_ref(ref) for ref in item.get("evidence_refs", [])]
+    return {**result, **identity}
+
+
+def _public_preview_ref(ref):
+    public = {key: value for key, value in ref.items() if key in {"artifact_id", "element_id", "page", "extractor", "extractor_version", "quote", "quote_sha256", "confidence"}}
+    if location := _canvas_location(ref.get("location")):
+        public["location"] = location
+    if ref.get("bbox"):
+        from src.data_prep.document_models import BoundingBox
+        import math
+        try:
+            bbox = BoundingBox.model_validate(ref["bbox"])
+            if bbox.coordinate_space in {"pdf_points", "image_pixels", "normalized_1000"} and all(math.isfinite(value) for value in (bbox.x0, bbox.y0, bbox.x1, bbox.y1)):
+                public["bbox"] = bbox.model_dump()
+        except ValueError:
+            pass
+    return public
+
+
+def _canvas_size_limit(path):
+    maximum = settings.data_prep_preview_max_bytes
+    if path.stat().st_size > maximum:
+        raise HTTPException(413, "来源超过完整预览大小上限")
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as archive:
+            if sum(item.file_size for item in archive.infolist()) > maximum:
+                raise HTTPException(413, "来源解压后超过完整预览大小上限")
+
+
+@router.get("/tasks/{task_id}/sources/{artifact_id}/preview")
+def preview_task_source(
+    task_id: str, artifact_id: str,
+    revision: int = Query(ge=1),
+    table_ref: str | None = Query(default=None, max_length=300),
+    offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=500),
+    search: str = Query(default="", max_length=200), sort_by: str | None = None,
+    sort_direction: Literal["asc", "desc"] = "asc",
+    row_number: int | None = Query(default=None, ge=1),
+    element_id: str | None = Query(default=None, max_length=200),
+    extractor_version: str | None = Query(default=None, max_length=100),
+    page: int | None = Query(default=None, ge=1),
+    user=Depends(get_current_user),
+):
+    user_id = user["user_id"]
+    _, selected = _canvas_revision(user_id, task_id, revision)
+    manifest = get_store().latest_semantic_delivery(user_id, selected["run_id"]) if selected.get("run_id") else None
+    source = _frozen_canvas_sources(user_id, task_id, selected, manifest).get(artifact_id)
+    if source is None:
+        raise HTTPException(404, "来源不属于所选任务版本")
+    common = {"task_id": task_id, "revision": revision, "artifact_id": artifact_id, "sha256": source["sha256"],
+              "location_status": "not_requested", "representation": {"kind": "source", "parser_or_inspector_version": None}}
+    if web := source.get("web"):
+        # 本票只读既有摘要，不借画布扩大到网页全文产品化。
+        return {**common, "kind": "web", "upload_id": None, "content_url": None, "original_name": web["title"], "media_type": web["media_type"],
+                "snapshot_id": web["snapshot_id"], "read_at": web["read_at"], "text_preview": web["text_preview"], "is_complete": False, "truncated": True}
+    upload = _canvas_upload(user_id, artifact_id, source)
+    path = Path(upload.storage_path)
+    _canvas_size_limit(path)
+    common.update({"upload_id": artifact_id, "original_name": upload.original_name, "media_type": upload.media_type,
+                   "content_url": f"/api/data-sources/uploads/{artifact_id}/content"})
+    suffix = Path(upload.original_name).suffix.lower()
+    try:
+        if suffix in {".csv", ".tsv", ".xlsx", ".parquet", ".json", ".jsonl"}:
+            from src.semantic_harness.inspectors.tabular import inspect_tabular_path
+            from src.semantic_harness.table_executor import _read_text_rows, _read_xlsx_rows, _read_polars_rows
+
+            report = source.get("report")
+            if report is None:
+                report = inspect_tabular_path(artifact_id=artifact_id, artifact_sha256=upload.sha256, path=path, original_name=upload.original_name, declared_media_type=upload.media_type).model_dump(mode="json")
+            tables = report.get("tables", [])
+            table = next((item for item in tables if item["table_ref"] == table_ref), None) if table_ref else next(iter(tables), None)
+            if not table:
+                raise HTTPException(409, "来源工作表不存在或不能完整解析")
+            if suffix in {".csv", ".tsv"}:
+                raw_rows = _read_text_rows(path, delimiter="," if suffix == ".csv" else "\t", header_row=table["header_row"])
+            elif suffix == ".xlsx":
+                raw_rows = _read_xlsx_rows(path, table_index=table["table_index"], header_row=table["header_row"])
+            else:
+                raw_rows = _read_polars_rows(path, suffix[1:], header_row=table["header_row"])
+            if len(raw_rows) > 50_000:
+                raise HTTPException(413, "来源超过完整预览行数上限")
+            columns = [item["normalized_name"] for item in table["columns"]]
+            records = [{column["normalized_name"]: values[column["column_index"]] if column["column_index"] < len(values) else None for column in table["columns"]} for _, values in raw_rows]
+            window = _python_table_preview(records, columns=columns, item_ids=[str(number) for number, _ in raw_rows], offset=0, limit=50_000, search=search, sort_by=sort_by, sort_direction=sort_direction)
+            pairs = list(zip(window.pop("_item_ids"), window["rows"]))
+            if extractor_version and extractor_version != report["inspector_version"]:
+                common["location_status"] = "version_mismatch"
+            elif row_number is not None:
+                found = next((index for index, pair in enumerate(pairs) if int(pair[0]) == row_number), None)
+                common["location_status"] = "located" if found is not None else "not_found"
+                if found is not None:
+                    offset = found // limit * limit
+            common["representation"]["parser_or_inspector_version"] = report["inspector_version"]
+            return {**common, "kind": "table", "tables": [{key: item[key] for key in ("table_ref", "table_index", "name", "header_row")} for item in tables],
+                    "selected_table_ref": table["table_ref"], "columns": columns, "rows": [{"row_number": int(number), "values": values} for number, values in pairs[offset:offset + limit]],
+                    "offset": offset, "limit": limit, "total": len(pairs), "is_complete": True}
+        if suffix == ".pdf":
+            from pypdf import PdfReader
+            with path.open("rb") as source_file:
+                page_count = len(PdfReader(source_file).pages)
+            if page is not None:
+                common["location_status"] = "located" if page <= page_count else "not_found"
+            elif element_id:
+                common["location_status"] = "not_found"
+            return {**common, "kind": "document", "elements": [], "page_count": page_count, "offset": 0, "limit": limit, "total": 0, "is_complete": True}
+        if suffix not in {".docx", ".txt", ".md", ".html", ".htm", ".pptx", ".xml"}:
+            raise HTTPException(415, "该来源尚无安全画布解析器")
+        from src.data_prep.models import RawArtifact
+        from src.parsers.registry import get_parser_registry
+        from src.data_prep.document_models import DocumentElement
+
+        parser = get_parser_registry().select(extension=suffix)
+        if parser is None:
+            raise HTTPException(415, "该来源尚无安全画布解析器")
+        artifact = RawArtifact(artifact_id=artifact_id, source_id=f"upload:{artifact_id}", task_id=task_id, uri=upload.original_name,
+                               media_type=upload.media_type, size_bytes=upload.size_bytes, sha256=upload.sha256, storage_path=str(path))
+        records, rejects = parser.parse(artifact, path.read_bytes())
+        if rejects:
+            raise HTTPException(409, "来源解析不完整，无法提供完整定位")
+        elements = [DocumentElement.model_validate(item) for record in records for item in record.data.get("elements", [])]
+        elements.sort(key=lambda item: (item.reading_order is None, item.reading_order or 0))
+        if len(elements) > 50_000:
+            raise HTTPException(413, "来源超过完整预览元素上限")
+        versions = {item.extractor_version for item in elements}
+        common["representation"]["parser_or_inspector_version"] = next(iter(versions)) if len(versions) == 1 else None
+        if search:
+            elements = [item for item in elements if search.casefold() in (item.text or "").casefold()]
+        if extractor_version and versions != {extractor_version}:
+            common["location_status"] = "version_mismatch"
+        elif element_id:
+            found = next((index for index, item in enumerate(elements) if item.element_id == element_id), None)
+            common["location_status"] = "located" if found is not None else "not_found"
+            if found is not None:
+                offset = found // limit * limit
+        public = []
+        for item in elements[offset:offset + limit]:
+            value = item.model_dump(mode="json", include={"element_id", "artifact_id", "page", "element_type", "text", "bbox", "reading_order", "extractor", "extractor_version"}, exclude_none=True)
+            if location := _canvas_location(item.metadata.get("location")):
+                value["location"] = location
+            public.append(value)
+        return {**common, "kind": "document", "elements": public, "offset": offset, "limit": limit, "total": len(elements), "is_complete": True}
+    except (ValueError, OSError, IndexError, KeyError):
+        raise HTTPException(409, "来源无法完整读取或定位条件无效") from None
 
 
 def _safe_archive_name(name: str) -> str:
@@ -4770,105 +5068,74 @@ def _safe_archive_name(name: str) -> str:
 
 @router.get("/tasks/{task_id}/bundle")
 def download_bundle(
-    task_id: str,
-    include_sources: bool = False,
+    task_id: str, include_sources: bool = False,
     revision: int | None = Query(default=None, ge=1),
     user=Depends(get_current_user),
 ):
     user_id = user["user_id"]
-    task = _task_or_404(user_id, task_id)
-    selected_revision = (
-        get_store().get_semantic_workspace_revision(
-            user_id, task_id, revision
-        )
-        if revision is not None
-        else get_store().get_semantic_workspace_revision(
-            user_id, task_id, task["active_revision"]
-        )
-    )
-    if selected_revision is None:
-        raise HTTPException(status_code=404, detail="结果版本不存在")
-    run_id = selected_revision["run_id"]
+    task, selected = _canvas_revision(user_id, task_id, revision)
+    run_id = selected.get("run_id")
     if not run_id:
-        raise HTTPException(status_code=409, detail="任务尚无正式交付")
+        raise HTTPException(409, "任务尚无正式交付")
     store = get_store()
     manifest = store.latest_semantic_delivery(user_id, run_id)
-    if manifest is None:
-        raise HTTPException(status_code=404, detail="正式交付不存在")
-    bundle_root = (
-        Path(settings.semantic_execution_root) / "_bundles"
-    ).resolve()
-    bundle_root.mkdir(parents=True, exist_ok=True)
-    bundle_path = bundle_root / f"{task_id}-{uuid.uuid4().hex[:8]}.zip"
+    if not manifest:
+        raise HTTPException(404, "正式交付不存在")
+    entries = []
+    mapping = {"outputs": {}, "sources": {}}
+    for output in manifest["outputs"]:
+        _, path = _verified_canvas_output(user_id, run_id, manifest, output)
+        name = f"outputs/{_safe_archive_name(output['output_id'])}-{_safe_archive_name(output['filename'])}"
+        entries.append((path, name, output))
+        mapping["outputs"][output["output_id"]] = name
+    if include_sources:
+        sources = _frozen_canvas_sources(user_id, task_id, selected, manifest)
+        expected = manifest.get("source_artifact_hashes")
+        if not isinstance(expected, dict) or any(not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in expected.values()):
+            raise HTTPException(409, "冻结原件清单不完整，无法打包来源")
+        if set(expected) != set(sources):
+            raise HTTPException(409, "交付原件清单与冻结修订来源不完整一致")
+        for artifact_id in expected:
+            source = sources.get(artifact_id)
+            if not source or source.get("web"):
+                raise HTTPException(409, "该冻结来源尚无可打包原件")
+            upload = _canvas_upload(user_id, artifact_id, source)
+            name = f"sources/{_safe_archive_name(artifact_id)}-{_safe_archive_name(upload.original_name)}"
+            entries.append((Path(upload.storage_path), name, upload.model_dump()))
+            mapping["sources"][artifact_id] = name
+    events = _revision_events(store.list_semantic_workspace_events(user_id, task_id), selected["revision"])
+    safe_events = _structured_progress_events({"task_id": task_id, "run_id": run_id, "viewing_revision": selected["revision"], "status": selected["status"], "events": events,
+                                              "harness_events": store.list_semantic_harness_events(user_id, run_id)})
+    safe_events = ProgressProjection().project(safe_events, audience=ProgressAudience.USER, task_status=selected["status"]).events
     trace = {
-        "task": {
-            key: value
-            for key, value in task.items()
-            if key not in {"question"}
-        },
-        "workspace_events": store.list_semantic_workspace_events(
-            user_id, task_id
-        ),
-        "harness_events": store.list_semantic_harness_events(
-            user_id, run_id
-        ),
-        "attempts": store.list_semantic_harness_attempts(
-            user_id, run_id
-        ),
+        "task": {"task_id": task_id, **{key: selected[key] for key in ("revision", "run_id", "status", "objective_text", "output_formats", "created_at")}},
+        "events": [_public_steering_payload(event.model_dump(mode="json")) for event in safe_events],
     }
-    qa = {
-        item["filename"]: item["qa"] for item in manifest["outputs"]
-    }
-    with zipfile.ZipFile(
-        bundle_path, "w", compression=zipfile.ZIP_DEFLATED
-    ) as archive:
-        for output in manifest["outputs"]:
-            record = store.get_semantic_delivery_output(
-                user_id, output["output_id"]
-            )
-            if record is None:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"交付文件登记缺失：{output['filename']}",
-                )
-            path = Path(record["file_path"]).resolve()
-            if not path.is_file():
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"交付文件不存在：{output['filename']}",
-                )
-            archive.write(
-                path,
-                arcname=f"outputs/{_safe_archive_name(output['filename'])}",
-            )
-        archive.writestr(
-            "manifest.json",
-            json.dumps(manifest, ensure_ascii=False, indent=2),
-        )
-        archive.writestr(
-            "qa.json",
-            json.dumps(qa, ensure_ascii=False, indent=2),
-        )
-        archive.writestr(
-            "trace.json",
-            json.dumps(trace, ensure_ascii=False, indent=2),
-        )
-        if include_sources:
-            for upload_id in task["upload_ids"]:
-                item = _uploads().resolve(user_id, upload_id)
-                archive.write(
-                    Path(item.storage_path),
-                    arcname=(
-                        "sources/"
-                        + _safe_archive_name(item.original_name)
-                    ),
-                )
-    return FileResponse(
-        bundle_path,
-        media_type="application/zip",
-        filename=f"{_safe_archive_name(task['title'])}.zip",
-        background=BackgroundTask(bundle_path.unlink, missing_ok=True),
-    )
+    trace["task"]["objective_text"] = _public_answer_text(trace["task"]["objective_text"])
+    public_manifest = {**manifest, "provenance": {key: value for key, value in manifest.get("provenance", {}).items() if key in {"authoritative_result_sha256", "result_kind"}}, "archive_entries": mapping}
+    qa = {item["output_id"]: item["qa"] for item in manifest["outputs"]}
+    # 所有身份和文件先验证，再创建本次临时包；异常只清理本次生成物。
+    bundle_root = (Path(settings.semantic_execution_root) / "_bundles").resolve()
+    bundle_root.mkdir(parents=True, exist_ok=True)
+    bundle_path = bundle_root / f"{uuid.uuid4().hex}.zip"
+    try:
+        with zipfile.ZipFile(bundle_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path, name, expected in entries:
+                digest = hashlib.sha256()
+                size = 0
+                with path.open("rb") as source_file, archive.open(name, "w") as target_file:
+                    for chunk in iter(lambda: source_file.read(1024 * 1024), b""):
+                        target_file.write(chunk)
+                        digest.update(chunk)
+                        size += len(chunk)
+                if size != expected["size_bytes"] or digest.hexdigest() != expected["sha256"]:
+                    raise HTTPException(409, "打包期间制品发生变化，已取消本次下载")
+            for name, payload in (("manifest", public_manifest), ("qa", qa), ("trace", trace)):
+                archive.writestr(f"{name}.json", json.dumps(payload, ensure_ascii=False, indent=2))
+    except Exception:
+        bundle_path.unlink(missing_ok=True)
+        raise
+    return FileResponse(bundle_path, media_type="application/zip", filename=f"{_safe_archive_name(task['title'])}.zip", background=BackgroundTask(bundle_path.unlink, missing_ok=True))
 
 
 @router.get("/storage")

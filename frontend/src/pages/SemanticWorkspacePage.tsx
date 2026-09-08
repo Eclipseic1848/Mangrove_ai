@@ -25,8 +25,10 @@ import { TaskComposer, type WebIntakeDraft } from "@/components/workspace/TaskCo
 import {
   CandidatePreview,
   ResultPreview,
+  initialResultView,
+  type ResultViewState,
 } from "@/components/workspace/ResultPreview";
-import { SourcePreviewPanel } from "@/components/workspace/SourcePreviewPanel";
+import { SourcePreviewPanel, initialSourceView, type SourceViewState } from "@/components/workspace/SourcePreviewPanel";
 import { TaskTimeline } from "@/components/workspace/TaskTimeline";
 import { Markdown } from "@/components/Markdown";
 import { WorkspaceTaskSidebar } from "@/components/workspace/WorkspaceTaskSidebar";
@@ -52,6 +54,7 @@ import {
   resumeAccountWorkspaceTask,
   sendWorkspaceTurn,
   streamWorkspaceTask,
+  readPublicResultContext,
 } from "@/lib/semanticWorkspaceApi";
 import type { GrayCapability } from "@/lib/semanticWorkspaceApi";
 import { cn } from "@/lib/utils";
@@ -64,6 +67,8 @@ import type {
   WorkspaceGuidance,
   SteeringResult,
   WorkspaceTask,
+  ResultSelection,
+  PublicResultContext,
 } from "@/types/semanticWorkspace";
 
 type ModelOption = { provider: string; model: string; label: string };
@@ -92,6 +97,14 @@ type ModelConnection = {
 };
 type ModelConnectionsResponse = { items: ModelConnection[] };
 
+function AnswerReferences({ context, onViewSource }: { context: PublicResultContext | null; onViewSource: (ref: Record<string, unknown>, revision: number) => void }) {
+  if (!context) return <p className="text-xs text-muted-foreground">未附结构化引用</p>;
+  return <div className="space-y-2 border-l-2 border-primary/40 pl-3 text-xs" aria-label="本次追问引用的结果和来源">
+    <p>本次追问引用的结果/来源：{context.label} · V{context.revision}</p>
+    {context.source_refs.length ? <div className="flex flex-wrap gap-2">{context.source_refs.map((ref, index) => <button type="button" key={index} className="rounded-lg border px-3 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onViewSource({ ...ref }, context.revision)}>来源 {index + 1}{ref.page ? ` · 第${ref.page}页` : ref.row_number ? ` · 第${ref.row_number}行` : ""}{ref.read_at ? ` · ${new Date(ref.read_at).toLocaleString()}` : ""}</button>)}</div> : <p className="text-muted-foreground">该结果未附原始来源。</p>}
+  </div>;
+}
+
 function taskRecoveryError(error: unknown) {
   if (!(error instanceof ApiError)) {
     return "任务详情暂时无法读取，请稍后重新加载。";
@@ -108,10 +121,16 @@ function FollowupComposer({
   onSubmit,
   onDecision,
   pendingResults,
+  resultContext,
+  onClearResultContext,
+  onBusyChange,
 }: {
   task: WorkspaceTask;
   pendingResults: SteeringResult[];
-  onSubmit: (text: string, idempotencyKey: string) => Promise<SteeringResult>;
+  onSubmit: (text: string, idempotencyKey: string, context?: ResultSelection) => Promise<SteeringResult>;
+  resultContext: (ResultSelection & { label: string }) | null;
+  onClearResultContext: () => void;
+  onBusyChange: (busy: boolean) => void;
   onDecision: (
     proposalId: string,
     mode: "cancel_now" | "after_safe_point" | "new_task",
@@ -120,8 +139,10 @@ function FollowupComposer({
 }) {
   const [text, setText] = useState("");
   const inFlight = useRef(false);
+  const submitAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const [confirmedProposal, setConfirmedProposal] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const contextExpired = Boolean(resultContext && (resultContext.revision !== task.current_revision || task.viewing_revision !== task.current_revision));
   const usesExternalConnection = Boolean(task.model_connection_id);
   useEffect(() => {
     setText("");
@@ -130,16 +151,25 @@ function FollowupComposer({
   const submit = async () => {
     if (!text.trim() || inFlight.current) return;
     const submitted = text;
+    const context = resultContext ? { revision: resultContext.revision, output_id: resultContext.output_id,
+      representation_sha256: resultContext.representation_sha256, item_ref: resultContext.item_ref } : undefined;
+    if (context && (context.revision !== task.current_revision || task.viewing_revision !== task.current_revision)) return;
+    const fingerprint = JSON.stringify([task.task_id, submitted.trim(), context]);
+    if (submitAttempt.current?.fingerprint !== fingerprint) submitAttempt.current = { fingerprint, key: nanoid() };
     inFlight.current = true;
     setBusy(true);
+    onBusyChange(true);
     try {
-      await onSubmit(submitted.trim(), nanoid());
+      await onSubmit(submitted.trim(), submitAttempt.current.key, context);
+      submitAttempt.current = null;
       setText(current => current === submitted ? "" : current);
+      if (context) onClearResultContext();
     } catch {
       // 父级展示请求错误；失败保留原稿，不自动重复发送。
     } finally {
       inFlight.current = false;
       setBusy(false);
+      onBusyChange(false);
     }
   };
   const decide = async (proposalId: string, mode: "cancel_now" | "after_safe_point" | "new_task") => {
@@ -158,6 +188,11 @@ function FollowupComposer({
   };
   return (
     <div className="rounded-2xl border bg-background p-3 shadow-[0_14px_45px_-32px_hsl(var(--primary)/0.7)]">
+      {resultContext && <div className="mb-2 flex items-start gap-2 rounded-lg border bg-accent p-2 text-xs text-accent-foreground" aria-label="本次追问引用的结果">
+        <span className="min-w-0 flex-1 break-words">本次追问引用的结果：{resultContext.label} · V{resultContext.revision}</span>
+        <button type="button" disabled={busy} className="shrink-0 rounded px-2 py-1 hover:bg-background focus-visible:ring-2 focus-visible:ring-ring" onClick={onClearResultContext}>移除引用</button>
+      </div>}
+      {contextExpired && <p role="alert" className="mb-2 text-xs text-destructive">所选结果已过期，请回到最新版本重新选择，或移除引用后继续。</p>}
       <textarea
         aria-label="继续对话"
         value={text}
@@ -178,7 +213,7 @@ function FollowupComposer({
         </span>
         <button
           type="button"
-          disabled={!text.trim() || busy}
+          disabled={!text.trim() || busy || contextExpired}
           onClick={() => void submit()}
           className="ml-auto rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground disabled:opacity-45"
         >
@@ -423,6 +458,13 @@ export function SemanticWorkspacePage() {
     evidence: Record<string, unknown> | null;
   } | null>(null);
   const [draftUploads, setDraftUploads] = useState<UploadItem[]>([]);
+  const [canvasView, setCanvasView] = useState<{
+    identity: string; outputId: string | null; results: Record<string, ResultViewState>; sources: Record<string, SourceViewState>;
+  }>({ identity: "", outputId: null, results: {}, sources: {} });
+  const canvasIdentityRef = useRef("");
+  const pendingSource = useRef<{ taskId: string; revision: number; evidence: Record<string, unknown> } | null>(null);
+  const [resultDraft, setResultDraft] = useState<{ identity: string; context: ResultSelection & { label: string } } | null>(null);
+  const [followupBusy, setFollowupBusy] = useState(false);
 
   const [liveFeed, setLiveFeed] = useState<{ identity: string; events: WorkspaceEvent[] }>({ identity: "", events: [] });
   const setLiveEvents = (events: WorkspaceEvent[]) => setLiveFeed({ identity: "", events });
@@ -572,14 +614,39 @@ export function SemanticWorkspacePage() {
     }
   };
   const resultIdentity = JSON.stringify([
+    user?.user_id,
     task?.task_id,
     task?.viewing_revision,
     task?.delivery?.delivery_id,
   ]);
+  canvasIdentityRef.current = resultIdentity;
+  // 在渲染阶段切换身份，缓存命中与旧组件卸载也不能写回前一修订的阅读状态。
+  if (canvasView.identity !== resultIdentity) {
+    setCanvasView({ identity: resultIdentity, outputId: null, results: {}, sources: {} });
+    setResultDraft(null);
+    setFollowupBusy(false);
+  }
+  const selectedOutputId = canvasView.outputId ?? task?.delivery?.outputs[0]?.output_id ?? null;
+  const resultView = canvasView.results[selectedOutputId ?? ""] ?? initialResultView;
+  const updateCanvasResult = (patch: Partial<ResultViewState>) => {
+    if (canvasIdentityRef.current !== resultIdentity) return;
+    setCanvasView(current => current.identity === resultIdentity
+      ? { ...current, results: { ...current.results, [selectedOutputId ?? ""]: { ...(current.results[selectedOutputId ?? ""] ?? initialResultView), ...patch } } } : current);
+  };
   // 缓存命中时也必须在本次渲染排除旧版本选择，不能等 effect 再消除错位。
   const sourceSelection = taskSourceSelection?.resultIdentity === resultIdentity
     ? taskSourceSelection : null;
-  const taskUploadId = sourceSelection?.uploadId ?? task?.upload_ids[0] ?? null;
+  const taskUploadId = sourceSelection?.uploadId ?? task?.upload_ids[0] ?? task?.web_source?.snapshot?.artifacts[0]?.artifact_id ?? null;
+
+  useEffect(() => {
+    const pending = pendingSource.current;
+    if (!pending || !task) return;
+    if (pending.taskId !== task.task_id) { pendingSource.current = null; return; }
+    if (pending.revision !== task.viewing_revision) return;
+    pendingSource.current = null;
+    setTaskSourceSelection({ resultIdentity, uploadId: String(pending.evidence.artifact_id), evidence: pending.evidence });
+    setInspectorKind("source"); setInspectorOpen(true);
+  }, [task?.task_id, task?.viewing_revision, resultIdentity]);
 
   useEffect(() => {
     if (!task?.delivery || task.status !== "completed" || previewedResults.current.has(resultIdentity)) return;
@@ -778,12 +845,18 @@ export function SemanticWorkspacePage() {
     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务要求"], textarea[aria-label="继续对话"]')?.focus());
   };
 
-  const viewSource = (evidence: Record<string, unknown>) => {
+  const viewSource = (evidence: Record<string, unknown>, revision = task?.viewing_revision) => {
     const artifactId = String(evidence.artifact_id || "");
+    if (!artifactId || !task || !revision) { toast.error("引用缺少可核验来源身份"); return; }
+    const requested = { ...evidence, _requestId: nanoid() };
+    if (revision !== task.viewing_revision) {
+      pendingSource.current = { taskId: task.task_id, revision, evidence: requested };
+      setSelectedRevision(revision); return;
+    }
     setTaskSourceSelection({
       resultIdentity,
-      uploadId: artifactId && task?.upload_ids.includes(artifactId) ? artifactId : taskUploadId,
-      evidence,
+      uploadId: artifactId,
+      evidence: requested,
     });
     setInspectorKind("source");
     setInspectorOpen(true);
@@ -800,7 +873,7 @@ export function SemanticWorkspacePage() {
         </div>
         <div className="flex items-center gap-2">
           <button type="button" aria-label="任务列表开关" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(value => !value)} className="rounded-lg border px-3 py-2 text-xs hover:bg-muted">任务列表</button>
-          {(newTask ? draftUploads.length > 0 : Boolean(task?.uploads?.length)) ? (
+          {(newTask ? draftUploads.length > 0 : Boolean(task?.uploads?.length || task?.web_source?.snapshot?.artifacts.length)) ? (
             <button
               type="button"
               onClick={() => { setInspectorKind("source"); setInspectorOpen(value => inspectorKind !== "source" || !value); }}
@@ -1432,15 +1505,18 @@ export function SemanticWorkspacePage() {
                           {conversation.isError && <button type="button" className="rounded-lg border px-3 py-2 text-sm" onClick={() => void conversation.refetch()}>对话读取失败，重试</button>}
                           {conversation.data?.turns?.filter(turn => turn.revision <= (task.viewing_revision ?? task.current_revision ?? task.active_revision)).map(turn => {
                             const response = conversation.data?.results?.find(item => item.turn_id === turn.turn_id && item.revision <= viewingRevision!);
-                            const answer = messages.find(message => message.turn_id === turn.turn_id)?.content ?? response?.answer;
+                            const message = messages.find(message => message.turn_id === turn.turn_id);
+                            const answer = message?.content ?? response?.answer;
+                            const context = readPublicResultContext(message?.result_context ?? response?.result_context);
                             return <article key={turn.turn_id} className="space-y-2 border-b pb-4 text-sm leading-7">
                               <p className="whitespace-pre-wrap font-medium">{turn.text}</p>
                               {response && <p className="text-muted-foreground">{response.acknowledgement}</p>}
                               {answer && <div aria-label="Mangrove 回答"><Markdown safeResources>{answer}</Markdown></div>}
+                              {answer && <AnswerReferences context={context && context.revision === (message?.revision ?? response?.revision) ? context : null} onViewSource={viewSource} />}
                             </article>;
                           })}
                           {messages.filter(message => !conversation.data?.turns?.some(turn => turn.turn_id === message.turn_id)).map(message => (
-                            <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown></article>
+                            <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown><AnswerReferences context={message.result_context?.revision === message.revision ? readPublicResultContext(message.result_context) : null} onViewSource={viewSource} /></article>
                           ))}
                         </section>
                         {task.status === "completed" && (
@@ -1562,6 +1638,9 @@ export function SemanticWorkspacePage() {
                           <FollowupComposer
                             key={task.task_id}
                             task={task}
+                            resultContext={resultDraft?.identity === resultIdentity ? resultDraft.context : null}
+                            onClearResultContext={() => setResultDraft(current => current?.identity === resultIdentity ? null : current)}
+                            onBusyChange={busy => { if (canvasIdentityRef.current === resultIdentity) setFollowupBusy(busy); }}
                             pendingResults={(conversation.data?.results ?? []).filter(result =>
                               conversation.data?.proposals?.some(proposal =>
                                 proposal.proposal_id === result.proposal_id
@@ -1569,12 +1648,13 @@ export function SemanticWorkspacePage() {
                                 && proposal.base_revision === (task.current_revision ?? task.active_revision),
                               ),
                             )}
-                            onSubmit={async (text, idempotencyKey) => {
+                            onSubmit={async (text, idempotencyKey, context) => {
                               try {
                                 const result = await sendWorkspaceTurn(
                                   task.task_id,
                                   text,
                                   idempotencyKey,
+                                  context,
                                 );
                                 await queryClient.invalidateQueries({
                                   queryKey: [
@@ -1647,16 +1727,34 @@ export function SemanticWorkspacePage() {
                     className="bg-background"
                   >
                     {inspectorKind === "result" ? (
-                      <div className="h-full overflow-auto p-3">
+                      <div className="h-full overflow-auto p-3" ref={element => { if (element) element.scrollTop = resultView.bodyTop ?? 0; }}
+                        onScroll={event => updateCanvasResult({ bodyTop: event.currentTarget.scrollTop })}>
                         <button type="button" className="mb-3 rounded-lg border px-3 py-2 text-xs hover:bg-muted" onClick={closeInspector}>关闭结果预览</button>
                         {!narrow && <button type="button" className="mb-3 ml-2 rounded-lg border px-3 py-2 text-xs hover:bg-muted" aria-expanded={inspectorExpanded} onClick={() => setInspectorExpanded(value => !value)}>{inspectorExpanded ? "恢复分栏" : "展开预览"}</button>}
-                        <ResultPreview key={resultIdentity} task={task} onViewSource={viewSource} />
+                        <ResultPreview key={`${resultIdentity}:${selectedOutputId}`} task={task} onViewSource={viewSource} viewState={resultView} onViewStateChange={updateCanvasResult}
+                          outputId={selectedOutputId} onSelectOutput={outputId => setCanvasView(current => ({ ...current, outputId }))}
+                          selectionDisabled={followupBusy}
+                          onSelectResult={(selection, label) => {
+                            if (followupBusy || selection.revision !== task.current_revision || canvasIdentityRef.current !== resultIdentity) return;
+                            setResultDraft({ identity: resultIdentity, context: { ...selection, label } });
+                            if (fullInspector) setInspectorOpen(false);
+                            requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="继续对话"]')?.focus());
+                          }} />
                       </div>
                     ) : <SourcePreviewPanel
                       key={`${resultIdentity}:${taskUploadId}`}
+                      task={task}
                       uploads={task.uploads || []}
                       selectedUploadId={taskUploadId}
                       evidence={sourceSelection?.evidence ?? null}
+                      viewState={canvasView.sources[taskUploadId ?? ""] ?? initialSourceView}
+                      onViewStateChange={patch => {
+                        if (canvasIdentityRef.current !== resultIdentity) return;
+                        const id = taskUploadId ?? "";
+                        setCanvasView(current => current.identity === resultIdentity ? { ...current, sources: {
+                          ...current.sources, [id]: { ...(current.sources[id] ?? initialSourceView), ...patch },
+                        } } : current);
+                      }}
                       onSelectUpload={(uploadId) => {
                         setTaskSourceSelection({ resultIdentity, uploadId, evidence: null });
                       }}

@@ -30,6 +30,21 @@ const guidance = {
   ],
 };
 
+function taskSourceFixture(route: Route, values: Record<string, unknown> = { 姓名: "张三", 工作量: 5 }) {
+  const url = new URL(route.request().url());
+  const parts = url.pathname.split("/");
+  const artifactId = parts.at(-2)!;
+  const tableRef = `artifact://${artifactId}/table/0`;
+  return {
+    task_id: parts.at(-4), revision: Number(url.searchParams.get("revision") || 1), artifact_id: artifactId,
+    upload_id: artifactId, sha256: "0".repeat(64), original_name: `${artifactId}.csv`, media_type: "text/csv",
+    content_url: `/api/data-sources/uploads/${artifactId}/content`, representation: { kind: "source", parser_or_inspector_version: "fixture" },
+    kind: "table", tables: [{ table_ref: tableRef, table_index: 0, name: "数据", header_row: 1 }], selected_table_ref: tableRef,
+    columns: Object.keys(values), rows: [{ row_number: Number(url.searchParams.get("row_number") || 2), values }],
+    offset: 0, limit: 100, total: 1, is_complete: true, location_status: url.searchParams.has("row_number") ? "located" : "not_requested",
+  };
+}
+
 async function mockWorkspace(
   page: Page,
   theme: "light" | "dark" = "light",
@@ -179,6 +194,7 @@ async function mockWorkspace(
       estimated_records: 1,
     },
   }));
+  await page.route("**/api/semantic-workspace/tasks/*/sources/*/preview?*", route => route.fulfill({ json: taskSourceFixture(route) }));
 }
 
 type WorkspaceFixture = {
@@ -408,13 +424,10 @@ test.describe("结果缓存身份隔离", () => {
     let owner = "A";
     const list = responseBarrier(), detail = responseBarrier(), body = responseBarrier(), source = responseBarrier();
     const listRequested = responseBarrier(), detailRequested = responseBarrier(), bodyRequested = responseBarrier(), sourceRequested = responseBarrier();
-    await page.route("**/api/data-tasks/preview", async (route) => {
+    await page.route("**/api/semantic-workspace/tasks/*/sources/*/preview?*", async (route) => {
       const requestedOwner = owner;
       if (requestedOwner === "B") { sourceRequested.release(); await source.promise; }
-      await route.fulfill({ json: {
-        schema: { fields: [{ name: "原件", dtype: "string", nullable: false }] },
-        sample: [{ 原件: `${requestedOwner}-原件私有内容` }], estimated_records: 1,
-      } });
+      await route.fulfill({ json: taskSourceFixture(route, { 原件: `${requestedOwner}-原件私有内容` }) });
     });
     await page.route("**/api/auth/login", (route) => {
       owner = "B";
@@ -485,10 +498,9 @@ test.describe("结果缓存身份隔离", () => {
       const revision = Number(new URL(route.request().url()).searchParams.get("revision") || 2);
       return route.fulfill({ json: previewIdentityFixture("A", revision).preview });
     });
-    await page.route("**/api/data-tasks/preview", (route) => route.fulfill({ json: {
-      schema: { fields: [{ name: "原件", dtype: "string", nullable: false }] },
-      sample: [{ 原件: `${route.request().postDataJSON().source.upload_id}-共享原件正文` }], estimated_records: 1,
-    } }));
+    await page.route("**/api/semantic-workspace/tasks/*/sources/*/preview?*", (route) => route.fulfill({ json:
+      taskSourceFixture(route, { 原件: `${new URL(route.request().url()).pathname.split("/").at(-2)}-共享原件正文` }),
+    }));
     await page.goto("/data-prep");
     await page.getByRole("button", { name: /A的结果任务/ }).click();
     await page.getByRole("button", { name: "原文件预览", exact: true }).click();
@@ -497,7 +509,7 @@ test.describe("结果缓存身份隔离", () => {
     await page.getByRole("button", { name: "查看结果", exact: true }).click();
     await expect(page.getByRole("button", { name: "下载 A-V1.xlsx", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "原文件预览", exact: true }).click();
-    await page.getByTestId("source").getByRole("combobox").selectOption("second");
+    await page.getByLabel("预览文件").selectOption("second");
     await expect(page.getByText("second-共享原件正文", { exact: true })).toBeVisible();
     await page.evaluate(async () => {
       const seen: string[] = [];
@@ -1441,6 +1453,8 @@ test.describe("统一数据工作台", () => {
   });
 
   test("Word 上传完成后自动打开并显示原文件预览", async ({ page }) => {
+    const pageErrors: string[] = [];
+    page.on("pageerror", error => pageErrors.push(error.message));
     await mockWorkspace(page);
     await page.unroute("**/api/data-sources/uploads");
     await page.route("**/api/data-sources/uploads", (route) => route.fulfill({
@@ -1494,6 +1508,7 @@ test.describe("统一数据工作台", () => {
     await expect(
       page.getByText("投标方逾期交付时应承担违约责任。"),
     ).toBeVisible();
+    expect(pageErrors).toEqual([]);
   });
 
   test("不支持的文件格式会明确说明，不会静默忽略", async ({ page }) => {
@@ -2320,9 +2335,9 @@ test.describe("统一数据工作台", () => {
     await page.getByRole("button", { name: /结果来源检查/ }).click();
     await expect(page.getByRole("heading", { name: "结果与正式交付" }))
       .toBeVisible();
-    await expect(page.getByText("张三工作量.xlsx")).toBeVisible();
+    await expect(page.locator("p").getByText("张三工作量.xlsx", { exact: true })).toBeVisible();
     await expect(page.getByText("可交付", { exact: true })).toBeVisible();
-    const filename = page.getByText("张三工作量.xlsx");
+    const filename = page.locator("p").getByText("张三工作量.xlsx", { exact: true });
     const bundle = page.getByRole("button", { name: "下载全部" });
     // 系统字体宽度不同；验证内容未裁切且按钮可操作，不固定汉字像素宽度。
     for (const element of [filename, bundle]) {

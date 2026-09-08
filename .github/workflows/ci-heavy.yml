@@ -89,6 +89,11 @@ jobs:
               --randomly-seed=0 --timeout=120 --junitxml=.artifacts/heavy/platform-sessions.xml
           elif [[ "${{ inputs.gate }}" == "unified-workspace" ]]; then
             python -m pytest -q tests/test_semantic_workspace_api.py tests/test_workspace_conversation_stream.py \
+              tests/test_workspace_canvas.py tests/test_workspace_canvas_migration.py tests/test_pi_runtime_workspace_api.py \
+              tests/test_semantic_table_execution.py tests/test_source_inspectors.py tests/test_semantic_delivery.py \
+              tests/test_database_migrations.py tests/test_database_migrations_components.py \
+              tests/test_account_execution_migrations.py tests/test_dev_database_preflight.py tests/test_feedback_audit_migration.py \
+              tests/test_platform_session_migration.py tests/test_runtime_config_secret_refs.py \
               tests/test_conversation_steering_api.py tests/test_conversation_steering.py tests/test_work_trace.py \
               tests/test_coremind_events.py tests/test_model_connections_api.py tests/test_candidate_verifier.py tests/test_candidate_reverification_provider.py \
               tests/test_platform_control_streams.py \

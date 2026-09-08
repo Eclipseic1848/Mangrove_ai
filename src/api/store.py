@@ -2733,6 +2733,24 @@ class WebUIStore:
             else {}
         )
 
+    def semantic_harness_artifacts_for_result(
+        self, user_id: str, run_id: str, result_sha256: str,
+    ) -> Optional[Dict[str, Any]]:
+        """按发布输入摘要查原 Attempt；不以最新尝试替换旧交付的来源链。"""
+        if self.get_semantic_harness_run(user_id, run_id) is None:
+            return None
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM semantic_harness_attempts WHERE user_id=? AND run_id=? ORDER BY attempt_number, created_at",
+                (user_id, run_id),
+            ).fetchall()
+        for row in rows:
+            item = self._semantic_harness_attempt_row(row, include_private=True)
+            refs = (item.get("tool_result") or {}).get("output_artifacts", [])
+            if any(ref.get("sha256") == result_sha256 and ref.get("kind") != "record_lineage" for ref in refs):
+                return item
+        return None
+
     def save_semantic_delivery(
         self,
         *,
