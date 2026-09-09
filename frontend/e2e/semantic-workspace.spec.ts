@@ -609,6 +609,250 @@ test("会话过期重新登录后恢复原任务与结果修订", async ({ page 
   await expect(page.getByLabel("结果版本")).toHaveValue("1");
 });
 
+function searchAttempt(key: string, count = 9, hard = false) {
+  const base = sourceAttempt(count ? "succeeded" : "failed");
+  const scope = {
+    kind: "public_search", normalized_url: "", site: "", query: "电池回收研究",
+    time_range: "week", domains: ["example.com"], page_limit: 10,
+    completeness: { mode: hard ? "hard_min_pages" : "exploratory", required_valid_pages: hard ? 10 : null },
+  };
+  const artifacts = Array.from({ length: count }, (_, index) => ({
+    ...sourceAttempt("succeeded").snapshot!.artifacts[0], artifact_id: `search-artifact-${index}`,
+    request_url: `https://example.com/article-${index}`, final_url: `https://example.com/article-${index}`,
+    title: `研究原文 ${index + 1}`, text_preview: `第 ${index + 1} 页已保存摘要`,
+  }));
+  const report = {
+    provider: "fixture-search", query: scope.query, time_range: scope.time_range, domains: scope.domains,
+    candidates: count ? [
+      ...artifacts.map(item => ({ url: item.final_url, title: item.title, status: "read" })),
+      ...(count < 10 ? [{ url: "https://example.com/login", title: "登录后才可读取", status: "failed", error_code: "site_refused", message: "站点拒绝读取" },
+        { url: "https://example.com/candidate", title: "仅搜索候选", status: "discovered" }] : []),
+    ] : [],
+    discovered_count: count ? (count < 10 ? count + 2 : count) : 0,
+    read_count: count, failed_count: count && count < 10 ? 1 : 0, requested_count: 10,
+    status: count === 10 ? "complete" : count ? "partial" : "no_results",
+  };
+  return {
+    ...base, attempt_id: "search-attempt", idempotency_key: key, request_url: "", normalized_url: "", allowed_scope: scope,
+    error_code: count ? null : "search_no_results", error_message: count ? null : "没有匹配的公开链接", search_report: report,
+    snapshot: count ? { ...sourceAttempt("succeeded").snapshot!, attempt_id: "search-attempt", allowed_scope: scope,
+      valid_page_count: count, failed_page_count: report.failed_count, artifacts,
+      coverage: { status: hard ? "hard_insufficient" : "coverage_unknown", limit_reached: true,
+        attempted_page_count: 10, required_valid_pages: hard ? 10 : null, search_report: report },
+    } : null,
+  };
+}
+
+test.describe("#134 公开搜索", () => {
+  test("仅主题显式联网，9条正文与候选分开并沿默认模型启动", async ({ page }, testInfo) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const requests: Record<string, unknown>[] = [];
+    let createdPayload: Record<string, unknown> | null = null;
+    await page.route("**/api/semantic-workspace/source-acquisitions", route => {
+      requests.push(route.request().postDataJSON());
+      return route.fulfill({ json: searchAttempt(route.request().headers()["idempotency-key"]) });
+    });
+    const task = workspaceTask("query-task", "queued", "电池回收研究");
+    await page.route("**/api/semantic-workspace/tasks", route => {
+      createdPayload = route.request().postDataJSON();
+      return route.fulfill({ json: task });
+    });
+    await page.route("**/api/semantic-workspace/tasks/query-task", route => route.fulfill({ json: workspaceDetail(task, {
+      web_source: { runtime_binding: { model: "Qwen3.6-35B-A3B" }, snapshot: searchAttempt("frozen").snapshot },
+      messages: [{ message_id: "query-answer", version: 1, task_id: "query-task", revision: 1, run_id: null,
+        turn_id: null, role: "assistant", kind: "answer", content: "已根据九篇实际读取的研究整理结论，另有一页读取失败。", status: "completed", created_at: "2026-09-08T00:02:00Z" }],
+    }) }));
+    await page.route("**/api/semantic-workspace/tasks/query-task/sources/search-artifact-0/preview?*", route => route.fulfill({ json: {
+      task_id: "query-task", revision: 1, artifact_id: "search-artifact-0", upload_id: null, sha256: "a".repeat(64),
+      original_name: "研究原文 1", media_type: "text/html", content_url: null, kind: "web", text_preview: "第 1 页已保存摘要",
+      representation: { kind: "source", parser_or_inspector_version: "fixture" }, is_complete: false, truncated: true,
+    } }));
+    await page.route("**/api/semantic-workspace/tasks/query-task/source-bundle?*", route => {
+      expect(route.request().headers()["x-mangrove-owner"]).toBe("u1");
+      expect(new URL(route.request().url()).searchParams.get("revision")).toBe("1");
+      return route.fulfill({ contentType: "application/zip", body: "synthetic-frozen-original-package" });
+    });
+    await page.goto("/data-prep");
+    await page.getByLabel("任务要求", { exact: true }).fill("电池回收研究");
+    await page.getByRole("button", { name: "开始执行", exact: true }).click();
+    await expect(page.getByLabel("搜索主题", { exact: true })).toHaveValue("电池回收研究");
+    await expect(page.getByLabel("精确网址")).toHaveCount(0);
+    expect(requests).toHaveLength(0);
+    await page.getByLabel("时间范围", { exact: true }).selectOption("week");
+    await page.getByLabel("限定域名（可选）").fill("example.com");
+    await expect(page.getByText("以上搜索条件将发送给公开搜索服务", { exact: false })).toBeVisible();
+    await page.getByRole("button", { name: "搜索并读取", exact: true }).click();
+    await expect(page.getByLabel("公开搜索结果")).toContainText("已读取 9 页");
+    expect(requests).toEqual([{ url: "", query: "电池回收研究", time_range: "week", domains: ["example.com"],
+      purpose: "读取公开网页内容，供当前数据任务分析", allowed_scope: "public_search", page_limit: 10,
+      completeness_mode: "exploratory", required_valid_pages: null }]);
+    await expect(page.getByLabel("公开搜索结果")).toContainText("仅发现链接，尚未读取");
+    await expect(page.getByLabel("公开搜索结果")).toContainText("读取失败");
+    await expect(page.getByLabel("选择已读页面").locator("option")).toHaveCount(9);
+    await page.getByLabel("选择已读页面").selectOption("search-artifact-8");
+    await expect(page.getByRole("article", { name: "网页正文预览" })).toContainText("第 9 页已保存摘要");
+    await expect(page.getByRole("article", { name: "网页正文预览" })).toContainText("未展示完整原文");
+    await page.screenshot({ path: testInfo.outputPath("search-partial-1440.png"), fullPage: true });
+    await page.getByRole("button", { name: "检查上下文草案" }).click();
+    await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "启动任务", exact: true }).click();
+    await expect.poll(() => createdPayload).not.toBeNull();
+    expect(createdPayload).toMatchObject({ source_snapshot_id: "snapshot-1", objective_text: "电池回收研究", model: "Qwen3.6-35B-A3B", upload_ids: [] });
+    expect(createdPayload).not.toHaveProperty("runtime_version");
+    expect(requests).toHaveLength(1);
+    await expect(page.getByLabel("Mangrove 回答")).toContainText("九篇实际读取");
+    await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+    await expect(page.getByLabel("网页摘要预览")).toContainText("第 1 页已保存摘要");
+    const download = page.waitForEvent("download");
+    await page.getByRole("button", { name: "下载完整资料包", exact: true }).click();
+    await download;
+  });
+
+  for (const scenario of ["zero", "blocked", "failed", "hard-nine", "complete-ten"] as const) {
+    test(`${scenario} 不混同缺口、失败与完整读取`, async ({ page }) => {
+      await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+      await mockWorkspace(page);
+      const empty = ["zero", "blocked", "failed"].includes(scenario);
+      await page.route("**/api/semantic-workspace/source-acquisitions", route => {
+        const saved = searchAttempt(route.request().headers()["idempotency-key"], empty ? 0 : scenario === "hard-nine" ? 9 : 10, scenario === "hard-nine");
+        if (scenario === "blocked" || scenario === "failed") {
+          saved.search_report.status = scenario;
+          saved.error_code = scenario === "blocked" ? "search_blocked" : "search_timeout";
+        }
+        return route.fulfill({ json: saved });
+      });
+      await page.goto("/data-prep");
+      await page.getByLabel("任务要求", { exact: true }).fill("电池回收研究");
+      await page.getByRole("button", { name: "开始执行", exact: true }).click();
+      if (scenario === "hard-nine") {
+        await page.getByLabel("结果要求", { exact: true }).selectOption("hard_min_pages");
+        await page.getByLabel("至少有效页数", { exact: true }).fill("10");
+      }
+      await page.getByRole("button", { name: "搜索并读取", exact: true }).click();
+      if (empty) {
+        await expect(page.getByLabel("公开搜索结果")).toContainText(scenario === "zero" ? "没有找到符合搜索条件" : scenario === "blocked" ? "公开访问被阻止" : "本次搜索或读取失败");
+        await expect(page.getByRole("article", { name: "网页正文预览" })).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "启动任务", exact: true })).toHaveCount(0);
+      } else {
+        await page.getByRole("button", { name: "检查上下文草案" }).click();
+        if (scenario === "hard-nine") {
+          await expect(page.getByText("有效页面不足 10 个", { exact: false })).toBeVisible();
+          await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeDisabled();
+          await expect(page.getByLabel("选择已读页面").locator("option")).toHaveCount(9);
+        } else {
+          await expect(page.getByLabel("公开搜索结果")).toContainText("不表示覆盖了所有公开网页");
+          await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeEnabled();
+        }
+      }
+    });
+  }
+
+  test("查询未知响应只重放同一身份，刷新及取消拒绝迟到成功", async ({ page }) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    const keys: string[] = [];
+    const bodies: unknown[] = [];
+    let delayed: Route | undefined;
+    let canceled = false;
+    const pending = () => ({ ...searchAttempt(keys[0], 0), status: canceled ? "canceled" : "acquiring", search_report: null, error_code: null, error_message: null });
+    await page.route("**/api/semantic-workspace/source-acquisitions", route => {
+      keys.push(route.request().headers()["idempotency-key"]);
+      bodies.push(route.request().postDataJSON());
+      if (keys.length === 1) return route.abort("connectionfailed");
+      if (keys.length === 2) return route.fulfill({ json: pending() });
+      delayed = route;
+    });
+    await page.route("**/api/semantic-workspace/source-acquisitions/search-attempt", route => route.fulfill({ json: pending() }));
+    await page.route("**/api/semantic-workspace/source-acquisitions/search-attempt/cancel", route => { canceled = true; return route.fulfill({ json: pending() }); });
+    await page.goto("/data-prep");
+    await page.getByLabel("任务要求", { exact: true }).fill("电池回收研究");
+    await page.getByRole("button", { name: "开始执行", exact: true }).click();
+    await page.getByLabel("时间范围", { exact: true }).selectOption("week");
+    await page.getByLabel("限定域名（可选）").fill("example.com");
+    await page.getByRole("button", { name: "搜索并读取", exact: true }).click();
+    await expect(page.getByRole("button", { name: "取消获取", exact: true })).toBeVisible();
+    await expect.poll(() => Boolean(delayed)).toBe(true);
+    await page.getByRole("button", { name: "取消获取", exact: true }).click();
+    await expect(page.getByText("来源获取已停止", { exact: true })).toBeVisible();
+    await delayed!.fulfill({ json: searchAttempt(keys[0], 10) });
+    await expect(page.getByText("来源获取已停止", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "启动任务", exact: true })).toHaveCount(0);
+    const requestsBeforeReload = keys.length;
+    await page.reload();
+    await page.getByRole("button", { name: "公开网页", exact: true }).click();
+    await expect(page.getByText("来源获取已停止", { exact: true })).toBeVisible();
+    expect(keys).toHaveLength(requestsBeforeReload);
+    expect(new Set(keys).size).toBe(1);
+    for (const body of bodies) expect(body).toEqual(bodies[0]);
+    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("mangrove_web_source_attempt_u1")!));
+    expect(stored).toMatchObject({ query: "电池回收研究", time_range: "week", domains: ["example.com"], scope_kind: "public_search" });
+  });
+
+  test("手机暗色键盘与中文输入不自动联网，清空保持焦点", async ({ page }, testInfo) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page, "dark");
+    await page.setViewportSize({ width: 390, height: 700 });
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    let requests = 0;
+    await page.route("**/api/semantic-workspace/source-acquisitions", route => { requests += 1; return route.fulfill({ json: searchAttempt("key", 0) }); });
+    await page.goto("/data-prep");
+    await page.getByLabel("任务要求", { exact: true }).fill("电池回收研究");
+    await page.getByRole("button", { name: "开始执行", exact: true }).click();
+    const query = page.getByLabel("搜索主题", { exact: true });
+    await query.focus();
+    await query.dispatchEvent("compositionstart");
+    await query.press("Enter");
+    await query.dispatchEvent("compositionend");
+    expect(requests).toBe(0);
+    await page.getByRole("button", { name: "清空搜索主题", exact: true }).click();
+    await expect(query).toBeFocused();
+    await expect(query).toHaveValue("");
+    await expect(page.getByRole("button", { name: "搜索并读取", exact: true })).toBeDisabled();
+    await query.fill("新的公开主题");
+    await page.getByLabel("限定域名（可选）").fill(Array.from({ length: 11 }, (_, i) => `site${i}.com`).join(","));
+    await expect(page.getByRole("button", { name: "搜索并读取", exact: true })).toBeDisabled();
+    await page.getByLabel("限定域名（可选）").fill("");
+    await page.getByLabel("时间范围", { exact: true }).focus();
+    await page.getByLabel("时间范围", { exact: true }).selectOption("month");
+    const scan = await new AxeBuilder({ page }).analyze();
+    expect(scan.violations.filter(item => ["serious", "critical"].includes(item.impact ?? ""))).toEqual([]);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    await page.screenshot({ path: testInfo.outputPath("search-dark-390.png"), fullPage: true });
+    await page.getByRole("button", { name: "搜索并读取", exact: true }).focus();
+    await page.getByRole("button", { name: "搜索并读取", exact: true }).press("Space");
+    await expect.poll(() => requests).toBe(1);
+  });
+
+  test("刷新成功搜索保留查询缺口语义，使用原快照不重新联网", async ({ page }) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    await page.addInitScript(() => localStorage.setItem("mangrove_web_source_attempt_u1", JSON.stringify({
+      attempt_id: "search-attempt", idempotency_key: "frozen-query-key", url: "", purpose: "公开研究分析",
+      scope_kind: "public_search", query: "电池回收研究", time_range: "week", domains: ["example.com"],
+      page_limit: 10, completeness_mode: "exploratory", required_valid_pages: null,
+    })));
+    let acquisitions = 0;
+    let submitted: Record<string, unknown> | null = null;
+    const task = workspaceTask("restored-search-task", "queued", "恢复公开研究");
+    await page.route("**/api/semantic-workspace/source-acquisitions", route => { acquisitions += 1; return route.abort(); });
+    await page.route("**/api/semantic-workspace/source-acquisitions/search-attempt", route => route.fulfill({ json: searchAttempt("frozen-query-key") }));
+    await page.route("**/api/semantic-workspace/tasks", route => { submitted = route.request().postDataJSON(); return route.fulfill({ json: task }); });
+    await page.route("**/api/semantic-workspace/tasks/restored-search-task", route => route.fulfill({ json: workspaceDetail(task) }));
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: "公开网页", exact: true }).click();
+    await expect(page.getByLabel("公开搜索结果")).toContainText("本次搜索：电池回收研究");
+    await expect(page.getByLabel("想得到什么结果")).toHaveValue("电池回收研究");
+    await page.getByRole("button", { name: "检查上下文草案" }).click();
+    await page.getByRole("button", { name: "启动任务", exact: true }).click();
+    await expect.poll(() => submitted).not.toBeNull();
+    expect(submitted).toMatchObject({ source_snapshot_id: "snapshot-1", quantity_requirement: "当前已成功读取页面中有证据的内容",
+      completeness_requirement: "披露搜索范围和未读取来源，不承诺覆盖全部公开网页" });
+    expect(acquisitions).toBe(0);
+  });
+});
+
 function sourceAttempt(
   status: "succeeded" | "failed",
   extra: Record<string, unknown> = {},
@@ -967,7 +1211,6 @@ test.describe("统一数据工作台", () => {
       quantity_requirement: "当前页面中有证据的全部内容",
       completeness_requirement: "仅对当前精确页面负责",
       output_formats: ["markdown"],
-      runtime_version: "pi",
       model_connection_id: null,
       external_api_confirmed: false,
       context_selection: {
@@ -976,6 +1219,7 @@ test.describe("统一数据工作台", () => {
       },
       context_preview_sha256: `sha256:${"3".repeat(64)}`,
     });
+    expect(taskSubmitted).not.toHaveProperty("runtime_version");
     expect(taskIdempotencyKey.length).toBeGreaterThan(5);
     await expect(page.getByRole("heading", { name: "公开网页产品摘要" }))
       .toBeVisible();

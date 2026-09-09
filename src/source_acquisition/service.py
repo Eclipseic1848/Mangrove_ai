@@ -81,10 +81,13 @@ class SourceAcquisitionRequest:
     url: str
     purpose: str
     scope_kind: str = "current_page"
-    page_limit: int = 1
+    page_limit: int | None = None
     completeness_mode: str = "exploratory"
     required_valid_pages: int | None = None
     request_context: str = ""
+    query: str = ""
+    time_range: str = "any"
+    domains: tuple[str, ...] = ()
 
     def normalized(self) -> "SourceAcquisitionRequest":
         purpose = self.purpose.strip()
@@ -92,11 +95,26 @@ class SourceAcquisitionRequest:
             raise ValueError("来源用途不能为空")
         if len(purpose) > 500:
             raise ValueError("来源用途不能超过 500 个字符")
-        if self.scope_kind not in {"current_page", "same_site"}:
+        if self.scope_kind not in {"current_page", "same_site", "public_search"}:
             raise ValueError("来源范围必须是当前页或同站有限扩展")
-        page_limit = 1 if self.scope_kind == "current_page" else self.page_limit
+        query = self.query.strip()
+        domains = ()
+        if self.scope_kind == "public_search":
+            from .public_search import normalize_domains
+            if self.url or not query or len(query) > 500:
+                raise ValueError("公开查询须为1至500字符且不能同时给URL")
+            if self.time_range not in {"any", "day", "week", "month", "year"}:
+                raise ValueError("查询时效无效")
+            domains = normalize_domains(self.domains)
+            if self.completeness_mode == "hard_scope_complete":
+                raise ValueError("公开查询不能承诺全网范围完整")
+        elif query or self.domains or self.time_range != "any":
+            raise ValueError("URL来源不能附带查询条件")
+        page_limit = 1 if self.scope_kind == "current_page" else self.page_limit if self.page_limit is not None else 10 if query else 1
         if page_limit < 1 or page_limit > 50:
             raise ValueError("同站页面上限必须为 1 至 50")
+        if self.scope_kind == "public_search" and page_limit > 20:
+            raise ValueError("公开查询上限必须为1至20")
         if self.completeness_mode not in {
             "exploratory",
             "hard_min_pages",
@@ -113,13 +131,14 @@ class SourceAcquisitionRequest:
         if len(request_context) > 500:
             raise ValueError("来源请求上下文不能超过 500 个字符")
         return SourceAcquisitionRequest(
-            url=normalize_public_url(self.url),
+            url="" if query else normalize_public_url(self.url),
             purpose=purpose,
             scope_kind=self.scope_kind,
             page_limit=page_limit,
             completeness_mode=self.completeness_mode,
             required_valid_pages=required,
             request_context=request_context,
+            query=query, time_range=self.time_range, domains=domains,
         )
 
     def request_hash(self) -> str:
@@ -138,6 +157,9 @@ class SourceAcquisitionRequest:
             "purpose": normalized.purpose,
         }
         # 仅刷新等复合操作写入内部上下文；普通来源请求保持既有哈希兼容。
+        if normalized.query:
+            from .public_search import PROVIDER
+            payload["search"] = dict(query=normalized.query, time_range=normalized.time_range, domains=normalized.domains, provider=PROVIDER)
         if normalized.request_context:
             payload["request_context"] = normalized.request_context
         encoded = json.dumps(
@@ -337,6 +359,7 @@ class SourceAcquisitionRepository:
     @staticmethod
     def _scope(request: SourceAcquisitionRequest) -> dict[str, Any]:
         return {
+            **({"query": request.query, "time_range": request.time_range, "domains": list(request.domains), "provider": "duckduckgo-html-v1"} if request.query else {}),
             "kind": request.scope_kind,
             "normalized_url": request.url,
             "site": urlsplit(request.url).netloc,
@@ -354,6 +377,7 @@ class SourceAcquisitionRepository:
         result = dict(row)
         result["allowed_scope"] = json.loads(result.pop("allowed_scope_json"))
         result.pop("request_hash", None)
+        result["search_report"] = json.loads(result.pop("search_report_json", None) or "null")
         return result
 
     def claim_attempt(
@@ -510,7 +534,7 @@ class SourceAcquisitionRepository:
             connection.execute("BEGIN IMMEDIATE")
             auth = self._require_execution(connection, owner_id, attempt_id)
             row = connection.execute(
-                "SELECT status, allowed_scope_json, cancel_requested_at FROM source_acquisition_attempts "
+                "SELECT status, allowed_scope_json, cancel_requested_at, search_report_json FROM source_acquisition_attempts "
                 "WHERE owner_id=? AND attempt_id=?",
                 (owner_id, attempt_id),
             ).fetchone()
@@ -542,6 +566,7 @@ class SourceAcquisitionRepository:
                             "scope_denied_count": scope_denied_count,
                             "failure_sample_count": len(failures),
                             "truncated_discovery_count": truncated_discovery_count,
+                            **({"search_report": json.loads(row["search_report_json"])} if row["search_report_json"] else {}),
                         },
                         ensure_ascii=False,
                     ),
@@ -605,6 +630,15 @@ class SourceAcquisitionRepository:
         if saved is None:  # pragma: no cover
             raise RuntimeError("来源获取结果未能持久化")
         return saved
+
+    def save_search_report(self, owner_id, attempt_id, report):
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._require_execution(connection, owner_id, attempt_id)
+            connection.execute(
+                "UPDATE source_acquisition_attempts SET search_report_json=? WHERE owner_id=? AND attempt_id=? AND status='acquiring' AND cancel_requested_at IS NULL",
+                (json.dumps(report, ensure_ascii=False), owner_id, attempt_id),
+            )
 
     def complete_failure(
         self,
@@ -695,6 +729,8 @@ class SourceAcquisitionRepository:
                 - int(coverage.get("scope_denied_count") or 0),
             )
         has_coverage_gap = bool(
+            result["allowed_scope"].get("kind") == "public_search"
+            or
             failed_request_count
             or coverage.get("limit_reached")
             or coverage.get("truncated_discovery_count")
@@ -1110,10 +1146,12 @@ class SourceAcquisitionService:
         fetcher: AnonymousWebFetcher,
         *,
         stale_after_seconds: float = 60.0,
+        search_client=None,
     ) -> None:
         self.repository = repository
         self.fetcher = fetcher
         self.stale_after_seconds = stale_after_seconds
+        self.search_client = search_client
 
     def _batch_deadline_seconds(self, page_limit: int) -> float:
         deadline = getattr(self.fetcher, "batch_deadline_seconds", None)
@@ -1220,7 +1258,11 @@ class SourceAcquisitionService:
     async def _read(
         self, owner_id: str, attempt: dict[str, Any], normalized: SourceAcquisitionRequest,
     ) -> dict[str, Any]:
-        check = lambda: self.repository.check_execution(owner_id, str(attempt['attempt_id']))
+        def check():
+            self.repository.check_execution(owner_id, str(attempt['attempt_id']))
+            # 不等待轮询：DNS 或响应等待期间的用户取消也必须阻断下一次外发。
+            if self.repository.cancellation_requested(owner_id, str(attempt['attempt_id'])):
+                raise asyncio.CancelledError()
         token = _execution_check.set(check)
         try:
             check()
@@ -1228,10 +1270,66 @@ class SourceAcquisitionService:
         finally:
             _execution_check.reset(token)
 
+    async def _read_public_search(self, owner_id, attempt, request):
+        from .public_search import PROVIDER, PublicSearchClient, PublicSearchError
+        attempt_id = str(attempt["attempt_id"])
+        report = dict(provider=PROVIDER, query=request.query, time_range=request.time_range,
+                      domains=list(request.domains), candidates=[], discovered_count=0,
+                      read_count=0, failed_count=0, requested_count=request.page_limit, status="partial")
+        save = lambda: self.repository.save_search_report(owner_id, attempt_id, report)
+        save()
+        try:
+            candidates = await (self.search_client or PublicSearchClient()).search(
+                request.query, time_range=request.time_range, domains=request.domains, limit=request.page_limit,
+            )
+        except PublicSearchError as exc:
+            report["status"] = "blocked" if exc.code in {"search_blocked", "search_network_denied"} else "failed"
+            save()
+            return self.repository.complete_failure(owner_id, attempt_id, error_code=exc.code, error_message=str(exc))
+        pages, failures, seen = [], [], set()
+        for candidate in candidates[:request.page_limit]:
+            url = normalize_public_url(candidate["url"])
+            if url in seen:
+                continue
+            seen.add(url)
+            report["candidates"].append({"url": url, "title": str(candidate.get("title", ""))[:300], "status": "discovered"})
+        report["discovered_count"] = len(report["candidates"])
+        save()
+        for candidate in report["candidates"]:
+            self.repository.check_execution(owner_id, attempt_id)
+            if self.repository.cancellation_requested(owner_id, attempt_id):
+                raise asyncio.CancelledError()
+            host = urlsplit(candidate["url"]).hostname or ""
+            try:
+                if request.domains and not any(host == domain or host.endswith('.' + domain) for domain in request.domains):
+                    raise _FetchFailure("scope_denied", "候选不在授权域名范围，未读取", final_url=None)
+                page = await self.fetcher.fetch(candidate["url"])
+                # 读取器仍核每跳范围；不跟正文站外链接，迟到结果必须先过取消门。
+                self.repository.check_execution(owner_id, attempt_id)
+                if self.repository.cancellation_requested(owner_id, attempt_id):
+                    raise asyncio.CancelledError()
+                pages.append(page)
+                candidate["status"] = "read"
+                report["read_count"] += 1
+            except _FetchFailure as exc:
+                candidate.update(status="scope_denied" if exc.code == "scope_denied" else "failed", error_code=exc.code, message=str(exc)[:500])
+                report["failed_count"] += 1
+                failures.append(_PageFailure(request_url=candidate["url"], final_url=exc.final_url, error_code=exc.code, error_message=str(exc), failed_at=_now()))
+            save()
+        report["status"] = "complete" if len(pages) == request.page_limit else "partial" if pages else "no_results" if not report["candidates"] else "failed"
+        save()
+        if not pages:
+            return self.repository.complete_failure(owner_id, attempt_id, error_code="search_no_results" if not candidates else "search_no_readable_pages", error_message="本次公开查询未形成可用正文；不表示全网不存在")
+        return self.repository.complete_batch(owner_id, attempt_id, pages=tuple(pages), failures=tuple(failures), limit_reached=len(pages) < request.page_limit,
+            attempted_page_count=len(report["candidates"]), failed_request_count=sum(item["status"] == "failed" for item in report["candidates"]),
+            scope_denied_count=sum(item["status"] == "scope_denied" for item in report["candidates"]), truncated_discovery_count=0)
+
     async def _read_authorized(
         self, owner_id: str, attempt: dict[str, Any], normalized: SourceAcquisitionRequest,
     ) -> dict[str, Any]:
         try:
+            if normalized.scope_kind == "public_search":
+                return await self._read_public_search(owner_id, attempt, normalized)
             if normalized.scope_kind == "same_site":
                 batch = await asyncio.wait_for(
                     self.fetcher.fetch_batch(

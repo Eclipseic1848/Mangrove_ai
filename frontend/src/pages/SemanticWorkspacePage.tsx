@@ -1072,7 +1072,7 @@ export function SemanticWorkspacePage() {
               setSettingsOpen(false);
               void queryClient.invalidateQueries({ queryKey: ["model-connections"] });
               void queryClient.invalidateQueries({ queryKey: ["model-connection-preference"] });
-              requestAnimationFrame(() => document.querySelector<HTMLElement>(task ? '[aria-label="继续对话"]' : webOpen ? '#web-task-objective, #web-source-url' : '[data-testid="workspace-model-picker"] button')?.focus());
+              requestAnimationFrame(() => document.querySelector<HTMLElement>(task ? '[aria-label="继续对话"]' : webOpen ? '#web-task-objective, #web-source-url, #web-search-query' : '[data-testid="workspace-model-picker"] button')?.focus());
             }}>返回当前任务</button>
             <ModelConnectionsPanel isManager={isAdminish(user?.role)} />
           </div>

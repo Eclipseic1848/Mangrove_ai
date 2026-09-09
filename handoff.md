@@ -9,11 +9,11 @@
 本文件写给完全没有上下文的新会话。先读 `AGENTS.md`、`docs/status/current.md`、`CONTEXT.md`，
 再现场读取 GitHub、Git 与运行态。历史计划是证据，不是当前状态。
 
-## 0. 当前接手位置：#133
+## 0. 当前接手位置：#134
 
 按 [当前状态](docs/status/current.md) 与 [整改地图 #113](https://github.com/Eclipseic1848/Mangrove_ai/issues/113)继续逐票工作。
-#132 已由 PR #169 合并关闭；本分支实现已批准工具复用，范围与门禁见
-[#133 规格](docs/plans/2026-09-08-approved-tool-reuse-spec.md)。先核关联 PR 的最终提交、CI、真实恢复与两轴审查；若已合并关闭，按依赖继续 #134，不重做 #133。
+#133 已由 PR #170 合并关闭；本分支实现无网址公开搜索，范围与门禁见
+[#134 规格](docs/plans/2026-09-09-public-query-search-spec.md)。先核关联 PR 的最终提交、CI 与两轴审查；真实匿名探针的网络安全拒绝不等于搜索成功资格。若已合并关闭，按依赖继续 #135，不重做 #134。
 
 沿用现有 checkout；保留其他任务与用户改动，仅精确暂存本票文件。工作树中的规划文档、冻结评测数据及本机脚本可能有独立工作，不能清理或整体提交。
 所有前端相关工作用 Astra high，其余委派用 Astra low；主会话协调用 Astra medium，实际档位须核会话记录。

@@ -719,8 +719,7 @@ export function TaskComposer({
   const submit = async () => {
     if (submittingRef.current) return;
     if (unified && prompt.trim() && !items.length && !submitting) {
-      if (/https?:\/\//i.test(prompt)) readWeb();
-      else setFileNotice("请添加要处理的文件，或提供一个具体公开网址。当前尚未开放全网搜索。");
+      readWeb();
       return;
     }
     if (
@@ -1048,7 +1047,7 @@ export function TaskComposer({
           <Paperclip className="h-3.5 w-3.5" />
           添加文件
         </button>
-        {unified && <button type="button" onClick={readWeb} disabled={items.length > 0 || busy} className="rounded-lg border px-2.5 py-1.5 text-xs hover:bg-muted disabled:opacity-50" title={items.length ? "网页与文件组合尚未接通；现有附件会保留" : "提供具体网页并确认读取范围"}>公开网页</button>}
+        {unified && <button type="button" onClick={readWeb} disabled={items.length > 0 || busy} className="rounded-lg border px-2.5 py-1.5 text-xs hover:bg-muted disabled:opacity-50" title={items.length ? "网页与文件组合尚未接通；现有附件会保留" : "搜索公开网页或读取已知网址"}>公开网页</button>}
         <span className="mr-1 text-xs text-muted-foreground">
           {kind === "empty" && !formats.length ? "上传后自动推荐输出" : "输出格式"}
         </span>
