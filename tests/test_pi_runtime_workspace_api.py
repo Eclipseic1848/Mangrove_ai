@@ -3865,6 +3865,7 @@ def test_manager_restart_resumes_persisted_pi_run_instead_of_starting_again(
     )
     auth_mod._store = None
     document, _ = _uploads(tmp_path)
+    frozen_upload = runtime_mod._upload_store().resolve("user-a", document)
     migrated_webui_database(settings.webui_db_path)
     store = auth_mod.get_store()
     task_id = "workspace_interrupted_pi"
@@ -3874,6 +3875,8 @@ def test_manager_restart_resumes_persisted_pi_run_instead_of_starting_again(
         title="恢复 Pi 任务",
         objective_text="从附件抽取表格，只输出一张 CSV",
         upload_ids=[document],
+        # 与正式创建入口一致，恢复只读取所选修订的冻结来源。
+        source_refs=[{"upload_id": document, "sha256": frozen_upload.sha256}],
         output_formats=["csv"],
         provider="local",
         model="Qwen3.6-35B-A3B",

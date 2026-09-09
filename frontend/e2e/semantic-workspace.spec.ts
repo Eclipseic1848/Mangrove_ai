@@ -5126,7 +5126,8 @@ test.describe("#135 修订与迟到边界", () => {
     await requested.promise;
     const peer = await context.newPage();
     await peer.route("**/*", route => route.fulfill({ contentType: "text/html", body: "<html lang=zh><title>合成草稿窗口</title></html>" }));
-    await peer.goto("http://127.0.0.1:4180/draft-peer");
+    await peer.goto(new URL("/draft-peer", page.url()).href);
+    expect(new URL(peer.url()).origin).toBe(new URL(page.url()).origin);
     await peer.evaluate(() => {
       localStorage.setItem("mangrove_workspace_draft_u1_new", JSON.stringify({ draft: { prompt: "另一个标签页的新资料" }, sources: [] }));
       localStorage.setItem("mangrove_workspace_draft_u1_new_files", JSON.stringify([{ id: "peer", name: "peer.csv", size: 12, status: "reselect" }]));
