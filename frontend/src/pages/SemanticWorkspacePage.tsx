@@ -831,7 +831,7 @@ export function SemanticWorkspacePage() {
   const sourceSelection = taskSourceSelection?.resultIdentity === resultIdentity
     ? taskSourceSelection : null;
   const taskWebSources = task?.web_sources ?? (task?.web_source ? [task.web_source] : []);
-  const taskUploadId = sourceSelection?.uploadId ?? task?.upload_ids[0] ?? taskWebSources[0]?.snapshot.artifacts[0]?.artifact_id ?? null;
+  const taskUploadId = sourceSelection?.uploadId ?? task?.upload_ids[0] ?? taskWebSources[0]?.snapshot.artifacts[0]?.artifact_id ?? task?.delivery_output_ids?.[0] ?? null;
 
   useEffect(() => {
     const pending = pendingSource.current;
@@ -946,6 +946,7 @@ export function SemanticWorkspacePage() {
         objective_text: payload.prompt,
         upload_ids: [...new Set(payload.uploads.map((upload) => upload.upload_id))],
         source_snapshot_ids: payload.sourceSnapshotIds,
+        delivery_output_ids: payload.deliveryOutputIds,
         ...payload.sourceGoal,
         output_formats: payload.formats,
         provider: payload.provider,
@@ -1061,7 +1062,7 @@ export function SemanticWorkspacePage() {
         </div>
         <div className="flex items-center gap-2">
           <button type="button" aria-label="任务列表开关" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(value => !value)} className="rounded-lg border px-3 py-2 text-xs hover:bg-muted">任务列表</button>
-          {(newTask ? draftUploads.length > 0 : Boolean(task?.uploads?.length || taskWebSources.some(source => source.snapshot.artifacts.length))) ? (
+          {(newTask ? draftUploads.length > 0 : Boolean(task?.uploads?.length || taskWebSources.some(source => source.snapshot.artifacts.length) || task?.delivery_output_ids?.length)) ? (
             <button
               type="button"
               onClick={() => { setInspectorKind("source"); setInspectorOpen(value => inspectorKind !== "source" || !value); }}
@@ -1758,7 +1759,7 @@ export function SemanticWorkspacePage() {
                               if (!pendingKey && !sourceEditUnknown) return null;
                               if (!pendingKey) return null;
                               return <div role="status" className="mt-3 rounded-lg border p-3 text-xs"><p>上次资料修订结果未知，原请求已保留。恢复只确认该请求，当前草稿不会作为第二次修订发送。</p><button type="button" disabled={sourceEditRecovering} className="mt-2 rounded-lg border px-3 py-2 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={async () => {
-                                const attempt = JSON.parse(localStorage.getItem(pendingKey) || "null") as { key: string; prompt: string; formats: string[]; externalApiConfirmed: boolean; selection: { upload_ids: string[]; source_snapshot_ids: string[] } } | null;
+                                const attempt = JSON.parse(localStorage.getItem(pendingKey) || "null") as { key: string; prompt: string; formats: string[]; externalApiConfirmed: boolean; selection: { upload_ids: string[]; source_snapshot_ids: string[]; delivery_output_ids?: string[] } } | null;
                                 if (!attempt) return;
                                 setSourceEditRecovering(true);
                                 try {
@@ -1774,14 +1775,14 @@ export function SemanticWorkspacePage() {
                               <p className="mb-3 text-xs text-muted-foreground">确认后创建新版本。使用原任务模型与上下文；上方旧版本来源保持冻结。</p>
                               <WorkspaceSourceComposer key={`${resultIdentity}:sources`} ownerId={user?.user_id ?? "current"} draftScope={`${task.task_id}_${viewingRevision}`} compact unified preserveContext modelLocked
                                 initialPrompt="保持原要求，使用当前选择的全部资料" initialFormats={task.output_formats}
-                                initialUploads={task.uploads ?? []} initialSources={taskWebSources.map(source => source.snapshot)}
+                                initialUploads={task.uploads ?? []} initialSources={taskWebSources.map(source => source.snapshot)} initialReusableSources={task.reusable_sources ?? []}
                                 modelOptions={models.data?.options} defaultModel={{ provider: task.provider, model: task.model || "", label: "任务冻结模型" }}
                                 allowPiRuntime={Boolean(models.data?.pi_runtime_enabled)} allowLocalPiRuntime={canUseLocalPiRuntime}
                                 modelConnections={verifiedModelConnections.filter(connection => connection.connection_id === task.model_connection_id)}
                                 defaultConnectionId={task.model_connection_id} defaultConnectionModel={task.agentic_runtime?.model_connection_model ?? task.web_source?.runtime_binding.model ?? task.model}
                                 onSubmit={async payload => {
                                   try {
-                                  const selection = { upload_ids: [...new Set(payload.uploads.map(upload => upload.upload_id))], source_snapshot_ids: payload.sourceSnapshotIds };
+                                  const selection = { upload_ids: [...new Set(payload.uploads.map(upload => upload.upload_id))], source_snapshot_ids: payload.sourceSnapshotIds, delivery_output_ids: payload.deliveryOutputIds };
                                   const identity = resultIdentity;
                                   const fingerprint = JSON.stringify([task.task_id, task.current_revision ?? task.active_revision, payload.prompt, payload.formats, selection]);
                                   const pendingKey = `mangrove_source_revision_${user?.user_id}_${task.task_id}_${task.current_revision ?? task.active_revision}`;

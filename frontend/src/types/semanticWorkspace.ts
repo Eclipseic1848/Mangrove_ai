@@ -413,6 +413,8 @@ export interface WorkspaceTask {
   title: string;
   objective_text: string;
   upload_ids: string[];
+  delivery_output_ids?: string[];
+  reusable_sources?: ReusableSource[];
   output_formats: string[];
   provider: string;
   model: string | null;
@@ -594,6 +596,32 @@ export interface WorkspaceDocumentPreview extends PreviewIdentity {
 }
 
 export type WorkspacePreview = TablePreview | WorkspaceDocumentPreview;
+
+export type ReusableSource = {
+  source_key: string;
+  kind: "upload" | "snapshot" | "delivery_output";
+  identity: "original" | "derived";
+  label: string;
+  time_kind: "acquired" | "generated" | "unknown";
+  acquired_at: string | null;
+  media_type: string | null;
+  size_bytes: number | null;
+  sha256: string | null;
+  upload_id?: string | null;
+  source_snapshot_id?: string | null;
+  output_id?: string | null;
+  origin: { task_id: string | null; revision: number | null; run_id: string | null; delivery_id: string | null };
+  availability: "available" | "unavailable" | "integrity_failed" | "unknown";
+  reason_code?: string | null;
+  limitations: string[];
+  attempt_id?: string;
+  allowed_scope?: SourceSnapshot["allowed_scope"];
+  coverage?: SourceSnapshot["coverage"];
+};
+export type SourceSelection = { upload_ids: string[]; source_snapshot_ids: string[]; delivery_output_ids: string[] };
+export type ReusableSourcePage = { items: ReusableSource[]; next_cursor: string | null; snapshot_token: string; total: number; page_complete: boolean };
+export type SourceReferencePage = Omit<ReusableSourcePage, "items"> & { unknown_uses: number; items: Array<{ task_id: string | null; revision: number | null; reference_kind: "revision" | "runtime" | "export" | "preview" | "delivery"; delivery_id?: string | null; run_id?: string | null; task_exists?: boolean; use_id: string | null; state: "retained" | "active" | "unknown" | "published"; in_recycle_bin: boolean | null }> };
+export type ReusableOutputPreview = WorkspacePreview & { source_key: string; identity: "derived"; sha256: string; origin: ReusableSource["origin"] };
 
 export interface WorkspaceSourcePreview {
   task_id: string;

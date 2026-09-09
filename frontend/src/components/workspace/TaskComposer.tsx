@@ -265,6 +265,7 @@ export function TaskComposer({
   unified = false,
   onConfigureModels,
   onReadWeb,
+  onPickSources,
   draft,
   onDraftChange,
   active = true,
@@ -276,6 +277,8 @@ export function TaskComposer({
   uploadStorageKey,
   initialUploads = [],
   webSourceCount = 0,
+  additionalSourceCount = 0,
+  additionalInputFormats = [],
   sourceBusy = false,
   submitBlocked = false,
   sourceIdentity = "",
@@ -294,6 +297,7 @@ export function TaskComposer({
   unified?: boolean;
   onConfigureModels?: () => void;
   onReadWeb?: (draft: WebIntakeDraft) => void;
+  onPickSources?: () => void;
   draft?: WebIntakeDraft | null;
   onDraftChange?: (draft: WebIntakeDraft) => void;
   active?: boolean;
@@ -322,6 +326,8 @@ export function TaskComposer({
   uploadStorageKey?: string;
   initialUploads?: UploadItem[];
   webSourceCount?: number;
+  additionalSourceCount?: number;
+  additionalInputFormats?: string[];
   sourceBusy?: boolean;
   submitBlocked?: boolean;
   sourceIdentity?: string;
@@ -754,12 +760,12 @@ export function TaskComposer({
     if (!template || !usesPiConfiguration || submitting || !active) return;
     const request = ++reuseRequest.current;
     setSelectedCapabilityIds([]);
-    const inputFormats = [...new Set(readyUploads.map(upload => {
+    const inputFormats = [...new Set([...additionalInputFormats, ...readyUploads.map(upload => {
       const format = extension(upload.original_name);
       return format === "md" ? "markdown" : format;
-    }))];
+    })])];
     const need = { ...template, input_formats: inputFormats, output_formats: [...formats] };
-    if (!readyUploads.length || readyUploads.length !== items.length || !formats.length
+    if ((!readyUploads.length && !additionalSourceCount) || readyUploads.length !== items.length || !formats.length
       || !template.operations.length || inputFormats.some(format => !TABLE_EXTENSIONS.has(format) && !DOCUMENT_EXTENSIONS.has(format))) {
       setReuse({ need, result: null, pending: false, error: "请先完成文件上传并选择输出格式；操作或来源格式不明确时，不能匹配同类工具。" });
       return;
@@ -776,13 +782,13 @@ export function TaskComposer({
 
   const submit = async () => {
     if (!active || submittingRef.current) return;
-    if (unified && prompt.trim() && !items.length && !webSourceCount && !submitting) {
+    if (unified && prompt.trim() && !items.length && !webSourceCount && !additionalSourceCount && !submitting) {
       readWeb();
       return;
     }
     if (
       !prompt.trim()
-      || (!ready.length && !webSourceCount)
+      || (!ready.length && !webSourceCount && !additionalSourceCount)
       || !formats.length
       || busy
       || hasFailed
@@ -927,7 +933,7 @@ export function TaskComposer({
                           : kind === "document"
                             ? "文档内容"
                             : "上传文件内容"}
-                        {webSourceCount > 0 ? "、全部已选网页的标题、正文与网址，以及本次确认的上下文" : ""}
+                        {webSourceCount > 0 ? "、全部已选网页的标题、正文与网址，以及本次确认的上下文" : ""}{additionalSourceCount > 0 ? "、全部已选历史原件和正式处理结果正文及出处" : ""}
                         与任务说明；仅用于当前任务版本，不授权其他任务复用。
                       </p>
                       <label className="mt-2 flex items-start gap-2 text-foreground">
@@ -1116,6 +1122,7 @@ export function TaskComposer({
           添加文件
         </button>
         {unified && <button type="button" onClick={readWeb} disabled={submitting || sourceBusy} className="rounded-lg border px-2.5 py-1.5 text-xs hover:bg-muted disabled:opacity-50" title="添加公开网页，保留已有资料">公开网页</button>}
+        {onPickSources && <button type="button" onClick={onPickSources} disabled={!active || submitting || sourceBusy} className="rounded-lg border px-2.5 py-1.5 text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">历史资料</button>}
         <span className="mr-1 text-xs text-muted-foreground">
           {kind === "empty" && !formats.length ? "上传后自动推荐输出" : "输出格式"}
         </span>
@@ -1162,14 +1169,14 @@ export function TaskComposer({
           onClick={() => void submit()}
           disabled={
             !prompt.trim()
-            || ((!unified || items.length > 0 || webSourceCount > 0) && !ready.length && !webSourceCount)
+            || ((!unified || items.length > 0 || webSourceCount > 0 || additionalSourceCount > 0) && !ready.length && !webSourceCount && !additionalSourceCount)
             || (ready.length > 0 && !formats.length)
             || busy
             || reuseInvalid
             || hasFailed
             || submitBlocked
             || (kind === "mixed" && runtimeSelection === "legacy")
-            || ((ready.length > 0 || webSourceCount > 0) && piSelectionInvalid)
+            || ((ready.length > 0 || webSourceCount > 0 || additionalSourceCount > 0) && piSelectionInvalid)
           }
           className="ml-auto inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-45"
         >

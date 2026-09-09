@@ -1,6 +1,8 @@
 """数据工作台的匿名网页来源获取 API。"""
 from __future__ import annotations
 
+from src.source_acquisition.reuse import guarded_response
+
 from src.api.auth import get_execution_user
 
 from typing import Literal
@@ -106,16 +108,49 @@ async def acquire_source(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+def _saved_source_refs(values):
+    import sqlite3
+    from contextlib import closing
+    from src.config.settings import settings
+    owner=values["user"]["user_id"]
+    # 身份工厂不读取摘要或正文；使用事实登记后才进入原读取入口。
+    with closing(sqlite3.connect(settings.webui_db_path)) as connection:
+        connection.row_factory=sqlite3.Row
+        if values.get("artifact_id"):
+            artifacts=connection.execute("SELECT artifact_id,snapshot_id,content_sha256 FROM source_artifacts WHERE owner_id=? AND artifact_id=?",(owner,values["artifact_id"])).fetchall()
+            if not artifacts: raise PermissionError("来源不存在")
+        else:
+            if values.get("attempt_id"):
+                row=connection.execute("SELECT snapshot_id FROM source_acquisition_attempts WHERE owner_id=? AND attempt_id=?",(owner,values["attempt_id"])).fetchone()
+                if row is None: raise PermissionError("来源不存在")
+                snapshot_id=row[0]
+            else:
+                snapshot_id=values["snapshot_id"]
+                if connection.execute("SELECT 1 FROM source_snapshots WHERE owner_id=? AND snapshot_id=?",(owner,snapshot_id)).fetchone() is None:
+                    raise PermissionError("来源不存在")
+            artifacts=connection.execute("SELECT artifact_id,snapshot_id,content_sha256 FROM source_artifacts WHERE owner_id=? AND snapshot_id=?",(owner,snapshot_id)).fetchall() if snapshot_id else []
+    return [{"kind":"web_artifact","snapshot_id":item["snapshot_id"],"artifact_id":item["artifact_id"],"sha256":item["content_sha256"]} for item in artifacts]
+
+
+@guarded_response("preview",_saved_source_refs)
+def _saved_attempt_response(snapshot_id,attempt,user):
+    snapshot=get_source_acquisition_service().repository.get_snapshot(user["user_id"],snapshot_id)
+    if snapshot is None: raise _not_found()
+    return {**attempt,"snapshot":snapshot}
+
+
 @router.get("/source-acquisitions/{attempt_id}")
 def get_source_acquisition(
     attempt_id: str,
     user=Depends(get_current_user),
 ):
     result = get_source_acquisition_service().repository.get_attempt(
-        user["user_id"], attempt_id
+        user["user_id"], attempt_id, include_snapshot=False
     )
     if result is None:
         raise _not_found()
+    if result.get("snapshot_id"):
+        return _saved_attempt_response(snapshot_id=result["snapshot_id"],attempt=result,user=user)
     return result
 
 
@@ -133,6 +168,7 @@ def cancel_source_acquisition(
 
 
 @router.get("/source-snapshots/{snapshot_id}")
+@guarded_response("preview",_saved_source_refs)
 def get_source_snapshot(
     snapshot_id: str,
     user=Depends(get_current_user),
@@ -146,6 +182,7 @@ def get_source_snapshot(
 
 
 @router.get("/source-artifacts/{artifact_id}")
+@guarded_response("preview",_saved_source_refs)
 def get_source_artifact(
     artifact_id: str,
     user=Depends(get_current_user),

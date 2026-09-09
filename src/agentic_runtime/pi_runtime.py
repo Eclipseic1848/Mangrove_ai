@@ -487,7 +487,9 @@ class PiRuntime:
         candidate_verification: CandidateVerificationService | None = None,
         state_store: AgenticRuntimeRepository | None = None,
         configure_as_default_document_broker: bool = True,
+        source_read_context=None,
     ) -> None:
+        self._source_read_context = source_read_context
         self.image = image or settings.pi_runtime_image
         self.execution_root = Path(
             execution_root or settings.semantic_execution_root
@@ -1150,7 +1152,7 @@ class PiRuntime:
                 request,
                 grant=grant,
             )
-            source_names = self._copy_sources(request, input_dir)
+            source_names = self._read_frozen_sources(request,input_dir)
             capability_dirs = (
                 self._capability_mount_resolver(
                     request.user_id,
@@ -1344,7 +1346,7 @@ class PiRuntime:
         )
         if any(not path.is_dir() for path in required):
             raise PiRuntimeError("Pi 恢复工作区不完整，禁止继续执行")
-        self._verify_copied_sources(request, input_dir)
+        self._read_frozen_sources(request,input_dir,resume=True)
         expected_container = self._container_name(
             request.task_id,
             request.revision,
@@ -1947,6 +1949,14 @@ class PiRuntime:
         if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
             raise PiRuntimeError("Pi Runtime 镜像未返回有效的 sha256 内容摘要")
         return f"oci-image-ref={self.image};content-digest={digest}"
+
+    def _read_frozen_sources(self,request,input_dir,*,resume=False):
+        from contextlib import nullcontext
+        # 工作台绑定原实体门；独立评测仍沿原有明确输入合同。
+        with self._source_read_context(request,tuple(source.upload_id for source in request.sources)) if self._source_read_context else nullcontext():
+            if resume:
+                return self._verify_copied_sources(request,input_dir)
+            return self._copy_sources(request,input_dir)
 
     @staticmethod
     def _copy_sources(

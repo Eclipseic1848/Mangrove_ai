@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 import httpx
 
 from src.api.auth import get_current_user
+from src.api import auth as auth_module
+from src.config.settings import settings
 from src.api.routes import source_acquisition as source_routes
 from src.connectors.http_security import HttpSecurityGuard
 from src.source_acquisition import (
@@ -24,6 +26,9 @@ from src.account_execution import execution_context
 
 def _client(tmp_path: Path, monkeypatch, handler):
     database = migrated_webui_database(tmp_path / "source-api.db")
+    # 旧状态/摘要读取和新增使用登记必须共用同一隔离库。
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
+    monkeypatch.setattr(auth_module, "_store", None)
     authorizations = {owner: seed_execution_owner(database, owner) for owner in ('owner-a', 'owner-b')}
     service = SourceAcquisitionService(
         SourceAcquisitionRepository(database),

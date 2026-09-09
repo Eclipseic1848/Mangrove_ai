@@ -2,27 +2,17 @@
 """Phase 4B 批次 6：用户隔离的正式交付查询与下载。"""
 from __future__ import annotations
 
-import hashlib
-from pathlib import Path
-
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 
 from src.api.auth import get_current_user, get_store
+from src.source_acquisition.reuse import guarded_response, verified_output
 
 
 router = APIRouter(
     prefix="/api/semantic-deliveries",
     tags=["semantic-deliveries"],
 )
-
-
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 @router.get("/{delivery_id}")
@@ -52,25 +42,17 @@ def latest_delivery(
 
 
 @router.get("/outputs/{output_id}")
+@guarded_response("export",lambda values:[{"kind":"delivery_output","output_id":values["output_id"]}])
 def download_output(
     output_id: str,
     user=Depends(get_current_user),
 ):
-    output = get_store().get_semantic_delivery_output(
-        user["user_id"], output_id
-    )
-    if output is None:
-        raise HTTPException(status_code=404, detail="交付文件不存在")
-    path = Path(output["file_path"])
-    if (
-        not path.is_file()
-        or path.stat().st_size != output["size_bytes"]
-        or _sha256(path) != output["sha256"]
-    ):
-        raise HTTPException(
-            status_code=409,
-            detail="交付文件缺失或完整性校验失败",
-        )
+    try:
+        output,path=verified_output(user["user_id"],output_id)
+    except PermissionError as exc:
+        raise HTTPException(404,"交付文件不存在") from exc
+    except (ValueError,OSError) as exc:
+        raise HTTPException(409,"交付文件缺失或完整性校验失败") from exc
     return FileResponse(
         path,
         media_type=output["media_type"],

@@ -12,6 +12,8 @@ import httpx
 import pytest
 
 from src.api.auth import get_current_user
+from src.api import auth as auth_module
+from src.config.settings import settings
 from src.api.routes import source_acquisition as source_routes
 from src.connectors.http_security import HttpSecurityGuard
 from src.source_acquisition import AnonymousWebFetcher, SourceAcquisitionRepository, SourceAcquisitionRequest, SourceAcquisitionService
@@ -58,6 +60,9 @@ async def test_stale_replay_cannot_take_over_live_reader_or_cleanup(tmp_path, re
 @pytest.mark.parametrize("scope", ["current_page", "same_site", "redirect"])
 async def test_cancel_api_stops_open_stream_before_confirming(tmp_path, monkeypatch, scope):
     database = migrated_webui_database(tmp_path / "cancel.db")
+    # 取消后的状态读取沿真实使用门，同样只访问临时库。
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
+    monkeypatch.setattr(auth_module, "_store", None)
     repository = SourceAcquisitionRepository(database)
     started = asyncio.Event()
     closed = asyncio.Event()
