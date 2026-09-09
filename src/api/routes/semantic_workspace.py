@@ -3740,7 +3740,7 @@ async def create_revision(
     task_id: str,
     payload: WorkspaceRevisionIn,
     user=Depends(get_execution_user),
-    idempotency_key: str | None = Header(default=None, min_length=1, max_length=200),
+    idempotency_key: Annotated[str | None, Header(min_length=1, max_length=200)] = None,
 ):
     if idempotency_key is None:
         return await _create_revision(task_id, payload, user)
