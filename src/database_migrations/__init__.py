@@ -104,7 +104,7 @@ class RestoreVerification:
 
 
 _PROFILE_HEADS = {
-    "webui": "webui_0014",
+    "webui": "webui_0015",
     "scheduler": "scheduler_0001",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
@@ -182,7 +182,7 @@ _PROFILE_REQUIRED_COLUMNS = {
             "attempt_id", "owner_id", "idempotency_key", "request_hash",
             "normalized_url", "allowed_scope_json", "purpose", "status",
             "started_at", "finished_at", "snapshot_id", "error_code",
-            "cancel_requested_at", "request_context",
+            "cancel_requested_at", "request_context", "search_report_json",
         ),
         "source_snapshots": (
             "snapshot_id", "owner_id", "attempt_id", "allowed_scope_json",

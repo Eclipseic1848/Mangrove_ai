@@ -94,6 +94,8 @@ jobs:
               tests/test_mineru_document_client.py tests/test_document_retrieval.py tests/test_document_tool_relay.py \
                 tests/test_agentic_runtime.py tests/test_image_file_task.py tests/test_semantic_document_execution.py \
               tests/test_source_export.py tests/test_source_export_api.py \
+              tests/test_public_search_api.py tests/test_public_search_service.py tests/test_public_search_delivery.py \
+              tests/test_source_acquisition.py tests/test_source_acquisition_api.py tests/test_source_cancellation.py tests/test_source_account_generation.py tests/test_source_refresh_cancellation.py \
               tests/test_vnext_delivery_publisher.py tests/test_candidate_reverification_publish.py tests/test_g1_formal_delivery_evaluation.py \
               tests/test_progressive_clarification.py tests/test_workspace_answer_persistence.py tests/test_workspace_revision_safety.py tests/test_progressive_clarification_evaluation.py \
               tests/test_semantic_plan_compiler.py tests/test_issue98_workbench_closeout.py tests/test_web_source_delivery_api.py \

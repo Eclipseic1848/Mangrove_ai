@@ -30,6 +30,7 @@ import type {
 } from "@/lib/semanticWorkspaceApi";
 import type {
   SourceAcquisitionAttempt,
+  SearchTimeRange,
   WorkspaceTask,
 } from "@/types/semanticWorkspace";
 
@@ -69,6 +70,11 @@ const ERROR_LABELS: Record<string, string> = {
   site_refused: "站点拒绝读取",
   parse_failed: "页面正文无法解析",
   scope_denied: "跳转超出已授权范围",
+  search_blocked: "公开搜索服务阻止了访问，请稍后重试或使用已知公开网址",
+  search_network_denied: "当前网络不允许公开搜索",
+  search_timeout: "公开搜索超时",
+  search_no_results: "没有找到符合条件的公开链接",
+  search_no_readable_pages: "已发现链接，但没有取得可用正文",
 };
 
 type StoredSourceAcquisition = {
@@ -76,7 +82,10 @@ type StoredSourceAcquisition = {
   idempotency_key: string;
   url: string;
   purpose: string;
-  scope_kind: "current_page" | "same_site";
+  scope_kind: "current_page" | "same_site" | "public_search";
+  query?: string;
+  time_range?: SearchTimeRange;
+  domains?: string[];
   page_limit: number;
   completeness_mode: "exploratory" | "hard_min_pages" | "hard_scope_complete";
   required_valid_pages: number | null;
@@ -98,6 +107,9 @@ function pendingAcquisition(stored: StoredSourceAcquisition): SourceAcquisitionA
     normalized_url: stored.url,
     allowed_scope: {
       kind: stored.scope_kind,
+      query: stored.query,
+      time_range: stored.time_range,
+      domains: stored.domains,
       normalized_url: stored.url,
       site: normalizedUrl(stored.url) ? new URL(stored.url).host : "",
       page_limit: stored.page_limit,
@@ -137,7 +149,10 @@ function readStoredAcquisition(value: string): StoredSourceAcquisition | null {
         idempotency_key: parsed.idempotency_key,
         url: parsed.url,
         purpose: parsed.purpose,
-        scope_kind: parsed.scope_kind === "same_site" ? "same_site" : "current_page",
+        scope_kind: parsed.scope_kind === "public_search" ? "public_search" : parsed.scope_kind === "same_site" ? "same_site" : "current_page",
+        query: parsed.query,
+        time_range: parsed.time_range,
+        domains: parsed.domains,
         page_limit: typeof parsed.page_limit === "number" ? parsed.page_limit : 1,
         completeness_mode: parsed.completeness_mode === "hard_min_pages"
           || parsed.completeness_mode === "hard_scope_complete"
@@ -174,6 +189,9 @@ function storeAcquisition(
     url: attempt.normalized_url,
     purpose: attempt.purpose,
     scope_kind: attempt.allowed_scope.kind,
+    query: attempt.allowed_scope.query,
+    time_range: attempt.allowed_scope.time_range,
+    domains: attempt.allowed_scope.domains,
     page_limit: attempt.allowed_scope.page_limit ?? 1,
     completeness_mode: attempt.allowed_scope.completeness?.mode ?? "exploratory",
     required_valid_pages: attempt.allowed_scope.completeness?.required_valid_pages ?? null,
@@ -248,10 +266,19 @@ export function WebSourceIntake({
     ?? "";
   const storageKey = `mangrove_web_source_attempt_${ownerId}`;
   const taskStorageKey = `mangrove_web_task_attempt_${ownerId}`;
+  const requestGeneration = useRef(0);
+  useLayoutEffect(() => {
+    requestGeneration.current += 1;
+    return () => { requestGeneration.current += 1; };
+  }, [ownerId]);
   const [url, setUrl] = useState(() => initialPrompt.match(/https?:\/\/[^\s<>"，。；）)]+/i)?.[0] ?? "");
   const [purpose, setPurpose] = useState("读取公开网页内容，供当前数据任务分析");
-  const [scopeKind, setScopeKind] = useState<"current_page" | "same_site">("current_page");
-  const [pageLimit, setPageLimit] = useState(5);
+  const initialSearch = Boolean(initialPrompt.trim() && !/https?:\/\//i.test(initialPrompt));
+  const [scopeKind, setScopeKind] = useState<"current_page" | "same_site" | "public_search">(initialSearch ? "public_search" : "current_page");
+  const [query, setQuery] = useState(initialSearch ? initialPrompt : "");
+  const [timeRange, setTimeRange] = useState<SearchTimeRange>("any");
+  const [domains, setDomains] = useState("");
+  const [pageLimit, setPageLimit] = useState(initialSearch ? 10 : 5);
   const [completenessMode, setCompletenessMode] = useState<
     "exploratory" | "hard_min_pages" | "hard_scope_complete"
   >("exploratory");
@@ -262,8 +289,8 @@ export function WebSourceIntake({
   const [objective, setObjective] = useState(initialPrompt);
   const [mustInclude, setMustInclude] = useState("");
   const [exclusions, setExclusions] = useState("");
-  const [quantity, setQuantity] = useState("当前页面中有证据的全部内容");
-  const [completeness, setCompleteness] = useState("仅对当前精确页面负责");
+  const [quantity, setQuantity] = useState(initialSearch ? "当前已成功读取页面中有证据的内容" : "当前页面中有证据的全部内容");
+  const [completeness, setCompleteness] = useState(initialSearch ? "披露搜索范围和未读取来源，不承诺覆盖全部公开网页" : "仅对当前精确页面负责");
   const [format, setFormat] = useState("markdown");
   const [connectionId, setConnectionId] = useState(initialConnectionId);
   const [connectionModel, setConnectionModel] = useState(initialConnectionModel);
@@ -275,8 +302,19 @@ export function WebSourceIntake({
   useLayoutEffect(() => {
     if (!active || !draft || receivedDraft.current === draft) return;
     receivedDraft.current = draft;
-    // 交接不会改动网址、授权范围或获取尝试，也不会重发网络请求。
+    // 已有来源保持冻结；空来源只预填草稿，联网仍需显式提交。
     setObjective(draft.prompt);
+    if (!attempt && !url && !query && draft.prompt.trim()) {
+      const draftUrl = draft.prompt.match(/https?:\/\/[^\s<>"，。；）)]+/i)?.[0];
+      if (draftUrl) setUrl(draftUrl);
+      else {
+        setScopeKind("public_search");
+        setQuery(draft.prompt);
+        setPageLimit(10);
+        setQuantity("当前已成功读取页面中有证据的内容");
+        setCompleteness("披露搜索范围和未读取来源，不承诺覆盖全部公开网页");
+      }
+    }
     setConnectionId(draft.connectionId ?? "");
     setConnectionModel(draft.connectionModel ?? "");
     if (draft.localModel) setLocalModel(draft.localModel);
@@ -312,6 +350,9 @@ export function WebSourceIntake({
   const taskReplayPromiseRef = useRef<Promise<WorkspaceTask> | null>(null);
   const onTaskCreatedRef = useRef(onTaskCreated);
   const normalized = useMemo(() => normalizedUrl(url), [url]);
+  const searching = scopeKind === "public_search";
+  const domainList = domains.split(/[\s,，]+/).map(value => value.trim()).filter(Boolean);
+  const validSource = searching ? Boolean(query.trim() && query.trim().length <= 500 && domainList.length <= 10) : Boolean(normalized);
   const acquiring = attempt?.status === "acquiring" || attempt?.status === "cancelling";
 
   useEffect(() => {
@@ -374,6 +415,9 @@ export function WebSourceIntake({
     if (stored.url) setUrl(stored.url);
     if (stored.purpose) setPurpose(stored.purpose);
     setScopeKind(stored.scope_kind);
+    setQuery(stored.query ?? "");
+    setTimeRange(stored.time_range ?? "any");
+    setDomains((stored.domains ?? []).join(", "));
     setPageLimit(stored.page_limit);
     setCompletenessMode(stored.completeness_mode);
     if (stored.required_valid_pages) setRequiredValidPages(stored.required_valid_pages);
@@ -383,6 +427,9 @@ export function WebSourceIntake({
           url: stored.url,
           purpose: stored.purpose,
           scopeKind: stored.scope_kind,
+          query: stored.query,
+          timeRange: stored.time_range,
+          domains: stored.domains,
           pageLimit: stored.page_limit,
           completenessMode: stored.completeness_mode,
           requiredValidPages: stored.required_valid_pages,
@@ -398,6 +445,9 @@ export function WebSourceIntake({
           url: stored.url,
           purpose: stored.purpose,
           allowed_scope: stored.scope_kind,
+          query: stored.query,
+          time_range: stored.time_range,
+          domains: stored.domains,
           page_limit: stored.page_limit,
           completeness_mode: stored.completeness_mode,
           required_valid_pages: stored.required_valid_pages,
@@ -408,6 +458,16 @@ export function WebSourceIntake({
         setAttempt((previous) => preserveStopping(previous, saved));
         setUrl(saved.normalized_url);
         setPurpose(saved.purpose);
+        if (saved.allowed_scope.kind === "public_search") {
+          // 刷新恢复仍按冻结搜索范围表述，不能沿用空表单的单页完整性默认值。
+          setScopeKind("public_search");
+          setQuery(saved.allowed_scope.query ?? "");
+          setTimeRange(saved.allowed_scope.time_range ?? "any");
+          setDomains((saved.allowed_scope.domains ?? []).join(", "));
+          setObjective(previous => previous.trim() ? previous : saved.allowed_scope.query ?? "");
+          setQuantity("当前已成功读取页面中有证据的内容");
+          setCompleteness("披露搜索范围和未读取来源，不承诺覆盖全部公开网页");
+        }
         storeAcquisition(storageKey, saved);
       })
       .catch(() => {
@@ -481,6 +541,9 @@ export function WebSourceIntake({
           url: attempt.normalized_url,
           purpose: attempt.purpose,
           allowed_scope: attempt.allowed_scope.kind,
+          query: attempt.allowed_scope.query,
+          time_range: attempt.allowed_scope.time_range,
+          domains: attempt.allowed_scope.domains,
           page_limit: attempt.allowed_scope.page_limit ?? 1,
           completeness_mode: attempt.allowed_scope.completeness?.mode ?? "exploratory",
           required_valid_pages: attempt.allowed_scope.completeness?.required_valid_pages ?? null,
@@ -502,15 +565,19 @@ export function WebSourceIntake({
   }, [attempt, storageKey]);
 
   const submit = async () => {
-    if (!normalized || !purpose.trim() || loading || acquiring) return;
+    if (!validSource || !purpose.trim() || loading || acquiring) return;
+    const generation = requestGeneration.current;
     const effectivePageLimit = scopeKind === "current_page" ? 1 : pageLimit;
     const effectiveRequired = completenessMode === "hard_min_pages"
       ? requiredValidPages
       : null;
     const fingerprint = JSON.stringify({
-      url: normalized,
+      url: searching ? "" : normalized!,
       purpose: purpose.trim(),
       scopeKind,
+      query: searching ? query.trim() : undefined,
+      timeRange: searching ? timeRange : undefined,
+      domains: searching ? domainList : undefined,
       pageLimit: effectivePageLimit,
       completenessMode,
       requiredValidPages: effectiveRequired,
@@ -521,9 +588,12 @@ export function WebSourceIntake({
     const stored: StoredSourceAcquisition = {
       attempt_id: null,
       idempotency_key: keyRef.current.key,
-      url: normalized,
+      url: searching ? "" : normalized!,
       purpose: purpose.trim(),
       scope_kind: scopeKind,
+      query: searching ? query.trim() : undefined,
+      time_range: searching ? timeRange : undefined,
+      domains: searching ? domainList : undefined,
       page_limit: effectivePageLimit,
       completeness_mode: completenessMode,
       required_valid_pages: effectiveRequired,
@@ -533,18 +603,22 @@ export function WebSourceIntake({
     setAttempt(pendingAcquisition(stored));
     try {
       const saved = await createSourceAcquisition({
-        url: normalized,
+        url: stored.url,
+        query: stored.query,
+        time_range: stored.time_range,
+        domains: stored.domains,
         purpose: purpose.trim(),
         allowed_scope: scopeKind,
         page_limit: effectivePageLimit,
         completeness_mode: completenessMode,
         required_valid_pages: effectiveRequired,
       }, keyRef.current.key);
-      if (keyRef.current?.key !== stored.idempotency_key) return;
+      if (generation !== requestGeneration.current || keyRef.current?.key !== stored.idempotency_key) return;
       setAttempt((previous) => preserveStopping(previous, saved));
       storeAcquisition(storageKey, saved);
       if (saved.status === "succeeded") toast.success("网页来源已冻结");
     } catch (error) {
+      if (generation !== requestGeneration.current || keyRef.current?.key !== stored.idempotency_key) return;
       // 初次响应丢失仍保留幂等身份，轮询继续确认停止或完成事实。
       if (error instanceof ApiError && [400, 401, 403, 404, 409, 422].includes(error.status)) {
         setAttempt((previous) => previous?.attempt_id === "pending" ? null : previous);
@@ -553,23 +627,28 @@ export function WebSourceIntake({
       }
       toast.error(error instanceof Error ? error.message : "网页来源获取失败");
     } finally {
-      if (keyRef.current?.key === stored.idempotency_key) setLoading(false);
+      if (generation === requestGeneration.current && keyRef.current?.key === stored.idempotency_key) setLoading(false);
     }
   };
 
   const cancel = async () => {
     if (!attempt || attempt.attempt_id === "pending") return;
+    const generation = requestGeneration.current;
+    const canceledKey = attempt.idempotency_key;
     try {
       const saved = await cancelSourceAcquisition(attempt.attempt_id);
+      if (generation !== requestGeneration.current || keyRef.current?.key !== canceledKey) return;
       setAttempt((previous) => preserveStopping(previous, saved));
       storeAcquisition(storageKey, saved);
     } catch (error) {
+      if (generation !== requestGeneration.current || keyRef.current?.key !== canceledKey) return;
       toast.error(error instanceof Error ? error.message : "取消失败");
     }
   };
 
   const clear = () => {
-    if (acquiring) return;
+    if (acquiring || starting) return;
+    requestGeneration.current += 1;
     removeStoredValue(storageKey);
     keyRef.current = null;
     setLoading(false);
@@ -577,8 +656,10 @@ export function WebSourceIntake({
     setUrl("");
   };
 
-  const artifact = attempt?.snapshot?.artifacts[0];
+  const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
+  const artifact = attempt?.snapshot?.artifacts.find(item => item.artifact_id === selectedArtifactId) ?? attempt?.snapshot?.artifacts[0];
   const snapshot = attempt?.snapshot;
+  const searchReport = attempt?.search_report ?? snapshot?.coverage.search_report;
   const selectedConnection = modelConnections.find(
     (connection) => connection.connection_id === connectionId,
   );
@@ -626,6 +707,7 @@ export function WebSourceIntake({
 
   const startTask = async () => {
     if (!attempt?.snapshot_id || !contextPreview || !canStart || starting) return;
+    const generation = requestGeneration.current;
     const payload = {
       objective_text: objective.trim(),
       upload_ids: [],
@@ -635,7 +717,6 @@ export function WebSourceIntake({
       quantity_requirement: quantity.trim(),
       completeness_requirement: completeness.trim(),
       output_formats: [format],
-      runtime_version: "pi" as const,
       permission_profile: "standard" as const,
       provider: "local",
       model: connectionId ? null : localModel,
@@ -658,14 +739,16 @@ export function WebSourceIntake({
     setStarting(true);
     try {
       const created = await createWorkspaceTask(payload, taskKeyRef.current.key);
+      if (generation !== requestGeneration.current) return;
       removeStoredValue(taskStorageKey);
       taskKeyRef.current = null;
       toast.success("网页任务已启动");
       await onTaskCreated(created);
     } catch (error) {
+      if (generation !== requestGeneration.current) return;
       toast.error(error instanceof Error ? error.message : "网页任务启动失败");
     } finally {
-      setStarting(false);
+      if (generation === requestGeneration.current) setStarting(false);
     }
   };
   return (
@@ -688,7 +771,7 @@ export function WebSourceIntake({
         <div className="flex items-center justify-between gap-4">
           <div>
             <h3 id="web-source-title" className="text-sm font-semibold">
-              获取一个公开网页
+              {searching ? "搜索公开网页" : "获取一个公开网页"}
             </h3>
             <p className="mt-1 text-xs text-muted-foreground">
               先确认来源事实；此阶段不会创建分析任务或调用模型。
@@ -698,6 +781,7 @@ export function WebSourceIntake({
             <button
               type="button"
               onClick={clear}
+              disabled={starting}
               className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               aria-label="清除网页来源"
             >
@@ -707,8 +791,69 @@ export function WebSourceIntake({
         </div>
       </div>
 
+      {searchReport && (
+        <div className="border-b p-4 text-xs" aria-label="公开搜索结果" aria-live="polite">
+          <p className="mb-2 break-words text-muted-foreground">本次搜索：{searchReport.query}{searchReport.domains.length ? ` · 限定域名：${searchReport.domains.join("、")}` : " · 公开网页"}</p>
+          <p className="font-medium">已发现 {searchReport.discovered_count} 条链接 · 已读取 {searchReport.read_count} 页 · 失败 {searchReport.failed_count} 页 · 目标 {searchReport.requested_count} 页</p>
+          <p className="mt-2 leading-5 text-muted-foreground">{
+            acquiring ? "正在搜索并逐页读取；以下仅记录当前已确认的事实。" : searchReport.status === "no_results" ? "没有找到符合搜索条件的公开链接，尚未读取任何原文。"
+              : searchReport.status === "blocked" ? "公开访问被阻止；需要登录或超出范围的内容不会自动读取。"
+                : searchReport.status === "failed" ? "本次搜索或读取失败；未读取的链接不能作为正文证据。"
+                  : searchReport.status === "partial" ? "仅取得部分正文，以下保留已读来源并列明缺口。"
+                    : "本次搜索读取已完成；这不表示覆盖了所有公开网页。"
+          }</p>
+          {searchReport.candidates.length > 0 && <ul className="mt-3 max-h-64 space-y-3 overflow-auto" aria-label="搜索链接与读取状态">
+            {searchReport.candidates.map((candidate, index) => (
+              <li key={`${candidate.url}-${index}`} className="break-words">
+                <span className={candidate.status === "read" ? "text-emerald-700 dark:text-emerald-300" : "text-muted-foreground"}>{candidate.status === "read" ? "已读取正文" : candidate.status === "discovered" ? "仅发现链接，尚未读取" : candidate.status === "scope_denied" ? "超出允许范围，未读取" : "读取失败"}</span>
+                <p className="mt-1 font-medium">{candidate.title || candidate.url}</p>
+                <p className="break-all text-muted-foreground">{candidate.url}</p>
+                {(candidate.error_code || candidate.message) && <p className="mt-1 text-muted-foreground">{ERROR_LABELS[candidate.error_code ?? ""] ?? candidate.message ?? "未取得可用正文"}</p>}
+              </li>
+            ))}
+          </ul>}
+        </div>
+      )}
       {!attempt || acquiring ? (
         <div className="p-4">
+          {!attempt && (
+            <label className="mb-4 block text-xs font-medium">
+              来源方式
+              <select value={searching ? "search" : "url"} disabled={loading || acquiring} onChange={event => {
+                const search = event.target.value === "search";
+                setScopeKind(search ? "public_search" : "current_page");
+                setPageLimit(search ? 10 : 5);
+                setCompletenessMode("exploratory");
+                if (search && !query) setQuery(objective);
+                setQuantity(search ? "当前已成功读取页面中有证据的内容" : "当前页面中有证据的全部内容");
+                setCompleteness(search ? "披露搜索范围和未读取来源，不承诺覆盖全部公开网页" : "仅对当前精确页面负责");
+              }} className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                <option value="url">已知网址</option>
+                <option value="search">按主题搜索公开网页</option>
+              </select>
+            </label>
+          )}
+          {searching ? (
+            <div className="space-y-3">
+              <label className="block text-xs font-medium" htmlFor="web-search-query">搜索主题</label>
+              <textarea id="web-search-query" rows={3} maxLength={500} value={query} aria-invalid={query.trim().length > 500} aria-describedby="web-search-query-help" disabled={loading || acquiring} onChange={event => setQuery(event.target.value)} placeholder="例如：近一周公开发布的电池回收研究" className="w-full resize-none rounded-xl border bg-background px-3 py-2 text-sm leading-6 outline-none focus:border-primary focus:ring-2 focus:ring-primary/15 disabled:opacity-60" />
+              <div className="flex items-center justify-between gap-2">
+                <p id="web-search-query-help" className={`text-xs ${query.trim().length > 500 ? "text-destructive" : "text-muted-foreground"}`}>搜索主题最多 500 字。</p>
+                {query && <button type="button" disabled={loading || acquiring} onClick={() => { setQuery(""); document.getElementById("web-search-query")?.focus(); }} className="rounded-lg px-3 py-2 text-xs text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60">清空搜索主题</button>}
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="text-xs font-medium">时间范围
+                  <select aria-label="时间范围" value={timeRange} disabled={loading || acquiring} onChange={event => setTimeRange(event.target.value as SearchTimeRange)} className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                    <option value="any">不限时间</option><option value="day">最近一天</option><option value="week">最近一周</option><option value="month">最近一月</option><option value="year">最近一年</option>
+                  </select>
+                </label>
+                <label className="text-xs font-medium">限定域名（可选）
+                  <input value={domains} aria-invalid={domainList.length > 10} disabled={loading || acquiring} onChange={event => setDomains(event.target.value)} placeholder="example.com，最多 10 个" aria-describedby="web-search-domains-help" className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" />
+                </label>
+              </div>
+              <p id="web-search-domains-help" className={`text-xs ${domainList.length > 10 ? "text-destructive" : "text-muted-foreground"}`}>{domainList.length > 10 ? "最多限定 10 个域名，请减少后重试。" : "域名以逗号或空格分隔；留空搜索公开网页。"}</p>
+            </div>
+          ) : (<>
           <label className="block text-xs font-medium" htmlFor="web-source-url">
             精确网址
           </label>
@@ -735,7 +880,7 @@ export function WebSourceIntake({
               <span className="text-destructive">请输入完整的 HTTP 或 HTTPS 网址</span>
             ) : null}
           </div>
-
+          </>)}
           <label className="mt-3 block text-xs font-medium" htmlFor="web-source-purpose">
             来源用途
           </label>
@@ -748,7 +893,7 @@ export function WebSourceIntake({
             className="mt-2 w-full resize-none rounded-xl border bg-background px-3 py-2 text-sm leading-6 outline-none transition-colors focus:border-primary focus:ring-2 focus:ring-primary/15 disabled:opacity-60"
           />
 
-          <fieldset className="mt-4">
+          {!searching && <fieldset className="mt-4">
             <legend className="text-xs font-medium">读取范围</legend>
             <div className="mt-2 flex flex-wrap gap-2">
               <button
@@ -779,20 +924,20 @@ export function WebSourceIntake({
                 同站有限扩展
               </button>
             </div>
-          </fieldset>
+          </fieldset>}
 
-          {scopeKind === "same_site" && (
+          {scopeKind !== "current_page" && (
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               <label className="text-xs font-medium">
                 最多读取页数
                 <input
                   type="number"
                   min={1}
-                  max={50}
+                  max={searching ? 20 : 50}
                   value={pageLimit}
                   disabled={loading || acquiring}
                   onChange={(event) => {
-                    const next = Math.max(1, Math.min(50, Number(event.target.value) || 1));
+                    const next = Math.max(1, Math.min(searching ? 20 : 50, Number(event.target.value) || 1));
                     setPageLimit(next);
                     setRequiredValidPages((current) => Math.min(current, next));
                   }}
@@ -802,6 +947,7 @@ export function WebSourceIntake({
               <label className="text-xs font-medium">
                 结果要求
                 <select
+                  aria-label="结果要求"
                   value={completenessMode}
                   disabled={loading || acquiring}
                   onChange={(event) => setCompletenessMode(event.target.value as "exploratory" | "hard_min_pages" | "hard_scope_complete")}
@@ -809,7 +955,7 @@ export function WebSourceIntake({
                 >
                   <option value="exploratory">能读多少展示多少</option>
                   <option value="hard_min_pages">不足指定页数不启动任务</option>
-                  <option value="hard_scope_complete">授权范围内必须全部读取成功</option>
+                  {!searching && <option value="hard_scope_complete">授权范围内必须全部读取成功</option>}
                 </select>
               </label>
               {completenessMode === "hard_min_pages" && (
@@ -836,12 +982,12 @@ export function WebSourceIntake({
               <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
               <div>
                 <p className="font-medium">
-                  {scopeKind === "current_page"
+                  {searching ? `允许范围：公开搜索，最多读取 ${pageLimit} 页` : scopeKind === "current_page"
                     ? "允许范围：仅当前页面"
                     : `允许范围：${normalized ? new URL(normalized).host : "当前站点"} 内最多 ${pageLimit} 页`}
                 </p>
                 <p className="mt-1 leading-5 text-muted-foreground">
-                  {scopeKind === "current_page"
+                  {searching ? "仅只读公开内容；登录页面和超出限定范围的链接不读取。" : scopeKind === "current_page"
                     ? "不跟随页面链接；跨站跳转会直接失败。"
                     : "只跟随同站链接；站外链接只记录、不访问，也不会静默扩大页数。"}
                 </p>
@@ -850,9 +996,9 @@ export function WebSourceIntake({
             <div className="flex gap-2.5">
               <ArrowRight className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
               <div>
-                <p className="font-medium">可能外发：标题、正文、网址</p>
+                <p className="font-medium">{searching ? "点击后联网：搜索主题、时间和域名" : "可能外发：标题、正文、网址"}</p>
                 <p className="mt-1 leading-5 text-muted-foreground">
-                  仅在后续任务中发给你选择的模型；本步骤不调用模型。
+                  {searching ? "以上搜索条件将发送给公开搜索服务，请勿填写私人正文。取得的网页仅在后续确认后发送给所选模型。" : "仅在后续任务中发给你选择的模型；本步骤不调用模型。"}
                 </p>
               </div>
             </div>
@@ -875,7 +1021,7 @@ export function WebSourceIntake({
             ) : (
               <button
                 type="button"
-                disabled={!normalized || !purpose.trim() || loading}
+                disabled={!validSource || !purpose.trim() || loading || acquiring}
                 aria-busy={loading}
                 onClick={() => void submit()}
                 className="inline-flex h-9 shrink-0 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-45"
@@ -885,7 +1031,7 @@ export function WebSourceIntake({
                 ) : (
                   <Globe2 className="h-4 w-4" />
                 )}
-                {loading ? "正在获取来源" : "获取网页"}
+                {loading || acquiring ? (searching ? "正在搜索与读取" : "正在获取来源") : searching ? "搜索并读取" : "获取网页"}
               </button>
             )}
           </div>
@@ -915,7 +1061,9 @@ export function WebSourceIntake({
               {snapshot.failed_page_count > 0 ? `，另有 ${snapshot.failed_page_count} 个失败或越界记录` : ""}
             </p>
             <p className={`mt-1 leading-5 ${snapshot.coverage.status === "hard_insufficient" ? "text-destructive" : "text-muted-foreground"}`}>
-              {snapshot.coverage.status === "scope_complete"
+              {searching && snapshot.coverage.status !== "hard_insufficient"
+                ? "仅使用本次实际读取并冻结的正文；未读取链接不作为证据，不承诺全网完整。"
+                : snapshot.coverage.status === "scope_complete"
                 ? "本次授权范围已读取完成。"
                 : snapshot.coverage.status === "hard_insufficient"
                   ? snapshot.allowed_scope.completeness?.mode === "hard_scope_complete"
@@ -967,8 +1115,14 @@ export function WebSourceIntake({
               </dd>
             </div>
           </dl>
+          {snapshot.artifacts.length > 1 && <label className="mt-4 block text-xs font-medium">选择已读页面
+            <select aria-label="选择已读页面" value={artifact.artifact_id} onChange={event => setSelectedArtifactId(event.target.value)} className="mt-2 h-10 w-full rounded-xl border bg-background px-3 text-sm font-normal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+              {snapshot.artifacts.map(item => <option key={item.artifact_id} value={item.artifact_id}>{item.title || item.final_url}</option>)}
+            </select>
+          </label>}
           <article className="mt-4" aria-label="网页正文预览">
             <p className="text-xs font-medium">{artifact.title || "网页正文预览"}</p>
+            <p className="mt-1 text-xs text-muted-foreground">以下是已保存的摘要，未展示完整原文。任务创建后可在来源预览中下载完整原文资料包。</p>
             <p className="mt-2 max-h-44 overflow-auto whitespace-pre-wrap text-sm leading-6 text-muted-foreground">
               {artifact.text_preview}
             </p>

@@ -4294,6 +4294,9 @@ async def refresh_task_source(
             idempotency_key=refresh_key,
             request=SourceAcquisitionRequest(
                 url=scope.get("normalized_url", old_attempt["normalized_url"]),
+                query=scope.get("query", ""),
+                time_range=scope.get("time_range", "any"),
+                domains=tuple(scope.get("domains", ())),
                 purpose=old_attempt["purpose"],
                 scope_kind=scope.get("kind", "current_page"),
                 page_limit=int(scope.get("page_limit", 1)),

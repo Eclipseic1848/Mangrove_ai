@@ -663,11 +663,35 @@ export interface SourceArtifact {
   text_preview: string;
 }
 
+export type SearchTimeRange = "any" | "day" | "week" | "month" | "year";
+
+export interface SourceSearchReport {
+  provider: string;
+  query: string;
+  time_range: SearchTimeRange;
+  domains: string[];
+  candidates: Array<{
+    url: string;
+    title: string;
+    status: "discovered" | "read" | "failed" | "scope_denied";
+    error_code?: string | null;
+    message?: string | null;
+  }>;
+  discovered_count: number;
+  read_count: number;
+  failed_count: number;
+  requested_count: number;
+  status: "complete" | "partial" | "no_results" | "blocked" | "failed";
+}
+
 export interface SourceSnapshot {
   snapshot_id: string;
   attempt_id: string;
   allowed_scope: {
-    kind: "current_page" | "same_site";
+    kind: "current_page" | "same_site" | "public_search";
+    query?: string;
+    time_range?: SearchTimeRange;
+    domains?: string[];
     normalized_url: string;
     site: string;
     page_limit: number;
@@ -680,6 +704,7 @@ export interface SourceSnapshot {
   failed_page_count: number;
   created_at: string;
   coverage: {
+    search_report?: SourceSearchReport | null;
     status: "scope_complete" | "coverage_unknown" | "hard_insufficient";
     limit_reached: boolean;
     attempted_page_count: number;
@@ -702,7 +727,10 @@ export interface SourceAcquisitionAttempt {
   request_url: string;
   normalized_url: string;
   allowed_scope: {
-    kind: "current_page" | "same_site";
+    kind: "current_page" | "same_site" | "public_search";
+    query?: string;
+    time_range?: SearchTimeRange;
+    domains?: string[];
     normalized_url: string;
     site: string;
     page_limit: number;
@@ -719,4 +747,5 @@ export interface SourceAcquisitionAttempt {
   error_code: string | null;
   error_message: string | null;
   snapshot: SourceSnapshot | null;
+  search_report?: SourceSearchReport | null;
 }

@@ -229,9 +229,12 @@ export function retryCandidateVerification(
 
 export function createSourceAcquisition(
   payload: {
-    url: string;
+    url?: string | null;
+    query?: string;
+    time_range?: "any" | "day" | "week" | "month" | "year";
+    domains?: string[];
     purpose: string;
-    allowed_scope: "current_page" | "same_site";
+    allowed_scope: "current_page" | "same_site" | "public_search";
     page_limit?: number;
     completeness_mode?: "exploratory" | "hard_min_pages" | "hard_scope_complete";
     required_valid_pages?: number | null;

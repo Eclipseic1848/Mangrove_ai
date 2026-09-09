@@ -139,7 +139,8 @@ def test_task_stop_closes_source_refresh_from_previous_revision(tmp_path, monkey
 
     service = SourceAcquisitionService(repository, AnonymousWebFetcher(
         security_guard=HttpSecurityGuard(resolver=lambda _host: ["93.184.216.34"]),
-        transport=httpx.MockTransport(respond), timeout_seconds=5,
+        # 此流须跨越 V2 完整交付，停止仍由下方两秒关闭断言验证，不能先自然超时。
+        transport=httpx.MockTransport(respond), timeout_seconds=60,
     ))
     monkeypatch.setattr(routes, "_source_acquisition_service", lambda: service)
     with client:

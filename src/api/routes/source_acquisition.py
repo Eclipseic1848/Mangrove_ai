@@ -6,7 +6,7 @@ from src.api.auth import get_execution_user
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from src.api.auth import get_current_user
 from src.config.settings import settings
@@ -28,16 +28,37 @@ router = APIRouter(
 class SourceAcquisitionIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    url: str = Field(min_length=1, max_length=4096)
+    url: str | None = Field(default=None, min_length=1, max_length=4096)
+    query: str | None = Field(default=None, min_length=1, max_length=500)
+    time_range: Literal["any", "day", "week", "month", "year"] = "any"
+    domains: list[str] = Field(default_factory=list, max_length=10)
     purpose: str = Field(min_length=1, max_length=500)
-    allowed_scope: Literal["current_page", "same_site"] = "current_page"
-    page_limit: int = Field(default=1, ge=1, le=50)
+    allowed_scope: Literal["current_page", "same_site", "public_search"] = "current_page"
+    page_limit: int | None = Field(default=None, ge=1, le=50)
     completeness_mode: Literal[
         "exploratory",
         "hard_min_pages",
         "hard_scope_complete",
     ] = "exploratory"
     required_valid_pages: int | None = Field(default=None, ge=1, le=50)
+
+    @model_validator(mode="after")
+    def validate_source_scope(self):
+        if bool(self.url) == bool(self.query):
+            raise ValueError("请提供网址或搜索需求，不能同时提供")
+        if self.query:
+            if self.allowed_scope == "same_site":
+                raise ValueError("搜索需求不能使用同站网址范围")
+            self.allowed_scope = "public_search"
+            self.page_limit = self.page_limit or 10
+            if self.page_limit > 20:
+                raise ValueError("一次公开搜索最多读取 20 个候选页面")
+        else:
+            # 单网址请求不能借可选搜索字段扩大既有授权。
+            if self.allowed_scope == "public_search" or self.domains or self.time_range != "any":
+                raise ValueError("搜索范围和时间筛选仅适用于公开搜索需求")
+            self.page_limit = self.page_limit or 1
+        return self
 
 
 def get_source_acquisition_service() -> SourceAcquisitionService:
@@ -68,7 +89,10 @@ async def acquire_source(
             owner_id=user["user_id"],
             idempotency_key=idempotency_key,
             request=SourceAcquisitionRequest(
-                url=payload.url,
+                url=payload.url or "",
+                query=payload.query or "",
+                time_range=payload.time_range,
+                domains=tuple(payload.domains),
                 purpose=payload.purpose,
                 scope_kind=payload.allowed_scope,
                 page_limit=payload.page_limit,
