@@ -16,3 +16,6 @@
 
 # 已核对：统一对话回归使用临时数据库和 MockTransport，命中为静态合成凭据，仅忽略该提交的此行。
 6268599f307d327e0015f8e78df1606b4b565ff8:tests/test_workspace_conversation_stream.py:generic-api-key:121
+
+# 已核对：关联清理索引 ix_deletion_owner_key 的值是 Schema 结构摘要，仅忽略该提交的此行。
+9a428600063e4e56e2c626dea6690b6461f85eb8:src/database_migrations/schema_manifest.json:generic-api-key:100
