@@ -235,7 +235,9 @@ class CoreMindAgentKernelAdapter:
         capability_tools_enabled: bool = False,
         poll_interval_seconds: float = 0.05,
         timeout_seconds: float = 300.0,
+        source_read_context=None,
     ) -> None:
+        self._source_read_context = source_read_context
         self.execution_root = Path(execution_root)
         self._client_factory = client_factory
         self._candidate_verifier_factory = candidate_verifier_factory
@@ -881,9 +883,11 @@ class CoreMindAgentKernelAdapter:
     def _prepare_workspace(self, request: PiRuntimeRequest, run_root: Path) -> None:
         run_root.mkdir(parents=True, exist_ok=True)
         (run_root / "output").mkdir(exist_ok=True)
-        for source in request.sources:
-            if self._file_sha256(source.host_path) != source.sha256:
-                raise AgentKernelCapabilityError("CoreMind 冻结来源内容哈希不一致")
+        from contextlib import nullcontext
+        with self._source_read_context(request,tuple(source.upload_id for source in request.sources)) if self._source_read_context else nullcontext():
+            for source in request.sources:
+                if self._file_sha256(source.host_path) != source.sha256:
+                    raise AgentKernelCapabilityError("CoreMind 冻结来源内容哈希不一致")
 
     @staticmethod
     def _assert_request_policy(request: PiRuntimeRequest) -> None:
@@ -1336,9 +1340,12 @@ class CoreMindAgentKernelAdapter:
         )
         if source is None:
             raise ValueError("来源不存在或不属于当前 Run")
-        if self._file_sha256(source.host_path) != source.sha256:
-            raise ValueError("冻结来源内容哈希已漂移")
-        raw = source.host_path.read_bytes()
+        from contextlib import nullcontext
+        # 工作台仅锁实际读入窗口，独立Adapter不强加数据库依赖。
+        with self._source_read_context(request,(source_id,)) if self._source_read_context else nullcontext():
+            raw = source.host_path.read_bytes()
+            if hashlib.sha256(raw).hexdigest() != source.sha256:
+                raise ValueError("冻结来源内容哈希已漂移")
         if len(raw) > _MAX_TEXT_TOOL_BYTES:
             raise ValueError("冻结来源超过当前文本工具上限")
         return {

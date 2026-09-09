@@ -5241,3 +5241,416 @@ test("#135 首创建未知后刷新遇到在途409，继续保留原请求和键
   await expect.poll(() => requests.length).toBe(3);
   expect(requests[1]).toEqual(requests[0]); expect(requests[2]).toEqual(requests[0]);
 });
+
+function reusableFixtures() {
+  const snapshot = mixedAttempt(1).snapshot;
+  const common = { acquired_at: "2026-09-08T08:00:00Z", time_kind: "acquired", availability: "available", reason_code: null, limitations: [], origin: { task_id: "origin-task", revision: 2, run_id: null, delivery_id: null }, media_type: "text/csv", size_bytes: 12, sha256: "a".repeat(64) };
+  return [
+    { ...common, source_key: "upload:history-file", kind: "upload", identity: "original", label: "历史明细.csv", upload_id: "history-file" },
+    { ...common, source_key: "snapshot:mixed-snapshot-1", kind: "snapshot", identity: "original", label: "历史网页组", source_snapshot_id: snapshot.snapshot_id, attempt_id: snapshot.attempt_id, allowed_scope: snapshot.allowed_scope, coverage: snapshot.coverage, sha256: null },
+    { ...common, source_key: "delivery_output:history-output", kind: "delivery_output", identity: "derived", label: "正式分析.md", output_id: "history-output", time_kind: "generated", media_type: "text/markdown", origin: { task_id: "origin-task", revision: 2, run_id: "origin-run", delivery_id: "origin-delivery" } },
+  ];
+}
+async function mockReusable(page: Page) {
+  await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+  await mockWorkspace(page);
+  const items = reusableFixtures();
+  await page.route("**/api/semantic-workspace/reusable-sources?*", route => route.fulfill({ json: { items, total: 3, page_complete: true, next_cursor: null, snapshot_token: "catalog-1" } }));
+  await page.route("**/api/semantic-workspace/reusable-sources/resolve", route => {
+    const body = route.request().postDataJSON();
+    const ids = [...(body.upload_ids ?? []), ...(body.source_snapshot_ids ?? []), ...(body.delivery_output_ids ?? [])];
+    return route.fulfill({ json: { items: items.filter(item => ids.includes(item.upload_id ?? item.source_snapshot_id ?? item.output_id)) } });
+  });
+  await page.route("**/api/semantic-workspace/source-acquisitions/mixed-attempt-1", route => route.fulfill({ json: mixedAttempt(1) }));
+  await page.route("**/api/data-sources/uploads/history-file", route => route.fulfill({ json: { upload_id: "history-file", original_name: "历史明细.csv", media_type: "text/csv", size_bytes: 12, sha256: "a".repeat(64) } }));
+  await page.route("**/api/semantic-workspace/reusable-sources/outputs/history-output/preview?*", route => route.fulfill({ json: {
+    kind: "document", action: "preview", items: [{ id: "line-1", type: "passage", label: "正式输出正文", content: "销售金额已汇总为 200 元。", evidence_refs: [] }], total: 1, offset: 0, limit: 30, warnings: [],
+    source_key: "delivery_output:history-output", identity: "derived", sha256: "a".repeat(64), output_id: "history-output", delivery_id: "origin-delivery", run_id: "origin-run", origin: items[2].origin,
+    representation: { kind: "output", sha256: "a".repeat(64), associated_output_id: "history-output", media_type: "text/markdown", lineage_available: true },
+  } }));
+  return items;
+}
+
+test("#136 当前文件和历史三类资料一次确认，预览返回且零重复上传采集", async ({ page }) => {
+  await mockReusable(page);
+  let uploads = 0, acquisitions = 0;
+  const submitted: Record<string, unknown>[] = [];
+  await page.route("**/api/data-sources/uploads", route => { uploads++; return route.fulfill({ json: { upload_id: "today-file", original_name: "今日.csv", media_type: "text/csv", size_bytes: 3, sha256: "b".repeat(64) } }); });
+  await page.route("**/api/semantic-workspace/source-acquisitions", route => { acquisitions++; return route.fulfill({ status: 422, json: {} }); });
+  await page.route("**/api/semantic-workspace/tasks", route => { submitted.push(route.request().postDataJSON()); return route.fulfill({ status: 503, json: { detail: "本例保留创建未知事实" } }); });
+  await page.goto("/data-prep");
+  await page.getByLabel("任务要求", { exact: true }).fill("综合昨天原件、历史说明和今天文件，核对正式分析");
+  await page.locator('input[type="file"]').setInputFiles({ name: "今日.csv", mimeType: "text/csv", buffer: Buffer.from("x\n1", "utf-8") });
+  await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "从历史资料添加" });
+  await dialog.getByRole("button", { name: "预览 正式分析.md", exact: true }).click();
+  await expect(dialog.getByText("销售金额已汇总为 200 元。", { exact: true })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog.getByRole("button", { name: "预览 正式分析.md", exact: true })).toBeFocused();
+  for (const name of ["历史明细.csv", "历史网页组", "正式分析.md"]) await dialog.getByRole("checkbox", { name: `选择 ${name}`, exact: true }).check();
+  await dialog.getByRole("button", { name: "添加 3 份资料", exact: true }).click();
+  await expect(page.getByLabel("任务要求", { exact: true })).toBeFocused();
+  await expect(page.getByText("正式处理结果 · 非原件", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "检查上下文草案", exact: true }).click();
+  await page.getByRole("button", { name: "启动任务", exact: true }).click();
+  await expect.poll(() => submitted.length).toBe(1);
+  expect(submitted[0]).toMatchObject({ upload_ids: ["today-file", "history-file"], source_snapshot_ids: ["mixed-snapshot-1"], delivery_output_ids: ["history-output"] });
+  expect(uploads).toBe(1);
+  expect(acquisitions).toBe(0);
+});
+
+async function selectHistoricalOutput(page: Page) {
+  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await page.getByRole("dialog").getByRole("checkbox", { name: "选择 正式分析.md", exact: true }).check();
+  await page.getByRole("button", { name: "添加 1 份资料", exact: true }).click();
+  await expect(page.getByLabel("已选历史资料")).toContainText("正式分析.md");
+}
+
+test("#136 纯正式结果未知后刷新，完整第三类与原幂等键恢复", async ({ page }) => {
+  await mockReusable(page);
+  const posts: { body: Record<string, unknown>; key: string }[] = [];
+  let acquisitions = 0;
+  await page.route("**/api/semantic-workspace/source-acquisitions", route => { acquisitions++; return route.fulfill({ status: 422, json: {} }); });
+  await page.route("**/api/semantic-workspace/tasks", route => { posts.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] }); return route.fulfill({ status: 503, json: { detail: "结果未知" } }); });
+  await page.goto("/data-prep");
+  await page.getByLabel("任务要求", { exact: true }).fill("用昨天的正式分析继续归纳");
+  await selectHistoricalOutput(page);
+  await page.getByRole("button", { name: "开始执行", exact: true }).click();
+  await expect.poll(() => posts.length).toBe(1);
+  await page.reload();
+  await expect.poll(() => posts.length).toBe(2);
+  await expect(page.getByLabel("已选历史资料")).toContainText("正式分析.md");
+  expect(posts[0]).toEqual(posts[1]);
+  expect(posts[0].body).toMatchObject({ upload_ids: [], source_snapshot_ids: [], delivery_output_ids: ["history-output"] });
+  await page.getByRole("button", { name: "移除历史资料 正式分析.md" }).click();
+  await page.getByLabel("任务要求", { exact: true }).fill("修改为另外一个任务");
+  expect(posts).toHaveLength(2);
+  expect(acquisitions).toBe(0);
+});
+
+test("#136 取消在途历史核验后迟到不能加入，保留文字并归还焦点", async ({ page }) => {
+  await mockReusable(page);
+  const requested = responseBarrier(), release = responseBarrier();
+  await page.route("**/api/semantic-workspace/reusable-sources/resolve", async route => { requested.release(); await release.promise; return route.fulfill({ json: { items: [reusableFixtures()[2]] } }); });
+  await page.goto("/data-prep");
+  await page.getByLabel("任务要求", { exact: true }).fill("保留原来的文字");
+  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await page.getByRole("checkbox", { name: "选择 正式分析.md" }).check();
+  await page.getByRole("button", { name: "添加 1 份资料" }).click();
+  await requested.promise;
+  await page.getByRole("button", { name: "取消添加" }).click();
+  release.release();
+  await expect(page.getByRole("button", { name: "历史资料", exact: true })).toBeFocused();
+  await expect(page.getByLabel("任务要求", { exact: true })).toHaveValue("保留原来的文字");
+  await expect(page.getByLabel("已选历史资料")).toHaveCount(0);
+});
+
+test("#136 历史列表可见后失权不添加，不使用缓存正文", async ({ page }) => {
+  await mockReusable(page);
+  let previews = 0;
+  await page.route("**/api/semantic-workspace/reusable-sources/resolve", route => route.fulfill({ json: { items: [{ ...reusableFixtures()[2], availability: "unavailable", reason_code: "unavailable" }] } }));
+  await page.route("**/api/semantic-workspace/reusable-sources/outputs/history-output/preview?*", route => { previews++; return route.fulfill({ json: {} }); });
+  await page.goto("/data-prep");
+  await page.getByLabel("任务要求", { exact: true }).fill("既有任务保持");
+  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await page.getByRole("button", { name: "预览 正式分析.md" }).click();
+  await expect(page.getByRole("alert")).toContainText("所选资料不可用");
+  expect(previews).toBe(0);
+  await page.getByRole("button", { name: "返回资料列表" }).click();
+  await page.getByRole("checkbox", { name: "选择 正式分析.md" }).check();
+  await page.getByRole("button", { name: "添加 1 份资料" }).click();
+  await expect(page.getByRole("alert")).toContainText("所选资料已不可用");
+  await page.getByRole("button", { name: "取消添加" }).click();
+  await expect(page.getByLabel("已选历史资料")).toHaveCount(0);
+  await expect(page.getByLabel("任务要求", { exact: true })).toHaveValue("既有任务保持");
+});
+
+test("#136 Owner切换不恢复其他人历史引用和预览", async ({ page }) => {
+  await mockReusable(page);
+  await page.goto("/data-prep");
+  await selectHistoricalOutput(page);
+  const restored: unknown[] = [];
+  await page.route("**/api/auth/me", route => route.fulfill({ json: { user_id: "u2", username: "second", role: "admin" } }));
+  await page.route("**/api/semantic-workspace/reusable-sources/resolve", route => { restored.push(route.request().postDataJSON()); return route.fulfill({ json: { items: [] } }); });
+  await page.route("**/api/semantic-workspace/reusable-sources?*", route => route.fulfill({ json: { items: [], total: 0, next_cursor: null, snapshot_token: "u2", page_complete: true } }));
+  await page.reload();
+  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await expect(page.getByText("暂无已保存的历史资料；可以先添加文件或公开网页。")).toBeVisible();
+  await expect(page.getByText("正式分析.md", { exact: true })).toHaveCount(0);
+  expect(restored).toEqual([]);
+});
+
+test("#136 引用清单显示非活动版本与未知导出，分页变化不拼旧清单", async ({ page }) => {
+  await mockReusable(page);
+  let changed = false;
+  await page.route("**/api/semantic-workspace/source-references?*", route => {
+    const cursor = new URL(route.request().url()).searchParams.get("cursor");
+    if (cursor) { changed = true; return route.fulfill({ status: 409, json: { detail: "references_changed，请重新读取引用清单" } }); }
+    return route.fulfill({ json: { source_key: "delivery_output:history-output", items: changed ? [] : [{ task_id: "older-task", revision: 1, reference_kind: "revision", use_id: null, state: "retained", in_recycle_bin: true }, { task_id: null, revision: null, reference_kind: "export", use_id: "unknown-export", state: "unknown", in_recycle_bin: null }], total: changed ? 0 : 3, unknown_uses: changed ? 0 : 1, next_cursor: changed ? null : "next", snapshot_token: changed ? "r2" : "r1", page_complete: changed } });
+  });
+  await page.goto("/data-prep");
+  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await page.getByRole("button", { name: "预览 正式分析.md" }).click();
+  await expect(page.getByText("销售金额已汇总为 200 元。")).toBeVisible();
+  await page.getByRole("button", { name: "查看出处与引用" }).click();
+  await expect(page.getByLabel("资料引用清单")).toContainText("older-task · V1");
+  await expect(page.getByLabel("资料引用清单")).toContainText("未知使用 1");
+  await page.getByRole("button", { name: "加载更多引用" }).click();
+  await expect(page.getByRole("alert")).toContainText("references_changed");
+  await expect(page.getByLabel("资料引用清单")).toHaveCount(0);
+  await page.getByRole("button", { name: "查看出处与引用" }).click();
+  await expect(page.getByLabel("资料引用清单")).toHaveText("0 个引用");
+});
+
+test("#136 正式交付引用跨页保留已清理原任务记录，不伪造导航", async ({ page }) => {
+  await mockReusable(page);
+  const requestedPages: URL[] = [];
+  await page.route("**/api/semantic-workspace/source-references?*", route => {
+    const url = new URL(route.request().url()); requestedPages.push(url);
+    const second = url.searchParams.has("cursor");
+    return route.fulfill({ json: { source_key: "delivery_output:history-output", items: second
+      ? [{ task_id: "cleaned-consumer", revision: 3, reference_kind: "delivery", delivery_id: "consumer-delivery", run_id: "consumer-run", task_exists: false, use_id: null, state: "published", in_recycle_bin: null }]
+      : [{ task_id: "active-consumer", revision: 2, reference_kind: "revision", use_id: null, state: "retained", in_recycle_bin: false }], total: 2, unknown_uses: 0, next_cursor: second ? null : "delivery-page", snapshot_token: "refs-with-formal-consumer", page_complete: second } });
+  });
+  await page.goto("/data-prep");
+  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await page.getByRole("button", { name: "预览 正式分析.md", exact: true }).click();
+  await expect(page.getByText("销售金额已汇总为 200 元。", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "查看出处与引用", exact: true }).click();
+  const references = page.getByLabel("资料引用清单", { exact: true });
+  await expect(references).toContainText("已显示 1 / 2 条引用");
+  await page.getByRole("button", { name: "加载更多引用", exact: true }).click();
+  await expect(references).toContainText("已显示 2 / 2 条引用");
+  await expect(references).toContainText("active-consumer · V2");
+  await expect(references).toContainText("cleaned-consumer · V3");
+  await expect(references).toContainText("正式交付记录");
+  await expect(references).toContainText("consumer-delivery");
+  await expect(references).toContainText("已发布");
+  await expect(references).toContainText("原任务记录已清理");
+  await expect(references.getByRole("link")).toHaveCount(0);
+  await expect(references.getByRole("button")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "预览 正式分析.md", exact: true })).toHaveCount(0);
+  expect(new URL(page.url()).searchParams.has("task")).toBe(false);
+  expect(requestedPages).toHaveLength(2);
+  expect(requestedPages[1].searchParams.get("cursor")).toBe("delivery-page");
+  expect(requestedPages[1].searchParams.get("snapshot_token")).toBe("refs-with-formal-consumer");
+});
+
+test("#136 已有任务修订第三类全量，未知恢复不丢输出ID", async ({ page }) => {
+  await mockReusable(page);
+  const task = workspaceTask("rev-history", "completed", "基于历史继续处理");
+  const detail = workspaceDetail(task, { upload_ids: [], uploads: [], delivery_output_ids: ["history-output"], reusable_sources: [reusableFixtures()[2]] });
+  await page.route("**/api/semantic-workspace/tasks/rev-history", route => route.fulfill({ json: detail }));
+  const requests: { body: Record<string, unknown>; key: string }[] = [];
+  await page.route("**/api/semantic-workspace/tasks/rev-history/revisions", route => { requests.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] }); return route.fulfill({ status: 503, json: { detail: "修订未知" } }); });
+  await page.goto("/data-prep?task=rev-history");
+  await page.getByRole("button", { name: "编辑本次资料", exact: true }).click();
+  await expect(page.getByLabel("已选历史资料")).toContainText("正式分析.md");
+  await page.getByRole("button", { name: "创建新版本", exact: true }).click();
+  await expect.poll(() => requests.length).toBe(1);
+  await page.reload();
+  await page.getByRole("button", { name: "恢复上次资料修订", exact: true }).click();
+  await expect.poll(() => requests.length).toBe(2);
+  expect(requests[1]).toEqual(requests[0]);
+  expect(requests[0].body).toMatchObject({ upload_ids: [], source_snapshot_ids: [], delivery_output_ids: ["history-output"] });
+});
+
+test("#136 历史选择明暗390与1440、键盘IME和取消保留完整草稿", async ({ page }, testInfo) => {
+  await mockReusable(page);
+  await page.goto("/data-prep");
+  const prompt = page.getByLabel("任务要求", { exact: true });
+  await prompt.fill("中文组合态保留需求");
+  await prompt.dispatchEvent("compositionstart");
+  await prompt.dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
+  await prompt.dispatchEvent("compositionend", { data: "资料" });
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.getByRole("button", { name: "历史资料", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "从历史资料添加" });
+  await dialog.getByRole("checkbox", { name: "选择 正式分析.md" }).focus();
+  await page.keyboard.press("Space");
+  for (const theme of ["light", "dark"]) for (const width of [390, 1440]) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+    await page.evaluate(async theme => { document.documentElement.classList.toggle("dark", theme === "dark"); void getComputedStyle(document.body).backgroundColor; await Promise.all(document.getAnimations().filter(animation => animation instanceof CSSTransition).map(animation => animation.finished.catch(() => undefined))); }, theme);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    const scan = await new AxeBuilder({ page }).include('[role="dialog"]').analyze();
+    expect(scan.violations.filter(item => item.impact === "serious" || item.impact === "critical")).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath(`history-${theme}-${width}.png`), fullPage: true });
+  }
+  await dialog.getByRole("button", { name: "预览 正式分析.md" }).click();
+  await expect(dialog.getByText("销售金额已汇总为 200 元。")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(dialog.getByRole("button", { name: "预览 正式分析.md" })).toBeFocused();
+  await expect(dialog.getByRole("checkbox", { name: "选择 正式分析.md" })).toBeChecked();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "历史资料", exact: true })).toBeFocused();
+  await expect(prompt).toHaveValue("中文组合态保留需求");
+  await expect(page.getByLabel("已选历史资料")).toHaveCount(0);
+});
+
+test("#136 精确引用只添加一次，同摘要不同出处仍可选", async ({ page }) => {
+  const items = await mockReusable(page);
+  const second = { ...items[2], source_key: "delivery_output:second-output", output_id: "second-output", label: "另一出处.md", origin: { ...items[2].origin, revision: 3 } };
+  await page.route("**/api/semantic-workspace/reusable-sources?*", route => route.fulfill({ json: { items: [...items, second], total: 4, page_complete: true, next_cursor: null, snapshot_token: "catalog" } }));
+  await page.route("**/api/semantic-workspace/reusable-sources/resolve", route => { const ids = route.request().postDataJSON().delivery_output_ids; return route.fulfill({ json: { items: [items[2], second].filter(item => ids.includes(item.output_id)) } }); });
+  await page.goto("/data-prep");
+  await selectHistoricalOutput(page);
+  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await expect(page.getByRole("checkbox", { name: "选择 正式分析.md" })).toBeDisabled();
+  await page.getByRole("checkbox", { name: "选择 另一出处.md" }).check();
+  await page.getByRole("button", { name: "添加 1 份资料" }).click();
+  const selected = page.getByLabel("已选历史资料");
+  await expect(selected.getByRole("button", { name: "移除历史资料 正式分析.md" })).toHaveCount(1);
+  await expect(selected.getByRole("button", { name: "移除历史资料 另一出处.md" })).toHaveCount(1);
+});
+
+test("#136 历史网页硬缺口不会被正式结果抵消", async ({ page }) => {
+  const items = await mockReusable(page);
+  const attempt = mixedAttempt(1);
+  attempt.snapshot.coverage.status = "hard_insufficient";
+  items[1].coverage = attempt.snapshot.coverage;
+  await page.route("**/api/semantic-workspace/reusable-sources?*", route => route.fulfill({ json: { items, total: 3, page_complete: true, next_cursor: null, snapshot_token: "hard" } }));
+  await page.route("**/api/semantic-workspace/reusable-sources/resolve", route => route.fulfill({ json: { items: [items[1], items[2]] } }));
+  await page.route("**/api/semantic-workspace/source-acquisitions/mixed-attempt-1", route => route.fulfill({ json: attempt }));
+  await page.goto("/data-prep");
+  await page.getByLabel("任务要求", { exact: true }).fill("必须完整覆盖原范围");
+  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await page.getByRole("checkbox", { name: "选择 历史网页组" }).check();
+  await page.getByRole("checkbox", { name: "选择 正式分析.md" }).check();
+  await page.getByRole("button", { name: "添加 2 份资料" }).click();
+  await expect(page.getByText("此组有效页面不足，当前仅供查看；其他资料不能抵消该组硬性缺口。")).toBeVisible();
+  await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeDisabled();
+});
+
+test("#136 同源另一标签页更新三类草稿，旧核验迟到不覆盖", async ({ page, context }) => {
+  await mockReusable(page);
+  const requested = responseBarrier(), release = responseBarrier();
+  await page.route("**/api/semantic-workspace/reusable-sources/resolve", async route => { requested.release(); await release.promise; return route.fulfill({ json: { items: [reusableFixtures()[2]] } }); });
+  await page.goto("/data-prep");
+  await page.getByLabel("任务要求", { exact: true }).fill("旧选择尚未确认");
+  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await page.getByRole("checkbox", { name: "选择 正式分析.md" }).check();
+  await page.getByRole("button", { name: "添加 1 份资料" }).click();
+  await requested.promise;
+  const peer = await context.newPage();
+  await peer.route("**/*", route => route.fulfill({ contentType: "text/html", body: "<html lang=zh><title>草稿窗口</title></html>" }));
+  await peer.goto(new URL("/draft-peer", page.url()).href);
+  expect(new URL(peer.url()).origin).toBe(new URL(page.url()).origin);
+  await peer.evaluate(() => localStorage.setItem("mangrove_workspace_draft_u1_new", JSON.stringify({ draft: { prompt: "新标签页已更新" }, sources: [], history: [{ source_key: "delivery_output:peer-output", kind: "delivery_output", output_id: "peer-output" }] })));
+  await expect(page.getByText("当前草稿已在其他页面更新", { exact: false })).toBeVisible();
+  release.release();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByLabel("已选历史资料")).toHaveCount(0);
+  expect(await peer.evaluate(() => localStorage.getItem("mangrove_workspace_draft_u1_new"))).toContain("peer-output");
+  await peer.close();
+});
+
+test("#136 正式结果模式确定拒绝保留集合与模型，不自动换执行配置", async ({ page }) => {
+  await mockReusable(page);
+  const posts: { body: Record<string, unknown>; key: string }[] = [];
+  await page.route("**/api/semantic-workspace/tasks", route => {
+    posts.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] });
+    return route.fulfill({ status: 422, headers: { "X-Mangrove-Task-Outcome": "rejected" }, json: { detail: "当前兼容执行模式不支持正式结果作为输入，请选择已启用的模型配置后重试。" } });
+  });
+  await page.goto("/data-prep");
+  await page.getByLabel("任务要求", { exact: true }).fill("继续昨天的正式分析");
+  await selectHistoricalOutput(page);
+  await page.getByRole("button", { name: "开始执行", exact: true }).click();
+  await expect(page.getByText("当前兼容执行模式不支持正式结果作为输入，请选择已启用的模型配置后重试。", { exact: true }).first()).toBeVisible();
+  await expect(page.getByLabel("已选历史资料")).toContainText("正式分析.md");
+  await page.getByLabel("任务要求", { exact: true }).fill("调整要求后继续昨天的正式分析");
+  await page.getByRole("button", { name: "开始执行", exact: true }).click();
+  await expect.poll(() => posts.length).toBe(2);
+  for (const post of posts) {
+    expect(post.body).toMatchObject({ upload_ids: [], source_snapshot_ids: [], delivery_output_ids: ["history-output"], provider: "local", model: "Qwen3.6-35B-A3B" });
+    expect(post.body).not.toHaveProperty("runtime_version");
+  }
+  expect(posts[1].key).not.toBe(posts[0].key);
+});
+
+test("#136 添加核验在途不能切换预览操作，取消后迟到不添加", async ({ page }) => {
+  const items = await mockReusable(page);
+  await page.goto("/data-prep");
+  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await page.getByLabel("选择 正式分析.md", { exact: true }).check();
+  await page.getByRole("button", { name: "预览 正式分析.md", exact: true }).click();
+  await expect(page.getByText("销售金额已汇总为 200 元。", { exact: true })).toBeVisible();
+  const requested = responseBarrier(), release = responseBarrier();
+  await page.route("**/api/semantic-workspace/reusable-sources/resolve", async route => {
+    requested.release(); await release.promise;
+    return route.fulfill({ json: { items: [items[2]] } });
+  });
+  await page.getByRole("button", { name: "添加 1 份资料", exact: true }).click();
+  await requested.promise;
+  await expect(page.getByRole("button", { name: "返回资料列表", exact: true })).toBeDisabled();
+  await expect(page.getByRole("button", { name: "查看出处与引用", exact: true })).toBeDisabled();
+  await page.keyboard.press("Escape");
+  await expect(page.getByLabel("历史资料预览", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "取消添加", exact: true }).click();
+  release.release();
+  await expect(page.getByRole("button", { name: "历史资料", exact: true })).toBeFocused();
+  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await expect(page.getByLabel("选择 正式分析.md", { exact: true })).toBeEnabled();
+  await expect(page.getByLabel("选择 正式分析.md", { exact: true })).not.toBeChecked();
+  await page.getByRole("button", { name: "取消添加", exact: true }).click();
+  await expect(page.getByRole("button", { name: "移除历史资料 正式分析.md" })).toHaveCount(0);
+});
+
+test("#136 派生画布重新读取期间不展示失权前缓存正文", async ({ page }) => {
+  await mockReusable(page);
+  const first = reusableFixtures()[2];
+  const second = { ...first, source_key: "delivery_output:another-output", output_id: "another-output", label: "另一个正式结果.md" };
+  const task = workspaceTask("derived-cache", "completed", "核对两个正式来源");
+  await page.route("**/api/semantic-workspace/tasks/derived-cache", route => route.fulfill({ json: workspaceDetail(task, { upload_ids: [], uploads: [], delivery_output_ids: [first.output_id, second.output_id], reusable_sources: [first, second] }) }));
+  let reads = 0;
+  const requested = responseBarrier(), release = responseBarrier();
+  await page.route("**/api/semantic-workspace/tasks/derived-cache/sources/*/preview?*", async route => {
+    const outputId = route.request().url().includes("/history-output/") ? first.output_id : second.output_id;
+    if (outputId === first.output_id && ++reads > 1) {
+      requested.release(); await release.promise;
+      return route.fulfill({ status: 403, json: { detail: "来源权限已失效" } });
+    }
+    const item = outputId === first.output_id ? first : second;
+    return route.fulfill({ json: { task_id: "derived-cache", revision: 1, artifact_id: outputId, kind: "document", action: "preview", items: [{ id: "passage", type: "passage", label: "正式来源", content: `正文 ${outputId}`, evidence_refs: [] }], total: 1, offset: 0, limit: 30, warnings: [], source_key: item.source_key, identity: "derived", sha256: item.sha256, output_id: outputId, delivery_id: "origin-delivery", run_id: "origin-run", origin: item.origin, representation: { kind: "output", sha256: item.sha256, associated_output_id: outputId, media_type: "text/markdown", lineage_available: true } } });
+  });
+  await page.goto("/data-prep?task=derived-cache");
+  await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+  await expect(page.getByText("正文 history-output", { exact: true })).toBeVisible();
+  await page.getByRole("combobox", { name: "预览文件", exact: true }).selectOption("another-output");
+  await expect(page.getByText("正文 another-output", { exact: true })).toBeVisible();
+  await page.getByRole("combobox", { name: "预览文件", exact: true }).selectOption("history-output");
+  await requested.promise;
+  await expect(page.getByText("正文 history-output", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("正在读取正式来源…", { exact: true })).toBeVisible();
+  release.release();
+  await expect(page.getByText("来源权限已失效，请重新核对来源。", { exact: true })).toBeVisible();
+  await expect(page.getByText("正文 history-output", { exact: true })).toHaveCount(0);
+});
+
+test("#136 派生输入任务画布读取冻结输出，移除后修订发送空第三类", async ({ page }) => {
+  await mockReusable(page);
+  const task = workspaceTask("derived-canvas", "completed", "使用正式历史结果");
+  const upload = { upload_id: "file-kept", original_name: "保留.csv", media_type: "text/csv", size_bytes: 3, sha256: "b".repeat(64) };
+  await page.route("**/api/data-sources/uploads/file-kept", route => route.fulfill({ json: upload }));
+  await page.route("**/api/semantic-workspace/tasks/derived-canvas", route => route.fulfill({ json: workspaceDetail(task, { upload_ids: [upload.upload_id], uploads: [upload], delivery_output_ids: ["history-output"], reusable_sources: [reusableFixtures()[2]] }) }));
+  const queries: string[] = [];
+  await page.route("**/api/semantic-workspace/tasks/derived-canvas/sources/history-output/preview?*", route => {
+    queries.push(route.request().url());
+    return route.fulfill({ json: { task_id: "derived-canvas", revision: 1, artifact_id: "history-output", kind: "document", action: "preview", items: [{ id: "source-1", type: "passage", label: "正式来源", content: "冻结的正式输入本体", evidence_refs: [] }], total: 1, offset: 0, limit: 30, warnings: [], source_key: "delivery_output:history-output", identity: "derived", sha256: "a".repeat(64), output_id: "history-output", delivery_id: "origin-delivery", run_id: "origin-run", origin: reusableFixtures()[2].origin, representation: { kind: "output", sha256: "a".repeat(64), associated_output_id: "history-output", media_type: "text/markdown", lineage_available: true } } });
+  });
+  const submitted: Record<string, unknown>[] = [];
+  await page.route("**/api/semantic-workspace/tasks/derived-canvas/revisions", route => { submitted.push(route.request().postDataJSON()); return route.fulfill({ status: 503, json: { detail: "测试保留未知" } }); });
+  await page.goto("/data-prep?task=derived-canvas");
+  await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+  await page.getByRole("combobox", { name: "预览文件", exact: true }).selectOption("history-output");
+  await expect(page.getByText("冻结的正式输入本体", { exact: true })).toBeVisible();
+  expect(new URL(queries[0]).searchParams.get("revision")).toBe("1");
+  await expect(page.getByRole("button", { name: "下载正式来源文件" })).toBeVisible();
+  await page.getByRole("button", { name: "关闭原文件预览", exact: true }).click();
+  await page.getByRole("button", { name: "编辑本次资料", exact: true }).click();
+  await page.getByRole("button", { name: "移除历史资料 正式分析.md" }).click();
+  await page.getByRole("button", { name: "创建新版本", exact: true }).click();
+  await expect.poll(() => submitted.length).toBe(1);
+  expect(submitted[0]).toMatchObject({ upload_ids: ["file-kept"], source_snapshot_ids: [], delivery_output_ids: [] });
+});

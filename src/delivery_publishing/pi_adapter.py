@@ -131,6 +131,12 @@ class PiCandidateAdapter:
             source_refs.append(
                 f"{source_ref['snapshot_id']}:{artifact_id}:{source_sha256}"
             )
+        from src.source_acquisition.reuse import resolve_frozen_source
+        for source_ref in task_revision.get("source_refs", []):
+            if source_ref.get("kind") == "delivery_output":
+                output=resolve_frozen_source(owner_id,source_ref)
+                source_hashes[source_ref["output_id"]]=output["sha256"]
+                source_refs.append(f"{source_ref['delivery_id']}:{source_ref['output_id']}:{output['sha256']}")
         frozen_request_sources = {
             str(item.get("upload_id")): str(item.get("sha256"))
             for item in request.get("sources") or []

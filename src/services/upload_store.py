@@ -19,6 +19,7 @@ import json
 import shutil
 import uuid
 import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -107,6 +108,7 @@ class UploadItem(BaseModel):
     media_type: str
     size_bytes: int = Field(ge=0)
     sha256: str
+    created_at: str | None = None
 
 
 class UploadStore:
@@ -241,6 +243,7 @@ class UploadStore:
             media_type=media_type,
             size_bytes=size,
             sha256=digest.hexdigest(),
+            created_at=datetime.now(timezone.utc).isoformat(),
         )
         # 元数据 sidecar（供 resolve 读回，不依赖重新读文件）
         self._write_sidecar(objects_dir, item)
@@ -299,6 +302,7 @@ class UploadStore:
             media_type=media_type,
             size_bytes=size,
             sha256=digest.hexdigest(),
+            created_at=datetime.now(timezone.utc).isoformat(),
         )
         self._write_sidecar(objects_dir, item)
         return item

@@ -89,6 +89,7 @@ from src.conversation_steering.repository import ResultContextConflict
 from src.delivery_publishing.models import TableOutputContract
 from src.services.upload_store import IMAGE_EXTENSIONS, UploadStore
 from src.capability_catalog.reuse import ToolNeed, match_installed_tools, discover_open_source_candidates
+from src.source_acquisition.reuse import guarded_response, workspace_response_refs, freeze_source_call, bundle_response_refs
 from src.source_acquisition import (
     AcquisitionConflictError,
     AnonymousWebFetcher,
@@ -314,6 +315,7 @@ class WorkspaceTaskCreateIn(BaseModel):
 
     objective_text: str = Field(min_length=1, max_length=20_000)
     upload_ids: tuple[str, ...] = ()
+    delivery_output_ids: tuple[Annotated[str, Field(min_length=1,max_length=200)], ...] = Field(default=(), max_length=100)
     source_snapshot_id: str | None = Field(default=None, min_length=1, max_length=160)
     source_snapshot_ids: tuple[str, ...] | None = None
     must_include: tuple[str, ...] = ()
@@ -352,7 +354,7 @@ class WorkspaceTaskCreateIn(BaseModel):
     def strip_text(cls, value: str) -> str:
         return value.strip()
 
-    @field_validator("upload_ids")
+    @field_validator("upload_ids", "delivery_output_ids")
     @classmethod
     def unique_uploads(cls, value: tuple[str, ...]) -> tuple[str, ...]:
         return tuple(dict.fromkeys(value))
@@ -407,7 +409,7 @@ class WorkspaceTaskCreateIn(BaseModel):
         self.source_snapshot_ids = tuple(dict.fromkeys(snapshots))
         # 单字段仅兼容投影，实际冻结必须使用完整集合。
         self.source_snapshot_id = next(iter(self.source_snapshot_ids), None)
-        if not self.upload_ids and not self.source_snapshot_ids:
+        if not self.upload_ids and not self.source_snapshot_ids and not self.delivery_output_ids:
             raise ValueError("任务至少选择一个来源")
         web_contract_values = (
             self.must_include,
@@ -533,13 +535,14 @@ class WorkspaceRevisionIn(BaseModel):
     expected_active_revision: int = Field(ge=1)
     source_snapshot_id: str | None = Field(default=None, min_length=1, max_length=160)
     upload_ids: tuple[str, ...] | None = None
+    delivery_output_ids: tuple[Annotated[str, Field(min_length=1,max_length=200)], ...] | None = Field(default=None, max_length=100)
     source_snapshot_ids: tuple[str, ...] | None = None
 
     @model_validator(mode="after")
     def validate_source_selection(self):
         if self.source_snapshot_id is not None and self.source_snapshot_ids is not None:
             raise ValueError("新旧网页来源字段不能同时提供")
-        for values in (self.upload_ids, self.source_snapshot_ids):
+        for values in (self.upload_ids, self.source_snapshot_ids, self.delivery_output_ids):
             if values is not None and any(not value.strip() or len(value) > 160 for value in values):
                 raise ValueError("来源身份无效")
         return self
@@ -1203,7 +1206,7 @@ def _candidate_download_allowed(
     )
 
 
-def _resolve_mixed_sources(user_id, upload_ids, snapshot_ids):
+def _resolve_mixed_sources(user_id, upload_ids, snapshot_ids, output_ids=()):
     """解析全量选择，逐组保留服务端范围；不得用网页列表覆盖上传。"""
     refs, snapshots = [], []
     for upload_id in dict.fromkeys(upload_ids):
@@ -1223,6 +1226,15 @@ def _resolve_mixed_sources(user_id, upload_ids, snapshot_ids):
         refs.extend({"kind": "web_artifact", "snapshot_id": snapshot_id,
                      "artifact_id": artifact["artifact_id"], "sha256": artifact["content_sha256"]}
                     for artifact in snapshot["artifacts"])
+    from src.source_acquisition.reuse import resolve_frozen_source
+    for output_id in dict.fromkeys(output_ids):
+        try:
+            resolved = resolve_frozen_source(user_id, {"kind": "delivery_output", "output_id": output_id})
+        except PermissionError as exc:
+            raise HTTPException(404, "正式输出不存在或无权访问") from exc
+        except (ValueError, OSError) as exc:
+            raise HTTPException(409, "正式输出不可用或完整性校验失败") from exc
+        refs.append(resolved["frozen_ref"])
     if not refs:
         raise HTTPException(422, "任务至少选择一个来源")
     return refs, snapshots
@@ -1334,6 +1346,11 @@ def _task_or_404(user_id: str, task_id: str) -> dict[str, Any]:
 
 
 def _workspace_source_findings(user_id: str, task: dict[str, Any]):
+    frozen=get_store().get_semantic_workspace_revision(user_id,task["task_id"],int(task["active_revision"]))
+    return freeze_source_call(user_id,(frozen or {}).get("source_refs",[]),_read_workspace_source_findings,user_id,task)
+
+
+def _read_workspace_source_findings(user_id: str, task: dict[str, Any]):
     from src.semantic_harness.inspectors.uploads import UploadSourceInspector, public_source_findings, TABULAR_INSPECTOR_VERSION, DOCUMENT_INSPECTOR_VERSION
 
     revision = int(task["active_revision"])
@@ -1354,7 +1371,7 @@ def _workspace_source_findings(user_id: str, task: dict[str, Any]):
 
     for event in reversed(get_store().list_semantic_workspace_events(user_id, task["task_id"])):
         facts = event.get("details") or {}
-        if not any(ref.get("kind") == "web_artifact" for ref in (frozen or {}).get("source_refs", [])) and event["event_type"] == "source.observed" and facts.get("revision") == revision and facts.get("inspected_sources") == inspected_sources:
+        if not any(ref.get("kind") in {"web_artifact","delivery_output"} for ref in (frozen or {}).get("source_refs", [])) and event["event_type"] == "source.observed" and facts.get("revision") == revision and facts.get("inspected_sources") == inspected_sources:
             return tuple(facts["source_findings"])
     reports = UploadSourceInspector(
         user_id=user_id, upload_store=_uploads(),
@@ -1382,6 +1399,20 @@ def _workspace_source_findings(user_id: str, task: dict[str, Any]):
             facade = SimpleNamespace(resolve=lambda owner, artifact_id: item)
             web_reports = UploadSourceInspector(user_id=user_id, upload_store=facade).inspect_artifacts((ref["artifact_id"],))
             findings.extend({**finding, "snapshot_id": ref["snapshot_id"]} for finding in public_source_findings(web_reports))
+    from src.source_acquisition.reuse import resolve_frozen_source
+    for ref in (frozen or {}).get("source_refs",[]):
+        if ref.get("kind")!="delivery_output":
+            continue
+        source=resolve_frozen_source(user_id,ref)
+        path=source["host_path"]
+        # 沿上传观察的轻量范围，追问不额外启动OCR等重解析。
+        if Path(source["label"]).suffix.lower() not in {".csv",".tsv",".xlsx",".json",".jsonl",".txt",".md",".markdown",".docx",".html",".htm"}:
+            continue
+        _canvas_size_limit(path)
+        item=SimpleNamespace(storage_path=str(path),original_name=source["label"],media_type=source["media_type"],sha256=source["sha256"],size_bytes=source["size_bytes"])
+        facade=SimpleNamespace(resolve=lambda owner,artifact_id:item)
+        reports=UploadSourceInspector(user_id=user_id,upload_store=facade).inspect_artifacts((ref["output_id"],))
+        findings.extend(public_source_findings(reports))
     findings = tuple(findings[:20])
     get_store().append_semantic_workspace_event(
         user_id, task["task_id"], stage="understand", event_type="source.observed",
@@ -1800,6 +1831,9 @@ def _task_detail(
         raise HTTPException(status_code=404, detail="结果版本不存在")
     task["viewing_revision"] = selected_revision["revision"]
     task["source_refs"] = selected_revision["source_refs"]
+    task["delivery_output_ids"] = [ref["output_id"] for ref in selected_revision["source_refs"] if ref.get("kind") == "delivery_output"]
+    from src.source_acquisition.reuse import resolve_choices
+    task["reusable_sources"] = resolve_choices(user_id,(),(),task["delivery_output_ids"])
     task["upload_ids"] = [ref["upload_id"] for ref in selected_revision["source_refs"] if ref.get("upload_id")]
     if selected_revision["revision"] != task["active_revision"]:
         task.update(
@@ -1938,6 +1972,54 @@ def _task_detail(
     return task
 
 
+class ReusableSourceSelection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    upload_ids: tuple[Annotated[str, Field(min_length=1,max_length=200)], ...] = Field(default=(), max_length=100)
+    source_snapshot_ids: tuple[Annotated[str, Field(min_length=1,max_length=200)], ...] = Field(default=(), max_length=100)
+    delivery_output_ids: tuple[Annotated[str, Field(min_length=1,max_length=200)], ...] = Field(default=(), max_length=100)
+
+
+@router.get("/source-references")
+def source_references(kind: Literal["upload","snapshot","delivery_output"], id: str = Query(min_length=1,max_length=200), cursor: str | None = None, limit: int = Query(default=30,ge=1,le=100), snapshot_token: str | None = None, user=Depends(get_current_user)):
+    from src.source_acquisition.reuse import references,page
+    items=references(user["user_id"],kind,id)
+    try:
+        return {**page(items,cursor=cursor,limit=limit,snapshot_token=snapshot_token),"source_key":kind+":"+id,"unknown_uses":sum(item["state"]=="unknown" for item in items)}
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+
+
+@router.get("/reusable-sources")
+def reusable_source_history(cursor: str | None = None, limit: int = Query(default=30, ge=1, le=100), snapshot_token: str | None = None, user=Depends(get_current_user)):
+    from src.source_acquisition.reuse import history, page
+    try:
+        return page(history(user["user_id"]),cursor=cursor,limit=limit,snapshot_token=snapshot_token)
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
+
+
+@router.get("/reusable-sources/outputs/{output_id}/preview")
+@guarded_response("preview", lambda values: [{"kind":"delivery_output","output_id":values["output_id"]}])
+def reusable_output_preview(output_id: str, offset: int = Query(default=0,ge=0), limit: int = Query(default=30,ge=1,le=100), user=Depends(get_current_user)):
+    from src.source_acquisition.reuse import resolve_frozen_source, public_source
+    try:
+        source=resolve_frozen_source(user["user_id"],{"kind":"delivery_output","output_id":output_id})
+        _canvas_size_limit(source["host_path"])
+        value=_preview_result_file(source["host_path"],lineage_path=None,offset=offset,limit=limit,search="",sort_by=None,sort_direction="asc")
+    except PermissionError as exc:
+        raise HTTPException(404,"正式输出不存在或无权访问") from exc
+    except (ValueError,OSError,duckdb.Error,KeyError,TypeError) as exc:
+        raise HTTPException(409,"正式输出无法预览") from exc
+    value.pop("item_refs",None)
+    return {**value,**public_source(source),"kind":value["kind"],"output_id":output_id,"delivery_id":source["origin"]["delivery_id"],"run_id":source["origin"]["run_id"],"representation":{"kind":"output","sha256":source["sha256"],"associated_output_id":output_id,"lineage_available":False}}
+
+
+@router.post("/reusable-sources/resolve")
+def resolve_reusable_sources(payload: ReusableSourceSelection, user=Depends(get_current_user)):
+    from src.source_acquisition.reuse import resolve_choices
+    return {"items": resolve_choices(user["user_id"], payload.upload_ids, payload.source_snapshot_ids, payload.delivery_output_ids)}
+
+
 @router.post("/tasks", status_code=status.HTTP_202_ACCEPTED, openapi_extra={"x-mangrove-task-control": True})
 async def create_task(
     payload: WorkspaceTaskCreateIn,
@@ -2042,6 +2124,8 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
         payload.external_api_confirmed = False
         payload.provider = "local"
         payload.model = None
+    if payload.delivery_output_ids and payload.runtime_version is not RuntimeVersion.PI:
+        raise HTTPException(422,"正式输出来源只能由 Pi Runtime 执行")
     reuse_plan = []
     if payload.capability_need is not None:
         resolution = _approved_tool_matches(user, payload.capability_need)
@@ -2194,6 +2278,15 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
             "sha256": upload.sha256,
         })
         input_suffixes.add(Path(upload.original_name).suffix.lower())
+    from src.source_acquisition.reuse import resolve_frozen_source
+    for output_id in payload.delivery_output_ids:
+        try:
+            source=resolve_frozen_source(user_id,{"kind":"delivery_output","output_id":output_id})
+        except PermissionError as exc:
+            raise HTTPException(404,"正式来源不存在或无权访问") from exc
+        except (ValueError,OSError) as exc:
+            raise HTTPException(409,"正式来源不可用") from exc
+        input_suffixes.add(Path(source["label"]).suffix.lower())
     if payload.capability_need is not None:
         actual_inputs = {"markdown" if suffix == ".md" else suffix.lstrip(".") for suffix in input_suffixes}
         actual_outputs = {"markdown" if value == "md" else value for value in payload.output_formats}
@@ -2201,7 +2294,7 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
             or set(payload.capability_need.input_formats) != actual_inputs
             or set(payload.capability_need.output_formats) != actual_outputs):
             raise HTTPException(409, "工具匹配与当前文件或输出格式不一致，请重新匹配；网页来源尚无可复用格式合同")
-    source_refs, source_snapshots = _resolve_mixed_sources(user_id, payload.upload_ids, payload.source_snapshot_ids or ())
+    source_refs, source_snapshots = _resolve_mixed_sources(user_id, payload.upload_ids, payload.source_snapshot_ids or (), payload.delivery_output_ids)
     source_snapshot = source_snapshots[0] if source_snapshots else None
     for source_snapshot_item in source_snapshots:
         if (
@@ -2481,7 +2574,7 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
     title = first_line[:40] + ("…" if len(first_line) > 40 else "")
     store = get_store()
     try:
-        task = store.create_semantic_workspace_task(
+        task = freeze_source_call(user_id, source_refs, store.create_semantic_workspace_task,
             user_id,
             task_id=task_id,
             title=title or "未命名任务",
@@ -2953,6 +3046,8 @@ async def _apply_confirmed_steering_revision(
         ),
     )
     selected_runtime = routing_plan.selected_runtime
+    if any(ref.get("kind")=="delivery_output" for ref in get_store().get_semantic_workspace_revision(user_id,task_id,int(task["active_revision"]))["source_refs"]) and selected_runtime is not RuntimeVersion.PI:
+        raise HTTPException(422,"正式输出来源只能由 Pi Runtime 执行")
     if previous_runtime and selected_runtime != previous_runtime["runtime_version"]:
         raise HTTPException(409, "冻结的执行路线已不可用，禁止自动切换")
     if (
@@ -3127,7 +3222,7 @@ async def _apply_confirmed_steering_revision(
             raise RuntimeError("确认决策已被处理，禁止重复创建版本")
     transaction_hook = commit_decision
     try:
-        revision = get_store().create_semantic_workspace_revision(
+        revision = freeze_source_call(user_id, get_store().get_semantic_workspace_revision(user_id,task_id,decision.base_revision)["source_refs"], get_store().create_semantic_workspace_revision,
             user_id,
             task_id,
             objective_text=objective,
@@ -3254,6 +3349,8 @@ async def decide_steering_revision(
             ),
         )
         selected_runtime = routing_plan.selected_runtime
+        if any(ref.get("kind")=="delivery_output" for ref in task.get("source_refs",[])) and selected_runtime is not RuntimeVersion.PI:
+            raise HTTPException(422,"正式输出来源只能由 Pi Runtime 执行")
         if previous_runtime and selected_runtime != previous_runtime["runtime_version"]:
             raise HTTPException(409, "冻结的执行路线已不可用，禁止自动切换")
         inherited_contracts = [
@@ -3412,7 +3509,7 @@ async def decide_steering_revision(
                 raise RuntimeError("确认决策已被处理，禁止重复创建任务")
         transaction_hook = commit_new_task_decision
         try:
-            new_task = get_store().create_semantic_workspace_task(
+            new_task = freeze_source_call(user_id, task.get("source_refs", []), get_store().create_semantic_workspace_task,
                 user_id,
                 task_id=new_task_id,
                 title=f"{task['title']}（独立任务）",
@@ -3799,7 +3896,8 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
     old_snapshot_ids = tuple(dict.fromkeys(ref["snapshot_id"] for ref in current_refs if ref.get("kind") == "web_artifact"))
     selected_upload_ids = payload.upload_ids if payload.upload_ids is not None else tuple(ref["upload_id"] for ref in current_refs if ref.get("upload_id"))
     selected_snapshot_ids = payload.source_snapshot_ids if payload.source_snapshot_ids is not None else ((payload.source_snapshot_id,) if payload.source_snapshot_id else old_snapshot_ids)
-    effective_source_refs, effective_snapshots = _resolve_mixed_sources(user_id, selected_upload_ids, selected_snapshot_ids)
+    selected_output_ids = payload.delivery_output_ids if payload.delivery_output_ids is not None else tuple(ref["output_id"] for ref in current_refs if ref.get("kind") == "delivery_output")
+    effective_source_refs, effective_snapshots = _resolve_mixed_sources(user_id, selected_upload_ids, selected_snapshot_ids, selected_output_ids)
     effective_snapshot = effective_snapshots[0] if effective_snapshots else None
     effective_snapshot_id = effective_snapshot["snapshot_id"] if effective_snapshot else None
     current_web_contract = ({"goal_contract": current_contract.get("goal_contract") or {"objective": task["objective_text"]}} if current_contract else None)
@@ -3853,6 +3951,8 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
             selection = catalog.resolve_selection(actor, task_id=task_id, revision=payload.expected_active_revision)
             if selection is not None:
                 actual_inputs = {Path(_uploads().resolve(user_id, item).original_name).suffix.lower().lstrip(".") for item in selected_upload_ids}
+                from src.source_acquisition.reuse import resolve_frozen_source
+                actual_inputs.update(Path(resolve_frozen_source(user_id,ref)["label"]).suffix.lower().lstrip(".") for ref in effective_source_refs if ref.get("kind")=="delivery_output")
                 actual_inputs = {"markdown" if value == "md" else value for value in actual_inputs}
                 actual_outputs = {"markdown" if value == "md" else value for value in formats}
                 try:
@@ -3889,6 +3989,8 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
         ),
     )
     selected_runtime = routing_plan.selected_runtime
+    if selected_output_ids and selected_runtime is not RuntimeVersion.PI:
+        raise HTTPException(422,"正式输出来源只能由 Pi Runtime 执行")
     effective_contracts = (
         payload.table_output_contracts
         if payload.table_output_contracts is not None
@@ -4085,7 +4187,7 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
     if mark_execution_started is not None:
         mark_execution_started()
     try:
-        revision = store.create_semantic_workspace_revision(
+        revision = freeze_source_call(user_id, effective_source_refs, store.create_semantic_workspace_revision,
             user_id,
             task_id,
             objective_text=objective,
@@ -5179,16 +5281,18 @@ def _canvas_revision(user_id: str, task_id: str, revision: int | None):
 
 
 def _verified_canvas_output(user_id, run_id, manifest, output):
-    qa = output.get("qa") or {}
-    if manifest.get("status") != "succeeded" or qa.get("openable") is not True or qa.get("sha256") != output["sha256"] or qa.get("size_bytes") != output["size_bytes"]:
-        raise HTTPException(409, "正式输出缺少一致的发布质量证据")
-    record = get_store().get_semantic_delivery_output(user_id, output["output_id"])
-    if record is None or record["run_id"] != run_id or record["delivery_id"] != manifest["delivery_id"]:
-        raise HTTPException(404, "正式输出不属于所选交付")
+    from src.source_acquisition.reuse import verified_output
+    try:
+        record,path=verified_output(user_id,output["output_id"])
+    except PermissionError as exc:
+        raise HTTPException(404,"正式输出不存在或无权访问") from exc
+    except (ValueError,OSError) as exc:
+        raise HTTPException(409,"正式输出完整性校验失败") from exc
+    if record["run_id"] != run_id or record["delivery_id"] != manifest["delivery_id"]:
+        raise HTTPException(404,"正式输出不属于所选交付")
     if record["sha256"] != output["sha256"] or record["size_bytes"] != output["size_bytes"]:
-        raise HTTPException(409, "正式输出登记与交付不一致")
-    path = _verified_canvas_path(record["file_path"], record)
-    return record, path
+        raise HTTPException(409,"正式输出完整性校验失败")
+    return record,path
 
 
 def _verified_canvas_path(value, expected):
@@ -5262,6 +5366,10 @@ def _frozen_canvas_sources(user_id, task_id, selected, manifest=None):
                 raise HTTPException(409, "冻结来源与交付摘要不一致")
             sources.setdefault(artifact_id, {"sha256": digest})
     for ref in selected.get("source_refs", []):
+        if ref.get("upload_id"):
+            sources.setdefault(ref["upload_id"], {"sha256":ref["sha256"]})
+        if ref.get("kind") == "delivery_output":
+            sources[ref["output_id"]] = {"sha256":ref["sha256"],"delivery_ref":ref}
         if ref.get("kind") == "web_artifact":
             artifact = SourceAcquisitionRepository(settings.webui_db_path).get_artifact(user_id, ref["artifact_id"])
             if not artifact or artifact["snapshot_id"] != ref.get("snapshot_id") or artifact["content_sha256"] != ref.get("sha256"):
@@ -5304,7 +5412,11 @@ def _canvas_source_refs(user_id, raw_refs, sources):
         if not source or not re.fullmatch(r"[0-9a-f]{64}", source["sha256"]):
             raise HTTPException(409, "结果引用缺少可信冻结来源")
         if not source.get("web") and artifact_id not in checked:
-            _canvas_upload(user_id, artifact_id, source)
+            if source.get("delivery_ref"):
+                from src.source_acquisition.reuse import resolve_frozen_source
+                resolve_frozen_source(user_id,source["delivery_ref"])
+            else:
+                _canvas_upload(user_id, artifact_id, source)
             checked.add(artifact_id)
         public = {"artifact_id": artifact_id, "source_sha256": source["sha256"]}
         for key in ("table_ref", "element_id", "extractor", "extractor_version"):
@@ -5371,6 +5483,7 @@ def _resolve_result_context(user_id, task_id, selection):
 
 
 @router.get("/tasks/{task_id}/preview")
+@guarded_response("preview", bundle_response_refs)
 def preview_task_result(
     task_id: str,
     revision: int | None = Query(default=None, ge=1),
@@ -5424,6 +5537,7 @@ def _canvas_size_limit(path):
 
 
 @router.get("/tasks/{task_id}/sources/{artifact_id}/preview")
+@guarded_response("preview", workspace_response_refs)
 def preview_task_source(
     task_id: str, artifact_id: str,
     revision: int = Query(ge=1),
@@ -5445,6 +5559,16 @@ def preview_task_source(
         raise HTTPException(404, "来源不属于所选任务版本")
     common = {"task_id": task_id, "revision": revision, "artifact_id": artifact_id, "sha256": source["sha256"],
               "location_status": "not_requested", "representation": {"kind": "source", "parser_or_inspector_version": None}}
+    if source.get("delivery_ref"):
+        from src.source_acquisition.reuse import resolve_frozen_source, public_source
+        resolved=resolve_frozen_source(user_id,source["delivery_ref"])
+        _canvas_size_limit(resolved["host_path"])
+        try:
+            value=_preview_result_file(resolved["host_path"],lineage_path=None,offset=offset,limit=limit,search=search,sort_by=sort_by,sort_direction=sort_direction)
+        except (ValueError,OSError,duckdb.Error,KeyError,TypeError):
+            raise HTTPException(409,"结果预览无法读取或查询无效") from None
+        value.pop("item_refs",None)
+        return {**common,**public_source(resolved),**value,"output_id":artifact_id,"delivery_id":resolved["origin"]["delivery_id"],"run_id":resolved["origin"]["run_id"],"representation":{"kind":"output","sha256":resolved["sha256"],"associated_output_id":artifact_id},"lineage_available":False}
     if web := source.get("web"):
         # 本票只读既有摘要，不借画布扩大到网页全文产品化。
         return {**common, "kind": "web", "upload_id": None, "content_url": None, "original_name": web["title"], "media_type": web["media_type"],
@@ -5596,6 +5720,14 @@ def _write_frozen_source_exports(archive, user_id, task_id, selected, sources, t
                     "media_type": web["media_type"], "sha256": source["sha256"], "size_bytes": web["size_bytes"],
                     "provenance": {key: web[key] for key in ("snapshot_id", "request_url", "final_url", "read_at")},
                 }
+            elif source.get("delivery_ref"):
+                from src.source_acquisition.reuse import resolve_frozen_source
+                resolved=resolve_frozen_source(user_id,source["delivery_ref"])
+                path=resolved["host_path"]
+                provenance={"source_kind":"delivery_output",**{key:str(value) for key,value in resolved["frozen_ref"].items() if key in {"output_id","delivery_id","run_id","source_task_id","source_revision"} and value is not None}}
+                if resolved.get("acquired_at"):
+                    provenance["generated_at"]=resolved["acquired_at"]
+                metadata=dict(artifact_id=artifact_id,original_name=resolved["label"],media_type=resolved["media_type"],sha256=resolved["sha256"],size_bytes=resolved["size_bytes"],provenance=provenance)
             else:
                 upload = _canvas_upload(user_id, artifact_id, source)
                 path = Path(upload.storage_path)
@@ -5609,6 +5741,7 @@ def _write_frozen_source_exports(archive, user_id, task_id, selected, sources, t
 
 
 @router.get("/tasks/{task_id}/source-bundle")
+@guarded_response("export", workspace_response_refs)
 def download_source_bundle(
     task_id: str, revision: int = Query(ge=1),
     artifact_id: str | None = Query(default=None, max_length=160),
@@ -5644,6 +5777,7 @@ def download_source_bundle(
 
 
 @router.get("/tasks/{task_id}/bundle")
+@guarded_response("export", bundle_response_refs)
 def download_bundle(
     task_id: str, include_sources: bool = False,
     revision: int | None = Query(default=None, ge=1),

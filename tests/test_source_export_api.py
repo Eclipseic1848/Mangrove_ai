@@ -95,7 +95,7 @@ def test_bundle_disconnect_removes_only_generated_zip(canvas, failure):
 
     _, _, task_id, _, upload = canvas
     response = download_bundle(task_id, include_sources=False, revision=1, user={"user_id": "user-a"})
-    path = Path(response.path)
+    path = Path(response.response.path)
     assert path.exists()
     async def send(message):
         if message["type"] == "http.response.body":

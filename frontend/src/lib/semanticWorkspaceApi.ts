@@ -17,9 +17,34 @@ import type {
   ResultSelection,
   PublicResultContext,
   WorkspaceSourcePreview,
+  ReusableSourcePage, ReusableSource, ReusableOutputPreview, SourceSelection, SourceReferencePage,
 } from "@/types/semanticWorkspace";
 
 const BASE = "/api/semantic-workspace";
+
+function sourcePageQuery(cursor?: string | null, token?: string) {
+  const query = new URLSearchParams({ limit: "30" });
+  if (cursor) query.set("cursor", cursor);
+  if (token) query.set("snapshot_token", token);
+  return query;
+}
+export function listReusableSources(cursor?: string | null, token?: string): Promise<ReusableSourcePage> {
+  return api.get(`${BASE}/reusable-sources?${sourcePageQuery(cursor, token)}`);
+}
+export function resolveReusableSources(selection: SourceSelection): Promise<{ items: ReusableSource[] }> {
+  return api.post(`${BASE}/reusable-sources/resolve`, selection);
+}
+export function previewReusableOutput(outputId: string, offset = 0): Promise<ReusableOutputPreview> {
+  return api.get(`${BASE}/reusable-sources/outputs/${encodeURIComponent(outputId)}/preview?offset=${offset}&limit=30`);
+}
+export function previewTaskReusableOutput(taskId: string, revision: number, outputId: string, offset = 0): Promise<ReusableOutputPreview & { task_id: string; revision: number; artifact_id: string }> {
+  return api.get(`${BASE}/tasks/${encodeURIComponent(taskId)}/sources/${encodeURIComponent(outputId)}/preview?revision=${revision}&offset=${offset}&limit=30`);
+}
+export function getSourceReferences(kind: ReusableSource["kind"], id: string, cursor?: string | null, token?: string): Promise<SourceReferencePage> {
+  const query = sourcePageQuery(cursor, token);
+  query.set("kind", kind); query.set("id", id);
+  return api.get(`${BASE}/source-references?${query}`);
+}
 
 /** 只接收公开引用身份；未知内部字段不能随消息进入画布。 */
 export function readPublicResultContext(value: unknown): PublicResultContext | null {
@@ -178,6 +203,7 @@ export async function createWorkspaceTask(payload: {
   upload_ids: string[];
   source_snapshot_id?: string;
   source_snapshot_ids?: string[];
+  delivery_output_ids?: string[];
   must_include?: string[];
   explicit_exclusions?: string[];
   quantity_requirement?: string;
@@ -363,7 +389,7 @@ export async function createWorkspaceRevision(
   expectedActiveRevision: number,
   outputFormats?: string[],
   externalApiConfirmed = false,
-  sources?: { upload_ids: string[]; source_snapshot_ids: string[] },
+  sources?: { upload_ids: string[]; source_snapshot_ids: string[]; delivery_output_ids?: string[] },
   idempotencyKey?: string,
 ): Promise<WorkspaceRevision> {
   const response = await authenticatedFetch(`${BASE}/tasks/${taskId}/revisions`, {

@@ -104,7 +104,7 @@ class RestoreVerification:
 
 
 _PROFILE_HEADS = {
-    "webui": "webui_0016",
+    "webui": "webui_0017",
     "scheduler": "scheduler_0001",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
@@ -148,6 +148,7 @@ _PROFILE_REQUIRED_COLUMNS = {
             "table_output_contracts_json",
             "source_refs_json", "source_contract_json",
         ),
+        "source_read_uses": ("use_id", "owner_id", "task_id", "revision", "operation", "source_refs_json", "state", "started_at", "finished_at"),
         "document_task_units": ("archived_at",),
         "agentic_runtime_runs": (
             "verification_json",

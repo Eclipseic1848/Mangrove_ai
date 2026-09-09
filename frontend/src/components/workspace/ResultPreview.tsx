@@ -38,6 +38,7 @@ import type {
   LegacyRebaselineConfirmation,
   WorkspaceTask,
   ResultSelection,
+  WorkspacePreview,
 } from "@/types/semanticWorkspace";
 
 const PAGE_SIZE = 100;
@@ -52,6 +53,7 @@ function SourceLinks({ refs, onViewSource }: { refs: Array<Record<string, unknow
 }
 
 type ResultActions = {
+  readOnly?: boolean;
   onAskResult: (index: number, label: string) => void;
   canAskResult: (index: number) => boolean;
   askUnavailable: string;
@@ -723,6 +725,7 @@ export function CandidatePreview({
 }
 
 function VirtualTable({
+  readOnly = false,
   columns,
   rows,
   sorting,
@@ -775,16 +778,16 @@ function VirtualTable({
             | undefined;
           return (
             <div className="space-y-1 py-1">
-              <SourceLinks refs={lineage ?? []} onViewSource={onViewSource} />
-              <button type="button" disabled={!canAskResult(row.index)} title={!canAskResult(row.index) ? askUnavailable : undefined}
+              {readOnly ? <span className="text-xs text-muted-foreground">见资料出处</span> : <SourceLinks refs={lineage ?? []} onViewSource={onViewSource} />}
+              {!readOnly && <button type="button" disabled={!canAskResult(row.index)} title={!canAskResult(row.index) ? askUnavailable : undefined}
                 onClick={() => onAskResult(row.index, columns.map(column => String(row.original[column] ?? "")).join(" · ").slice(0, 120))}
-                className="whitespace-nowrap text-xs text-primary hover:underline focus-visible:ring-2 focus-visible:ring-ring disabled:text-muted-foreground disabled:cursor-not-allowed">围绕此结果追问</button>
+                className="whitespace-nowrap text-xs text-primary hover:underline focus-visible:ring-2 focus-visible:ring-ring disabled:text-muted-foreground disabled:cursor-not-allowed">围绕此结果追问</button>}
             </div>
           );
         },
       },
     ],
-    [columns, onViewSource, onAskResult, canAskResult, askUnavailable],
+    [columns, onViewSource, onAskResult, canAskResult, askUnavailable, readOnly],
   );
   const table = useReactTable({
     data: rows,
@@ -819,7 +822,7 @@ function VirtualTable({
           <button
             key={header.id}
             type="button"
-            disabled={!header.column.getCanSort()}
+            disabled={readOnly || !header.column.getCanSort()}
             onClick={header.column.getToggleSortingHandler()}
             className="flex h-10 items-center gap-1 border-r px-3 text-left last:border-r-0 hover:bg-muted disabled:cursor-default"
           >
@@ -872,6 +875,7 @@ function VirtualTable({
 }
 
 function DocumentResult({
+  readOnly = false,
   items,
   onViewSource,
   onAskResult,
@@ -892,17 +896,28 @@ function DocumentResult({
               </span>
               <h3 className="mt-1 text-sm font-semibold">{item.label}</h3>
             </div>
-            <SourceLinks refs={item.evidence_refs} onViewSource={onViewSource} />
+            {!readOnly && <SourceLinks refs={item.evidence_refs} onViewSource={onViewSource} />}
           </div>
           <p className="mt-3 whitespace-pre-wrap text-sm leading-7 text-muted-foreground">
             {item.content}
           </p>
-          <button type="button" disabled={!canAskResult(index)} title={!canAskResult(index) ? askUnavailable : undefined} onClick={() => onAskResult(index, item.label)}
-            className="mt-3 rounded-lg border px-3 py-2 text-xs text-primary hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:text-muted-foreground disabled:cursor-not-allowed">围绕此结果追问</button>
+          {!readOnly && <button type="button" disabled={!canAskResult(index)} title={!canAskResult(index) ? askUnavailable : undefined} onClick={() => onAskResult(index, item.label)}
+            className="mt-3 rounded-lg border px-3 py-2 text-xs text-primary hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:text-muted-foreground disabled:cursor-not-allowed">围绕此结果追问</button>}
         </article>
       ))}
     </div>
   );
+}
+
+/** 历史资料只读预览沿用正式结果渲染，不生成追问或来源任务。 */
+export function ReusableResultPreview({ preview }: { preview: WorkspacePreview }) {
+  const [view, setView] = useState(initialResultView);
+  const actions = { readOnly: true, onAskResult: () => undefined, canAskResult: () => false, askUnavailable: "历史资料仅供本次选择预览" };
+  return <div className="min-w-0">
+    {preview.kind === "table" ? <VirtualTable columns={preview.columns} rows={preview.rows} sorting={[]} onSortingChange={() => undefined}
+      onViewSource={() => undefined} viewState={view} onViewStateChange={patch => setView(current => ({ ...current, ...patch }))} {...actions} />
+      : <><DocumentResult items={preview.items} onViewSource={() => undefined} {...actions} />{preview.warnings.map((warning, index) => <p key={index} className="mt-2 text-xs text-muted-foreground">{warning}</p>)}</>}
+  </div>;
 }
 
 export function ResultPreview({

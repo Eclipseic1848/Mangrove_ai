@@ -25,6 +25,8 @@ from src.data_prep.document_models import DocumentElement
 from src.data_prep.models import RawArtifact
 from src.parsers.registry import get_parser_registry
 from src.services.upload_store import UploadStore
+from src.source_acquisition.reuse import guarded_response
+from src.api.execution import execution_to_thread
 
 from ..auth import get_current_user, get_store
 
@@ -70,6 +72,7 @@ def get_upload(
 
 
 @router.get("/uploads/{upload_id}/content")
+@guarded_response("preview", lambda values: [{"upload_id":values["upload_id"]}])
 def get_upload_content(
     upload_id: str,
     user=Depends(get_current_user),
@@ -89,6 +92,7 @@ def get_upload_content(
 
 
 @router.get("/uploads/{upload_id}/document-preview")
+@guarded_response("preview", lambda values: [{"upload_id":values["upload_id"]}], joined_reader=True)
 async def get_document_preview(
     upload_id: str,
     user=Depends(get_current_user),
@@ -116,7 +120,7 @@ async def get_document_preview(
             detail="未找到 DOCX 解析器",
         )
 
-    raw_bytes = await asyncio.to_thread(Path(item.storage_path).read_bytes)
+    raw_bytes = await execution_to_thread(Path(item.storage_path).read_bytes)
     artifact = RawArtifact(
         artifact_id=f"raw-{item.sha256[:16]}",
         source_id=f"upload:{upload_id}",
@@ -127,7 +131,7 @@ async def get_document_preview(
         sha256=item.sha256,
         storage_path=item.storage_path,
     )
-    records, rejects = await asyncio.to_thread(parser.parse, artifact, raw_bytes)
+    records, rejects = await execution_to_thread(parser.parse, artifact, raw_bytes)
     elements = [
         DocumentElement.model_validate(raw_element)
         for record in records
@@ -156,7 +160,13 @@ def delete_upload(
     """删除上传项。跨用户返回 404。"""
     store = get_upload_store()
     try:
-        store.delete(user["user_id"], upload_id)
+        from src.source_acquisition.reuse import source_locks,assert_no_open_uses
+        ref={"upload_id":upload_id}
+        with source_locks(user["user_id"],[ref]):
+            assert_no_open_uses(user["user_id"],ref)
+            store.delete(user["user_id"], upload_id)
+    except ValueError as exc:
+        raise HTTPException(409,str(exc)) from exc
     except PermissionError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="上传不存在")
     return {"ok": True}

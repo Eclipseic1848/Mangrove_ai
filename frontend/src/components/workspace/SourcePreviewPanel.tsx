@@ -26,7 +26,8 @@ import {
 } from "@/lib/dataPrepApi";
 import type { UploadItem } from "@/types/dataPrep";
 import type { WorkspaceTask } from "@/types/semanticWorkspace";
-import { downloadWorkspaceSourceBundle, getWorkspaceSourcePreview } from "@/lib/semanticWorkspaceApi";
+import { downloadWorkspaceSourceBundle, getWorkspaceSourcePreview, previewTaskReusableOutput } from "@/lib/semanticWorkspaceApi";
+import { ReusableResultPreview } from "./ResultPreview";
 import { downloadFile } from "@/lib/api";
 import { toast } from "sonner";
 
@@ -82,6 +83,8 @@ export function SourcePreviewPanel({
   task?: WorkspaceTask;
 }) {
   const webArtifacts = (task?.web_sources ?? (task?.web_source ? [task.web_source] : [])).flatMap(source => source.snapshot.artifacts);
+  const derivedSources = (task?.reusable_sources ?? []).filter(item => item.kind === "delivery_output");
+  const selectedDerived = derivedSources.find(item => item.output_id === selectedUploadId);
   const selectedUpload =
     uploads.find((upload) => upload.upload_id === selectedUploadId)
     ?? (!selectedUploadId ? uploads[0] : null)
@@ -144,11 +147,25 @@ export function SourcePreviewPanel({
       const data = await getWorkspaceSourcePreview(task!.task_id, selectedUploadId!, sourceParams);
       if (data.task_id !== task!.task_id || data.revision !== task!.viewing_revision || data.artifact_id !== selectedUploadId
         || (typeof evidence?.source_sha256 === "string" && evidence.source_sha256 !== data.sha256)
-        || (selectedUpload && data.sha256 !== selectedUpload.sha256)) throw new Error("来源身份或版本不匹配，请重新选择来源");
+        || (selectedUpload && data.sha256 !== selectedUpload.sha256)
+        || (selectedDerived && data.sha256 !== selectedDerived.sha256)) throw new Error("来源身份或版本不匹配，请重新选择来源");
       if (data.content_url && (!data.upload_id || data.content_url !== `/api/data-sources/uploads/${data.upload_id}/content`)) throw new Error("来源原件地址不可用");
       return data;
     },
-    enabled: Boolean(task && selectedUploadId), retry: false,
+    enabled: Boolean(task && selectedUploadId && !selectedDerived), retry: false,
+  });
+  // 每次重新选取都重新检查正式本体；读取期间的旧缓存不授予展示权限。
+  const derivedPreview = useQuery({
+    queryKey: ["workspace-task-derived-source", task?.task_id, task?.viewing_revision, selectedDerived?.source_key, selectedDerived?.sha256, currentView.offset ?? 0],
+    queryFn: async () => {
+      const data = await previewTaskReusableOutput(task!.task_id, task!.viewing_revision!, selectedUploadId!, currentView.offset ?? 0);
+      if (data.task_id !== task!.task_id || data.revision !== task!.viewing_revision || data.artifact_id !== selectedUploadId
+        || data.identity !== "derived" || data.source_key !== selectedDerived!.source_key || data.output_id !== selectedDerived!.output_id
+        || data.sha256 !== selectedDerived!.sha256 || data.delivery_id !== selectedDerived!.origin.delivery_id || data.run_id !== selectedDerived!.origin.run_id
+        || data.representation?.kind !== "output" || data.representation.associated_output_id !== selectedUploadId || data.representation.sha256 !== selectedDerived!.sha256) throw new Error("正式来源身份或版本不匹配");
+      return data;
+    },
+    enabled: Boolean(task && selectedDerived), retry: false,
   });
   const selected = selectedUpload ?? (source.data ? { upload_id: source.data.upload_id ?? source.data.artifact_id,
     original_name: source.data.original_name, media_type: source.data.media_type, sha256: source.data.sha256, size_bytes: 0 } : null);
@@ -315,7 +332,8 @@ export function SourcePreviewPanel({
             </option>
           ))}
           {webArtifacts.map(artifact => <option key={artifact.artifact_id} value={artifact.artifact_id}>{artifact.title || artifact.final_url}</option>)}
-          {selectedUploadId && !uploads.some(upload => upload.upload_id === selectedUploadId) && !webArtifacts.some(artifact => artifact.artifact_id === selectedUploadId) && <option value={selectedUploadId}>引用来源</option>}
+          {derivedSources.map(item => <option key={item.source_key} value={item.output_id ?? ""}>处理结果 · {item.label}</option>)}
+          {selectedUploadId && !uploads.some(upload => upload.upload_id === selectedUploadId) && !webArtifacts.some(artifact => artifact.artifact_id === selectedUploadId) && !selectedDerived && <option value={selectedUploadId}>引用来源</option>}
         </select>
         {(ext === "pdf" || isImage) && (
           <>
@@ -373,7 +391,8 @@ export function SourcePreviewPanel({
 
       {isImage && <p className="shrink-0 border-b px-3 py-2 text-xs text-muted-foreground">此预览仅显示原件，不执行文字识别。</p>}
       {task && <div className="shrink-0 space-y-1 border-b px-3 py-2 text-xs text-muted-foreground">
-        <p>版本 V{task.viewing_revision} · {ext === "pdf" ? "PDF 原件" : isImage ? "图片原件" : source.data?.kind === "web" ? "网页摘要预览" : "解析预览"}</p>
+        <p>版本 V{task.viewing_revision} · {selectedDerived ? "正式处理结果 · 非原件" : ext === "pdf" ? "PDF 原件" : isImage ? "图片原件" : source.data?.kind === "web" ? "网页摘要预览" : "解析预览"}</p>
+        {selectedDerived && <><p>来源：{selectedDerived.origin.task_id || "来源任务未记录"} · {selectedDerived.origin.revision ? `V${selectedDerived.origin.revision}` : "版本未记录"} · 生成时间：{selectedDerived.acquired_at ? new Date(selectedDerived.acquired_at).toLocaleString() : "时间未记录"}</p>{selectedDerived.limitations.map((value, index) => <p key={index}>{value}</p>)}</>}
         <p>读取时间：{source.data?.read_at ? new Date(source.data.read_at).toLocaleString() : "未提供"} · 解析版本：{source.data?.representation.parser_or_inspector_version || "未提供"}</p>
         {source.data?.content_url && <button type="button" className="rounded border px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => void downloadFile(source.data!.content_url!, source.data!.original_name).catch(error => toast.error(error instanceof Error ? error.message : "原件下载失败"))}>下载原件</button>}
         {source.data?.kind === "web" && <p>仅展示已保存摘要，内容可能截断，完整性未确认。</p>}
@@ -388,13 +407,13 @@ export function SourcePreviewPanel({
               <option value="none">不附加</option><option value="csv">CSV（适用表格）</option><option value="xlsx">XLSX（适用表格）</option>
             </select>
           </label>
-          <button type="button" disabled={downloadBusy || !(task.upload_ids.length || webArtifacts.length)} onClick={() => void downloadSources()}
+          <button type="button" disabled={downloadBusy || !(task.upload_ids.length || webArtifacts.length || derivedSources.length)} onClick={() => void downloadSources()}
             className="inline-flex min-w-36 items-center justify-center gap-2 rounded border px-3 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50">
             {downloadBusy && <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />}{downloadBusy ? "正在准备下载…" : "下载完整资料包"}
           </button>
           {downloadBusy && <button type="button" onClick={() => { downloadRequest.current?.abort(); downloadRequest.current = null; setDownloadBusy(false); setDownloadStatus("已取消下载"); }} className="rounded border px-3 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring">取消下载</button>}
         </div>
-        {!(task.upload_ids.length || webArtifacts.length) && <p>当前版本没有可下载的已保存来源。</p>}
+        {!(task.upload_ids.length || webArtifacts.length || derivedSources.length) && <p>当前版本没有可下载的已保存来源。</p>}
         {downloadError && <p role="alert" className="text-destructive">{downloadError}</p>}
         {downloadStatus && <p role="status" className="text-muted-foreground">{downloadStatus}</p>}
       </section>}
@@ -448,7 +467,12 @@ export function SourcePreviewPanel({
           if (isImage && !imageSize) return;
           updateView({ scrollTop: event.currentTarget.scrollTop, scrollLeft: event.currentTarget.scrollLeft });
         }}>
-        {readError || pdfError || imageError ? <div role="alert" className="rounded-lg border border-destructive/30 p-4 text-sm text-destructive">来源预览失败：{readError?.message ?? pdfError ?? imageError}<button type="button" className="ml-2 rounded border px-2 py-1" onClick={() => { setPdfError(null); setImageError(null); void (source.isError ? source.refetch() : file.isError || ext === "pdf" || isImage ? file.refetch() : task ? source.refetch() : table ? tablePreview.refetch() : documentPreview.refetch()); }}>重试</button></div>
+        {selectedDerived ? <div className="space-y-3">
+          {derivedPreview.isError ? <p role="alert" className="text-sm text-destructive">{derivedPreview.error.message}，请重新核对来源。</p>
+            : derivedPreview.isLoading || derivedPreview.isFetching ? <p role="status">正在读取正式来源…</p>
+            : derivedPreview.data && <><ReusableResultPreview key={derivedPreview.data.offset} preview={derivedPreview.data} /><p className="text-xs text-muted-foreground">仅显示当前窗口 · 共 {derivedPreview.data.total} 条</p><div className="flex gap-2"><button type="button" className="rounded border px-3 py-2 text-xs disabled:opacity-40" disabled={derivedPreview.data.offset === 0} onClick={() => updateView({ offset: Math.max(0, derivedPreview.data!.offset - derivedPreview.data!.limit), scrollTop: 0 })}>上一页</button><button type="button" className="rounded border px-3 py-2 text-xs disabled:opacity-40" disabled={derivedPreview.data.offset + derivedPreview.data.limit >= derivedPreview.data.total} onClick={() => updateView({ offset: derivedPreview.data!.offset + derivedPreview.data!.limit, scrollTop: 0 })}>下一页</button></div></>}
+          <button type="button" className="rounded border px-3 py-2 text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => void downloadFile(`/api/semantic-deliveries/outputs/${encodeURIComponent(selectedDerived.output_id!)}`, selectedDerived.label).catch(error => toast.error(error instanceof Error ? error.message : "正式来源下载失败"))}>下载正式来源文件</button>
+        </div> : readError || pdfError || imageError ? <div role="alert" className="rounded-lg border border-destructive/30 p-4 text-sm text-destructive">来源预览失败：{readError?.message ?? pdfError ?? imageError}<button type="button" className="ml-2 rounded border px-2 py-1" onClick={() => { setPdfError(null); setImageError(null); void (source.isError ? source.refetch() : file.isError || ext === "pdf" || isImage ? file.refetch() : task ? source.refetch() : table ? tablePreview.refetch() : documentPreview.refetch()); }}>重试</button></div>
         : source.isLoading || file.isLoading || tablePreview.isLoading || documentPreview.isLoading || ((isImage || ext === "pdf") && file.data && !fileUrl) ? (
           <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-5 w-5 animate-spin" />

@@ -4,10 +4,14 @@ import { WebSourceIntake } from "./WebSourceIntake";
 import { getSourceAcquisition, getTaskContextOptions, previewTaskContext, type TaskContextPreview, type TaskTemplateOption, type OwnerMemoryOption } from "@/lib/semanticWorkspaceApi";
 import type { SourceSnapshot } from "@/types/semanticWorkspace";
 import type { UploadItem } from "@/types/dataPrep";
+import type { ReusableSource } from "@/types/semanticWorkspace";
+import { resolveReusableSources } from "@/lib/semanticWorkspaceApi";
+import { ReusableSourcePicker, ReusableSourceFacts, reusableSelection, sourceId } from "./ReusableSourcePicker";
 
 type ComposerProps = ComponentProps<typeof TaskComposer>;
 export type SourceTaskPayload = Parameters<ComposerProps["onSubmit"]>[0] & {
   sourceSnapshotIds: string[];
+  deliveryOutputIds: string[];
   sourceGoal?: {
     must_include: string[]; explicit_exclusions: string[];
     quantity_requirement: string; completeness_requirement: string;
@@ -20,20 +24,25 @@ type Props = Omit<ComposerProps, "onSubmit" | "onReadWeb"> & {
   ownerId: string;
   draftScope?: string;
   initialSources?: SourceSnapshot[];
+  initialReusableSources?: ReusableSource[];
   preserveContext?: boolean;
   onSubmit: (payload: SourceTaskPayload) => Promise<void>;
 };
 const splitLines = (value: string) => value.split(/[\n,，]/).map(item => item.trim()).filter(Boolean);
 
-export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSources = [], preserveContext = false, onSubmit, ...props }: Props) {
+export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSources = [], initialReusableSources = [], preserveContext = false, onSubmit, ...props }: Props) {
   const storageKey = `mangrove_workspace_draft_${ownerId}_${draftScope}`;
   const filesKey = `${storageKey}_files`;
   const [saved] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(storageKey) || "null") as { draft?: WebIntakeDraft; sources?: Choice[]; mustInclude?: string; exclusions?: string; quantity?: string; completeness?: string; templateId?: string; memoryIds?: number[] } | null; } catch { return null; }
+    try { return JSON.parse(localStorage.getItem(storageKey) || "null") as { draft?: WebIntakeDraft; sources?: Choice[]; history?: ReusableSource[]; mustInclude?: string; exclusions?: string; quantity?: string; completeness?: string; templateId?: string; memoryIds?: number[] } | null; } catch { return null; }
   });
   const [draft, setDraft] = useState<WebIntakeDraft | null>(props.draft ?? saved?.draft ?? null);
   const [sources, setSources] = useState<Choice[]>(() => saved?.sources ?? initialSources.map(snapshot => ({ snapshotId: snapshot.snapshot_id, attemptId: snapshot.attempt_id, snapshot })));
   const [uploads, setUploads] = useState<UploadItem[]>([]);
+  const [history, setHistory] = useState<ReusableSource[]>(() => saved?.history ?? initialReusableSources.filter(item => item.kind === "delivery_output"));
+  const [restoringHistory, setRestoringHistory] = useState(true);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const pickerTrigger = useRef<HTMLElement | null>(null);
   const [webOpen, setWebOpen] = useState(() => { try { return Boolean(localStorage.getItem(`mangrove_web_source_attempt_${ownerId}${draftScope === "new" ? "" : `_${draftScope}`}`)); } catch { return false; } });
   const [webPrompt, setWebPrompt] = useState("");
   const [acquiring, setAcquiring] = useState(false);
@@ -59,6 +68,21 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   useEffect(() => () => { generation.current += 1; }, []);
   useEffect(() => {
     let current = true;
+    if (!history.length) { setRestoringHistory(false); return; }
+    // 恢复只读真实引用，缓存里的标签和正文不能授予继续读取权限。
+    void resolveReusableSources(reusableSelection(history)).then(response => {
+      if (!current) return;
+      setHistory(previous => previous.map(item => {
+        const resolved = response.items.find(value => value.source_key === item.source_key);
+        return resolved && resolved.sha256 === item.sha256 ? resolved : { ...item, availability: "unavailable", reason_code: "identity_changed" };
+      }));
+    }).catch(() => { if (current) setHistory(previous => previous.map(item => ({ ...item, availability: "unknown" }))); })
+      .finally(() => { if (current) setRestoringHistory(false); });
+    return () => { current = false; };
+  }, []);
+  useEffect(() => { if (stale || props.active === false) { generation.current++; setPickerOpen(false); } }, [stale, props.active]);
+  useEffect(() => {
+    let current = true;
     for (const source of sources.filter(item => !item.snapshot)) {
       void getSourceAcquisition(source.attemptId).then(attempt => {
         if (!current) return;
@@ -70,8 +94,10 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   }, []);
   useEffect(() => {
     if (stale) return;
-    try { localStorage.setItem(storageKey, JSON.stringify({ draft, mustInclude, exclusions, quantity, completeness, templateId, memoryIds, sources: sources.map(({ snapshotId, attemptId }) => ({ snapshotId, attemptId })) })); } catch { /* 不存原文，存储不可用时仅当前会话保留。 */ }
-  }, [draft, sources, storageKey, stale, mustInclude, exclusions, quantity, completeness, templateId, memoryIds]);
+    try { localStorage.setItem(storageKey, JSON.stringify({ draft, mustInclude, exclusions, quantity, completeness, templateId, memoryIds,
+      history: history.map(({ source_key, kind, identity, label, sha256, upload_id, output_id, acquired_at, time_kind, media_type, size_bytes, origin }) => ({ source_key, kind, identity, label, sha256, upload_id, output_id, acquired_at, time_kind, media_type, size_bytes, origin, availability: "unknown", limitations: [] })),
+      sources: sources.map(({ snapshotId, attemptId }) => ({ snapshotId, attemptId })) })); } catch { /* 不存原文，存储不可用时仅当前会话保留。 */ }
+  }, [draft, sources, history, storageKey, stale, mustInclude, exclusions, quantity, completeness, templateId, memoryIds]);
   useEffect(() => {
     const changed = (event: StorageEvent) => { if (event.key === storageKey || event.key === filesKey) { generation.current += 1; setStale(true); } };
     window.addEventListener("storage", changed);
@@ -86,11 +112,11 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   }, [hasWeb]);
   const template = options.templates.find(item => item.template_id === templateId);
   const selection = useMemo(() => ({ template: template ? { template_id: template.template_id, version: template.version } : null, memories: memoryIds.map(memory_id => ({ memory_id })) }), [template, memoryIds]);
-  const sourceIdentity = JSON.stringify([sources.map(item => [item.snapshotId, item.snapshot?.artifacts.map(artifact => [artifact.artifact_id, artifact.content_sha256])]), uploads.map(item => [item.upload_id, item.sha256])]);
+  const sourceIdentity = JSON.stringify([sources.map(item => [item.snapshotId, item.snapshot?.artifacts.map(artifact => [artifact.artifact_id, artifact.content_sha256])]), uploads.map(item => [item.upload_id, item.sha256]), history.map(item => [item.source_key, item.sha256, item.availability])]);
   const reviewIdentity = JSON.stringify([sourceIdentity, draft?.prompt, draft?.formats, mustInclude, exclusions, quantity, completeness, selection]);
   const currentReview = useRef(reviewIdentity);
   currentReview.current = reviewIdentity;
-  const ready = sources.every(item => item.snapshot && item.snapshot.coverage.status !== "hard_insufficient" && !item.error);
+  const ready = !restoringHistory && history.every(item => item.availability === "available") && sources.every(item => item.snapshot && item.snapshot.coverage.status !== "hard_insufficient" && !item.error);
   const contextReady = preserveContext || !hasWeb || Boolean(preview?.identity === reviewIdentity && quantity.trim() && completeness.trim());
   const review = async () => {
     if (!draft?.prompt.trim() || reviewing) return;
@@ -108,24 +134,36 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   return <div ref={container} className="space-y-3" aria-label="当前任务资料">
     {stale && <p role="alert" className="rounded-lg border p-3 text-sm">当前草稿已在其他页面更新，请刷新页面恢复最新选择；本页不会覆盖它。</p>}
     <TaskComposer {...props} draft={draft} onDraftChange={updateDraft} active={props.active !== false && !stale} uploadStorageKey={filesKey}
-      webSourceCount={sources.length} sourceBusy={acquiring || submitting} submitBlocked={stale || !ready || !contextReady || webOpen}
+      webSourceCount={sources.length} additionalSourceCount={history.length} additionalInputFormats={history.map(item => { const format = item.label.split(".").pop()?.toLowerCase() || ""; return format === "md" ? "markdown" : format; })}
+      sourceBusy={acquiring || submitting || restoringHistory} submitBlocked={stale || !ready || !contextReady || webOpen || pickerOpen}
+      onPickSources={() => { pickerTrigger.current = document.activeElement as HTMLElement; setPickerOpen(true); }}
       sourceIdentity={sourceIdentity}
       onUploadsChange={value => { setUploads(value); props.onUploadsChange?.(value); }}
       onReadWeb={value => { updateDraft(value); setWebPrompt(value.prompt); setWebOpen(true); }}
       onSubmit={async payload => {
-        if (stale || !ready || !contextReady || webOpen) return;
+        if (stale || !ready || !contextReady || webOpen || pickerOpen) return;
         const requestGeneration = generation.current;
         const storedDraft = localStorage.getItem(storageKey);
         const storedFiles = localStorage.getItem(filesKey);
         setSubmitting(true);
         try {
-          await onSubmit({ ...payload, sourceSnapshotIds: sources.map(item => item.snapshotId), ...(hasWeb && !preserveContext && preview ? { sourceGoal: {
+          if (history.length) {
+            const resolved = await resolveReusableSources(reusableSelection(history));
+            if (requestGeneration !== generation.current) return;
+            if (history.some(item => !resolved.items.some(value => value.source_key === item.source_key && value.sha256 === item.sha256 && value.availability === "available"))) {
+              setHistory(current => current.map(item => resolved.items.find(value => value.source_key === item.source_key && value.sha256 === item.sha256) ?? { ...item, availability: "unavailable" }));
+              throw new Error("历史资料已不可用，请核对当前选择");
+            }
+          }
+          const allUploads = [...new Map([...payload.uploads, ...history.filter(item => item.kind === "upload").map(item => ({ upload_id: sourceId(item), original_name: item.label, media_type: item.media_type || "", size_bytes: item.size_bytes ?? 0, sha256: item.sha256 || "" }))].map(item => [item.upload_id, item])).values()];
+          await onSubmit({ ...payload, uploads: allUploads, deliveryOutputIds: history.filter(item => item.kind === "delivery_output").map(sourceId), sourceSnapshotIds: sources.map(item => item.snapshotId), ...(hasWeb && !preserveContext && preview ? { sourceGoal: {
             must_include: splitLines(mustInclude), explicit_exclusions: splitLines(exclusions), quantity_requirement: quantity.trim(), completeness_requirement: completeness.trim(),
             context_purpose: "web_research", context_selection: selection, context_preview_sha256: preview.value.preview_sha256,
           } } : {}) });
           try { if (requestGeneration === generation.current && localStorage.getItem(storageKey) === storedDraft && localStorage.getItem(filesKey) === storedFiles) { localStorage.removeItem(storageKey); localStorage.removeItem(filesKey); } } catch { /* 当前草稿已完成。 */ }
         } finally { setSubmitting(false); }
       }}>
+      {history.length > 0 && <section aria-label="已选历史资料" className="mt-3 space-y-3 border-t pt-3">{history.map(item => <div key={item.source_key} className="flex items-start gap-3 border-b pb-3"><div className="min-w-0 flex-1"><p className="break-all text-sm font-medium">{item.label}</p><ReusableSourceFacts item={item} /></div><button type="button" aria-label={`移除历史资料 ${item.label}`} disabled={submitting} className="shrink-0 rounded border px-2 py-1 text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { generation.current++; setHistory(current => current.filter(value => value.source_key !== item.source_key)); }}>从本次移除</button></div>)}<p className="text-xs text-muted-foreground">只移除本次引用，不删除历史资料。</p></section>}
       {hasWeb && <section className="mt-3 space-y-3 border-t pt-3" aria-label="已选网页资料">
         {sources.map(source => <div key={source.snapshotId} className="rounded-xl border p-3 text-xs">
           <div className="flex items-start justify-between gap-3"><div className="min-w-0 break-words">
@@ -156,6 +194,22 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
         </>}
       </section>}
     </TaskComposer>
+    {pickerOpen && <ReusableSourcePicker selectedKeys={[...uploads.map(item => `upload:${item.upload_id}`), ...sources.map(item => `snapshot:${item.snapshotId}`), ...history.map(item => item.source_key)]}
+      onClose={added => { generation.current++; setPickerOpen(false); requestAnimationFrame(() => { if (added) container.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务要求"]')?.focus(); else pickerTrigger.current?.focus(); }); }}
+      onAdd={async items => {
+        const requestGeneration = generation.current;
+        const snapshots = await Promise.all(items.filter(item => item.kind === "snapshot").map(async item => {
+          if (!item.attempt_id) throw new Error("网页快照缺少恢复身份");
+          const attempt = await getSourceAcquisition(item.attempt_id);
+          if (!attempt.snapshot || attempt.snapshot.snapshot_id !== item.source_snapshot_id) throw new Error("网页快照身份已变化");
+          return { snapshotId: attempt.snapshot.snapshot_id, attemptId: item.attempt_id, snapshot: attempt.snapshot };
+        }));
+        if (requestGeneration !== generation.current) return;
+        setSources(current => [...new Map([...current, ...snapshots].map(item => [item.snapshotId, item])).values()]);
+        setHistory(current => [...new Map([...current, ...items.filter(item => item.kind !== "snapshot" && !uploads.some(upload => upload.upload_id === item.upload_id))].map(item => [item.source_key, item])).values()]);
+        const next = draft ?? { prompt: "", connectionId: null, connectionModel: null, localModel: props.defaultModel?.model ?? null };
+        updateDraft({ ...next, formats: next.formats?.length ? next.formats : ["markdown"] });
+      }} />}
     {webOpen && <section aria-label="网页资料" className="rounded-xl border p-3">
       <button type="button" disabled={acquiring} onClick={closeWeb} className="mb-3 rounded-lg border px-3 py-2 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">返回当前资料</button>
       <WebSourceIntake draft={draft} initialPrompt={webPrompt} ownerId={ownerId} storageScope={draftScope === "new" ? undefined : draftScope}

@@ -667,7 +667,9 @@ class SemanticWorkspaceManager:
             self._agent_kernels[agent_kernel.adapter_id] = agent_kernel
             self._primary_adapter_id = agent_kernel.adapter_id
         if not self._agent_kernels:
+            from src.source_acquisition.reuse import workspace_source_read_context
             runtime = pi_runtime or PiRuntime(
+                source_read_context=workspace_source_read_context,
                 capability_mount_resolver=DefaultCapabilityMounts(
                     db_path=settings.webui_db_path,
                     oci_layout_path=settings.capability_oci_layout_path,
@@ -705,6 +707,7 @@ class SemanticWorkspaceManager:
             self._agent_kernels[pi_kernel.adapter_id] = pi_kernel
             if settings.coremind_runtime_enabled:
                 coremind_options = dict(
+                    source_read_context=workspace_source_read_context,
                     execution_root=Path(settings.semantic_execution_root) / "coremind-runs",
                     candidate_verifier_factory=self._build_full_candidate_verifier,
                     relay_base_url=settings.coremind_runtime_relay_base_url or f"http://127.0.0.1:{settings.api_port}/internal/model-relay",
@@ -2618,6 +2621,11 @@ class SemanticWorkspaceManager:
                     media_type=upload.media_type,
                 )
             )
+        from src.source_acquisition.reuse import resolve_frozen_source
+        for source_ref in task_revision.get("source_refs", []):
+            if source_ref.get("kind") == "delivery_output":
+                output=resolve_frozen_source(user_id,source_ref)
+                sources.append(SourceInput(upload_id=source_ref["output_id"],original_name=output["label"],host_path=output["host_path"],sha256=output["sha256"],media_type=output["media_type"]))
         web_repository = SourceAcquisitionRepository(settings.webui_db_path)
         for source_ref in task_revision.get("source_refs", []):
             if source_ref.get("kind") != "web_artifact":

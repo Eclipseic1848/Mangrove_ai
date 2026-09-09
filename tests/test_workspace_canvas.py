@@ -213,6 +213,20 @@ def test_result_selection_rejects_foreign_stale_or_forged_identity(canvas, monke
     assert client.get(f"/api/semantic-workspace/tasks/{task_id}/sources/{upload.upload_id}/preview", params={"revision": 1}).status_code == 404
 
 
+def _source_preview_task(*uploads):
+    """格式测试同样冻结真实来源，不能仅靠预览替身冒充任务成员。"""
+    from src.api.auth import get_store
+
+    task_id = "preview_" + uploads[0].upload_id
+    get_store().create_semantic_workspace_task(
+        "user-a", task_id=task_id, title="来源预览", objective_text="检查合成资料",
+        upload_ids=[item.upload_id for item in uploads],
+        source_refs=[{"upload_id": item.upload_id, "sha256": item.sha256} for item in uploads],
+        output_formats=["json"], provider="local", model="fixture", external_api_confirmed=False,
+    )
+    return task_id
+
+
 def test_source_full_window_multisheet_physical_rows_and_fail_closed(canvas, tmp_path, monkeypatch):
     from openpyxl import Workbook
     from src.services.upload_store import UploadStore
@@ -231,6 +245,7 @@ def test_source_full_window_multisheet_physical_rows_and_fail_closed(canvas, tmp
     workbook.save(file)
     upload = UploadStore(root=str(tmp_path / "uploads"), max_bytes=10_000_000).save_bytes("user-a", file.name, file.read_bytes())
     report = inspect_tabular_path(artifact_id=upload.upload_id, artifact_sha256=upload.sha256, path=Path(upload.storage_path), original_name=file.name, declared_media_type=upload.media_type).model_dump(mode="json")
+    task_id = _source_preview_task(upload)
     monkeypatch.setattr(routes, "_frozen_canvas_sources", lambda *args: {upload.upload_id: {"sha256": upload.sha256, "report": report}})
     url = f"/api/semantic-workspace/tasks/{task_id}/sources/{upload.upload_id}/preview"
     params = {"revision": 1, "table_ref": report["tables"][1]["table_ref"], "limit": 5, "row_number": 37, "sort_by": "金额", "sort_direction": "desc"}
@@ -266,6 +281,7 @@ def test_source_document_version_page_and_membership_are_explicit(canvas, tmp_pa
     pdf = tmp_path / "pages.pdf"
     writer.write(pdf)
     pdf_upload = uploads.save_bytes("user-a", pdf.name, pdf.read_bytes())
+    task_id = _source_preview_task(upload, pdf_upload)
     monkeypatch.setattr(routes, "_frozen_canvas_sources", lambda *args: {item.upload_id: {"sha256": item.sha256} for item in (upload, pdf_upload)})
     url = f"/api/semantic-workspace/tasks/{task_id}/sources/{upload.upload_id}/preview"
     full = client.get(url, params={"revision": 1}).json()
@@ -292,6 +308,7 @@ def test_csv_source_window_and_executor_preserve_identical_multiline_records(can
     client, _, task_id, _, _ = canvas
     raw = 'name,note\nfirst,"line one\nline two"\nsecond,ok\n'.encode("utf-8")
     upload = UploadStore(root=str(tmp_path / "uploads"), max_bytes=1_000_000).save_bytes("user-a", "lines.csv", raw)
+    task_id = _source_preview_task(upload)
     monkeypatch.setattr(routes, "_frozen_canvas_sources", lambda *args: {upload.upload_id: {"sha256": upload.sha256}})
     response = client.get(f"/api/semantic-workspace/tasks/{task_id}/sources/{upload.upload_id}/preview", params={"revision": 1})
     assert response.status_code == 200, response.text
@@ -315,6 +332,7 @@ def test_image_source_preview_is_original_without_ocr(canvas, tmp_path, monkeypa
     payload = buffer.getvalue()
     uploads = UploadStore(root=str(tmp_path / "uploads"), max_bytes=4096)
     upload = uploads.save_bytes("user-a", "rotated.jpg", payload, verify_magic=True)
+    task_id = _source_preview_task(upload)
     monkeypatch.setattr(routes, "_frozen_canvas_sources", lambda *args: {upload.upload_id: {"sha256": upload.sha256}})
     monkeypatch.setattr(ImageParser, "parse", lambda *args: pytest.fail("原件预览禁止触发 OCR"))
     url = f"/api/semantic-workspace/tasks/{task_id}/sources/{upload.upload_id}/preview"
@@ -382,6 +400,7 @@ def test_source_formula_without_cache_and_tampered_source_are_rejected(canvas, t
     file = tmp_path / "formula.xlsx"
     workbook.save(file)
     upload = UploadStore(root=str(tmp_path / "uploads"), max_bytes=1_000_000).save_bytes("user-a", file.name, file.read_bytes())
+    task_id = _source_preview_task(upload)
     monkeypatch.setattr(routes, "_frozen_canvas_sources", lambda *args: {upload.upload_id: {"sha256": upload.sha256}})
     url = f"/api/semantic-workspace/tasks/{task_id}/sources/{upload.upload_id}/preview?revision=1"
     assert client.get(url).status_code == 409

@@ -12,9 +12,12 @@ from fastapi.testclient import TestClient
 from src.api.auth import get_current_user
 from src.api.routes.data_sources import router
 from src.config.settings import settings
+from tests.database_migration_helpers import migrated_webui_database
 
 
 def _make_client(tmp_path: Path, monkeypatch, *, max_bytes: int = 1024, user_id: str = "user-a") -> TestClient:
+    # 读取使用登记也必须落在测试库，不能沿用本机默认数据库。
+    monkeypatch.setattr(settings, "webui_db_path", str(migrated_webui_database(tmp_path / "uploads.db")))
     monkeypatch.setattr(settings, "data_prep_upload_root", str(tmp_path))
     monkeypatch.setattr(settings, "data_prep_max_upload_bytes", max_bytes)
     app = FastAPI()
