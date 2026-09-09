@@ -110,6 +110,29 @@ export function previewTaskContext(payload: {
   return api.post(`${BASE}/context-preview`, payload);
 }
 
+export type CapabilityNeed = {
+  purpose: string;
+  operations: string[];
+  input_formats: string[];
+  output_formats: string[];
+};
+
+export type CapabilityResolution = {
+  matches: Array<{
+    ref: { pack_id: string; version: string; digest: string };
+    compatibility: Omit<CapabilityNeed, "purpose">;
+    authorization: "freeze_gate_passed";
+    health: "not_checked";
+    license: string;
+    source_provenance: string[];
+  }>;
+  gaps: Array<{ code: string; remediation: string }>;
+};
+
+export function resolveWorkspaceCapabilities(need: CapabilityNeed): Promise<CapabilityResolution> {
+  return api.post(`${BASE}/capabilities/resolve`, { need, allow_discovery: false });
+}
+
 export type GrayCapability = {
   pack_id: string;
   version: string;
@@ -118,6 +141,7 @@ export type GrayCapability = {
   kind: "tool" | "mcp_local" | "skill" | "dependency_bundle" | "capability_pack";
   purpose: string;
   scope: "platform" | "personal";
+  reuse_need?: CapabilityNeed | null;
 };
 
 export function listGrayCapabilities(): Promise<{
@@ -161,6 +185,7 @@ export function createWorkspaceTask(payload: {
   model_connection_id?: string | null;
   model_connection_model?: string | null;
   external_api_confirmed?: boolean;
+  capability_need?: CapabilityNeed;
   capability_pack_refs?: Array<{
     pack_id: string;
     version: string;

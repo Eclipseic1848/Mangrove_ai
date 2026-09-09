@@ -199,6 +199,42 @@ class CapabilityHost:
             await asyncio.sleep(0.25)
         raise RuntimeError("Capability Host 健康检查超时")
 
+    async def invoke(self, lease: CapabilityHostLease, payload: dict) -> dict:
+        """固定协议调用，无 Shell；租约身份与冻结能力名不能由参数替换。"""
+        if set(payload) - {"capability", "arguments", "tool"}:
+            raise ValueError("能力调用字段无效")
+        name = payload.get("capability")
+        if name not in lease.capability_names:
+            raise ValueError("能力不在当前租约中")
+        arguments = payload.get("arguments")
+        kind = dict(lease.capability_kinds).get(name)
+        if kind == "mcp_local":
+            if not isinstance(arguments, dict) or not isinstance(payload.get("tool"), str) or not payload["tool"]:
+                raise ValueError("MCP 调用字段无效")
+        elif kind not in {"python", "node", "cli"} or "tool" in payload or not isinstance(arguments, list) or any(not isinstance(value, str) for value in arguments):
+            raise ValueError("原生能力参数必须为字符串数组")
+        encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False)
+        if len(encoded.encode("utf-8")) > 64 * 1024:
+            raise ValueError("能力输入超过限制")
+        resource_id = await owned_resource_id(self._docker, "container", lease.container_name, lease.owner_identity)
+        if resource_id is None:
+            raise RuntimeError("能力容器已失效")
+        script = (
+            "(async()=>{const r=await fetch('http://127.0.0.1:8765/invoke',{method:'POST',"
+            "headers:{authorization:'Bearer '+process.env.MANGROVE_CAPABILITY_TOKEN,'content-type':'application/json'},"
+            "body:process.argv[1]});let n=0;const chunks=[];for await(const b of r.body){n+=b.length;"
+            "if(n>2097152)throw Error('response limit');chunks.push(b)}"
+            "if(!r.ok)throw Error('invoke failed');process.stdout.write(Buffer.concat(chunks))})()"
+            ".catch(()=>process.exit(1))"
+        )
+        result = await self._docker(("docker", "exec", resource_id, "node", "-e", script, encoded))
+        if result.returncode or len(result.stdout.encode("utf-8")) > 2 * 1024 * 1024:
+            raise RuntimeError("能力调用结果未知，禁止自动重放")
+        value = json.loads(result.stdout)
+        if not isinstance(value, dict) or any(not isinstance(value.get(key, ""), str) for key in ("stdout", "stderr")):
+            raise RuntimeError("能力结果协议无效")
+        return {key: value.get(key, "") for key in ("stdout", "stderr")}
+
     async def stop(self, lease: CapabilityHostLease) -> None:
         resource_id = await owned_resource_id(self._docker, "container", lease.container_name, lease.owner_identity)
         stop_error = ""

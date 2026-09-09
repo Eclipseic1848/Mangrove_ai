@@ -568,6 +568,11 @@ class AgentKernel:
     def adapter_id(self) -> str:
         return self._adapter.manifest.adapter_id
 
+    @property
+    def runtime_artifact(self) -> str:
+        """用于选择已冻结的执行合同，不触发运行或外部解析。"""
+        return self._adapter.manifest.runtime_artifact
+
     def frozen_binding(
         self,
         user_id: str,

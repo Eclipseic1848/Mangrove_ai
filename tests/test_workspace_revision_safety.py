@@ -94,9 +94,12 @@ def test_binding_identity_drift_rejected_before_cancel(proposed, monkeypatch, ch
 
     class BindingManager(_ApiManager):
         prepare_runtime_binding = SemanticWorkspaceManager.prepare_runtime_binding
+        _uses_capability_contract = SemanticWorkspaceManager._uses_capability_contract
+        _capability_agent_kernel = None
 
-        def _kernel(self, adapter_id):
+        def _kernel(self, adapter_id, *, capability_tools_enabled=False):
             assert adapter_id == "fixture-adapter"
+            assert capability_tools_enabled is False
             return PreparedKernel()
 
     manager = BindingManager()

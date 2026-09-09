@@ -88,6 +88,7 @@ from src.conversation_steering.models import FrozenResultContext, ResultSelectio
 from src.conversation_steering.repository import ResultContextConflict
 from src.delivery_publishing.models import TableOutputContract
 from src.services.upload_store import IMAGE_EXTENSIONS, UploadStore
+from src.capability_catalog.reuse import ToolNeed, match_installed_tools, discover_open_source_candidates
 from src.source_acquisition import (
     AcquisitionConflictError,
     AnonymousWebFetcher,
@@ -334,6 +335,7 @@ class WorkspaceTaskCreateIn(BaseModel):
     )
     model_connection_model: str | None = Field(default=None, min_length=1, max_length=200)
     capability_pack_refs: tuple[CapabilityPackRef, ...] = ()
+    capability_need: ToolNeed | None = None
     # #15 D9 验证任务标记：本任务是为验证该个人 draft 能力而创建；
     # 仅在 create_task 校验后随冻结 selection 落库。
     validation_target: CapabilityPackRef | None = None
@@ -1343,6 +1345,38 @@ def _workspace_question(user_id, task):
     return question
 
 
+class CapabilityResolveRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    need: ToolNeed
+    allow_discovery: bool = False
+
+
+def _approved_tool_matches(user, need):
+    _require_capability_gray(user)
+    catalog = _capability_catalog()
+    actor = catalog_actor_from_user(user)
+    result = match_installed_tools(catalog, actor, need)
+    approved = []
+    for match in result["matches"]:
+        ref = CapabilityPackRef.model_validate(match["ref"])
+        try:
+            _check_freeze_gate(actor, (ref,), catalog)
+        except HTTPException:
+            result["gaps"].append({"ref": match["ref"], "code": "governance_rejected", "remediation": "请核对能力状态、受众与精确版本，完成治理修复后重试"})
+            continue
+        approved.append({**match, "authorization": "freeze_gate_passed"})
+    result["matches"] = sorted(approved, key=lambda item: (item["ref"]["pack_id"], item["ref"]["version"], item["ref"]["digest"]))
+    return result
+
+
+@router.post("/capabilities/resolve")
+async def resolve_gray_capabilities(payload: CapabilityResolveRequest, user=Depends(get_current_user)):
+    result = _approved_tool_matches(user, payload.need)
+    if not result["matches"] and payload.allow_discovery:
+        result["discovery"] = await discover_open_source_candidates(payload.need, allow_discovery=True)
+    return result
+
+
 @router.get("/capabilities")
 def list_gray_capabilities(user=Depends(get_current_user)):
     """只列出已验证的平台能力；草稿和执行配置不进入灰度选择界面。"""
@@ -1360,6 +1394,19 @@ def list_gray_capabilities(user=Depends(get_current_user)):
             # deprecated/revoked/quarantined 不进入新任务选择（AC3）。
             continue
         manifest = dict(pack.manifest)
+        reuse_need = None
+        try:
+            from src.capability_catalog.reuse import validated_reuse_contract
+            contract = validated_reuse_contract(pack)
+            reuse_need = ToolNeed(
+                purpose=manifest.get("purpose") or "复用当前已批准工具",
+                operations=contract.operations,
+                input_formats=contract.accepts,
+                output_formats=contract.produces,
+            ).model_dump(mode="json")
+        except (ValueError, TypeError):
+            # 缺少兼容声明的旧包保持显式选择，不冒充可自动复用。
+            pass
         kind = manifest.get("kind", "capability_pack")
         if kind not in {
             "tool",
@@ -1380,6 +1427,7 @@ def list_gray_capabilities(user=Depends(get_current_user)):
                 or "提供当前任务所需的专业处理能力"
             ),
             "scope": pack.scope.value,
+            "reuse_need": reuse_need,
             # 推荐指针（#14 回滚命令折叠）；推荐是默认值不是约束。
             "recommended": (
                 projection.recommended_version == pack.version
@@ -1918,6 +1966,18 @@ async def create_task(
         payload.external_api_confirmed = False
         payload.provider = "local"
         payload.model = None
+    reuse_plan = []
+    if payload.capability_need is not None:
+        resolution = _approved_tool_matches(user, payload.capability_need)
+        matches = resolution["matches"]
+        if not matches:
+            raise HTTPException(409, "无兼容且获准的工具；请补充契约或修复治理状态后重试")
+        compatible = [CapabilityPackRef.model_validate(item["ref"]) for item in matches]
+        if payload.capability_pack_refs and any(ref not in compatible for ref in payload.capability_pack_refs):
+            raise HTTPException(409, "所选工具与当前需求或治理许可不兼容")
+        if not payload.capability_pack_refs:
+            payload.capability_pack_refs = (compatible[0],)
+        reuse_plan = [item for item in matches if CapabilityPackRef.model_validate(item["ref"]) in payload.capability_pack_refs]
     capability_catalog = None
     if payload.capability_pack_refs:
         _require_capability_gray(user)
@@ -2058,6 +2118,13 @@ async def create_task(
             "sha256": upload.sha256,
         })
         input_suffixes.add(Path(upload.original_name).suffix.lower())
+    if payload.capability_need is not None:
+        actual_inputs = {"markdown" if suffix == ".md" else suffix.lstrip(".") for suffix in input_suffixes}
+        actual_outputs = {"markdown" if value == "md" else value for value in payload.output_formats}
+        if (payload.source_snapshot_id is not None or not actual_inputs
+            or set(payload.capability_need.input_formats) != actual_inputs
+            or set(payload.capability_need.output_formats) != actual_outputs):
+            raise HTTPException(409, "工具匹配与当前文件或输出格式不一致，请重新匹配；网页来源尚无可复用格式合同")
     source_snapshot = None
     if payload.source_snapshot_id is not None:
         source_snapshot = SourceAcquisitionRepository(
@@ -2278,6 +2345,7 @@ async def create_task(
                         or payload.model
                         or settings.llm_model_name
                     ),
+                    **({"capability_tools_enabled": True} if payload.capability_pack_refs else {}),
                 )
             )
         except Exception:
@@ -2413,6 +2481,13 @@ async def create_task(
             else f"任务已创建，共 {len(source_refs)} 个网页来源"
         ),
     )
+    if reuse_plan:
+        # 只记录精确身份与兼容依据；本地用途正文不进入能力事件。
+        store.append_semantic_workspace_event(
+            user_id, task_id, stage="queued", event_type="capability_reuse_planned",
+            summary="已选择兼容获准工具，启动时仍须真实健康检查",
+            details={"matches": reuse_plan},
+        )
     get_semantic_workspace_manager().enqueue(user_id, task_id)
     return {
         **task,

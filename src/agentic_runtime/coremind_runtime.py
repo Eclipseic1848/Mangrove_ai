@@ -52,6 +52,8 @@ from src.model_connections import (
     ProviderOutcomeUnknownError,
     get_default_broker,
 )
+from src.capability_host import CapabilityHost, CapabilityHostRequest
+from src.capability_adapters import load_runtime_manifests
 
 
 COREMIND_VERSION = "0.7.1"
@@ -97,8 +99,8 @@ class _WorkerSubprocess:
         return self._module.Popen(*args, **kwargs)
 
 
-def _tool_definitions() -> tuple[dict[str, Any], ...]:
-    return (
+def _tool_definitions(capability_tools_enabled: bool = False) -> tuple[dict[str, Any], ...]:
+    definitions = (
         {
             "schemaVersion": 1,
             "registrationId": "mangrove-read-source-v1",
@@ -172,18 +174,34 @@ def _tool_definitions() -> tuple[dict[str, Any], ...]:
             },
         },
     )
+    if not capability_tools_enabled:
+        return definitions
+    return definitions + ({
+        "schemaVersion": 1, "registrationId": "mangrove-invoke-capability-v1",
+        "definitionVersion": 1, "toolId": "mangrove-invoke-capability",
+        "name": "mangrove_invoke_capability", "label": "调用已批准冻结能力",
+        "description": "仅调用本 Run 已批准并核验的只读能力，不接收命令或宿主路径。",
+        "parameters": {"type": "object", "properties": {
+            "capability": {"type": "string", "minLength": 1},
+            "arguments": {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "object"}]},
+            "tool": {"type": "string", "minLength": 1},
+        }, "required": ["capability", "arguments"], "additionalProperties": False},
+        "effect": {"operations": ["read"], "reversible": True},
+        "capability": {"effect": "none", "replay": "idempotent", "concurrency": "workspace_exclusive",
+                       "checkpoint": "none", "durability": "ordinary"},
+    },)
 
 
-def _execution_contract(timeout_seconds: float) -> dict[str, Any]:
+def _execution_contract(timeout_seconds: float, capability_tools_enabled: bool = False) -> dict[str, Any]:
     timeout_ms = max(1_000, int(timeout_seconds * 1_000))
     return {
-        "tools": _tool_definitions(),
+        "tools": _tool_definitions(capability_tools_enabled),
         "permissionProfile": PermissionProfile.STANDARD.value,
         "permissions": {
             "mode": "ask",
             "workspaceOnly": True,
             "network": "deny",
-            "allow": ["mangrove_read_source", "mangrove_submit_candidate"],
+            "allow": [item["name"] for item in _tool_definitions(capability_tools_enabled)],
         },
         "runtime": {
             "maxTurns": 12,
@@ -210,6 +228,11 @@ class CoreMindAgentKernelAdapter:
         connection_broker: ConnectionBroker | None = None,
         relay_base_url: str | None = None,
         tool_names: Mapping[str, str] | None = None,
+        capability_mount_resolver: Callable[[str, str, int], tuple[Path, ...]] | None = None,
+        capability_host: CapabilityHost | None = None,
+        capability_call_validator: Callable[[str, str, int, str, list | dict, str | None], None] | None = None,
+        capability_contract_describer: Callable[[str, str, int], list[dict[str, Any]]] | None = None,
+        capability_tools_enabled: bool = False,
         poll_interval_seconds: float = 0.05,
         timeout_seconds: float = 300.0,
     ) -> None:
@@ -222,14 +245,23 @@ class CoreMindAgentKernelAdapter:
         self._tool_names = {
             "mangrove_read_source": "读取冻结来源",
             "mangrove_submit_candidate": "提交候选结果",
+            **({"mangrove_invoke_capability": "调用已批准冻结能力"} if capability_tools_enabled else {}),
             **dict(tool_names or {}),
         }
         self._poll_interval_seconds = poll_interval_seconds
         self._timeout_seconds = timeout_seconds
         self._clients: dict[tuple[str, str, int], tuple[str, Any, Path]] = {}
+        self._capability_mount_resolver = capability_mount_resolver
+        self._capability_host = capability_host
+        self._capability_call_validator = capability_call_validator
+        self._capability_contract_describer = capability_contract_describer
+        self._capability_descriptions: dict[tuple[str, str, int], str] = {}
+        self._capability_tools_enabled = capability_tools_enabled
+        self._capability_leases: dict[tuple[str, str, int], Any] = {}
+        self._cancelled_capability_runs: set[tuple[str, str, int]] = set()
         contract_digest = hashlib.sha256(
             json.dumps(
-                _execution_contract(timeout_seconds),
+                _execution_contract(timeout_seconds, capability_tools_enabled),
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
@@ -351,12 +383,14 @@ class CoreMindAgentKernelAdapter:
         key = (request.user_id, request.task_id, request.revision)
         self._clients[key] = (binding.external_run_id, client, run_root)
         try:
+            # 先落盘清理身份，崩溃后取消才能找到 Host 创建窗口中的租约。
             self._write_worker_state(run_root, binding.external_run_id, client, "active")
+            await self._prepare_capability_host(request, binding, run_root)
             self._prepare_workspace(request, run_root)
             self._register_tools(client)
             handle = await asyncio.to_thread(
                 client.run,
-                self._runtime_prompt(request),
+                self._runtime_prompt(request) + self._capability_prompt(request),
                 run_id=binding.external_run_id,
             )
             self._assert_handle(handle, binding.external_run_id)
@@ -410,7 +444,9 @@ class CoreMindAgentKernelAdapter:
         key = (request.user_id, request.task_id, request.revision)
         self._clients[key] = (binding.external_run_id, client, run_root)
         try:
+            # 先落盘清理身份，崩溃后取消才能找到 Host 创建窗口中的租约。
             self._write_worker_state(run_root, binding.external_run_id, client, "active")
+            await self._prepare_capability_host(request, binding, run_root)
             self._prepare_workspace(request, run_root)
             self._register_tools(client)
             handle = await asyncio.to_thread(
@@ -476,12 +512,20 @@ class CoreMindAgentKernelAdapter:
         return receipt
 
     async def cancel(self, user_id: str, task_id: str, revision: int) -> None:
+        key = (user_id, task_id, revision)
+        self._cancelled_capability_runs.add(key)
         entry = self._clients.get((user_id, task_id, revision))
         if entry is None:
+            if self._capability_host is not None:
+                owner = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:16]
+                root = self.execution_root / "coremind" / owner / task_id / f"r{revision}"
+                for state in root.glob(f"*/{_WORKER_STATE}"):
+                    await self._capability_host.stop(self._capability_host.cleanup_lease(user_id, task_id, revision, state.parent.name))
             self._assert_persisted_worker_closed(user_id, task_id, revision)
             return
         run_id, client, run_root = entry
         try:
+            await self._stop_capability_host(key)
             await asyncio.to_thread(client.cancel, run_id)
         finally:
             # 控制回执不等于静止；关闭独立 Worker 才是本切片的硬停边界。
@@ -509,6 +553,52 @@ class CoreMindAgentKernelAdapter:
         ):
             raise AgentKernelCapabilityError("CoreMind Adapter 已绑定其他验证 Module")
         self._candidate_verification = service
+
+    async def _prepare_capability_host(self, request, binding, run_root) -> None:
+        key = (request.user_id, request.task_id, request.revision)
+        self._cancelled_capability_runs.discard(key)
+        dirs = tuple(self._capability_mount_resolver(*key)) if self._capability_mount_resolver else ()
+        if bool(dirs) != self._capability_tools_enabled:
+            raise AgentKernelCapabilityError("冻结工具配置与实际能力挂载不一致")
+        if not dirs:
+            return
+        if self._capability_call_validator is None:
+            raise AgentKernelCapabilityError("能力业务合同校验尚未配置")
+        if self._capability_contract_describer is None:
+            raise AgentKernelCapabilityError("能力调用合同描述尚未配置")
+        description = json.dumps(self._capability_contract_describer(*key), ensure_ascii=False, allow_nan=False)
+        if len(description.encode("utf-8")) > 64 * 1024:
+            raise AgentKernelCapabilityError("能力调用合同描述超限")
+        self._capability_descriptions[key] = description
+        mounted = load_runtime_manifests(dirs)
+        if not mounted or any(item.manifest.kind not in {"python", "node", "cli", "mcp_local"}
+                              or "work:write" in item.manifest.permissions
+                              or "network:none" not in item.manifest.permissions for item in mounted):
+            raise AgentKernelCapabilityError("能力不满足本工具配置的只读/无网络权限")
+        if self._capability_host is None:
+            raise AgentKernelCapabilityError("Capability Host 尚未启用")
+        # 恢复重建确定性 Owner/Run 资源，不能复用未知旧会话或更换冻结版本。
+        cleanup = self._capability_host.cleanup_lease(*key, binding.external_run_id)
+        await self._capability_host.stop(cleanup)
+        lease = await self._capability_host.start(CapabilityHostRequest(
+            user_id=request.user_id, task_id=request.task_id, revision=request.revision,
+            run_id=binding.external_run_id, network_name="none", capability_dirs=dirs,
+        ))
+        self._capability_leases[key] = lease
+        if key in self._cancelled_capability_runs:
+            await self._stop_capability_host(key)
+            raise asyncio.CancelledError
+
+    async def _stop_capability_host(self, key) -> None:
+        self._capability_descriptions.pop(key, None)
+        lease = self._capability_leases.get(key)
+        if lease is not None:
+            await self._capability_host.stop(lease)
+            self._capability_leases.pop(key, None)
+
+    def _capability_prompt(self, request) -> str:
+        description = self._capability_descriptions.get((request.user_id, request.task_id, request.revision))
+        return "\n已核冻结能力调用合同（按参数 Schema 调用，不扩展权限）：" + description if description else ""
 
     def _new_client(
         self,
@@ -647,6 +737,11 @@ class CoreMindAgentKernelAdapter:
         run_id: str,
         reason: str,
     ) -> None:
+        host_error = False
+        try:
+            await self._stop_capability_host((user_id, task_id, revision))
+        except Exception:
+            host_error = True
         stopped = False
         cancelled = False
         try:
@@ -678,7 +773,7 @@ class CoreMindAgentKernelAdapter:
             )
         except Exception:
             revoke_error = True
-        if not stopped or not state_saved or revoke_error:
+        if not stopped or not state_saved or revoke_error or host_error:
             # 清理未知不是可静止等待的模型结果未知，交由调用方继续核验停止。
             raise AgentKernelError(
                 "CoreMind Worker 或临时模型授权未能证明已清理"
@@ -798,10 +893,10 @@ class CoreMindAgentKernelAdapter:
             )
 
     @staticmethod
-    def _approval_decision(event: Mapping[str, Any], run_id: str) -> str:
+    def _approval_decision(event: Mapping[str, Any], run_id: str, capability_tools_enabled: bool = False) -> str:
         """只批准当前 Run 冻结目录内、语义未漂移的工具。"""
 
-        definitions = {item["name"]: item for item in _tool_definitions()}
+        definitions = {item["name"]: item for item in _tool_definitions(capability_tools_enabled)}
         definition = definitions.get(str(event.get("tool") or ""))
         if (
             event.get("type") != "approval_required"
@@ -820,7 +915,7 @@ class CoreMindAgentKernelAdapter:
         register = getattr(client, "register_tool_definition", None)
         if not callable(register):
             raise AgentKernelCapabilityError("CoreMind Worker 不支持声明式工具")
-        for definition in _tool_definitions():
+        for definition in _tool_definitions(self._capability_tools_enabled):
             receipt = register(definition)
             if (
                 not isinstance(receipt, Mapping)
@@ -881,7 +976,7 @@ class CoreMindAgentKernelAdapter:
             "MANGROVE_COREMIND_RUN_GRANT_"
             + hashlib.sha256(binding.external_run_id.encode("utf-8")).hexdigest()[:16]
         )
-        contract = _execution_contract(self._timeout_seconds)
+        contract = _execution_contract(self._timeout_seconds, self._capability_tools_enabled)
         config = {
             "schemaVersion": 2,
             "name": "mangrove-agent-kernel",
@@ -915,6 +1010,7 @@ class CoreMindAgentKernelAdapter:
             approval_handler=lambda event: self._approval_decision(
                 event,
                 binding.external_run_id,
+                self._capability_tools_enabled,
             ),
             request_timeout=self._timeout_seconds,
             protocol_version="2.0",
@@ -1112,7 +1208,7 @@ class CoreMindAgentKernelAdapter:
             raise ExecutionDenied("工具执行上下文不属于任务 Owner")
         # 一批回调可先执行多次工具再发事件，必须在真实工具调用前复核。
         get_store().require_account_execution(authorization, "workspace", request.task_id)
-        definitions = {item["name"]: item for item in _tool_definitions()}
+        definitions = {item["name"]: item for item in _tool_definitions(self._capability_tools_enabled)}
         definition = definitions.get(str(call.get("name") or ""))
         if (
             definition is None
@@ -1125,9 +1221,17 @@ class CoreMindAgentKernelAdapter:
         try:
             if definition["name"] == "mangrove_read_source":
                 result = self._read_source(request, call["args"])
-            else:
+            elif definition["name"] == "mangrove_submit_candidate":
                 result = self._submit_candidate(request, run_root, call["args"])
+            elif definition["name"] == "mangrove_invoke_capability":
+                result = await self._invoke_capability(request, binding, run_root, call)
+                get_store().require_account_execution(authorization, "workspace", request.task_id)
+            else:
+                raise AgentKernelCapabilityError("未知工具分支")
             error = None
+        except ExecutionDenied:
+            # Owner 撤权必须中止回调，不能转换成模型可继续消费的工具结果。
+            raise
         except (OSError, UnicodeError, ValueError):
             result = None
             error = "Mangrove 隔离来源或候选参数无效"
@@ -1160,6 +1264,65 @@ class CoreMindAgentKernelAdapter:
             raise AgentKernelResultUnknownError(
                 "CoreMind 工具结果不确定，禁止自动重放副作用"
             )
+
+    async def _invoke_capability(self, request, binding, run_root, call):
+        key = (request.user_id, request.task_id, request.revision)
+        lease = self._capability_leases.get(key)
+        args = dict(call["args"])
+        name = args.get("capability")
+        if key in self._cancelled_capability_runs:
+            raise asyncio.CancelledError
+        if lease is None or name not in lease.capability_names or set(args) - {"capability", "arguments", "tool"}:
+            raise AgentKernelCapabilityError("能力不属于当前冻结 Run")
+        kind = dict(lease.capability_kinds).get(name)
+        arguments = args.get("arguments")
+        if kind == "mcp_local":
+            valid = isinstance(arguments, dict) and isinstance(args.get("tool"), str) and bool(args["tool"])
+        else:
+            valid = "tool" not in args and isinstance(arguments, list) and all(isinstance(item, str) for item in arguments)
+        if not valid or not isinstance(call.get("callId"), str) or not call["callId"]:
+            raise AgentKernelCapabilityError("能力调用 schema 无效")
+        encoded = json.dumps(args, ensure_ascii=False, sort_keys=True, allow_nan=False)
+        if len(encoded.encode("utf-8")) > 64 * 1024:
+            raise AgentKernelCapabilityError("能力调用输入超限")
+        identity = hashlib.sha256((binding.external_run_id + "|" + call["callId"]).encode()).hexdigest()
+        fingerprint = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        journal = run_root / f".capability-call-{identity}.json"
+        if journal.exists():
+            record = json.loads(journal.read_text(encoding="utf-8"))
+            if record.get("input_sha256") != fingerprint or record.get("status") != "returned":
+                raise AgentKernelResultUnknownError("能力调用结果未知或参数改变，禁止重放")
+            return record["result"]
+        if self._capability_call_validator is None:
+            raise AgentKernelCapabilityError("能力业务合同校验尚未配置")
+        try:
+            # 实际调用前重核冻结业务合同；协议封套不能代替业务参数与工具授权。
+            self._capability_call_validator(*key, name, arguments, args.get("tool"))
+        except Exception as exc:
+            raise AgentKernelCapabilityError("能力业务合同拒绝调用") from exc
+        # idempotent 指桥接调用ID去重，不代表远端可重试；pending跨恢复也不得重放。
+        with journal.open("x", encoding="utf-8") as handle:
+            json.dump({"status": "pending", "input_sha256": fingerprint}, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            result = await self._capability_host.invoke(lease, args)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise AgentKernelResultUnknownError("能力调用结果未知，禁止自动重放") from exc
+        if key in self._cancelled_capability_runs or self._capability_leases.get(key) is not lease:
+            raise asyncio.CancelledError
+        from src.account_execution import current_authorization
+        from src.api.auth import get_store
+        get_store().require_account_execution(current_authorization(), "workspace", request.task_id)
+        temporary = journal.with_suffix(".tmp")
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump({"status": "returned", "input_sha256": fingerprint, "result": result}, handle, ensure_ascii=False)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(journal)
+        return result
 
     def _read_source(
         self,

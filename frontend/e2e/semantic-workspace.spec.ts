@@ -4467,6 +4467,176 @@ for (const sample of [{"extension": "jpg", "mime": "image/jpeg", "base64": "/9j/
 });
 
 
+test.describe("#133 获准工具复用", () => {
+  const need = { purpose: "筛选表格记录", operations: ["filter"], input_formats: ["csv", "xlsx"], output_formats: ["csv", "xlsx"] };
+  const capability = { pack_id: "table-tool", version: "1.0.0", digest: `sha256:${"a".repeat(64)}`, name: "表格筛选工具", kind: "tool", purpose: need.purpose, scope: "platform", reuse_need: need };
+  const match = { ref: { pack_id: "approved-table-tool", version: "2.0.0", digest: `sha256:${"b".repeat(64)}` }, compatibility: { operations: ["filter"], input_formats: ["csv"], output_formats: ["xlsx"] }, authorization: "freeze_gate_passed", health: "not_checked", license: "MIT", source_provenance: ["https://github.com/example/table-tool"] };
+  async function prepare(page: Page) {
+    await mockWorkspace(page);
+    await page.route("**/api/semantic-workspace/capabilities", route => route.fulfill({ json: { enabled: true, items: [capability] } }));
+    await page.goto("/data-prep");
+    await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8") });
+    await expect(page.getByText("已上传，等待执行")).toBeVisible();
+    await page.getByRole("textbox", { name: "任务要求" }).fill("保留符合条件的记录");
+    await page.getByRole("button", { name: "更多", exact: true }).click();
+  }
+
+  test("连续任务复用精确版本，当前格式覆盖模板且不发现外部工具", async ({ page }, testInfo) => {
+    await prepare(page);
+    const resolutions: Record<string, unknown>[] = [];
+    const submissions: Record<string, unknown>[] = [];
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await page.route("**/api/semantic-workspace/capabilities/resolve", route => {
+      resolutions.push(route.request().postDataJSON());
+      return route.fulfill({ json: { matches: [match], gaps: [] } });
+    });
+    const created = workspaceTask("reused-task", "candidate_ready", "复用工具任务");
+    await page.route("**/api/semantic-workspace/tasks", async route => {
+      if (route.request().method() !== "POST") return route.fallback();
+      submissions.push(route.request().postDataJSON());
+      await route.fulfill({ status: 202, json: created });
+    });
+    await page.route("**/api/semantic-workspace/tasks/reused-task", route => route.fulfill({ json: workspaceDetail(created) }));
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt) {
+        await page.goto("/data-prep");
+        await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("姓名,工作量\n李四,8\n", "utf-8") });
+        await expect(page.getByText("已上传，等待执行")).toBeVisible();
+        await page.getByRole("textbox", { name: "任务要求" }).fill("保留符合条件的记录");
+        await page.getByRole("button", { name: "更多", exact: true }).click();
+      }
+      await page.getByRole("checkbox", { name: /表格筛选工具/ }).check();
+      await page.getByRole("button", { name: "复用同类工具：表格筛选工具" }).click();
+      await expect(page.getByTestId("capability-reuse-result")).toContainText("可复用：approved-table-tool · v2.0.0");
+      await expect(page.getByTestId("capability-reuse-result")).toContainText("运行时检查健康状态");
+      await expect(page.getByRole("checkbox", { name: /表格筛选工具/ })).not.toBeChecked();
+      if (!attempt) {
+        for (const width of [1440, 390]) {
+          await page.setViewportSize({ width, height: 900 });
+          if (width === 390) await page.getByRole("button", { name: "关闭原文件预览" }).click();
+          await page.getByTestId("capability-reuse-result").scrollIntoViewIfNeeded();
+          await expect(page.getByRole("button", { name: "取消复用" })).toBeVisible();
+          expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+          await page.screenshot({ path: testInfo.outputPath(`reuse-${width}.png`) });
+        }
+        await page.setViewportSize({ width: 1440, height: 900 });
+      }
+      await page.getByRole("button", { name: "开始执行" }).click();
+      await expect(page.getByRole("heading", { name: "复用工具任务" })).toBeVisible();
+    }
+    expect(resolutions).toEqual(Array.from({ length: 2 }, () => ({ need: { ...need, input_formats: ["csv"], output_formats: ["xlsx"] }, allow_discovery: false })));
+    expect(submissions).toHaveLength(2);
+    for (const submitted of submissions) {
+      expect(submitted).toMatchObject({ capability_need: { ...need, input_formats: ["csv"], output_formats: ["xlsx"] }, capability_pack_refs: [match.ref] });
+      expect(submitted).not.toHaveProperty("runtime_version");
+    }
+    expect(errors).toEqual([]);
+  });
+
+  test("修改要求或来源使旧匹配失效，迟到响应不能恢复许可", async ({ page }) => {
+    await prepare(page);
+    const arrived = responseBarrier();
+    const release = responseBarrier();
+    await page.route("**/api/semantic-workspace/capabilities/resolve", async route => {
+      arrived.release();
+      await release.promise;
+      await route.fulfill({ json: { matches: [match], gaps: [] } });
+    });
+    await page.getByRole("button", { name: "复用同类工具：表格筛选工具" }).click();
+    await arrived.promise;
+    await page.getByRole("textbox", { name: "任务要求" }).fill("改为另一组筛选条件");
+    const response = page.waitForResponse("**/api/semantic-workspace/capabilities/resolve");
+    release.release();
+    await response;
+    await page.evaluate(() => new Promise(requestAnimationFrame));
+    await expect(page.getByTestId("capability-reuse-result")).toContainText("请重新匹配工具");
+    await expect(page.getByTestId("capability-reuse-result")).not.toContainText("可复用：");
+    await expect(page.getByRole("button", { name: "开始执行" })).toBeDisabled();
+    await page.getByRole("button", { name: "复用同类工具：表格筛选工具" }).click();
+    await expect(page.getByTestId("capability-reuse-result")).toContainText("可复用：");
+    await page.getByRole("button", { name: "CSV", exact: true }).click();
+    await expect(page.getByTestId("capability-reuse-result")).not.toContainText("可复用：");
+    await expect(page.getByRole("button", { name: "开始执行" })).toBeDisabled();
+    await page.getByRole("button", { name: "CSV", exact: true }).click();
+    await page.getByRole("button", { name: "复用同类工具：表格筛选工具" }).click();
+    await expect(page.getByTestId("capability-reuse-result")).toContainText("可复用：");
+    await page.getByRole("button", { name: "移除 workload.csv" }).click();
+    await expect(page.getByTestId("capability-reuse-result")).not.toContainText("可复用：");
+    await page.getByRole("button", { name: "复用同类工具：表格筛选工具" }).click();
+    await expect(page.getByTestId("capability-reuse-result")).toContainText("请先完成文件上传并选择输出格式");
+  });
+
+  test("不兼容与创建时撤销均阻止启用，用户可明确取消后手选", async ({ page }) => {
+    await prepare(page);
+    await page.route("**/api/semantic-workspace/capabilities/resolve", route => route.fulfill({ json: { matches: [], gaps: [{ code: "governance_rejected", remediation: "工具已撤销，请核对治理状态后重试" }] } }));
+    await page.getByRole("button", { name: "复用同类工具：表格筛选工具" }).click();
+    await expect(page.getByTestId("capability-reuse-result")).toContainText("工具已撤销");
+    await expect(page.getByRole("button", { name: "开始执行" })).toBeDisabled();
+    await page.route("**/api/semantic-workspace/capabilities/resolve", route => route.fulfill({ json: { matches: [match], gaps: [] } }));
+    await page.getByRole("button", { name: "复用同类工具：表格筛选工具" }).click();
+    await expect(page.getByTestId("capability-reuse-result")).toContainText("可复用：");
+    await page.route("**/api/semantic-workspace/tasks", route => route.fulfill({ status: 409, json: { detail: "所选工具与当前需求或治理许可不兼容" } }));
+    await page.getByRole("button", { name: "开始执行" }).click();
+    await expect(page.getByTestId("capability-reuse-result")).toContainText("任务未创建，工具尚未启用");
+    await expect(page.getByRole("button", { name: "开始执行" })).toBeDisabled();
+    await page.getByRole("button", { name: "取消复用" }).click();
+    await page.getByRole("checkbox", { name: /表格筛选工具/ }).check();
+    await expect(page.getByRole("button", { name: "开始执行" })).toBeEnabled();
+  });
+
+  test("匹配后目录清空仍可取消复用，不锁死任务输入", async ({ page }) => {
+    await prepare(page);
+    await page.route("**/api/semantic-workspace/capabilities/resolve", route => route.fulfill({ json: { matches: [match], gaps: [] } }));
+    await page.getByRole("button", { name: "复用同类工具：表格筛选工具" }).click();
+    await expect(page.getByTestId("capability-reuse-result")).toContainText("可复用：");
+    await page.route("**/api/semantic-workspace/capabilities", route => route.fulfill({ json: { enabled: true, items: [] } }));
+    // 用浏览器的恢复联网事件触发目录复核，模拟权限或治理目录被收回。
+    await page.evaluate(() => {
+      window.dispatchEvent(new Event("offline"));
+      window.dispatchEvent(new Event("online"));
+    });
+    await expect(page.getByRole("checkbox", { name: /表格筛选工具/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "开始执行" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "取消复用" })).toBeVisible();
+    await page.getByRole("button", { name: "取消复用" }).click();
+    await expect(page.getByRole("button", { name: "开始执行" })).toBeEnabled();
+  });
+
+  test("Markdown 文件需求使用规范格式，原文件名保持不变", async ({ page }) => {
+    await mockWorkspace(page);
+    await page.route("**/api/semantic-workspace/capabilities", route => route.fulfill({ json: { enabled: true, items: [capability] } }));
+    await page.route("**/api/data-sources/uploads", route => route.fulfill({ json: { upload_id: "upload-markdown", original_name: "来源.md", media_type: "text/markdown", size_bytes: 10, sha256: "0".repeat(64) } }));
+    let request: Record<string, unknown> | null = null;
+    await page.route("**/api/semantic-workspace/capabilities/resolve", route => {
+      request = route.request().postDataJSON();
+      return route.fulfill({ json: { matches: [], gaps: [{ code: "incompatible_contract", remediation: "此工具未声明 Markdown 输入，请选择兼容工具" }] } });
+    });
+    await page.goto("/data-prep");
+    await page.getByRole("textbox", { name: "任务要求" }).fill("从文档筛选记录");
+    await page.locator('input[type="file"]').setInputFiles({ name: "来源.md", mimeType: "text/markdown", buffer: Buffer.from("# 合成资料\n", "utf-8") });
+    await expect(page.getByText("已上传，等待执行")).toBeVisible();
+    await page.getByRole("button", { name: "更多", exact: true }).click();
+    await page.getByRole("button", { name: "复用同类工具：表格筛选工具" }).click();
+    await expect(page.getByTestId("capability-reuse-result")).toContainText("此工具未声明 Markdown 输入");
+    expect(request).toEqual({ need: { ...need, input_formats: ["markdown"], output_formats: ["docx", "pdf"] }, allow_discovery: false });
+    await expect(page.getByText("来源.md", { exact: true })).toBeVisible();
+  });
+
+  test("普通用户无复用入口且不会请求灰度目录", async ({ page }) => {
+    await mockWorkspace(page, "light", "user");
+    const grayRequests: string[] = [];
+    page.on("request", request => { if (request.url().includes("/semantic-workspace/capabilities")) grayRequests.push(request.url()); });
+    await page.goto("/data-prep");
+    await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8") });
+    await expect(page.getByText("已上传，等待执行")).toBeVisible();
+    await page.getByRole("button", { name: "更多", exact: true }).click();
+    await expect(page.getByRole("button", { name: /复用同类工具/ })).toHaveCount(0);
+    await expect(page.getByText("本地任务能力（管理员灰度）")).toHaveCount(0);
+    expect(grayRequests).toEqual([]);
+  });
+});
+
 test("JPEG 原件按 EXIF 方向显示而不改写上传", async ({ page }) => {
   await mockWorkspace(page);
   const original = Buffer.from("/9j/4AAQSkZJRgABAQAAAQABAAD/4QAiRXhpZgAATU0AKgAAAAgAAQESAAMAAAABAAYAAAAAAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjL/wAARCAAeABQDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDaooor5A/KwooooAKKKKACiiigD//Z", "base64");

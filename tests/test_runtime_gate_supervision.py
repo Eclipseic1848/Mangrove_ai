@@ -520,6 +520,9 @@ class TestS6Supervision:
             def get(self, user_id, task_id, revision):
                 return dict(self._row)
 
+            def list_events(self, user_id, task_id, revision):
+                return []
+
             def update(self, user_id, task_id, revision, **fields):
                 self.updates.append(fields)
 

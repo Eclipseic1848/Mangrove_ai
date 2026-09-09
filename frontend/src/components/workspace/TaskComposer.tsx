@@ -42,7 +42,7 @@ import {
 } from "lucide-react";
 import { nanoid } from "nanoid/non-secure";
 import { uploadFileWithProgress } from "@/lib/dataPrepApi";
-import type { GrayCapability } from "@/lib/semanticWorkspaceApi";
+import { resolveWorkspaceCapabilities, type CapabilityNeed, type CapabilityResolution, type GrayCapability } from "@/lib/semanticWorkspaceApi";
 import { cn } from "@/lib/utils";
 import type { UploadItem } from "@/types/dataPrep";
 
@@ -291,6 +291,7 @@ export function TaskComposer({
     modelConnectionId: string | null;
     modelConnectionModel: string | null;
     externalApiConfirmed: boolean;
+    capabilityNeed?: CapabilityNeed;
     capabilityPackRefs: Array<{
       pack_id: string;
       version: string;
@@ -329,6 +330,21 @@ export function TaskComposer({
   const [selectedConnectionModelId, setSelectedConnectionModelId] = useState("");
   const [externalApiConfirmed, setExternalApiConfirmed] = useState(false);
   const [selectedCapabilityIds, setSelectedCapabilityIds] = useState<string[]>([]);
+  const [reuse, setReuse] = useState<{
+    need: CapabilityNeed;
+    result: CapabilityResolution | null;
+    pending: boolean;
+    error: string;
+  } | null>(null);
+  const reuseRequest = useRef(0);
+  const reuseContext = JSON.stringify([prompt, formats, runtimeSelection, usesPiConfiguration, active, grayCapabilities,
+    items.map(item => [item.id, item.status, item.upload])]);
+  useLayoutEffect(() => {
+    // 修改输入或离开当前输入流程后，旧匹配和迟到响应都不能继续启用工具。
+    reuseRequest.current += 1;
+    setReuse(current => current ? { ...current, result: null, pending: false, error: "任务要求、资料或输出已改变，请重新匹配工具。" } : null);
+  }, [reuseContext]);
+  useEffect(() => () => { reuseRequest.current += 1; }, []);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [fileNotice, setFileNotice] = useState("");
   const promptRef = useRef<HTMLTextAreaElement>(null);
@@ -373,6 +389,7 @@ export function TaskComposer({
     setSelectedConnectionId("");
     setSelectedConnectionModelId("");
     setSelectedCapabilityIds([]);
+    setReuse(null);
     setExternalApiConfirmed(false);
     if (defaultModel) {
       setSelectedModel(`${defaultModel.provider}::${defaultModel.model}`);
@@ -608,8 +625,10 @@ export function TaskComposer({
     () => inputKind(items.map((item) => item.file)),
     [items],
   );
-  const busy = items.some((item) => item.status === "uploading") || submitting;
+  const busy = items.some((item) => item.status === "uploading") || submitting || Boolean(reuse?.pending);
   const hasFailed = items.some((item) => item.status === "failed");
+  const reusedMatch = reuse?.result?.matches[0];
+  const reuseInvalid = Boolean(reuse && !reusedMatch);
   const ready = items.filter((item) => item.status === "ready" && item.upload);
   const commonFormats =
     kind === "document"
@@ -672,6 +691,31 @@ export function TaskComposer({
     onReadWeb?.(currentDraft);
   };
 
+  const reuseCapability = async (capability: GrayCapability) => {
+    const template = capability.reuse_need;
+    if (!template || !usesPiConfiguration || submitting || !active) return;
+    const request = ++reuseRequest.current;
+    setSelectedCapabilityIds([]);
+    const inputFormats = [...new Set(readyUploads.map(upload => {
+      const format = extension(upload.original_name);
+      return format === "md" ? "markdown" : format;
+    }))];
+    const need = { ...template, input_formats: inputFormats, output_formats: [...formats] };
+    if (!readyUploads.length || readyUploads.length !== items.length || !formats.length
+      || !template.operations.length || inputFormats.some(format => !TABLE_EXTENSIONS.has(format) && !DOCUMENT_EXTENSIONS.has(format))) {
+      setReuse({ need, result: null, pending: false, error: "请先完成文件上传并选择输出格式；操作或来源格式不明确时，不能匹配同类工具。" });
+      return;
+    }
+    setReuse({ need, result: null, pending: true, error: "" });
+    try {
+      const result = await resolveWorkspaceCapabilities(need);
+      if (request !== reuseRequest.current) return;
+      setReuse({ need, result, pending: false, error: result.matches.length ? "" : "没有兼容且获准的工具，请修复下列缺口后重新匹配。" });
+    } catch {
+      if (request === reuseRequest.current) setReuse({ need, result: null, pending: false, error: "工具匹配未成功，尚未启用任何工具。请核对权限或治理状态后重新匹配。" });
+    }
+  };
+
   const submit = async () => {
     if (submittingRef.current) return;
     if (unified && prompt.trim() && !items.length && !submitting) {
@@ -687,6 +731,7 @@ export function TaskComposer({
       || hasFailed
       || (kind === "mixed" && runtimeSelection === "legacy")
       || piSelectionInvalid
+      || reuseInvalid
     ) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -713,7 +758,8 @@ export function TaskComposer({
           usesPiConfiguration
           && Boolean(selectedConnection)
           && externalApiConfirmed,
-        capabilityPackRefs: usesPiConfiguration
+        ...(usesPiConfiguration && reuse && reusedMatch ? { capabilityNeed: reuse.need } : {}),
+        capabilityPackRefs: usesPiConfiguration && reusedMatch ? [reusedMatch.ref] : usesPiConfiguration
           ? grayCapabilities
               .filter((item) => selectedCapabilityIds.includes(
                 `${item.pack_id}@${item.version}@${item.digest}`,
@@ -729,7 +775,10 @@ export function TaskComposer({
       setItems([]);
       setFormats([]);
       setSelectedCapabilityIds([]);
+      setReuse(null);
     } catch {
+      // 创建失败后重新过治理门，不能把预览时的获准状态继续当作本次许可。
+      setReuse(current => current ? { ...current, result: null, pending: false, error: "任务未创建，工具尚未启用。请重新匹配并核对许可后再提交。" } : null);
       return;
     } finally {
       submittingRef.current = false;
@@ -971,6 +1020,19 @@ export function TaskComposer({
           Mangrove 增强模式可以在同一任务中观察并组合表格与文档来源。
         </div>
       )}
+      {reuse && <div role="status" aria-live="polite" className="mt-3 space-y-2 rounded-lg border p-3 text-xs" data-testid="capability-reuse-result">
+        {reuse.pending && <p>正在匹配已获准工具…</p>}
+        {reuse.error && <p className="text-destructive">{reuse.error}</p>}
+        {reusedMatch && <>
+          <p className="break-words font-medium">可复用：{reusedMatch.ref.pack_id} · v{reusedMatch.ref.version}</p>
+          <p>匹配操作：{reusedMatch.compatibility.operations.join("、")}；输入：{reusedMatch.compatibility.input_formats.join("、")}；输出：{reusedMatch.compatibility.output_formats.join("、")}</p>
+          <p>已通过选择许可；运行时检查健康状态。</p>
+          <p>许可证：{reusedMatch.license}</p>
+          <p className="break-all">来源：{reusedMatch.source_provenance.join("、")}</p>
+        </>}
+        {!reusedMatch && reuse.result?.gaps.map((gap, index) => <p key={`${gap.code}:${index}`}>{gap.remediation}</p>)}
+        <button type="button" disabled={submitting} onClick={() => { reuseRequest.current += 1; setReuse(null); }} className="rounded-lg border px-3 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">取消复用</button>
+      </div>}
       {fileNotice && (
         <div className="mt-2 flex items-start gap-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -1039,6 +1101,7 @@ export function TaskComposer({
             || ((!unified || items.length > 0) && !ready.length)
             || (ready.length > 0 && !formats.length)
             || busy
+            || reuseInvalid
             || hasFailed
             || (kind === "mixed" && runtimeSelection === "legacy")
             || (ready.length > 0 && piSelectionInvalid)
@@ -1118,18 +1181,23 @@ export function TaskComposer({
                           const identity = `${capability.pack_id}@${capability.version}@${capability.digest}`;
                           const selected = selectedCapabilityIds.includes(identity);
                           return (
-                            <label
+                            <div
                               key={identity}
-                              className="flex items-start gap-2 rounded-lg border px-2.5 py-2 text-[11px]"
+                              className="rounded-lg border px-2.5 py-2 text-[11px]"
                             >
+                            <label className="flex items-start gap-2">
                               <input
                                 type="checkbox"
                                 checked={selected}
-                                onChange={(event) => setSelectedCapabilityIds((current) => (
-                                  event.target.checked
-                                    ? [...current, identity]
-                                    : current.filter((item) => item !== identity)
-                                ))}
+                                onChange={(event) => {
+                                  reuseRequest.current += 1;
+                                  setReuse(null);
+                                  setSelectedCapabilityIds((current) => (
+                                    event.target.checked
+                                      ? [...current, identity]
+                                      : current.filter((item) => item !== identity)
+                                  ));
+                                }}
                                 className="mt-1"
                               />
                               <span className="min-w-0">
@@ -1145,6 +1213,17 @@ export function TaskComposer({
                                 </span>
                               </span>
                             </label>
+                            {capability.reuse_need ? <div className="mt-2 border-t pt-2">
+                              <p className="break-words text-muted-foreground">复用用途：{capability.reuse_need.purpose}</p>
+                              <p className="break-words text-muted-foreground">声明操作：{capability.reuse_need.operations.join("、")}</p>
+                              <button type="button" disabled={submitting || Boolean(reuse?.pending)} onClick={() => void reuseCapability(capability)}
+                                aria-label={`复用同类工具：${capability.name}`}
+                                className="mt-2 rounded-lg border px-3 py-2 text-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">
+                                复用同类工具
+                              </button>
+                              <p className="mt-1 text-muted-foreground">点击即确认上述用途与操作；按当前文件和输出匹配已获准工具。</p>
+                            </div> : <p className="mt-2 text-muted-foreground">缺少完整复用声明，仍可按原方式手动选择。</p>}
+                            </div>
                           );
                         })}
                       </div>

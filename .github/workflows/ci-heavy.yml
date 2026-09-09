@@ -105,6 +105,9 @@ jobs:
               tests/test_conversation_steering_api.py tests/test_conversation_steering.py tests/test_work_trace.py \
               tests/test_coremind_events.py tests/test_model_connections_api.py tests/test_candidate_verifier.py tests/test_candidate_reverification_provider.py \
               tests/test_platform_control_streams.py \
+              tests/test_capability_reuse.py tests/test_capability_reuse_api.py tests/test_capability_reuse_routing.py tests/test_capability_call_contract.py \
+              tests/test_coremind_capability_host.py tests/test_coremind_capability_host_live.py tests/test_coremind_agent_kernel_adapter.py tests/test_capability_host.py \
+              tests/test_capability_catalog.py tests/test_capability_adapters.py tests/test_runtime_gate_supervision.py \
               tests/test_workspace_telemetry.py tests/test_workspace_telemetry_control.py tests/test_workspace_telemetry_lifecycle.py \
               tests/test_account_execution_grants.py tests/test_account_execution_providers.py tests/test_model_relay_readonly_tools.py \
               --randomly-seed=0 --timeout=120 --junitxml=.artifacts/heavy/unified-workspace.xml

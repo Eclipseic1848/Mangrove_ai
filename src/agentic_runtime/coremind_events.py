@@ -14,6 +14,8 @@ from .models import RuntimeEvent
 
 _IGNORED_EVENT_TYPES = {
     "fact.start",
+    "fact.resume",
+    "fact.telemetry_configuration",
     "fact.operation",
     "input_receipt",
     "input_claimed",
