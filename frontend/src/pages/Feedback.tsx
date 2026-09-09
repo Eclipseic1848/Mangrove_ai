@@ -20,6 +20,8 @@ interface Overview {
 }
 
 interface FeedbackItem {
+  source_kind?: "message" | "workspace";
+  task_id?: string; revision?: number; output_id?: string; output_sha256?: string;
   id: number;
   rating: "up" | "down";
   user_id: string;
@@ -34,6 +36,7 @@ interface FeedbackItem {
 }
 
 interface AuditContent {
+  answer_kind?: "revision_summary";
   event_id: string;
   content: { question: string | null; answer: string | null; comment: string | null; admin_note: string | null };
   truncated: boolean;
@@ -388,6 +391,7 @@ function FeedbackPage({ actorId, actorRole }: { actorId: string; actorRole: stri
                       )}
                       <span className="text-muted-foreground">{it.created_at}</span>
                       <span className="text-muted-foreground" title={userLabel(it)}>{userLabel(it)}</span>
+                      {it.source_kind === "workspace" && <span className="break-all text-xs">工作台 · {it.task_id} · V{it.revision} · 正式结果 {it.output_id}</span>}
                       <Badge variant={sm.variant} className="text-[11px]">{sm.label}</Badge>
                       {it.reasons.map((r) => (
                         <Badge key={r} variant="warning" className="text-[11px]">{r}</Badge>
@@ -441,7 +445,7 @@ function FeedbackPage({ actorId, actorRole }: { actorId: string; actorRole: stri
             {auditContent.truncated && <p>正文已截断，仅显示有界内容；为避免覆盖完整备注，本次不可编辑备注。</p>}
             <div className="max-h-72 space-y-3 overflow-y-auto">
               {([['question', '用户问题'], ['answer', 'AI 回复'], ['comment', '用户描述']] as const).map(([key, label]) => (
-                <div key={key}><p className="font-medium">{label}</p><p className="whitespace-pre-wrap break-words text-muted-foreground">{auditContent.content[key] || "（无）"}</p></div>
+                <div key={key}><p className="font-medium">{key === "answer" && auditContent.answer_kind === "revision_summary" ? "此任务版本的回答摘要（非完整文件）" : label}</p><p className="whitespace-pre-wrap break-words text-muted-foreground">{auditContent.content[key] || "（无）"}</p></div>
               ))}
             </div>
             <label htmlFor="feedback-admin-note" className="block">处理备注（清空后保存将删除旧备注）</label>

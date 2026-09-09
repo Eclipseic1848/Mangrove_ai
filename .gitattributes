@@ -15,3 +15,7 @@ src/database_migrations/alembic/versions/webui_0016_mixed_source_contract.py tex
 
 src/database_migrations/alembic/versions/webui_0017_source_read_uses.py text eol=lf
 src/database_migrations/alembic/versions/webui_0018_source_deletion.py text eol=lf
+src/database_migrations/alembic/versions/scheduler_0002_workspace_lifecycle.py text eol=lf
+src/database_migrations/alembic/versions/webui_0019_authenticated_sources.py text eol=lf
+src/database_migrations/alembic/versions/webui_0020_connector_sources.py text eol=lf
+src/database_migrations/alembic/versions/webui_0021_workspace_lifecycle.py text eol=lf

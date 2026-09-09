@@ -98,8 +98,12 @@ class ScheduleStore:
                     raise execution.ExecutionDenied("计划不可执行")
                 task = dict(row)
                 # 领取与核对同事务：旧队列不能执行已改期或已恢复的新计划。
-                if task != {key: value for key, value in expected_task.items() if key != "_execution_generation"}:
+                if task != {key: value for key, value in expected_task.items() if key not in {"_execution_generation", "_manual_request_key"}}:
                     raise execution.ExecutionDenied("计划已更新，请重新读取")
+                if task.get("source")=="workspace":
+                    from .workspace import claim_occurrence
+                    if manual:task["_manual_request_key"]=expected_task.get("_manual_request_key")
+                    task["_workspace_occurrence"]=claim_occurrence(conn,task,manual,auth.generation)
                 execution.set_execution_state(web_conn, auth, "schedule", task_id, state="active", now=time.time())
         return auth, task
 
@@ -147,6 +151,7 @@ class ScheduleStore:
         interval_seconds: Optional[int] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        transaction_hook=None,
     ) -> str:
         """新增一条定时任务，返回 task_id。owner_user_id 用于 Web UI 多用户归属。
 
@@ -174,6 +179,8 @@ class ScheduleStore:
                         name, source, interval_seconds, start_date, end_date,
                     ),
                 )
+                if transaction_hook is not None:
+                    transaction_hook(conn, task_id)
         return task_id
 
     def get(self, task_id: str) -> Optional[Dict[str, Any]]:
