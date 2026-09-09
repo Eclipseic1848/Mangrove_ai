@@ -18,6 +18,7 @@ import type {
   PublicResultContext,
   WorkspaceSourcePreview,
   ReusableSourcePage, ReusableSource, ReusableOutputPreview, SourceSelection, SourceReferencePage,
+  DeletionPolicy, TaskDeletionPlan, TaskDeletionOperation,
 } from "@/types/semanticWorkspace";
 
 const BASE = "/api/semantic-workspace";
@@ -445,6 +446,30 @@ export function permanentlyDeleteWorkspaceTask(
   taskId: string,
 ): Promise<{ ok: boolean }> {
   return api.del(`${BASE}/tasks/${taskId}/permanent`);
+}
+
+export function getTaskDeletionPlan(taskId: string, policy: DeletionPolicy): Promise<TaskDeletionPlan> {
+  return api.get(`${BASE}/tasks/${encodeURIComponent(taskId)}/deletion-plan?shared_policy=${policy}`);
+}
+export function getTaskDeletionOperation(operationId: string): Promise<TaskDeletionOperation> {
+  return api.get(`${BASE}/deletion-operations/${encodeURIComponent(operationId)}`);
+}
+export function findTaskDeletionOperation(taskId: string, key: string): Promise<TaskDeletionOperation> {
+  return api.get(`${BASE}/deletion-operations/by-key?${new URLSearchParams({ task_id: taskId, idempotency_key: key })}`);
+}
+export class WorkspaceDeletionError extends ApiError {
+  constructor(status: number, message: string, readonly rejected: boolean) { super(status, message); }
+}
+export async function submitTaskDeletion(taskId: string, payload: { plan_token: string; shared_policy: DeletionPolicy }, key: string): Promise<TaskDeletionOperation> {
+  const response = await authenticatedFetch(`${BASE}/tasks/${encodeURIComponent(taskId)}/deletion-operations`, {
+    method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": key }, body: JSON.stringify(payload),
+  });
+  const body = await readAuthenticatedJson(response);
+  if (!response.ok) throw new WorkspaceDeletionError(response.status, typeof body?.detail === "string" ? body.detail : "清理结果尚未确认，请查询原操作", response.headers.get("X-Mangrove-Deletion-Outcome") === "rejected");
+  return body;
+}
+export function resumeTaskDeletion(operationId: string, payload: { plan_token?: string; shared_policy?: DeletionPolicy }): Promise<TaskDeletionOperation> {
+  return api.post(`${BASE}/deletion-operations/${encodeURIComponent(operationId)}/resume`, payload);
 }
 
 export function getWorkspacePreview(

@@ -1907,6 +1907,8 @@ class WebUIStore:
                 # 编译可能跨 await；结果提交必须复核原请求冻结的账号代数。
                 conn.execute("BEGIN IMMEDIATE")
                 self._execution_owner(conn, user_id)
+                from src.source_acquisition.deletion import assert_sources_readable
+                assert_sources_readable(user_id,[dict(upload_id=report.artifact_id,sha256=report.artifact_sha256) for report in reports],connection=conn)
                 for report, report_dict in zip(reports, report_dicts):
                     conn.execute(
                         "INSERT OR IGNORE INTO source_inspection_reports "
@@ -3956,16 +3958,28 @@ class WebUIStore:
         task_id: str,
         *,
         after: int = 0,
+        through: int | None = None,
+        revision: int | None = None,
     ) -> List[Dict[str, Any]]:
         if self.get_semantic_workspace_task(user_id, task_id) is None:
             return []
         with self._conn() as conn:
+            clause="";parameters=[user_id,task_id,max(0,after)]
+            if through is not None:
+                clause+=" AND sequence<=?";parameters.append(through)
+            if revision is not None:
+                boundaries=[row[0] for row in conn.execute("SELECT sequence FROM semantic_workspace_events WHERE user_id=? AND task_id=? AND event_type='revision_created' ORDER BY sequence",(user_id,task_id))]
+                if revision>=2 and len(boundaries)<revision-1:return []
+                start=boundaries[revision-2] if revision>=2 else 0
+                clause+=" AND sequence>=? AND (json_extract(details_json,'$.revision') IS NULL OR json_extract(details_json,'$.revision')=?)";parameters.extend([start,revision])
+                if revision-1<len(boundaries):
+                    clause+=" AND sequence<?";parameters.append(boundaries[revision-1])
             rows = conn.execute(
                 "SELECT event_id, sequence, stage, event_type, summary, "
                 "details_json, created_at FROM semantic_workspace_events "
                 "WHERE user_id=? AND task_id=? AND sequence>? "
-                "ORDER BY sequence",
-                (user_id, task_id, max(0, after)),
+                +clause+" ORDER BY sequence",
+                parameters,
             ).fetchall()
         return [
             {
@@ -3995,24 +4009,26 @@ class WebUIStore:
             ),
         )
 
-    def restore_semantic_workspace_task(
-        self,
-        user_id: str,
-        task_id: str,
-    ) -> Dict[str, Any]:
-        return self.update_semantic_workspace_task(
-            user_id,
-            task_id,
-            deleted_at=None,
-            purge_after=None,
-        )
+    def restore_semantic_workspace_task(self,user_id: str,task_id: str) -> Dict[str,Any]:
+        with self._lock,self._conn() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            if conn.execute("SELECT 1 FROM source_deletion_operations WHERE owner_id=? AND task_id=?",(user_id,task_id)).fetchone():
+                raise ValueError('清理操作已经开始，请查看原操作状态')
+            conn.execute('UPDATE semantic_workspace_tasks SET deleted_at=NULL,purge_after=NULL,updated_at=? WHERE user_id=? AND task_id=?',(_now(),user_id,task_id))
+        return self.get_semantic_workspace_task(user_id,task_id)
 
     def purge_semantic_workspace_task(
         self,
         user_id: str,
         task_id: str,
+        *, deletion_operation_id: str | None = None,
     ) -> bool:
+        if deletion_operation_id is None:
+            raise ValueError('需要关联清理确认')
         with self._lock, self._conn() as conn:
+            operation=conn.execute("SELECT state FROM source_deletion_operations WHERE owner_id=? AND task_id=? AND operation_id=?",(user_id,task_id,deletion_operation_id)).fetchone()
+            if operation is None or operation[0]!='cleaning' or conn.execute("SELECT 1 FROM source_deletions WHERE owner_id=? AND operation_id=? AND state!='deleted'",(user_id,deletion_operation_id)).fetchone():
+                raise ValueError('关联清理尚未完成')
             owner = conn.execute(
                 "SELECT * FROM semantic_workspace_tasks "
                 "WHERE user_id=? AND task_id=? AND deleted_at IS NOT NULL",
@@ -4020,6 +4036,8 @@ class WebUIStore:
             ).fetchone()
             if owner is None:
                 return False
+            for table in ('task_revision_contexts','web_task_contracts','conversation_raw_turns','conversation_context_deltas','conversation_revision_proposals','conversation_revision_decisions','conversation_steering_results'):
+                conn.execute('DELETE FROM '+table+' WHERE owner_id=? AND task_id=?',(user_id,task_id))
             self._create_semantic_workspace_audit_tombstone(
                 conn,
                 owner,
@@ -4047,41 +4065,9 @@ class WebUIStore:
         *,
         now: datetime | None = None,
     ) -> int:
-        """清理已超过 30 天保留期的工作台记录，底层审计产物继续保留。"""
-        cutoff = (now or datetime.now()).isoformat(timespec="seconds")
-        with self._lock, self._conn() as conn:
-            rows = conn.execute(
-                "SELECT * FROM semantic_workspace_tasks "
-                "WHERE deleted_at IS NOT NULL AND purge_after IS NOT NULL "
-                "AND purge_after<=?",
-                (cutoff,),
-            ).fetchall()
-            task_ids = [str(row["task_id"]) for row in rows]
-            if not task_ids:
-                return 0
-            for row in rows:
-                self._create_semantic_workspace_audit_tombstone(
-                    conn,
-                    row,
-                    purge_reason="retention_expired",
-                )
-            placeholders = ",".join("?" for _ in task_ids)
-            conn.execute(
-                "DELETE FROM semantic_workspace_events "
-                f"WHERE task_id IN ({placeholders})",
-                task_ids,
-            )
-            conn.execute(
-                "DELETE FROM semantic_workspace_revisions "
-                f"WHERE task_id IN ({placeholders})",
-                task_ids,
-            )
-            cursor = conn.execute(
-                "DELETE FROM semantic_workspace_tasks "
-                f"WHERE task_id IN ({placeholders})",
-                task_ids,
-            )
-        return cursor.rowcount
+        """保留旧调度入口，但到期不等于用户授权物理清理。"""
+        # 关联确认依赖全部历史修订；启动和后台循环均不得提前删除这些事实。
+        return 0
 
     @staticmethod
     def _create_semantic_workspace_audit_tombstone(
@@ -4100,6 +4086,7 @@ class WebUIStore:
                 "ORDER BY output_id",
                 (task["user_id"], task["run_id"]),
             ).fetchall()
+        result_rows=list(result_rows)+list(conn.execute("SELECT o.output_id,o.format,o.sha256 FROM formal_delivery_outputs o JOIN formal_delivery_runs r ON r.delivery_id=o.delivery_id AND r.owner_id=o.owner_id WHERE r.owner_id=? AND r.task_id=? ORDER BY o.output_id",(task['user_id'],task['task_id'])))
         result_refs = [
             {
                 "output_id": row["output_id"],
@@ -4120,7 +4107,7 @@ class WebUIStore:
                 hashlib.sha256(
                     task["objective_text"].encode("utf-8")
                 ).hexdigest(),
-                task["source_refs_json"] or "[]",
+                json.dumps([{key:value for key,value in ref.items() if key in {'kind','upload_id','artifact_id','snapshot_id','output_id','sha256','delivery_id','run_id','source_task_id','source_revision'}} for ref in json.loads(task['source_refs_json'] or '[]')],ensure_ascii=False),
                 json.dumps(result_refs, ensure_ascii=False),
                 task["output_formats_json"] or "[]",
                 task["status"],

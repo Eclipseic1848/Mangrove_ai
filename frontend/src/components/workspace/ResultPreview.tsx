@@ -205,6 +205,7 @@ export function CandidatePreview({
       && !attemptActive
       && attempt?.status !== "outcome_unknown"
       && !awaitingPublication
+      && task.source_integrity?.can_reverify !== false
       && onRequestReverification,
   );
   const title = attemptActive

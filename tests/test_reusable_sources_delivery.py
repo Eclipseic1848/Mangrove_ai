@@ -2,6 +2,7 @@
 import hashlib
 import io
 import json
+import sqlite3
 import zipfile
 
 import httpx
@@ -18,7 +19,14 @@ from tests.test_pi_runtime_workspace_api import _wait_for_delivery
 from tests.test_web_source_delivery_api import CoverageAwareWebPiRuntime, _client
 
 
-def test_saved_web_and_formal_output_reuse_real_bytes_without_refetch(tmp_path, monkeypatch):
+def _seed_legacy_purged_task(database, task_id):
+    """合成旧版本已清理任务记录的存量，不能作为当前删除API的替代入口。"""
+    with sqlite3.connect(database) as connection:
+        for table in ("semantic_workspace_events", "semantic_workspace_revisions", "semantic_workspace_tasks"):
+            connection.execute(f"DELETE FROM {table} WHERE user_id=? AND task_id=?", ("user-a", task_id))
+
+
+def test_legacy_purged_web_and_formal_output_reuse_real_bytes_without_refetch(tmp_path, monkeypatch):
     runtime = CoverageAwareWebPiRuntime()
     client = _client(tmp_path, monkeypatch, role="admin", pi_runtime=runtime)
     client.app.include_router(source_routes.router)
@@ -69,11 +77,13 @@ def test_saved_web_and_formal_output_reuse_real_bytes_without_refetch(tmp_path, 
         produced_bytes = downloaded.content
         assert hashlib.sha256(produced_bytes).hexdigest() == output["sha256"]
 
-        # 清理的是临时测试任务记录；正式对象与真实出处仍须独立可读。
+        # 当前无确认永久入口必须拒绝；独立布置旧版本已无任务记录的存量。
         recycled = client.delete(f"/api/semantic-workspace/tasks/{producer_id}")
         assert recycled.status_code == 200, recycled.text
         purged = client.delete(f"/api/semantic-workspace/tasks/{producer_id}/permanent")
-        assert purged.status_code == 200, purged.text
+        assert purged.status_code == 409, purged.text
+        assert client.get(f"/api/semantic-workspace/tasks/{producer_id}").status_code == 200
+        _seed_legacy_purged_task(settings.webui_db_path, producer_id)
         assert client.get(f"/api/semantic-workspace/tasks/{producer_id}").status_code == 404
         preview = client.get(f"/api/semantic-workspace/reusable-sources/outputs/{output_id}/preview")
         assert preview.status_code == 200, preview.text
@@ -129,9 +139,10 @@ def test_saved_web_and_formal_output_reuse_real_bytes_without_refetch(tmp_path, 
         assert references.status_code == 200, references.text
         assert any(item["task_id"] == consumer_id and item["revision"] == 1 for item in references.json()["items"])
         assert references.json()["unknown_uses"] == 0
-        # 任务记录清理后，已发布结果的真实来源关系不能被当成零引用。
+        # 旧版本任务记录已清理的存量，仍须保留正式消费关系。
         assert client.delete(f"/api/semantic-workspace/tasks/{consumer_id}").status_code == 200
-        assert client.delete(f"/api/semantic-workspace/tasks/{consumer_id}/permanent").status_code == 200
+        assert client.delete(f"/api/semantic-workspace/tasks/{consumer_id}/permanent").status_code == 409
+        _seed_legacy_purged_task(settings.webui_db_path, consumer_id)
         assert client.get(f"/api/semantic-workspace/tasks/{consumer_id}").status_code == 404
         retained = client.get("/api/semantic-workspace/source-references", params={"kind": "delivery_output", "id": output_id})
         assert retained.status_code == 200, retained.text

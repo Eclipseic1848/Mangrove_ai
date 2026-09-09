@@ -164,6 +164,9 @@ def delete_upload(
         ref={"upload_id":upload_id}
         with source_locks(user["user_id"],[ref]):
             assert_no_open_uses(user["user_id"],ref)
+            from src.source_acquisition.reuse import references
+            if references(user['user_id'],'upload',upload_id):
+                raise ValueError('资料仍被任务或正式结果引用，请通过关联清理确认')
             store.delete(user["user_id"], upload_id)
     except ValueError as exc:
         raise HTTPException(409,str(exc)) from exc

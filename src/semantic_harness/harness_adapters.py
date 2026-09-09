@@ -2,7 +2,7 @@
 """把批次 3/4 执行 Graph 包装为统一 Harness 能力适配器。"""
 from __future__ import annotations
 
-import asyncio
+from src.api.execution import execution_to_thread
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
@@ -86,13 +86,13 @@ class TableHarnessAdapter:
     ) -> HarnessAdapterOutcome:
         physical = PhysicalPlan.model_validate(physical_plan)
         del bound_plan, reports, profile
-        bundle = await asyncio.to_thread(
+        bundle = await execution_to_thread(
             execute_physical_plan,
             physical,
             artifact_paths=artifact_paths,
             output_dir=output_dir,
         )
-        verification = await asyncio.to_thread(
+        verification = await execution_to_thread(
             verify_table_execution,
             logical_plan,
             bundle,
@@ -163,7 +163,7 @@ class DocumentHarnessAdapter:
             output_dir=output_dir,
             semantic_provider=self._semantic_provider(physical),
         )
-        verification = await asyncio.to_thread(
+        verification = await execution_to_thread(
             verify_document_execution,
             physical,
             bundle.result,

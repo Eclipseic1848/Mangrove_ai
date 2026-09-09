@@ -180,6 +180,9 @@ class FakePiRuntime:
             run_id=checkpoint.run_id,
         )
 
+    def _workspace_root(self, request, run_id):
+        return Path(settings.semantic_execution_root) / "fake-pi" / request.task_id / f"r{request.revision}"
+
     async def _complete(self, request, *, on_event, run_id=None):
         await on_event(
             RuntimeEvent(
@@ -189,12 +192,7 @@ class FakePiRuntime:
         )
 
 
-        root = (
-            Path(settings.semantic_execution_root)
-            / "fake-pi"
-            / request.task_id
-            / f"r{request.revision}"
-        )
+        root = self._workspace_root(request, run_id or f"pi_run_test_r{request.revision}")
         output = root / "output"
         output.mkdir(parents=True, exist_ok=True)
         requested_format = request.requested_output_formats[0]
@@ -3108,14 +3106,15 @@ def test_full_candidate_reverification_is_idempotent_and_rejects_concurrent_key(
             f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications"
         )
 
-        first = client.post(
-            url,
-            headers={"Idempotency-Key": "reverify-idempotent"},
-            json=payload,
-        )
-        assert first.status_code == 202, first.text
-        assert verifier.started.wait(timeout=5)
+        # 首次响应断言失败也须释放真实线程，否则pytest汇总后仍无法退出。
         try:
+            first = client.post(
+                url,
+                headers={"Idempotency-Key": "reverify-idempotent"},
+                json=payload,
+            )
+            assert first.status_code == 202, first.text
+            assert verifier.started.wait(timeout=5)
             same = client.post(
                 url,
                 headers={"Idempotency-Key": "reverify-idempotent"},

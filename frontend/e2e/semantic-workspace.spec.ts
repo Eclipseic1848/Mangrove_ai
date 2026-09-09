@@ -5271,6 +5271,321 @@ async function mockReusable(page: Page) {
   return items;
 }
 
+function deletionPlan(policy = "keep_shared", token = "delete-plan-1") {
+  return { plan_token: token, task_id: "delete-target", shared_policy: policy, can_execute: true, blockers: [],
+    objects: [{ source_key: "upload:exclusive", kind: "upload", sha256: "a".repeat(64), label: "独占原件.csv", disposition: "delete", references: [] },
+      { source_key: "delivery_output:shared", kind: "delivery_output", sha256: "b".repeat(64), label: "共享分析.md", disposition: policy === "keep_shared" ? "keep_shared" : "delete", references: [{ task_id: "other-task", revision: 2, reference_kind: "delivery", delivery_id: "other-delivery", run_id: "other-run", task_exists: true, state: "published", use_id: null, in_recycle_bin: false }] }],
+    affected_tasks: [{ task_id: "other-task", revision: 2, task_exists: true, in_recycle_bin: false }] };
+}
+function deletionOperation(state: string) {
+  return { operation_id: "delete-op", task_id: "delete-target", state, completed_source_keys: state === "completed" ? ["upload:exclusive"] : [], retained_source_keys: ["delivery_output:shared"], affected_tasks: deletionPlan().affected_tasks, error_code: null, message: null };
+}
+async function mockDeletion(page: Page) {
+  await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+  await mockWorkspace(page);
+  const task = { ...workspaceTask("delete-target", "completed", "待清理项目"), deleted_at: "2026-09-09T08:00:00Z", purge_after: null };
+  await page.route("**/api/semantic-workspace/tasks?*", route => route.fulfill({ json: new URL(route.request().url()).searchParams.get("deleted") === "true" ? [task] : [] }));
+  await page.route("**/api/semantic-workspace/tasks/delete-target", route => route.fulfill({ json: workspaceDetail(task) }));
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-plan?*", route => route.fulfill({ json: deletionPlan(new URL(route.request().url()).searchParams.get("shared_policy")!) }));
+}
+async function openDeletion(page: Page) {
+  await page.goto("/data-prep");
+  await page.getByRole("button", { name: "回收站", exact: true }).click();
+  await page.getByRole("button", { name: /待清理项目/ }).click();
+  await page.getByRole("button", { name: "永久删除", exact: true }).click();
+}
+
+test("#137 永久清理先核对资料，默认保留共享且取消零写", async ({ page }) => {
+  await mockDeletion(page);
+  let writes = 0;
+  await page.route("**/api/semantic-workspace/tasks/delete-target/permanent", route => { writes++; return route.fulfill({ json: { ok: true } }); });
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-operations", route => { writes++; return route.fulfill({ json: deletionOperation("completed") }); });
+  await openDeletion(page);
+  await expect(page.getByRole("heading", { name: "清理任务和资料", exact: true })).toBeVisible();
+  await expect(page.getByLabel("资料清理清单")).toContainText("独占原件.csv");
+  await expect(page.getByRole("radio", { name: "保留其他任务使用的资料（默认）", exact: true })).toBeChecked();
+  await expect(page.getByRole("radio", { name: "同时删除共享资料，先停止依赖任务", exact: true })).not.toBeChecked();
+  await expect(page.getByRole("button", { name: "取消", exact: true })).toBeFocused();
+  await page.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(page.getByRole("button", { name: "永久删除", exact: true })).toBeFocused();
+  expect(writes).toBe(0);
+});
+
+test("#137 默认清理保留共享，服务端完成后才显示真实回执", async ({ page }) => {
+  await mockDeletion(page);
+  const posts: { body: unknown; key: string }[] = [];
+  const requested = responseBarrier(), release = responseBarrier();
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-operations", async route => { posts.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] }); requested.release(); await release.promise; return route.fulfill({ json: deletionOperation("completed") }); });
+  await openDeletion(page);
+  await page.getByRole("button", { name: "确认清理并保留共享资料", exact: true }).click();
+  await requested.promise;
+  await expect(page.getByText("删除完成", { exact: true })).toHaveCount(0);
+  release.release();
+  await expect(page.getByLabel("清理操作状态")).toContainText("删除完成");
+  await expect(page.getByLabel("清理操作状态")).toContainText("已清理 1 份 · 保留共享 1 份");
+  expect(posts).toHaveLength(1);
+  expect(posts[0].body).toEqual({ plan_token: "delete-plan-1", shared_policy: "keep_shared" });
+  expect(posts[0].key).toBeTruthy();
+  expect(await page.evaluate(() => localStorage.getItem("mangrove_task_deletion_u1"))).toBeNull();
+});
+
+test("#137 明确删共享后失败保留原操作，继续不创建第二次清理", async ({ page }) => {
+  await mockDeletion(page);
+  const bodies: unknown[] = [], resumes: unknown[] = [];
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-operations", route => { bodies.push(route.request().postDataJSON()); return route.fulfill({ json: { ...deletionOperation("incomplete"), message: "依赖任务尚未确认停止，未清理正文" } }); });
+  await page.route("**/api/semantic-workspace/deletion-operations/delete-op/resume", route => { resumes.push(route.request().postDataJSON()); return route.fulfill({ json: deletionOperation("completed") }); });
+  await openDeletion(page);
+  await page.getByRole("radio", { name: "同时删除共享资料，先停止依赖任务", exact: true }).check();
+  await expect(page.getByLabel("资料清理清单")).not.toContainText("保留共享资料");
+  await page.getByRole("button", { name: "确认清理任务和共享资料", exact: true }).click();
+  await expect(page.getByLabel("清理操作状态")).toContainText("删除未完成");
+  await expect(page.getByText("依赖任务尚未确认停止，未清理正文", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "继续原清理操作", exact: true }).click();
+  await expect(page.getByLabel("清理操作状态")).toContainText("删除完成");
+  expect(bodies).toEqual([{ plan_token: "delete-plan-1", shared_policy: "delete_shared" }]); expect(resumes).toEqual([{}]);
+});
+
+test("#137 删除未知刷新按原键查询，目标不存在也不冒充成功", async ({ page }) => {
+  await mockDeletion(page);
+  let posts = 0; const queries: URL[] = [];
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-operations", route => { posts++; return route.fulfill({ status: 503, json: { detail: "结果未知" } }); });
+  await page.route("**/api/semantic-workspace/deletion-operations/by-key?*", route => { queries.push(new URL(route.request().url())); return route.fulfill({ status: 404, json: {} }); });
+  await openDeletion(page);
+  await page.getByRole("button", { name: "确认清理并保留共享资料", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("结果未知");
+  const saved = await page.evaluate(() => JSON.parse(localStorage.getItem("mangrove_task_deletion_u1")!));
+  await page.route("**/api/semantic-workspace/tasks/delete-target", route => route.fulfill({ status: 404, json: {} }));
+  await page.reload();
+  await expect(page.getByRole("alert")).toContainText("尚未查到原操作");
+  expect(posts).toBe(1); expect(queries[0].searchParams.get("idempotency_key")).toBe(saved.key);
+  expect(await page.evaluate(() => localStorage.getItem("mangrove_task_deletion_u1"))).toContain(saved.key);
+  await page.route("**/api/semantic-workspace/deletion-operations/by-key?*", route => route.fulfill({ json: deletionOperation("completed") }));
+  await page.getByRole("button", { name: "查询原操作状态", exact: true }).click();
+  await expect(page.getByLabel("清理操作状态")).toContainText("删除完成"); expect(posts).toBe(1);
+});
+
+test("#137 新引用使清理确认失效，安全默认重确认同一个操作", async ({ page }) => {
+  await mockDeletion(page);
+  let changed = false; const resumes: unknown[] = [];
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-plan?*", route => route.fulfill({ json: deletionPlan(new URL(route.request().url()).searchParams.get("shared_policy")!, changed ? "new-plan" : "old-plan") }));
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-operations", route => { changed = true; return route.fulfill({ json: deletionOperation("needs_confirmation") }); });
+  await page.route("**/api/semantic-workspace/deletion-operations/delete-op/resume", route => { resumes.push(route.request().postDataJSON()); return route.fulfill({ json: deletionOperation("completed") }); });
+  await openDeletion(page);
+  await page.getByRole("radio", { name: "同时删除共享资料，先停止依赖任务", exact: true }).check();
+  await page.getByRole("button", { name: "确认清理任务和共享资料", exact: true }).click();
+  await expect(page.getByLabel("清理操作状态")).toContainText("关联已变化，需要重新确认");
+  await expect(page.getByRole("radio", { name: "保留其他任务使用的资料（默认）", exact: true })).toBeChecked();
+  await expect(page.getByRole("button", { name: "按新清单确认继续", exact: true })).toBeDisabled();
+  await page.getByRole("button", { name: "重新核对清单", exact: true }).click();
+  await page.getByRole("button", { name: "按新清单确认继续", exact: true }).click();
+  await expect(page.getByLabel("清理操作状态")).toContainText("删除完成");
+  expect(resumes).toEqual([{ plan_token: "new-plan", shared_policy: "keep_shared" }]);
+});
+
+test("#137 清单阻断或确定拒绝后取消危险选择，不用旧令牌执行", async ({ page }) => {
+  await mockDeletion(page);
+  let blocked = true, posts = 0;
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-plan?*", route => route.fulfill({ json: { ...deletionPlan(new URL(route.request().url()).searchParams.get("shared_policy")!), can_execute: !blocked, blockers: blocked ? [{ code: "source_in_use", message: "有结果未知的导出，不能清理" }] : [] } }));
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-operations", route => { posts++; return route.fulfill({ status: 409, headers: { "X-Mangrove-Deletion-Outcome": "rejected" }, json: { detail: "关联已变化，请重新核对" } }); });
+  await openDeletion(page);
+  await expect(page.getByRole("alert")).toContainText("有结果未知的导出");
+  await expect(page.getByRole("button", { name: "确认清理并保留共享资料", exact: true })).toBeDisabled();
+  blocked = false;
+  await page.getByRole("radio", { name: "同时删除共享资料，先停止依赖任务", exact: true }).check();
+  await page.getByRole("button", { name: "确认清理任务和共享资料", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("关联已变化");
+  await expect(page.getByRole("radio", { name: "保留其他任务使用的资料（默认）", exact: true })).toBeChecked();
+  await expect(page.getByRole("button", { name: "确认清理并保留共享资料", exact: true })).toBeDisabled();
+  expect(posts).toBe(1);
+  expect(await page.evaluate(() => localStorage.getItem("mangrove_task_deletion_u1"))).toBeNull();
+});
+
+test("#137 清单迟到不能重开已取消弹窗，重新打开按新清单读取", async ({ page }) => {
+  await mockDeletion(page);
+  const requested = responseBarrier(), release = responseBarrier(); let reads = 0;
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-plan?*", async route => { if (++reads === 1) { requested.release(); await release.promise; } return route.fulfill({ json: deletionPlan() }); });
+  await openDeletion(page); await requested.promise;
+  await page.getByRole("button", { name: "取消", exact: true }).click(); release.release();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await page.getByRole("button", { name: "永久删除", exact: true }).click();
+  await expect(page.getByLabel("资料清理清单")).toContainText("独占原件.csv");
+  expect(reads).toBe(2);
+});
+
+test("#137 关闭未知清理只关闭查看，迟到后仍按原键查询", async ({ page }) => {
+  await mockDeletion(page);
+  const requested = responseBarrier(), release = responseBarrier(); let posts = 0, reads = 0;
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-operations", async route => { posts++; requested.release(); await release.promise; return route.fulfill({ json: deletionOperation("completed") }); });
+  await page.route("**/api/semantic-workspace/deletion-operations/by-key?*", route => { reads++; return route.fulfill({ json: deletionOperation("completed") }); });
+  await openDeletion(page);
+  await page.getByRole("button", { name: "确认清理并保留共享资料", exact: true }).click(); await requested.promise;
+  await page.getByRole("button", { name: "关闭查看", exact: true }).click(); release.release();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "查看未完成的资料清理", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "查看未完成的资料清理", exact: true }).click();
+  await expect(page.getByLabel("清理操作状态")).toContainText("删除完成");
+  expect(posts).toBe(1); expect(reads).toBe(1);
+});
+
+test("#137 Owner切换不读取前Owner的删除身份或关联正文", async ({ page }) => {
+  await mockDeletion(page);
+  let queries = 0;
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-operations", route => route.fulfill({ status: 503, json: { detail: "结果未知" } }));
+  await page.route("**/api/semantic-workspace/deletion-operations/by-key?*", route => { queries++; return route.fulfill({ json: deletionOperation("incomplete") }); });
+  await openDeletion(page);
+  await page.getByRole("button", { name: "确认清理并保留共享资料", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("结果未知");
+  await page.route("**/api/auth/me", route => route.fulfill({ json: { user_id: "u2", username: "other", display_name: "另一人", role: "admin" } }));
+  await page.route("**/api/semantic-workspace/tasks/delete-target", route => route.fulfill({ status: 404, json: {} }));
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "任务工作台", exact: true })).toBeVisible();
+  await expect(page.getByRole("alertdialog")).toHaveCount(0); expect(queries).toBe(0);
+  await expect(page.getByText("独占原件.csv", { exact: true })).toHaveCount(0);
+  expect(await page.evaluate(() => localStorage.getItem("mangrove_task_deletion_u1"))).toBeTruthy();
+});
+
+test("#137 同源标签更新清理身份使旧确认失效", async ({ page, context }) => {
+  await mockDeletion(page); await openDeletion(page);
+  await expect(page.getByLabel("资料清理清单")).toBeVisible();
+  const peer = await context.newPage();
+  await peer.route("**/peer-deletion.html", route => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>同源草稿测试</title>" }));
+  await peer.goto(new URL("/peer-deletion.html", page.url()).toString());
+  await peer.evaluate(() => localStorage.setItem("mangrove_task_deletion_u1", JSON.stringify({ task_id: "other-task", key: "peer-key", payload: { plan_token: "peer-plan", shared_policy: "keep_shared" } })));
+  await expect(page.getByRole("alert")).toContainText("其他页面更新");
+  await expect(page.getByRole("button", { name: "确认清理并保留共享资料", exact: true })).toBeDisabled();
+  expect(await page.evaluate(() => localStorage.getItem("mangrove_task_deletion_u1"))).toContain("peer-key");
+  await peer.close();
+});
+
+test("#137 明暗390和1440清理确认安全焦点、IME与可访问性", async ({ page }, testInfo) => {
+  await mockDeletion(page); let posts = 0;
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-operations", route => { posts++; return route.fulfill({ json: deletionOperation("completed") }); });
+  await openDeletion(page);
+  await expect(page.getByRole("button", { name: "取消", exact: true })).toBeFocused();
+  await page.keyboard.press("Enter"); await expect(page.getByRole("alertdialog")).toHaveCount(0); expect(posts).toBe(0);
+  await page.getByRole("button", { name: "永久删除", exact: true }).click();
+  for (const theme of ["light", "dark"]) for (const width of [390, 1440]) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+    await page.evaluate(theme => document.documentElement.classList.toggle("dark", theme === "dark"), theme);
+    await page.getByText("查看 1 条关联记录", { exact: true }).click();
+    await expect(page.getByLabel("资料清理清单")).toContainText("other-task · V2");
+    await expect(page.getByLabel("资料清理清单")).toContainText("正式交付记录");
+    await page.getByRole("button", { name: "确认清理并保留共享资料", exact: true }).focus();
+    await page.getByRole("button", { name: "确认清理并保留共享资料", exact: true }).dispatchEvent("keydown", { key: "Enter", isComposing: true, bubbles: true });
+    expect(posts).toBe(0);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    const result = await new AxeBuilder({ page }).include('[role="alertdialog"]').analyze();
+    expect(result.violations.filter(item => item.impact === "serious" || item.impact === "critical")).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath(`deletion-${theme}-${width}.png`), fullPage: true });
+    await page.getByText("查看 1 条关联记录", { exact: true }).click();
+  }
+  await page.keyboard.press("Escape"); await expect(page.getByRole("alertdialog")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "永久删除", exact: true })).toBeFocused(); expect(posts).toBe(0);
+});
+
+test("#137 来源墓碑限制重跑但保留独立正式结果和历史QA", async ({ page }) => {
+  await mockWorkspace(page);
+  const fixture = previewIdentityFixture("A", 2);
+  await page.route("**/api/semantic-workspace/tasks/identity-task", route => route.fulfill({ json: { ...fixture.detail, source_integrity: { state: "source_deleted", deleted_source_keys: ["upload:V2-upload"], can_rerun: false, can_reverify: false } } }));
+  await page.route("**/api/semantic-workspace/tasks/identity-task/preview?*", route => route.fulfill({ json: fixture.preview }));
+  await page.goto("/data-prep?task=identity-task");
+  await expect(page.getByText("部分来源已删除，不能按原来源完整重跑或复验。", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "查看结果", exact: true }).click();
+  await expect(page.getByText("A-V2-正文", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "下载 A-V2.xlsx", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("来源已删除，原文不可再读取");
+  await expect(page.getByText("张三", { exact: true })).toHaveCount(0);
+});
+
+test("#137 已删原来源仍可下载独立结果，并显式换新资料创建修订", async ({ page }) => {
+  await mockWorkspace(page);
+  const fixture = previewIdentityFixture("A", 2);
+  await page.route("**/api/semantic-workspace/tasks/identity-task", route => route.fulfill({ json: { ...fixture.detail, source_integrity: { state: "source_deleted", deleted_source_keys: ["upload:V2-upload"], can_rerun: false, can_reverify: false } } }));
+  await page.route("**/api/semantic-workspace/tasks/identity-task/preview?*", route => route.fulfill({ json: fixture.preview }));
+  await page.route("**/api/semantic-delivery/outputs/A-V2-output", route => route.fulfill({ contentType: "application/octet-stream", body: "independent-formal-output" }));
+  const posts: Record<string, unknown>[] = [];
+  await page.route("**/api/semantic-workspace/tasks/identity-task/revisions", route => { posts.push(route.request().postDataJSON()); return route.fulfill({ status: 503, json: { detail: "合成测试保留修订未知" } }); });
+  await page.goto("/data-prep?task=identity-task");
+  await page.getByRole("button", { name: "查看结果", exact: true }).click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "下载 A-V2.xlsx", exact: true }).click();
+  expect((await download).suggestedFilename()).toBe("A-V2.xlsx");
+  await page.getByRole("button", { name: "编辑本次资料", exact: true }).click();
+  await page.getByRole("button", { name: "移除 A-V2-原件.csv", exact: true }).click();
+  await page.locator('input[type="file"]').setInputFiles({ name: "新证据.csv", mimeType: "text/csv", buffer: Buffer.from("ID\nN01", "utf-8") });
+  await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "创建新版本", exact: true }).click();
+  await expect.poll(() => posts.length).toBe(1);
+  expect(posts[0]).toMatchObject({ expected_active_revision: 2, upload_ids: ["upload-e2e"], source_snapshot_ids: [], delivery_output_ids: [] });
+});
+
+test("#137 切换任务使旧清理响应失效，保留原操作供查询", async ({ page }) => {
+  await mockDeletion(page);
+  const requested = responseBarrier(), release = responseBarrier();
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-operations", async route => { requested.release(); await release.promise; return route.fulfill({ json: deletionOperation("completed") }); });
+  await page.route("**/api/semantic-workspace/tasks/other-view", route => route.fulfill({ json: workspaceDetail(workspaceTask("other-view", "completed", "另一任务")) }));
+  await openDeletion(page);
+  await page.getByRole("button", { name: "确认清理并保留共享资料", exact: true }).click(); await requested.promise;
+  await page.evaluate(() => { history.pushState({}, "", "/data-prep?task=other-view"); window.dispatchEvent(new PopStateEvent("popstate")); });
+  await expect(page.getByRole("alertdialog")).toHaveCount(0); release.release();
+  await expect(page.getByRole("heading", { name: "另一任务", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "查看未完成的资料清理", exact: true })).toBeVisible();
+  expect(new URL(page.url()).searchParams.get("task")).toBe("other-view");
+  expect(await page.evaluate(() => localStorage.getItem("mangrove_task_deletion_u1"))).toBeTruthy();
+});
+
+test("#137 实际网页原件和生产归属显示精确组与原件身份", async ({ page }) => {
+  await mockDeletion(page);
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-plan?*", route => route.fulfill({ json: { ...deletionPlan(), objects: [{ source_key: "web_artifact:web-1", kind: "web_artifact", identity: "original", artifact_id: "web-1", snapshot_id: "web-group", label: "历史网页原文", sha256: "c".repeat(64), time_kind: "acquired", acquired_at: "2026-09-09T01:00:00Z", disposition: "keep_shared", references: [{ task_id: "producer-task", revision: 1, delivery_id: "producer-delivery", run_id: "producer-run", reference_kind: "producer", state: "retained", use_id: null, task_exists: true, in_recycle_bin: false }] }] } }));
+  await openDeletion(page);
+  const list = page.getByLabel("资料清理清单");
+  await expect(list).toContainText("网页原文");
+  await expect(list).toContainText("来源组：web-group");
+  await expect(list).toContainText("原件：web-1");
+  await page.getByText("查看 1 条关联记录", { exact: true }).click();
+  await expect(list).toContainText("生产归属");
+  await expect(list).toContainText("producer-task · V1");
+});
+
+for (const state of ["incomplete", "needs_confirmation"]) test(`#137 继续操作 ${state} 结果未知只能查询原操作`, async ({ page }) => {
+  await mockDeletion(page); let resumes = 0, reads = 0;
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-operations", route => route.fulfill({ json: deletionOperation(state) }));
+  await page.route("**/api/semantic-workspace/deletion-operations/delete-op/resume", route => { resumes++; return route.fulfill({ status: 503, json: { detail: "继续结果未知" } }); });
+  await page.route("**/api/semantic-workspace/deletion-operations/delete-op", route => { reads++; return route.fulfill({ json: deletionOperation("stopping") }); });
+  await openDeletion(page);
+  await page.getByRole("button", { name: "确认清理并保留共享资料", exact: true }).click();
+  if (state === "needs_confirmation") await page.getByRole("button", { name: "重新核对清单", exact: true }).click();
+  await page.getByRole("button", { name: state === "needs_confirmation" ? "按新清单确认继续" : "继续原清理操作", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("继续结果未知");
+  await expect(page.getByRole("button", { name: "继续原清理操作", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "按新清单确认继续", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("radio")).toHaveCount(0);
+  await page.getByRole("button", { name: "查询原操作状态", exact: true }).click();
+  await expect(page.getByLabel("清理操作状态")).toContainText("正在停止依赖任务");
+  expect(resumes).toBe(1); expect(reads).toBe(1);
+});
+
+for (const afterSubmit of [false, true]) test(`#137 同源存储事件未送达时也不覆盖新清理身份 afterSubmit=${afterSubmit}`, async ({ page, context }) => {
+  await page.addInitScript(() => window.addEventListener("storage", event => event.stopImmediatePropagation(), true));
+  await mockDeletion(page); let posts = 0;
+  const requested = responseBarrier(), release = responseBarrier();
+  await page.route("**/api/semantic-workspace/tasks/delete-target/deletion-operations", async route => { posts++; requested.release(); if (afterSubmit) await release.promise; return route.fulfill({ json: deletionOperation("completed") }); });
+  await openDeletion(page); await expect(page.getByLabel("资料清理清单")).toBeVisible();
+  // 屏障刻意扣住事件通知，检查提交/清理自身也核对共享存储，不能依赖通知时序。
+  if (afterSubmit) { await page.getByRole("button", { name: "确认清理并保留共享资料", exact: true }).click(); await requested.promise; }
+  const peer = await context.newPage();
+  await peer.route("**/peer-deletion.html", route => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>同源屏障</title>" }));
+  await peer.goto(new URL("/peer-deletion.html", page.url()).toString());
+  await peer.evaluate(() => localStorage.setItem("mangrove_task_deletion_u1", JSON.stringify({ task_id: "peer-task", key: "new-peer-key", payload: { plan_token: "new-peer-plan", shared_policy: "keep_shared" } })));
+  if (afterSubmit) release.release(); else await page.getByRole("button", { name: "确认清理并保留共享资料", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("其他页面更新");
+  expect(await page.evaluate(() => localStorage.getItem("mangrove_task_deletion_u1"))).toContain("new-peer-key");
+  await expect(page.getByText("删除完成", { exact: true })).toHaveCount(0);
+  expect(new URL(page.url()).searchParams.get("task")).toBe("delete-target");
+  expect(posts).toBe(afterSubmit ? 1 : 0); await peer.close();
+});
+
 test("#136 当前文件和历史三类资料一次确认，预览返回且零重复上传采集", async ({ page }) => {
   await mockReusable(page);
   let uploads = 0, acquisitions = 0;
@@ -5653,4 +5968,75 @@ test("#136 派生输入任务画布读取冻结输出，移除后修订发送空
   await page.getByRole("button", { name: "创建新版本", exact: true }).click();
   await expect.poll(() => submitted.length).toBe(1);
   expect(submitted[0]).toMatchObject({ upload_ids: ["file-kept"], source_snapshot_ids: [], delivery_output_ids: [] });
+});
+
+
+test("#137 已删网页空快照保留整组，明确移除后才可换新资料", async ({ page }) => {
+  await mockWorkspace(page); let acquisitions = 0;
+  const fixture = previewIdentityFixture("A", 2);
+  await page.route("**/api/semantic-workspace/tasks/identity-task", route => route.fulfill({ json: { ...fixture.detail, web_sources: [{ source_snapshot_id: "deleted-web-group", snapshot: null, availability: "unavailable", reason_code: "source_deleted" }], source_integrity: { state: "source_deleted", deleted_source_keys: ["web_artifact:deleted-page"], can_rerun: false, can_reverify: false } } }));
+  await page.route("**/api/semantic-workspace/tasks/identity-task/preview?*", route => route.fulfill({ json: fixture.preview }));
+  await page.route("**/api/semantic-workspace/source-acquisitions**", route => { acquisitions++; return route.fulfill({ status: 404, json: {} }); });
+  const posts: Record<string, unknown>[] = [];
+  await page.route("**/api/semantic-workspace/tasks/identity-task/revisions", route => { posts.push(route.request().postDataJSON()); return route.fulfill({ status: 503, json: { detail: "合成测试保留修订未知" } }); });
+  await page.goto("/data-prep?task=identity-task");
+  await expect(page.getByText("网页来源组已清理：deleted-web-group", { exact: false })).toBeVisible();
+  await page.getByRole("button", { name: "查看结果", exact: true }).click();
+  await expect(page.getByText("A-V2-正文", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "编辑本次资料", exact: true }).click();
+  await expect(page.getByLabel("已选网页资料")).toContainText("来源已删除");
+  await expect(page.getByRole("button", { name: "创建新版本", exact: true })).toBeDisabled();
+  await page.reload();
+  await page.getByRole("button", { name: "编辑本次资料", exact: true }).click();
+  await expect(page.getByLabel("已选网页资料")).toContainText("deleted-web-group");
+  await expect(page.getByRole("button", { name: "创建新版本", exact: true })).toBeDisabled();
+  expect(acquisitions).toBe(0); expect(posts).toHaveLength(0);
+  await page.getByRole("button", { name: "移除网页组 deleted-web-group", exact: true }).click();
+  await page.getByRole("button", { name: "移除 A-V2-原件.csv", exact: true }).click();
+  await page.locator('input[type="file"]').setInputFiles({ name: "新证据.csv", mimeType: "text/csv", buffer: Buffer.from("ID\nN01", "utf-8") });
+  await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "创建新版本", exact: true }).click();
+  await expect.poll(() => posts.length).toBe(1);
+  expect(posts[0]).toMatchObject({ expected_active_revision: 2, upload_ids: ["upload-e2e"], source_snapshot_ids: [], delivery_output_ids: [] });
+  expect(acquisitions).toBe(0);
+});
+
+
+test("#137 历史网页删除不能借当前完整版本或旧缓存恢复原文", async ({ page }) => {
+  await mockWorkspace(page);
+  const old = previewIdentityFixture("A", 1), current = previewIdentityFixture("A", 2);
+  const snapshot = mixedAttempt(1).snapshot!;
+  let deleted = false, marked = false;
+  const requested = responseBarrier(), release = responseBarrier();
+  await page.route(/\/api\/semantic-workspace\/tasks\/identity-task(?:\?.*)?$/, route => {
+    const isOld = new URL(route.request().url()).searchParams.get("revision") === "1";
+    return route.fulfill({ json: { ...(isOld ? old.detail : current.detail), ...(isOld ? { upload_ids: [], uploads: [], web_sources: [{ source_snapshot_id: snapshot.snapshot_id, snapshot }] } : {}), source_integrity: { state: isOld && marked ? "source_deleted" : "intact", deleted_source_keys: isOld && marked ? ["web_artifact:mixed-artifact-1"] : [], can_rerun: !(isOld && marked), can_reverify: !(isOld && marked) } } });
+  });
+  await page.route("**/identity-task/preview?*", route => route.fulfill({ json: new URL(route.request().url()).searchParams.get("revision") === "1" ? old.preview : current.preview }));
+  await page.route("**/identity-task/sources/mixed-artifact-1/preview?*", async route => {
+    if (deleted) { requested.release(); await release.promise; return route.fulfill({ status: 404, json: { detail: "来源已删除" } }); }
+    return route.fulfill({ json: { task_id: "identity-task", revision: 1, artifact_id: "mixed-artifact-1", snapshot_id: snapshot.snapshot_id, upload_id: null, sha256: "a".repeat(64), original_name: "历史网页.html", media_type: "text/html", content_url: null, kind: "web", text_preview: "历史网页真实旧正文", representation: { kind: "source", parser_or_inspector_version: "fixture" }, is_complete: false, truncated: true } });
+  });
+  await page.goto("/data-prep?task=identity-task");
+  await page.getByLabel("结果版本").selectOption("1");
+  await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+  await expect(page.getByText("历史网页真实旧正文", { exact: true })).toBeVisible();
+  await page.getByLabel("结果版本").selectOption("2");
+  await expect(page.getByText("历史网页真实旧正文", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("部分来源已删除，不能按原来源完整重跑或复验。", { exact: false })).toHaveCount(0);
+  deleted = true;
+  await page.getByLabel("结果版本").selectOption("1");
+  await expect(page.getByRole("button", { name: "关闭原文件预览", exact: true })).toBeVisible();
+  await requested.promise;
+  await expect(page.getByText("历史网页真实旧正文", { exact: true })).toHaveCount(0);
+  release.release();
+  await expect(page.getByRole("alert")).toContainText("来源已删除");
+  await expect(page.getByText("历史网页真实旧正文", { exact: true })).toHaveCount(0);
+  marked = true;
+  await page.getByLabel("结果版本").selectOption("2");
+  await expect(page.getByText("部分来源已删除，不能按原来源完整重跑或复验。", { exact: false })).toHaveCount(0);
+  await page.getByLabel("结果版本").selectOption("1");
+  await expect(page.getByText("部分来源已删除，不能按原来源完整重跑或复验。", { exact: false })).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("来源已删除，原文不可再读取");
+  await expect(page.getByText("历史网页真实旧正文", { exact: true })).toHaveCount(0);
 });

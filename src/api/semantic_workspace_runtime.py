@@ -1852,7 +1852,7 @@ class SemanticWorkspaceManager:
             or saved
         )
 
-    async def _confirm_runtime_stopped(self, user_id: str, task_id: str, revision: int, *, account_hold: bool = False, expected_generation: int | None = None) -> bool:
+    async def _confirm_runtime_stopped(self, user_id: str, task_id: str, revision: int, *, account_hold: bool = False, expected_generation: int | None = None, deletion_revision_only: bool = False) -> bool:
         store = get_store()
         runtime = AgenticRuntimeRepository(settings.webui_db_path).get(user_id, task_id, revision)
         try:
@@ -1871,7 +1871,7 @@ class SemanticWorkspaceManager:
                     attempt = sources.get_attempt(user_id, attempt_id)
                     source_stopped = source_stopped and requested and bool(attempt) and attempt["status"] not in {"acquiring", "cancelling"}
             else:
-                source_stopped = sources.cancel_for_task(user_id, task_id)
+                source_stopped = sources.cancel_for_task(user_id, task_id, revision=revision if deletion_revision_only else None)
             if runtime is not None and runtime.get("run_id") and not (
                 account_hold and runtime["status"] is RuntimeStatus.NEEDS_INPUT
             ):
@@ -1881,6 +1881,9 @@ class SemanticWorkspaceManager:
         except Exception:
             if account_hold:
                 # 账号暂停不得借取消终态清空原问题，失败由调用者记录为未静默。
+                return False
+            if deletion_revision_only:
+                # 历史来源清理不能改写已经换源的活动版本状态。
                 return False
             store.update_semantic_workspace_task(user_id, task_id, status="cancelling", cancel_requested=True)
             store.append_semantic_workspace_event(
@@ -2605,6 +2608,8 @@ class SemanticWorkspaceManager:
                 session_file=runtime["session_file"],
             )
         upload_store = _upload_store()
+        from src.source_acquisition.deletion import assert_sources_readable
+        assert_sources_readable(user_id,task_revision.get('source_refs',[]))
         sources: list[SourceInput] = []
         for source_ref in task_revision.get("source_refs", []):
             if not source_ref.get("upload_id"):

@@ -24,20 +24,21 @@ type Props = Omit<ComposerProps, "onSubmit" | "onReadWeb"> & {
   ownerId: string;
   draftScope?: string;
   initialSources?: SourceSnapshot[];
+  initialUnavailableSourceIds?: string[];
   initialReusableSources?: ReusableSource[];
   preserveContext?: boolean;
   onSubmit: (payload: SourceTaskPayload) => Promise<void>;
 };
 const splitLines = (value: string) => value.split(/[\n,，]/).map(item => item.trim()).filter(Boolean);
 
-export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSources = [], initialReusableSources = [], preserveContext = false, onSubmit, ...props }: Props) {
+export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSources = [], initialUnavailableSourceIds = [], initialReusableSources = [], preserveContext = false, onSubmit, ...props }: Props) {
   const storageKey = `mangrove_workspace_draft_${ownerId}_${draftScope}`;
   const filesKey = `${storageKey}_files`;
   const [saved] = useState(() => {
     try { return JSON.parse(localStorage.getItem(storageKey) || "null") as { draft?: WebIntakeDraft; sources?: Choice[]; history?: ReusableSource[]; mustInclude?: string; exclusions?: string; quantity?: string; completeness?: string; templateId?: string; memoryIds?: number[] } | null; } catch { return null; }
   });
   const [draft, setDraft] = useState<WebIntakeDraft | null>(props.draft ?? saved?.draft ?? null);
-  const [sources, setSources] = useState<Choice[]>(() => saved?.sources ?? initialSources.map(snapshot => ({ snapshotId: snapshot.snapshot_id, attemptId: snapshot.attempt_id, snapshot })));
+  const [sources, setSources] = useState<Choice[]>(() => (saved?.sources ?? [...initialSources.map(snapshot => ({ snapshotId: snapshot.snapshot_id, attemptId: snapshot.attempt_id, snapshot })), ...initialUnavailableSourceIds.map(snapshotId => ({ snapshotId, attemptId: "" }))]).map(source => initialUnavailableSourceIds.includes(source.snapshotId) ? { snapshotId: source.snapshotId, attemptId: "", error: "来源已删除，请明确移除此组后换新资料；不会重新采集。" } : source));
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [history, setHistory] = useState<ReusableSource[]>(() => saved?.history ?? initialReusableSources.filter(item => item.kind === "delivery_output"));
   const [restoringHistory, setRestoringHistory] = useState(true);
@@ -83,7 +84,7 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   useEffect(() => { if (stale || props.active === false) { generation.current++; setPickerOpen(false); } }, [stale, props.active]);
   useEffect(() => {
     let current = true;
-    for (const source of sources.filter(item => !item.snapshot)) {
+    for (const source of sources.filter(item => !item.snapshot && !item.error)) {
       void getSourceAcquisition(source.attemptId).then(attempt => {
         if (!current) return;
         if (attempt.snapshot?.snapshot_id !== source.snapshotId) throw new Error("网页来源不可用或身份已改变");
