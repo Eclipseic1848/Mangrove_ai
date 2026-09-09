@@ -1,7 +1,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { LayoutDashboard, MessagesSquare, CalendarClock, Moon, Sun, LogOut, Library, Brain, Settings, Users, BarChart3, Database, Menu, X } from "lucide-react";
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Link, NavLink, Outlet, useLocation } from "react-router-dom";
 import { toast } from "sonner";
 import { useAuth, isAdminish } from "@/lib/auth";
 import { useTheme } from "@/lib/theme";
@@ -23,43 +23,61 @@ const NAV_ADMIN = [
   { to: "/admin", label: "用户管理", icon: Users, end: false },
 ];
 
+// OwnerQueryScope换账号会重挂载Layout；只在本页内存保留身份边界，不能因此认领旧地址。
+let navigationOwner: { ownerId: string; blockedLocation: string | null } | null = null;
+
 export function Layout() {
   const { user, logout } = useAuth();
   const { theme, toggle } = useTheme();
-  const navigate = useNavigate();
   const location = useLocation();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const taskWorkspace = location.pathname === "/data-prep" && new URLSearchParams(location.search).get("legacy") !== "1";
-  const compactDataPrep = location.pathname === "/data-prep" || location.pathname === "/settings";
+  const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 767px)").matches);
+  const drawer = taskWorkspace || narrow;
+  const menuButton = useRef<HTMLButtonElement>(null);
+  const main = useRef<HTMLElement>(null);
+  const workspaceReturn = useRef<{ ownerId: string; to: string; hasTask: boolean } | null>(null);
+  // 只保留当前Owner的真实路由身份，不复制正文、任意查询参数或持久化秘密。
+  if (user && navigationOwner?.ownerId !== user.user_id) {
+    workspaceReturn.current = null;
+    // 换账号时旧地址仍在屏幕上；禁止后续重渲染把它重新归给新Owner。
+    navigationOwner = { ownerId: user.user_id, blockedLocation: navigationOwner ? location.key : null };
+  }
+  if (taskWorkspace && user && location.key !== navigationOwner?.blockedLocation) {
+    const current = new URLSearchParams(location.search);
+    const target = new URLSearchParams();
+    for (const key of ["task", "revision"]) if (current.has(key)) target.set(key, current.get(key)!);
+    workspaceReturn.current = { ownerId: user.user_id, to: `/data-prep${target.size ? `?${target}` : ""}`, hasTask: Boolean(target.get("task")) };
+  }
+  const returnTarget = ["/settings", "/admin"].includes(location.pathname) ? workspaceReturn.current : null;
+  const pageLabel = [...NAV, ...NAV_ADMIN].find(item => item.to === location.pathname)?.label || "Mangrove";
+  const NavigationContainer = drawer ? "div" : "aside";
 
   useEffect(() => {
     setMobileNavOpen(false);
-  }, [location.pathname]);
+  }, [location.pathname, location.search, drawer]);
 
   useEffect(() => {
-    if (!mobileNavOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMobileNavOpen(false);
-    };
-    window.addEventListener("keydown", closeOnEscape);
-    return () => window.removeEventListener("keydown", closeOnEscape);
-  }, [mobileNavOpen]);
+    const media = window.matchMedia("(max-width: 767px)");
+    const update = () => setNarrow(media.matches);
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
 
   const navigation = (
-      <aside className={cn(
-        "flex w-60 shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground",
-        compactDataPrep && !mobileNavOpen && (taskWorkspace ? "hidden" : "max-md:hidden"),
-        compactDataPrep && mobileNavOpen && (taskWorkspace ? "fixed inset-y-0 left-0 z-50" : "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50"),
+      <NavigationContainer className={cn(
+        "flex w-60 max-w-[calc(100vw-2rem)] shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground",
+        drawer && "fixed inset-y-0 left-0 z-50",
       )}>
-        {taskWorkspace && <Dialog.Title className="sr-only">全局导航</Dialog.Title>}
+        {drawer && <Dialog.Title className="sr-only">全局导航</Dialog.Title>}
         <div className="flex items-center gap-2.5 px-5 py-5">
           <img src="/logo.svg" alt="howso@Mangrove" className="h-8 w-8" />
           <div className="leading-tight">
             <div className="text-[15px] font-semibold text-foreground">howso@Mangrove</div>
             <div className="text-[11px] text-muted-foreground">数据治理智能体</div>
           </div>
-          {compactDataPrep && mobileNavOpen && (
+          {drawer && (
             <button
               type="button"
               aria-label="关闭导航"
@@ -156,37 +174,30 @@ export function Layout() {
             <span>南京华苏科技</span>
           </div>
         </div>
-      </aside>
+      </NavigationContainer>
   );
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background">
-      {!taskWorkspace && compactDataPrep && mobileNavOpen && (
-        <button
-          type="button"
-          aria-label="关闭导航背景"
-          onClick={() => setMobileNavOpen(false)}
-          className={cn("fixed inset-0 z-40 bg-foreground/20", !taskWorkspace && "md:hidden")}
-        />
-      )}
       {/* 左侧导航 */}
-      {taskWorkspace ? (
+      {drawer ? (
         <Dialog.Root open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
           <Dialog.Portal>
             <Dialog.Overlay className="fixed inset-0 z-40 bg-foreground/20" />
             <Dialog.Content asChild aria-label="全局导航" aria-describedby={undefined} onCloseAutoFocus={event => {
               event.preventDefault();
-              document.querySelector<HTMLButtonElement>('[aria-label="打开导航"]')?.focus();
+              (menuButton.current || main.current)?.focus();
             }}>{navigation}</Dialog.Content>
           </Dialog.Portal>
         </Dialog.Root>
       ) : navigation}
 
       {/* 主内容 */}
-      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        {compactDataPrep && (
-          <div className={cn("h-11 shrink-0 items-center justify-between border-b bg-background px-3", taskWorkspace ? "flex" : "hidden max-md:flex")}>
-            <button
+      <main ref={main} tabIndex={-1} className="flex min-w-0 flex-1 flex-col overflow-hidden">
+        {(drawer || returnTarget) && (
+          <div className="flex min-h-11 shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-background px-3 py-1">
+            {drawer && <button
+              ref={menuButton}
               type="button"
               aria-label={mobileNavOpen ? "关闭导航" : "打开导航"}
               aria-expanded={mobileNavOpen}
@@ -194,8 +205,9 @@ export function Layout() {
               className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
             >
               {mobileNavOpen ? <X className="h-4 w-4" /> : <Menu className="h-4 w-4" />}
-            </button>
-            <span className="text-xs font-medium text-muted-foreground">{location.pathname === "/settings" ? "Mangrove 设置" : "Mangrove 数据工作台"}</span>
+            </button>}
+            <span className="text-xs font-medium text-muted-foreground">Mangrove · {pageLabel}</span>
+            {returnTarget && <Link to={returnTarget.to} className="rounded-md px-2 py-1 text-sm text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{returnTarget.hasTask ? "返回原任务" : "返回工作台"}</Link>}
           </div>
         )}
         <Outlet />
