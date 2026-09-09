@@ -3,6 +3,8 @@ import AxeBuilder from "@axe-core/playwright";
 
 async function mockPages(page: Page, role = "admin") {
   await page.addInitScript(() => localStorage.setItem("mangrove_token", "synthetic-navigation-token"));
+  // 合成文档保留开发HMR；仅允许当前隔离origin访问本地开发服务器。
+  await page.context().grantPermissions(["local-network-access"], { origin: String(test.info().project.use.baseURL) });
   await page.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (url.origin !== new URL(String(test.info().project.use.baseURL)).origin) return route.abort();
@@ -15,6 +17,7 @@ async function mockPages(page: Page, role = "admin") {
     if (!url.pathname.startsWith("/api/")) return route.continue();
     const data: Record<string, unknown> = {
       "/api/semantic-workspace/tasks": [],
+      "/api/semantic-workspace/context-options": { templates: [], memories: [] },
       "/api/semantic-workspace/guidance": { onboarding: [], examples: [] },
       "/api/auth/me": { user_id: `synthetic-${role}`, username: role, display_name: "合成导航账号", role },
       "/api/auth/login": { user_id: "synthetic-other", username: "other", display_name: "另一个合成账号", role },

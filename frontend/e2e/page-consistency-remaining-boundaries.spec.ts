@@ -4,6 +4,8 @@ import AxeBuilder from "@axe-core/playwright";
 const modelData = (model = "synthetic-model") => ({ options: [{ provider: "local", model, label: model }], available: ["local"], default: { provider: "local", model, label: model }, document_default: { provider: "local", model, label: model }, document_default_source: "global" });
 async function fixture(page: Page, role = "admin") {
   const control = { settingsFail: false, domainFail: false, mutationFail: true, writes: [] as string[], adminReads: [] as string[] };
+  // 合成文档保留开发HMR；仅允许当前隔离origin访问本地开发服务器。
+  await page.context().grantPermissions(["local-network-access"], { origin: String(test.info().project.use.baseURL) });
   await page.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (url.origin !== new URL(String(test.info().project.use.baseURL)).origin) return route.abort();
@@ -23,6 +25,7 @@ async function fixture(page: Page, role = "admin") {
     if (control.domainFail && url.pathname === "/api/config/domain-health") return route.fulfill({ status: 503, json: { detail: "合成域名读取失败" } });
     const data: Record<string, unknown> = {
       "/api/semantic-workspace/tasks": [],
+      "/api/semantic-workspace/context-options": { templates: [], memories: [] },
       "/api/semantic-workspace/guidance": { onboarding: [], examples: [] },
       "/api/auth/me": { user_id: `synthetic-${role}`, username: role, display_name: "合成账号", role },
       "/api/models": modelData(),

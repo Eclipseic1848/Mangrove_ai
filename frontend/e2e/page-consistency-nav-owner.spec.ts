@@ -2,6 +2,8 @@ import { test, expect, type Page } from "@playwright/test";
 
 async function mockPages(page: Page, role = "admin") {
   await page.addInitScript(() => localStorage.setItem("mangrove_token", "synthetic-navigation-token"));
+  // 合成文档保留开发HMR；仅允许当前隔离origin访问本地开发服务器。
+  await page.context().grantPermissions(["local-network-access"], { origin: String(test.info().project.use.baseURL) });
   await page.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (url.origin !== new URL(String(test.info().project.use.baseURL)).origin) return route.abort();
@@ -14,6 +16,7 @@ async function mockPages(page: Page, role = "admin") {
     if (!url.pathname.startsWith("/api/")) return route.continue();
     const data: Record<string, unknown> = {
       "/api/semantic-workspace/tasks": [],
+      "/api/semantic-workspace/context-options": { templates: [], memories: [] },
       "/api/semantic-workspace/guidance": { onboarding: [], examples: [] },
       "/api/auth/me": { user_id: `synthetic-${role}`, username: role, display_name: "合成导航账号", role },
       "/api/auth/login": { user_id: "synthetic-other", username: "other", display_name: "另一个合成账号", role },
@@ -35,6 +38,7 @@ async function mockPages(page: Page, role = "admin") {
 }
 
 test("N9 工作台切Owner后旧location持续禁记，新导航可以登记", async ({ page }) => {
+  const pageErrors: string[] = []; page.on("pageerror", error => pageErrors.push(error.message));
   await mockPages(page); await page.goto("/data-prep?task=owner-a-task&revision=2");
   await expect(page.getByRole("button", { name: "打开导航", exact: true })).toBeVisible();
   await page.evaluate(() => (window as any).navigationFixture.changeOwner());
@@ -47,4 +51,5 @@ test("N9 工作台切Owner后旧location持续禁记，新导航可以登记", a
   await page.getByRole("button", { name: "打开导航", exact: true }).click();
   await page.getByRole("link", { name: "设置", exact: true }).click();
   await expect(page.getByRole("link", { name: "返回原任务", exact: true })).toHaveAttribute("href", "/data-prep?task=owner-b-task&revision=1");
+  expect(pageErrors).toEqual([]);
 });
