@@ -465,6 +465,12 @@ export interface WorkspaceTask {
   permission_profile?: "standard" | "extended" | "host_dev";
   agentic_runtime?: AgenticRuntimeInfo;
   progress?: TaskProgressView;
+  web_sources?: Array<{ source_snapshot_id: string; snapshot: SourceSnapshot }>;
+  source_contract?: {
+    schema_version: number;
+    goal_contract: NonNullable<WorkspaceTask["web_source"]>["goal_contract"] | null;
+    web_sources: Array<{ source_snapshot_id: string; allowed_scope: SourceSnapshot["allowed_scope"]; coverage: SourceSnapshot["coverage"] }>;
+  } | null;
   web_source?: {
     source_snapshot_id: string;
     goal_contract: {

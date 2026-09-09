@@ -21,7 +21,8 @@ import { toast } from "sonner";
 import { api, ApiError } from "@/lib/api";
 import { isAdminish, useAuth } from "@/lib/auth";
 import { ModelConnectionsPanel } from "@/pages/settings/ModelConnectionsPanel";
-import { TaskComposer, type WebIntakeDraft } from "@/components/workspace/TaskComposer";
+import { type WebIntakeDraft } from "@/components/workspace/TaskComposer";
+import { WorkspaceSourceComposer, type SourceTaskPayload } from "@/components/workspace/WorkspaceSourceComposer";
 import {
   CandidatePreview,
   ResultPreview,
@@ -32,12 +33,13 @@ import { SourcePreviewPanel, initialSourceView, type SourceViewState } from "@/c
 import { TaskTimeline } from "@/components/workspace/TaskTimeline";
 import { Markdown } from "@/components/Markdown";
 import { WorkspaceTaskSidebar } from "@/components/workspace/WorkspaceTaskSidebar";
-import { WebSourceIntake } from "@/components/workspace/WebSourceIntake";
 import {
   answerWorkspaceTask,
   cancelWorkspaceTask,
   createWorkspaceRevision,
+  WorkspaceRevisionError,
   createWorkspaceTask,
+  WorkspaceTaskError,
   decideCandidateGap,
   decideWorkspaceRevision,
   getWorkspaceGuidance,
@@ -566,6 +568,36 @@ export function SemanticWorkspacePage() {
     selectionParams.current = next;
     setSearchParams(next);
   };
+  const [recoveringCreate, setRecoveringCreate] = useState(false);
+  const createRecovery = useRef<{ key: string; promise: ReturnType<typeof createWorkspaceTask> } | null>(null);
+  useEffect(() => {
+    if (!user?.user_id) return;
+    const storageKey = `mangrove_web_task_attempt_${user.user_id}`;
+    let stored: { fingerprint: string; idempotency_key: string; payload: Parameters<typeof createWorkspaceTask>[0] } | null = null;
+    try { stored = JSON.parse(localStorage.getItem(storageKey) || "null"); } catch { return; }
+    if (!stored?.payload || !stored.idempotency_key) return;
+    let current = true;
+    const draftKey = `mangrove_workspace_draft_${user.user_id}_new`;
+    const savedDraft = localStorage.getItem(draftKey), savedFiles = localStorage.getItem(`${draftKey}_files`);
+    createAttemptRef.current = { fingerprint: stored.fingerprint, key: stored.idempotency_key };
+    setRecoveringCreate(true);
+    // 恢复同一完整请求和幂等键，未知结果不能变成第二个任务。
+    if (createRecovery.current?.key !== stored.idempotency_key) createRecovery.current = { key: stored.idempotency_key, promise: createWorkspaceTask(stored.payload, stored.idempotency_key) };
+    void createRecovery.current.promise.then(created => {
+      if (!current) return;
+      localStorage.removeItem(storageKey);
+      if (localStorage.getItem(draftKey) === savedDraft && localStorage.getItem(`${draftKey}_files`) === savedFiles) { localStorage.removeItem(draftKey); localStorage.removeItem(`${draftKey}_files`); }
+      createAttemptRef.current = null;
+      setSelectedTaskId(created.task_id);
+      void queryClient.invalidateQueries({ queryKey: ["semantic-workspace-tasks"] });
+      toast.success("已恢复上次任务");
+    }).catch(error => {
+      if (!current) return;
+      if (error instanceof WorkspaceTaskError && error.rejected) { localStorage.removeItem(storageKey); createAttemptRef.current = null; }
+      toast.error("上次任务尚未恢复，资料仍保留；请核对后重试原请求");
+    }).finally(() => { if (current) setRecoveringCreate(false); });
+    return () => { current = false; };
+  }, [user?.user_id]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(() => window.innerWidth >= 1024);
   const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 767px)").matches);
@@ -575,9 +607,11 @@ export function SemanticWorkspacePage() {
     media.addEventListener("change", update);
     return () => media.removeEventListener("change", update);
   }, []);
-  const [webPrompt, setWebPrompt] = useState<WebIntakeDraft | null>(null);
   const [composerDraft, setComposerDraft] = useState<WebIntakeDraft | null>(null);
-  const [webOpen, setWebOpen] = useState(false);
+  const [sourceEditorIdentity, setSourceEditorIdentity] = useState<string | null>(null);
+  const sourceEditAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
+  const [sourceEditUnknown, setSourceEditUnknown] = useState(false);
+  const [sourceEditRecovering, setSourceEditRecovering] = useState(false);
   const [filter, setFilter] = useState<
     "all" | "active" | "needs_input" | "completed"
   >("all");
@@ -796,7 +830,8 @@ export function SemanticWorkspacePage() {
   // 缓存命中时也必须在本次渲染排除旧版本选择，不能等 effect 再消除错位。
   const sourceSelection = taskSourceSelection?.resultIdentity === resultIdentity
     ? taskSourceSelection : null;
-  const taskUploadId = sourceSelection?.uploadId ?? task?.upload_ids[0] ?? task?.web_source?.snapshot?.artifacts[0]?.artifact_id ?? null;
+  const taskWebSources = task?.web_sources ?? (task?.web_source ? [task.web_source] : []);
+  const taskUploadId = sourceSelection?.uploadId ?? task?.upload_ids[0] ?? taskWebSources[0]?.snapshot.artifacts[0]?.artifact_id ?? null;
 
   useEffect(() => {
     const pending = pendingSource.current;
@@ -873,8 +908,6 @@ export function SemanticWorkspacePage() {
     setSelectedUploadId(null);
     setInspectorOpen(false);
     setComposerDraft(null);
-    setWebPrompt(null);
-    setWebOpen(false);
     setExampleSeed({
       key: `${example.id}:${Date.now()}`,
       prompt: example.prompt,
@@ -903,28 +936,17 @@ export function SemanticWorkspacePage() {
     );
   }, []);
 
-  const submitNew = async (payload: {
-    prompt: string;
-    uploads: Array<{ upload_id: string }>;
-    formats: string[];
-    provider: string;
-    model: string | null;
-    runtimeVersion?: "legacy" | "pi";
-    permissionProfile: "standard";
-    modelConnectionId: string | null;
-    modelConnectionModel: string | null;
-    externalApiConfirmed: boolean;
-    capabilityNeed?: CapabilityNeed;
-    capabilityPackRefs: Array<{
-      pack_id: string;
-      version: string;
-      digest: string;
-    }>;
-  }) => {
+  const submitNew = async (payload: SourceTaskPayload) => {
+    const storageKey = `mangrove_web_task_attempt_${user?.user_id}`;
+    const owner = user?.user_id;
+    const draftKey = `mangrove_workspace_draft_${owner}_new`;
+    const savedDraft = localStorage.getItem(draftKey), savedFiles = localStorage.getItem(`${draftKey}_files`);
     try {
       const requestPayload = {
         objective_text: payload.prompt,
-        upload_ids: payload.uploads.map((upload) => upload.upload_id),
+        upload_ids: [...new Set(payload.uploads.map((upload) => upload.upload_id))],
+        source_snapshot_ids: payload.sourceSnapshotIds,
+        ...payload.sourceGoal,
         output_formats: payload.formats,
         provider: payload.provider,
         model: payload.model,
@@ -937,18 +959,23 @@ export function SemanticWorkspacePage() {
         external_api_confirmed: payload.externalApiConfirmed,
         capability_pack_refs: payload.capabilityPackRefs,
         ...(payload.capabilityNeed ? { capability_need: payload.capabilityNeed } : {}),
-      } as const;
+      };
       const fingerprint = JSON.stringify(requestPayload);
+      if (createAttemptRef.current && createAttemptRef.current.fingerprint !== fingerprint) throw new Error("上次创建结果未知，请刷新恢复原请求后再更改资料");
       if (createAttemptRef.current?.fingerprint !== fingerprint) {
         createAttemptRef.current = {
           fingerprint,
           key: nanoid(),
         };
       }
+      localStorage.setItem(storageKey, JSON.stringify({ fingerprint, idempotency_key: createAttemptRef.current.key, payload: requestPayload }));
       const created = await createWorkspaceTask(
         requestPayload,
         createAttemptRef.current.key,
       );
+      if (accountResumeOwner.current !== owner) return;
+      if (localStorage.getItem(draftKey) === savedDraft && localStorage.getItem(`${draftKey}_files`) === savedFiles) { localStorage.removeItem(draftKey); localStorage.removeItem(`${draftKey}_files`); }
+      localStorage.removeItem(storageKey);
       createAttemptRef.current = null;
       setSelectedTaskId(created.task_id);
 
@@ -958,6 +985,7 @@ export function SemanticWorkspacePage() {
         queryKey: ["semantic-workspace-tasks"],
       });
     } catch (error) {
+      if (error instanceof WorkspaceTaskError && error.rejected) { localStorage.removeItem(storageKey); createAttemptRef.current = null; }
       toast.error(error instanceof Error ? error.message : "创建任务失败");
       throw error;
     }
@@ -982,8 +1010,6 @@ export function SemanticWorkspacePage() {
           }}
           onNew={() => {
             setComposerDraft(null);
-            setWebPrompt(null);
-            setWebOpen(false);
             setExampleSeed(null);
             if (narrow) setNavigationOpen(false);
             setRecycleBin(false);
@@ -1035,7 +1061,7 @@ export function SemanticWorkspacePage() {
         </div>
         <div className="flex items-center gap-2">
           <button type="button" aria-label="任务列表开关" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(value => !value)} className="rounded-lg border px-3 py-2 text-xs hover:bg-muted">任务列表</button>
-          {(newTask ? draftUploads.length > 0 : Boolean(task?.uploads?.length || task?.web_source?.snapshot?.artifacts.length)) ? (
+          {(newTask ? draftUploads.length > 0 : Boolean(task?.uploads?.length || taskWebSources.some(source => source.snapshot.artifacts.length))) ? (
             <button
               type="button"
               onClick={() => { setInspectorKind("source"); setInspectorOpen(value => inspectorKind !== "source" || !value); }}
@@ -1072,7 +1098,7 @@ export function SemanticWorkspacePage() {
               setSettingsOpen(false);
               void queryClient.invalidateQueries({ queryKey: ["model-connections"] });
               void queryClient.invalidateQueries({ queryKey: ["model-connection-preference"] });
-              requestAnimationFrame(() => document.querySelector<HTMLElement>(task ? '[aria-label="继续对话"]' : webOpen ? '#web-task-objective, #web-source-url, #web-search-query' : '[data-testid="workspace-model-picker"] button')?.focus());
+              requestAnimationFrame(() => document.querySelector<HTMLElement>(task ? '[aria-label="继续对话"]' : 'textarea[aria-label="任务要求"]')?.focus());
             }}>返回当前任务</button>
             <ModelConnectionsPanel isManager={isAdminish(user?.role)} />
           </div>
@@ -1138,15 +1164,15 @@ export function SemanticWorkspacePage() {
                     draftUploads.length === 0 && "mt-6",
                   )}
                 >
-                    <div className={webOpen ? "hidden" : undefined}>
-                    <TaskComposer
+                    <div>
+                    <WorkspaceSourceComposer
+                    ownerId={user?.user_id ?? "current"}
                     unified
                     onConfigureModels={() => setSettingsOpen(true)}
                     draft={composerDraft}
                     onDraftChange={setComposerDraft}
-                    active={!webOpen && !settingsOpen}
-                    onReadWeb={draft => { setComposerDraft(draft); setWebPrompt(draft); setWebOpen(true); }}
-                    key={exampleSeed?.key || "new-task"}
+                    active={!settingsOpen && !recoveringCreate}
+                    key={`${user?.user_id}:${exampleSeed?.key || "new-task"}`}
                     initialPrompt={exampleSeed?.prompt}
                     initialFormats={exampleSeed?.formats}
                     modelOptions={models.data?.options}
@@ -1169,39 +1195,7 @@ export function SemanticWorkspacePage() {
                     onSubmit={submitNew}
                     />
                     </div>
-                  {webPrompt !== null && (
-                    <section className={cn("mt-3 rounded-xl border p-3", !webOpen && "hidden")} aria-label="网页资料">
-                      <button type="button" className="mb-3 rounded-lg border px-3 py-2 text-xs hover:bg-muted" onClick={() => { setWebOpen(false); requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('[aria-label="任务要求"]')?.focus()); }}>返回文件输入</button>
-                      <button type="button" className="mb-3 ml-2 rounded-lg border px-3 py-2 text-xs hover:bg-muted" onClick={() => setSettingsOpen(true)}>模型设置</button>
-                    <WebSourceIntake
-                      draft={composerDraft}
-                      onDraftChange={setComposerDraft}
-                      active={webOpen && !settingsOpen}
-                      initialPrompt={webPrompt.prompt}
-                      ownerId={user?.user_id ?? "current"}
-                      allowLocalRuntime={canUseLocalPiRuntime}
-                      localModels={(models.data?.options ?? [])
-                        .filter((model) => model.provider === "local")
-                        .map((model) => ({ model: model.model, label: model.label }))}
-                      defaultLocalModel={webPrompt.localModel}
-                      modelConnections={verifiedModelConnections}
-                      defaultConnectionId={webPrompt.connectionId}
-                      defaultConnectionModel={webPrompt.connectionModel}
-                      onTaskCreated={async (created) => {
-                        setWebPrompt(null);
-                        setComposerDraft(null);
-                        setWebOpen(false);
-                        setSelectedTaskId(created.task_id);
 
-                        setRecycleBin(false);
-                        setLiveEvents([]);
-                        await queryClient.invalidateQueries({
-                          queryKey: ["semantic-workspace-tasks"],
-                        });
-                      }}
-                    />
-                    </section>
-                  )}
                 </div>
 
                 </div>
@@ -1498,11 +1492,16 @@ export function SemanticWorkspacePage() {
                               );
                             }
                           }}
-                          onRefreshSource={async (externalApiConfirmed) => {
+                          onRefreshSource={async (externalApiConfirmed, targetSourceSnapshotId) => {
                             const expectedRevision = task.current_revision
                               ?? task.active_revision;
-                            const fingerprint = `${task.task_id}:${expectedRevision}`;
+                            const fingerprint = `${task.task_id}:${expectedRevision}${taskWebSources.length > 1 ? `:${targetSourceSnapshotId}` : ""}`;
                             const storageKey = `mangrove_source_refresh_${user?.user_id ?? "unknown"}_${task.task_id}`;
+                            const priorRefresh = localStorage.getItem(storageKey);
+                            if (priorRefresh) {
+                              const prior = JSON.parse(priorRefresh) as { fingerprint?: string };
+                              if (prior.fingerprint?.startsWith(`${task.task_id}:${expectedRevision}:`) && prior.fingerprint !== fingerprint) throw new Error("另一网页组的刷新结果仍未知，请先选择原组恢复同一请求");
+                            }
                             let resumeUnknown = sourceRefreshAttemptRef.current?.fingerprint
                               === fingerprint;
                             if (
@@ -1548,6 +1547,7 @@ export function SemanticWorkspacePage() {
                                 externalApiConfirmed,
                                 sourceRefreshAttemptRef.current.key,
                                 resumeUnknown,
+                                targetSourceSnapshotId,
                               );
                               if (result.status === "acquiring") {
                                 toast.info(
@@ -1749,7 +1749,66 @@ export function SemanticWorkspacePage() {
                             }}
                           />
                         )}
-                        <div id="workspace-revision-composer" className="h-28" />
+                        <div id="workspace-revision-composer" className="mx-auto mb-6 max-w-4xl px-6">
+                          {viewingRevision === (task.current_revision ?? task.active_revision) && ["completed", "failed", "cancelled", "candidate_ready"].includes(task.status) && <>
+                            <button type="button" aria-expanded={sourceEditorIdentity === resultIdentity} onClick={() => setSourceEditorIdentity(current => current === resultIdentity ? null : resultIdentity)} className="rounded-lg border px-3 py-2 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">编辑本次资料</button>
+                            {(() => {
+                              const prefix = `mangrove_source_revision_${user?.user_id}_${task.task_id}_`;
+                              const pendingKey = Object.keys(localStorage).find(key => key.startsWith(prefix));
+                              if (!pendingKey && !sourceEditUnknown) return null;
+                              if (!pendingKey) return null;
+                              return <div role="status" className="mt-3 rounded-lg border p-3 text-xs"><p>上次资料修订结果未知，原请求已保留。恢复只确认该请求，当前草稿不会作为第二次修订发送。</p><button type="button" disabled={sourceEditRecovering} className="mt-2 rounded-lg border px-3 py-2 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={async () => {
+                                const attempt = JSON.parse(localStorage.getItem(pendingKey) || "null") as { key: string; prompt: string; formats: string[]; externalApiConfirmed: boolean; selection: { upload_ids: string[]; source_snapshot_ids: string[] } } | null;
+                                if (!attempt) return;
+                                setSourceEditRecovering(true);
+                                try {
+                                  const revision = await createWorkspaceRevision(task.task_id, attempt.prompt, Number(pendingKey.slice(prefix.length)), attempt.formats, attempt.externalApiConfirmed, attempt.selection, attempt.key);
+                                  localStorage.removeItem(pendingKey); setSourceEditUnknown(false);
+                                  toast.success(`已确认原请求创建的版本 V${revision.revision}`);
+                                  await queryClient.invalidateQueries({ queryKey: ["semantic-workspace-task", task.task_id] });
+                                } catch (error) { if (error instanceof WorkspaceRevisionError && error.rejected) { localStorage.removeItem(pendingKey); setSourceEditUnknown(false); } toast.error(error instanceof Error ? error.message : "原请求尚未确认，继续保留资料"); }
+                                finally { setSourceEditRecovering(false); }
+                              }}>{sourceEditRecovering ? "正在恢复原请求" : "恢复上次资料修订"}</button></div>;
+                            })()}
+                            {sourceEditorIdentity === resultIdentity && <div className="mt-3">
+                              <p className="mb-3 text-xs text-muted-foreground">确认后创建新版本。使用原任务模型与上下文；上方旧版本来源保持冻结。</p>
+                              <WorkspaceSourceComposer key={`${resultIdentity}:sources`} ownerId={user?.user_id ?? "current"} draftScope={`${task.task_id}_${viewingRevision}`} compact unified preserveContext modelLocked
+                                initialPrompt="保持原要求，使用当前选择的全部资料" initialFormats={task.output_formats}
+                                initialUploads={task.uploads ?? []} initialSources={taskWebSources.map(source => source.snapshot)}
+                                modelOptions={models.data?.options} defaultModel={{ provider: task.provider, model: task.model || "", label: "任务冻结模型" }}
+                                allowPiRuntime={Boolean(models.data?.pi_runtime_enabled)} allowLocalPiRuntime={canUseLocalPiRuntime}
+                                modelConnections={verifiedModelConnections.filter(connection => connection.connection_id === task.model_connection_id)}
+                                defaultConnectionId={task.model_connection_id} defaultConnectionModel={task.agentic_runtime?.model_connection_model ?? task.web_source?.runtime_binding.model ?? task.model}
+                                onSubmit={async payload => {
+                                  try {
+                                  const selection = { upload_ids: [...new Set(payload.uploads.map(upload => upload.upload_id))], source_snapshot_ids: payload.sourceSnapshotIds };
+                                  const identity = resultIdentity;
+                                  const fingerprint = JSON.stringify([task.task_id, task.current_revision ?? task.active_revision, payload.prompt, payload.formats, selection]);
+                                  const pendingKey = `mangrove_source_revision_${user?.user_id}_${task.task_id}_${task.current_revision ?? task.active_revision}`;
+                                  const stored = JSON.parse(localStorage.getItem(pendingKey) || "null") as { fingerprint: string; key: string; prompt: string; formats: string[]; externalApiConfirmed: boolean; selection: typeof selection } | null;
+                                  if (stored && stored.fingerprint !== fingerprint) throw new Error("上次资料修订结果未知，请恢复原资料和要求后重试同一请求");
+                                  const attempt = stored ?? { fingerprint, key: nanoid(), prompt: payload.prompt, formats: payload.formats, externalApiConfirmed: payload.externalApiConfirmed, selection };
+                                  sourceEditAttempt.current = attempt;
+                                  localStorage.setItem(pendingKey, JSON.stringify(attempt));
+                                  setSourceEditUnknown(false);
+                                  try {
+                                    await createWorkspaceRevision(task.task_id, attempt.prompt, task.current_revision ?? task.active_revision, attempt.formats, attempt.externalApiConfirmed, attempt.selection, attempt.key);
+                                    localStorage.removeItem(pendingKey);
+                                  } catch (error) {
+                                    if (error instanceof WorkspaceRevisionError && error.rejected) localStorage.removeItem(pendingKey);
+                                    else setSourceEditUnknown(true);
+                                    throw error;
+                                  }
+                                  if (canvasIdentityRef.current !== identity) return;
+                                  sourceEditAttempt.current = null;
+                                  setSourceEditorIdentity(null); setSelectedRevision(null);
+                                  await Promise.all([queryClient.invalidateQueries({ queryKey: ["semantic-workspace-task", task.task_id] }), queryClient.invalidateQueries({ queryKey: ["semantic-workspace-tasks"] })]);
+                                  toast.success("已按完整资料集合创建新版本");
+                                  } catch (error) { toast.error(error instanceof Error ? error.message : "资料修订未确认，已保留当前草稿"); throw error; }
+                                }} />
+                            </div>}
+                          </>}
+                        </div>
                       </div>
                       <div className="shrink-0 border-t bg-background/95 px-6 py-3 backdrop-blur">
                         <div className="mx-auto max-w-4xl">

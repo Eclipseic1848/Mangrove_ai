@@ -6,6 +6,7 @@ import {
   useRef,
   useState,
   type ClipboardEvent,
+  type ReactNode,
 } from "react";
 import { useDropzone } from "react-dropzone";
 import {
@@ -41,7 +42,7 @@ import {
   UploadCloud,
 } from "lucide-react";
 import { nanoid } from "nanoid/non-secure";
-import { uploadFileWithProgress } from "@/lib/dataPrepApi";
+import { getUploadMetadata, uploadFileWithProgress } from "@/lib/dataPrepApi";
 import { resolveWorkspaceCapabilities, type CapabilityNeed, type CapabilityResolution, type GrayCapability } from "@/lib/semanticWorkspaceApi";
 import { cn } from "@/lib/utils";
 import type { UploadItem } from "@/types/dataPrep";
@@ -97,9 +98,11 @@ const FORMAT_LABELS: Record<string, string> = {
 
 type UploadDraft = {
   id: string;
-  file: File;
+  file?: File;
+  name: string;
+  size: number;
   progress: number;
-  status: "uploading" | "ready" | "failed";
+  status: "uploading" | "ready" | "failed" | "reselect" | "restoring";
   upload?: UploadItem;
   error?: string;
 };
@@ -126,7 +129,7 @@ function extension(name: string) {
   return name.split(".").pop()?.toLowerCase() ?? "";
 }
 
-function inputKind(files: File[]): "table" | "document" | "mixed" | "empty" {
+function inputKind(files: Array<{ name: string }>): "table" | "document" | "mixed" | "empty" {
   const kinds = new Set(
     files.map((file) => {
       const ext = extension(file.name);
@@ -151,10 +154,12 @@ function SortableFileCard({
   item,
   onRemove,
   onRetry,
+  onReselect,
 }: {
   item: UploadDraft;
   onRemove: () => void;
   onRetry: () => void;
+  onReselect: (file: File) => void;
 }) {
   const {
     attributes,
@@ -164,7 +169,7 @@ function SortableFileCard({
     transition,
     isDragging,
   } = useSortable({ id: item.id });
-  const table = TABLE_EXTENSIONS.has(extension(item.file.name));
+  const table = TABLE_EXTENSIONS.has(extension(item.name));
   return (
     <div
       ref={setNodeRef}
@@ -176,7 +181,7 @@ function SortableFileCard({
     >
       <button
         type="button"
-        aria-label={`拖动排序 ${item.file.name}`}
+        aria-label={`拖动排序 ${item.name}`}
         className="cursor-grab rounded p-1 text-muted-foreground opacity-50 hover:bg-muted hover:opacity-100"
         {...attributes}
         {...listeners}
@@ -192,9 +197,9 @@ function SortableFileCard({
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
-          <span className="truncate text-sm font-medium">{item.file.name}</span>
+          <span className="truncate text-sm font-medium">{item.name}</span>
           <span className="shrink-0 text-[11px] text-muted-foreground">
-            {formatBytes(item.file.size)}
+            {formatBytes(item.size)}
           </span>
         </div>
         {item.status === "uploading" ? (
@@ -209,22 +214,27 @@ function SortableFileCard({
               {item.progress}%
             </span>
           </div>
-        ) : item.status === "failed" ? (
+        ) : item.status === "reselect" ? <p className="mt-1 text-xs text-muted-foreground">上传未确认，请重新选择文件；不会自动重传。</p>
+        : item.status === "restoring" ? <p className="mt-1 text-xs text-muted-foreground">正在核验已上传文件…</p>
+        : item.status === "failed" ? (
           <p className="mt-1 truncate text-xs text-destructive">
             {item.error || "上传失败"}
           </p>
         ) : (
-          <p className="mt-1 flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+          <p className="mt-1 flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400">
             <Check className="h-3 w-3" />
             已上传，等待执行
           </p>
         )}
       </div>
+      {item.status === "reselect" && <label className="rounded p-1.5 text-xs text-primary">
+        重新选择<input type="file" aria-label={`重新选择 ${item.name}`} className="block max-w-32 text-xs" onChange={event => { const file = event.target.files?.[0]; if (file) onReselect(file); }} />
+      </label>}
       {item.status === "failed" && (
         <button
           type="button"
           onClick={onRetry}
-          aria-label={`重试上传 ${item.file.name}`}
+          aria-label={`重试上传 ${item.name}`}
           className="rounded p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
         >
           <RefreshCw className="h-4 w-4" />
@@ -233,7 +243,7 @@ function SortableFileCard({
       <button
         type="button"
         onClick={onRemove}
-        aria-label={`移除 ${item.file.name}`}
+        aria-label={`移除 ${item.name}`}
         className="rounded p-1.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
       >
         <Trash2 className="h-4 w-4" />
@@ -247,6 +257,7 @@ export type WebIntakeDraft = {
   connectionId: string | null;
   connectionModel: string | null;
   localModel: string | null;
+  formats?: string[];
 };
 
 export function TaskComposer({
@@ -262,6 +273,14 @@ export function TaskComposer({
   onSubmit,
   onBusyChange,
   onUploadsChange,
+  uploadStorageKey,
+  initialUploads = [],
+  webSourceCount = 0,
+  sourceBusy = false,
+  submitBlocked = false,
+  sourceIdentity = "",
+  modelLocked = false,
+  children,
   modelOptions = [],
   defaultModel = null,
   allowPiRuntime = false,
@@ -300,6 +319,14 @@ export function TaskComposer({
   }) => Promise<void>;
   onBusyChange?: (busy: boolean) => void;
   onUploadsChange?: (uploads: UploadItem[]) => void;
+  uploadStorageKey?: string;
+  initialUploads?: UploadItem[];
+  webSourceCount?: number;
+  sourceBusy?: boolean;
+  submitBlocked?: boolean;
+  sourceIdentity?: string;
+  modelLocked?: boolean;
+  children?: ReactNode;
   modelOptions?: Array<{ provider: string; model: string; label: string }>;
   defaultModel?: { provider: string; model: string; label: string } | null;
   allowPiRuntime?: boolean;
@@ -311,7 +338,28 @@ export function TaskComposer({
 }) {
   const [prompt, setPrompt] = useState(initialPrompt);
   const [formats, setFormats] = useState<string[]>(initialFormats);
-  const [items, setItems] = useState<UploadDraft[]>([]);
+  const [items, setItems] = useState<UploadDraft[]>(() => {
+    try {
+      const stored = uploadStorageKey && localStorage.getItem(uploadStorageKey);
+      if (stored) return (JSON.parse(stored) as UploadDraft[]).map(item => ({ ...item, file: undefined, status: item.upload ? "restoring" : "reselect" }));
+    } catch { /* 当前草稿损坏时不伪造上传。 */ }
+    return initialUploads.map(upload => ({ id: upload.upload_id, name: upload.original_name, size: upload.size_bytes, progress: 100, status: "restoring", upload }));
+  });
+  useEffect(() => {
+    let current = true;
+    for (const item of items.filter(item => item.status === "restoring" && item.upload)) {
+      void getUploadMetadata(item.upload!.upload_id).then(upload => {
+        if (!current) return;
+        if (upload.upload_id !== item.upload!.upload_id || upload.sha256 !== item.upload!.sha256) throw new Error("已上传文件身份已改变，请重新选择");
+        setItems(previous => previous.map(value => value.id === item.id ? { ...value, upload, status: "ready" } : value));
+      }).catch(error => { if (current) setItems(previous => previous.map(value => value.id === item.id ? { ...value, status: "failed", error: error instanceof Error ? error.message : "已上传文件暂不可用" } : value)); });
+    }
+    return () => { current = false; };
+  }, []);
+  useEffect(() => {
+    if (!uploadStorageKey || !active) return;
+    try { localStorage.setItem(uploadStorageKey, JSON.stringify(items.map(({ file: _file, ...item }) => item))); } catch { /* 不存正文；当前会话仍保留资料。 */ }
+  }, [items, uploadStorageKey, active]);
   const submittingRef = useRef(false);
   const uploadControllers = useRef(new Map<string, AbortController>());
   useEffect(() => () => {
@@ -337,7 +385,7 @@ export function TaskComposer({
     error: string;
   } | null>(null);
   const reuseRequest = useRef(0);
-  const reuseContext = JSON.stringify([prompt, formats, runtimeSelection, usesPiConfiguration, active, grayCapabilities,
+  const reuseContext = JSON.stringify([prompt, formats, sourceIdentity, runtimeSelection, usesPiConfiguration, active, grayCapabilities,
     items.map(item => [item.id, item.status, item.upload])]);
   useLayoutEffect(() => {
     // 修改输入或离开当前输入流程后，旧匹配和迟到响应都不能继续启用工具。
@@ -347,6 +395,10 @@ export function TaskComposer({
   useEffect(() => () => { reuseRequest.current += 1; }, []);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [fileNotice, setFileNotice] = useState("");
+  useEffect(() => {
+    setExternalApiConfirmed(false);
+    if (sourceIdentity) setReuse(current => current ? { ...current, result: null, pending: false, error: "来源集合已改变，请重新匹配或取消复用。" } : null);
+  }, [sourceIdentity]);
   const promptRef = useRef<HTMLTextAreaElement>(null);
   const receivedDraft = useRef<WebIntakeDraft | null>(null);
   const receivingDraft = Boolean(active && draft && receivedDraft.current !== draft);
@@ -362,6 +414,7 @@ export function TaskComposer({
     ) modelSelectionExplicit.current = true;
     // 只交接输入和模型；附件、上传状态及运行路由留在原组件。
     setPrompt(draft.prompt);
+    if (draft.formats) setFormats(draft.formats);
     setSelectedConnectionId(draft.connectionId ?? (allowLocalPiRuntime ? "__local__" : ""));
     setSelectedConnectionModelId(draft.connectionModel ?? "");
     modelSelectionConnection.current = draft.connectionId ?? "";
@@ -511,6 +564,16 @@ export function TaskComposer({
 
   const uploadDraft = useCallback(
     async (draft: UploadDraft) => {
+      if (!draft.file) {
+        if (draft.upload) {
+          try {
+            const upload = await getUploadMetadata(draft.upload.upload_id);
+            if (upload.sha256 !== draft.upload.sha256) throw new Error("文件身份已改变");
+            setItems(current => current.map(item => item.id === draft.id ? { ...item, upload, status: "ready", error: undefined } : item));
+          } catch (error) { setItems(current => current.map(item => item.id === draft.id ? { ...item, status: "failed", error: error instanceof Error ? error.message : "恢复失败" } : item)); }
+        }
+        return;
+      }
       const controller = new AbortController();
       uploadControllers.current.get(draft.id)?.abort();
       uploadControllers.current.set(draft.id, controller);
@@ -525,11 +588,9 @@ export function TaskComposer({
         }, controller.signal);
         if (controller.signal.aborted) return;
         setItems((current) =>
-          current.map((item) =>
-            item.id === draft.id
-              ? { ...item, upload, progress: 100, status: "ready" }
-              : item,
-          ),
+          current.some(item => item.id !== draft.id && item.upload?.upload_id === upload.upload_id && item.upload.sha256 === upload.sha256)
+            ? current.filter(item => item.id !== draft.id)
+            : current.map(item => item.id === draft.id ? { ...item, upload, progress: 100, status: "ready" } : item),
         );
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -551,20 +612,17 @@ export function TaskComposer({
     [],
   );
 
-  const addFiles = useCallback(
-    (files: File[]) => {
+  const addFiles = (files: File[]) => {
       const supported = files.filter((file) => {
         const ext = extension(file.name);
         return TABLE_EXTENSIONS.has(ext) || DOCUMENT_EXTENSIONS.has(ext);
       });
-      const existing = new Set(
-        items.map((item) => `${item.file.name}:${item.file.size}`),
-      );
       const drafts = supported
-        .filter((file) => !existing.has(`${file.name}:${file.size}`))
         .map<UploadDraft>((file) => ({
           id: nanoid(),
           file,
+          name: file.name,
+          size: file.size,
           progress: 0,
           status: "uploading",
         }));
@@ -572,21 +630,20 @@ export function TaskComposer({
         setFileNotice(
           "部分文件格式不受支持。可上传表格、PDF、Word、PPT、PNG/JPG/WEBP 图片、HTML、Markdown、TXT 和 XML。",
         );
-      } else if (!drafts.length && supported.length > 0) {
-        setFileNotice("同名且大小相同的文件已经添加，本次没有重复上传。");
+
       } else {
         setFileNotice("");
       }
       if (!drafts.length) return;
       setItems((current) => [...current, ...drafts]);
       if (!formats.length) {
-        const kind = inputKind(drafts.map((item) => item.file));
-        setFormats(kind === "document" ? ["docx", "pdf"] : ["xlsx"]);
+        const kind = inputKind(drafts);
+        const nextFormats = kind === "document" ? ["docx", "pdf"] : ["xlsx"];
+        setFormats(nextFormats);
+        updateDraft({ formats: nextFormats });
       }
       drafts.forEach((draft) => void uploadDraft(draft));
-    },
-    [formats.length, items, uploadDraft],
-  );
+    };
 
   const { getRootProps, getInputProps, isDragActive, open } = useDropzone({
     noClick: true,
@@ -622,11 +679,11 @@ export function TaskComposer({
   });
 
   const kind = useMemo(
-    () => inputKind(items.map((item) => item.file)),
+    () => inputKind(items),
     [items],
   );
-  const busy = items.some((item) => item.status === "uploading") || submitting || Boolean(reuse?.pending);
-  const hasFailed = items.some((item) => item.status === "failed");
+  const busy = items.some((item) => item.status === "uploading" || item.status === "restoring") || submitting || Boolean(reuse?.pending) || sourceBusy;
+  const hasFailed = items.some((item) => item.status === "failed" || item.status === "reselect");
   const reusedMatch = reuse?.result?.matches[0];
   const reuseInvalid = Boolean(reuse && !reusedMatch);
   const ready = items.filter((item) => item.status === "ready" && item.upload);
@@ -671,6 +728,7 @@ export function TaskComposer({
 
   const currentDraft: WebIntakeDraft = {
     prompt,
+    formats,
     connectionId: selectedConnectionId && selectedConnectionId !== "__local__" ? selectedConnectionId : null,
     connectionModel: selectedConnectionId && selectedConnectionId !== "__local__" ? selectedConnectionModelId : null,
     localModel: selectedConnectionId && selectedConnectionId !== "__local__" ? null : selectedModel.split("::").slice(1).join("::") || null,
@@ -681,11 +739,11 @@ export function TaskComposer({
     const nextDraft = { ...currentDraft, ...change };
     // 本组件编辑的回声已在本地应用，不能当作外来选模阻止迟到偏好。
     receivedDraft.current = nextDraft;
-    if (change.prompt !== undefined) setExternalApiConfirmed(false);
+    if (change.prompt !== undefined || change.formats !== undefined) setExternalApiConfirmed(false);
     onDraftChange?.(nextDraft);
   };
   const readWeb = () => {
-    if (!active || items.length || busy) return;
+    if (!active || submitting || sourceBusy) return;
     receivedDraft.current = currentDraft;
     onDraftChange?.(currentDraft);
     onReadWeb?.(currentDraft);
@@ -717,20 +775,21 @@ export function TaskComposer({
   };
 
   const submit = async () => {
-    if (submittingRef.current) return;
-    if (unified && prompt.trim() && !items.length && !submitting) {
+    if (!active || submittingRef.current) return;
+    if (unified && prompt.trim() && !items.length && !webSourceCount && !submitting) {
       readWeb();
       return;
     }
     if (
       !prompt.trim()
-      || !ready.length
+      || (!ready.length && !webSourceCount)
       || !formats.length
       || busy
       || hasFailed
       || (kind === "mixed" && runtimeSelection === "legacy")
       || piSelectionInvalid
       || reuseInvalid
+      || submitBlocked
     ) return;
     submittingRef.current = true;
     setSubmitting(true);
@@ -791,6 +850,7 @@ export function TaskComposer({
                     <span className="font-medium">模型连接</span>
                     <select
                       aria-label="模型连接"
+                      disabled={modelLocked}
                       value={selectedConnectionId}
                       onChange={(event) => {
                         modelSelectionExplicit.current = true;
@@ -836,6 +896,7 @@ export function TaskComposer({
                           <span className="text-muted-foreground">本任务模型</span>
                           <select
                             aria-label="本任务模型"
+                      disabled={modelLocked}
                             value={selectedConnectionModelId}
                             onChange={(event) => {
                               modelSelectionExplicit.current = true;
@@ -866,6 +927,7 @@ export function TaskComposer({
                           : kind === "document"
                             ? "文档内容"
                             : "上传文件内容"}
+                        {webSourceCount > 0 ? "、全部已选网页的标题、正文与网址，以及本次确认的上下文" : ""}
                         与任务说明；仅用于当前任务版本，不授权其他任务复用。
                       </p>
                       <label className="mt-2 flex items-start gap-2 text-foreground">
@@ -889,6 +951,7 @@ export function TaskComposer({
               <span className="font-medium">执行模型</span>
               <select
                 aria-label="执行模型"
+                      disabled={modelLocked}
                 value={selectedModel}
                 onChange={(event) => {
                   modelSelectionExplicit.current = true;
@@ -971,6 +1034,11 @@ export function TaskComposer({
                     );
                     void uploadDraft({ ...item, status: "uploading", progress: 0 });
                   }}
+                  onReselect={file => {
+                    const next = { ...item, file, name: file.name, size: file.size, status: "uploading" as const, progress: 0, upload: undefined, error: undefined };
+                    setItems(current => current.map(value => value.id === item.id ? next : value));
+                    void uploadDraft(next);
+                  }}
                 />
               ))}
             </div>
@@ -1047,7 +1115,7 @@ export function TaskComposer({
           <Paperclip className="h-3.5 w-3.5" />
           添加文件
         </button>
-        {unified && <button type="button" onClick={readWeb} disabled={items.length > 0 || busy} className="rounded-lg border px-2.5 py-1.5 text-xs hover:bg-muted disabled:opacity-50" title={items.length ? "网页与文件组合尚未接通；现有附件会保留" : "搜索公开网页或读取已知网址"}>公开网页</button>}
+        {unified && <button type="button" onClick={readWeb} disabled={submitting || sourceBusy} className="rounded-lg border px-2.5 py-1.5 text-xs hover:bg-muted disabled:opacity-50" title="添加公开网页，保留已有资料">公开网页</button>}
         <span className="mr-1 text-xs text-muted-foreground">
           {kind === "empty" && !formats.length ? "上传后自动推荐输出" : "输出格式"}
         </span>
@@ -1058,17 +1126,14 @@ export function TaskComposer({
               key={format}
               type="button"
               aria-pressed={selected}
-              onClick={() =>
-                setFormats((current) =>
-                  selected
-                    ? current.filter((item) => item !== format)
-                    : [...current, format],
-                )
-              }
+              onClick={() => {
+                  const next = selected ? formats.filter(item => item !== format) : [...formats, format];
+                  setFormats(next); updateDraft({ formats: next });
+                }}
               className={cn(
                 "rounded-full border px-2.5 py-1 text-[11px] font-medium uppercase transition-colors",
                 selected
-                  ? "border-primary/30 bg-primary/10 text-primary"
+                  ? "border-primary/30 bg-primary/10 text-foreground"
                   : "text-muted-foreground hover:bg-muted",
               )}
             >
@@ -1097,13 +1162,14 @@ export function TaskComposer({
           onClick={() => void submit()}
           disabled={
             !prompt.trim()
-            || ((!unified || items.length > 0) && !ready.length)
+            || ((!unified || items.length > 0 || webSourceCount > 0) && !ready.length && !webSourceCount)
             || (ready.length > 0 && !formats.length)
             || busy
             || reuseInvalid
             || hasFailed
+            || submitBlocked
             || (kind === "mixed" && runtimeSelection === "legacy")
-            || (ready.length > 0 && piSelectionInvalid)
+            || ((ready.length > 0 || webSourceCount > 0) && piSelectionInvalid)
           }
           className="ml-auto inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-45"
         >
@@ -1112,9 +1178,10 @@ export function TaskComposer({
           ) : (
             <Send className="h-4 w-4" />
           )}
-          {compact ? "创建新版本" : "开始执行"}
+          {compact ? "创建新版本" : webSourceCount ? "启动任务" : "开始执行"}
         </button>
       </div>
+      {children}
       {advancedOpen && (
         <div className="mt-3 rounded-xl border bg-muted/20 p-3">
           {!compact && (
@@ -1244,17 +1311,14 @@ export function TaskComposer({
                   key={format}
                   type="button"
                   aria-pressed={selected}
-                  onClick={() =>
-                    setFormats((current) =>
-                      selected
-                        ? current.filter((item) => item !== format)
-                        : [...current, format],
-                    )
-                  }
+                  onClick={() => {
+                  const next = selected ? formats.filter(item => item !== format) : [...formats, format];
+                  setFormats(next); updateDraft({ formats: next });
+                }}
                   className={cn(
                     "rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors",
                     selected
-                      ? "border-primary/30 bg-primary/10 text-primary"
+                      ? "border-primary/30 bg-primary/10 text-foreground"
                       : "bg-background text-muted-foreground hover:bg-muted",
                   )}
                 >

@@ -81,6 +81,7 @@ export function SourcePreviewPanel({
   onViewStateChange?: (patch: Partial<SourceViewState>) => void;
   task?: WorkspaceTask;
 }) {
+  const webArtifacts = (task?.web_sources ?? (task?.web_source ? [task.web_source] : [])).flatMap(source => source.snapshot.artifacts);
   const selectedUpload =
     uploads.find((upload) => upload.upload_id === selectedUploadId)
     ?? (!selectedUploadId ? uploads[0] : null)
@@ -313,8 +314,8 @@ export function SourcePreviewPanel({
               {upload.original_name}
             </option>
           ))}
-          {task?.web_source?.snapshot?.artifacts.map(artifact => <option key={artifact.artifact_id} value={artifact.artifact_id}>{artifact.title || artifact.final_url}</option>)}
-          {selectedUploadId && !uploads.some(upload => upload.upload_id === selectedUploadId) && !task?.web_source?.snapshot?.artifacts.some(artifact => artifact.artifact_id === selectedUploadId) && <option value={selectedUploadId}>引用来源</option>}
+          {webArtifacts.map(artifact => <option key={artifact.artifact_id} value={artifact.artifact_id}>{artifact.title || artifact.final_url}</option>)}
+          {selectedUploadId && !uploads.some(upload => upload.upload_id === selectedUploadId) && !webArtifacts.some(artifact => artifact.artifact_id === selectedUploadId) && <option value={selectedUploadId}>引用来源</option>}
         </select>
         {(ext === "pdf" || isImage) && (
           <>
@@ -387,13 +388,13 @@ export function SourcePreviewPanel({
               <option value="none">不附加</option><option value="csv">CSV（适用表格）</option><option value="xlsx">XLSX（适用表格）</option>
             </select>
           </label>
-          <button type="button" disabled={downloadBusy || !(task.upload_ids.length || task.web_source?.snapshot?.artifacts.length)} onClick={() => void downloadSources()}
+          <button type="button" disabled={downloadBusy || !(task.upload_ids.length || webArtifacts.length)} onClick={() => void downloadSources()}
             className="inline-flex min-w-36 items-center justify-center gap-2 rounded border px-3 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50">
             {downloadBusy && <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />}{downloadBusy ? "正在准备下载…" : "下载完整资料包"}
           </button>
           {downloadBusy && <button type="button" onClick={() => { downloadRequest.current?.abort(); downloadRequest.current = null; setDownloadBusy(false); setDownloadStatus("已取消下载"); }} className="rounded border px-3 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring">取消下载</button>}
         </div>
-        {!(task.upload_ids.length || task.web_source?.snapshot?.artifacts.length) && <p>当前版本没有可下载的已保存来源。</p>}
+        {!(task.upload_ids.length || webArtifacts.length) && <p>当前版本没有可下载的已保存来源。</p>}
         {downloadError && <p role="alert" className="text-destructive">{downloadError}</p>}
         {downloadStatus && <p role="status" className="text-muted-foreground">{downloadStatus}</p>}
       </section>}

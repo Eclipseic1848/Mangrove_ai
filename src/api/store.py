@@ -2958,6 +2958,7 @@ class WebUIStore:
         model: str | None,
         external_api_confirmed: bool,
         source_refs: List[Dict[str, str]] | None = None,
+        source_contract: Dict[str, Any] | None = None,
         table_output_contracts: List[Dict[str, Any]] | None = None,
         transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     ) -> Dict[str, Any]:
@@ -3017,6 +3018,9 @@ class WebUIStore:
                         now,
                     ),
                 )
+                if source_contract is not None:
+                    conn.execute("UPDATE semantic_workspace_revisions SET source_contract_json=? WHERE user_id=? AND task_id=? AND revision=?",
+                                 (json.dumps(source_contract, ensure_ascii=False), user_id, task_id, 1))
                 if transaction_hook is not None:
                     transaction_hook(conn)
             except sqlite3.IntegrityError as exc:
@@ -3041,6 +3045,33 @@ class WebUIStore:
                 (user_id, task_id),
             ).fetchone()
         return self._semantic_workspace_task_row(row)
+
+    def find_source_revision_receipt(self, user_id, task_id, key_hash, request_hash):
+        """只匹配同Owner/任务的实际修订回执，不推断expected+1归属。"""
+        with self._conn() as conn:
+            rows = conn.execute("SELECT * FROM semantic_workspace_revisions WHERE user_id=? AND task_id=? AND source_contract_json IS NOT NULL ORDER BY revision DESC", (user_id, task_id)).fetchall()
+        for row in rows:
+            receipt = json.loads(row["source_contract_json"]).get("request_receipt") or {}
+            if receipt.get("key_sha256") != key_hash or receipt.get("target_revision") != row["revision"]:
+                continue
+            if receipt.get("request_sha256") != request_hash:
+                raise ValueError("幂等键已用于不同的修订请求")
+            return self._semantic_workspace_revision_row(row)
+        return None
+
+    def get_source_contract(self, user_id: str, task_id: str, revision: int) -> Optional[Dict[str, Any]]:
+        """只读选定修订合同；旧行回退历史网页合同，不制造来源锚点。"""
+        with self._conn() as conn:
+            row = conn.execute("SELECT source_contract_json FROM semantic_workspace_revisions WHERE user_id=? AND task_id=? AND revision=?", (user_id, task_id, revision)).fetchone()
+        if row is None:
+            return None
+        if row["source_contract_json"] is not None:
+            return json.loads(row["source_contract_json"])
+        legacy = self.get_web_task_contract(user_id, task_id, revision)
+        if legacy is None:
+            return None
+        return {"schema_version": 1, "goal_contract": legacy["goal_contract"],
+                "web_sources": [{"source_snapshot_id": legacy["source_snapshot_id"]}]}
 
     def get_web_task_contract(
         self,
@@ -3075,13 +3106,11 @@ class WebUIStore:
         """查找已绑定该快照的版本，供刷新请求安全恢复。"""
 
         with self._conn() as conn:
-            row = conn.execute(
-                "SELECT revision FROM web_task_contracts "
-                "WHERE owner_id=? AND task_id=? AND source_snapshot_id=? "
-                "ORDER BY revision DESC LIMIT 1",
-                (user_id, task_id, snapshot_id),
-            ).fetchone()
-        return int(row["revision"]) if row is not None else None
+            rows = conn.execute("SELECT revision, source_refs_json FROM semantic_workspace_revisions WHERE user_id=? AND task_id=? ORDER BY revision DESC", (user_id, task_id)).fetchall()
+        for row in rows:
+            if any(ref.get("kind") == "web_artifact" and ref.get("snapshot_id") == snapshot_id for ref in json.loads(row["source_refs_json"] or "[]")):
+                return int(row["revision"])
+        return None
 
     def claim_source_refresh_intent(
         self,
@@ -3606,6 +3635,7 @@ class WebUIStore:
         output_formats: List[str],
         change_summary: str,
         source_refs: List[Dict[str, str]] | None = None,
+        source_contract: Dict[str, Any] | None = None,
         table_output_contracts: List[Dict[str, Any]] | None = None,
         expected_revision: int | None = None,
         expected_cancel_generation: int | None = None,
@@ -3664,11 +3694,11 @@ class WebUIStore:
                     for item in task.get("table_output_contracts", [])
                     if item.get("format") in output_formats
                 ]
-            frozen_source_refs = (
-                source_refs
-                if source_refs is not None
-                else task.get("source_refs", [])
-            )
+            previous_revision = conn.execute("SELECT source_refs_json, source_contract_json FROM semantic_workspace_revisions WHERE user_id=? AND task_id=? AND revision=?", (user_id, task_id, task["active_revision"])).fetchone()
+            frozen_source_refs = source_refs if source_refs is not None else json.loads(previous_revision["source_refs_json"] or "[]")
+            if source_contract is None and previous_revision["source_contract_json"] is not None:
+                source_contract = json.loads(previous_revision["source_contract_json"])
+                source_contract.pop("request_receipt", None)
             try:
                 conn.execute(
                     "INSERT INTO semantic_workspace_revisions "
@@ -3717,6 +3747,11 @@ class WebUIStore:
                 )
                 if cursor.rowcount != 1:
                     raise RuntimeError("活动版本已变化，禁止创建半应用 Revision")
+                if source_refs is not None:
+                    conn.execute("UPDATE semantic_workspace_tasks SET upload_ids_json=? WHERE user_id=? AND task_id=?", (json.dumps([ref["upload_id"] for ref in source_refs if ref.get("upload_id")]), user_id, task_id))
+                if source_contract is not None:
+                    conn.execute("UPDATE semantic_workspace_revisions SET source_contract_json=? WHERE user_id=? AND task_id=? AND revision=?",
+                                 (json.dumps(source_contract, ensure_ascii=False), user_id, task_id, revision))
                 if transaction_hook is not None:
                     transaction_hook(conn)
             except sqlite3.IntegrityError as exc:
@@ -3744,6 +3779,7 @@ class WebUIStore:
                 row["table_output_contracts_json"] or "[]"
             ),
             "source_refs": json.loads(row["source_refs_json"] or "[]"),
+            "source_contract": json.loads(row["source_contract_json"]) if row["source_contract_json"] is not None else None,
             "plan_id": row["plan_id"],
             "logical_revision": row["logical_revision"],
             "binding_revision": row["binding_revision"],

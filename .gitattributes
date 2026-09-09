@@ -11,3 +11,4 @@ evals/generalization-g1-independent-v3/sources/*.docx binary
 evals/generalization-g1-independent-v3/sources/*.xlsx binary
 src/database_migrations/alembic/versions/webui_0013_feedback_content_access.py text eol=lf
 src/database_migrations/alembic/versions/webui_0015_public_search.py text eol=lf
+src/database_migrations/alembic/versions/webui_0016_mixed_source_contract.py text eol=lf

@@ -1,5 +1,5 @@
 import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { api, downloadFile, authenticatedFetch, getAuthGeneration, revalidateStreamSession, ApiError } from "@/lib/api";
+import { api, downloadFile, authenticatedFetch, getAuthGeneration, revalidateStreamSession, ApiError, readAuthenticatedJson } from "@/lib/api";
 import type {
   WorkspaceEvent,
   WorkspaceMessage,
@@ -169,10 +169,15 @@ export function getWorkspaceTask(
   return api.get(`${BASE}/tasks/${taskId}${query}`);
 }
 
-export function createWorkspaceTask(payload: {
+export class WorkspaceTaskError extends ApiError {
+  constructor(status: number, message: string, readonly rejected: boolean) { super(status, message); }
+}
+
+export async function createWorkspaceTask(payload: {
   objective_text: string;
   upload_ids: string[];
   source_snapshot_id?: string;
+  source_snapshot_ids?: string[];
   must_include?: string[];
   explicit_exclusions?: string[];
   quantity_requirement?: string;
@@ -195,10 +200,16 @@ export function createWorkspaceTask(payload: {
   context_selection?: TaskContextSelection;
   context_preview_sha256?: string;
 }, idempotencyKey?: string): Promise<WorkspaceTask> {
-  return api.post(`${BASE}/tasks`, {
-    provider: "local",
-    ...payload,
-  }, idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {});
+  const response = await authenticatedFetch(`${BASE}/tasks`, {
+    method: "POST", headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
+    body: JSON.stringify({ provider: "local", ...payload }),
+  });
+  const body = await readAuthenticatedJson(response);
+  if (!response.ok) {
+    // 确定拒绝来自服务端 preflight；普通 409 也可能只是原请求仍在创建。
+    throw new WorkspaceTaskError(response.status, typeof body?.detail === "string" ? body.detail : "任务创建尚未确认，请保留原请求", response.headers.get("X-Mangrove-Task-Outcome") === "rejected");
+  }
+  return body;
 }
 
 export function answerWorkspaceTask(
@@ -266,6 +277,7 @@ export function refreshWorkspaceSource(
   externalApiConfirmed: boolean,
   idempotencyKey: string,
   resumeUnknown: boolean,
+  targetSourceSnapshotId?: string,
 ): Promise<{
   status: "acquiring" | "revision_created";
   attempt: SourceAcquisitionAttempt;
@@ -277,6 +289,7 @@ export function refreshWorkspaceSource(
       expected_active_revision: expectedActiveRevision,
       external_api_confirmed: externalApiConfirmed,
       resume_unknown: resumeUnknown,
+      ...(targetSourceSnapshotId ? { target_source_snapshot_id: targetSourceSnapshotId } : {}),
     },
     { "Idempotency-Key": idempotencyKey },
   );
@@ -340,19 +353,30 @@ export function publishCandidateVerification(
   );
 }
 
-export function createWorkspaceRevision(
+export class WorkspaceRevisionError extends ApiError {
+  constructor(status: number, message: string, readonly rejected: boolean) { super(status, message); }
+}
+
+export async function createWorkspaceRevision(
   taskId: string,
   instruction: string,
   expectedActiveRevision: number,
   outputFormats?: string[],
   externalApiConfirmed = false,
+  sources?: { upload_ids: string[]; source_snapshot_ids: string[] },
+  idempotencyKey?: string,
 ): Promise<WorkspaceRevision> {
-  return api.post(`${BASE}/tasks/${taskId}/revisions`, {
-    instruction,
-    output_formats: outputFormats,
-    external_api_confirmed: externalApiConfirmed,
-    expected_active_revision: expectedActiveRevision,
+  const response = await authenticatedFetch(`${BASE}/tasks/${taskId}/revisions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
+    body: JSON.stringify({ instruction, output_formats: outputFormats, external_api_confirmed: externalApiConfirmed, expected_active_revision: expectedActiveRevision, ...sources }),
   });
+  const body = await readAuthenticatedJson(response);
+  if (!response.ok) {
+    // 只有服务端证明未开始执行，才能解除未知请求；HTTP 状态本身不证明零副作用。
+    throw new WorkspaceRevisionError(response.status, typeof body?.detail === "string" ? body.detail : "资料修订尚未确认，请保留原请求", response.headers.get("X-Mangrove-Revision-Outcome") === "rejected");
+  }
+  return body;
 }
 
 export function sendWorkspaceTurn(
