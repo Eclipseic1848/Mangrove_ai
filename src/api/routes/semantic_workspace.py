@@ -1804,13 +1804,17 @@ def _detail_response_refs(values):
     return [ref for ref in row["source_refs"] if source_key(ref) not in deleted]
 
 
-@guarded_response("preview", _detail_response_refs, lock_timeout=5)
-def _task_detail_response(task_id, user, *, revision=None, audience=ProgressAudience.USER, answer_receipt=None, envelope=None):
+@guarded_response("preview", _detail_response_refs, lock_timeout=5, materialized_json=True)
+def _task_detail_response(task_id, user, *, revision=None, audience=ProgressAudience.USER, answer_receipt=None, envelope=None, response_status=200):
     # 写入/等待完成后才冻结本次实际返回版本，不能用操作前的旧refs保护新正文。
     detail=_task_detail(user["user_id"],task_id,revision=revision,audience=audience)
     if answer_receipt is not None:
         detail["answer_receipt"]=answer_receipt
-    return {**envelope,"task":detail} if envelope is not None else detail
+    from fastapi.encoders import jsonable_encoder
+    from starlette.responses import JSONResponse
+    payload={**envelope,"task":detail} if envelope is not None else detail
+    # 显式Response不会继承路由声明的202，须保留调用者原有HTTP合同。
+    return JSONResponse(jsonable_encoder(payload),status_code=response_status)
 
 
 def _task_detail(
@@ -3792,7 +3796,7 @@ async def request_candidate_reverification(
         if is_admin_role(user.get("role"))
         else ProgressAudience.USER
     )
-    return _task_detail_response(task_id, user, audience=audience, envelope={
+    return _task_detail_response(task_id, user, audience=audience, response_status=202, envelope={
         "attempt_id": attempt.attempt_id,
         "task_id": attempt.task_id,
         "revision": attempt.revision,

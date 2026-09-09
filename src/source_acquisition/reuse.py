@@ -242,8 +242,8 @@ class SourceReadUse:
 
 
 class SourceUseResponse(Response):
-    def __init__(self,response,use):
-        self.response=response;self.use=use
+    def __init__(self,response,use,*,materialized_json=False):
+        self.response=response;self.use=use;self.materialized_json=materialized_json
         super().__init__(status_code=response.status_code)
         self.raw_headers=response.raw_headers
 
@@ -253,7 +253,15 @@ class SourceUseResponse(Response):
         known=False
         response_started=False
         try:
-            await execution_to_thread(self.use.recheck)
+            if self.materialized_json:
+                # 此JSON已在源锁内读完并序列化；发送前不再让出执行权重读原件。
+                # 权限和删除意图仍同步复核，锁与使用事实直到实际发送退出才释放。
+                from src.api.execution import execution_checkpoint
+                from src.source_acquisition.deletion import assert_sources_readable
+                execution_checkpoint()
+                assert_sources_readable(self.use.owner_id,self.use.refs)
+            else:
+                await execution_to_thread(self.use.recheck)
             response_started=True
             await self.response(scope,receive,send)
             known=True
@@ -322,7 +330,7 @@ def freeze_source_call(owner_id,refs,call,*args,**kwargs):
         return call(*args,**kwargs)
 
 
-def guarded_response(operation,refs_factory,*,joined_reader=False,lock_timeout=0):
+def guarded_response(operation,refs_factory,*,joined_reader=False,lock_timeout=0,materialized_json=False):
     """路由仅装配身份，锁与使用事实覆盖正文读取及完整响应。"""
     import asyncio,functools,inspect
     from fastapi import HTTPException
@@ -350,7 +358,9 @@ def guarded_response(operation,refs_factory,*,joined_reader=False,lock_timeout=0
             except (ValueError,OSError) as exc:
                 raise HTTPException(409,"source_in_use" if str(exc)=="source_in_use" else "来源不可用") from exc
         def wrap(value,use):
-            return SourceUseResponse(value if isinstance(value,Response) else JSONResponse(jsonable_encoder(value)),use)
+            if materialized_json and not isinstance(value,JSONResponse):
+                raise TypeError("已物化响应必须在受保护函数内生成JSONResponse")
+            return SourceUseResponse(value if isinstance(value,Response) else JSONResponse(jsonable_encoder(value)),use,materialized_json=materialized_json)
         if inspect.iscoroutinefunction(function):
             @functools.wraps(function)
             async def wrapped(*args,**kwargs):

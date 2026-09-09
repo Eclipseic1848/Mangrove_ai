@@ -3106,14 +3106,15 @@ def test_full_candidate_reverification_is_idempotent_and_rejects_concurrent_key(
             f"/api/semantic-workspace/tasks/{task_id}/candidate-verifications"
         )
 
-        first = client.post(
-            url,
-            headers={"Idempotency-Key": "reverify-idempotent"},
-            json=payload,
-        )
-        assert first.status_code == 202, first.text
-        assert verifier.started.wait(timeout=5)
+        # 首次响应断言失败也须释放真实线程，否则pytest汇总后仍无法退出。
         try:
+            first = client.post(
+                url,
+                headers={"Idempotency-Key": "reverify-idempotent"},
+                json=payload,
+            )
+            assert first.status_code == 202, first.text
+            assert verifier.started.wait(timeout=5)
             same = client.post(
                 url,
                 headers={"Idempotency-Key": "reverify-idempotent"},

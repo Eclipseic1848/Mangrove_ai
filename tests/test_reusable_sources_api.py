@@ -87,9 +87,12 @@ def test_history_does_not_advertise_known_invalid_formal_qa(canvas,monkeypatch):
     assert item["reason_code"]=="formal_evidence_invalid"
 
 
-def test_independent_result_bundle_survives_deleted_original(canvas):
+def test_independent_result_bundle_survives_missing_original(canvas):
+    from pathlib import Path
     client,_,task_id,_,upload=canvas
-    assert client.delete('/api/data-sources/uploads/'+upload.upload_id).status_code==200
+    assert client.delete('/api/data-sources/uploads/'+upload.upload_id).status_code==409
+    # 仅隔离夹具模拟历史原件丢失；正式关联清理由删除纵切面验证。
+    Path(upload.storage_path).unlink()
     result=client.get('/api/semantic-workspace/tasks/'+task_id+'/bundle')
     assert result.status_code==200,result.text
     assert client.get('/api/semantic-workspace/tasks/'+task_id+'/bundle?include_sources=true').status_code==409

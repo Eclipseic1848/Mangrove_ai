@@ -198,7 +198,8 @@ def test_confirmed_web_clarification_updates_typed_goal_and_preserves_snapshot(t
                 selection_delta={"explicit_exclusions":["代理机构"]} if request.text != "未知字段" else {"unsupported_key":"不允许"},
                 coverage_delta={"quantity_requirement":"至少 1 项", "completeness_requirement":"允许部分但必须有真实证据"})
     monkeypatch.setattr(route, "build_context_rewriter", lambda request, **kwargs: Rewriter())
-    with client:
+    # 此 HTTP 夹具的真实账号是 user-a，不能继承本模块其余测试的 owner-a。
+    with execution_context(ExecutionAuthorization("user-a", 0)), client:
         created = client.post("/api/semantic-workspace/tasks", json={"objective_text":"整理公开网页产品", "source_snapshot_id":snapshot,
             "quantity_requirement":"尽可能多", "completeness_requirement":"允许部分但必须有证据", "output_formats":["json"], "runtime_version":"pi", "provider":"local"})
         assert created.status_code == 202, created.text

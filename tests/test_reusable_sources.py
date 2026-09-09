@@ -24,7 +24,9 @@ def test_guarded_response_resolves_original_forward_signature_and_finishes_rejec
     from src.source_acquisition import reuse
     class Use:
         def __init__(self,*args,**kwargs): self.finished=[]
-        def start(self): return self
+        def start(self, *, lock_timeout=0):
+            assert lock_timeout == 0
+            return self
         def finish(self,*,known): self.finished.append(known)
     use=Use()
     monkeypatch.setattr(reuse,"SourceReadUse",lambda *args,**kwargs:use)
@@ -142,7 +144,9 @@ async def test_async_preview_cancel_after_joined_worker_completes_usage(monkeypa
     monkeypatch.setattr('src.api.execution.execution_checkpoint',lambda:None)
     entered=threading.Event();release=threading.Event();finished=[]
     class Use:
-        def start(self): return self
+        def start(self, *, lock_timeout=0):
+            assert lock_timeout == 0
+            return self
         def finish(self,*,known): finished.append(known)
     monkeypatch.setattr(reuse,'SourceReadUse',lambda *args,**kwargs:Use())
     @reuse.guarded_response('preview',lambda values:[],joined_reader=True)
@@ -171,7 +175,8 @@ def test_response_body_uses_revision_captured_before_active_revision_changes(mon
         def get_semantic_workspace_revision(self,owner,task,revision): return {'source_refs':[{'upload_id':'source-'+str(revision),'sha256':str(revision)*64}]}
     class Use:
         def __init__(self,owner,refs,**kwargs): registered.append((kwargs['revision'],refs[0]['upload_id']))
-        def start(self):
+        def start(self, *, lock_timeout=0):
+            assert lock_timeout == 0
             captured.set()
             assert release.wait(5)
             return self

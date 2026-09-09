@@ -310,3 +310,45 @@ def test_reconfirmation_does_not_mutate_while_operation_lock_is_held(canvas):
         assert response.json()['state']=='needs_confirmation'
         with sqlite3.connect(settings.webui_db_path) as connection:
             assert connection.execute('SELECT plan_json FROM source_deletion_operations WHERE operation_id=?',(operation_id,)).fetchone()[0]==prior
+
+
+def test_materialized_detail_keeps_status_and_source_lock_through_send(canvas,monkeypatch):
+    import asyncio,sqlite3,pytest
+    from starlette.responses import JSONResponse
+    from src.source_acquisition.reuse import SourceReadUse,SourceUseResponse,source_locks
+    from src.config.settings import settings
+    _,_,task_id,_,upload=canvas
+    refs=[{'upload_id':upload.upload_id,'sha256':upload.sha256}]
+    use=SourceReadUse('user-a',refs,operation='preview',task_id=task_id,revision=1).start()
+    monkeypatch.setattr(use,'recheck',lambda:pytest.fail('已物化JSON不得再次异步读取原件'))
+    response=SourceUseResponse(JSONResponse({'accepted':True},status_code=202),use,materialized_json=True)
+    messages=[]
+    async def send(message):
+        with sqlite3.connect(settings.webui_db_path) as conn:
+            assert conn.execute('SELECT state FROM source_read_uses WHERE use_id=?',(use.use_id,)).fetchone()[0]=='active'
+        with pytest.raises(ValueError,match='source_in_use'):
+            with source_locks('user-a',refs): pass
+        messages.append(message)
+    asyncio.run(response({'type':'http'},None,send))
+    assert messages[0]['status']==202
+    with source_locks('user-a',refs): pass
+    with sqlite3.connect(settings.webui_db_path) as conn:
+        assert conn.execute('SELECT state FROM source_read_uses WHERE use_id=?',(use.use_id,)).fetchone()[0]=='completed'
+
+
+def test_materialized_detail_rechecks_authority_and_deletion_before_send(canvas,monkeypatch):
+    import asyncio,pytest
+    from starlette.responses import JSONResponse
+    from src.source_acquisition.reuse import SourceReadUse,SourceUseResponse
+    from src.api import execution
+    from src.source_acquisition import deletion
+    _,_,task_id,_,upload=canvas
+    for seam in ('authority','deletion'):
+        use=SourceReadUse('user-a',[{'upload_id':upload.upload_id,'sha256':upload.sha256}],operation='preview',task_id=task_id,revision=1).start()
+        def deny(*args,**kwargs): raise PermissionError('合成发送前撤权')
+        with monkeypatch.context() as patch:
+            patch.setattr(execution if seam=='authority' else deletion,'execution_checkpoint' if seam=='authority' else 'assert_sources_readable',deny)
+            async def send(message): pytest.fail('撤权后不得发送正文')
+            with pytest.raises(PermissionError):
+                asyncio.run(SourceUseResponse(JSONResponse({'body':'synthetic'}),use,materialized_json=True)({'type':'http'},None,send))
+        assert use._locks is None
