@@ -94,7 +94,7 @@ jobs:
               tests/test_pdf_render.py tests/test_pdf_office_parsers.py tests/test_paddleocr_vl_document_client.py \
               tests/test_mineru_document_client.py tests/test_document_retrieval.py tests/test_document_tool_relay.py \
                 tests/test_agentic_runtime.py tests/test_image_file_task.py tests/test_semantic_document_execution.py \
-              tests/test_context_universal.py \
+              tests/test_context_universal.py tests/test_task_context.py tests/test_task_context_api.py \
               tests/test_source_export.py tests/test_source_export_api.py \
               tests/test_public_search_api.py tests/test_public_search_service.py tests/test_public_search_delivery.py \
               tests/test_mixed_sources_api.py tests/test_mixed_sources_runtime.py tests/test_mixed_sources_migration.py tests/test_mixed_sources_delivery.py \

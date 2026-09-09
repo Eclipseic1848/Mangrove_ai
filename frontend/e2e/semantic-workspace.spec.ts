@@ -1299,13 +1299,13 @@ test.describe("统一数据工作台", () => {
     await page.getByLabel("必须包含").fill("产品名称\n公开说明");
     await page.getByLabel("明确不要").fill("不要推测未公开价格");
     await page.getByLabel("任务模板（可选）").selectOption(
-      "public-company-summary",
+      JSON.stringify(["public-company-summary", 1]),
     );
     await page.getByText("个人记忆（可选）").click();
     await page.getByText("公司名使用官网全称").click();
     await page.getByRole("button", { name: "检查上下文草案" }).click();
     await expect(page.getByText("已检查，可以启动")).toBeVisible();
-    await expect(page.getByText("按公司提取名称和来源证据", { exact: true }))
+    await expect(page.getByText("建议目标：按公司提取名称和来源证据", { exact: true }))
       .toBeVisible();
     await page.getByRole("button", { name: "启动任务" }).click();
     await expect.poll(() => taskSubmitted).not.toBeNull();

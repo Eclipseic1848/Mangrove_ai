@@ -19,3 +19,6 @@
 
 # 已核对：关联清理索引 ix_deletion_owner_key 的值是 Schema 结构摘要，仅忽略该提交的此行。
 9a428600063e4e56e2c626dea6690b6461f85eb8:src/database_migrations/schema_manifest.json:generic-api-key:100
+
+# 同一索引结构摘要在Issue #137合并基线再次命中；仅豁免已核实的这条合并历史行。
+115c990c60a865ceb0749b7993664d963c112251:src/database_migrations/schema_manifest.json:generic-api-key:100
