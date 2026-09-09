@@ -750,7 +750,7 @@ function MessageBubble({ msg, onAction, onLike, onDislike }: { msg: Msg; onActio
   return (
     <div className="animate-fade-in space-y-3">
       <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-3">
-        <Markdown>{msg.content}</Markdown>
+        <Markdown externalImagesAsLinks>{msg.content}</Markdown>
       </div>
 
       {/* 产出文件 */}

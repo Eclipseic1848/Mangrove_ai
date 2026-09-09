@@ -643,7 +643,7 @@ class SemanticWorkspaceManager:
         pi_runtime: PiRuntime | None = None,
         candidate_verification: CandidateVerificationService | None = None,
     ) -> None:
-        self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=256)
         self._workers: list[asyncio.Task[None]] = []
         self._maintenance: asyncio.Task[None] | None = None
         self._active: dict[str, asyncio.Task[None]] = {}
@@ -1466,7 +1466,10 @@ class SemanticWorkspaceManager:
                 now = time.monotonic()
                 for pending in pending_tasks:
                     if pending["status"] == "cancelling":
-                        await self.cancel(pending["user_id"], pending["task_id"])
+                        # 维护任务没有请求身份，只能使用待清理任务的持久冻结代数。
+                        authorization = self._workspace_authorization(pending["user_id"], pending["task_id"])
+                        with execution_context(authorization):
+                            await self.cancel(pending["user_id"], pending["task_id"])
                         continue
                     if self._delivery_retry_after.get(
                         pending["task_id"], 0.0
@@ -1709,8 +1712,13 @@ class SemanticWorkspaceManager:
             self._active.pop(task_id, None)
         if task_id in self._queued or task_id in self._active:
             return
+        # ponytail: 单进程内存最多暂存 256 项；溢出仍在持久库，由维护循环接管。
+        # 先入队再登记，避免满队列留下无法再被接管的幽灵标记。
+        try:
+            self._queue.put_nowait((user_id, task_id))
+        except asyncio.QueueFull:
+            return
         self._queued.add(task_id)
-        self._queue.put_nowait((user_id, task_id))
 
     def _workspace_authorization(self, user_id: str, task_id: str) -> ExecutionAuthorization:
         binding = get_store().account_execution_binding(user_id, "workspace", task_id)
@@ -1847,10 +1855,14 @@ class SemanticWorkspaceManager:
         running.cancel()
         with suppress(asyncio.CancelledError):
             await running
-        return (
-            store.get_semantic_workspace_task(user_id, task_id)
-            or saved
-        )
+        current = store.get_semantic_workspace_task(user_id, task_id) or saved
+        # 协程在进入自己的finally前也可能被取消；再核真实资源静默后才能补齐终态。
+        if current["status"] == "cancelling" and await self._confirm_runtime_stopped(user_id, task_id, task["active_revision"]):
+            # 清理等待期间可能已有新版本；旧资源停止证明不能取消新的活动版本。
+            current = store.get_semantic_workspace_task(user_id, task_id)
+            if current and current["active_revision"] == task["active_revision"] and current["status"] == "cancelling":
+                self._mark_cancelled(user_id, task_id, task["active_revision"])
+        return store.get_semantic_workspace_task(user_id, task_id) or current
 
     async def _confirm_runtime_stopped(self, user_id: str, task_id: str, revision: int, *, account_hold: bool = False, expected_generation: int | None = None, deletion_revision_only: bool = False) -> bool:
         store = get_store()
