@@ -54,6 +54,11 @@ async def upload_source(
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(e))
+    except OSError as exc:
+        import errno
+        if exc.errno != errno.ENOSPC:
+            raise
+        raise HTTPException(status_code=507, detail="存储空间不足，请联系管理员释放空间后重试") from None
     return item.model_dump(mode="json", exclude={"storage_path", "user_id"})
 
 

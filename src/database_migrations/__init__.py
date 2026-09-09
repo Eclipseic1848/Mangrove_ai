@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from contextlib import closing
+from collections import OrderedDict
+from threading import RLock
 from dataclasses import dataclass
 from functools import lru_cache
 import hashlib
@@ -1018,6 +1020,44 @@ def _profile_evidence_gaps(
     return gaps
 
 
+_schema_gap_calculations: OrderedDict[tuple, tuple[str, ...]] = OrderedDict()
+_schema_gap_lock = RLock()
+
+
+def _schema_contract_gaps(profile, connection, table_names, is_current):
+    """缓存相同DDL快照的结构计算；版本和历史证据始终逐次读取。"""
+    rows = connection.execute("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").fetchall()
+    required = _PROFILE_REQUIRED_COLUMNS[profile]
+    manifest = _schema_manifest()[profile] if is_current else None
+    key = (profile, is_current, connection.execute("PRAGMA schema_version").fetchone()[0],
+           tuple(tuple(row) for row in rows), tuple((table, tuple(columns)) for table, columns in required.items()),
+           tuple(sorted(manifest["objects"].items())) if manifest else (),
+           tuple(sorted(manifest["tables"].items())) if manifest else ())
+    with _schema_gap_lock:
+        cached = _schema_gap_calculations.get(key)
+        if cached is not None:
+            _schema_gap_calculations.move_to_end(key)
+            return list(cached)
+    gaps = []
+    if table_names:
+        for table, columns in required.items():
+            if table not in table_names:
+                gaps.append(f"table:{table}")
+                continue
+            quoted = '"' + table.replace('"', '""') + '"'
+            actual = {str(row[1]) for row in connection.execute(f"PRAGMA table_info({quoted})").fetchall()}
+            gaps.extend(f"column:{table}.{column}" for column in columns if column not in actual)
+    if is_current:
+        gaps.extend(_profile_schema_gaps(profile, connection, gaps))
+    with _schema_gap_lock:
+        _schema_gap_calculations[key] = tuple(gaps)
+        _schema_gap_calculations.move_to_end(key)
+        # ponytail: 最多8份DDL快照；所有版本/证据与快照输入仍在本次事务内重读。
+        while len(_schema_gap_calculations) > 8:
+            _schema_gap_calculations.popitem(last=False)
+    return gaps
+
+
 def _inspect_open_connection(
     target: DatabaseTarget,
     connection: sqlite3.Connection,
@@ -1040,34 +1080,16 @@ def _inspect_open_connection(
         if version_table
         else []
     )
-    gaps: list[str] = []
-    if table_names:
-        for table, columns in _PROFILE_REQUIRED_COLUMNS[target.profile].items():
-            if table not in table_names:
-                gaps.append(f"table:{table}")
-                continue
-            quoted = '"' + table.replace('"', '""') + '"'
-            actual_columns = {
-                str(item[1])
-                for item in connection.execute(
-                    f"PRAGMA table_info({quoted})"
-                ).fetchall()
-            }
-            gaps.extend(
-                f"column:{table}.{column}"
-                for column in columns
-                if column not in actual_columns
-            )
     current_revision = (
         str(version_rows[0][0]) if len(version_rows) == 1 else None
     )
     has_ambiguous_versions = len(version_rows) > 1
     pending = _pending_revisions(target.profile, current_revision)
     is_current = not has_ambiguous_versions and current_revision == target_revision
+    gaps = _schema_contract_gaps(target.profile, connection, table_names, is_current)
     if is_current:
-        gaps.extend(_profile_schema_gaps(target.profile, connection, gaps))
         gaps.extend(_profile_evidence_gaps(target.profile, connection, table_names))
-    has_managed_table = bool(table_names & _owned_tables(target.profile))
+    has_managed_table = not is_current and bool(table_names & _owned_tables(target.profile))
     is_known_legacy = (
         pending is not None
         and (
@@ -1122,6 +1144,8 @@ def inspect_database(target: DatabaseTarget) -> DatabaseStatus:
         )
     database_uri = f"{target.path.resolve().as_uri()}?mode=ro"
     with closing(sqlite3.connect(database_uri, uri=True, timeout=5)) as connection:
+        # 同一只读快照绑定DDL和PRAGMA，避免并发DDL令计算输入与读取不一致。
+        connection.execute("BEGIN")
         return _inspect_open_connection(target, connection)
 
 

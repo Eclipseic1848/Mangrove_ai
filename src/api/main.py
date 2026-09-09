@@ -33,6 +33,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config.settings import settings  # noqa: E402
+from src.api.browser_security import BrowserSecurityMiddleware, browser_security_error  # noqa: E402
 from src.api.services import start_scheduler  # noqa: E402
 from src.api.cookie_health_scanner import start_cookie_health_scanner  # noqa: E402
 from src.api.library_dedup_scanner import start_library_dedup_scanner  # noqa: E402
@@ -111,6 +112,8 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["X-Mangrove-Auth", "Retry-After"],
 )
+app.add_middleware(BrowserSecurityMiddleware)
+app.add_exception_handler(Exception, browser_security_error)
 
 for r in (auth_routes, conversations, chat, confirm, tasks, models, downloads,
           memory_routes, overview, templates_routes, lessons_routes, library_dedup_routes,
