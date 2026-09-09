@@ -14,3 +14,4 @@ src/database_migrations/alembic/versions/webui_0015_public_search.py text eol=lf
 src/database_migrations/alembic/versions/webui_0016_mixed_source_contract.py text eol=lf
 
 src/database_migrations/alembic/versions/webui_0017_source_read_uses.py text eol=lf
+src/database_migrations/alembic/versions/webui_0018_source_deletion.py text eol=lf

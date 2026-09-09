@@ -1790,6 +1790,29 @@ def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgres
     return tuple(projected)
 
 
+def _detail_response_refs(values):
+    from src.source_acquisition.deletion import source_integrity
+    from src.source_acquisition.reuse import source_key
+    owner=values["user"]["user_id"]
+    task=_task_or_404(owner,values["task_id"])
+    revision=values.get("revision") or task["active_revision"]
+    values["revision"]=revision
+    row=get_store().get_semantic_workspace_revision(owner,values["task_id"],revision)
+    if row is None:
+        raise PermissionError("修订不存在")
+    deleted=set(source_integrity(owner,row["source_refs"])["deleted_source_keys"])
+    return [ref for ref in row["source_refs"] if source_key(ref) not in deleted]
+
+
+@guarded_response("preview", _detail_response_refs, lock_timeout=5)
+def _task_detail_response(task_id, user, *, revision=None, audience=ProgressAudience.USER, answer_receipt=None, envelope=None):
+    # 写入/等待完成后才冻结本次实际返回版本，不能用操作前的旧refs保护新正文。
+    detail=_task_detail(user["user_id"],task_id,revision=revision,audience=audience)
+    if answer_receipt is not None:
+        detail["answer_receipt"]=answer_receipt
+    return {**envelope,"task":detail} if envelope is not None else detail
+
+
 def _task_detail(
     user_id: str,
     task_id: str,
@@ -1813,6 +1836,7 @@ def _task_detail(
             except ExecutionDenied:
                 # 并发恢复已使读取事实过期；只隐藏旧操作提示，不把 GET 当成执行。
                 pass
+    from src.source_acquisition.deletion import source_integrity
     task["current_status"] = task["status"]
     task["current_revision"] = task["active_revision"]
     task["revisions"] = store.list_semantic_workspace_revisions(
@@ -1831,6 +1855,7 @@ def _task_detail(
         raise HTTPException(status_code=404, detail="结果版本不存在")
     task["viewing_revision"] = selected_revision["revision"]
     task["source_refs"] = selected_revision["source_refs"]
+    task['source_integrity']=source_integrity(user_id,selected_revision['source_refs'])
     task["delivery_output_ids"] = [ref["output_id"] for ref in selected_revision["source_refs"] if ref.get("kind") == "delivery_output"]
     from src.source_acquisition.reuse import resolve_choices
     task["reusable_sources"] = resolve_choices(user_id,(),(),task["delivery_output_ids"])
@@ -1851,10 +1876,7 @@ def _task_detail(
                 )
             }
         )
-    task["events"] = _revision_events(
-        store.list_semantic_workspace_events(user_id, task_id),
-        selected_revision["revision"],
-    )
+    task["events"] = store.list_semantic_workspace_events(user_id,task_id,revision=selected_revision["revision"])
     task["uploads"] = []
     for upload_id in task["upload_ids"]:
         try:
@@ -1922,6 +1944,11 @@ def _task_detail(
     for group in (source_contract or {}).get("web_sources", []):
         snapshot = SourceAcquisitionRepository(settings.webui_db_path).get_snapshot(user_id, group["source_snapshot_id"])
         if snapshot is None:
+            with sqlite3.connect(settings.webui_db_path) as connection:
+                deleted=connection.execute("SELECT 1 FROM source_deletions WHERE owner_id=? AND snapshot_id=? AND state='deleted'",(user_id,group['source_snapshot_id'])).fetchone()
+            if deleted:
+                task['web_sources'].append({'source_snapshot_id':group['source_snapshot_id'],'snapshot':None,'availability':'unavailable','reason_code':'source_deleted'})
+                continue
             raise HTTPException(409, "冻结网页来源快照已缺失")
         task["web_sources"].append({"source_snapshot_id": group["source_snapshot_id"], "snapshot": snapshot})
     if task["web_sources"]:
@@ -2695,9 +2722,9 @@ def get_task(
     revision: int | None = Query(default=None, ge=1),
     user=Depends(get_current_user),
 ):
-    return _task_detail(
-        user["user_id"],
+    return _task_detail_response(
         task_id,
+        user,
         revision=revision,
         audience=(
             ProgressAudience.ADMIN
@@ -2707,6 +2734,26 @@ def get_task(
     )
 
 
+def _event_response_refs(values):
+    import sqlite3,json
+    from contextlib import closing
+    from src.source_acquisition.deletion import source_integrity
+    from src.source_acquisition.reuse import source_key
+    owner=values["user"]["user_id"];task_id=values["task_id"]
+    _task_or_404(owner,task_id)
+    with closing(sqlite3.connect(settings.webui_db_path)) as connection:
+        connection.execute("BEGIN")
+        values["through"]=connection.execute('SELECT COALESCE(MAX(sequence),0) FROM semantic_workspace_events WHERE user_id=? AND task_id=?',(owner,task_id)).fetchone()[0]
+        refs=[ref for row in connection.execute('SELECT source_refs_json FROM semantic_workspace_revisions WHERE user_id=? AND task_id=?',(owner,task_id)) for ref in json.loads(row[0])]
+    deleted=set(source_integrity(owner,refs)['deleted_source_keys'])
+    return [ref for ref in refs if source_key(ref) not in deleted]
+
+
+@guarded_response("preview", _event_response_refs, lock_timeout=5)
+def _events_response(task_id,user,after=0,through=None):
+    return _public_workspace_events(get_store().list_semantic_workspace_events(user["user_id"],task_id,after=after,through=through))
+
+
 @router.get("/tasks/{task_id}/events")
 def get_task_events(
     task_id: str,
@@ -2714,8 +2761,7 @@ def get_task_events(
     user=Depends(get_current_user),
 ):
     _task_or_404(user["user_id"], task_id)
-    events = get_store().list_semantic_workspace_events(user["user_id"], task_id, after=after)
-    return _public_workspace_events(events)
+    return _events_response(task_id,user,after=after)
 
 
 @router.get("/tasks/{task_id}/stream")
@@ -3604,9 +3650,7 @@ async def answer_task(
     store = get_store()
     receipt = None
     def response_for(saved_receipt):
-        detail = _task_detail(user_id, task_id)
-        detail["answer_receipt"] = saved_receipt
-        return detail
+        return _task_detail_response(task_id, user, answer_receipt=saved_receipt)
     try:
         task = _task_or_404(user_id, task_id)
         _workspace_question(user_id, task)
@@ -3748,15 +3792,14 @@ async def request_candidate_reverification(
         if is_admin_role(user.get("role"))
         else ProgressAudience.USER
     )
-    return {
+    return _task_detail_response(task_id, user, audience=audience, envelope={
         "attempt_id": attempt.attempt_id,
         "task_id": attempt.task_id,
         "revision": attempt.revision,
         "run_id": attempt.run_id,
         "previous_attempt_id": attempt.previous_attempt_id,
         "status": attempt.status.value,
-        "task": _task_detail(user["user_id"], task_id, audience=audience),
-    }
+    })
 
 
 @router.post(
@@ -4741,27 +4784,69 @@ def restore_task(
     task = _task_or_404(user["user_id"], task_id)
     if task["deleted_at"] is None:
         raise HTTPException(status_code=409, detail="任务不在回收站")
-    return get_store().restore_semantic_workspace_task(
-        user["user_id"], task_id
-    )
+    try:
+        return get_store().restore_semantic_workspace_task(user['user_id'],task_id)
+    except ValueError as error:
+        raise HTTPException(409,str(error)) from error
 
 
 @router.delete("/tasks/{task_id}/permanent")
-def permanently_delete_task(
-    task_id: str,
-    user=Depends(get_current_user),
-):
-    task = _task_or_404(user["user_id"], task_id)
-    if task["deleted_at"] is None:
-        raise HTTPException(
-            status_code=409,
-            detail="必须先把任务移入回收站",
-        )
-    if not get_store().purge_semantic_workspace_task(
-        user["user_id"], task_id
-    ):
-        raise HTTPException(status_code=404, detail="任务不存在")
-    return {"ok": True}
+def permanently_delete_task(task_id: str,user=Depends(get_current_user)):
+    _task_or_404(user['user_id'],task_id)
+    raise HTTPException(409,'请先预检并确认关联清理',headers={'X-Mangrove-Deletion-Outcome':'rejected'})
+
+
+class DeletionRequest(BaseModel):
+    plan_token: str = Field(min_length=64,max_length=64)
+    shared_policy: Literal['keep_shared','delete_shared'] = 'keep_shared'
+
+
+class DeletionResumeRequest(BaseModel):
+    plan_token: str | None = None
+    shared_policy: Literal['keep_shared','delete_shared'] | None = None
+
+
+def _deletion_rejection(error):
+    return HTTPException(404 if isinstance(error,PermissionError) else 409,str(error),headers={'X-Mangrove-Deletion-Outcome':'rejected'})
+
+
+@router.get('/tasks/{task_id}/deletion-plan')
+def get_deletion_plan(task_id: str,shared_policy: Literal['keep_shared','delete_shared']='keep_shared',user=Depends(get_current_user)):
+    from src.source_acquisition.deletion import deletion_plan
+    try: return deletion_plan(user['user_id'],task_id,shared_policy)
+    except (ValueError,PermissionError) as error: raise _deletion_rejection(error) from error
+
+
+@router.get('/deletion-operations/by-key')
+def get_deletion_by_key(task_id: str,idempotency_key: str,user=Depends(get_current_user)):
+    from src.source_acquisition.deletion import operation_by_key
+    result=operation_by_key(user['user_id'],task_id,idempotency_key)
+    if result is None: raise HTTPException(404,'清理操作尚未登记')
+    return result
+
+
+@router.get('/deletion-operations/{operation_id}')
+def get_deletion_operation(operation_id: str,user=Depends(get_current_user)):
+    from src.source_acquisition.deletion import get_operation
+    try: return get_operation(user['user_id'],operation_id)
+    except PermissionError as error: raise HTTPException(404,str(error)) from error
+
+
+@router.post('/tasks/{task_id}/deletion-operations',status_code=202)
+async def create_deletion_operation(task_id: str,payload: DeletionRequest,idempotency_key: Annotated[str,Header(min_length=1,max_length=200)],user=Depends(get_execution_user)):
+    from src.source_acquisition.deletion import begin_operation,continue_operation
+    try: operation=begin_operation(user['user_id'],task_id,payload.plan_token,payload.shared_policy,idempotency_key)
+    except (ValueError,PermissionError) as error: raise _deletion_rejection(error) from error
+    return await continue_operation(user['user_id'],operation['operation_id'],get_semantic_workspace_manager())
+
+
+@router.post('/deletion-operations/{operation_id}/resume',status_code=202)
+async def resume_deletion_operation(operation_id: str,payload: DeletionResumeRequest,user=Depends(get_execution_user)):
+    from src.source_acquisition.deletion import continue_operation
+    try:
+        return await continue_operation(user['user_id'],operation_id,get_semantic_workspace_manager(),plan_token=payload.plan_token,shared_policy=payload.shared_policy)
+    except (PermissionError,ValueError) as error:
+        raise _deletion_rejection(error) from error
 
 
 def _quote_identifier(value: str) -> str:

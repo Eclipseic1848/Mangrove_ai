@@ -545,7 +545,8 @@ export function TaskTimeline({
   const [eventsOpen, setEventsOpen] = useState(true);
   const [retryingUnknown, setRetryingUnknown] = useState(false);
   const [refreshingSource, setRefreshingSource] = useState(false);
-  const webSources = task.web_sources ?? (task.web_source ? [task.web_source] : []);
+  const allWebSources = task.web_sources ?? (task.web_source ? [task.web_source] : []);
+  const webSources = allWebSources.flatMap(source => source.snapshot ? [{ ...source, snapshot: source.snapshot }] : []);
   const [refreshTarget, setRefreshTarget] = useState("");
   const selectedWebSource = webSources.find(source => source.source_snapshot_id === refreshTarget) ?? webSources[0];
   const [gapAction, setGapAction] = useState<string | null>(null);
@@ -630,6 +631,7 @@ export function TaskTimeline({
         <QuestionDialog key={`${task.task_id}:${task.viewing_revision}:${task.question.round_id ?? task.question.question_id}`} question={task.question} onAnswer={onAnswer} onRefreshQuestion={onRefreshQuestion} />
       )}
       {task.question?.purpose === "control" && <p role="status" className="mb-4 rounded-xl border p-4 text-sm leading-6">{task.question.prompt} 仍可继续对话提出更正；补充要求需要明确确认后，以新版本重新开始。</p>}
+      {allWebSources.filter(source => !source.snapshot).map(source => <p key={source.source_snapshot_id} role="status" className="mb-4 break-all rounded-xl border p-4 text-sm">网页来源组已清理：{source.source_snapshot_id}。原文不可读取，不能按此组重跑；可明确移除此组并换新资料创建版本。</p>)}
       {selectedWebSource && (
         <div className="mb-4 flex flex-wrap items-start gap-3 border-b pb-4 text-sm">
           <Globe2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
@@ -833,7 +835,7 @@ export function TaskTimeline({
                     将这个任务移入回收站？
                   </AlertDialog.Title>
                   <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">
-                    任务会从当前列表移除，并可在回收站保留期内恢复；生产审计和溯源记录不会被清除。
+                    任务记录会从当前列表移除，可在回收站恢复；此操作不会清理原件和结果。
                   </AlertDialog.Description>
                   <div className="mt-5 flex justify-end gap-2">
                     <AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm hover:bg-muted">
@@ -853,6 +855,7 @@ export function TaskTimeline({
         </div>
       </div>
 
+      {task.source_integrity?.state === "source_deleted" && <p role="status" className="mt-4 rounded-lg border border-amber-500/40 p-3 text-sm">部分来源已删除，不能按原来源完整重跑或复验。其他任务及独立正式结果保留，历史 QA 结论仅表示当时的验证事实。</p>}
       {task.summary && (
         <div className="mt-6 rounded-2xl border bg-muted/20 p-4">
           <div className="flex items-center gap-2 text-sm font-medium">
@@ -1348,7 +1351,7 @@ export function TaskTimeline({
                           取消
                         </AlertDialog.Cancel>
                         <AlertDialog.Action
-                          disabled={retryingUnknown}
+                          disabled={retryingUnknown || task.source_integrity?.can_rerun === false}
                           onClick={() => {
                             setRetryingUnknown(true);
                             void Promise.resolve(onRetry(true)).finally(() => {
@@ -1366,7 +1369,7 @@ export function TaskTimeline({
               ) : (
                 <button
                   type="button"
-                  onClick={() => void onRetry(false)}
+                  disabled={task.source_integrity?.can_rerun === false} onClick={() => void onRetry(false)}
                   className="mt-3 inline-flex items-center gap-1.5 rounded-lg border bg-background px-3 py-2 text-xs font-medium hover:bg-muted"
                 >
                   <RotateCcw className="h-3.5 w-3.5" />

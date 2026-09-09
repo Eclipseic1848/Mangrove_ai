@@ -1134,7 +1134,7 @@ def test_workspace_revision_keeps_previous_delivery_available(
         assert preview.json()["total"] == 11
 
 
-def test_workspace_expired_recycle_records_are_removed(
+def test_workspace_expired_recycle_records_require_deletion_confirmation(
     tmp_path,
     monkeypatch,
 ):
@@ -1166,35 +1166,20 @@ def test_workspace_expired_recycle_records_are_removed(
             get_store().purge_expired_semantic_workspace_tasks(
                 now=datetime.now()
             )
-            == 1
+            == 0
         )
-        assert (
-            client.get(
-                "/api/semantic-workspace/tasks?deleted=true"
-            ).json()
-            == []
-        )
+        retained = client.get("/api/semantic-workspace/tasks?deleted=true").json()
+        assert [item["task_id"] for item in retained] == [task_id]
+        revision = get_store().get_semantic_workspace_revision("user-a", task_id, 1)
+        assert revision["source_refs"][0]["upload_id"] == upload.upload_id
+        assert Path(upload.storage_path).is_file()
         tombstone = get_store().get_semantic_workspace_audit_tombstone(
             "user-a",
             task_id,
         )
-        assert tombstone is not None
-        assert tombstone["task_id"] == task_id
-        assert tombstone["user_id"] == "user-a"
-        assert len(tombstone["objective_sha256"]) == 64
-        assert tombstone["source_refs"] == [{
-            "upload_id": upload.upload_id,
-            "sha256": upload.sha256,
-        }]
-        assert tombstone["result_refs"] == []
-        assert tombstone["requested_formats"] == ["xlsx"]
-        assert tombstone["terminal_status"] == "needs_input"
-        assert tombstone["error_code"] is None
-        assert tombstone["purge_reason"] == "retention_expired"
-        serialized = json.dumps(tombstone, ensure_ascii=False)
-        assert "整理工作量表" not in serialized
-        assert "workload.csv" not in serialized
-        assert str(tmp_path) not in serialized
+        assert tombstone is None
+        assert client.post(f"/api/semantic-workspace/tasks/{task_id}/restore").status_code == 200
+        assert client.get(f"/api/semantic-workspace/tasks/{task_id}").status_code == 200
 
 
 @pytest.mark.asyncio

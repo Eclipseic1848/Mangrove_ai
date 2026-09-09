@@ -448,6 +448,7 @@ export interface WorkspaceTask {
   cancel_requested: boolean;
   deleted_at: string | null;
   purge_after: string | null;
+  source_integrity?: { state: "intact" | "source_deleted"; deleted_source_keys: string[]; can_rerun: boolean; can_reverify: boolean };
   created_at: string;
   updated_at: string;
   revisions?: WorkspaceRevision[];
@@ -467,7 +468,7 @@ export interface WorkspaceTask {
   permission_profile?: "standard" | "extended" | "host_dev";
   agentic_runtime?: AgenticRuntimeInfo;
   progress?: TaskProgressView;
-  web_sources?: Array<{ source_snapshot_id: string; snapshot: SourceSnapshot }>;
+  web_sources?: Array<{ source_snapshot_id: string; snapshot: SourceSnapshot | null; availability?: "unavailable"; reason_code?: "source_deleted" }>;
   source_contract?: {
     schema_version: number;
     goal_contract: NonNullable<WorkspaceTask["web_source"]>["goal_contract"] | null;
@@ -620,7 +621,19 @@ export type ReusableSource = {
 };
 export type SourceSelection = { upload_ids: string[]; source_snapshot_ids: string[]; delivery_output_ids: string[] };
 export type ReusableSourcePage = { items: ReusableSource[]; next_cursor: string | null; snapshot_token: string; total: number; page_complete: boolean };
-export type SourceReferencePage = Omit<ReusableSourcePage, "items"> & { unknown_uses: number; items: Array<{ task_id: string | null; revision: number | null; reference_kind: "revision" | "runtime" | "export" | "preview" | "delivery"; delivery_id?: string | null; run_id?: string | null; task_exists?: boolean; use_id: string | null; state: "retained" | "active" | "unknown" | "published"; in_recycle_bin: boolean | null }> };
+export type SourceReferencePage = Omit<ReusableSourcePage, "items"> & { unknown_uses: number; items: Array<{ task_id: string | null; revision: number | null; reference_kind: "revision" | "runtime" | "export" | "preview" | "delivery" | "producer"; delivery_id?: string | null; run_id?: string | null; task_exists?: boolean; use_id: string | null; state: "retained" | "active" | "unknown" | "published"; in_recycle_bin: boolean | null }> };
+export type DeletionPolicy = "keep_shared" | "delete_shared";
+export type TaskDeletionPlan = {
+  plan_token: string; task_id: string; shared_policy: DeletionPolicy;
+  objects: Array<{ source_key: string; kind: "upload" | "web_artifact" | "delivery_output"; artifact_id?: string; snapshot_id?: string; identity?: "original" | "derived"; acquired_at?: string | null; time_kind?: "acquired" | "generated" | "unknown"; sha256: string | null; label: string; disposition: "delete" | "keep_shared"; references: SourceReferencePage["items"] }>;
+  affected_tasks: Array<{ task_id: string; revision?: number | null; task_exists: boolean; in_recycle_bin: boolean | null }>;
+  can_execute: boolean; blockers: Array<{ code: string; message: string }>;
+};
+export type TaskDeletionOperation = {
+  operation_id: string; task_id: string; state: "planned" | "stopping" | "cleaning" | "needs_confirmation" | "incomplete" | "completed";
+  completed_source_keys: string[]; retained_source_keys: string[]; affected_tasks: TaskDeletionPlan["affected_tasks"];
+  error_code: string | null; message: string | null;
+};
 export type ReusableOutputPreview = WorkspacePreview & { source_key: string; identity: "derived"; sha256: string; origin: ReusableSource["origin"] };
 
 export interface WorkspaceSourcePreview {

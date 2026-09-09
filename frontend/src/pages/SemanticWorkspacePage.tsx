@@ -30,6 +30,7 @@ import {
   type ResultViewState,
 } from "@/components/workspace/ResultPreview";
 import { SourcePreviewPanel, initialSourceView, type SourceViewState } from "@/components/workspace/SourcePreviewPanel";
+import { TaskDeletionDialog } from "@/components/workspace/TaskDeletionDialog";
 import { TaskTimeline } from "@/components/workspace/TaskTimeline";
 import { Markdown } from "@/components/Markdown";
 import { WorkspaceTaskSidebar } from "@/components/workspace/WorkspaceTaskSidebar";
@@ -47,7 +48,6 @@ import {
   getWorkspaceTask,
   listGrayCapabilities,
   listWorkspaceTasks,
-  permanentlyDeleteWorkspaceTask,
   recycleWorkspaceTask,
   requestCandidateReverification,
   publishCandidateVerification,
@@ -616,6 +616,7 @@ export function SemanticWorkspacePage() {
     "all" | "active" | "needs_input" | "completed"
   >("all");
   const [recycleBin, setRecycleBin] = useState(false);
+  const [deletionTarget, setDeletionTarget] = useState<{ task_id: string; title: string } | null>(null);
   const newTask = !selectedTaskId && !recycleBin;
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorExpanded, setInspectorExpanded] = useState(false);
@@ -831,7 +832,7 @@ export function SemanticWorkspacePage() {
   const sourceSelection = taskSourceSelection?.resultIdentity === resultIdentity
     ? taskSourceSelection : null;
   const taskWebSources = task?.web_sources ?? (task?.web_source ? [task.web_source] : []);
-  const taskUploadId = sourceSelection?.uploadId ?? task?.upload_ids[0] ?? taskWebSources[0]?.snapshot.artifacts[0]?.artifact_id ?? task?.delivery_output_ids?.[0] ?? null;
+  const taskUploadId = sourceSelection?.uploadId ?? task?.upload_ids[0] ?? taskWebSources.find(source => source.snapshot)?.snapshot?.artifacts[0]?.artifact_id ?? task?.delivery_output_ids?.[0] ?? null;
 
   useEffect(() => {
     const pending = pendingSource.current;
@@ -1053,6 +1054,10 @@ export function SemanticWorkspacePage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      {user && <TaskDeletionDialog key={user.user_id} ownerId={user.user_id} target={deletionTarget} currentTaskId={selectedTaskId} onClose={() => setDeletionTarget(null)} onCompleted={operation => {
+        if (selectedTaskId === operation.task_id) setSelectedTaskId(null);
+        void Promise.all(["semantic-workspace-task", "semantic-workspace-tasks", "semantic-workspace-storage", "workspace-task-source", "workspace-task-derived-source", "workspace-source-file"].map(key => queryClient.invalidateQueries({ queryKey: [key] })));
+      }} />}
       <header className="flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-background px-3 py-2">
         <div>
           <h1 className="text-sm font-semibold">任务工作台</h1>
@@ -1062,7 +1067,7 @@ export function SemanticWorkspacePage() {
         </div>
         <div className="flex items-center gap-2">
           <button type="button" aria-label="任务列表开关" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(value => !value)} className="rounded-lg border px-3 py-2 text-xs hover:bg-muted">任务列表</button>
-          {(newTask ? draftUploads.length > 0 : Boolean(task?.uploads?.length || taskWebSources.some(source => source.snapshot.artifacts.length) || task?.delivery_output_ids?.length)) ? (
+          {(newTask ? draftUploads.length > 0 : Boolean(task?.uploads?.length || taskWebSources.some(source => source.snapshot?.artifacts.length) || task?.delivery_output_ids?.length)) ? (
             <button
               type="button"
               onClick={() => { setInspectorKind("source"); setInspectorOpen(value => inspectorKind !== "source" || !value); }}
@@ -1281,11 +1286,7 @@ export function SemanticWorkspacePage() {
                         <Trash2 className="mx-auto h-8 w-8 text-muted-foreground" />
                         <h2 className="mt-4 font-semibold">{task.title}</h2>
                         <p className="mt-2 text-sm text-muted-foreground">
-                          可在{" "}
-                          {new Date(task.purge_after || "").toLocaleDateString(
-                            "zh-CN",
-                          )}{" "}
-                          前恢复。
+                          移入回收站不会清理资料。可恢复任务记录；永久清理需要另行确认。
                         </p>
                         <div className="mt-5 flex justify-center gap-2">
                           <button
@@ -1319,60 +1320,7 @@ export function SemanticWorkspacePage() {
                             <RotateCcw className="h-3.5 w-3.5" />
                             恢复任务
                           </button>
-                          <AlertDialog.Root>
-                            <AlertDialog.Trigger asChild>
-                              <button
-                                type="button"
-                                className="rounded-lg border border-destructive/30 px-3 py-2 text-xs font-medium text-destructive"
-                              >
-                                永久删除
-                              </button>
-                            </AlertDialog.Trigger>
-                            <AlertDialog.Portal>
-                              <AlertDialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
-                              <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(90vw,440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl">
-                                <AlertDialog.Title className="font-semibold">
-                                  永久删除这个任务？
-                                </AlertDialog.Title>
-                                <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">
-                                  此操作不可恢复。工作台记录会删除，底层审计制品按生产溯源规则继续保留。
-                                </AlertDialog.Description>
-                                <div className="mt-5 flex justify-end gap-2">
-                                  <AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm">
-                                    取消
-                                  </AlertDialog.Cancel>
-                                  <AlertDialog.Action
-                                    onClick={async () => {
-                                      try {
-                                        await permanentlyDeleteWorkspaceTask(
-                                          task.task_id,
-                                        );
-                                        setSelectedTaskId(null);
-                                        await Promise.all([
-                                          queryClient.invalidateQueries({
-                                            queryKey: ["semantic-workspace-tasks"],
-                                          }),
-                                          queryClient.invalidateQueries({
-                                            queryKey: ["semantic-workspace-storage"],
-                                          }),
-                                        ]);
-                                        toast.success("任务已永久删除");
-                                      } catch (error) {
-                                        toast.error(
-                                          error instanceof Error
-                                            ? error.message
-                                            : "永久删除失败",
-                                        );
-                                      }
-                                    }}
-                                    className="rounded-lg bg-destructive px-3 py-2 text-sm text-destructive-foreground"
-                                  >
-                                    永久删除
-                                  </AlertDialog.Action>
-                                </div>
-                              </AlertDialog.Content>
-                            </AlertDialog.Portal>
-                          </AlertDialog.Root>
+                          <button type="button" className="rounded-lg border border-destructive/30 px-3 py-2 text-xs font-medium text-destructive" onClick={() => setDeletionTarget({ task_id: task.task_id, title: task.title })}>永久删除</button>
                         </div>
                       </div>
                     </div>
@@ -1459,6 +1407,7 @@ export function SemanticWorkspacePage() {
                             }
                           }}
                           onRetry={async (unchanged = false) => {
+                            if (task.source_integrity?.can_rerun === false) { toast.error("来源已删除，不能按原来源重跑；请先核对本次资料。"); return; }
                             if (!unchanged) {
                               document
                                 .getElementById("workspace-revision-composer")
@@ -1681,6 +1630,7 @@ export function SemanticWorkspacePage() {
                               historicalAuthorityRecovery,
                               legacyRebaseline,
                             ) => {
+                              if (task.source_integrity?.can_reverify === false) throw new Error("来源已删除，不能完整复验；历史 QA 与独立结果仍保留。");
                               const previousAttemptId = task.agentic_runtime
                                 ?.latest_verification_attempt?.attempt_id;
                               if (!previousAttemptId) {
@@ -1775,7 +1725,7 @@ export function SemanticWorkspacePage() {
                               <p className="mb-3 text-xs text-muted-foreground">确认后创建新版本。使用原任务模型与上下文；上方旧版本来源保持冻结。</p>
                               <WorkspaceSourceComposer key={`${resultIdentity}:sources`} ownerId={user?.user_id ?? "current"} draftScope={`${task.task_id}_${viewingRevision}`} compact unified preserveContext modelLocked
                                 initialPrompt="保持原要求，使用当前选择的全部资料" initialFormats={task.output_formats}
-                                initialUploads={task.uploads ?? []} initialSources={taskWebSources.map(source => source.snapshot)} initialReusableSources={task.reusable_sources ?? []}
+                                initialUploads={task.uploads ?? []} initialSources={taskWebSources.flatMap(source => source.snapshot ? [source.snapshot] : [])} initialUnavailableSourceIds={taskWebSources.filter(source => !source.snapshot).map(source => source.source_snapshot_id)} initialReusableSources={task.reusable_sources ?? []}
                                 modelOptions={models.data?.options} defaultModel={{ provider: task.provider, model: task.model || "", label: "任务冻结模型" }}
                                 allowPiRuntime={Boolean(models.data?.pi_runtime_enabled)} allowLocalPiRuntime={canUseLocalPiRuntime}
                                 modelConnections={verifiedModelConnections.filter(connection => connection.connection_id === task.model_connection_id)}

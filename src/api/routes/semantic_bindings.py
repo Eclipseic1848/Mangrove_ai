@@ -32,6 +32,45 @@ class BindingResolutionIn(BaseModel):
     use_local_semantics: bool = True
 
 
+def _binding_source_refs(values):
+    import sqlite3
+    from contextlib import closing
+    with closing(sqlite3.connect(settings.webui_db_path)) as connection:
+        revision=values.get("binding_revision")
+        query="SELECT binding_revision FROM semantic_binding_revisions WHERE user_id=? AND plan_id=?"
+        parameters=[values["user"]["user_id"],values["plan_id"]]
+        if revision is not None:
+            query+=" AND binding_revision=?";parameters.append(revision)
+        selected=[row[0] for row in connection.execute(query+" ORDER BY binding_revision DESC",parameters)]
+        if not selected:raise PermissionError("语义绑定不存在")
+        values["selected_revisions"]=selected
+        refs=[]
+        for identity in selected:
+            rows=connection.execute("SELECT json_extract(j.value,'$.artifact_id'),json_extract(j.value,'$.artifact_sha256') FROM semantic_binding_revisions b,json_each(b.reports_json) j WHERE b.user_id=? AND b.plan_id=? AND b.binding_revision=?",(parameters[0],parameters[1],identity))
+            refs.extend(dict(upload_id=row[0],sha256=row[1]) for row in rows)
+        return refs
+
+
+from src.source_acquisition.reuse import guarded_response, SourceReadUse
+
+
+class _GuardedInspector(UploadSourceInspector):
+    def inspect_artifacts(self, artifact_ids):
+        # 同步检查在实际读取线程中持锁并收口，不跨后续模型等待。
+        use=SourceReadUse(self._user_id,[dict(upload_id=identity) for identity in artifact_ids],operation="preview").start(lock_timeout=5)
+        try:
+            return super().inspect_artifacts(artifact_ids)
+        finally:
+            use.finish(known=True)
+
+
+@guarded_response("preview", _binding_source_refs)
+def _binding_response(plan_id, binding_revision, user, selected_revisions=None):
+    # 列表按首次选定的完整版本集合返回，不能在登记后混入新绑定正文。
+    rows=[get_store().get_semantic_binding_revision(user["user_id"],plan_id,revision) for revision in selected_revisions]
+    return rows[0] if binding_revision is not None else rows
+
+
 def _upload_store() -> UploadStore:
     return UploadStore(
         root=settings.data_prep_upload_root,
@@ -63,7 +102,7 @@ async def _run_and_save(
     resolutions: dict[str, str],
     use_local_semantics: bool,
 ):
-    inspector = UploadSourceInspector(
+    inspector = _GuardedInspector(
         user_id=user_id,
         upload_store=_upload_store(),
         cache_lookup=lambda artifact_id, artifact_sha256, inspector_version: (
@@ -83,12 +122,13 @@ async def _run_and_save(
             resolutions=resolutions,
             use_local_semantics=use_local_semantics,
         )
-        return get_store().save_semantic_binding_revision(
+        saved = get_store().save_semantic_binding_revision(
             user_id,
             reports=reports,
             result=result,
             resolutions=resolutions,
         )
+        return saved
     except PermissionError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -117,13 +157,14 @@ async def inspect_and_bind(
             status_code=status.HTTP_409_CONFLICT,
             detail="该计划已经开始绑定，请创建下一 revision",
         )
-    return await _run_and_save(
+    saved = await _run_and_save(
         user_id=user["user_id"],
         plan=plan,
         binding_revision=1,
         resolutions={},
         use_local_semantics=payload.use_local_semantics,
     )
+    return _binding_response(plan_id,saved["binding_revision"],user)
 
 
 @router.get("/{plan_id}/bound-revisions")
@@ -131,15 +172,7 @@ def list_bound_revisions(
     plan_id: str,
     user=Depends(get_current_user),
 ):
-    rows = get_store().list_semantic_binding_revisions(
-        user["user_id"], plan_id
-    )
-    if not rows:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="语义绑定不存在",
-        )
-    return rows
+    return _binding_response(plan_id,None,user)
 
 
 @router.get("/{plan_id}/bound-revisions/{binding_revision}")
@@ -148,17 +181,7 @@ def get_bound_revision(
     binding_revision: int,
     user=Depends(get_current_user),
 ):
-    row = get_store().get_semantic_binding_revision(
-        user["user_id"],
-        plan_id,
-        binding_revision,
-    )
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="语义绑定 revision 不存在",
-        )
-    return row
+    return _binding_response(plan_id,binding_revision,user)
 
 
 @router.post("/{plan_id}/bound-revisions")
@@ -199,10 +222,11 @@ async def revise_binding(
         )
     resolutions = dict(previous["resolutions"])
     resolutions[payload.ambiguity_id] = payload.physical_ref
-    return await _run_and_save(
+    saved = await _run_and_save(
         user_id=user["user_id"],
         plan=_logical_plan(user["user_id"], plan_id),
         binding_revision=previous["binding_revision"] + 1,
         resolutions=resolutions,
         use_local_semantics=payload.use_local_semantics,
     )
+    return _binding_response(plan_id,saved["binding_revision"],user)

@@ -180,6 +180,9 @@ class FakePiRuntime:
             run_id=checkpoint.run_id,
         )
 
+    def _workspace_root(self, request, run_id):
+        return Path(settings.semantic_execution_root) / "fake-pi" / request.task_id / f"r{request.revision}"
+
     async def _complete(self, request, *, on_event, run_id=None):
         await on_event(
             RuntimeEvent(
@@ -189,12 +192,7 @@ class FakePiRuntime:
         )
 
 
-        root = (
-            Path(settings.semantic_execution_root)
-            / "fake-pi"
-            / request.task_id
-            / f"r{request.revision}"
-        )
+        root = self._workspace_root(request, run_id or f"pi_run_test_r{request.revision}")
         output = root / "output"
         output.mkdir(parents=True, exist_ok=True)
         requested_format = request.requested_output_formats[0]

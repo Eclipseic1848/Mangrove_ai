@@ -339,19 +339,19 @@ class SourceAcquisitionRepository:
                 "AND cancel_requested_at IS NOT NULL", (_now(), owner_id, attempt_id),
             )
 
-    def task_attempts(self, owner_id: str, task_id: str) -> list[str]:
+    def task_attempts(self, owner_id: str, task_id: str, *, revision: int | None = None) -> list[str]:
         connection = self._connect()
         try:
             return [str(row[0]) for row in connection.execute(
                 "SELECT attempt_id FROM source_acquisition_attempts "
                 "WHERE owner_id=? AND instr(request_context, ?)=1 AND status='acquiring'",
-                (owner_id, f"source-refresh:{task_id}:revision:"),
+                (owner_id, f"source-refresh:{task_id}:revision:" + (f"{revision}:" if revision is not None else "")),
             )]
         finally:
             connection.close()
 
-    def cancel_for_task(self, owner_id: str, task_id: str) -> bool:
-        attempts = self.task_attempts(owner_id, task_id)
+    def cancel_for_task(self, owner_id: str, task_id: str, *, revision: int | None = None) -> bool:
+        attempts = self.task_attempts(owner_id, task_id, revision=revision)
         # 任务先写取消事实；随后注册的来源须在发请求前重新检查任务取消代数。
         results = [self.cancel_attempt(owner_id, attempt_id) for attempt_id in attempts]
         return all(result and result["status"] not in {"acquiring", "cancelling"} for result in results)
@@ -690,17 +690,25 @@ class SourceAcquisitionRepository:
         self,
         owner_id: str,
         snapshot_id: str,
+        *, include_preview: bool = True,
     ) -> dict[str, Any] | None:
         with self._connect() as connection:
+            if connection.execute("SELECT 1 FROM source_deletions WHERE owner_id=? AND snapshot_id=? AND state='deleted'",(owner_id,snapshot_id)).fetchone() and not connection.execute('SELECT 1 FROM source_artifacts WHERE owner_id=? AND snapshot_id=?',(owner_id,snapshot_id)).fetchone():
+                return None
             row = connection.execute(
                 "SELECT * FROM source_snapshots WHERE owner_id=? AND snapshot_id=?",
                 (owner_id, snapshot_id),
             ).fetchone()
             if row is None:
                 return None
+            if include_preview:
+                from src.source_acquisition.deletion import assert_sources_readable
+                identities=connection.execute("SELECT artifact_id FROM source_artifacts WHERE owner_id=? AND snapshot_id=?",(owner_id,snapshot_id)).fetchall()
+                assert_sources_readable(owner_id,[dict(kind="web_artifact",artifact_id=item[0]) for item in identities],connection=connection)
             artifacts = connection.execute(
                 "SELECT artifact_id, request_url, final_url, read_at, "
-                "content_sha256, media_type, size_bytes, title, text_preview "
+                "content_sha256, media_type, size_bytes, title, "
+                + ("text_preview " if include_preview else "NULL AS text_preview ") +
                 "FROM source_artifacts WHERE owner_id=? AND snapshot_id=? "
                 "ORDER BY read_at, artifact_id",
                 (owner_id, snapshot_id),
@@ -764,6 +772,10 @@ class SourceAcquisitionRepository:
             "content_sha256, media_type, size_bytes, title, text_preview"
         )
         with self._connect() as connection:
+            from src.source_acquisition.deletion import assert_sources_readable
+            deleted=connection.execute("SELECT state FROM source_deletions WHERE owner_id=? AND source_key=?",(owner_id,'web_artifact:'+artifact_id)).fetchone()
+            if deleted and deleted[0]=='deleted': return None
+            assert_sources_readable(owner_id,[dict(kind='web_artifact',artifact_id=artifact_id)],connection=connection)
             row = connection.execute(
                 f"SELECT {columns} FROM source_artifacts "
                 "WHERE owner_id=? AND artifact_id=?",

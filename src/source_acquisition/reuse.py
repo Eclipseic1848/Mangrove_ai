@@ -45,6 +45,8 @@ def verified_output_metadata(owner_id, output_id):
 
 
 def verified_output(owner_id, output_id):
+    from src.source_acquisition.deletion import assert_sources_readable
+    assert_sources_readable(owner_id,[dict(kind='delivery_output',output_id=output_id)])
     record=verified_output_metadata(owner_id,output_id)
     path = Path(record["file_path"]).resolve()
     if not path.is_relative_to(Path(settings.semantic_execution_root).resolve()) or not path.is_file() or path.stat().st_size != record["size_bytes"] or _digest(path) != record["sha256"]:
@@ -53,6 +55,8 @@ def verified_output(owner_id, output_id):
 
 
 def resolve_frozen_source(owner_id, ref):
+    from src.source_acquisition.deletion import assert_sources_readable
+    assert_sources_readable(owner_id,[ref])
     kind = ref.get("kind", "upload")
     origin = dict(task_id=None, revision=None, run_id=None, delivery_id=None)
     if kind == "delivery_output":
@@ -92,7 +96,7 @@ def resolve_choices(owner_id, upload_ids=(), snapshot_ids=(), output_ids=()):
         for identity in dict.fromkeys(ids):
             try:
                 if kind == "snapshot":
-                    snapshot = SourceAcquisitionRepository(settings.webui_db_path).get_snapshot(owner_id,identity)
+                    snapshot = SourceAcquisitionRepository(settings.webui_db_path).get_snapshot(owner_id,identity,include_preview=False)
                     if snapshot is None:
                         raise PermissionError("来源不可用")
                     for artifact in snapshot["artifacts"]:
@@ -130,7 +134,10 @@ def history(owner_id):
         connection.execute("BEGIN")
         for row in connection.execute("SELECT snapshot_id FROM source_snapshots WHERE owner_id=?",(owner_id,)):
             identity=row[0]
-            snapshot=SourceAcquisitionRepository(settings.webui_db_path).get_snapshot(owner_id,identity)
+            snapshot=SourceAcquisitionRepository(settings.webui_db_path).get_snapshot(owner_id,identity,include_preview=False)
+            if snapshot is None:
+                values['snapshot:'+identity]=dict(source_key='snapshot:'+identity,kind='snapshot',identity='original',label='已清理网页资料',source_snapshot_id=identity,acquired_at=None,time_kind='unknown',sha256=None,media_type=None,size_bytes=0,origin=dict(task_id=None,revision=None,run_id=None,delivery_id=None),availability='unavailable',reason_code='source_deleted',limitations=[])
+                continue
             values["snapshot:"+identity]=dict(source_key="snapshot:"+identity,kind="snapshot",identity="original",label="网页资料",source_snapshot_id=identity,acquired_at=snapshot.get("created_at"),time_kind="acquired",sha256=None,media_type=None,size_bytes=sum(x["size_bytes"] for x in snapshot["artifacts"]),origin=dict(task_id=None,revision=None,run_id=None,delivery_id=None),availability="available",reason_code=None,limitations=["使用时重新核验"],attempt_id=snapshot.get("attempt_id"),allowed_scope=snapshot["allowed_scope"],coverage=snapshot["coverage"])
             if not snapshot["valid_page_count"] or snapshot["coverage"]["status"]=="hard_insufficient":
                 values["snapshot:"+identity].update(availability="unavailable",reason_code="source_coverage_insufficient")
@@ -140,6 +147,8 @@ def history(owner_id):
                 producer=connection.execute("SELECT task_id,task_revision FROM formal_delivery_runs WHERE owner_id=? AND delivery_id=?",(owner_id,item["delivery_id"])).fetchone()
                 values["delivery_output:"+identity]=dict(source_key="delivery_output:"+identity,kind="delivery_output",identity="derived",label=item["filename"],output_id=identity,acquired_at=item["created_at"],time_kind="generated",media_type=item["media_type"],size_bytes=item["size_bytes"],sha256=item["sha256"],origin=dict(task_id=producer[0] if producer else None,revision=producer[1] if producer else None,run_id=item["run_id"],delivery_id=item["delivery_id"]),availability="available",reason_code=None,limitations=["使用时重新核验"])
                 try:
+                    from src.source_acquisition.deletion import assert_sources_readable
+                    assert_sources_readable(owner_id,[dict(kind='delivery_output',output_id=identity)],connection=connection)
                     verified_output_metadata(owner_id,identity)
                 except (PermissionError,ValueError,KeyError,TypeError):
                     values["delivery_output:"+identity].update(availability="unavailable",reason_code="formal_evidence_invalid")
@@ -170,14 +179,14 @@ def source_key(ref):
 
 
 @contextmanager
-def source_locks(owner_id, refs):
+def source_locks(owner_id, refs, *, timeout=0):
     locks=[]
     directory=Path(settings.webui_db_path).parent/".source-read-locks"
     directory.mkdir(parents=True,exist_ok=True)
     try:
         for key in sorted({source_key(ref) for ref in refs}):
             identity="\0".join((str(Path(settings.webui_db_path).resolve()),owner_id,key))
-            lock=FileLock(directory/(hashlib.sha256(identity.encode()).hexdigest()+".lock"),timeout=0,thread_local=False)
+            lock=FileLock(directory/(hashlib.sha256(identity.encode()).hexdigest()+".lock"),timeout=timeout,thread_local=False)
             lock.acquire()
             locks.append(lock)
         yield
@@ -199,8 +208,8 @@ class SourceReadUse:
         for ref in self.refs:
             resolve_frozen_source(self.owner_id,ref)
 
-    def start(self):
-        self._locks=source_locks(self.owner_id,self.refs)
+    def start(self, *, lock_timeout=0):
+        self._locks=source_locks(self.owner_id,self.refs,timeout=lock_timeout)
         self._locks.__enter__()
         registered=False
         try:
@@ -278,7 +287,9 @@ def references(owner_id,kind,identity):
             manifest=json.loads(row["manifest_json"])
             hashes=manifest.get("source_artifact_hashes") or {}
             if kind=="snapshot":
-                linked=any(hashes.get(artifact[0])==artifact[1] for artifact in connection.execute("SELECT artifact_id,content_sha256 FROM source_artifacts WHERE owner_id=? AND snapshot_id=?",(owner_id,identity)))
+                identities=list(connection.execute("SELECT artifact_id,content_sha256 FROM source_artifacts WHERE owner_id=? AND snapshot_id=?",(owner_id,identity)))
+                identities.extend((row[0].split(':',1)[1],row[1]) for row in connection.execute("SELECT source_key,sha256 FROM source_deletions WHERE owner_id=? AND snapshot_id=?",(owner_id,identity)))
+                linked=any(hashes.get(artifact[0])==artifact[1] for artifact in identities)
             else:
                 linked=identity in hashes
             if linked:
@@ -311,7 +322,7 @@ def freeze_source_call(owner_id,refs,call,*args,**kwargs):
         return call(*args,**kwargs)
 
 
-def guarded_response(operation,refs_factory,*,joined_reader=False):
+def guarded_response(operation,refs_factory,*,joined_reader=False,lock_timeout=0):
     """路由仅装配身份，锁与使用事实覆盖正文读取及完整响应。"""
     import asyncio,functools,inspect
     from fastapi import HTTPException
@@ -332,7 +343,7 @@ def guarded_response(operation,refs_factory,*,joined_reader=False):
                 raise HTTPException(404,"来源不存在或无权访问") from exc
             try:
                 use=SourceReadUse(owner,refs,operation=operation,task_id=values.get("task_id"),revision=values.get("revision"))
-                return use.start(),bound
+                return use.start(lock_timeout=lock_timeout),bound
             except PermissionError as exc:
                 # 已确认属于Owner冻结任务的成员消失属于完整性缺口，不冒充未授权身份。
                 raise HTTPException(409 if values.get("task_id") else 404,"冻结来源不可用" if values.get("task_id") else "来源不存在或无权访问") from exc

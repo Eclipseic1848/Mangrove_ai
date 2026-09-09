@@ -61,6 +61,13 @@ class DeliveryPublishingRepository:
 
     @staticmethod
     def _require_publish(conn, command, intent=None):
+        # 与删除意图共用SQLite写事务：意图先提交后，发布不得跨过最终提交点。
+        from src.source_acquisition.deletion import assert_sources_readable
+        row=conn.execute('SELECT source_refs_json FROM semantic_workspace_revisions WHERE user_id=? AND task_id=? AND revision=?',(command.owner_id,command.task_id,command.task_revision)).fetchone()
+        if row:
+            assert_sources_readable(command.owner_id,json.loads(row[0] or '[]'),connection=conn)
+        if conn.execute("SELECT 1 FROM source_deletion_operations WHERE owner_id=? AND task_id=? AND state!='completed'",(command.owner_id,command.task_id)).fetchone():
+            raise ValueError('task_deleting')
         auth = execution.current_authorization()
         if auth.owner_user_id != command.owner_id:
             raise execution.ExecutionDenied('发布 Owner 与冻结授权不符')

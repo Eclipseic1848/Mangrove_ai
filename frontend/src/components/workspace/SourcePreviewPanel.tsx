@@ -82,7 +82,7 @@ export function SourcePreviewPanel({
   onViewStateChange?: (patch: Partial<SourceViewState>) => void;
   task?: WorkspaceTask;
 }) {
-  const webArtifacts = (task?.web_sources ?? (task?.web_source ? [task.web_source] : [])).flatMap(source => source.snapshot.artifacts);
+  const webArtifacts = (task?.web_sources ?? (task?.web_source ? [task.web_source] : [])).flatMap(source => source.snapshot?.artifacts ?? []);
   const derivedSources = (task?.reusable_sources ?? []).filter(item => item.kind === "delivery_output");
   const selectedDerived = derivedSources.find(item => item.output_id === selectedUploadId);
   const selectedUpload =
@@ -137,6 +137,9 @@ export function SourcePreviewPanel({
       element_id: typeof evidence?.element_id === "string" ? evidence.element_id : undefined,
       extractor_version: typeof evidence?.extractor_version === "string" ? evidence.extractor_version : undefined } : {}),
   };
+  const sourceIdentity = JSON.stringify([task?.task_id, task?.viewing_revision, selectedUploadId]);
+  const sourceAccess = useRef({ identity: sourceIdentity, verified: false });
+  if (sourceAccess.current.identity !== sourceIdentity) sourceAccess.current = { identity: sourceIdentity, verified: false };
   const source = useQuery({
     queryKey: ["workspace-task-source", task?.task_id, task?.viewing_revision, selectedUploadId, evidence?.source_sha256, sourceParams],
     // 同一来源定位完成后切换到所在窗口时，保留内容，避免卸载造成滚动归零。
@@ -150,10 +153,13 @@ export function SourcePreviewPanel({
         || (selectedUpload && data.sha256 !== selectedUpload.sha256)
         || (selectedDerived && data.sha256 !== selectedDerived.sha256)) throw new Error("来源身份或版本不匹配，请重新选择来源");
       if (data.content_url && (!data.upload_id || data.content_url !== `/api/data-sources/uploads/${data.upload_id}/content`)) throw new Error("来源原件地址不可用");
+      // 每次选回任务/版本/原件先核验；同一来源窗口定位仍保留既有滚动行为。
+      if (sourceAccess.current.identity === sourceIdentity) sourceAccess.current.verified = true;
       return data;
     },
     enabled: Boolean(task && selectedUploadId && !selectedDerived), retry: false,
   });
+  const checkingSource = Boolean(task && source.isFetching && !sourceAccess.current.verified);
   // 每次重新选取都重新检查正式本体；读取期间的旧缓存不授予展示权限。
   const derivedPreview = useQuery({
     queryKey: ["workspace-task-derived-source", task?.task_id, task?.viewing_revision, selectedDerived?.source_key, selectedDerived?.sha256, currentView.offset ?? 0],
@@ -222,6 +228,7 @@ export function SourcePreviewPanel({
   });
 
   useLayoutEffect(() => {
+    if (checkingSource) return;
     // PDF 的真实页在异步解析后才有高度，提前恢复会被浏览器裁成零。
     if (selected && extension(selected.original_name) === "pdf" && loadedPage !== page) return;
     if (isImage && !imageSize) return;
@@ -229,20 +236,20 @@ export function SourcePreviewPanel({
       contentRef.current.scrollTop = currentView.scrollTop;
       contentRef.current.scrollLeft = currentView.scrollLeft;
     }
-  }, [file.data, tablePreview.data, documentPreview.data, source.data, loadedPage, imageSize]);
+  }, [file.data, tablePreview.data, documentPreview.data, source.data, loadedPage, imageSize, checkingSource]);
 
   useLayoutEffect(() => {
-    if (!source.data || source.isPlaceholderData || currentView.parserVersion === parserVersion) return;
+    if (checkingSource || !source.data || source.isPlaceholderData || currentView.parserVersion === parserVersion) return;
     if (parserChanged) {
       // 同一原件的新解析表示不继承旧元素位置，首次取得版本只记录身份。
       if (contentRef.current) { contentRef.current.scrollTop = 0; contentRef.current.scrollLeft = 0; }
       updateView({ ...initialSourceView, offset: 0, tableRef: undefined, searchInput: "", search: "", sortBy: undefined,
         parserVersion, evidenceKey, locationStatus: "解析版本已变化，无法定位" });
     } else updateView({ parserVersion });
-  }, [source.data, source.isPlaceholderData]);
+  }, [source.data, source.isPlaceholderData, checkingSource]);
 
   useLayoutEffect(() => {
-    if (!locate || parserChanged || source.isPlaceholderData || (task && !source.data) || (!task && !documentPreview.data && !file.data && !tablePreview.data)) return;
+    if (checkingSource || !locate || parserChanged || source.isPlaceholderData || (task && !source.data) || (!task && !documentPreview.data && !file.data && !tablePreview.data)) return;
     const data = source.data;
     // 本切片只验证图片原件，尚未建立识别坐标到原件的可核验映射。
     if (isImage) { updateView({ evidenceKey, locationStatus: "尚无可核验的图片定位，当前仅浏览原件" }); return; }
@@ -265,7 +272,7 @@ export function SourcePreviewPanel({
       updateView({ evidenceKey, locationStatus: "已定位来源", scrollTop: contentRef.current.scrollTop,
         ...(data ? { offset: data.offset ?? 0, tableRef: data.selected_table_ref, search: "", searchInput: "", sortBy: undefined } : {}) });
     } else updateView({ evidenceKey, locationStatus: "缺少可核验位置，当前仅浏览来源" });
-  }, [locate, evidenceKey, parserChanged, source.data, source.isPlaceholderData, documentPreview.data, tablePreview.data, pageCount, loadedPage, page]);
+  }, [checkingSource, locate, evidenceKey, parserChanged, source.data, source.isPlaceholderData, documentPreview.data, tablePreview.data, pageCount, loadedPage, page]);
 
   if (!selected && !task) {
     return (
@@ -463,17 +470,19 @@ export function SourcePreviewPanel({
 
       <div ref={contentRef} tabIndex={0} aria-label="来源内容" className="min-h-0 flex-1 overflow-auto p-4 focus-visible:ring-2 focus-visible:ring-ring"
         onScroll={event => {
+          // 核验中的占位没有正文高度，不能覆盖原来保存的位置。
+          if (checkingSource) return;
           // 图片重新解码时短暂没有高度，不能把浏览器裁出的零覆盖已保存位置。
           if (isImage && !imageSize) return;
           updateView({ scrollTop: event.currentTarget.scrollTop, scrollLeft: event.currentTarget.scrollLeft });
         }}>
-        {selectedDerived ? <div className="space-y-3">
+        {task?.source_integrity?.deleted_source_keys.some(key => key === `web_artifact:${selectedUploadId}` || key === `upload:${selectedUploadId}` || key === `delivery_output:${selectedUploadId}` || (source.data?.snapshot_id && key === `snapshot:${source.data.snapshot_id}`)) ? <p role="alert" className="text-sm text-destructive">来源已删除，原文不可再读取；不会从缓存恢复。独立正式结果仍可查看。</p> : selectedDerived ? <div className="space-y-3">
           {derivedPreview.isError ? <p role="alert" className="text-sm text-destructive">{derivedPreview.error.message}，请重新核对来源。</p>
             : derivedPreview.isLoading || derivedPreview.isFetching ? <p role="status">正在读取正式来源…</p>
             : derivedPreview.data && <><ReusableResultPreview key={derivedPreview.data.offset} preview={derivedPreview.data} /><p className="text-xs text-muted-foreground">仅显示当前窗口 · 共 {derivedPreview.data.total} 条</p><div className="flex gap-2"><button type="button" className="rounded border px-3 py-2 text-xs disabled:opacity-40" disabled={derivedPreview.data.offset === 0} onClick={() => updateView({ offset: Math.max(0, derivedPreview.data!.offset - derivedPreview.data!.limit), scrollTop: 0 })}>上一页</button><button type="button" className="rounded border px-3 py-2 text-xs disabled:opacity-40" disabled={derivedPreview.data.offset + derivedPreview.data.limit >= derivedPreview.data.total} onClick={() => updateView({ offset: derivedPreview.data!.offset + derivedPreview.data!.limit, scrollTop: 0 })}>下一页</button></div></>}
           <button type="button" className="rounded border px-3 py-2 text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => void downloadFile(`/api/semantic-deliveries/outputs/${encodeURIComponent(selectedDerived.output_id!)}`, selectedDerived.label).catch(error => toast.error(error instanceof Error ? error.message : "正式来源下载失败"))}>下载正式来源文件</button>
         </div> : readError || pdfError || imageError ? <div role="alert" className="rounded-lg border border-destructive/30 p-4 text-sm text-destructive">来源预览失败：{readError?.message ?? pdfError ?? imageError}<button type="button" className="ml-2 rounded border px-2 py-1" onClick={() => { setPdfError(null); setImageError(null); void (source.isError ? source.refetch() : file.isError || ext === "pdf" || isImage ? file.refetch() : task ? source.refetch() : table ? tablePreview.refetch() : documentPreview.refetch()); }}>重试</button></div>
-        : source.isLoading || file.isLoading || tablePreview.isLoading || documentPreview.isLoading || ((isImage || ext === "pdf") && file.data && !fileUrl) ? (
+        : source.isLoading || checkingSource || file.isLoading || tablePreview.isLoading || documentPreview.isLoading || ((isImage || ext === "pdf") && file.data && !fileUrl) ? (
           <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-5 w-5 animate-spin" />
             正在读取原文件

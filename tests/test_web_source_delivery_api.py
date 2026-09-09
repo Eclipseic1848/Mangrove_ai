@@ -783,7 +783,7 @@ def test_binding_prepare_failure_releases_task_idempotency_claim(
         _wait_for_delivery(client, retried.json()["task_id"])
 
 
-def test_web_task_permanent_delete_retains_immutable_contract(
+def test_web_task_unconfirmed_delete_rejects_and_retains_immutable_contract(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -811,13 +811,14 @@ def test_web_task_permanent_delete_retains_immutable_contract(
         from src.account_execution import execution_context
         with execution_context(get_store().capture_account_execution("user-a")):
             get_store().soft_delete_semantic_workspace_task("user-a", task_id)
-        assert get_store().purge_semantic_workspace_task("user-a", task_id)
+        with pytest.raises(ValueError, match="需要关联清理确认"):
+            get_store().purge_semantic_workspace_task("user-a", task_id)
 
     with sqlite3.connect(settings.webui_db_path) as connection:
         assert connection.execute(
             "SELECT COUNT(*) FROM semantic_workspace_tasks WHERE task_id=?",
             (task_id,),
-        ).fetchone()[0] == 0
+        ).fetchone()[0] == 1
         assert connection.execute(
             "SELECT COUNT(*) FROM web_task_contracts WHERE task_id=?",
             (task_id,),
