@@ -637,6 +637,7 @@ class SemanticWorkspaceManager:
         self,
         *,
         agent_kernel: AgentKernel | None = None,
+        capability_agent_kernel: AgentKernel | None = None,
         agent_kernels: Mapping[str, AgentKernel] | None = None,
         primary_adapter_id: str | None = None,
         pi_runtime: PiRuntime | None = None,
@@ -658,6 +659,7 @@ class SemanticWorkspaceManager:
         self._heavy = asyncio.Semaphore(1)
         self._candidate_verification = candidate_verification
         self._agent_kernels = dict(agent_kernels or {})
+        self._capability_agent_kernel = capability_agent_kernel
         self._primary_adapter_id = primary_adapter_id
         if agent_kernel is not None:
             if self._agent_kernels:
@@ -702,24 +704,40 @@ class SemanticWorkspaceManager:
             )
             self._agent_kernels[pi_kernel.adapter_id] = pi_kernel
             if settings.coremind_runtime_enabled:
+                coremind_options = dict(
+                    execution_root=Path(settings.semantic_execution_root) / "coremind-runs",
+                    candidate_verifier_factory=self._build_full_candidate_verifier,
+                    relay_base_url=settings.coremind_runtime_relay_base_url or f"http://127.0.0.1:{settings.api_port}/internal/model-relay",
+                    timeout_seconds=settings.pi_runtime_timeout_seconds,
+                )
                 coremind_kernel = AgentKernel(
-                    adapter=CoreMindAgentKernelAdapter(
-                        execution_root=(
-                            Path(settings.semantic_execution_root)
-                            / "coremind-runs"
-                        ),
-                        candidate_verifier_factory=(
-                            self._build_full_candidate_verifier
-                        ),
-                        relay_base_url=(
-                            settings.coremind_runtime_relay_base_url
-                            or f"http://127.0.0.1:{settings.api_port}/internal/model-relay"
-                        ),
-                        timeout_seconds=settings.pi_runtime_timeout_seconds,
-                    ),
+                    adapter=CoreMindAgentKernelAdapter(**coremind_options),
                     repository=repository_factory,
                 )
                 self._agent_kernels[coremind_kernel.adapter_id] = coremind_kernel
+                if settings.pi_capability_host_enabled:
+                    self._coremind_capability_mounts = DefaultCapabilityMounts(
+                                db_path=settings.webui_db_path,
+                                oci_layout_path=settings.capability_oci_layout_path,
+                                mount_root=settings.capability_mount_cache_path,
+                                platform_oci_layout_path=settings.capability_platform_oci_layout_path,
+                                platform_oras_executable_factory=_platform_oras_executable,
+                                platform_signing_public_key_path=settings.capability_platform_signing_public_key,
+                                signing_runtime_factory=_platform_signing_runtime_factory,
+                                actor_role_resolver=_resolve_actor_role,
+                            )
+                    self._capability_agent_kernel = AgentKernel(
+                        adapter=CoreMindAgentKernelAdapter(
+                            **coremind_options, capability_tools_enabled=True,
+                            capability_mount_resolver=self._coremind_capability_mounts,
+                            capability_call_validator=self._validate_capability_call,
+                            capability_contract_describer=self._describe_capability_contracts,
+                            capability_host=CapabilityHost(
+                                image=settings.pi_capability_host_image,
+                                execution_root=Path(settings.semantic_execution_root) / "capability-hosts",
+                            ),
+                        ), repository=repository_factory,
+                    )
             self._primary_adapter_id = (
                 self._primary_adapter_id
                 or settings.agent_kernel_primary_adapter
@@ -727,12 +745,66 @@ class SemanticWorkspaceManager:
         if self._primary_adapter_id not in self._agent_kernels:
             raise ValueError("主 AgentKernel Adapter 未启用或不存在")
         self._agent_kernel = self._agent_kernels[self._primary_adapter_id]
+        if self._capability_agent_kernel is not None and (
+            self._capability_agent_kernel.adapter_id != "coremind-runtime"
+            or "coremind-runtime" not in self._agent_kernels
+        ):
+            raise ValueError("工具合同必须属于已启用的 CoreMind Adapter")
 
-    def _kernel(self, adapter_id: str | None = None) -> AgentKernel:
+    def _resolved_capability_packs(self, user_id: str, task_id: str, revision: int):
+        from src.capability_adapters.manifest import load_runtime_manifests
+        from src.capability_catalog import CapabilityCatalog, SqliteCapabilityCatalogRepository
+        from src.capability_catalog.models import CatalogActor
+
+        # 描述与每次调用共用当前 Owner、冻结 digest、治理及完整性门。
+        mounts = self._coremind_capability_mounts(user_id, task_id, revision)
+        catalog = CapabilityCatalog(SqliteCapabilityCatalogRepository(settings.webui_db_path))
+        actor = CatalogActor(owner_id=user_id, role=_resolve_actor_role(user_id))
+        selection = catalog.resolve_selection(actor, task_id=task_id, revision=revision)
+        if selection is None or len(mounts) != len(selection.pack_refs):
+            raise ValueError("能力冻结选择与实际挂载不一致")
+        resolved = []
+        for mounted in load_runtime_manifests(mounts):
+            ref = selection.pack_refs[mounted.mount_index - 1]
+            pack = catalog.resolve_pack(actor, ref.pack_id, ref.version)
+            if pack is None or pack.digest != ref.digest:
+                raise ValueError("能力冻结版本已不可用")
+            resolved.append((mounted.manifest, pack))
+        return resolved
+
+    def _describe_capability_contracts(self, user_id: str, task_id: str, revision: int) -> list[dict]:
+        from src.capability_catalog.reuse import validated_reuse_contract
+
+        descriptions = []
+        for manifest, pack in self._resolved_capability_packs(user_id, task_id, revision):
+            contract = validated_reuse_contract(pack)
+            if contract.version != manifest.version:
+                raise ValueError("能力运行版本与业务合同不一致")
+            descriptions.append(dict(capability=manifest.name, operations=contract.operations,
+                input_formats=contract.accepts, output_formats=contract.produces,
+                parameters_schema=contract.parameters_schema,
+                tools=json.loads(dict(pack.manifest).get("reuse_tools", "[]"))))
+        return descriptions
+
+    def _validate_capability_call(self, user_id: str, task_id: str, revision: int,
+                                  capability_name: str, arguments: list | dict, tool: str | None) -> None:
+        from src.capability_catalog.reuse import validate_reuse_call
+
+        for manifest, pack in self._resolved_capability_packs(user_id, task_id, revision):
+            if manifest.name == capability_name:
+                validate_reuse_call(pack, manifest, arguments, tool)
+                return
+        raise ValueError("工具不属于当前任务冻结的能力")
+
+    def _kernel(self, adapter_id: str | None = None, *, capability_tools_enabled: bool = False) -> AgentKernel:
         """首次需要 Runtime 时才验证数据库 Schema 并建立 Kernel。"""
 
         resolved = adapter_id or self._primary_adapter_id
         assert resolved is not None
+        if resolved == "coremind-runtime" and capability_tools_enabled:
+            if self._capability_agent_kernel is None:
+                raise RuntimeError("CoreMind 工具执行合同尚未启用，请检查能力宿主配置")
+            return self._capability_agent_kernel
         try:
             return self._agent_kernels[resolved]
         except KeyError as exc:
@@ -744,14 +816,27 @@ class SemanticWorkspaceManager:
         task_id: str,
         revision: int,
     ) -> AgentKernel:
-        if len(self._agent_kernels) == 1:
+        if len(self._agent_kernels) == 1 and self._capability_agent_kernel is None:
             return self._agent_kernel
         binding = self._agent_kernel.frozen_binding(user_id, task_id, revision)
-        return self._kernel(binding.adapter_id if binding is not None else None)
+        enabled = False
+        if binding is not None:
+            # 历史 Run 只按原合同选择；不能随新配置把两工具 Run 改为三工具 Run。
+            enabled = self._uses_capability_contract(binding.model_dump() if hasattr(binding, "model_dump") else vars(binding))
+        elif self._primary_adapter_id == "coremind-runtime":
+            from src.capability_catalog import SqliteCapabilityCatalogRepository
+            selection = SqliteCapabilityCatalogRepository(settings.webui_db_path).get_selection(user_id, task_id, revision)
+            enabled = bool(selection and selection.pack_refs)
+        return self._kernel(binding.adapter_id if binding is not None else None, capability_tools_enabled=enabled)
 
-    async def prepare_runtime_binding(self, *, model_connection_id: str | None, model_connection_version: str | None, model: str, expected_binding: dict[str, Any] | None = None):
+    def _uses_capability_contract(self, binding: dict[str, Any]) -> bool:
+        return bool(self._capability_agent_kernel is not None
+                    and binding.get("adapter_id") == "coremind-runtime"
+                    and binding.get("runtime_artifact") == self._capability_agent_kernel.runtime_artifact)
+
+    async def prepare_runtime_binding(self, *, model_connection_id: str | None, model_connection_version: str | None, model: str, expected_binding: dict[str, Any] | None = None, capability_tools_enabled: bool = False):
         """沿原绑定解析新 Run；全局默认改变不能替换已确认的执行内核。"""
-        binding, manifest = await self._kernel((expected_binding or {}).get("adapter_id")).prepare_binding(
+        binding, manifest = await self._kernel((expected_binding or {}).get("adapter_id"), capability_tools_enabled=capability_tools_enabled or self._uses_capability_contract(expected_binding or {})).prepare_binding(
             model_connection_id=model_connection_id, model_connection_version=model_connection_version, model=model,
         )
         if expected_binding:
@@ -779,7 +864,7 @@ class SemanticWorkspaceManager:
                     get_default_broker().revoke_grant(provider_attempt_id, reason)
                 ),
             )
-        for kernel in self._agent_kernels.values():
+        for kernel in (*self._agent_kernels.values(), *([self._capability_agent_kernel] if self._capability_agent_kernel is not None else [])):
             kernel.bind_candidate_verification(self._candidate_verification)
         return self._candidate_verification
 

@@ -56,7 +56,7 @@ import {
   streamWorkspaceTask,
   readPublicResultContext,
 } from "@/lib/semanticWorkspaceApi";
-import type { GrayCapability } from "@/lib/semanticWorkspaceApi";
+import type { CapabilityNeed, GrayCapability } from "@/lib/semanticWorkspaceApi";
 import { cn } from "@/lib/utils";
 import type {
   UploadItem,
@@ -914,6 +914,7 @@ export function SemanticWorkspacePage() {
     modelConnectionId: string | null;
     modelConnectionModel: string | null;
     externalApiConfirmed: boolean;
+    capabilityNeed?: CapabilityNeed;
     capabilityPackRefs: Array<{
       pack_id: string;
       version: string;
@@ -935,6 +936,7 @@ export function SemanticWorkspacePage() {
         model_connection_model: payload.modelConnectionModel,
         external_api_confirmed: payload.externalApiConfirmed,
         capability_pack_refs: payload.capabilityPackRefs,
+        ...(payload.capabilityNeed ? { capability_need: payload.capabilityNeed } : {}),
       } as const;
       const fingerprint = JSON.stringify(requestPayload);
       if (createAttemptRef.current?.fingerprint !== fingerprint) {
