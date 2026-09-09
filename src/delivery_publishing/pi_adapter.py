@@ -113,11 +113,16 @@ class PiCandidateAdapter:
 
         source_refs: list[str] = []
         source_hashes: dict[str, str] = {}
-        for upload_id in task["upload_ids"]:
+        for source_ref in task_revision.get("source_refs", []):
+            if not source_ref.get("upload_id"):
+                continue
+            upload_id = source_ref["upload_id"]
             upload = self._upload_store.resolve(owner_id, upload_id)
+            if upload.sha256 != source_ref.get("sha256"):
+                raise ValueError("冻结上传来源与所选修订不一致")
             source_hashes[upload_id] = upload.sha256
             source_refs.append(f"{upload_id}:{upload.sha256}")
-        for source_ref in task.get("source_refs", []):
+        for source_ref in task_revision.get("source_refs", []):
             if source_ref.get("kind") != "web_artifact":
                 continue
             artifact_id = str(source_ref["artifact_id"])

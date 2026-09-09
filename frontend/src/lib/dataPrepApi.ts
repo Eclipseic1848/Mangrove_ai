@@ -57,6 +57,10 @@ export async function uploadFile(file: File): Promise<UploadItem> {
   return readAuthenticatedJson(res);
 }
 
+export function getUploadMetadata(uploadId: string): Promise<UploadItem> {
+  return api.get(`/api/data-sources/uploads/${encodeURIComponent(uploadId)}`);
+}
+
 /** 使用浏览器原生上传进度事件，不引入第二套上传框架。 */
 export function uploadFileWithProgress(
   file: File,

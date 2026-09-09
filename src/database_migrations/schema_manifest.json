@@ -135,7 +135,7 @@
       "trigger:web_task_contracts_no_delete": "087edf8a00b0d641049f16b71fecb82ea57f2a29480ea1d532b25ae89f5f93a4",
       "trigger:web_task_contracts_no_update": "f70469242d490e4d28c884d7d2669bf72b3d3cd123ebefce630f33aab25274c0"
     },
-    "revision": "webui_0015",
+    "revision": "webui_0016",
     "tables": {
       "account_execution_bindings": "792d18e3f5416745c405e022cc798847f4a44d9c1123e58e3900e724c60e0cfd",
       "account_execution_holds": "985dd26ff02bf54e43557d05f72b11d5c97c3f3f18294bb3451afd2748e64db3",
@@ -216,7 +216,7 @@
       "semantic_plan_revisions": "2ee7944bc4c068e7d1f15c25bba2d48da9389b4b084bb7020c0ca51464ceef79",
       "semantic_workspace_audit_tombstones": "33226e972900985f445e788d2c5db2eeb1d657a547b9339f1b662dee8f4ed02c",
       "semantic_workspace_events": "e43755ceaadc329f0c65d8c6196523270a1ae82944400e1038147bb104e193cc",
-      "semantic_workspace_revisions": "e0e671b21f3a5ae8b6b54bf797e94b2cf8d549be32b7539e70792540ae54206b",
+      "semantic_workspace_revisions": "3ac1e970dde8bdce3924ab2cc97a4476b7fd8f848b6dec4bd435c449baefedf8",
       "semantic_workspace_tasks": "2b67ae4060ef3bb42604662eec52346a8126477c8efc57544fb046d2b2ca7feb",
       "source_acquisition_attempts": "c7424d106533f0752f06e6d080dd8f437db8bcf5703b087d7183290d9ee821e8",
       "source_artifacts": "4f989bb2ffa9b86dac48bd172d619593132d636507ac2a9902298ccd6c67941a",

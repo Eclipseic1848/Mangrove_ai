@@ -30,6 +30,7 @@ import type {
 } from "@/lib/semanticWorkspaceApi";
 import type {
   SourceAcquisitionAttempt,
+  SourceSnapshot,
   SearchTimeRange,
   WorkspaceTask,
 } from "@/types/semanticWorkspace";
@@ -59,6 +60,9 @@ type WebSourceIntakeProps = {
   defaultConnectionId: string | null;
   defaultConnectionModel: string | null;
   onTaskCreated: (task: WorkspaceTask) => Promise<void> | void;
+  onSourceSelected?: (snapshot: SourceSnapshot, attemptId: string) => void;
+  onAcquisitionBusy?: (busy: boolean) => void;
+  storageScope?: string;
 };
 
 const ERROR_LABELS: Record<string, string> = {
@@ -251,6 +255,9 @@ export function WebSourceIntake({
   defaultConnectionId,
   defaultConnectionModel,
   onTaskCreated,
+  onSourceSelected,
+  onAcquisitionBusy,
+  storageScope,
 }: WebSourceIntakeProps) {
   const initialConnectionId = defaultConnectionId
     ?? (!allowLocalRuntime ? modelConnections[0]?.connection_id : "")
@@ -264,7 +271,7 @@ export function WebSourceIntake({
       (model) => model.status === "available" && model.enabled,
     )?.model_id
     ?? "";
-  const storageKey = `mangrove_web_source_attempt_${ownerId}`;
+  const storageKey = `mangrove_web_source_attempt_${ownerId}${storageScope ? `_${storageScope}` : ""}`;
   const taskStorageKey = `mangrove_web_task_attempt_${ownerId}`;
   const requestGeneration = useRef(0);
   useLayoutEffect(() => {
@@ -354,9 +361,10 @@ export function WebSourceIntake({
   const domainList = domains.split(/[\s,，]+/).map(value => value.trim()).filter(Boolean);
   const validSource = searching ? Boolean(query.trim() && query.trim().length <= 500 && domainList.length <= 10) : Boolean(normalized);
   const acquiring = attempt?.status === "acquiring" || attempt?.status === "cancelling";
+  useEffect(() => { onAcquisitionBusy?.(Boolean(acquiring || loading)); }, [acquiring, loading, onAcquisitionBusy]);
 
   useEffect(() => {
-    if (attempt?.status !== "succeeded") return;
+    if (attempt?.status !== "succeeded" || onSourceSelected) return;
     let active = true;
     setContextOptionsLoading(true);
     void getTaskContextOptions("web_research")
@@ -482,6 +490,7 @@ export function WebSourceIntake({
   }, [storageKey]);
 
   useEffect(() => {
+    if (onSourceSelected) return;
     const raw = readStoredValue(taskStorageKey);
     if (!raw) return;
     let active = true;
@@ -1127,7 +1136,10 @@ export function WebSourceIntake({
               {artifact.text_preview}
             </p>
           </article>
-          <div className="mt-5 border-t pt-5">
+          {onSourceSelected ? <div className="mt-5 border-t pt-4">
+            <button type="button" onClick={() => { onSourceSelected(snapshot, attempt.attempt_id); clear(); }} className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">添加到当前任务</button>
+            <p className="mt-2 text-xs text-muted-foreground">只加入当前资料列表；已有文件和网页保留，确认任务后才执行。</p>
+          </div> : <div className="mt-5 border-t pt-5">
             <div className="flex flex-wrap items-end justify-between gap-2">
               <div>
                 <p className="text-sm font-semibold">确认任务后启动</p>
@@ -1445,7 +1457,7 @@ export function WebSourceIntake({
                 {starting ? "正在启动" : "启动任务"}
               </button>
             </div>
-          </div>
+          </div>}
         </div>
       ) : (
         <div className="p-4" role="alert" aria-live="assertive">

@@ -315,6 +315,7 @@ class WorkspaceTaskCreateIn(BaseModel):
     objective_text: str = Field(min_length=1, max_length=20_000)
     upload_ids: tuple[str, ...] = ()
     source_snapshot_id: str | None = Field(default=None, min_length=1, max_length=160)
+    source_snapshot_ids: tuple[str, ...] | None = None
     must_include: tuple[str, ...] = ()
     explicit_exclusions: tuple[str, ...] = ()
     quantity_requirement: str | None = Field(default=None, min_length=1, max_length=500)
@@ -354,9 +355,7 @@ class WorkspaceTaskCreateIn(BaseModel):
     @field_validator("upload_ids")
     @classmethod
     def unique_uploads(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        if len(value) != len(set(value)):
-            raise ValueError("upload_ids 不得重复")
-        return value
+        return tuple(dict.fromkeys(value))
 
     @field_validator("must_include", "explicit_exclusions")
     @classmethod
@@ -400,10 +399,16 @@ class WorkspaceTaskCreateIn(BaseModel):
     def validate_validation_target(self) -> "WorkspaceTaskCreateIn":
         if bool(self.context_selection) != bool(self.context_preview_sha256):
             raise ValueError("上下文选择和已确认预览哈希必须同时提供")
-        if self.context_selection is not None and self.source_snapshot_id is None:
-            raise ValueError("P1-01 上下文复用当前只开放给网页任务")
-        if bool(self.upload_ids) == bool(self.source_snapshot_id):
-            raise ValueError("任务必须且只能选择上传文件或一个网页来源快照")
+        if self.source_snapshot_ids is not None and self.source_snapshot_id is not None:
+            raise ValueError("新旧网页来源字段不能同时提供")
+        snapshots = self.source_snapshot_ids if self.source_snapshot_ids is not None else ((self.source_snapshot_id,) if self.source_snapshot_id else ())
+        if any(not value.strip() or len(value) > 160 for value in snapshots):
+            raise ValueError("网页来源身份无效")
+        self.source_snapshot_ids = tuple(dict.fromkeys(snapshots))
+        # 单字段仅兼容投影，实际冻结必须使用完整集合。
+        self.source_snapshot_id = next(iter(self.source_snapshot_ids), None)
+        if not self.upload_ids and not self.source_snapshot_ids:
+            raise ValueError("任务至少选择一个来源")
         web_contract_values = (
             self.must_include,
             self.explicit_exclusions,
@@ -527,6 +532,18 @@ class WorkspaceRevisionIn(BaseModel):
     external_api_confirmed: bool = False
     expected_active_revision: int = Field(ge=1)
     source_snapshot_id: str | None = Field(default=None, min_length=1, max_length=160)
+    upload_ids: tuple[str, ...] | None = None
+    source_snapshot_ids: tuple[str, ...] | None = None
+
+    @model_validator(mode="after")
+    def validate_source_selection(self):
+        if self.source_snapshot_id is not None and self.source_snapshot_ids is not None:
+            raise ValueError("新旧网页来源字段不能同时提供")
+        for values in (self.upload_ids, self.source_snapshot_ids):
+            if values is not None and any(not value.strip() or len(value) > 160 for value in values):
+                raise ValueError("来源身份无效")
+        return self
+
     accepted_candidate_set_hash: str | None = Field(
         default=None,
         pattern=r"^[0-9a-f]{64}$",
@@ -614,6 +631,7 @@ class SourceRefreshIn(BaseModel):
 
     expected_active_revision: int = Field(ge=1)
     external_api_confirmed: bool = False
+    target_source_snapshot_id: str | None = Field(default=None, min_length=1, max_length=160)
     resume_unknown: bool = False
 
 
@@ -696,31 +714,37 @@ def _inherit_web_contract_hook(
 ) -> Callable[[sqlite3.Connection], None] | None:
     """网页修订沿用冻结来源边界，并只更新用户确认的目标与格式。"""
 
-    contract = get_store().get_web_task_contract(
+    contract = get_store().get_source_contract(
         owner_id,
         source_task_id,
         source_revision,
     )
-    if contract is None:
+    if contract is None or contract.get("goal_contract") is None:
         return base_hook
+    contract.pop("request_receipt", None)
     goal_contract = json.loads(
         json.dumps(contract["goal_contract"], ensure_ascii=False)
     )
     goal_contract["objective"] = objective_text
     if semantic_delta is not None:
-        if semantic_delta.source_scope_delta or semantic_delta.field_semantics_delta:
-            raise HTTPException(422, "当前网页合同无法表达新的来源或字段含义，请重新澄清")
+        if semantic_delta.source_scope_delta or semantic_delta.permission_delta:
+            raise HTTPException(422, "业务语义确认不能修改来源范围或权限")
+        if semantic_delta.field_semantics_delta:
+            # 仅在用户确认后的修订事务保存业务解释，不据此执行代码或修改授权。
+            goal_contract["field_semantics"] = {**goal_contract.get("field_semantics", {}), **semantic_delta.field_semantics_delta}
         selection = semantic_delta.selection_delta
         coverage = semantic_delta.coverage_delta
         if set(selection) - {"must_include", "explicit_exclusions"} or set(coverage) - {"quantity_requirement", "completeness_requirement"}:
             raise HTTPException(422, "修改包含当前网页合同无法表达的条件，请重新澄清")
         if selection or coverage:
-            snapshot = SourceAcquisitionRepository(settings.webui_db_path).get_snapshot(owner_id, contract["source_snapshot_id"])
-            if snapshot is None:
-                raise HTTPException(409, "冻结来源快照已缺失")
+            snapshot_ids = tuple(group["source_snapshot_id"] for group in contract.get("web_sources", []))
+            source_revision_row = get_store().get_semantic_workspace_revision(owner_id, source_task_id, source_revision)
+            upload_ids = tuple(ref["upload_id"] for ref in source_revision_row["source_refs"] if ref.get("upload_id"))
+            _, snapshots = _resolve_mixed_sources(owner_id, upload_ids, snapshot_ids)
+            snapshot = {"allowed_scope": {"groups": [item["allowed_scope"] for item in snapshots]}}
             try:
                 typed = WorkspaceTaskCreateIn(
-                    objective_text=objective_text, source_snapshot_id=contract["source_snapshot_id"],
+                    objective_text=objective_text, source_snapshot_ids=snapshot_ids, upload_ids=upload_ids,
                     output_formats=list(output_formats), runtime_version=RuntimeVersion.PI,
                     must_include=selection.get("must_include", goal_contract.get("must_include", [])),
                     explicit_exclusions=selection.get("explicit_exclusions", goal_contract.get("explicit_exclusions", [])),
@@ -729,11 +753,7 @@ def _inherit_web_contract_hook(
                 )
             except ValueError as exc:
                 raise HTTPException(422, "修改后的网页条件不完整或不受支持，请重新澄清") from exc
-            goal_contract = _freeze_goal_contract(typed, objective=objective_text, source_snapshot=snapshot)
-    delivery_spec = json.loads(
-        json.dumps(contract["delivery_spec"], ensure_ascii=False)
-    )
-    delivery_spec["formats"] = list(output_formats)
+            goal_contract = {**goal_contract, **_freeze_goal_contract(typed, objective=objective_text, source_snapshot=snapshot)}
     runtime_payload = runtime_binding.model_dump(mode="json")
 
     def bind_web_contract(connection: sqlite3.Connection) -> None:
@@ -750,22 +770,12 @@ def _inherit_web_contract_hook(
             preallocated_run=True,
             connection=connection,
         )
-        connection.execute(
-            "INSERT INTO web_task_contracts "
-            "(owner_id, task_id, revision, source_snapshot_id, "
-            "goal_contract_json, delivery_spec_json, runtime_binding_json, "
-            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                owner_id,
-                target_task_id,
-                target_revision,
-                contract["source_snapshot_id"],
-                json.dumps(goal_contract, ensure_ascii=False),
-                json.dumps(delivery_spec, ensure_ascii=False),
-                json.dumps(runtime_payload, ensure_ascii=False),
-                datetime.now(timezone.utc).isoformat(),
-            ),
-        )
+        contract["goal_contract"] = goal_contract
+        connection.execute("UPDATE semantic_workspace_revisions SET source_contract_json=? WHERE user_id=? AND task_id=? AND revision=?",
+                           (json.dumps(contract, ensure_ascii=False), owner_id, target_task_id, target_revision))
+        if contract.get("web_sources"):
+            connection.execute("INSERT INTO web_task_contracts (owner_id,task_id,revision,source_snapshot_id,goal_contract_json,delivery_spec_json,runtime_binding_json,created_at) VALUES (?,?,?,?,?,?,?,?)",
+                               (owner_id,target_task_id,target_revision,contract["web_sources"][0]["source_snapshot_id"],json.dumps(goal_contract,ensure_ascii=False),json.dumps({"formats":list(output_formats)}),json.dumps(runtime_payload,ensure_ascii=False),datetime.now(timezone.utc).isoformat()))
 
     return bind_web_contract
 
@@ -1193,6 +1203,38 @@ def _candidate_download_allowed(
     )
 
 
+def _resolve_mixed_sources(user_id, upload_ids, snapshot_ids):
+    """解析全量选择，逐组保留服务端范围；不得用网页列表覆盖上传。"""
+    refs, snapshots = [], []
+    for upload_id in dict.fromkeys(upload_ids):
+        try:
+            upload = _uploads().resolve(user_id, upload_id)
+        except (PermissionError, FileNotFoundError) as exc:
+            raise HTTPException(404, "上传文件不存在或无权访问") from exc
+        refs.append({"upload_id": upload.upload_id, "sha256": upload.sha256})
+    repository = SourceAcquisitionRepository(settings.webui_db_path)
+    for snapshot_id in dict.fromkeys(snapshot_ids):
+        snapshot = repository.get_snapshot(user_id, snapshot_id)
+        if snapshot is None:
+            raise HTTPException(404, "网页来源快照不存在或无权访问")
+        if int(snapshot["valid_page_count"]) < 1 or snapshot.get("coverage", {}).get("status") == "hard_insufficient":
+            raise HTTPException(409, "网页来源未达到冻结完整性门，不能通过其他来源抵消")
+        snapshots.append(snapshot)
+        refs.extend({"kind": "web_artifact", "snapshot_id": snapshot_id,
+                     "artifact_id": artifact["artifact_id"], "sha256": artifact["content_sha256"]}
+                    for artifact in snapshot["artifacts"])
+    if not refs:
+        raise HTTPException(422, "任务至少选择一个来源")
+    return refs, snapshots
+
+
+def _source_contract(goal_contract, snapshots):
+    return {"schema_version": 1, "goal_contract": goal_contract,
+            "web_sources": [{"source_snapshot_id": item["snapshot_id"],
+                             "allowed_scope": item["allowed_scope"], "coverage": item["coverage"]}
+                            for item in snapshots]}
+
+
 def _freeze_goal_contract(
     payload: WorkspaceTaskCreateIn,
     *,
@@ -1299,7 +1341,7 @@ def _workspace_source_findings(user_id: str, task: dict[str, Any]):
     expected = {item["upload_id"]: item["sha256"] for item in (frozen or {}).get("source_refs", []) if item.get("upload_id")}
     artifact_ids = []
     inspected_sources = []
-    for upload_id in task.get("upload_ids", []):
+    for upload_id in expected:
         item = _uploads().resolve(user_id, upload_id)
         if expected.get(upload_id) != item.sha256:
             raise ValueError("来源与冻结版本不一致，不能用于理解")
@@ -1309,11 +1351,10 @@ def _workspace_source_findings(user_id: str, task: dict[str, Any]):
             artifact_ids.append(upload_id)
             inspector_version = TABULAR_INSPECTOR_VERSION if Path(item.original_name).suffix.lower() in {".csv", ".tsv", ".xlsx", ".json", ".jsonl"} else DOCUMENT_INSPECTOR_VERSION
             inspected_sources.append({"artifact_id":upload_id, "source_sha256":item.sha256, "inspector_version":inspector_version})
-    if not artifact_ids:
-        return ()
+
     for event in reversed(get_store().list_semantic_workspace_events(user_id, task["task_id"])):
         facts = event.get("details") or {}
-        if event["event_type"] == "source.observed" and facts.get("revision") == revision and facts.get("inspected_sources") == inspected_sources:
+        if not any(ref.get("kind") == "web_artifact" for ref in (frozen or {}).get("source_refs", [])) and event["event_type"] == "source.observed" and facts.get("revision") == revision and facts.get("inspected_sources") == inspected_sources:
             return tuple(facts["source_findings"])
     reports = UploadSourceInspector(
         user_id=user_id, upload_store=_uploads(),
@@ -1321,7 +1362,27 @@ def _workspace_source_findings(user_id: str, task: dict[str, Any]):
             user_id, artifact_id=artifact_id, artifact_sha256=artifact_sha256, inspector_version=inspector_version,
         ),
     ).inspect_artifacts(tuple(artifact_ids))
-    findings = public_source_findings(reports)
+    findings = list(public_source_findings(reports))
+    from types import SimpleNamespace
+    repository = SourceAcquisitionRepository(settings.webui_db_path)
+    for ref in (frozen or {}).get("source_refs", []):
+        if ref.get("kind") != "web_artifact":
+            continue
+        artifact = repository.get_artifact(user_id, ref["artifact_id"], include_content=True)
+        if artifact is None or artifact["snapshot_id"] != ref["snapshot_id"] or artifact["content_sha256"] != ref["sha256"]:
+            raise ValueError("网页来源与冻结版本不一致")
+        content = bytes(artifact["content_blob"])
+        if hashlib.sha256(content).hexdigest() != ref["sha256"]:
+            raise ValueError("网页原件哈希不一致")
+        with tempfile.TemporaryDirectory(prefix="mixed-source-observation-") as temporary:
+            path = Path(temporary) / "source.html"
+            path.write_bytes(content)
+            _canvas_size_limit(path)
+            item = SimpleNamespace(storage_path=str(path), original_name="source.html", media_type="text/html", sha256=ref["sha256"], size_bytes=len(content))
+            facade = SimpleNamespace(resolve=lambda owner, artifact_id: item)
+            web_reports = UploadSourceInspector(user_id=user_id, upload_store=facade).inspect_artifacts((ref["artifact_id"],))
+            findings.extend({**finding, "snapshot_id": ref["snapshot_id"]} for finding in public_source_findings(web_reports))
+    findings = tuple(findings[:20])
     get_store().append_semantic_workspace_event(
         user_id, task["task_id"], stage="understand", event_type="source.observed",
         summary="已读取用于理解的有界来源结构", details={"revision": revision, "source_findings": findings, "inspected_sources": inspected_sources},
@@ -1738,6 +1799,8 @@ def _task_detail(
     if selected_revision is None:
         raise HTTPException(status_code=404, detail="结果版本不存在")
     task["viewing_revision"] = selected_revision["revision"]
+    task["source_refs"] = selected_revision["source_refs"]
+    task["upload_ids"] = [ref["upload_id"] for ref in selected_revision["source_refs"] if ref.get("upload_id")]
     if selected_revision["revision"] != task["active_revision"]:
         task.update(
             {
@@ -1819,21 +1882,17 @@ def _task_detail(
         if frozen_context is not None
         else None
     )
-    web_contract = store.get_web_task_contract(
-        user_id,
-        task_id,
-        selected_revision["revision"],
-    )
-    if web_contract is not None:
-        snapshot = SourceAcquisitionRepository(
-            settings.webui_db_path
-        ).get_snapshot(user_id, web_contract["source_snapshot_id"])
+    source_contract = store.get_source_contract(user_id, task_id, selected_revision["revision"])
+    task["source_contract"] = source_contract
+    task["web_sources"] = []
+    for group in (source_contract or {}).get("web_sources", []):
+        snapshot = SourceAcquisitionRepository(settings.webui_db_path).get_snapshot(user_id, group["source_snapshot_id"])
         if snapshot is None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="冻结网页来源快照已缺失",
-            )
-        task["web_source"] = {**web_contract, "snapshot": snapshot}
+            raise HTTPException(409, "冻结网页来源快照已缺失")
+        task["web_sources"].append({"source_snapshot_id": group["source_snapshot_id"], "snapshot": snapshot})
+    if task["web_sources"]:
+        legacy = store.get_web_task_contract(user_id, task_id, selected_revision["revision"]) or {}
+        task["web_source"] = {**legacy, **task["web_sources"][0], "goal_contract": (source_contract or {}).get("goal_contract")}
     structured_events = _structured_progress_events(task)
     progress_view = ProgressProjection().project(
         structured_events,
@@ -1888,6 +1947,23 @@ async def create_task(
     ),
     user=Depends(get_execution_user),
 ):
+    claim_started = False
+
+    def mark_claim_started() -> None:
+        nonlocal claim_started
+        claim_started = True
+
+    try:
+        return await _create_task(payload, idempotency_key, user, mark_claim_started=mark_claim_started)
+    except HTTPException as exc:
+        # 只提供首次认领前的确定拒绝事实，已有claim冲突或未知不能解锁新请求。
+        if (not claim_started and exc.status_code in {404, 409, 422}
+            and (idempotency_key is None or not _runtime_repository().has_idempotency(user["user_id"], idempotency_key.strip()))):
+            exc.headers = {**(exc.headers or {}), "X-Mangrove-Task-Outcome": "rejected"}
+        raise
+
+
+async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *, mark_claim_started):
     user_id = user["user_id"]
     user_objective = payload.objective_text
     idempotency_payload = payload.model_dump(
@@ -2125,28 +2201,11 @@ async def create_task(
             or set(payload.capability_need.input_formats) != actual_inputs
             or set(payload.capability_need.output_formats) != actual_outputs):
             raise HTTPException(409, "工具匹配与当前文件或输出格式不一致，请重新匹配；网页来源尚无可复用格式合同")
-    source_snapshot = None
-    if payload.source_snapshot_id is not None:
-        source_snapshot = SourceAcquisitionRepository(
-            settings.webui_db_path
-        ).get_snapshot(user_id, payload.source_snapshot_id)
-        if source_snapshot is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="网页来源快照不存在或无权访问",
-            )
-        if int(source_snapshot["valid_page_count"]) < 1:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="网页来源快照没有可执行的有效页面",
-            )
-        if source_snapshot.get("coverage", {}).get("status") == "hard_insufficient":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="网页来源未达到启动前冻结的硬性有效页数；可刷新来源或调整要求",
-            )
+    source_refs, source_snapshots = _resolve_mixed_sources(user_id, payload.upload_ids, payload.source_snapshot_ids or ())
+    source_snapshot = source_snapshots[0] if source_snapshots else None
+    for source_snapshot_item in source_snapshots:
         if (
-            source_snapshot.get("coverage", {}).get("status")
+            source_snapshot_item.get("coverage", {}).get("status")
             == "coverage_unknown"
             and _HARD_SOURCE_REQUIREMENT_PATTERN.search(
                 "\n".join((
@@ -2164,15 +2223,7 @@ async def create_task(
                     "必须 N 项’；请改为探索性要求，或重新获取完整授权范围"
                 ),
             )
-        source_refs = [
-            {
-                "kind": "web_artifact",
-                "snapshot_id": payload.source_snapshot_id,
-                "artifact_id": artifact["artifact_id"],
-                "sha256": artifact["content_sha256"],
-            }
-            for artifact in source_snapshot["artifacts"]
-        ]
+    if source_snapshot is not None:
         constraint_lines = [
             *(f"必须包含：{item}" for item in payload.must_include),
             *(f"明确不要：{item}" for item in payload.explicit_exclusions),
@@ -2261,6 +2312,7 @@ async def create_task(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
+        mark_claim_started()
         try:
             task_id, is_new_claim = repository.claim_idempotency(
                 user_id,
@@ -2306,6 +2358,7 @@ async def create_task(
                     else None
                 ),
             }
+    mark_claim_started()
     transaction_hook = None
     if routing_repository is not None:
         assert routing_ref is not None
@@ -2411,17 +2464,19 @@ async def create_task(
                     datetime.now(timezone.utc).isoformat(),
                 ),
             )
-            if context_preview is not None:
-                _task_context_service().freeze(
-                    connection,
-                    owner_id=user_id,
-                    task_id=task_id,
-                    revision=1,
-                    preview=context_preview,
-                    expected_preview_sha256=payload.context_preview_sha256 or "",
-                )
-
         transaction_hook = bind_web_contract
+    if context_preview is not None:
+        context_base_hook = transaction_hook
+        def bind_confirmed_context(connection):
+            if context_base_hook is not None:
+                context_base_hook(connection)
+            _task_context_service().freeze(connection, owner_id=user_id, task_id=task_id, revision=1,
+                                           preview=context_preview, expected_preview_sha256=payload.context_preview_sha256 or "")
+        transaction_hook = bind_confirmed_context
+    frozen_source_contract = _source_contract(
+        _freeze_goal_contract(payload, objective=user_objective, source_snapshot={"allowed_scope": {"groups": [item["allowed_scope"] for item in source_snapshots]}}) if source_snapshots else None,
+        source_snapshots,
+    )
     first_line = payload.objective_text.splitlines()[0].strip()
     title = first_line[:40] + ("…" if len(first_line) > 40 else "")
     store = get_store()
@@ -2437,6 +2492,7 @@ async def create_task(
             model=payload.model,
             external_api_confirmed=payload.external_api_confirmed,
             source_refs=source_refs,
+            source_contract=frozen_source_contract,
             table_output_contracts=[
                 item.model_dump(mode="json")
                 for item in payload.table_output_contracts
@@ -3684,11 +3740,46 @@ async def create_revision(
     task_id: str,
     payload: WorkspaceRevisionIn,
     user=Depends(get_execution_user),
+    idempotency_key: Annotated[str | None, Header(min_length=1, max_length=200)] = None,
 ):
-    return await _create_revision(task_id, payload, user)
+    if idempotency_key is None:
+        return await _create_revision(task_id, payload, user)
+    user_id = user["user_id"]
+    _task_or_404(user_id, task_id)
+    # 先辨认原请求，不用活动版本或可能已失效的来源替代成功回执。
+    raw_payload = payload.model_dump(mode="json", exclude_unset=True)
+    request_hash = hashlib.sha256(json.dumps(raw_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    key_hash = hashlib.sha256(json.dumps([task_id, idempotency_key], ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+    try:
+        existing = get_store().find_source_revision_receipt(user_id, task_id, key_hash, request_hash)
+        if existing is not None:
+            return existing
+        _, claimed = _runtime_repository().claim_idempotency(user_id, "source-revision:" + key_hash, request_hash=request_hash, proposed_task_id=task_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if not claimed:
+        # 占位无回执可能仍在准备或结果未知，不重新分配binding或重发任务。
+        existing = get_store().find_source_revision_receipt(user_id, task_id, key_hash, request_hash)
+        if existing is not None:
+            return existing
+        raise HTTPException(409, "修订请求仍在处理或结果未知，请保留原请求与幂等键等待确认")
+    execution_started = False
+
+    def mark_execution_started(started: bool = True) -> None:
+        nonlocal execution_started
+        execution_started = started
+
+    try:
+        return await _create_revision(task_id, payload, user, request_receipt={"key_sha256": key_hash, "request_sha256": request_hash}, mark_execution_started=mark_execution_started)
+    except HTTPException as exc:
+        if not execution_started and exc.status_code in {404, 409, 422}:
+            # 只释放可证明尚无取消、准备或提交副作用的拒绝；未知仍保留占位。
+            _runtime_repository().release_idempotency(user_id, "source-revision:" + key_hash, task_id=task_id)
+            exc.headers = {**(exc.headers or {}), "X-Mangrove-Revision-Outcome": "rejected"}
+        raise
 
 
-async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, expected_cancel_generation: int | None = None, account_resume_generation: int | None = None):
+async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, expected_cancel_generation: int | None = None, account_resume_generation: int | None = None, request_receipt: dict[str, Any] | None = None, mark_execution_started=None):
     user_id = user["user_id"]
     store = get_store()
     task = _task_or_404(user_id, task_id)
@@ -3702,54 +3793,17 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
             status_code=status.HTTP_409_CONFLICT,
             detail="活动版本已变化，请查看最新结果后再决定是否重新执行",
         )
-    current_web_contract = store.get_web_task_contract(
-        user_id,
-        task_id,
-        int(task["active_revision"]),
-    )
-    if payload.source_snapshot_id is not None and current_web_contract is None:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="只有网页来源任务可以刷新来源快照",
-        )
-    effective_snapshot_id = (
-        payload.source_snapshot_id
-        or (
-            current_web_contract["source_snapshot_id"]
-            if current_web_contract is not None
-            else None
-        )
-    )
-    effective_source_refs = list(task.get("source_refs", []))
-    effective_snapshot = None
-    if effective_snapshot_id is not None:
-        effective_snapshot = SourceAcquisitionRepository(
-            settings.webui_db_path
-        ).get_snapshot(user_id, effective_snapshot_id)
-        if effective_snapshot is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="网页来源快照不存在或无权访问",
-            )
-        if int(effective_snapshot["valid_page_count"]) < 1:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="网页来源快照没有可执行的有效页面",
-            )
-        if effective_snapshot.get("coverage", {}).get("status") == "hard_insufficient":
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="网页来源未达到启动前冻结的硬性有效页数",
-            )
-        effective_source_refs = [
-            {
-                "kind": "web_artifact",
-                "snapshot_id": effective_snapshot_id,
-                "artifact_id": artifact["artifact_id"],
-                "sha256": artifact["content_sha256"],
-            }
-            for artifact in effective_snapshot["artifacts"]
-        ]
+    current_revision = store.get_semantic_workspace_revision(user_id, task_id, payload.expected_active_revision)
+    current_contract = store.get_source_contract(user_id, task_id, payload.expected_active_revision)
+    current_refs = current_revision["source_refs"]
+    old_snapshot_ids = tuple(dict.fromkeys(ref["snapshot_id"] for ref in current_refs if ref.get("kind") == "web_artifact"))
+    selected_upload_ids = payload.upload_ids if payload.upload_ids is not None else tuple(ref["upload_id"] for ref in current_refs if ref.get("upload_id"))
+    selected_snapshot_ids = payload.source_snapshot_ids if payload.source_snapshot_ids is not None else ((payload.source_snapshot_id,) if payload.source_snapshot_id else old_snapshot_ids)
+    effective_source_refs, effective_snapshots = _resolve_mixed_sources(user_id, selected_upload_ids, selected_snapshot_ids)
+    effective_snapshot = effective_snapshots[0] if effective_snapshots else None
+    effective_snapshot_id = effective_snapshot["snapshot_id"] if effective_snapshot else None
+    current_web_contract = ({"goal_contract": current_contract.get("goal_contract") or {"objective": task["objective_text"]}} if current_contract else None)
+    previous_goal = json.loads(json.dumps((current_contract or {}).get("goal_contract"), ensure_ascii=False))
     previous_runtime = _runtime_repository().get(
         user_id,
         task_id,
@@ -3788,6 +3842,31 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
         if payload.output_formats is not None
         else task["output_formats"]
     )
+    if effective_source_refs != current_refs or set(formats) != set(task["output_formats"]):
+        from src.api.semantic_workspace_runtime import _capability_selections_table_exists
+        from src.capability_catalog.reuse import validated_reuse_contract
+
+        # 读取冻结选择而非审计事件；new_task继承选择时没有复制事件也不能绕过。
+        if _capability_selections_table_exists():
+            catalog = _capability_catalog()
+            actor = catalog_actor_from_user(user)
+            selection = catalog.resolve_selection(actor, task_id=task_id, revision=payload.expected_active_revision)
+            if selection is not None:
+                actual_inputs = {Path(_uploads().resolve(user_id, item).original_name).suffix.lower().lstrip(".") for item in selected_upload_ids}
+                actual_inputs = {"markdown" if value == "md" else value for value in actual_inputs}
+                actual_outputs = {"markdown" if value == "md" else value for value in formats}
+                try:
+                    if selected_snapshot_ids or selection.procedure_refs or not selection.pack_refs:
+                        raise ValueError("来源缺少兼容合同")
+                    for ref in selection.pack_refs:
+                        pack = catalog.resolve_pack(actor, ref.pack_id, ref.version, digest=ref.digest)
+                        if pack is None:
+                            raise ValueError("冻结能力不可见或身份变化")
+                        contract = validated_reuse_contract(pack)
+                        if not actual_inputs <= set(contract.accepts) or not actual_outputs <= set(contract.produces):
+                            raise ValueError("来源或输出格式不兼容")
+                except (ValueError, TypeError) as exc:
+                    raise HTTPException(409, "工具匹配与当前文件或输出格式不一致，请重新匹配；网页来源尚无可复用格式合同") from exc
     if (
         payload.table_output_contracts is not None
         and not {
@@ -3850,11 +3929,19 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
         "failed",
         "cancelled",
     }:
+        if mark_execution_started is not None:
+            mark_execution_started()
         await get_semantic_workspace_manager().cancel(user_id, task_id, for_revision=True)
         task = _task_or_404(user_id, task_id)
         if task["status"] == "cancelling":
+            if mark_execution_started is not None:
+                # 取消已返回；旧Run可能停止，但本次未准备或创建修订，允许清理后再确认。
+                mark_execution_started(False)
             raise HTTPException(status_code=409, detail="旧任务仍在停止，请在清理完成后再创建新版本")
     if int(task["active_revision"]) + 1 != expected_revision:
+        if mark_execution_started is not None:
+            # 已回读到竞争版本，本次尚未prepare或提交，拒绝事实确定。
+            mark_execution_started(False)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="活动版本已变化，请重新提交 Revision",
@@ -3893,6 +3980,8 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
     prepared_binding = None
     prepared_manifest = None
     if effective_snapshot_id is not None:
+        if mark_execution_started is not None:
+            mark_execution_started()
         prepared_binding, prepared_manifest = (
             await get_semantic_workspace_manager().prepare_runtime_binding(
                 model_connection_id=runtime_config.model_connection_id,
@@ -3976,6 +4065,13 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
             )
 
         transaction_hook = bind_web_revision
+    if previous_goal is not None:
+        previous_goal["objective"] = objective
+        previous_goal.setdefault("coverage", {})["authorized_source_scope"] = {"groups": [item["allowed_scope"] for item in effective_snapshots]}
+    frozen_source_contract = _source_contract(previous_goal, effective_snapshots)
+    if request_receipt is not None:
+        frozen_source_contract["request_receipt"] = {**request_receipt, "target_revision": expected_revision,
+            "source_refs_sha256": hashlib.sha256(json.dumps(effective_source_refs, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()}
     transaction_hook = _inherit_task_context_hook(
         transaction_hook,
         owner_id=user_id,
@@ -3986,6 +4082,8 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
         objective_text=objective,
         output_formats=tuple(formats),
     )
+    if mark_execution_started is not None:
+        mark_execution_started()
     try:
         revision = store.create_semantic_workspace_revision(
             user_id,
@@ -3994,6 +4092,7 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
             output_formats=formats,
             change_summary=payload.instruction,
             source_refs=effective_source_refs,
+            source_contract=frozen_source_contract,
             table_output_contracts=(
                 [
                     item.model_dump(mode="json")
@@ -4124,13 +4223,13 @@ async def decide_candidate_gap(
     ):
         # 新 Revision 已写入、动作终态尚未来得及回写时，从冻结合同恢复同一幂等结果。
         recovery_revision = payload.expected_revision + 1
-        recovery_contract = get_store().get_web_task_contract(
+        recovery_contract = get_store().get_source_contract(
             user_id,
             task_id,
             recovery_revision,
         )
         accepted_from = (
-            (recovery_contract or {}).get("goal_contract", {})
+            ((recovery_contract or {}).get("goal_contract") or {})
             .get("coverage", {})
             .get("accepted_gap_from", {})
         )
@@ -4243,18 +4342,19 @@ async def refresh_task_source(
     user_id = user["user_id"]
     store = get_store()
     task = _task_or_404(user_id, task_id)
-    contract = store.get_web_task_contract(
-        user_id,
-        task_id,
-        payload.expected_active_revision,
-    )
-    if contract is None:
-        raise HTTPException(status_code=404, detail="当前版本没有可刷新的网页来源")
+    selected_revision = store.get_semantic_workspace_revision(user_id, task_id, payload.expected_active_revision)
+    if selected_revision is None:
+        raise HTTPException(404, "任务修订不存在")
+    selected_snapshot_ids = tuple(dict.fromkeys(ref["snapshot_id"] for ref in selected_revision["source_refs"] if ref.get("kind") == "web_artifact"))
+    target_snapshot_id = payload.target_source_snapshot_id
+    if target_snapshot_id is None:
+        if len(selected_snapshot_ids) != 1:
+            raise HTTPException(422, "多个网页组必须明确选择刷新目标")
+        target_snapshot_id = selected_snapshot_ids[0]
+    if target_snapshot_id not in selected_snapshot_ids:
+        raise HTTPException(404, "刷新目标不属于所选修订")
     repository = SourceAcquisitionRepository(settings.webui_db_path)
-    old_snapshot = repository.get_snapshot(
-        user_id,
-        contract["source_snapshot_id"],
-    )
+    old_snapshot = repository.get_snapshot(user_id, target_snapshot_id)
     if old_snapshot is None:
         raise HTTPException(status_code=409, detail="当前版本的冻结来源快照已缺失")
     old_attempt = repository.get_attempt(
@@ -4304,7 +4404,7 @@ async def refresh_task_source(
                 required_valid_pages=completeness.get("required_valid_pages"),
                 request_context=(
                     f"source-refresh:{task_id}:revision:"
-                    f"{payload.expected_active_revision}:cancel:{cancel_generation}"
+                    f"{payload.expected_active_revision}:cancel:{cancel_generation}:target:{target_snapshot_id}"
                 ),
             ),
             resume_unknown=payload.resume_unknown,
@@ -4354,6 +4454,7 @@ async def refresh_task_source(
             {
                 "task_id": task_id,
                 "expected_revision": payload.expected_active_revision,
+                "target_source_snapshot_id": target_snapshot_id,
                 "attempt_id": attempt["attempt_id"],
                 "snapshot_id": snapshot["snapshot_id"],
             },
@@ -4413,7 +4514,7 @@ async def refresh_task_source(
                 instruction="按原授权范围刷新网页来源",
                 external_api_confirmed=payload.external_api_confirmed,
                 expected_active_revision=payload.expected_active_revision,
-                source_snapshot_id=snapshot["snapshot_id"],
+                source_snapshot_ids=tuple(snapshot["snapshot_id"] if value == target_snapshot_id else value for value in selected_snapshot_ids),
             ),
             user,
             expected_cancel_generation=cancel_generation,

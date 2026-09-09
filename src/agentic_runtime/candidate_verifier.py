@@ -585,7 +585,11 @@ def _complete_scope_review_evidence(
     if len(omission_item) > _VERIFIER_EVIDENCE_MAX_EACH:
         return None
     items: list[str] = [omission_item]
-    for source in request.sources:
+    web_ids = coverage.get("web_artifact_ids")
+    sources = tuple(source for source in request.sources if web_ids is None or source.upload_id in web_ids)
+    if not sources or (web_ids is not None and {source.upload_id for source in sources} != set(web_ids)):
+        return None
+    for source in sources:
         try:
             content = _source_text(
                 source.host_path,

@@ -363,6 +363,14 @@ class AgenticRuntimeRepository:
             raise ValueError("幂等键已用于不同的任务请求")
         return str(row["task_id"]), cursor.rowcount == 1
 
+    def has_idempotency(self, user_id: str, idempotency_key: str) -> bool:
+        """读取同 Owner 原请求事实，避免预检拒绝解除已有未知占位。"""
+        with _LOCK, self._conn() as conn:
+            return conn.execute(
+                "SELECT 1 FROM agentic_runtime_idempotency WHERE user_id=? AND idempotency_key=?",
+                (user_id, idempotency_key),
+            ).fetchone() is not None
+
     def release_idempotency(
         self,
         user_id: str,

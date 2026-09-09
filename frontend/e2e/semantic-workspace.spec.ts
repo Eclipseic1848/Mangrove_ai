@@ -695,11 +695,12 @@ test.describe("#134 公开搜索", () => {
     await expect(page.getByRole("article", { name: "网页正文预览" })).toContainText("第 9 页已保存摘要");
     await expect(page.getByRole("article", { name: "网页正文预览" })).toContainText("未展示完整原文");
     await page.screenshot({ path: testInfo.outputPath("search-partial-1440.png"), fullPage: true });
+    await page.getByRole("button", { name: "添加到当前任务", exact: true }).click();
     await page.getByRole("button", { name: "检查上下文草案" }).click();
     await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeEnabled();
     await page.getByRole("button", { name: "启动任务", exact: true }).click();
     await expect.poll(() => createdPayload).not.toBeNull();
-    expect(createdPayload).toMatchObject({ source_snapshot_id: "snapshot-1", objective_text: "电池回收研究", model: "Qwen3.6-35B-A3B", upload_ids: [] });
+    expect(createdPayload).toMatchObject({ source_snapshot_ids: ["snapshot-1"], objective_text: "电池回收研究", model: "Qwen3.6-35B-A3B", upload_ids: [] });
     expect(createdPayload).not.toHaveProperty("runtime_version");
     expect(requests).toHaveLength(1);
     await expect(page.getByLabel("Mangrove 回答")).toContainText("九篇实际读取");
@@ -736,13 +737,17 @@ test.describe("#134 公开搜索", () => {
         await expect(page.getByRole("article", { name: "网页正文预览" })).toHaveCount(0);
         await expect(page.getByRole("button", { name: "启动任务", exact: true })).toHaveCount(0);
       } else {
-        await page.getByRole("button", { name: "检查上下文草案" }).click();
         if (scenario === "hard-nine") {
           await expect(page.getByText("有效页面不足 10 个", { exact: false })).toBeVisible();
-          await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeDisabled();
           await expect(page.getByLabel("选择已读页面").locator("option")).toHaveCount(9);
+          await page.getByRole("button", { name: "添加到当前任务", exact: true }).click();
+          await expect(page.getByRole("button", { name: "检查上下文草案" })).toBeDisabled();
+          await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeDisabled();
+          await expect(page.getByLabel("已选网页资料")).toContainText("其他资料不能抵消该组硬性缺口");
         } else {
           await expect(page.getByLabel("公开搜索结果")).toContainText("不表示覆盖了所有公开网页");
+          await page.getByRole("button", { name: "添加到当前任务", exact: true }).click();
+          await page.getByRole("button", { name: "检查上下文草案" }).click();
           await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeEnabled();
         }
       }
@@ -843,13 +848,114 @@ test.describe("#134 公开搜索", () => {
     await page.goto("/data-prep");
     await page.getByRole("button", { name: "公开网页", exact: true }).click();
     await expect(page.getByLabel("公开搜索结果")).toContainText("本次搜索：电池回收研究");
-    await expect(page.getByLabel("想得到什么结果")).toHaveValue("电池回收研究");
+    await page.getByRole("button", { name: "添加到当前任务", exact: true }).click();
+    await expect(page.getByLabel("任务要求", { exact: true })).toHaveValue("电池回收研究");
     await page.getByRole("button", { name: "检查上下文草案" }).click();
     await page.getByRole("button", { name: "启动任务", exact: true }).click();
     await expect.poll(() => submitted).not.toBeNull();
-    expect(submitted).toMatchObject({ source_snapshot_id: "snapshot-1", quantity_requirement: "当前已成功读取页面中有证据的内容",
-      completeness_requirement: "披露搜索范围和未读取来源，不承诺覆盖全部公开网页" });
+    expect(submitted).toMatchObject({ source_snapshot_ids: ["snapshot-1"], quantity_requirement: "当前已成功读取页面中有证据的内容",
+      completeness_requirement: "逐来源披露失败、范围和未覆盖内容，不承诺全网完整" });
     expect(acquisitions).toBe(0);
+  });
+});
+
+function mixedAttempt(index: number) {
+  const attempt = sourceAttempt("succeeded");
+  const url = `https://example.com/source-${index}`;
+  return { ...attempt, request_url: url, normalized_url: url, allowed_scope: { ...attempt.allowed_scope, normalized_url: url }, attempt_id: `mixed-attempt-${index}`, snapshot_id: `mixed-snapshot-${index}`,
+    snapshot: { ...attempt.snapshot!, snapshot_id: `mixed-snapshot-${index}`, attempt_id: `mixed-attempt-${index}`,
+      allowed_scope: { ...attempt.snapshot!.allowed_scope, normalized_url: url },
+      artifacts: [{ ...attempt.snapshot!.artifacts[0], artifact_id: `mixed-artifact-${index}`, title: `独立说明 ${index}`, final_url: url, text_preview: `实体 E101 的来源 ${index}` }] } };
+}
+async function addMixedWeb(page: Page, index: number) {
+  await page.getByRole("button", { name: "公开网页", exact: true }).click();
+  await page.getByRole("combobox", { name: "来源方式", exact: true }).selectOption("url");
+  await page.getByLabel("精确网址").fill(`https://example.com/source-${index}`);
+  await page.getByRole("button", { name: "获取网页", exact: true }).click();
+  await page.getByRole("button", { name: "添加到当前任务", exact: true }).click();
+}
+
+test.describe("#135 混合来源", () => {
+  test("文件与两个独立网页连续添加并一次确认完整集合", async ({ page }) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    let acquired = 0;
+    let submitted: Record<string, unknown> | null = null;
+    await page.route("**/api/semantic-workspace/source-acquisitions", route => route.fulfill({ json: mixedAttempt(++acquired) }));
+    await page.route("**/api/semantic-workspace/tasks", route => { submitted = route.request().postDataJSON(); return route.fulfill({ json: workspaceTask("mixed-task", "queued", "混合任务") }); });
+    await page.route("**/api/semantic-workspace/tasks/mixed-task", route => route.fulfill({ json: workspaceDetail(workspaceTask("mixed-task", "queued", "混合任务"), {
+      upload_ids: ["upload-e2e"], uploads: [{ upload_id: "upload-e2e", original_name: "workload.csv", media_type: "text/csv", size_bytes: 64, sha256: "0".repeat(64) }],
+      web_sources: [1, 2].map(index => ({ source_snapshot_id: mixedAttempt(index).snapshot_id, snapshot: mixedAttempt(index).snapshot })),
+    }) }));
+    await page.route("**/api/semantic-workspace/tasks/mixed-task/sources/mixed-artifact-2/preview?*", route => route.fulfill({ json: {
+      task_id: "mixed-task", revision: 1, artifact_id: "mixed-artifact-2", upload_id: null, sha256: "a".repeat(64), original_name: "独立说明 2", media_type: "text/html", content_url: null, kind: "web", text_preview: "第二组独立冻结摘要", representation: { kind: "source", parser_or_inspector_version: "fixture" }, is_complete: false, truncated: true,
+    } }));
+    await page.goto("/data-prep");
+    await page.getByLabel("任务要求", { exact: true }).fill("按实体ID关联表格和公开说明");
+    await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("实体ID,规模\nE101,200", "utf-8") });
+    await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "公开网页", exact: true })).toBeEnabled();
+    await addMixedWeb(page, 1);
+    await addMixedWeb(page, 2);
+    await expect(page.getByLabel("已选网页资料")).toContainText("独立说明 1");
+    await expect(page.getByLabel("已选网页资料")).toContainText("独立说明 2");
+    await expect(page.getByText("workload.csv").first()).toBeVisible();
+    expect(submitted).toBeNull();
+    await page.getByRole("button", { name: "检查上下文草案" }).click();
+    await page.getByRole("button", { name: "启动任务", exact: true }).click();
+    await expect.poll(() => submitted).toMatchObject({ upload_ids: ["upload-e2e"], source_snapshot_ids: ["mixed-snapshot-1", "mixed-snapshot-2"], objective_text: "按实体ID关联表格和公开说明", output_formats: ["xlsx"] });
+    expect(submitted).not.toHaveProperty("source_snapshot_id");
+    expect(acquired).toBe(2);
+    await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+    await expect(page.getByLabel("预览文件").locator("option")).toHaveCount(3);
+    await page.getByLabel("预览文件").selectOption("mixed-artifact-2");
+    await expect(page.getByText("第二组独立冻结摘要", { exact: true })).toBeVisible();
+  });
+
+  test("同名同大小不同文件不吞证据，精确重复引用仅保留一次", async ({ page }) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    let calls = 0;
+    let submitted: Record<string, unknown> | null = null;
+    await page.route("**/api/data-sources/uploads", route => { calls++; return route.fulfill({ json: { upload_id: calls === 1 ? "same-a" : "same-b", original_name: "same.csv", media_type: "text/csv", size_bytes: 10, sha256: (calls === 1 ? "a" : "b").repeat(64) } }); });
+    await page.route("**/api/semantic-workspace/tasks", route => { submitted = route.request().postDataJSON(); return route.fulfill({ status: 422, json: { detail: "保留当前草稿" } }); });
+    await page.goto("/data-prep");
+    await page.getByLabel("任务要求", { exact: true }).fill("对照三次选入的证据");
+    for (const [index, body] of ["ID,n\nA,100", "ID,n\nA,200", "ID,n\nA,200"].entries()) {
+      await page.locator('input[type="file"]').setInputFiles({ name: "same.csv", mimeType: "text/csv", buffer: Buffer.from(body, "utf-8") });
+      await expect.poll(() => calls).toBe(index + 1);
+      await expect(page.getByText("已上传，等待执行", { exact: true })).toHaveCount(Math.min(index + 1, 2));
+      await expect(page.getByText(/上传中/)).toHaveCount(0);
+    }
+    await expect(page.getByText("已上传，等待执行", { exact: true })).toHaveCount(2);
+    await page.getByRole("button", { name: "开始执行", exact: true }).click();
+    await expect.poll(() => submitted).toMatchObject({ upload_ids: ["same-a", "same-b"], source_snapshot_ids: [] });
+    expect(calls).toBe(3);
+  });
+
+  test("刷新恢复完整草稿，仅Owner读取元数据，未完成文件保留待重选", async ({ page }) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    const upload = { upload_id: "saved-upload", original_name: "saved.csv", media_type: "text/csv", size_bytes: 10, sha256: "a".repeat(64) };
+    await page.addInitScript(({ upload }) => {
+      localStorage.setItem("mangrove_workspace_draft_u1_new", JSON.stringify({ draft: { prompt: "保留明确目标", formats: ["xlsx"], connectionId: null, connectionModel: null, localModel: "Qwen3.6-35B-A3B" }, sources: [{ snapshotId: "mixed-snapshot-1", attemptId: "mixed-attempt-1" }], quantity: "至少两条且披露不足", completeness: "只分析已选范围" }));
+      localStorage.setItem("mangrove_workspace_draft_u1_new_files", JSON.stringify([{ id: "saved", name: "saved.csv", size: 10, status: "ready", progress: 100, upload }, { id: "pending", name: "pending.csv", size: 12, status: "uploading", progress: 25 }]));
+    }, { upload });
+    let reads = 0, posts = 0;
+    await page.route("**/api/data-sources/uploads/saved-upload", route => { reads++; expect(route.request().headers()["x-mangrove-owner"]).toBe("u1"); return route.fulfill({ json: upload }); });
+    await page.route("**/api/semantic-workspace/source-acquisitions/mixed-attempt-1", route => route.fulfill({ json: mixedAttempt(1) }));
+    await page.route("**/api/data-sources/uploads", route => { posts++; return route.abort(); });
+    await page.goto("/data-prep");
+    await expect(page.getByLabel("任务要求", { exact: true })).toHaveValue("保留明确目标");
+    await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("重新选择 pending.csv")).toBeVisible();
+    await expect(page.getByLabel("数量要求", { exact: true })).toHaveValue("至少两条且披露不足");
+    await expect(page.getByLabel("完整性要求", { exact: true })).toHaveValue("只分析已选范围");
+    await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeDisabled();
+    expect(reads).toBeGreaterThan(0); expect(posts).toBe(0);
+    await page.getByRole("button", { name: "移除网页组 独立说明 1" }).click();
+    await expect(page.getByText("saved.csv").first()).toBeVisible();
+    await expect(page.getByLabel("重新选择 pending.csv")).toBeVisible();
   });
 });
 
@@ -1188,7 +1294,8 @@ test.describe("统一数据工作台", () => {
     });
     expect(idempotencyKey.length).toBeGreaterThan(5);
 
-    await page.getByLabel("想得到什么结果").fill("生成产品摘要并保留来源证据");
+    await page.getByRole("button", { name: "添加到当前任务", exact: true }).click();
+    await page.getByLabel("任务要求", { exact: true }).fill("生成产品摘要并保留来源证据");
     await page.getByLabel("必须包含").fill("产品名称\n公开说明");
     await page.getByLabel("明确不要").fill("不要推测未公开价格");
     await page.getByLabel("任务模板（可选）").selectOption(
@@ -1205,11 +1312,11 @@ test.describe("统一数据工作台", () => {
     expect(taskSubmitted).toMatchObject({
       objective_text: "生成产品摘要并保留来源证据",
       upload_ids: [],
-      source_snapshot_id: "snapshot-1",
+      source_snapshot_ids: ["snapshot-1"],
       must_include: ["产品名称", "公开说明"],
       explicit_exclusions: ["不要推测未公开价格"],
-      quantity_requirement: "当前页面中有证据的全部内容",
-      completeness_requirement: "仅对当前精确页面负责",
+      quantity_requirement: "当前已成功读取页面中有证据的内容",
+      completeness_requirement: "逐来源披露失败、范围和未覆盖内容，不承诺全网完整",
       output_formats: ["markdown"],
       model_connection_id: null,
       external_api_confirmed: false,
@@ -1228,12 +1335,8 @@ test.describe("统一数据工作台", () => {
     await expect(page.getByRole("heading", { name: "公开网页产品摘要" })).toBeVisible();
     await page.getByRole("button", { name: "新建任务", exact: true }).click();
     await page.getByText("公开网页", { exact: true }).click();
-    await expect(
-      page.getByRole("region", { name: "获取一个公开网页" })
-        .getByText("网页来源已冻结", { exact: true }),
-    ).toBeVisible();
-    await expect(page.getByText("这是页面中冻结的公开产品说明。"))
-      .toBeVisible();
+    await expect(page.getByLabel("精确网址")).toHaveValue("");
+    await expect(page.getByRole("article", { name: "网页正文预览" })).toHaveCount(0);
   });
 
   test("同站探索范围会披露未覆盖页面并允许继续", async ({ page }) => {
@@ -1323,15 +1426,16 @@ test.describe("统一数据工作台", () => {
       required_valid_pages: null,
     });
 
-    await page.getByLabel("想得到什么结果").fill("汇总已成功读取的页面并披露缺口");
+    await page.getByRole("button", { name: "添加到当前任务", exact: true }).click();
+    await page.getByLabel("任务要求", { exact: true }).fill("汇总已成功读取的页面并披露缺口");
     await page.getByRole("button", { name: "检查上下文草案" }).click();
     await expect(page.getByText("已检查，可以启动")).toBeVisible();
     await page.getByRole("button", { name: "启动任务" }).click();
     await expect.poll(() => taskSubmitted).not.toBeNull();
     expect(taskSubmitted).toMatchObject({
-      source_snapshot_id: "snapshot-1",
+      source_snapshot_ids: ["snapshot-1"],
       quantity_requirement: "当前已成功读取页面中有证据的内容",
-      completeness_requirement: "披露失败、截断和未覆盖页面，不承诺完整覆盖",
+      completeness_requirement: "逐来源披露失败、范围和未覆盖内容，不承诺全网完整",
     });
   });
 
@@ -1393,6 +1497,7 @@ test.describe("统一数据工作台", () => {
       .toHaveCount(0);
     await expect(page.getByText("下一步：清除本次来源后降低硬性要求", { exact: false }))
       .toBeVisible();
+    await page.getByRole("button", { name: "添加到当前任务", exact: true }).click();
     await expect(page.getByRole("button", { name: "启动任务" })).toBeDisabled();
   });
 
@@ -1581,11 +1686,11 @@ test.describe("统一数据工作台", () => {
     const pendingPayload = {
       objective_text: "生成产品摘要并保留来源证据",
       upload_ids: [],
-      source_snapshot_id: "snapshot-1",
+      source_snapshot_ids: ["snapshot-1"],
       must_include: ["产品名称"],
       explicit_exclusions: ["不得推测价格"],
-      quantity_requirement: "当前页面中有证据的全部内容",
-      completeness_requirement: "仅对当前精确页面负责",
+      quantity_requirement: "当前已成功读取页面中有证据的内容",
+      completeness_requirement: "逐来源披露失败、范围和未覆盖内容，不承诺全网完整",
       output_formats: ["markdown"],
       runtime_version: "pi",
       permission_profile: "standard",
@@ -1625,8 +1730,6 @@ test.describe("统一数据工作台", () => {
       route.fulfill({ json: workspaceDetail(createdTask) }));
 
     await page.goto("/data-prep");
-    await page.getByText("公开网页", { exact: true }).click();
-
     await expect.poll(() => receivedKeys.length).toBe(1);
     expect(receivedKeys).toEqual(["pending-task-reconnect-key"]);
     expect(receivedPayload).toEqual(pendingPayload);
@@ -4480,31 +4583,33 @@ test.describe("#127 输入与导航边界", () => {
     await expect(page.getByLabel("精确网址")).toHaveValue("https://example.com/article");
     expect(acquisitions).toBe(0);
     await page.getByRole("button", { name: "获取网页", exact: true }).click();
-    await expect(page.getByLabel("想得到什么结果")).toHaveValue(prompt);
+    await page.getByRole("button", { name: "添加到当前任务", exact: true }).click();
+    await expect(page.getByLabel("任务要求", { exact: true })).toHaveValue(prompt);
     await expect(page.getByLabel("模型连接", { exact: true })).toHaveValue("conn-current");
-    await expect(page.getByRole("combobox", { name: "精确模型", exact: true })).toHaveValue("model-b");
-    await expect(page.getByRole("checkbox", { name: /我确认将当前公开页面/ })).not.toBeChecked();
-    await page.getByLabel("想得到什么结果").fill(`${prompt}，提取三条结论`);
-    await page.getByRole("combobox", { name: "精确模型", exact: true }).selectOption("model-a");
-    await page.getByRole("button", { name: "返回文件输入", exact: true }).click();
+    await expect(page.getByRole("combobox", { name: "本任务模型", exact: true })).toHaveValue("model-b");
+    await expect(page.getByRole("checkbox", { name: /我确认将上述内容/ })).not.toBeChecked();
+    await page.getByLabel("任务要求", { exact: true }).fill(`${prompt}，提取三条结论`);
+    await page.getByRole("combobox", { name: "本任务模型", exact: true }).selectOption("model-a");
+
     await expect(page.getByRole("textbox", { name: "任务要求", exact: true })).toHaveValue(`${prompt}，提取三条结论`);
     await expect(page.getByLabel("本任务模型")).toHaveValue("model-a");
     await page.getByRole("button", { name: "公开网页", exact: true }).click();
-    await expect(page.getByLabel("想得到什么结果")).toHaveValue(`${prompt}，提取三条结论`);
-    await expect(page.getByRole("combobox", { name: "精确模型", exact: true })).toHaveValue("model-a");
+    await page.getByRole("button", { name: "返回当前资料", exact: true }).click();
+    await expect(page.getByLabel("任务要求", { exact: true })).toHaveValue(`${prompt}，提取三条结论`);
+    await expect(page.getByRole("combobox", { name: "本任务模型", exact: true })).toHaveValue("model-a");
     expect(acquisitions).toBe(1);
     await page.getByRole("button", { name: "检查上下文草案", exact: true }).click();
-    const consent = page.getByRole("checkbox", { name: /我确认将当前公开页面/ });
+    const consent = page.getByRole("checkbox", { name: /我确认将上述内容/ });
     await consent.check();
     await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeEnabled();
-    await page.getByRole("button", { name: "模型设置", exact: true }).click();
+    await page.getByRole("button", { name: "添加模型", exact: true }).click();
     await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [{ ...modelConnection, models: modelConnection.models.filter(model => model.model_id === "model-b") }] } }));
     await page.getByRole("button", { name: "返回当前任务" }).click();
-    await expect(page.getByRole("textbox", { name: "想得到什么结果" })).toBeFocused();
-    await expect(page.getByRole("combobox", { name: "精确模型", exact: true })).toHaveValue("");
+    await expect(page.getByRole("textbox", { name: "任务要求", exact: true })).toBeFocused();
+    await expect(page.getByRole("combobox", { name: "本任务模型", exact: true })).toHaveValue("");
     await consent.check();
     await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeDisabled();
-    await page.getByRole("combobox", { name: "精确模型", exact: true }).selectOption("model-b");
+    await page.getByRole("combobox", { name: "本任务模型", exact: true }).selectOption("model-b");
     await consent.check();
     await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeEnabled();
   });
@@ -4811,6 +4916,22 @@ test.describe("#133 获准工具复用", () => {
     await expect(page.getByTestId("capability-reuse-result")).toContainText("请先完成文件上传并选择输出格式");
   });
 
+  test("#135 网页组变化使在途工具匹配失效，迟到不得恢复旧许可", async ({ page }) => {
+    await prepare(page);
+    const arrived = responseBarrier(), release = responseBarrier();
+    await page.route("**/api/semantic-workspace/source-acquisitions", route => route.fulfill({ json: mixedAttempt(1) }));
+    await page.route("**/api/semantic-workspace/capabilities/resolve", async route => { arrived.release(); await release.promise; return route.fulfill({ json: { matches: [match], gaps: [] } }); });
+    await page.getByRole("button", { name: "复用同类工具：表格筛选工具" }).click();
+    await arrived.promise;
+    await addMixedWeb(page, 1);
+    const response = page.waitForResponse("**/api/semantic-workspace/capabilities/resolve");
+    release.release(); await response;
+    await expect(page.getByTestId("capability-reuse-result")).not.toContainText("可复用：");
+    await expect(page.getByTestId("capability-reuse-result")).toContainText("请重新匹配");
+    await page.getByRole("button", { name: "检查上下文草案" }).click();
+    await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeDisabled();
+  });
+
   test("不兼容与创建时撤销均阻止启用，用户可明确取消后手选", async ({ page }) => {
     await prepare(page);
     await page.route("**/api/semantic-workspace/capabilities/resolve", route => route.fulfill({ json: { matches: [], gaps: [{ code: "governance_rejected", remediation: "工具已撤销，请核对治理状态后重试" }] } }));
@@ -4820,13 +4941,17 @@ test.describe("#133 获准工具复用", () => {
     await page.route("**/api/semantic-workspace/capabilities/resolve", route => route.fulfill({ json: { matches: [match], gaps: [] } }));
     await page.getByRole("button", { name: "复用同类工具：表格筛选工具" }).click();
     await expect(page.getByTestId("capability-reuse-result")).toContainText("可复用：");
-    await page.route("**/api/semantic-workspace/tasks", route => route.fulfill({ status: 409, json: { detail: "所选工具与当前需求或治理许可不兼容" } }));
+    const taskKeys: string[] = [];
+    await page.route("**/api/semantic-workspace/tasks", route => { taskKeys.push(route.request().headers()["idempotency-key"]); return route.fulfill({ status: 409, headers: { "X-Mangrove-Task-Outcome": "rejected" }, json: { detail: "所选工具与当前需求或治理许可不兼容" } }); });
     await page.getByRole("button", { name: "开始执行" }).click();
     await expect(page.getByTestId("capability-reuse-result")).toContainText("任务未创建，工具尚未启用");
     await expect(page.getByRole("button", { name: "开始执行" })).toBeDisabled();
     await page.getByRole("button", { name: "取消复用" }).click();
     await page.getByRole("checkbox", { name: /表格筛选工具/ }).check();
     await expect(page.getByRole("button", { name: "开始执行" })).toBeEnabled();
+    await page.getByRole("button", { name: "开始执行" }).click();
+    await expect.poll(() => taskKeys.length).toBe(2);
+    expect(taskKeys[1]).not.toBe(taskKeys[0]);
   });
 
   test("匹配后目录清空仍可取消复用，不锁死任务输入", async ({ page }) => {
@@ -4896,4 +5021,223 @@ test("JPEG 原件按 EXIF 方向显示而不改写上传", async ({ page }) => {
   await expect(image).toBeVisible();
   await expect.poll(() => image.evaluate(node => [(node as HTMLImageElement).naturalWidth, (node as HTMLImageElement).naturalHeight])).toEqual([30, 20]);
   expect(uploadedOriginal).toBe(true);
+});
+
+
+test.describe("#135 修订与迟到边界", () => {
+  async function existingMixed(page: Page) {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    const upload = { upload_id: "original-file", original_name: "original.csv", media_type: "text/csv", size_bytes: 10, sha256: "a".repeat(64) };
+    const task = { ...workspaceTask("edit-mixed", "completed", "待修订混合任务"), runtime_version: "pi", provider: "local", model: "Qwen3.6-35B-A3B", model_connection_id: null };
+    const webSources = [1, 2].map(index => ({ source_snapshot_id: mixedAttempt(index).snapshot_id, snapshot: mixedAttempt(index).snapshot }));
+    const detail = workspaceDetail(task, { uploads: [upload], upload_ids: [upload.upload_id], web_sources: webSources,
+      web_source: { ...webSources[0], goal_contract: { objective: task.objective_text }, runtime_binding: { model: task.model }, delivery_spec: { formats: ["xlsx"] } } });
+    await page.route("**/api/semantic-workspace/tasks?*", route => route.fulfill({ json: [task] }));
+    await page.route("**/api/semantic-workspace/tasks/edit-mixed", route => route.fulfill({ json: detail }));
+    await page.route("**/api/data-sources/uploads/original-file", route => route.fulfill({ json: upload }));
+    await page.route("**/api/semantic-workspace/source-acquisitions/mixed-attempt-*", route => route.fulfill({ json: mixedAttempt(Number(route.request().url().split("-").at(-1))) }));
+    await page.goto("/data-prep?task=edit-mixed");
+    await page.getByRole("button", { name: "编辑本次资料", exact: true }).click();
+    await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+    return { task, detail };
+  }
+
+  test("移除最后网页提交全量文件与空网页集合，未知响应刷新重试保持原身份", async ({ page }) => {
+    await existingMixed(page);
+    const requests: { body: Record<string, unknown>; key: string }[] = [];
+    await page.route("**/api/semantic-workspace/tasks/edit-mixed/revisions", route => {
+      requests.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] });
+      return route.fulfill({ status: 503, json: { detail: "修订结果未知" } });
+    });
+    await page.getByRole("button", { name: "移除网页组 独立说明 1" }).click();
+    await page.getByRole("button", { name: "移除网页组 独立说明 2" }).click();
+    await page.getByRole("button", { name: "创建新版本", exact: true }).click();
+    await expect.poll(() => requests.length).toBe(1);
+    expect(requests[0].body).toMatchObject({ upload_ids: ["original-file"], source_snapshot_ids: [], expected_active_revision: 1 });
+    expect(requests[0].body).not.toHaveProperty("context_selection");
+    await page.getByLabel("任务要求", { exact: true }).fill("不能将未知请求改成第二次修订");
+    await page.getByRole("button", { name: "创建新版本", exact: true }).click();
+    expect(requests).toHaveLength(1);
+    await page.reload();
+    await page.getByRole("button", { name: "编辑本次资料", exact: true }).click();
+    await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "恢复上次资料修订", exact: true }).click();
+    await expect.poll(() => requests.length).toBe(2);
+    expect(requests[1]).toEqual(requests[0]);
+    await expect(page.getByText("original.csv").first()).toBeVisible();
+  });
+
+  test("目标组刷新未知不能改组重发，原组只恢复同一请求", async ({ page }) => {
+    await existingMixed(page);
+    await page.getByRole("button", { name: "编辑本次资料", exact: true }).click();
+    const requests: { body: Record<string, unknown>; key: string }[] = [];
+    await page.route("**/api/semantic-workspace/tasks/edit-mixed/source-refresh", route => {
+      requests.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] });
+      return route.fulfill({ status: 202, json: { status: "acquiring", attempt: mixedAttempt(2), revision: null } });
+    });
+    await page.getByLabel("获取最新的网页组").selectOption("mixed-snapshot-2");
+    await page.getByRole("button", { name: "获取最新网页", exact: true }).click();
+    await expect.poll(() => requests.length).toBe(1);
+    expect(requests[0].body).toMatchObject({ target_source_snapshot_id: "mixed-snapshot-2", expected_active_revision: 1, resume_unknown: false });
+    await page.getByLabel("获取最新的网页组").selectOption("mixed-snapshot-1");
+    await page.getByRole("button", { name: "获取最新网页", exact: true }).click();
+    expect(requests).toHaveLength(1);
+    await page.getByLabel("获取最新的网页组").selectOption("mixed-snapshot-2");
+    await page.getByRole("button", { name: "获取最新网页", exact: true }).click();
+    await expect.poll(() => requests.length).toBe(2);
+    expect(requests[1].key).toBe(requests[0].key);
+    expect(requests[1].body).toMatchObject({ target_source_snapshot_id: "mixed-snapshot-2", resume_unknown: true });
+  });
+
+  for (const rejected of [true, false]) test(`仅明确未启动拒绝可以修改资料；普通422保留unknown：${rejected}`, async ({ page }) => {
+    await existingMixed(page);
+    const requests: { body: Record<string, unknown>; key: string }[] = [];
+    await page.route("**/api/semantic-workspace/tasks/edit-mixed/revisions", route => {
+      requests.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] });
+      return route.fulfill({ status: 422, headers: rejected ? { "X-Mangrove-Revision-Outcome": "rejected" } : {}, json: { detail: rejected ? "来源无效，尚未开始" : "执行状态未确认" } });
+    });
+    await page.getByRole("button", { name: "创建新版本", exact: true }).click();
+    await expect.poll(() => requests.length).toBe(1);
+    await expect(page.getByText(rejected ? "来源无效，尚未开始" : "执行状态未确认", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "移除网页组 独立说明 2" }).click();
+    await page.getByRole("button", { name: "创建新版本", exact: true }).click();
+    if (rejected) {
+      await expect.poll(() => requests.length).toBe(2);
+      expect(requests[1].key).not.toBe(requests[0].key);
+      expect(requests[1].body.source_snapshot_ids).toEqual(["mixed-snapshot-1"]);
+    } else {
+      await expect(page.getByText("上次资料修订结果未知，请恢复原资料和要求后重试同一请求", { exact: true })).toBeVisible();
+      expect(requests).toHaveLength(1);
+      await expect(page.getByRole("button", { name: "恢复上次资料修订", exact: true })).toBeVisible();
+    }
+  });
+
+  test("另一标签页更新后，旧创建迟到成功不能清除新草稿", async ({ page, context }) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    const requested = responseBarrier(), release = responseBarrier();
+    await page.route("**/api/semantic-workspace/tasks", async route => { requested.release(); await release.promise; return route.fulfill({ json: workspaceTask("late-mixed", "queued", "旧请求已完成") }); });
+    await page.goto("/data-prep");
+    await page.getByLabel("任务要求", { exact: true }).fill("旧草稿请求");
+    await page.locator('input[type="file"]').setInputFiles({ name: "old.csv", mimeType: "text/csv", buffer: Buffer.from("x\n1", "utf-8") });
+    await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "开始执行", exact: true }).click();
+    await requested.promise;
+    const peer = await context.newPage();
+    await peer.route("**/*", route => route.fulfill({ contentType: "text/html", body: "<html lang=zh><title>合成草稿窗口</title></html>" }));
+    await peer.goto(new URL("/draft-peer", page.url()).href);
+    expect(new URL(peer.url()).origin).toBe(new URL(page.url()).origin);
+    await peer.evaluate(() => {
+      localStorage.setItem("mangrove_workspace_draft_u1_new", JSON.stringify({ draft: { prompt: "另一个标签页的新资料" }, sources: [] }));
+      localStorage.setItem("mangrove_workspace_draft_u1_new_files", JSON.stringify([{ id: "peer", name: "peer.csv", size: 12, status: "reselect" }]));
+    });
+    await expect(page.getByText("当前草稿已在其他页面更新", { exact: false })).toBeVisible();
+    release.release();
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("mangrove_web_task_attempt_u1"))).toBeNull();
+    expect(await peer.evaluate(() => localStorage.getItem("mangrove_workspace_draft_u1_new"))).toContain("另一个标签页的新资料");
+    expect(await peer.evaluate(() => localStorage.getItem("mangrove_workspace_draft_u1_new_files"))).toContain("peer.csv");
+    await peer.close();
+  });
+});
+
+
+test("#135 混合资料明暗390与1440、键盘IME及取消保持焦点", async ({ page }, testInfo) => {
+  await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+  await mockWorkspace(page);
+  let acquisitions = 0, tasks = 0;
+  await page.route("**/api/semantic-workspace/source-acquisitions", route => { acquisitions++; return route.fulfill({ json: mixedAttempt(acquisitions) }); });
+  await page.route("**/api/semantic-workspace/tasks", route => { tasks++; return route.fulfill({ status: 422, json: { detail: "此用例不应创建任务" } }); });
+  await page.goto("/data-prep");
+  await page.getByLabel("任务要求", { exact: true }).fill("关联实体 ID，逐份解释冲突与缺口");
+  await page.locator('input[type="file"]').setInputFiles({ name: "proof.csv", mimeType: "text/csv", buffer: Buffer.from("ID,n\nE101,200", "utf-8") });
+  await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+  await addMixedWeb(page, 1);
+  await expect(page.getByLabel("任务要求", { exact: true })).toBeFocused();
+  const prompt = page.getByLabel("任务要求", { exact: true });
+  await prompt.dispatchEvent("compositionstart");
+  await prompt.dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
+  await prompt.dispatchEvent("compositionend", { data: "资料" });
+  expect(tasks).toBe(0);
+  await page.getByRole("button", { name: "公开网页", exact: true }).click();
+  await page.getByRole("button", { name: "返回当前资料", exact: true }).focus();
+  await page.keyboard.press("Enter");
+  await expect(prompt).toBeFocused();
+  expect(acquisitions).toBe(1);
+  for (const theme of ["light", "dark"]) for (const width of [390, 1440]) {
+    await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
+    await page.evaluate(async theme => {
+      document.documentElement.classList.toggle("dark", theme === "dark");
+      void getComputedStyle(document.querySelector('[aria-label="当前任务资料"] [role="presentation"]')!).backgroundColor;
+      await Promise.all(document.getAnimations().filter(animation => animation instanceof CSSTransition).map(animation => animation.finished.catch(() => undefined)));
+    }, theme);
+    await page.getByLabel("已选网页资料").scrollIntoViewIfNeeded();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    const scan = await new AxeBuilder({ page }).include('[aria-label="当前任务资料"]').analyze();
+    expect(scan.violations.filter(item => item.impact === "serious" || item.impact === "critical")).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath(`mixed-${theme}-${width}.png`), fullPage: true });
+  }
+});
+
+
+test("#135 取消新网页获取的迟到成功保留既有文件和网页组", async ({ page }) => {
+  await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+  await mockWorkspace(page);
+  let posts = 0, canceled = false;
+  const requested = responseBarrier(), release = responseBarrier();
+  await page.route("**/api/semantic-workspace/source-acquisitions", async route => {
+    posts++;
+    if (posts > 2) { requested.release(); await release.promise; return route.fulfill({ json: mixedAttempt(2) }); }
+    return route.fulfill({ json: posts === 1 ? mixedAttempt(1) : { ...mixedAttempt(2), idempotency_key: route.request().headers()["idempotency-key"], status: "acquiring", snapshot: null, snapshot_id: null } });
+  });
+  await page.route("**/api/semantic-workspace/source-acquisitions/mixed-attempt-2", async route => {
+    if (canceled) return route.fulfill({ json: { ...mixedAttempt(2), status: "canceled", snapshot: null, snapshot_id: null } });
+    requested.release(); await release.promise;
+    return route.fulfill({ json: mixedAttempt(2) });
+  });
+  await page.route("**/api/semantic-workspace/source-acquisitions/mixed-attempt-2/cancel", route => { canceled = true; return route.fulfill({ json: { ...mixedAttempt(2), status: "canceled", snapshot: null, snapshot_id: null } }); });
+  await page.goto("/data-prep");
+  await page.getByLabel("任务要求", { exact: true }).fill("保留当前证据");
+  await page.locator('input[type="file"]').setInputFiles({ name: "keep.csv", mimeType: "text/csv", buffer: Buffer.from("ID\nE101", "utf-8") });
+  await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+  await addMixedWeb(page, 1);
+  await page.getByRole("button", { name: "公开网页", exact: true }).click();
+  await page.getByRole("combobox", { name: "来源方式", exact: true }).selectOption("url");
+  await page.getByLabel("精确网址").fill("https://example.com/source-2");
+  await page.getByRole("button", { name: "获取网页", exact: true }).click();
+  await requested.promise;
+  await page.getByRole("button", { name: "取消获取", exact: true }).click();
+  release.release();
+  await page.getByRole("button", { name: "返回当前资料", exact: true }).click();
+  await expect(page.getByLabel("任务要求", { exact: true })).toBeFocused();
+  await expect(page.getByRole("button", { name: "移除网页组 独立说明 1" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "移除网页组 独立说明 2" })).toHaveCount(0);
+  await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+  expect(posts).toBe(3);
+});
+
+
+test("#135 首创建未知后刷新遇到在途409，继续保留原请求和键", async ({ page }) => {
+  await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+  await mockWorkspace(page);
+  const requests: { body: unknown; key: string }[] = [];
+  await page.route("**/api/data-sources/uploads/upload-e2e", route => route.fulfill({ json: { upload_id: "upload-e2e", original_name: "workload.csv", media_type: "text/csv", size_bytes: 64, sha256: "0".repeat(64) } }));
+  await page.route("**/api/semantic-workspace/tasks", route => {
+    requests.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] });
+    return route.fulfill({ status: requests.length === 1 ? 503 : 409, json: { detail: requests.length === 1 ? "创建结果未知" : "同一幂等请求正在创建" } });
+  });
+  await page.goto("/data-prep");
+  await page.getByLabel("任务要求", { exact: true }).fill("只创建一次完整任务");
+  await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("ID\nE101", "utf-8") });
+  await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "开始执行", exact: true }).click();
+  await expect.poll(() => requests.length).toBe(1);
+  await page.reload();
+  await expect.poll(() => requests.length).toBe(2);
+  await expect(page.getByText("上次任务尚未恢复，资料仍保留", { exact: false })).toBeVisible();
+  expect(await page.evaluate(() => localStorage.getItem("mangrove_web_task_attempt_u1"))).toContain(requests[0].key);
+  await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "开始执行", exact: true }).click();
+  await expect.poll(() => requests.length).toBe(3);
+  expect(requests[1]).toEqual(requests[0]); expect(requests[2]).toEqual(requests[0]);
 });

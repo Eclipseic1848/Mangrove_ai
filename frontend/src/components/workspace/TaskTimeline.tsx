@@ -532,7 +532,7 @@ export function TaskTimeline({
   onCancel: () => Promise<void>;
   onRecycle: () => Promise<void>;
   onRetry: (unchanged?: boolean) => void | Promise<void>;
-  onRefreshSource: (externalApiConfirmed: boolean) => Promise<void>;
+  onRefreshSource: (externalApiConfirmed: boolean, targetSourceSnapshotId?: string) => Promise<void>;
   onGapAction: (
     action: "accept_gap" | "reject_gap" | "supplement_source" | "refresh_source",
   ) => Promise<void>;
@@ -545,6 +545,9 @@ export function TaskTimeline({
   const [eventsOpen, setEventsOpen] = useState(true);
   const [retryingUnknown, setRetryingUnknown] = useState(false);
   const [refreshingSource, setRefreshingSource] = useState(false);
+  const webSources = task.web_sources ?? (task.web_source ? [task.web_source] : []);
+  const [refreshTarget, setRefreshTarget] = useState("");
+  const selectedWebSource = webSources.find(source => source.source_snapshot_id === refreshTarget) ?? webSources[0];
   const [gapAction, setGapAction] = useState<string | null>(null);
   const [retryingStop, setRetryingStop] = useState(false);
   const events = useMemo(() => {
@@ -627,24 +630,25 @@ export function TaskTimeline({
         <QuestionDialog key={`${task.task_id}:${task.viewing_revision}:${task.question.round_id ?? task.question.question_id}`} question={task.question} onAnswer={onAnswer} onRefreshQuestion={onRefreshQuestion} />
       )}
       {task.question?.purpose === "control" && <p role="status" className="mb-4 rounded-xl border p-4 text-sm leading-6">{task.question.prompt} 仍可继续对话提出更正；补充要求需要明确确认后，以新版本重新开始。</p>}
-      {task.web_source && (
+      {selectedWebSource && (
         <div className="mb-4 flex flex-wrap items-start gap-3 border-b pb-4 text-sm">
           <Globe2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
           <div className="min-w-0 flex-1">
             <p className="font-medium">来源快照已冻结</p>
             <p className="mt-1 break-all text-xs leading-5 text-muted-foreground">
-              {task.web_source.snapshot.artifacts[0]?.final_url}
+              {selectedWebSource.snapshot.artifacts[0]?.final_url}
               {" · "}
-              {new Date(task.web_source.snapshot.created_at).toLocaleString("zh-CN")}
+              {new Date(selectedWebSource.snapshot.created_at).toLocaleString("zh-CN")}
               {" · "}
-              {task.web_source.snapshot.valid_page_count} 个有效页面
+              {selectedWebSource.snapshot.valid_page_count} 个有效页面
               {" · "}
-              {task.web_source.snapshot.allowed_scope.kind === "same_site"
-                ? `${task.web_source.snapshot.allowed_scope.site} 内最多 ${task.web_source.snapshot.allowed_scope.page_limit} 页`
-                : "仅当前页"}
+              {selectedWebSource.snapshot.allowed_scope.kind === "same_site"
+                ? `${selectedWebSource.snapshot.allowed_scope.site} 内最多 ${selectedWebSource.snapshot.allowed_scope.page_limit} 页`
+                : selectedWebSource.snapshot.allowed_scope.kind === "public_search" ? "公开搜索范围" : "仅当前页"}
               {" · "}
               重试不会重新读取网页
             </p>
+            {webSources.length > 1 && <label className="mt-2 block text-xs">获取最新的网页组<select aria-label="获取最新的网页组" value={selectedWebSource.source_snapshot_id} disabled={refreshingSource} onChange={event => setRefreshTarget(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-2 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{webSources.map(source => <option key={source.source_snapshot_id} value={source.source_snapshot_id}>{source.snapshot.allowed_scope.query || source.snapshot.artifacts[0]?.title || source.source_snapshot_id}</option>)}</select></label>}
           </div>
           {task.viewing_revision === task.current_revision && (
             task.model_connection_id ? (
@@ -673,7 +677,7 @@ export function TaskTimeline({
                       <AlertDialog.Action
                         onClick={() => {
                           setRefreshingSource(true);
-                          void onRefreshSource(true).catch(() => {
+                          void onRefreshSource(true, selectedWebSource.source_snapshot_id).catch(() => {
                             // 父级已展示失败原因；事件入口接住拒绝，避免未处理异常。
                           }).finally(() => setRefreshingSource(false));
                         }}
@@ -691,7 +695,7 @@ export function TaskTimeline({
                 disabled={refreshingSource}
                 onClick={() => {
                   setRefreshingSource(true);
-                  void onRefreshSource(false).catch(() => {
+                  void onRefreshSource(false, selectedWebSource.source_snapshot_id).catch(() => {
                     // 父级已展示失败原因；事件入口接住拒绝，避免未处理异常。
                   }).finally(() => setRefreshingSource(false));
                 }}

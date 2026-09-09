@@ -542,6 +542,13 @@ class TestS6Supervision:
             runtime_mod, "AgenticRuntimeRepository", lambda db_path: repository
         )
 
+        import hashlib
+
+        # 夹具使用真实原件和修订冻结摘要，避免绕过正式来源完整性门。
+        source_path = tmp_path / "f.csv"
+        source_path.write_text("name,value\nA,1\n", encoding="utf-8")
+        source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+
         class _Store(WebUIStore):
             def get_semantic_workspace_revision(
                 self, user_id, task_id, revision
@@ -550,6 +557,7 @@ class TestS6Supervision:
                     "objective_text": "汇总目标",
                     "output_formats": ("json",),
                     "table_output_contracts": [],
+                    "source_refs": [{"upload_id": "u1", "sha256": source_sha256}],
                 }
 
             def get_web_task_contract(self, user_id, task_id, revision):
@@ -571,7 +579,7 @@ class TestS6Supervision:
             upload_id = "u1"
             original_name = "f.csv"
             storage_path = str(tmp_path / "f.csv")
-            sha256 = "a" * 64
+            sha256 = source_sha256
             media_type = "text/csv"
 
         class _UploadStore:

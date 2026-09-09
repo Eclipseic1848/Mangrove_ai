@@ -93,7 +93,7 @@ def test_webui_0010_preserves_source_history_and_supports_recovery(tmp_path: Pat
         connection.commit()
     before = database.read_bytes()
     target = DatabaseTarget("webui", database)
-    assert inspect_database(target).pending_revisions == ("webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015")
+    assert inspect_database(target).pending_revisions == ("webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016")
     with pytest.raises(SchemaNotCurrentError):
         WebUIStore(str(database))
     assert database.read_bytes() == before
@@ -103,7 +103,7 @@ def test_webui_0010_preserves_source_history_and_supports_recovery(tmp_path: Pat
         expected_source_sha256=hashlib.sha256(before).hexdigest(),
     )
     assert receipt.source_revision == "webui_0009"
-    assert receipt.applied_revisions == ("webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015")
+    assert receipt.applied_revisions == ("webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016")
     with closing(sqlite3.connect(database)) as connection:
         columns = {row[1]: row for row in connection.execute(
             "PRAGMA table_info(source_acquisition_attempts)"
@@ -171,7 +171,7 @@ def test_current_webui_installs_component_schemas_and_evidence(tmp_path: Path) -
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("webui_0015",)
+        ).fetchone() == ("webui_0016",)
         candidate_rows = connection.execute(
             "SELECT migration_id, backup_sha256 "
             "FROM candidate_verification_migrations ORDER BY migration_id"
@@ -307,7 +307,7 @@ def test_current_webui_resumes_known_history_without_rewriting_evidence(
             )
         connection.commit()
 
-    _upgrade(database, "webui_0015")
+    _upgrade(database, "webui_0016")
 
     attempts = SqliteCandidateVerificationRepository(database).list_for_candidate(
         "owner-a",

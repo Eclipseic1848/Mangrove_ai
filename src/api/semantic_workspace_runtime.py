@@ -952,13 +952,13 @@ class SemanticWorkspaceManager:
             candidate_set_hash=str(runtime["verified_candidate_set_hash"]),
         )
         if assessment is None:
-            web_contract = get_store().get_web_task_contract(
+            web_contract = get_store().get_source_contract(
                 user_id,
                 task_id,
                 revision,
             )
             if web_contract is not None and (
-                web_contract.get("goal_contract", {}).get("coverage")
+                (web_contract.get("goal_contract") or {}).get("coverage")
             ):
                 raise ValueError(
                     "网页 Candidate 缺少冻结覆盖结论，禁止正式发布"
@@ -2603,8 +2603,12 @@ class SemanticWorkspaceManager:
             )
         upload_store = _upload_store()
         sources: list[SourceInput] = []
-        for upload_id in task["upload_ids"]:
-            upload = upload_store.resolve(user_id, upload_id)
+        for source_ref in task_revision.get("source_refs", []):
+            if not source_ref.get("upload_id"):
+                continue
+            upload = upload_store.resolve(user_id, source_ref["upload_id"])
+            if upload.sha256 != source_ref.get("sha256") or hashlib.sha256(Path(upload.storage_path).read_bytes()).hexdigest() != source_ref.get("sha256"):
+                raise ValueError("冻结上传来源内容与任务修订不一致")
             sources.append(
                 SourceInput(
                     upload_id=upload.upload_id,
@@ -2660,22 +2664,27 @@ class SemanticWorkspaceManager:
                     media_type=artifact["media_type"],
                 )
             )
-        web_contract = get_store().get_web_task_contract(
-            user_id,
-            task_id,
-            revision,
-        )
-        frozen_context = TaskContextRepository(
-            settings.webui_db_path
-        ).get_frozen(user_id, task_id, revision)
-        web_snapshot = (
-            web_repository.get_snapshot(
-                user_id,
-                web_contract["source_snapshot_id"],
-            )
-            if web_contract is not None
-            else None
-        )
+        source_contract = get_store().get_source_contract(user_id, task_id, revision)
+        frozen_context = TaskContextRepository(settings.webui_db_path).get_frozen(user_id, task_id, revision)
+        web_snapshots = []
+        for group in (source_contract or {}).get("web_sources", []):
+            snapshot = web_repository.get_snapshot(user_id, group["source_snapshot_id"])
+            if snapshot is None:
+                raise ValueError("冻结网页来源组已缺失")
+            web_snapshots.append(snapshot)
+        # 保留的结果目标仍须评估；零网页不等于目标已完整，也不把文件计成网页。
+        source_coverage = ({"kind": "selected_files", "status": "coverage_unknown", "valid_page_count": 0,
+                            "failed_page_count": 0, "limit_reached": False, "web_artifact_ids": []}
+                           if source_contract and source_contract.get("goal_contract") is not None else None)
+        if web_snapshots:
+            coverages = [item.get("coverage") or {} for item in web_snapshots]
+            source_coverage = {
+                "status": "scope_complete" if all(item.get("status") == "scope_complete" and not item.get("limit_reached") and not item.get("failed_request_count") for item in coverages) and not any(item["failed_page_count"] for item in web_snapshots) else "coverage_unknown",
+                "valid_page_count": sum(item["valid_page_count"] for item in web_snapshots),
+                "failed_page_count": sum(item["failed_page_count"] for item in web_snapshots),
+                "limit_reached": any(item.get("limit_reached") for item in coverages),
+                "web_artifact_ids": [ref["artifact_id"] for ref in task_revision.get("source_refs", []) if ref.get("kind") == "web_artifact"],
+            }
         request_values: dict[str, Any] = {
             "user_id": user_id,
             "task_id": task_id,
@@ -2687,8 +2696,8 @@ class SemanticWorkspaceManager:
             ),
             "sources": tuple(sources),
             "goal_contract": (
-                web_contract["goal_contract"]
-                if web_contract is not None
+                source_contract["goal_contract"]
+                if source_contract is not None
                 else None
             ),
             "compiled_context": (
@@ -2696,15 +2705,7 @@ class SemanticWorkspaceManager:
                 if frozen_context is not None
                 else None
             ),
-            "source_coverage": (
-                {
-                    **(web_snapshot.get("coverage") or {}),
-                    "valid_page_count": int(web_snapshot["valid_page_count"]),
-                    "failed_page_count": int(web_snapshot["failed_page_count"]),
-                }
-                if web_snapshot is not None
-                else None
-            ),
+            "source_coverage": source_coverage,
             "permission_profile": runtime["permission_profile"],
             # 外部 Provider 只能使用创建运行记录时已经冻结的用户确认，不能在执行时推断。
             "external_api_confirmed": bool(
