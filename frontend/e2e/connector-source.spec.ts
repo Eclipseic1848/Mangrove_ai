@@ -403,3 +403,20 @@ test("I2 Owner切换后迟到原件不能回填新Owner或持久化正文", asyn
   expect(await page.evaluate(() => Object.entries(localStorage).filter(([key]) => key.includes("owner-b") && key.includes("connector_attempt")))).toEqual([]);
   expect(writes.filter(item => item.path.endsWith("acquisitions"))).toHaveLength(0);
 });
+
+for (const mode of ["http_api", "database"]) test(`J2 纯${mode}无附件默认输出并提交原任务`, async ({page}) => {
+  const {scope,control,writes}=await fixture(page);
+  control.task={task_id:"created-connector-task",title:"纯连接任务",objective_text:"核对连接记录",upload_ids:[],output_formats:["markdown"],provider:"local",model:"fixture",runtime_version:"pi",status:"queued",active_revision:1,current_revision:1,viewing_revision:1,run_id:"original-run",summary:null,error:null,question:null,cancel_requested:false,created_at:"2026-09-09T00:00:00Z",updated_at:"2026-09-09T00:00:00Z",events:[],revisions:[],attempts:[],harness_events:[],plan:null,run:null,delivery:null,uploads:[],web_sources:[]};
+  if(mode==="database") {
+    Object.assign(scope,{protocol:"database",connection_id:"owned-db"});
+    await page.route("**/api/data-sources/connections",route=>route.fulfill({json:[{connection_id:"owned-db",name:"本人只读连接",dialect:"sqlite"}]}));
+    await page.route("**/api/data-sources/connections/owned-db/schema",route=>route.fulfill({json:{default_schema:"main",tables:[{name:"orders",schema:"main",primary_key:["id"],columns:[{name:"id",type:"integer"}]}]}}));
+  }
+  await page.goto("/data-prep");await page.getByRole("textbox",{name:"任务要求"}).fill("核对连接记录");await page.getByRole("button",{name:"从已有连接读取",exact:true}).click();
+  if(mode==="database"){await page.getByRole("combobox",{name:"资料来源",exact:true}).selectOption(mode);await page.getByRole("combobox",{name:"已登记数据库连接",exact:true}).selectOption("owned-db");await page.getByRole("combobox",{name:"读取哪张表",exact:true}).selectOption("orders");}
+  else await page.getByLabel("公开数据地址",{exact:true}).fill("https://records.example.invalid/items");
+  await page.getByRole("button",{name:"核对读取范围",exact:true}).click();await page.getByRole("button",{name:"读取并冻结资料",exact:true}).click();await page.getByRole("button",{name:"加入当前任务",exact:true}).click();
+  await page.getByRole("button",{name:"检查上下文草案",exact:true}).click();await page.getByRole("button",{name:/^(启动任务|开始执行)$/}).click();
+  await expect.poll(()=>writes.filter(item=>item.path==="/api/semantic-workspace/tasks").length).toBe(1);
+  expect(writes.find(item=>item.path==="/api/semantic-workspace/tasks").body).toMatchObject({upload_ids:[],source_snapshot_ids:["connector-snapshot"],output_formats:["markdown"]});await expect(page).toHaveURL(/task=created-connector-task/);
+});
