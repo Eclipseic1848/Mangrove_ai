@@ -3,9 +3,16 @@
   "private": true,
   "version": "0.0.0",
   "scripts": {
-    "eval": "promptfoo eval --no-cache --no-share --no-progress-bar --no-table --output results.json"
+    "eval": "promptfoo eval --no-cache --no-share --no-progress-bar --no-table --output results.json",
+    "test:security": "node verify-security.mjs"
   },
   "devDependencies": {
     "promptfoo": "0.122.1"
+  },
+  "overrides": {
+    "sharp": "0.35.4",
+    "onnxruntime-node": {
+      "adm-zip": "0.6.0"
+    }
   }
 }

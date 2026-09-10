@@ -224,12 +224,43 @@ jobs:
           python -m pip check 2>&1 | tee "${evidence_dir}/pip-check.log"
           python scripts/ci/check_dependency_group_imports.py --group "${{ matrix.group }}" \
             | tee "${evidence_dir}/import-smoke.json"
+      - name: 验证采集通配匹配安全边界
+        if: matrix.group == 'collectors'
+        run: python scripts/ci/check_protego_security.py | tee .artifacts/dependency-groups/collectors/protego-security.json
       - name: 上传依赖组证据
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: dependency-${{ matrix.group }}-evidence
           path: .artifacts/dependency-groups/${{ matrix.group }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  node-evaluation-security:
+    if: inputs.gate == 'dependency-groups'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22.22.1'
+      - name: 验证评测依赖安全与现有适配
+        working-directory: evals/promptfoo-batch8a
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm ls sharp adm-zip --all
+          npm run test:security | tee security-result.log
+          npm audit --audit-level=high --json > security-audit.json
+      - name: 上传评测依赖证据
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: node-evaluation-security-evidence
+          path: |
+            evals/promptfoo-batch8a/security-result.log
+            evals/promptfoo-batch8a/security-audit.json
           if-no-files-found: warn
           retention-days: 14
 
@@ -254,6 +285,8 @@ jobs:
           mkdir -p ../.artifacts/heavy
           npm ci 2>&1 | tee ../.artifacts/heavy/frontend-install.log
           npm run build 2>&1 | tee ../.artifacts/heavy/frontend-build.log
+      - name: 验证浏览器目标数据安全边界
+        run: node ../scripts/ci/check_browserslist_security.cjs node_modules
       - name: 运行所选浏览器回归
         env:
           PLAYWRIGHT_JUNIT_OUTPUT_FILE: ../.artifacts/heavy/frontend-e2e.xml
