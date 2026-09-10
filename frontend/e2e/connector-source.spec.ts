@@ -182,6 +182,8 @@ test("H1 公开HTTP来源先核范围再读取预览，显式加入完整任务"
   await expect(page.getByText('[{"name":"合成记录"}]', { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "加入当前任务", exact: true }).click();
   await expect(page.getByText("连接资料 · 1 个原件", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("数量要求", { exact: true })).toHaveValue("当前已成功读取资料中有证据的内容");
+  await expect(page.getByLabel("完整性要求", { exact: true })).toHaveValue("逐来源披露失败、范围和未覆盖内容，不承诺来源完整");
   await page.getByRole("button", { name: "检查上下文草案", exact: true }).click();
   await page.getByRole("button", { name: "启动任务", exact: true }).click();
   await expect(page.getByText("任务已创建：created-connector-task", { exact: true })).toBeVisible();
@@ -351,10 +353,13 @@ test("D2 数据库范围和原件全程正确标示，加入后仍完整提交�
   await expect(sources).toBeVisible(); await sources.getByText("查看已读原件与范围", { exact: true }).click();
   await expect(sources.getByText("数据库：owned-db · 表：orders", { exact: true })).toBeVisible();
   await expect(sources).not.toContainText("精确页面");
+  await page.getByLabel("数量要求", { exact: true }).fill("保留用户明确的数量目标");
+  await page.getByLabel("完整性要求", { exact: true }).fill("保留用户明确的缺口边界");
   await page.getByRole("button", { name: "检查上下文草案", exact: true }).click();
   await page.getByRole("button", { name: "启动任务", exact: true }).click();
   await expect(page.getByText("任务已创建：created-connector-task", { exact: true })).toBeVisible();
   expect(writes.find(item => item.path.endsWith("/acquisitions")).body.source).toEqual({ source_type: "database", connection_id: "owned-db", table: "orders", fields: ["region"] });
+  expect(writes.find(item => item.path === "/api/semantic-workspace/tasks").body).toMatchObject({ quantity_requirement: "保留用户明确的数量目标", completeness_requirement: "保留用户明确的缺口边界" });
   expect(writes.find(item => item.path === "/api/semantic-workspace/tasks").body).toMatchObject({ source_snapshot_ids: ["connector-snapshot"], upload_ids: ["original-file"], output_formats: ["json"] });
 });
 

@@ -37,7 +37,7 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   const storageKey = `mangrove_workspace_draft_${ownerId}_${draftScope}`;
   const filesKey = `${storageKey}_files`;
   const [saved] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(storageKey) || "null") as { draft?: WebIntakeDraft; sources?: Choice[]; history?: ReusableSource[]; mustInclude?: string; exclusions?: string; quantity?: string; completeness?: string; templateId?: string; templateVersion?: number; memoryIds?: number[] } | null; } catch { return null; }
+    try { return JSON.parse(localStorage.getItem(storageKey) || "null") as { draft?: WebIntakeDraft; sources?: Choice[]; history?: ReusableSource[]; mustInclude?: string; exclusions?: string; quantity?: string | null; completeness?: string | null; templateId?: string; templateVersion?: number; memoryIds?: number[] } | null; } catch { return null; }
   });
   const [draft, setDraft] = useState<WebIntakeDraft | null>(props.draft ?? saved?.draft ?? null);
   const [sources, setSources] = useState<Choice[]>(() => (saved?.sources ?? [...initialSources.map(snapshot => ({ snapshotId: snapshot.snapshot_id, attemptId: snapshot.attempt_id, snapshot })), ...initialUnavailableSourceIds.map(snapshotId => ({ snapshotId, attemptId: "" }))]).map(source => initialUnavailableSourceIds.includes(source.snapshotId) ? { snapshotId: source.snapshotId, attemptId: "", error: "来源已删除，请明确移除此组后换新资料；不会重新采集。" } : source));
@@ -54,8 +54,8 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   const [submitting, setSubmitting] = useState(false);
   const [mustInclude, setMustInclude] = useState(saved?.mustInclude ?? "");
   const [exclusions, setExclusions] = useState(saved?.exclusions ?? "");
-  const [quantity, setQuantity] = useState(saved?.quantity ?? "当前已成功读取资料中有证据的内容");
-  const [completeness, setCompleteness] = useState(saved?.completeness ?? "逐来源披露失败、范围和未覆盖内容，不承诺来源完整");
+  const [quantityDraft, setQuantity] = useState<string | null>(saved?.quantity ?? null);
+  const [completenessDraft, setCompleteness] = useState<string | null>(saved?.completeness ?? null);
   const [options, setOptions] = useState<{ templates: TaskTemplateOption[]; memories: OwnerMemoryOption[] }>({ templates: [], memories: [] });
   const [templateId, setTemplateId] = useState(saved?.templateId ?? "");
   const [templateVersion, setTemplateVersion] = useState(saved?.templateVersion ?? 0);
@@ -101,10 +101,10 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   }, []);
   useEffect(() => {
     if (stale) return;
-    try { localStorage.setItem(storageKey, JSON.stringify({ draft, mustInclude, exclusions, quantity, completeness, templateId, templateVersion, memoryIds,
+    try { localStorage.setItem(storageKey, JSON.stringify({ draft, mustInclude, exclusions, quantity: quantityDraft, completeness: completenessDraft, templateId, templateVersion, memoryIds,
       history: history.map(({ source_key, kind, identity, label, sha256, upload_id, output_id, acquired_at, time_kind, media_type, size_bytes, origin }) => ({ source_key, kind, identity, label, sha256, upload_id, output_id, acquired_at, time_kind, media_type, size_bytes, origin, availability: "unknown", limitations: [] })),
       sources: sources.map(({ snapshotId, attemptId }) => ({ snapshotId, attemptId })) })); } catch { /* 不存原文，存储不可用时仅当前会话保留。 */ }
-  }, [draft, sources, history, storageKey, stale, mustInclude, exclusions, quantity, completeness, templateId, templateVersion, memoryIds]);
+  }, [draft, sources, history, storageKey, stale, mustInclude, exclusions, quantityDraft, completenessDraft, templateId, templateVersion, memoryIds]);
   useEffect(() => {
     const changed = (event: StorageEvent) => { if (event.key === storageKey || event.key === filesKey) { generation.current += 1; setStale(true); } };
     window.addEventListener("storage", changed);
@@ -112,6 +112,8 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   }, [storageKey, filesKey]);
   const hasWeb = sources.length > 0;
   const connectorCount = sources.filter(item => item.snapshot?.source_kind === "connector").length;
+  const quantity = quantityDraft ?? (connectorCount ? "当前已成功读取资料中有证据的内容" : "当前已成功读取页面中有证据的内容");
+  const completeness = completenessDraft ?? (connectorCount ? "逐来源披露失败、范围和未覆盖内容，不承诺来源完整" : "逐来源披露失败、范围和未覆盖内容，不承诺全网完整");
   useEffect(() => {
     if (preserveContext) return;
     let current = true;
