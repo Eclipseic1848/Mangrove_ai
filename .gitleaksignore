@@ -22,3 +22,13 @@
 
 # 同一索引结构摘要在Issue #137合并基线再次命中；仅豁免已核实的这条合并历史行。
 115c990c60a865ceb0749b7993664d963c112251:src/database_migrations/schema_manifest.json:generic-api-key:100
+
+# Issue141已核实历史DDL摘要和合成幂等请求标识，精确到commit/file/rule/line。
+72891b7572e1bf7c91ae90bf0905e2faead55df2:src/database_migrations/schema_manifest.json:generic-api-key:131
+72891b7572e1bf7c91ae90bf0905e2faead55df2:src/database_migrations/schema_manifest.json:generic-api-key:142
+72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:56
+72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:84
+72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:87
+72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:98
+72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:151
+72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:199

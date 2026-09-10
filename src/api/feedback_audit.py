@@ -31,7 +31,8 @@ def require_admin(conn, actor_id):
 
 def feedback_content(conn, feedback_id):
     # 关联必须来自同一快照；损坏历史反馈不能借新的消息归属补成可读。
-    row = conn.execute('''SELECT f.id,f.message_id,f.conv_id,f.user_id,
+    from .workspace_feedback import content_row
+    row = content_row(conn,feedback_id) if feedback_id<0 else conn.execute('''SELECT f.id,f.message_id,f.conv_id,f.user_id,
         substr(CAST(f.comment AS BLOB),1,2097153) AS comment,
         substr(CAST(f.admin_note AS BLOB),1,2097153) AS admin_note,
         substr(CAST(m.content AS BLOB),1,2097153) AS answer,
@@ -67,6 +68,9 @@ def feedback_content(conn, feedback_id):
         content[key] = original[:lo]
         truncated = truncated or lo < len(original)
     payload = {'content': content, 'truncated': truncated, 'content_bytes': len(encoded(content))}
+    if feedback_id<0:
+        payload["source"]={key:row[key] for key in ("source_kind","task_id","revision","output_id","output_sha256")}
+        payload["answer_kind"]="revision_summary"
     return row, payload
 
 
@@ -88,19 +92,23 @@ def audit_content(conn, feedback_id, actor_id, reason, idempotency_key):
         payload = {'result': result, 'failure_code': failure_code}
     request_digest = digest([actor_id, role, feedback_id, message_id, conv_id, owner_id, reason, 'feedback_content_read'])
     response_digest = digest(payload)
-    old = conn.execute('SELECT event_id,request_digest,response_digest FROM feedback_content_access WHERE actor_id=? AND idempotency_key=?', (actor_id, idempotency_key)).fetchone()
+    audit_table='workspace_feedback_content_access' if feedback_id<0 else 'feedback_content_access'
+    old = conn.execute('SELECT event_id,request_digest,response_digest FROM feedback_content_access WHERE actor_id=? AND idempotency_key=? UNION ALL SELECT event_id,request_digest,response_digest FROM workspace_feedback_content_access WHERE actor_id=? AND idempotency_key=?', (actor_id,idempotency_key,actor_id,idempotency_key)).fetchone()
     if old:
         if old['request_digest'] != request_digest or old['response_digest'] != response_digest:
             raise ValueError('审计幂等键冲突')
         return {'event_id': old['event_id'], **payload}
     event_id = uuid.uuid4().hex
-    conn.execute('''INSERT INTO feedback_content_access
+    source_fields=',source_identity_json' if feedback_id<0 else ''
+    source_values=',?' if feedback_id<0 else ''
+    source_args=(json.dumps(payload.get('source'),ensure_ascii=False) if result=='success' else None,) if feedback_id<0 else ()
+    conn.execute(f'''INSERT INTO {audit_table}
         (event_id,actor_id,actor_role,idempotency_key,reason,action,feedback_id,message_id,
-         conv_id,owner_id,request_digest,response_digest,content_bytes,truncated,result,failure_code,created_at)
-        VALUES (?,?,?,?,?,'feedback_content_read',?,?,?,?,?,?,?,?,?,?,?)''',
+         conv_id,owner_id,request_digest,response_digest,content_bytes,truncated,result,failure_code,created_at{source_fields})
+        VALUES (?,?,?,?,?,'feedback_content_read',?,?,?,?,?,?,?,?,?,?,?{source_values})''',
         (event_id,actor_id,role,idempotency_key,reason,feedback_id,message_id,conv_id,owner_id,
          request_digest,response_digest,payload.get('content_bytes',0),int(payload.get('truncated',False)),
-         result,failure_code,datetime.now(timezone.utc).isoformat()))
+         result,failure_code,datetime.now(timezone.utc).isoformat())+source_args)
     return {'event_id': event_id, **payload}
 
 
