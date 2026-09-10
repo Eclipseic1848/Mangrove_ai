@@ -51,7 +51,7 @@ def test_scrapling_fetchers_extra_has_a_complete_compatible_constraint_set() -> 
         "browserforge==1.2.4",
         "apify-fingerprint-datapoints==0.13.0",
         "msgspec==0.21.1",
-        "protego==0.6.1",
+        "protego==0.6.2",
     }.issubset(production)
     assert "chardet==5.2.0" in collectors
     assert "pydantic-settings==2.14.2" in runtime
