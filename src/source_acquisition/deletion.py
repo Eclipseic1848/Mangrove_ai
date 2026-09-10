@@ -83,7 +83,7 @@ def _metadata(owner_id,ref):
         store=reuse.uploads();identity=ref['upload_id']
         item=store._load_sidecar(store._user_dir(owner_id,'objects')/(identity+'.meta'),user_id=owner_id,upload_id=identity)
         result=dict(source_key=key,kind=kind,identity='original',upload_id=identity,label=item.original_name,sha256=item.sha256,media_type=item.media_type,size_bytes=item.size_bytes,acquired_at=item.created_at,time_kind='acquired' if item.created_at else 'unknown')
-    elif kind=='web_artifact':
+    elif kind in {'web_artifact','connector_artifact'}:
         with closing(_connection()) as connection:
             row=connection.execute('SELECT artifact_id,snapshot_id,content_sha256,media_type,size_bytes,title,read_at FROM source_artifacts WHERE owner_id=? AND artifact_id=?',(owner_id,ref['artifact_id'])).fetchone()
         if row is None: raise PermissionError('网页原件不存在')
@@ -108,7 +108,7 @@ def _now():
 def _ref(item):
     kind=item['kind']
     if kind=='upload': return dict(upload_id=item['upload_id'],sha256=item['sha256'])
-    if kind=='web_artifact': return dict(kind=kind,artifact_id=item['artifact_id'],snapshot_id=item['snapshot_id'],sha256=item['sha256'])
+    if kind in {'web_artifact','connector_artifact'}: return dict(kind=kind,artifact_id=item['artifact_id'],snapshot_id=item['snapshot_id'],sha256=item['sha256'])
     return dict(kind=kind,output_id=item['output_id'],sha256=item['sha256'])
 
 
@@ -246,10 +246,15 @@ def _remove_object(owner_id,item):
                 bound=redact(json.loads(binding['bound_plan_json'])) if binding['bound_plan_json'] else None
                 connection.execute('UPDATE semantic_binding_revisions SET reports_json=?,result_json=?,bound_plan_json=? WHERE user_id=? AND plan_id=? AND binding_revision=?',(_json(reports),_json(result),_json(bound) if bound is not None else None,owner_id,binding['plan_id'],binding['binding_revision']))
 
-        if item['kind']=='web_artifact':
+        if item['kind'] in {'web_artifact','connector_artifact'}:
+            media=connection.execute('SELECT media_type FROM source_artifacts WHERE owner_id=? AND artifact_id=?',(owner_id,identity)).fetchone()
+            if item['kind']=='connector_artifact':
+                from src.source_acquisition.connection_source import remove_connector_raw
+                scope=connection.execute('SELECT allowed_scope_json FROM source_snapshots WHERE owner_id=? AND snapshot_id=?',(owner_id,item['snapshot_id'])).fetchone()
+                remove_connector_raw(json.loads(scope[0]),item['sha256'])
             connection.execute('DELETE FROM source_artifacts WHERE owner_id=? AND artifact_id=?',(owner_id,identity))
             snapshot=item['snapshot_id']
-            cached=Path(settings.semantic_execution_root).resolve()/'frozen-web-sources'/hashlib.sha256(owner_id.encode()).hexdigest()[:16]/(hashlib.sha256(identity.encode()).hexdigest()[:24]+'.html')
+            cached=Path(settings.semantic_execution_root).resolve()/'frozen-web-sources'/hashlib.sha256(owner_id.encode()).hexdigest()[:16]/(hashlib.sha256(identity.encode()).hexdigest()[:24]+('.jsonl' if (media[0] if media else None)=='application/x-ndjson' else '.json' if (media[0] if media else None)=='application/json' else '.html'))
             if cached.is_symlink() or cached.resolve()!=cached: raise ValueError('unsafe_web_cache_path')
             if cached.exists():
                 if reuse._digest(cached)!=item['sha256']: raise ValueError('web_cache_identity_changed')
@@ -257,7 +262,7 @@ def _remove_object(owner_id,item):
             if not connection.execute('SELECT 1 FROM source_artifacts WHERE owner_id=? AND snapshot_id=?',(owner_id,snapshot)).fetchone():
                 connection.execute('DELETE FROM source_page_failures WHERE owner_id=? AND snapshot_id=?',(owner_id,snapshot))
                 connection.execute("UPDATE source_snapshots SET allowed_scope_json='{}',coverage_json='{}',valid_page_count=0,failed_page_count=0 WHERE owner_id=? AND snapshot_id=?",(owner_id,snapshot))
-                connection.execute("UPDATE source_acquisition_attempts SET request_url='',normalized_url='',allowed_scope_json='{}',purpose='',error_message=NULL,search_report_json=NULL WHERE owner_id=? AND snapshot_id=?",(owner_id,snapshot))
+                connection.execute("UPDATE source_acquisition_attempts SET request_url='',normalized_url='',allowed_scope_json='{}',purpose='',error_message=NULL,search_report_json=NULL,connector_progress_json=NULL WHERE owner_id=? AND snapshot_id=?",(owner_id,snapshot))
         connection.execute("UPDATE source_deletions SET state='deleted',deleted_at=? WHERE owner_id=? AND source_key=?",(_now(),owner_id,key));connection.commit()
 
 

@@ -1251,7 +1251,7 @@ def _resolve_mixed_sources(user_id, upload_ids, snapshot_ids, output_ids=()):
         if int(snapshot["valid_page_count"]) < 1 or snapshot.get("coverage", {}).get("status") == "hard_insufficient":
             raise HTTPException(409, "网页来源未达到冻结完整性门，不能通过其他来源抵消")
         snapshots.append(snapshot)
-        refs.extend({"kind": "web_artifact", "snapshot_id": snapshot_id,
+        refs.extend({"kind": "connector_artifact" if snapshot.get("source_kind")=="connector" else "web_artifact", "snapshot_id": snapshot_id,
                      "artifact_id": artifact["artifact_id"], "sha256": artifact["content_sha256"]}
                     for artifact in snapshot["artifacts"])
     from src.source_acquisition.reuse import resolve_frozen_source
@@ -1399,7 +1399,7 @@ def _read_workspace_source_findings(user_id: str, task: dict[str, Any]):
 
     for event in reversed(get_store().list_semantic_workspace_events(user_id, task["task_id"])):
         facts = event.get("details") or {}
-        if not any(ref.get("kind") in {"web_artifact","delivery_output"} for ref in (frozen or {}).get("source_refs", [])) and event["event_type"] == "source.observed" and facts.get("revision") == revision and facts.get("inspected_sources") == inspected_sources:
+        if not any(ref.get("kind") in {"web_artifact","connector_artifact","delivery_output"} for ref in (frozen or {}).get("source_refs", [])) and event["event_type"] == "source.observed" and facts.get("revision") == revision and facts.get("inspected_sources") == inspected_sources:
             return tuple(facts["source_findings"])
     reports = UploadSourceInspector(
         user_id=user_id, upload_store=_uploads(),
@@ -1411,7 +1411,7 @@ def _read_workspace_source_findings(user_id: str, task: dict[str, Any]):
     from types import SimpleNamespace
     repository = SourceAcquisitionRepository(settings.webui_db_path)
     for ref in (frozen or {}).get("source_refs", []):
-        if ref.get("kind") != "web_artifact":
+        if ref.get("kind") not in {"web_artifact", "connector_artifact"}:
             continue
         artifact = repository.get_artifact(user_id, ref["artifact_id"], include_content=True)
         if artifact is None or artifact["snapshot_id"] != ref["snapshot_id"] or artifact["content_sha256"] != ref["sha256"]:
@@ -1420,10 +1420,10 @@ def _read_workspace_source_findings(user_id: str, task: dict[str, Any]):
         if hashlib.sha256(content).hexdigest() != ref["sha256"]:
             raise ValueError("网页原件哈希不一致")
         with tempfile.TemporaryDirectory(prefix="mixed-source-observation-") as temporary:
-            path = Path(temporary) / "source.html"
+            path = Path(temporary) / ("source.jsonl" if artifact["media_type"]=="application/x-ndjson" else "source.json" if artifact["media_type"]=="application/json" else "source.html")
             path.write_bytes(content)
             _canvas_size_limit(path)
-            item = SimpleNamespace(storage_path=str(path), original_name="source.html", media_type="text/html", sha256=ref["sha256"], size_bytes=len(content))
+            item = SimpleNamespace(storage_path=str(path), original_name=path.name, media_type=artifact["media_type"], sha256=ref["sha256"], size_bytes=len(content))
             facade = SimpleNamespace(resolve=lambda owner, artifact_id: item)
             web_reports = UploadSourceInspector(user_id=user_id, upload_store=facade).inspect_artifacts((ref["artifact_id"],))
             findings.extend({**finding, "snapshot_id": ref["snapshot_id"]} for finding in public_source_findings(web_reports))
@@ -4006,7 +4006,7 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
     current_revision = store.get_semantic_workspace_revision(user_id, task_id, payload.expected_active_revision)
     current_contract = store.get_source_contract(user_id, task_id, payload.expected_active_revision)
     current_refs = current_revision["source_refs"]
-    old_snapshot_ids = tuple(dict.fromkeys(ref["snapshot_id"] for ref in current_refs if ref.get("kind") == "web_artifact"))
+    old_snapshot_ids = tuple(dict.fromkeys(ref["snapshot_id"] for ref in current_refs if ref.get("kind") in {"web_artifact", "connector_artifact"}))
     selected_upload_ids = payload.upload_ids if payload.upload_ids is not None else tuple(ref["upload_id"] for ref in current_refs if ref.get("upload_id"))
     selected_snapshot_ids = payload.source_snapshot_ids if payload.source_snapshot_ids is not None else ((payload.source_snapshot_id,) if payload.source_snapshot_id else old_snapshot_ids)
     selected_output_ids = payload.delivery_output_ids if payload.delivery_output_ids is not None else tuple(ref["output_id"] for ref in current_refs if ref.get("kind") == "delivery_output")
@@ -4560,7 +4560,7 @@ async def refresh_task_source(
     selected_revision = store.get_semantic_workspace_revision(user_id, task_id, payload.expected_active_revision)
     if selected_revision is None:
         raise HTTPException(404, "任务修订不存在")
-    selected_snapshot_ids = tuple(dict.fromkeys(ref["snapshot_id"] for ref in selected_revision["source_refs"] if ref.get("kind") == "web_artifact"))
+    selected_snapshot_ids = tuple(dict.fromkeys(ref["snapshot_id"] for ref in selected_revision["source_refs"] if ref.get("kind") in {"web_artifact", "connector_artifact"}))
     target_snapshot_id = payload.target_source_snapshot_id
     if target_snapshot_id is None:
         if len(selected_snapshot_ids) != 1:
@@ -4604,27 +4604,31 @@ async def refresh_task_source(
             detail="活动版本已变化，请查看最新版本后再刷新来源",
         )
     try:
-        attempt = await _source_acquisition_service().acquire(
-            owner_id=user_id,
-            idempotency_key=refresh_key,
-            request=SourceAcquisitionRequest(
-                url=scope.get("normalized_url", old_attempt["normalized_url"]),
-                query=scope.get("query", ""),
-                time_range=scope.get("time_range", "any"),
-                domains=tuple(scope.get("domains", ())),
-                purpose=old_attempt["purpose"],
-                scope_kind=scope.get("kind", "current_page"),
-                page_limit=int(scope.get("page_limit", 1)),
-                completeness_mode=completeness.get("mode", "exploratory"),
-                required_valid_pages=completeness.get("required_valid_pages"),
-                request_context=(
-                    f"source-refresh:{task_id}:revision:"
-                    f"{payload.expected_active_revision}:cancel:{cancel_generation}:target:{target_snapshot_id}"
+        if scope.get('kind')=='connector':
+            from src.source_acquisition.connection_source import refresh_connector
+            attempt=await refresh_connector(repository,owner=user_id,key=refresh_key,scope=scope,purpose=old_attempt['purpose'],request_context=f'source-refresh:{task_id}:revision:{payload.expected_active_revision}:cancel:{cancel_generation}:target:{target_snapshot_id}',cancel_if=refresh_cancelled)
+        else:
+            attempt = await _source_acquisition_service().acquire(
+                owner_id=user_id,
+                idempotency_key=refresh_key,
+                request=SourceAcquisitionRequest(
+                    url=scope.get("normalized_url", old_attempt["normalized_url"]),
+                    query=scope.get("query", ""),
+                    time_range=scope.get("time_range", "any"),
+                    domains=tuple(scope.get("domains", ())),
+                    purpose=old_attempt["purpose"],
+                    scope_kind=scope.get("kind", "current_page"),
+                    page_limit=int(scope.get("page_limit", 1)),
+                    completeness_mode=completeness.get("mode", "exploratory"),
+                    required_valid_pages=completeness.get("required_valid_pages"),
+                    request_context=(
+                        f"source-refresh:{task_id}:revision:"
+                        f"{payload.expected_active_revision}:cancel:{cancel_generation}:target:{target_snapshot_id}"
+                    ),
                 ),
-            ),
-            resume_unknown=payload.resume_unknown,
-            cancel_if=refresh_cancelled,
-        )
+                resume_unknown=payload.resume_unknown,
+                cancel_if=refresh_cancelled,
+            )
     except AcquisitionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if refresh_cancelled():
@@ -5525,7 +5529,7 @@ def _frozen_canvas_sources(user_id, task_id, selected, manifest=None):
             sources.setdefault(ref["upload_id"], {"sha256":ref["sha256"]})
         if ref.get("kind") == "delivery_output":
             sources[ref["output_id"]] = {"sha256":ref["sha256"],"delivery_ref":ref}
-        if ref.get("kind") == "web_artifact":
+        if ref.get("kind") in {"web_artifact", "connector_artifact"}:
             artifact = SourceAcquisitionRepository(settings.webui_db_path).get_artifact(user_id, ref["artifact_id"])
             if not artifact or artifact["snapshot_id"] != ref.get("snapshot_id") or artifact["content_sha256"] != ref.get("sha256"):
                 raise HTTPException(409, "冻结网页来源身份不一致")
@@ -5868,12 +5872,13 @@ def _write_frozen_source_exports(archive, user_id, task_id, selected, sources, t
                         {key: failure.get(key) for key in ("request_url", "final_url", "error_code", "failed_at")}
                         for failure in snapshot.get("failures", [])
                     ]
-                path = Path(temporary) / f"{len(entries)}.html"
+                scope = repository.get_snapshot(user_id,snapshot_id,include_preview=False)['allowed_scope']
+                path = Path(temporary) / (f"{len(entries)}" + (".jsonl" if web["media_type"]=="application/x-ndjson" else ".json" if web["media_type"]=="application/json" else ".html"))
                 path.write_bytes(bytes(web["content_blob"]))
                 metadata = {
-                    "artifact_id": artifact_id, "original_name": f"{web['title'] or artifact_id}.html",
+                    "artifact_id": artifact_id, "original_name": (str(web["title"] or artifact_id) + path.suffix),
                     "media_type": web["media_type"], "sha256": source["sha256"], "size_bytes": web["size_bytes"],
-                    "provenance": {key: web[key] for key in ("snapshot_id", "request_url", "final_url", "read_at")},
+                    "provenance": {**{key: web[key] for key in ("snapshot_id", "request_url", "final_url", "read_at")}, **({"source_kind":"connector","connection_id":scope['connection_id'],"connection_version":scope['connection_version']} if scope.get('kind')=='connector' else {"source_kind":"web_artifact"})},
                 }
             elif source.get("delivery_ref"):
                 from src.source_acquisition.reuse import resolve_frozen_source

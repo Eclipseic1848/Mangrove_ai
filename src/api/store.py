@@ -3115,7 +3115,7 @@ class WebUIStore:
         with self._conn() as conn:
             rows = conn.execute("SELECT revision, source_refs_json FROM semantic_workspace_revisions WHERE user_id=? AND task_id=? ORDER BY revision DESC", (user_id, task_id)).fetchall()
         for row in rows:
-            if any(ref.get("kind") == "web_artifact" and ref.get("snapshot_id") == snapshot_id for ref in json.loads(row["source_refs_json"] or "[]")):
+            if any(ref.get("kind") in {"web_artifact", "connector_artifact"} and ref.get("snapshot_id") == snapshot_id for ref in json.loads(row["source_refs_json"] or "[]")):
                 return int(row["revision"])
         return None
 
@@ -4047,7 +4047,7 @@ class WebUIStore:
                 raise ValueError('source_in_use')
             conn.execute('DELETE FROM workspace_feedback WHERE user_id=? AND task_id=?',(user_id,task_id))
             conn.execute('DELETE FROM workspace_feedback_receipts WHERE user_id=? AND task_id=?',(user_id,task_id))
-            for table in ('task_revision_contexts','web_task_contracts','conversation_raw_turns','conversation_context_deltas','conversation_revision_proposals','conversation_revision_decisions','conversation_steering_results'):
+            for table in ('source_refresh_intents','task_revision_contexts','web_task_contracts','conversation_raw_turns','conversation_context_deltas','conversation_revision_proposals','conversation_revision_decisions','conversation_steering_results'):
                 conn.execute('DELETE FROM '+table+' WHERE owner_id=? AND task_id=?',(user_id,task_id))
             self._create_semantic_workspace_audit_tombstone(
                 conn,
