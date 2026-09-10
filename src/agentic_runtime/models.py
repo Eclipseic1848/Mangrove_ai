@@ -119,7 +119,14 @@ class PiRuntimeRequest(BaseModel):
         default=(),
         exclude_if=lambda value: not value,
     )
-    sources: tuple[SourceInput, ...] = Field(min_length=1)
+    sources: tuple[SourceInput, ...] = ()
+    authenticated_source_handle: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def validate_source_presence(self):
+        if not self.sources and not self.authenticated_source_handle:
+            raise ValueError("任务必须有冻结来源")
+        return self
     goal_contract: dict[str, Any] | None = None
     compiled_context: CompiledContext | None = None
     source_coverage: dict[str, Any] | None = None

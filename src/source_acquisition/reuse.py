@@ -285,8 +285,10 @@ def references(owner_id,kind,identity):
     with closing(sqlite3.connect(settings.webui_db_path)) as connection:
         connection.row_factory=sqlite3.Row
         connection.execute("BEGIN")
-        for row in connection.execute("SELECT r.task_id,r.revision,r.source_refs_json,t.deleted_at FROM semantic_workspace_revisions r JOIN semantic_workspace_tasks t ON t.task_id=r.task_id AND t.user_id=r.user_id WHERE r.user_id=? ORDER BY r.task_id,r.revision",(owner_id,)):
-            if any(matches(ref) for ref in json.loads(row["source_refs_json"] or "[]")):
+        for row in connection.execute("SELECT r.task_id,r.revision,r.source_refs_json,r.source_contract_json,t.deleted_at FROM semantic_workspace_revisions r JOIN semantic_workspace_tasks t ON t.task_id=r.task_id AND t.user_id=r.user_id WHERE r.user_id=? ORDER BY r.task_id,r.revision",(owner_id,)):
+            from src.source_acquisition.authenticated_run import effective_refs
+            refs=effective_refs(connection,owner_id,json.loads(row["source_refs_json"] or "[]"),json.loads(row["source_contract_json"]) if row["source_contract_json"] else None)
+            if any(matches(ref) for ref in refs):
                 items.append(dict(task_id=row["task_id"],revision=row["revision"],reference_kind="revision",use_id=None,state="retained",in_recycle_bin=row["deleted_at"] is not None))
                 runtime=connection.execute("SELECT status FROM agentic_runtime_runs WHERE user_id=? AND task_id=? AND revision=?",(owner_id,row["task_id"],row["revision"])).fetchone()
                 if runtime and runtime[0] in {"preparing","running","needs_input","cancelling"}:

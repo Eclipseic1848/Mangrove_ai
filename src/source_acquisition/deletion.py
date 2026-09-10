@@ -31,9 +31,10 @@ def deletion_plan(owner_id,task_id,shared_policy='keep_shared'):
             raise PermissionError('任务不存在或无权访问')
         if not task['deleted_at']:
             raise ValueError('请先移入回收站')
-        revisions=connection.execute('SELECT source_refs_json,run_id FROM semantic_workspace_revisions WHERE user_id=? AND task_id=? ORDER BY revision',(owner_id,task_id)).fetchall()
+        revisions=connection.execute('SELECT source_refs_json,source_contract_json,run_id FROM semantic_workspace_revisions WHERE user_id=? AND task_id=? ORDER BY revision',(owner_id,task_id)).fetchall()
         for row in revisions:
-            for ref in json.loads(row['source_refs_json'] or '[]'):
+            from src.source_acquisition.authenticated_run import effective_refs
+            for ref in effective_refs(connection,owner_id,json.loads(row['source_refs_json'] or '[]'),json.loads(row['source_contract_json']) if row['source_contract_json'] else None):
                 refs[reuse.source_key(ref)]=ref
         own_deliveries=set()
         for row in connection.execute('SELECT delivery_id FROM formal_delivery_runs WHERE owner_id=? AND task_id=?',(owner_id,task_id)):

@@ -88,6 +88,7 @@ class SourceAcquisitionRequest:
     query: str = ""
     time_range: str = "any"
     domains: tuple[str, ...] = ()
+    search_provider: str = "duckduckgo-html-v1"
 
     def normalized(self) -> "SourceAcquisitionRequest":
         purpose = self.purpose.strip()
@@ -98,6 +99,10 @@ class SourceAcquisitionRequest:
         if self.scope_kind not in {"current_page", "same_site", "public_search"}:
             raise ValueError("来源范围必须是当前页或同站有限扩展")
         query = self.query.strip()
+        if self.search_provider != "duckduckgo-html-v1":
+            import re
+            if self.scope_kind != "public_search" or not re.fullmatch(r"browser:(bilibili|xiaohongshu):[A-Za-z0-9._-]{1,80}", self.search_provider):
+                raise ValueError("查询读取器身份无效")
         domains = ()
         if self.scope_kind == "public_search":
             from .public_search import normalize_domains
@@ -138,7 +143,7 @@ class SourceAcquisitionRequest:
             completeness_mode=self.completeness_mode,
             required_valid_pages=required,
             request_context=request_context,
-            query=query, time_range=self.time_range, domains=domains,
+            query=query, time_range=self.time_range, domains=domains, search_provider=self.search_provider,
         )
 
     def request_hash(self) -> str:
@@ -158,8 +163,7 @@ class SourceAcquisitionRequest:
         }
         # 仅刷新等复合操作写入内部上下文；普通来源请求保持既有哈希兼容。
         if normalized.query:
-            from .public_search import PROVIDER
-            payload["search"] = dict(query=normalized.query, time_range=normalized.time_range, domains=normalized.domains, provider=PROVIDER)
+            payload["search"] = dict(query=normalized.query, time_range=normalized.time_range, domains=normalized.domains, provider=normalized.search_provider)
         if normalized.request_context:
             payload["request_context"] = normalized.request_context
         encoded = json.dumps(
@@ -169,6 +173,19 @@ class SourceAcquisitionRequest:
             separators=(",", ":"),
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    @classmethod
+    def from_frozen_attempt(cls, row):
+        """恢复只读原持久范围，不能用新注册版本重写旧授权。"""
+        scope=json.loads(row["allowed_scope_json"])
+        value=cls(url=row["normalized_url"],purpose=row["purpose"],scope_kind=scope["kind"],
+            page_limit=scope["page_limit"],completeness_mode=scope["completeness"]["mode"],
+            required_valid_pages=scope["completeness"]["required_valid_pages"],
+            request_context=row["request_context"],query=scope.get("query",""),
+            time_range=scope.get("time_range","any"),domains=tuple(scope.get("domains",())),
+            search_provider=scope.get("provider","duckduckgo-html-v1")).normalized()
+        if value.request_hash()!=row["request_hash"]:raise ValueError("source_scope_changed")
+        return value
 
     def legacy_exact_page_hash(self) -> str | None:
         """返回 #90 精确页请求的旧哈希，仅用于升级后重放兼容。"""
@@ -313,6 +330,7 @@ class SourceAcquisitionRepository:
             raise execution.ExecutionDenied('来源 Owner 与冻结授权不符')
         with closing(self._connect()) as connection:
             connection.execute('BEGIN IMMEDIATE')
+            if connection.execute("SELECT 1 FROM source_acquisition_attempts WHERE owner_id=? AND attempt_id=? AND error_code='auth_cleanup_unknown'",(owner_id,attempt_id)).fetchone(): return False
             if connection.execute("SELECT 1 FROM source_acquisition_attempts WHERE owner_id=? AND attempt_id=? AND error_code IN ('connector_cleanup_unknown','connector_resume_unknown')",(owner_id,attempt_id)).fetchone():
                 return False
             confirmed = execution.confirm_execution_stopped(connection, owner_id, 'source', attempt_id, expected_generation=auth.generation, now=time.time())
@@ -338,7 +356,7 @@ class SourceAcquisitionRepository:
             connection.execute(
                 "UPDATE source_acquisition_attempts SET status='canceled', finished_at=? "
                 "WHERE owner_id=? AND attempt_id=? AND status='acquiring' "
-                "AND cancel_requested_at IS NOT NULL AND COALESCE(error_code,'') NOT IN ('connector_cleanup_unknown','connector_resume_unknown')", (_now(), owner_id, attempt_id),
+                "AND cancel_requested_at IS NOT NULL AND COALESCE(error_code,'') NOT IN ('auth_cleanup_unknown','connector_cleanup_unknown','connector_resume_unknown')", (_now(), owner_id, attempt_id),
             )
 
     def task_attempts(self, owner_id: str, task_id: str, *, revision: int | None = None) -> list[str]:
@@ -368,7 +386,7 @@ class SourceAcquisitionRepository:
         if request.scope_kind == "connector":
             return request.allowed_scope()
         return {
-            **({"query": request.query, "time_range": request.time_range, "domains": list(request.domains), "provider": "duckduckgo-html-v1"} if request.query else {}),
+            **({"query": request.query, "time_range": request.time_range, "domains": list(request.domains), "provider": request.search_provider} if request.query else {}),
             "kind": request.scope_kind,
             "normalized_url": request.url,
             "site": urlsplit(request.url).netloc,
@@ -472,6 +490,11 @@ class SourceAcquisitionRepository:
         attempt = self._row(row)
         if attempt is None:
             return None
+        if attempt['status']=='acquiring' and attempt.get('error_code')=='auth_cleanup_unknown':
+            if attempt.get('cancel_requested_at'): attempt['status']='cancelling'
+            attempt['authentication_state']='auth_cleanup_unknown'
+            attempt['snapshot']=None
+            return attempt
         if attempt.get("error_code") in {"connector_cleanup_unknown","connector_resume_unknown"}:
             attempt["status"]="cancelling" if attempt.get("cancel_requested_at") else attempt["status"]
             attempt["connector_state"]="cleanup_unknown"
@@ -485,6 +508,13 @@ class SourceAcquisitionRepository:
                 return self.get_attempt(owner_id, attempt_id, include_snapshot=include_snapshot)
             except FileLockTimeout:
                 attempt["status"] = "cancelling"
+        if attempt['status']=='acquiring' and row['current_auth_request_id']:
+            with self._connect() as connection:
+                connection.execute('BEGIN IMMEDIATE')
+                auth_state=self._auth_wait_gate(connection,owner_id,attempt_id)
+            if auth_state in ('auth_expired','auth_cancelled'):
+                return self.get_attempt(owner_id,attempt_id,include_snapshot=include_snapshot)
+            attempt['authentication_state']=auth_state
         attempt["snapshot"] = (
             self.get_snapshot(owner_id, str(attempt["snapshot_id"]))
             if include_snapshot and attempt.get("snapshot_id")
@@ -697,6 +727,7 @@ class SourceAcquisitionRepository:
         attempt_id: str,
     ) -> dict[str, Any] | None:
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             exists = connection.execute(
                 "SELECT 1 FROM source_acquisition_attempts "
                 "WHERE owner_id=? AND attempt_id=?",
@@ -710,6 +741,7 @@ class SourceAcquisitionRepository:
                 "AND status='acquiring'",
                 (_now(), owner_id, attempt_id),
             )
+            connection.execute("UPDATE source_reauthentication_requests SET state='cancelled' WHERE owner=? AND request_id=(SELECT current_auth_request_id FROM source_acquisition_attempts WHERE owner_id=? AND attempt_id=?) AND state IN ('pending','verified')",(owner_id,owner_id,attempt_id))
         return self.get_attempt(owner_id, attempt_id)
 
     def get_snapshot(
@@ -821,6 +853,68 @@ class SourceAcquisitionRepository:
             ).fetchone()
         return int(row[0])
 
+    def auth_digest(self,connection,owner_id,attempt_id,*,read_only=False):
+        if read_only:
+            auth=execution.capture_authorization(connection,owner_id)
+            execution.require_binding(connection,auth,'source',attempt_id)
+        else:
+            auth=self._require_execution(connection,owner_id,attempt_id)
+        row=connection.execute('SELECT * FROM source_acquisition_attempts WHERE owner_id=? AND attempt_id=?',(owner_id,attempt_id)).fetchone()
+        if row is None: raise PermissionError('attempt_not_found')
+        material={'owner_id':owner_id,'attempt_id':attempt_id,'generation':auth.generation,'request_hash':row['request_hash'],'allowed_scope':json.loads(row['allowed_scope_json'])}
+        return hashlib.sha256(json.dumps(material,sort_keys=True,separators=(',',':'),ensure_ascii=False).encode()).hexdigest()
+
+    def bind_auth_wait(self,owner_id,attempt_id,request_id):
+        with self.execution_lock(owner_id,attempt_id).acquire(timeout=0):
+            return self.bind_auth_wait_locked(owner_id,attempt_id,request_id)
+
+    def bind_auth_wait_locked(self,owner,attempt_id,request_id,*,previous=None):
+        # 调用者已持原attempt execution_lock；不能另取FileLock导致非重入死锁。
+        with self._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            digest=self.auth_digest(db,owner,attempt_id)
+            request=db.execute('SELECT * FROM source_reauthentication_requests WHERE owner=? AND request_id=?',(owner,request_id)).fetchone()
+            row=db.execute('SELECT * FROM source_acquisition_attempts WHERE owner_id=? AND attempt_id=?',(owner,attempt_id)).fetchone()
+            if request is None or request['authorization_digest']!=digest or json.loads(request['binding_json'])!={'attempt_id':attempt_id} or request['state']!='pending' or request['expires']<=time.time():raise ValueError('invalid_auth_binding')
+            if row['cancel_requested_at'] or row['current_auth_request_id'] not in (previous,request_id):raise ValueError('attempt_not_bindable')
+            if previous is None:
+                if row['status']!='acquiring':raise ValueError('attempt_not_bindable')
+            else:
+                old=db.execute('SELECT state,expires FROM source_reauthentication_requests WHERE owner=? AND request_id=?',(owner,previous)).fetchone()
+                if old is None or old['state'] not in ('pending','expired') or old['expires']>time.time() or row['error_code'] not in (None,'auth_expired') or row['status'] not in ('acquiring','failed'):raise ValueError('refresh_not_allowed')
+                db.execute("UPDATE source_reauthentication_requests SET state='expired' WHERE owner=? AND request_id=? AND state='pending'",(owner,previous))
+            db.execute("UPDATE source_acquisition_attempts SET current_auth_request_id=?,status='acquiring',finished_at=NULL,error_code=NULL,error_message=NULL WHERE owner_id=? AND attempt_id=?",(request_id,owner,attempt_id))
+
+    def _auth_wait_gate(self,connection,owner_id,attempt_id):
+        row=connection.execute('SELECT current_auth_request_id,error_code FROM source_acquisition_attempts WHERE owner_id=? AND attempt_id=?',(owner_id,attempt_id)).fetchone()
+        if row is not None and row['error_code']=='auth_cleanup_unknown':return 'auth_cleanup_unknown'
+        if row is None or row[0] is None: return None
+        request=connection.execute('SELECT * FROM source_reauthentication_requests WHERE owner=? AND request_id=?',(owner_id,row[0])).fetchone()
+        if request is None or json.loads(request['binding_json'])!={'attempt_id':attempt_id}: raise ValueError('invalid_auth_binding')
+        if request['authorization_digest']!=self.auth_digest(connection,owner_id,attempt_id,read_only=True): raise ValueError('auth_authorization_changed')
+        state=request['state']
+        if state=='claimed': return 'auth_resume_unknown'
+        if state in ('pending','verified') and request['expires']>time.time(): return 'needs_auth' if state=='pending' else 'auth_ready'
+        if state=='pending':
+            connection.execute("UPDATE source_reauthentication_requests SET state='expired' WHERE owner=? AND request_id=? AND state='pending'",(owner_id,row[0]))
+        reason='auth_cancelled' if state=='cancelled' else 'auth_expired'
+        connection.execute("UPDATE source_acquisition_attempts SET status='failed',error_code=?,error_message='认证等待已结束',finished_at=? WHERE owner_id=? AND attempt_id=? AND status='acquiring' AND cancel_requested_at IS NULL",(reason,datetime.now(timezone.utc).isoformat(),owner_id,attempt_id))
+        return reason
+
+    def claim_auth_resume(self,owner_id,attempt_id,request_id):
+        # 调用者必须持同execution_lock直到实际_read结束，不能仅凭返回值新建attempt。
+        with self._connect() as conn:
+            conn.execute('BEGIN IMMEDIATE')
+            digest=self.auth_digest(conn,owner_id,attempt_id)
+            row=conn.execute('SELECT * FROM source_acquisition_attempts WHERE owner_id=? AND attempt_id=?',(owner_id,attempt_id)).fetchone()
+            request=conn.execute('SELECT * FROM source_reauthentication_requests WHERE owner=? AND request_id=?',(owner_id,request_id)).fetchone()
+            if request is not None and request['state']=='claimed' and row['current_auth_request_id']==request_id: return False
+            if row['current_auth_request_id']!=request_id or row['status']!='acquiring' or row['cancel_requested_at'] or request is None or request['authorization_digest']!=digest or json.loads(request['binding_json'])!={'attempt_id':attempt_id}: raise ValueError('invalid_auth_resume')
+            if request['state']!='verified' or request['expires']<=time.time(): return False
+            active=conn.execute('SELECT active_version,usable FROM authenticated_source_connections WHERE owner=? AND website=? AND account=?',(owner_id,request['website'],request['account'])).fetchone()
+            if active is None or not active['usable'] or active['active_version']!=request['expected_version']+1: return False
+            return conn.execute("UPDATE source_reauthentication_requests SET state='claimed' WHERE owner=? AND request_id=? AND state='verified'",(owner_id,request_id)).rowcount==1
+
     def fail_if_stale(
         self,
         owner_id: str,
@@ -835,6 +929,8 @@ class SourceAcquisitionRepository:
             - timedelta(seconds=stale_after_seconds)
         ).isoformat()
         with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            if self._auth_wait_gate(connection,owner_id,attempt_id): return False
             cursor = connection.execute(
                 "UPDATE source_acquisition_attempts SET status='failed', "
                 "finished_at=?, error_code='network_error', "
@@ -861,6 +957,7 @@ class SourceAcquisitionRepository:
         with self._connect() as connection:
             connection.execute('BEGIN IMMEDIATE')
             self._require_execution(connection, owner_id, attempt_id)
+            if self._auth_wait_gate(connection,owner_id,attempt_id): return False
             cursor = connection.execute(
                 "UPDATE source_acquisition_attempts SET started_at=?, "
                 "finished_at=NULL, error_code=NULL, error_message=NULL "
@@ -1282,6 +1379,59 @@ class SourceAcquisitionService:
         except FileLockTimeout:
             return self.repository.get_attempt(owner_id, attempt_id) or attempt
 
+    async def resume_authenticated(self,*,owner_id,attempt_id,request_id,request):
+        normalized=request.normalized()
+        reader=getattr(self,'_authenticated_reader',None)
+        if reader is None: raise ValueError('authenticated_reader_unavailable')
+        with self.repository.execution_lock(owner_id,attempt_id).acquire(timeout=0):
+            attempt=self.repository.get_attempt(owner_id,attempt_id)
+            if attempt is None: raise PermissionError('attempt_not_found')
+            with self.repository._connect() as conn:
+                conn.execute('BEGIN')
+                self.repository._require_execution(conn,owner_id,attempt_id)
+                frozen=conn.execute('SELECT request_hash FROM source_acquisition_attempts WHERE owner_id=? AND attempt_id=?',(owner_id,attempt_id)).fetchone()
+                if frozen[0]!=normalized.request_hash(): raise ValueError('source_scope_changed')
+            if not self.repository.claim_auth_resume(owner_id,attempt_id,request_id):
+                return {'attempt_id':attempt_id,'continuation_state':'not_claimed','result':attempt}
+            reading=asyncio.create_task(reader(owner_id,attempt,normalized))
+            watcher=asyncio.create_task(self._watch_cancel(owner_id,attempt_id,reading))
+            settled=False
+            try:
+                result=await asyncio.shield(reading)
+                if self.repository.cancellation_requested(owner_id,attempt_id):
+                    self.repository._confirm_cancel(owner_id,attempt_id)
+                    result=self.repository.get_attempt(owner_id,attempt_id)
+                # 正式结果只认Repository已完成的同一attempt，不能信reader返回成功字样。
+                saved=self.repository.get_attempt(owner_id,attempt_id)
+                settled=True
+                return {'attempt_id':attempt_id,'continuation_state':'completed' if saved['status'] in ('succeeded','failed','canceled') else 'unknown','result':saved}
+            except (asyncio.CancelledError,execution.ExecutionDenied):
+                reading.cancel()
+                # 反复取消也必须等真实reader收口，不能释放执行锁后仍有后台读取。
+                while not reading.done():
+                    try: await asyncio.shield(reading)
+                    except asyncio.CancelledError: continue
+                    except Exception: break
+                # reader清理异常不是停止证明，保留claimed未知并拒绝确认静默。
+                if not reading.cancelled() and reading.exception() is not None:
+                    raise reading.exception()
+                try:
+                    self.repository.check_execution(owner_id,attempt_id)
+                except execution.ExecutionDenied:
+                    self.repository.confirm_account_stop(owner_id,attempt_id)
+                else:
+                    if self.repository.cancellation_requested(owner_id,attempt_id):
+                        self.repository._confirm_cancel(owner_id,attempt_id)
+                settled=True
+                raise
+            finally:
+                if not settled:
+                    # 包含watcher触发取消后直接抛出的清理异常；没有收口证明就持久阻止误确认。
+                    with self.repository._connect() as conn:
+                        conn.execute("UPDATE source_acquisition_attempts SET error_code='auth_cleanup_unknown',error_message='认证读取清理结果未知' WHERE owner_id=? AND attempt_id=? AND current_auth_request_id=? AND status='acquiring'",(owner_id,attempt_id,request_id))
+                watcher.cancel()
+                with suppress(asyncio.CancelledError): await watcher
+
     async def _watch_cancel(self, owner_id: str, attempt_id: str, reading: asyncio.Task) -> None:
         # 独立监视器可中断等待下一块内容的慢流，不依赖 chunk 或下一页到达。
         while not reading.done():
@@ -1315,7 +1465,9 @@ class SourceAcquisitionService:
     async def _read_public_search(self, owner_id, attempt, request):
         from .public_search import PROVIDER, PublicSearchClient, PublicSearchError
         attempt_id = str(attempt["attempt_id"])
-        report = dict(provider=PROVIDER, query=request.query, time_range=request.time_range,
+        if request.search_provider != PROVIDER and getattr(self.search_client, "provider", None) != request.search_provider:
+            raise ValueError("固定查询读取器版本不匹配")
+        report = dict(provider=request.search_provider, query=request.query, time_range=request.time_range,
                       domains=list(request.domains), candidates=[], discovered_count=0,
                       read_count=0, failed_count=0, requested_count=request.page_limit, status="partial")
         save = lambda: self.repository.save_search_report(owner_id, attempt_id, report)

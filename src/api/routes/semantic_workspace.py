@@ -317,6 +317,7 @@ class WorkspaceTaskCreateIn(BaseModel):
     objective_text: str = Field(min_length=1, max_length=20_000)
     upload_ids: tuple[str, ...] = ()
     delivery_output_ids: tuple[Annotated[str, Field(min_length=1,max_length=200)], ...] = Field(default=(), max_length=100)
+    authenticated_source_attempt_id: str | None = Field(default=None,min_length=1,max_length=200)
     source_snapshot_id: str | None = Field(default=None, min_length=1, max_length=160)
     source_snapshot_ids: tuple[str, ...] | None = None
     must_include: tuple[str, ...] = ()
@@ -410,7 +411,7 @@ class WorkspaceTaskCreateIn(BaseModel):
         self.source_snapshot_ids = tuple(dict.fromkeys(snapshots))
         # 单字段仅兼容投影，实际冻结必须使用完整集合。
         self.source_snapshot_id = next(iter(self.source_snapshot_ids), None)
-        if not self.upload_ids and not self.source_snapshot_ids and not self.delivery_output_ids:
+        if not self.upload_ids and not self.source_snapshot_ids and not self.delivery_output_ids and not self.authenticated_source_attempt_id:
             raise ValueError("任务至少选择一个来源")
         web_contract_values = (
             self.must_include,
@@ -2028,6 +2029,9 @@ def _task_detail(
     })
     task["question"] = _public_workspace_question(task.get("question"))
     task["events"] = _public_workspace_events(task["events"])
+    from src.source_acquisition.authenticated_run import public_contract
+    task["source_contract"]=public_contract(task.get("source_contract"))
+    for item in task.get("revisions",[]):item["source_contract"]=public_contract(item.get("source_contract"))
     return task
 
 
@@ -2382,7 +2386,15 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
             or set(payload.capability_need.input_formats) != actual_inputs
             or set(payload.capability_need.output_formats) != actual_outputs):
             raise HTTPException(409, "工具匹配与当前文件或输出格式不一致，请重新匹配；网页来源尚无可复用格式合同")
-    source_refs, source_snapshots = _resolve_mixed_sources(user_id, payload.upload_ids, payload.source_snapshot_ids or (), payload.delivery_output_ids)
+    auth_handle=None
+    if payload.authenticated_source_attempt_id:
+        gate=get_semantic_workspace_manager().authenticated_source_gate
+        if gate is None or get_semantic_workspace_manager()._agent_kernel.adapter_id != 'pi-authenticated-preflight' or payload.runtime_version is not RuntimeVersion.PI or payload.capability_pack_refs:
+            raise HTTPException(422,"当前执行器不支持认证来源前置阶段")
+        from src.source_acquisition.authenticated_run import freeze_handle
+        try:auth_handle=freeze_handle(gate.sources,gate.authentication,user_id,payload.authenticated_source_attempt_id)
+        except (ValueError,PermissionError):raise HTTPException(409,"认证来源待办已变化，请重新选择") from None
+    source_refs, source_snapshots = (_resolve_mixed_sources(user_id, payload.upload_ids, payload.source_snapshot_ids or (), payload.delivery_output_ids) if payload.upload_ids or payload.source_snapshot_ids or payload.delivery_output_ids else ([],[]))
     if frozen_config_guard is not None:
         frozen_config_guard(payload,source_refs,connection_binding)
     source_snapshot = source_snapshots[0] if source_snapshots else None
@@ -2660,6 +2672,15 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
         _freeze_goal_contract(payload, objective=user_objective, source_snapshot={"allowed_scope": {"groups": [item["allowed_scope"] for item in source_snapshots]}}) if source_snapshots else None,
         source_snapshots,
     )
+    if auth_handle is not None:
+        frozen_source_contract = dict(frozen_source_contract or {"goal_contract":None,"web_sources":[]})
+        frozen_source_contract["authenticated_source"]=auth_handle
+        auth_base_hook=transaction_hook
+        def bind_authentication(connection):
+            from src.source_acquisition.authenticated_run import recheck_creation
+            recheck_creation(connection,gate.sources,user_id,auth_handle)
+            if auth_base_hook is not None:auth_base_hook(connection)
+        transaction_hook=bind_authentication
     if frozen_config_guard is not None:
         frozen_base_hook=transaction_hook
         def bind_frozen_schedule(connection):
@@ -4580,6 +4601,9 @@ async def refresh_task_source(
     if old_attempt is None:
         raise HTTPException(status_code=409, detail="当前版本的来源获取事实已缺失")
     scope = old_snapshot["allowed_scope"]
+    # 原认证身份不能退回匿名读取；刷新调度尚未支持时在任何新attempt/网络前拒绝。
+    if old_attempt.get("current_auth_request_id") or str(scope.get("provider", "")).startswith("browser:"):
+        raise HTTPException(409,"authenticated_source_refresh_unsupported")
     completeness = scope.get("completeness", {})
     refresh_key = (
         f"refresh-{task_id}-"
