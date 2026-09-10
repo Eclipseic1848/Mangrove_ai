@@ -731,10 +731,27 @@ export interface SourceSearchReport {
   status: "complete" | "partial" | "no_results" | "blocked" | "failed";
 }
 
-export interface SourceSnapshot {
-  snapshot_id: string;
-  attempt_id: string;
-  allowed_scope: {
+export type ConnectorSourceSelection = {
+  source_type: "http_api" | "database";
+  url?: string;
+  connection_id?: string;
+  table?: string;
+  fields?: string[];
+  filters?: Array<{ field: string; op: string; value: string }>;
+  pagination?: { strategy: "page"; options: { page_param: string; per_page_param: string; per_page: number; start_page: number; max_pages: number } };
+};
+export type ConnectorSourceScope = {
+  kind: "connector";
+  protocol: "http_api" | "database";
+  connection_id: string;
+  connection_version: string;
+  configuration_version: string;
+  selection: ConnectorSourceSelection;
+  selection_sha256: string;
+  query?: never; time_range?: never; domains?: never; normalized_url?: never; site?: never; page_limit?: never; completeness?: never;
+};
+
+export type WebSourceScope = {
     kind: "current_page" | "same_site" | "public_search";
     query?: string;
     time_range?: SearchTimeRange;
@@ -747,6 +764,13 @@ export interface SourceSnapshot {
       required_valid_pages: number | null;
     };
   };
+
+export interface SourceSnapshot<Scope extends WebSourceScope | ConnectorSourceScope = WebSourceScope | ConnectorSourceScope> {
+  source_kind?: "web" | "connector";
+  artifact_count?: number;
+  snapshot_id: string;
+  attempt_id: string;
+  allowed_scope: Scope;
   valid_page_count: number;
   failed_page_count: number;
   created_at: string;
@@ -773,19 +797,7 @@ export interface SourceAcquisitionAttempt {
   idempotency_key: string;
   request_url: string;
   normalized_url: string;
-  allowed_scope: {
-    kind: "current_page" | "same_site" | "public_search";
-    query?: string;
-    time_range?: SearchTimeRange;
-    domains?: string[];
-    normalized_url: string;
-    site: string;
-    page_limit: number;
-    completeness: {
-      mode: "exploratory" | "hard_min_pages" | "hard_scope_complete";
-      required_valid_pages: number | null;
-    };
-  };
+  allowed_scope: WebSourceScope;
   purpose: string;
   status: SourceAcquisitionStatus;
   started_at: string;
@@ -793,6 +805,6 @@ export interface SourceAcquisitionAttempt {
   snapshot_id: string | null;
   error_code: string | null;
   error_message: string | null;
-  snapshot: SourceSnapshot | null;
+  snapshot: SourceSnapshot<WebSourceScope> | null;
   search_report?: SourceSearchReport | null;
 }

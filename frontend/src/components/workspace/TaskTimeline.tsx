@@ -28,6 +28,7 @@ import type {
   WorkspaceTask,
 } from "@/types/semanticWorkspace";
 import { workspaceStatusLabel } from "./WorkspaceTaskSidebar";
+import { ConnectorScopeFacts } from "./ConnectorScopeFacts";
 
 const STAGE_LABELS: Record<string, string> = {
   queued: "等待执行",
@@ -549,6 +550,9 @@ export function TaskTimeline({
   const webSources = allWebSources.flatMap(source => source.snapshot ? [{ ...source, snapshot: source.snapshot }] : []);
   const [refreshTarget, setRefreshTarget] = useState("");
   const selectedWebSource = webSources.find(source => source.source_snapshot_id === refreshTarget) ?? webSources[0];
+  const connectorSource = selectedWebSource?.snapshot.allowed_scope.kind === "connector";
+  const refreshSourceLabel = connectorSource ? "获取最新连接资料" : "获取最新网页";
+  const sourceGroupLabel = webSources.some(source => source.snapshot.allowed_scope.kind === "connector") ? "获取最新的资料组" : "获取最新的网页组";
   const [gapAction, setGapAction] = useState<string | null>(null);
   const [retryingStop, setRetryingStop] = useState(false);
   const events = useMemo(() => {
@@ -631,7 +635,7 @@ export function TaskTimeline({
         <QuestionDialog key={`${task.task_id}:${task.viewing_revision}:${task.question.round_id ?? task.question.question_id}`} question={task.question} onAnswer={onAnswer} onRefreshQuestion={onRefreshQuestion} />
       )}
       {task.question?.purpose === "control" && <p role="status" className="mb-4 rounded-xl border p-4 text-sm leading-6">{task.question.prompt} 仍可继续对话提出更正；补充要求需要明确确认后，以新版本重新开始。</p>}
-      {allWebSources.filter(source => !source.snapshot).map(source => <p key={source.source_snapshot_id} role="status" className="mb-4 break-all rounded-xl border p-4 text-sm">网页来源组已清理：{source.source_snapshot_id}。原文不可读取，不能按此组重跑；可明确移除此组并换新资料创建版本。</p>)}
+      {allWebSources.filter(source => !source.snapshot).map(source => <p key={source.source_snapshot_id} role="status" className="mb-4 break-all rounded-xl border p-4 text-sm">来源组已清理：{source.source_snapshot_id}。原文不可读取，不能按此组重跑；可明确移除此组并换新资料创建版本。</p>)}
       {selectedWebSource && (
         <div className="mb-4 flex flex-wrap items-start gap-3 border-b pb-4 text-sm">
           <Globe2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
@@ -642,15 +646,16 @@ export function TaskTimeline({
               {" · "}
               {new Date(selectedWebSource.snapshot.created_at).toLocaleString("zh-CN")}
               {" · "}
-              {selectedWebSource.snapshot.valid_page_count} 个有效页面
+              {connectorSource ? `${selectedWebSource.snapshot.artifact_count ?? selectedWebSource.snapshot.artifacts.length} 个连接原件` : `${selectedWebSource.snapshot.valid_page_count} 个有效页面`}
               {" · "}
               {selectedWebSource.snapshot.allowed_scope.kind === "same_site"
                 ? `${selectedWebSource.snapshot.allowed_scope.site} 内最多 ${selectedWebSource.snapshot.allowed_scope.page_limit} 页`
-                : selectedWebSource.snapshot.allowed_scope.kind === "public_search" ? "公开搜索范围" : "仅当前页"}
+                : selectedWebSource.snapshot.allowed_scope.kind === "public_search" ? "公开搜索范围" : connectorSource ? "本次有界读取" : "仅当前页"}
               {" · "}
-              重试不会重新读取网页
+              {connectorSource ? "重试不会重新读取连接" : "重试不会重新读取网页"}
             </p>
-            {webSources.length > 1 && <label className="mt-2 block text-xs">获取最新的网页组<select aria-label="获取最新的网页组" value={selectedWebSource.source_snapshot_id} disabled={refreshingSource} onChange={event => setRefreshTarget(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-2 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{webSources.map(source => <option key={source.source_snapshot_id} value={source.source_snapshot_id}>{source.snapshot.allowed_scope.query || source.snapshot.artifacts[0]?.title || source.source_snapshot_id}</option>)}</select></label>}
+            {selectedWebSource.snapshot.allowed_scope.kind === "connector" && <ConnectorScopeFacts scope={selectedWebSource.snapshot.allowed_scope} />}
+            {webSources.length > 1 && <label className="mt-2 block text-xs">{sourceGroupLabel}<select aria-label={sourceGroupLabel} value={selectedWebSource.source_snapshot_id} disabled={refreshingSource} onChange={event => setRefreshTarget(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-2 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{webSources.map(source => <option key={source.source_snapshot_id} value={source.source_snapshot_id}>{source.snapshot.allowed_scope.query || source.snapshot.artifacts[0]?.title || source.source_snapshot_id}</option>)}</select></label>}
           </div>
           {task.viewing_revision === task.current_revision && (
             task.model_connection_id ? (
@@ -664,15 +669,15 @@ export function TaskTimeline({
                     {refreshingSource
                       ? <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
                       : <RotateCcw className="h-3.5 w-3.5" />}
-                    获取最新网页
+                    {refreshSourceLabel}
                   </button>
                 </AlertDialog.Trigger>
                 <AlertDialog.Portal>
                   <AlertDialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
                   <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(90vw,440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl">
-                    <AlertDialog.Title className="font-semibold">获取最新网页并创建新版本？</AlertDialog.Title>
+                    <AlertDialog.Title className="font-semibold">{refreshSourceLabel}并创建新版本？</AlertDialog.Title>
                     <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">
-                      系统会沿用原来的站点和页数边界。只有新快照满足原完整性要求后，才会创建新版本，并把公开网页内容发送给当前模型连接；旧版本和旧 Run 保持不变。
+                      {connectorSource ? "系统会核对原连接版本，沿用原表、字段、筛选或公开数据地址的读取范围。成功冻结新资料后才创建新版本，并把连接记录、字段与来源信息发送给当前模型连接；有界读取不保证整个来源完整。旧版本和旧 Run 保持不变。" : "系统会沿用原来的站点和页数边界。只有新快照满足原完整性要求后，才会创建新版本，并把公开网页内容发送给当前模型连接；旧版本和旧 Run 保持不变。"}
                     </AlertDialog.Description>
                     <div className="mt-5 flex justify-end gap-2">
                       <AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm">取消</AlertDialog.Cancel>
@@ -706,7 +711,7 @@ export function TaskTimeline({
                 {refreshingSource
                   ? <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
                   : <RotateCcw className="h-3.5 w-3.5" />}
-                获取最新网页
+                {refreshSourceLabel}
               </button>
             )
           )}

@@ -313,6 +313,8 @@ class SourceAcquisitionRepository:
             raise execution.ExecutionDenied('来源 Owner 与冻结授权不符')
         with closing(self._connect()) as connection:
             connection.execute('BEGIN IMMEDIATE')
+            if connection.execute("SELECT 1 FROM source_acquisition_attempts WHERE owner_id=? AND attempt_id=? AND error_code IN ('connector_cleanup_unknown','connector_resume_unknown')",(owner_id,attempt_id)).fetchone():
+                return False
             confirmed = execution.confirm_execution_stopped(connection, owner_id, 'source', attempt_id, expected_generation=auth.generation, now=time.time())
             if confirmed:
                 connection.execute("UPDATE source_acquisition_attempts SET status='canceled',finished_at=?,cancel_requested_at=COALESCE(cancel_requested_at,?) WHERE owner_id=? AND attempt_id=? AND status='acquiring'", (_now(), _now(), owner_id, attempt_id))
@@ -336,7 +338,7 @@ class SourceAcquisitionRepository:
             connection.execute(
                 "UPDATE source_acquisition_attempts SET status='canceled', finished_at=? "
                 "WHERE owner_id=? AND attempt_id=? AND status='acquiring' "
-                "AND cancel_requested_at IS NOT NULL", (_now(), owner_id, attempt_id),
+                "AND cancel_requested_at IS NOT NULL AND COALESCE(error_code,'') NOT IN ('connector_cleanup_unknown','connector_resume_unknown')", (_now(), owner_id, attempt_id),
             )
 
     def task_attempts(self, owner_id: str, task_id: str, *, revision: int | None = None) -> list[str]:
@@ -357,7 +359,14 @@ class SourceAcquisitionRepository:
         return all(result and result["status"] not in {"acquiring", "cancelling"} for result in results)
 
     @staticmethod
+    def _artifact_kind(connection, owner_id, artifact_id):
+        row=connection.execute("SELECT s.allowed_scope_json FROM source_artifacts a JOIN source_snapshots s ON s.snapshot_id=a.snapshot_id AND s.owner_id=a.owner_id WHERE a.owner_id=? AND a.artifact_id=?",(owner_id,artifact_id)).fetchone()
+        return 'connector_artifact' if row and json.loads(row[0]).get('kind')=='connector' else 'web_artifact'
+
+    @staticmethod
     def _scope(request: SourceAcquisitionRequest) -> dict[str, Any]:
+        if request.scope_kind == "connector":
+            return request.allowed_scope()
         return {
             **({"query": request.query, "time_range": request.time_range, "domains": list(request.domains), "provider": "duckduckgo-html-v1"} if request.query else {}),
             "kind": request.scope_kind,
@@ -377,6 +386,7 @@ class SourceAcquisitionRepository:
         result = dict(row)
         result["allowed_scope"] = json.loads(result.pop("allowed_scope_json"))
         result.pop("request_hash", None)
+        result.pop("connector_progress_json", None)
         result["search_report"] = json.loads(result.pop("search_report_json", None) or "null")
         return result
 
@@ -462,6 +472,11 @@ class SourceAcquisitionRepository:
         attempt = self._row(row)
         if attempt is None:
             return None
+        if attempt.get("error_code") in {"connector_cleanup_unknown","connector_resume_unknown"}:
+            attempt["status"]="cancelling" if attempt.get("cancel_requested_at") else attempt["status"]
+            attempt["connector_state"]="cleanup_unknown"
+            attempt["snapshot"]=None
+            return attempt
         if attempt["status"] == "acquiring" and attempt.get("cancel_requested_at"):
             try:
                 # 文件锁由操作系统随崩溃进程释放；空闲锁才能证明没有仍在读取的执行者。
@@ -512,7 +527,18 @@ class SourceAcquisitionRepository:
             truncated_discovery_count=0,
         )
 
-    def complete_batch(
+    def complete_batch(self, owner_id, attempt_id, **kwargs):
+        return self._complete_artifacts(owner_id, attempt_id, **kwargs)
+
+    def complete_connector(self, owner_id, attempt_id, *, artifacts, error_code=None):
+        with self._connect() as connection:
+            row=connection.execute("SELECT allowed_scope_json FROM source_acquisition_attempts WHERE owner_id=? AND attempt_id=?", (owner_id,attempt_id)).fetchone()
+            if row is None or json.loads(row[0]).get('kind')!='connector':
+                raise ValueError('connector_attempt_required')
+        failures=(_PageFailure('',None,error_code,'连接部分读取失败',_now()),) if error_code else ()
+        return self._complete_artifacts(owner_id,attempt_id,pages=artifacts,failures=failures,limit_reached=True,attempted_page_count=len(artifacts)+len(failures),failed_request_count=len(failures),scope_denied_count=0,truncated_discovery_count=0)
+
+    def _complete_artifacts(
         self,
         owner_id: str,
         attempt_id: str,
@@ -704,7 +730,7 @@ class SourceAcquisitionRepository:
             if include_preview:
                 from src.source_acquisition.deletion import assert_sources_readable
                 identities=connection.execute("SELECT artifact_id FROM source_artifacts WHERE owner_id=? AND snapshot_id=?",(owner_id,snapshot_id)).fetchall()
-                assert_sources_readable(owner_id,[dict(kind="web_artifact",artifact_id=item[0]) for item in identities],connection=connection)
+                assert_sources_readable(owner_id,[dict(kind=self._artifact_kind(connection,owner_id,item[0]),artifact_id=item[0]) for item in identities],connection=connection)
             artifacts = connection.execute(
                 "SELECT artifact_id, request_url, final_url, read_at, "
                 "content_sha256, media_type, size_bytes, title, "
@@ -756,6 +782,10 @@ class SourceAcquisitionRepository:
             "status": completeness_status,
             "required_valid_pages": required,
         }
+        if result['allowed_scope'].get('kind')=='connector':
+            result['source_kind']='connector'
+            result['artifact_count']=result['valid_page_count']
+            result['coverage']['status']='coverage_unknown'
         result["artifacts"] = [dict(item) for item in artifacts]
         result["failures"] = [dict(item) for item in failures]
         return result
@@ -773,9 +803,9 @@ class SourceAcquisitionRepository:
         )
         with self._connect() as connection:
             from src.source_acquisition.deletion import assert_sources_readable
-            deleted=connection.execute("SELECT state FROM source_deletions WHERE owner_id=? AND source_key=?",(owner_id,'web_artifact:'+artifact_id)).fetchone()
+            deleted=connection.execute("SELECT state FROM source_deletions WHERE owner_id=? AND source_key=?",(owner_id,self._artifact_kind(connection,owner_id,artifact_id)+':'+artifact_id)).fetchone()
             if deleted and deleted[0]=='deleted': return None
-            assert_sources_readable(owner_id,[dict(kind='web_artifact',artifact_id=artifact_id)],connection=connection)
+            assert_sources_readable(owner_id,[dict(kind=self._artifact_kind(connection,owner_id,artifact_id),artifact_id=artifact_id)],connection=connection)
             row = connection.execute(
                 f"SELECT {columns} FROM source_artifacts "
                 "WHERE owner_id=? AND artifact_id=?",
@@ -810,7 +840,7 @@ class SourceAcquisitionRepository:
                 "finished_at=?, error_code='network_error', "
                 "error_message='上次网页获取已中断，未形成来源快照' "
                 "WHERE owner_id=? AND attempt_id=? AND status='acquiring' "
-                "AND cancel_requested_at IS NULL AND started_at<=?",
+                "AND cancel_requested_at IS NULL AND COALESCE(error_code,'') NOT IN ('connector_cleanup_unknown','connector_resume_unknown') AND COALESCE(error_code,'')!='connector_checkpoint_ready' AND started_at<=?",
                 (_now(), owner_id, attempt_id, cutoff),
             )
         return cursor.rowcount == 1
@@ -835,7 +865,7 @@ class SourceAcquisitionRepository:
                 "UPDATE source_acquisition_attempts SET started_at=?, "
                 "finished_at=NULL, error_code=NULL, error_message=NULL "
                 "WHERE owner_id=? AND attempt_id=? AND status='acquiring' "
-                "AND cancel_requested_at IS NULL AND started_at<=?",
+                "AND cancel_requested_at IS NULL AND COALESCE(error_code,'') NOT IN ('connector_cleanup_unknown','connector_resume_unknown') AND COALESCE(error_code,'')!='connector_checkpoint_ready' AND started_at<=?",
                 (_now(), owner_id, attempt_id, cutoff),
             )
         return cursor.rowcount == 1

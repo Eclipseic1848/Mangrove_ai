@@ -129,7 +129,8 @@ def _saved_source_refs(values):
                 if connection.execute("SELECT 1 FROM source_snapshots WHERE owner_id=? AND snapshot_id=?",(owner,snapshot_id)).fetchone() is None:
                     raise PermissionError("来源不存在")
             artifacts=connection.execute("SELECT artifact_id,snapshot_id,content_sha256 FROM source_artifacts WHERE owner_id=? AND snapshot_id=?",(owner,snapshot_id)).fetchall() if snapshot_id else []
-    return [{"kind":"web_artifact","snapshot_id":item["snapshot_id"],"artifact_id":item["artifact_id"],"sha256":item["content_sha256"]} for item in artifacts]
+        kinds={item["artifact_id"]:SourceAcquisitionRepository._artifact_kind(connection,owner,item["artifact_id"]) for item in artifacts}
+    return [{"kind":kinds[item["artifact_id"]],"snapshot_id":item["snapshot_id"],"artifact_id":item["artifact_id"],"sha256":item["content_sha256"]} for item in artifacts]
 
 
 @guarded_response("preview",_saved_source_refs)
