@@ -641,8 +641,10 @@ class SemanticWorkspaceManager:
         agent_kernels: Mapping[str, AgentKernel] | None = None,
         primary_adapter_id: str | None = None,
         pi_runtime: PiRuntime | None = None,
+        authenticated_source_gate=None,
         candidate_verification: CandidateVerificationService | None = None,
     ) -> None:
+        self.authenticated_source_gate=authenticated_source_gate
         self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
         self._workers: list[asyncio.Task[None]] = []
         self._maintenance: asyncio.Task[None] | None = None
@@ -669,7 +671,7 @@ class SemanticWorkspaceManager:
         if not self._agent_kernels:
             from src.source_acquisition.reuse import workspace_source_read_context
             runtime = pi_runtime or PiRuntime(
-                source_read_context=workspace_source_read_context,
+                source_read_context=(authenticated_source_gate.read_context if authenticated_source_gate is not None else workspace_source_read_context),
                 capability_mount_resolver=DefaultCapabilityMounts(
                     db_path=settings.webui_db_path,
                     oci_layout_path=settings.capability_oci_layout_path,
@@ -701,7 +703,7 @@ class SemanticWorkspaceManager:
                 settings.webui_db_path
             )
             pi_kernel = AgentKernel(
-                adapter=PiAgentKernelAdapter(runtime),
+                adapter=(__import__('src.source_acquisition.authenticated_run',fromlist=['AuthenticatedPreflightAdapter']).AuthenticatedPreflightAdapter(runtime,authenticated_source_gate) if authenticated_source_gate is not None else PiAgentKernelAdapter(runtime)),
                 repository=repository_factory,
             )
             self._agent_kernels[pi_kernel.adapter_id] = pi_kernel
@@ -743,7 +745,7 @@ class SemanticWorkspaceManager:
                     )
             self._primary_adapter_id = (
                 self._primary_adapter_id
-                or settings.agent_kernel_primary_adapter
+                or (pi_kernel.adapter_id if authenticated_source_gate is not None else settings.agent_kernel_primary_adapter)
             )
         if self._primary_adapter_id not in self._agent_kernels:
             raise ValueError("主 AgentKernel Adapter 未启用或不存在")
@@ -2709,6 +2711,7 @@ class SemanticWorkspaceManager:
                 task_revision["table_output_contracts"]
             ),
             "sources": tuple(sources),
+            "authenticated_source_handle": (source_contract or {}).get("authenticated_source"),
             "goal_contract": (
                 source_contract["goal_contract"]
                 if source_contract is not None

@@ -3073,7 +3073,11 @@ class WebUIStore:
         if row is None:
             return None
         if row["source_contract_json"] is not None:
-            return json.loads(row["source_contract_json"])
+            value=json.loads(row["source_contract_json"])
+            if value.get("authenticated_source"):
+                from src.source_acquisition.authenticated_run import project_contract
+                with self._conn() as conn:return project_contract(conn,user_id,value)
+            return value
         legacy = self.get_web_task_contract(user_id, task_id, revision)
         if legacy is None:
             return None
@@ -3810,7 +3814,12 @@ class WebUIStore:
                 "WHERE user_id=? AND task_id=? AND revision=?",
                 (user_id, task_id, revision),
             ).fetchone()
-        return self._semantic_workspace_revision_row(row)
+        value = self._semantic_workspace_revision_row(row)
+        if value is not None and (value.get("source_contract") or {}).get("authenticated_source"):
+            from src.source_acquisition.authenticated_run import effective_refs
+            with self._conn() as conn:
+                value["source_refs"] = effective_refs(conn, user_id, value["source_refs"], value["source_contract"])
+        return value
 
     def list_semantic_workspace_revisions(
         self,
@@ -3829,7 +3838,7 @@ class WebUIStore:
             item
             for row in rows
             if (
-                item := self._semantic_workspace_revision_row(row)
+                item := self.get_semantic_workspace_revision(user_id,task_id,row["revision"])
             ) is not None
         ]
 

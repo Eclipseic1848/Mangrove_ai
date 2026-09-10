@@ -30,6 +30,7 @@ router = APIRouter(
 class SourceAcquisitionIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    authenticated_website: str | None = Field(default=None,min_length=1,max_length=100)
     url: str | None = Field(default=None, min_length=1, max_length=4096)
     query: str | None = Field(default=None, min_length=1, max_length=500)
     time_range: Literal["any", "day", "week", "month", "year"] = "any"
@@ -86,6 +87,12 @@ async def acquire_source(
     user=Depends(get_execution_user),
 ):
     service = get_source_acquisition_service()
+    if payload.authenticated_website:
+        from src.api.semantic_workspace_runtime import get_semantic_workspace_manager
+        host=getattr(get_semantic_workspace_manager(),"authenticated_source_host",None)
+        service=host.source_entries.get(payload.authenticated_website) if host is not None else None
+        if service is None:raise HTTPException(422,"该站点认证读取尚未可用")
+        if payload.query and not getattr(service.driver,"search_provider",None):raise HTTPException(422,"该站点查询读取尚未可用")
     try:
         return await service.acquire(
             owner_id=user["user_id"],
@@ -94,7 +101,8 @@ async def acquire_source(
                 url=payload.url or "",
                 query=payload.query or "",
                 time_range=payload.time_range,
-                domains=tuple(payload.domains),
+                search_provider=(service.driver.search_provider if payload.authenticated_website and payload.query else "duckduckgo-html-v1"),
+                domains=tuple(payload.domains) or ((payload.authenticated_website+".com",) if payload.authenticated_website and payload.query else ()),
                 purpose=payload.purpose,
                 scope_kind=payload.allowed_scope,
                 page_limit=payload.page_limit,
@@ -105,7 +113,11 @@ async def acquire_source(
     except AcquisitionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
+        if payload.authenticated_website:raise HTTPException(409,"authentication_operation_unknown") from None
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        if payload.authenticated_website:raise HTTPException(409,"authentication_operation_unknown") from None
+        raise
 
 
 def _saved_source_refs(values):
