@@ -94,6 +94,8 @@ def _remove_platform_session_schema(connection: sqlite3.Connection) -> None:
 
 def _drop_legacy_simple_columns(database: Path) -> None:
     with sqlite3.connect(database) as connection:
+        # 历史缺列夹具先移除新版本VIEW，避免SQLite在制造旧表时拒绝。
+        connection.execute("DROP VIEW IF EXISTS feedback_management")
         connection.execute("DROP INDEX IF EXISTS idx_dpt_unit")
         for table, column in _LEGACY_SIMPLE_COLUMNS:
             existing = {
@@ -1148,6 +1150,7 @@ def test_inspect_reports_all_frozen_legacy_column_gaps(tmp_path: Path) -> None:
             [
                 *(f"column:{table}.{column}" for table, column in _LEGACY_SIMPLE_COLUMNS),
                 "object:idx_dpt_unit",
+                "object:feedback_management",
             ]
         )
     )

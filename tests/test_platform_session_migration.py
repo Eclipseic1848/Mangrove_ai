@@ -36,7 +36,7 @@ def test_webui_0010_session_upgrade_preserves_users_tasks_and_backup(tmp_path):
         WebUIStore(str(database))
     assert database.read_bytes() == before
     receipt = migrations.apply_migrations(target, tmp_path / "before-sessions.db", expected_source_sha256=hashlib.sha256(before).hexdigest())
-    assert receipt.applied_revisions == ("webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018")
+    assert receipt.applied_revisions == ("webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020", "webui_0021")
     assert migrations.inspect_database(target).state == "current"
     store = WebUIStore(str(database))
     assert store.get_user("synthetic-owner")["display_name"] == "虚构用户"

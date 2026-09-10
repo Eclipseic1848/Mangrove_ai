@@ -309,7 +309,7 @@ def test_current_webui_resumes_known_history_without_rewriting_evidence(
             )
         connection.commit()
 
-    _upgrade(database, "webui_0018")
+    _upgrade(database, "webui_0021")
 
     attempts = SqliteCandidateVerificationRepository(database).list_for_candidate(
         "owner-a",
