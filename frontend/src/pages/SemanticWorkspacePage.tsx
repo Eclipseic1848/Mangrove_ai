@@ -7,12 +7,15 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import {
   ArrowLeft,
+  Copy,
   FileSearch,
   HelpCircle,
   LayoutTemplate,
   Loader2,
+  Pencil,
   RotateCcw,
   Search,
+  Share2,
   Sparkles,
   Trash2,
   X,
@@ -108,6 +111,59 @@ function AnswerReferences({ context, onViewSource }: { context: PublicResultCont
   </div>;
 }
 
+function copyAnswer(text: string) {
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(() => toast.success("已复制回答")).catch(() => copyAnswerFallback(text));
+    return;
+  }
+  copyAnswerFallback(text);
+}
+
+function copyAnswerFallback(text: string) {
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  try {
+    if (!document.execCommand("copy")) throw new Error("copy failed");
+    toast.success("已复制回答");
+  } catch {
+    toast.error("复制失败，请手动选择正文");
+  } finally {
+    document.body.removeChild(input);
+  }
+}
+
+function ConversationActions({ content }: { content: string }) {
+  const shareAnswer = async () => {
+    if (typeof navigator.share !== "function") {
+      toast.error("当前浏览器不支持系统分享，请复制后自行发送");
+      return;
+    }
+    try {
+      await navigator.share({ title: "Mangrove 回答", text: content });
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) toast.error("系统分享失败，请复制后自行发送");
+    }
+  };
+  return <div className="mt-2 flex flex-wrap gap-1 text-xs text-muted-foreground" role="group" aria-label="回答操作">
+    <button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => copyAnswer(content)}><Copy className="h-3.5 w-3.5" />复制</button>
+    <AlertDialog.Root>
+      <AlertDialog.Trigger asChild><button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"><Share2 className="h-3.5 w-3.5" />分享</button></AlertDialog.Trigger>
+      <AlertDialog.Portal>
+        <AlertDialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
+        <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(90vw,440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl">
+          <AlertDialog.Title className="font-semibold">分享这条回答？</AlertDialog.Title>
+          <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">只把当前回答正文交给系统分享面板；不会创建公开链接，也不会额外附带原始资料、下载凭据或任务访问权限。</AlertDialog.Description>
+          <div className="mt-5 flex justify-end gap-2"><AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm hover:bg-muted">取消</AlertDialog.Cancel><AlertDialog.Action className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground" onClick={() => void shareAnswer()}>打开系统分享</AlertDialog.Action></div>
+        </AlertDialog.Content>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
+  </div>;
+}
+
 function taskRecoveryError(error: unknown) {
   if (!(error instanceof ApiError)) {
     return "任务详情暂时无法读取，请稍后重新加载。";
@@ -130,6 +186,7 @@ function FollowupComposer({
   resultContext,
   onClearResultContext,
   onBusyChange,
+  draftRequest,
 }: {
   task: WorkspaceTask;
   scopeIdentity: string;
@@ -140,6 +197,7 @@ function FollowupComposer({
   resultContext: (ResultSelection & { label: string }) | null;
   onClearResultContext: () => void;
   onBusyChange: (busy: boolean) => void;
+  draftRequest: { key: string; text: string } | null;
   onDecision: (
     proposalId: string,
     mode: "cancel_now" | "after_safe_point" | "new_task",
@@ -183,6 +241,12 @@ function FollowupComposer({
     setText("");
     setConfirmedProposal(null);
   }, [task.task_id]);
+  useEffect(() => {
+    if (!draftRequest) return;
+    setAnswerMode(null);
+    setText(draftRequest.text);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [draftRequest]);
   useEffect(() => { latestIdentity.current = currentIdentity; return () => { latestIdentity.current = null; }; }, []);
   useLayoutEffect(() => {
     // 新轮次可继续编辑；旧请求不能清理新一轮的忙碌状态。
@@ -638,6 +702,8 @@ export function SemanticWorkspacePage() {
   const pendingSource = useRef<{ taskId: string; revision: number; evidence: Record<string, unknown> } | null>(null);
   const [resultDraft, setResultDraft] = useState<{ identity: string; context: ResultSelection & { label: string } } | null>(null);
   const [followupBusy, setFollowupBusy] = useState(false);
+  const [resendDraft, setResendDraft] = useState<{ scope: string; key: string; text: string } | null>(null);
+  const rerunFlight = useRef(false);
 
   const [liveFeed, setLiveFeed] = useState<{ identity: string; events: WorkspaceEvent[] }>({ identity: "", events: [] });
   const setLiveEvents = (events: WorkspaceEvent[]) => setLiveFeed({ identity: "", events });
@@ -760,6 +826,44 @@ export function SemanticWorkspacePage() {
     } catch (error) {
       if (answerScope.current === capturedScope && answerRound.current === question.round_id) toast.error(error instanceof Error ? error.message : "提交回答失败");
       throw error;
+    }
+  };
+  const retryCurrentTask = async (externalApiConfirmed: boolean) => {
+    if (!task || rerunFlight.current) return;
+    if (task.source_integrity?.can_rerun === false) {
+      toast.error("来源已删除，不能按原来源重跑；请先核对本次资料。");
+      return;
+    }
+    const externalConnection = Boolean(task.agentic_runtime?.model_connection_id ?? task.model_connection_id);
+    if (externalConnection && !externalApiConfirmed) return;
+    const storageKey = `mangrove_task_retry_${user?.user_id ?? "unknown"}_${task.task_id}_${task.active_revision}`;
+    let idempotencyKey: string;
+    try {
+      const stored = localStorage.getItem(storageKey);
+      idempotencyKey = stored && /^[A-Za-z0-9_-]{1,128}$/.test(stored) ? stored : nanoid();
+      localStorage.setItem(storageKey, idempotencyKey);
+    } catch {
+      toast.error("浏览器无法安全保存重试标识，本次未重新执行。");
+      return;
+    }
+    const capturedScope = readingIdentity;
+    rerunFlight.current = true;
+    try {
+      await createWorkspaceRevision(task.task_id, "保持原要求，重新执行", task.active_revision, undefined, externalApiConfirmed, undefined, idempotencyKey);
+      try { localStorage.removeItem(storageKey); } catch { /* 同一幂等键残留只会重放已完成请求。 */ }
+      if (answerScope.current === capturedScope) setSelectedRevision(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-task", task.task_id] }),
+        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-tasks"] }),
+      ]);
+      if (answerScope.current === capturedScope) toast.success("已创建新版本，正在重新执行");
+    } catch (error) {
+      if (error instanceof WorkspaceRevisionError && error.rejected) {
+        try { localStorage.removeItem(storageKey); } catch { /* 服务端已明确拒绝，残留键不会造成重复执行。 */ }
+      }
+      if (answerScope.current === capturedScope) toast.error(error instanceof WorkspaceRevisionError && error.rejected ? error.message : "重新执行结果未知，请刷新任务核对；不会自动重发。");
+    } finally {
+      rerunFlight.current = false;
     }
   };
   useLayoutEffect(() => {
@@ -1358,7 +1462,9 @@ export function SemanticWorkspacePage() {
                           </section>
                         )}
                         <TaskTimeline
+                          key={`${user?.user_id}:${task.task_id}:${task.active_revision}`}
                           task={task}
+                          externalConnection={Boolean(task.agentic_runtime?.model_connection_id ?? task.model_connection_id)}
                           connectionLabel={modelConnections.data?.items.find(connection => connection.connection_id === (task.agentic_runtime?.model_connection_id ?? task.model_connection_id))?.display_name}
                           clarificationTurnIds={conversation.data?.turns.map(turn => turn.turn_id)}
                           liveEvents={liveEvents}
@@ -1407,7 +1513,7 @@ export function SemanticWorkspacePage() {
                               );
                             }
                           }}
-                          onRetry={async (unchanged = false) => {
+                          onRetry={async (unchanged = false, externalApiConfirmed = false) => {
                             if (task.source_integrity?.can_rerun === false) { toast.error("来源已删除，不能按原来源重跑；请先核对本次资料。"); return; }
                             if (!unchanged) {
                               document
@@ -1415,33 +1521,7 @@ export function SemanticWorkspacePage() {
                                 ?.scrollIntoView({ behavior: "smooth" });
                               return;
                             }
-                            try {
-                              await createWorkspaceRevision(
-                                task.task_id,
-                                "保持原要求，重新执行",
-                                task.active_revision,
-                                undefined,
-                                true,
-                              );
-                              await Promise.all([
-                                queryClient.invalidateQueries({
-                                  queryKey: [
-                                    "semantic-workspace-task",
-                                    task.task_id,
-                                  ],
-                                }),
-                                queryClient.invalidateQueries({
-                                  queryKey: ["semantic-workspace-tasks"],
-                                }),
-                              ]);
-                              toast.success("已创建新版本并重新执行");
-                            } catch (error) {
-                              toast.error(
-                                error instanceof Error
-                                  ? error.message
-                                  : "重新执行失败",
-                              );
-                            }
+                            await retryCurrentTask(externalApiConfirmed);
                           }}
                           onRefreshSource={async (externalApiConfirmed, targetSourceSnapshotId) => {
                             const expectedRevision = task.current_revision
@@ -1604,14 +1684,15 @@ export function SemanticWorkspacePage() {
                             const clarification = task.clarification_history?.find(entry => entry.turn_id === turn.turn_id);
                             return <article key={turn.turn_id} className="space-y-2 border-b pb-4 text-sm leading-7">
                               {clarification && <p className="text-muted-foreground">{clarification.question.prompt}</p>}
-                              <p className="whitespace-pre-wrap font-medium">{turn.text}</p>
+                              <div className="flex items-start gap-2"><p className="min-w-0 flex-1 whitespace-pre-wrap font-medium">{turn.text}</p><button type="button" disabled={followupBusy} className="inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50" onClick={() => { setResultDraft(null); setResendDraft({ scope: readingIdentity, key: nanoid(), text: turn.text }); }}><Pencil className="h-3.5 w-3.5" />编辑为新消息</button></div>
                               {response && <p className="text-muted-foreground">{response.acknowledgement}</p>}
                               {answer && <div aria-label="Mangrove 回答"><Markdown safeResources>{answer}</Markdown></div>}
                               {answer && <AnswerReferences context={context && context.revision === (message?.revision ?? response?.revision) ? context : null} onViewSource={viewSource} />}
+                              {answer && <ConversationActions content={answer} />}
                             </article>;
                           })}
                           {messages.filter(message => !conversation.data?.turns?.some(turn => turn.turn_id === message.turn_id)).map(message => (
-                            <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown><AnswerReferences context={message.result_context?.revision === message.revision ? readPublicResultContext(message.result_context) : null} onViewSource={viewSource} /></article>
+                            <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown><AnswerReferences context={message.result_context?.revision === message.revision ? readPublicResultContext(message.result_context) : null} onViewSource={viewSource} /><ConversationActions content={message.content} /></article>
                           ))}
                         </section>
                         {task.status === "completed" && (
@@ -1794,6 +1875,7 @@ export function SemanticWorkspacePage() {
                             key={`${user?.user_id}:${task.task_id}`}
                             task={task}
                             scopeIdentity={readingIdentity}
+                            draftRequest={resendDraft?.scope === readingIdentity ? resendDraft : null}
                             onAnswer={answerQuestion}
                             onRefreshQuestion={() => { void detail.refetch(); }}
                             resultContext={resultDraft?.identity === resultIdentity ? resultDraft.context : null}
