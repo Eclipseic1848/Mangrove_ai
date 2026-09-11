@@ -153,7 +153,7 @@ def write_source_entries(archive: zipfile.ZipFile, *, path: Path, source: dict, 
     entry["original_name"] = _safe_name(source["original_name"])
     entry["artifact_id"] = _safe_name(source["artifact_id"])
     entry["provenance"] = {key: value for key, value in source.get("provenance", {}).items()
-                           if key in {"request_url", "source_url", "final_url", "read_at", "snapshot_id", "source_kind", "output_id", "delivery_id", "run_id", "source_task_id", "source_revision", "generated_at"}}
+                           if key in {"request_url", "source_url", "final_url", "read_at", "snapshot_id", "source_kind", "connection_id", "connection_version", "output_id", "delivery_id", "run_id", "source_task_id", "source_revision", "generated_at"}}
     entry["provenance"] = {key: value for key, value in entry["provenance"].items()
                            if isinstance(value, str) and (not key.endswith("url") or _public_url(value))}
     entry["files"] = [dict(path=original, role="original", format=Path(source["original_name"]).suffix.lstrip("."),

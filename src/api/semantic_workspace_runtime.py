@@ -2633,7 +2633,7 @@ class SemanticWorkspaceManager:
                 sources.append(SourceInput(upload_id=source_ref["output_id"],original_name=output["label"],host_path=output["host_path"],sha256=output["sha256"],media_type=output["media_type"]))
         web_repository = SourceAcquisitionRepository(settings.webui_db_path)
         for source_ref in task_revision.get("source_refs", []):
-            if source_ref.get("kind") != "web_artifact":
+            if source_ref.get("kind") not in {"web_artifact", "connector_artifact"}:
                 continue
             artifact = web_repository.get_artifact(
                 user_id,
@@ -2657,7 +2657,7 @@ class SemanticWorkspaceManager:
                 Path(settings.semantic_execution_root)
                 / "frozen-web-sources"
                 / owner_key
-                / f"{artifact_key}.html"
+                / (artifact_key + (".jsonl" if artifact["media_type"]=="application/x-ndjson" else ".json" if artifact["media_type"]=="application/json" else ".html"))
             )
             source_path.parent.mkdir(parents=True, exist_ok=True)
             if (
@@ -2684,7 +2684,8 @@ class SemanticWorkspaceManager:
             snapshot = web_repository.get_snapshot(user_id, group["source_snapshot_id"])
             if snapshot is None:
                 raise ValueError("冻结网页来源组已缺失")
-            web_snapshots.append(snapshot)
+            if snapshot.get("source_kind") != "connector":
+                web_snapshots.append(snapshot)
         # 保留的结果目标仍须评估；零网页不等于目标已完整，也不把文件计成网页。
         source_coverage = ({"kind": "selected_files", "status": "coverage_unknown", "valid_page_count": 0,
                             "failed_page_count": 0, "limit_reached": False, "web_artifact_ids": []}

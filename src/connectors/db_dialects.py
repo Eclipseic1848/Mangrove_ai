@@ -405,6 +405,30 @@ def classify_error(exc: Exception, dialect: str) -> str:
     return get_dialect(dialect).classify_error(exc)
 
 
+def classify_source_error(exc: Exception, dialect: str) -> Optional[str]:
+    """只把驱动明确标识的鉴权/权限失败投影为公开错误码。"""
+    original = getattr(exc, "orig", exc)
+    if dialect == "mysql":
+        args = getattr(original, "args", ())
+        code = args[0] if args and isinstance(args[0], int) else None
+        if code == 1045:
+            return "authorization_expired"
+        if code in {1044, 1142, 1143, 1227}:
+            return "permission_denied"
+    elif dialect == "postgresql":
+        code = getattr(original, "pgcode", None)
+        if code in {"28000", "28P01"}:
+            return "authorization_expired"
+        if code == "42501":
+            return "permission_denied"
+        message = str(original).lower()
+        if "password authentication failed" in message:
+            return "authorization_expired"
+        if "permission denied" in message:
+            return "permission_denied"
+    return None
+
+
 def normalize_value(v: Any) -> Any:
     """DB 值 → JSONL 值（按计划 §3.4 类型归一化表）。"""
     if v is None:

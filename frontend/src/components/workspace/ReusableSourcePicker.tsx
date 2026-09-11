@@ -5,6 +5,7 @@ import { getSourceAcquisition, getSourceReferences, listReusableSources, preview
 import type { ReusableSource, ReusableSourcePage, ReusableOutputPreview, SourceReferencePage, SourceSelection, SourceSnapshot } from "@/types/semanticWorkspace";
 import { ReusableResultPreview } from "./ResultPreview";
 import { SourcePreviewPanel } from "./SourcePreviewPanel";
+import { ConnectorScopeFacts } from "./ConnectorScopeFacts";
 
 export const sourceId = (item: ReusableSource) => item.upload_id || item.source_snapshot_id || item.output_id || "";
 export function reusableSelection(items: ReusableSource[]): SourceSelection {
@@ -16,7 +17,7 @@ export function ReusableSourceFacts({ item }: { item: ReusableSource }) {
     <p>{item.identity === "derived" ? "正式处理结果 · 非原件" : "原始资料"}</p>
     <p>{item.kind === "upload" ? "曾用于" : "来源"}：{item.origin?.task_id || "来源任务未记录"} · {item.origin?.revision ? `V${item.origin.revision}` : "版本未记录"}</p>
     <p>{item.time_kind === "generated" ? "生成时间" : "取得时间"}：{time && item.time_kind !== "unknown" ? time : "时间未记录"}</p>
-    {item.allowed_scope && <p>范围：{item.allowed_scope.query || item.allowed_scope.normalized_url} · 时间：{({ any: "不限", day: "最近一天", week: "最近一周", month: "最近一月", year: "最近一年" })[item.allowed_scope.time_range ?? "any"]} · 域名：{item.allowed_scope.domains?.join("、") || "按原授权范围"}</p>}
+    {item.allowed_scope && (item.allowed_scope.kind === "connector" ? <ConnectorScopeFacts scope={item.allowed_scope} /> : <p>范围：{item.allowed_scope.query || item.allowed_scope.normalized_url} · 时间：{({ any: "不限", day: "最近一天", week: "最近一周", month: "最近一月", year: "最近一年" })[item.allowed_scope.time_range ?? "any"]} · 域名：{item.allowed_scope.domains?.join("、") || "按原授权范围"}</p>)}
     {item.coverage && <p>{item.coverage.status === "hard_insufficient" ? "硬性目标未满足，不能由其他资料抵消" : item.coverage.status === "scope_complete" ? "已覆盖授权范围" : "覆盖仍有未知，不代表完整"}{item.coverage.search_report && ` · 正文 ${item.coverage.search_report.read_count} · 失败 ${item.coverage.search_report.failed_count} · 尚未读到正文 ${item.coverage.search_report.candidates.filter(value => value.status !== "read").length}`}</p>}
     {item.availability !== "available" && <p role="alert">资料不可用，请移除或重新核对；不会从缓存恢复。{item.reason_code ? `（${item.reason_code}）` : ""}</p>}
     {item.limitations?.map((value, index) => <p key={index}>{value}</p>)}
@@ -75,9 +76,9 @@ export function ReusableSourcePicker({ selectedKeys, onAdd, onClose }: { selecte
           || next.representation.associated_output_id !== checked.output_id || next.representation.sha256 !== checked.sha256) throw new Error("正式输出预览身份已变化，请重新选择");
         if (alive.current && request.current === generation) setOutput(next);
       } else if (checked.kind === "snapshot") {
-        if (!checked.attempt_id) throw new Error("网页缺少可恢复身份");
+        if (!checked.attempt_id) throw new Error("来源缺少可恢复身份");
         const next = await getSourceAcquisition(checked.attempt_id);
-        if (next.snapshot?.snapshot_id !== checked.source_snapshot_id) throw new Error("网页快照身份已变化");
+        if (next.snapshot?.snapshot_id !== checked.source_snapshot_id) throw new Error("来源快照身份已变化");
         if (alive.current && request.current === generation) setSnapshot(next.snapshot);
       }
     } catch (reason) { if (alive.current && request.current === generation) setError(reason instanceof Error ? reason.message : "资料预览失败"); }
@@ -117,7 +118,7 @@ export function ReusableSourcePicker({ selectedKeys, onAdd, onClose }: { selecte
           {loadingPreview && <p role="status">正在读取资料…</p>}
           {!error && !loadingPreview && output && <><ReusableResultPreview key={`${view.source_key}:${output.offset}`} preview={output} /><p className="text-xs text-muted-foreground">仅显示当前窗口 · 共 {output.total} 条</p><div className="flex gap-2"><button type="button" className={button} disabled={busy || output.offset === 0} onClick={() => void show(view, Math.max(0, output.offset - output.limit))}>上一页</button><button type="button" className={button} disabled={busy || output.offset + output.limit >= output.total} onClick={() => void show(view, output.offset + output.limit)}>下一页</button></div></>}
           {!error && !loadingPreview && view.kind === "upload" && <div className="h-[50dvh] min-h-48"><SourcePreviewPanel uploads={[{ upload_id: sourceId(view), original_name: view.label, media_type: view.media_type || "", size_bytes: view.size_bytes ?? 0, sha256: view.sha256 || "" }]} selectedUploadId={sourceId(view)} evidence={null} onSelectUpload={() => undefined} onClose={back} /></div>}
-          {!error && snapshot && <><p className="text-xs text-muted-foreground">网页摘要预览，可能截断；完整内容沿任务资料包保留。</p>{snapshot.artifacts.map(item => <article key={item.artifact_id} className="border-t py-3"><p className="break-all">{item.title || item.final_url}</p><p className="break-all text-xs text-muted-foreground">{item.final_url}</p><p className="mt-2 whitespace-pre-wrap text-sm">{item.text_preview}</p></article>)}</>}
+          {!error && snapshot && <><p className="text-xs text-muted-foreground">{snapshot.source_kind === "connector" ? "连接记录摘要预览，可能截断；完整内容沿任务资料包保留。" : "网页摘要预览，可能截断；完整内容沿任务资料包保留。"}</p>{snapshot.artifacts.map(item => <article key={item.artifact_id} className="border-t py-3"><p className="break-all">{item.title || item.final_url}</p><p className="break-all text-xs text-muted-foreground">{item.final_url}</p><p className="mt-2 whitespace-pre-wrap text-sm">{item.text_preview}</p></article>)}</>}
           <button type="button" className={button} disabled={busy || loadingPreview} onClick={() => void readReferences()}>查看出处与引用</button>
           {references && <section aria-label="资料引用清单" className="space-y-2 text-xs"><p>{references.page_complete && references.total === 0 && references.unknown_uses === 0 ? "0 个引用" : `已显示 ${references.items.length} / ${references.total} 条引用 · 未知使用 ${references.unknown_uses}`}</p>{references.items.map((item, index) => <p key={`${item.task_id}-${item.revision}-${item.use_id}-${index}`}><SourceReferenceFacts item={item} /></p>)}{references.next_cursor && <button type="button" className={button} disabled={busy || loadingPreview} onClick={() => void readReferences(true)}>加载更多引用</button>}</section>}
         </section> : <div className="space-y-3">

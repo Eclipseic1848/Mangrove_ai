@@ -69,14 +69,14 @@ def resolve_frozen_source(owner_id, ref):
             if key in ref and ref[key] != frozen[key]:
                 raise ValueError("正式输出冻结出处变化")
         result = dict(source_key="delivery_output:"+item["output_id"], kind=kind, identity="derived", label=item["filename"], acquired_at=item.get("created_at"), time_kind="generated", media_type=item["media_type"], size_bytes=item["size_bytes"], sha256=item["sha256"], output_id=item["output_id"], host_path=path, frozen_ref=frozen, origin=origin)
-    elif kind == "web_artifact":
+    elif kind in {"web_artifact", "connector_artifact"}:
         item = SourceAcquisitionRepository(settings.webui_db_path).get_artifact(owner_id, ref["artifact_id"], include_content=True)
         if item is None or item["snapshot_id"] != ref["snapshot_id"]:
             raise PermissionError("网页原件不存在或无权访问")
         raw = bytes(item["content_blob"])
         if hashlib.sha256(raw).hexdigest() != item["content_sha256"]:
             raise ValueError("网页原件完整性校验失败")
-        result = dict(source_key="web_artifact:"+item["artifact_id"], kind=kind, identity="original", label=item.get("title") or "source.html", acquired_at=item["read_at"], time_kind="acquired", media_type=item["media_type"], size_bytes=item["size_bytes"], sha256=item["content_sha256"], content_bytes=raw, frozen_ref=dict(ref), origin=origin, web=item)
+        result = dict(source_key=kind+":"+item["artifact_id"], kind=kind, identity="original", label=item.get("title") or ("source.jsonl" if item["media_type"]=="application/x-ndjson" else "source.json" if kind=="connector_artifact" else "source.html"), acquired_at=item["read_at"], time_kind="acquired", media_type=item["media_type"], size_bytes=item["size_bytes"], sha256=item["content_sha256"], content_bytes=raw, frozen_ref=dict(ref), origin=origin, web=item)
     else:
         item = uploads().resolve(owner_id, ref["upload_id"])
         result = dict(source_key="upload:"+item.upload_id, kind="upload", identity="original", label=item.original_name, acquired_at=getattr(item,"created_at",None), time_kind="acquired" if getattr(item,"created_at",None) else "unknown", media_type=item.media_type, size_bytes=item.size_bytes, sha256=item.sha256, upload_id=item.upload_id, host_path=Path(item.storage_path), frozen_ref=dict(upload_id=item.upload_id,sha256=item.sha256), origin=origin)
@@ -100,7 +100,7 @@ def resolve_choices(owner_id, upload_ids=(), snapshot_ids=(), output_ids=()):
                     if snapshot is None:
                         raise PermissionError("来源不可用")
                     for artifact in snapshot["artifacts"]:
-                        resolve_frozen_source(owner_id,dict(kind="web_artifact",snapshot_id=identity,artifact_id=artifact["artifact_id"],sha256=artifact["content_sha256"]))
+                        resolve_frozen_source(owner_id,dict(kind="connector_artifact" if snapshot.get("source_kind")=="connector" else "web_artifact",snapshot_id=identity,artifact_id=artifact["artifact_id"],sha256=artifact["content_sha256"]))
                     item = dict(source_key="snapshot:"+identity,kind=kind,identity="original",label=snapshot.get("request_url") or "网页资料",source_snapshot_id=identity, acquired_at=snapshot.get("created_at"),time_kind="acquired",media_type=None,size_bytes=sum(x["size_bytes"] for x in snapshot["artifacts"]),sha256=None,origin=dict(task_id=None,revision=None,run_id=None,delivery_id=None),availability="available" if snapshot["valid_page_count"] and snapshot["coverage"]["status"] != "hard_insufficient" else "unavailable",reason_code=None if snapshot["valid_page_count"] and snapshot["coverage"]["status"] != "hard_insufficient" else "source_coverage_insufficient",limitations=[],attempt_id=snapshot.get("attempt_id"),allowed_scope=snapshot["allowed_scope"],coverage=snapshot["coverage"])
                 else:
                     item = public_source(resolve_frozen_source(owner_id,{"kind":kind,field:identity}))
@@ -138,7 +138,7 @@ def history(owner_id):
             if snapshot is None:
                 values['snapshot:'+identity]=dict(source_key='snapshot:'+identity,kind='snapshot',identity='original',label='已清理网页资料',source_snapshot_id=identity,acquired_at=None,time_kind='unknown',sha256=None,media_type=None,size_bytes=0,origin=dict(task_id=None,revision=None,run_id=None,delivery_id=None),availability='unavailable',reason_code='source_deleted',limitations=[])
                 continue
-            values["snapshot:"+identity]=dict(source_key="snapshot:"+identity,kind="snapshot",identity="original",label="网页资料",source_snapshot_id=identity,acquired_at=snapshot.get("created_at"),time_kind="acquired",sha256=None,media_type=None,size_bytes=sum(x["size_bytes"] for x in snapshot["artifacts"]),origin=dict(task_id=None,revision=None,run_id=None,delivery_id=None),availability="available",reason_code=None,limitations=["使用时重新核验"],attempt_id=snapshot.get("attempt_id"),allowed_scope=snapshot["allowed_scope"],coverage=snapshot["coverage"])
+            values["snapshot:"+identity]=dict(source_key="snapshot:"+identity,kind="snapshot",identity="original",label="连接资料" if snapshot.get("source_kind")=="connector" else "网页资料",source_snapshot_id=identity,acquired_at=snapshot.get("created_at"),time_kind="acquired",sha256=None,media_type=None,size_bytes=sum(x["size_bytes"] for x in snapshot["artifacts"]),origin=dict(task_id=None,revision=None,run_id=None,delivery_id=None),availability="available",reason_code=None,limitations=["使用时重新核验"],attempt_id=snapshot.get("attempt_id"),allowed_scope=snapshot["allowed_scope"],coverage=snapshot["coverage"])
             if not snapshot["valid_page_count"] or snapshot["coverage"]["status"]=="hard_insufficient":
                 values["snapshot:"+identity].update(availability="unavailable",reason_code="source_coverage_insufficient")
         for table,column in (("formal_delivery_outputs","owner_id"),("semantic_delivery_outputs","user_id")):
@@ -173,8 +173,8 @@ from starlette.responses import Response
 def source_key(ref):
     if ref.get("kind") == "delivery_output":
         return "delivery_output:"+ref["output_id"]
-    if ref.get("kind") == "web_artifact":
-        return "web_artifact:"+ref["artifact_id"]
+    if ref.get("kind") in {"web_artifact", "connector_artifact"}:
+        return ref["kind"]+":"+ref["artifact_id"]
     return "upload:"+ref["upload_id"]
 
 

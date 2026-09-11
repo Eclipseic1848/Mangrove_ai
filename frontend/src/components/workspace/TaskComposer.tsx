@@ -277,6 +277,7 @@ export function TaskComposer({
   uploadStorageKey,
   initialUploads = [],
   webSourceCount = 0,
+  connectorSourceCount = 0,
   additionalSourceCount = 0,
   additionalInputFormats = [],
   sourceBusy = false,
@@ -326,6 +327,7 @@ export function TaskComposer({
   uploadStorageKey?: string;
   initialUploads?: UploadItem[];
   webSourceCount?: number;
+  connectorSourceCount?: number;
   additionalSourceCount?: number;
   additionalInputFormats?: string[];
   sourceBusy?: boolean;
@@ -782,13 +784,13 @@ export function TaskComposer({
 
   const submit = async () => {
     if (!active || submittingRef.current) return;
-    if (unified && prompt.trim() && !items.length && !webSourceCount && !additionalSourceCount && !submitting) {
+    if (unified && prompt.trim() && !items.length && !webSourceCount && !connectorSourceCount && !additionalSourceCount && !submitting) {
       readWeb();
       return;
     }
     if (
       !prompt.trim()
-      || (!ready.length && !webSourceCount && !additionalSourceCount)
+      || (!ready.length && !webSourceCount && !connectorSourceCount && !additionalSourceCount)
       || !formats.length
       || busy
       || hasFailed
@@ -933,7 +935,7 @@ export function TaskComposer({
                           : kind === "document"
                             ? "文档内容"
                             : "上传文件内容"}
-                        {webSourceCount > 0 ? "、全部已选网页的标题、正文与网址，以及本次确认的上下文" : ""}{additionalSourceCount > 0 ? "、全部已选历史原件和正式处理结果正文及出处" : ""}
+                        {webSourceCount > 0 ? "、全部已选网页的标题、正文与网址，以及本次确认的上下文" : ""}{connectorSourceCount > 0 ? "、全部已选连接资料的记录、字段与来源信息，以及本次确认的上下文" : ""}{additionalSourceCount > 0 ? "、全部已选历史原件和正式处理结果正文及出处" : ""}
                         与任务说明；仅用于当前任务版本，不授权其他任务复用。
                       </p>
                       <label className="mt-2 flex items-start gap-2 text-foreground">
@@ -1169,14 +1171,14 @@ export function TaskComposer({
           onClick={() => void submit()}
           disabled={
             !prompt.trim()
-            || ((!unified || items.length > 0 || webSourceCount > 0 || additionalSourceCount > 0) && !ready.length && !webSourceCount && !additionalSourceCount)
+            || ((!unified || items.length > 0 || webSourceCount > 0 || connectorSourceCount > 0 || additionalSourceCount > 0) && !ready.length && !webSourceCount && !connectorSourceCount && !additionalSourceCount)
             || (ready.length > 0 && !formats.length)
             || busy
             || reuseInvalid
             || hasFailed
             || submitBlocked
             || (kind === "mixed" && runtimeSelection === "legacy")
-            || ((ready.length > 0 || webSourceCount > 0 || additionalSourceCount > 0) && piSelectionInvalid)
+            || ((ready.length > 0 || webSourceCount > 0 || connectorSourceCount > 0 || additionalSourceCount > 0) && piSelectionInvalid)
           }
           className="ml-auto inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-45"
         >
@@ -1185,7 +1187,7 @@ export function TaskComposer({
           ) : (
             <Send className="h-4 w-4" />
           )}
-          {compact ? "创建新版本" : webSourceCount ? "启动任务" : "开始执行"}
+          {compact ? "创建新版本" : (webSourceCount || connectorSourceCount) ? "启动任务" : "开始执行"}
         </button>
       </div>
       {children}

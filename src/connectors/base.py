@@ -51,6 +51,7 @@ class RecordBatch:
     warnings: List[str] = field(default_factory=list)
     retryable_error: Optional[str] = None     # 可重试错误（网络/限流）
     fatal_error: Optional[str] = None         # 不可重试错误（凭证失效/权限不足）
+    error_code: Optional[str] = None          # 对外稳定分类；原始错误仍只用于脱敏诊断
 
     @property
     def has_data(self) -> bool:
