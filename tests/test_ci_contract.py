@@ -292,7 +292,7 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     assert "commits =" not in config
     assert "tests/.*" not in config
     assert "evals/.*" not in config
-    assert len(ignored) == 21
+    assert len(ignored) == 28
     assert (
         "8f23acbdcb69890cc94c733bb47baa3a75d5de22:"
         "tests/test_source_account_generation.py:generic-api-key:19"
@@ -321,6 +321,15 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
         },
     }
     assert new_false_positives.issubset(ignored)
+    assert {
+        "e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:src/database_migrations/schema_manifest.json:generic-api-key:247",
+        "e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:56",
+        "e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:84",
+        "e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:87",
+        "e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:98",
+        "e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:151",
+        "e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:199",
+    } <= set(ignored)
     assert all("*" not in fingerprint for fingerprint in ignored)
     assert all(fingerprint.count(":") >= 3 for fingerprint in ignored)
 
