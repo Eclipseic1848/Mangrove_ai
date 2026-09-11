@@ -165,8 +165,14 @@ class HttpApiConnector(SourceConnector):
             for item in settings.data_prep_http_private_host_allowlist.split(",")
             if item.strip()
         )
+        proxy_fake_ip_allowlist = tuple(
+            item.strip()
+            for item in settings.data_prep_http_proxy_fake_ip_host_allowlist.split(",")
+            if item.strip()
+        )
         self._guard = security_guard or HttpSecurityGuard(
-            private_host_allowlist=allowlist
+            private_host_allowlist=allowlist,
+            proxy_fake_ip_host_allowlist=proxy_fake_ip_allowlist,
         )
         # transport 注入：生产 None（默认网络），测试注入 MockTransport
         self._transport = transport

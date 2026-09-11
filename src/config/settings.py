@@ -431,6 +431,10 @@ class Settings(BaseSettings):
         default="",
         description="允许 HTTP API 访问的私网主机名/IP，逗号分隔；loopback 等硬黑名单仍拒绝",
     )
+    data_prep_http_proxy_fake_ip_host_allowlist: str = Field(
+        default="",
+        description="允许透明代理 Fake-IP 的精确 HTTPS 主机名，逗号分隔；仅放行 198.18.0.0/15",
+    )
     # 扫描/混合 PDF 坐标型 OCR（Phase 4A）。当前本机开发环境使用 MinerU 3.4.4 HTTP 服务；
     # 数字 PDF 不调用该服务，服务失败时保留 ocr_required，不伪造解析成功。
     mineru_enabled: bool = Field(default=True, description="是否启用 MinerU 扫描 PDF 解析")
@@ -701,4 +705,3 @@ def resolve_vision_model_api_settings() -> Dict[str, Any]:
         "timeout": s.llm_timeout,
         "max_tokens": s.llm_max_tokens,
     }
-

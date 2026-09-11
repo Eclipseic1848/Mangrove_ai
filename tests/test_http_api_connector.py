@@ -31,6 +31,7 @@ from src.connectors.http_api_connector import (
     _retry_after_seconds,
 )
 from src.connectors.http_security import HttpSecurityGuard, SsrfError
+from src.config.settings import settings
 from src.data_prep.models import SourceSpec, SourceType
 
 URL = "https://api.example.com/items"
@@ -96,6 +97,26 @@ class TestConfig:
             assert client._trust_env is False
         finally:
             _run(client.aclose())
+
+    def test_configured_https_host_accepts_only_proxy_fake_ip(
+        self, monkeypatch
+    ):
+        monkeypatch.setattr(
+            settings,
+            "data_prep_http_proxy_fake_ip_host_allowlist",
+            " API.EXAMPLE.COM ",
+        )
+        monkeypatch.setattr(
+            "src.connectors.http_security.default_resolver",
+            lambda _host: ["198.18.0.97"],
+        )
+        guard = HttpApiConnector()._guard
+
+        assert guard.validate(URL).ips == ("198.18.0.97",)
+        with pytest.raises(SsrfError, match="私网地址"):
+            guard.validate("https://other.example.com/items")
+        with pytest.raises(SsrfError, match="私网地址"):
+            guard.validate("http://api.example.com/items")
 
     def test_post_requires_readonly(self):
         with pytest.raises(ValueError, match="readonly"):
