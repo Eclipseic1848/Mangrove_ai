@@ -2090,14 +2090,12 @@ class WorkspaceFeedbackIn(BaseModel):
 
 @router.post("/tasks/{task_id}/feedback")
 def submit_workspace_feedback(task_id:str,payload:WorkspaceFeedbackIn,idempotency_key:str=Header(alias="Idempotency-Key"),user=Depends(get_execution_user)):
-    from src.api.workspace_feedback import submit_feedback
+    from src.api.workspace_feedback import record_rejection,submit_feedback
     store=get_store()
     try:return submit_feedback(store,user,task_id,payload,idempotency_key)
     except HTTPException as exc:
-        with store._lock,store._conn() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            exists=conn.execute("SELECT 1 FROM workspace_feedback_receipts WHERE user_id=? AND request_key=?",(user["user_id"],idempotency_key)).fetchone()
-        if not exists:exc.headers={**(exc.headers or {}),"X-Mangrove-Lifecycle-Outcome":"rejected"}
+        if record_rejection(store,user,task_id,payload,idempotency_key,exc.status_code):
+            exc.headers={**(exc.headers or {}),"X-Mangrove-Lifecycle-Outcome":"rejected"}
         raise
 
 @router.get("/tasks/{task_id}/feedback")

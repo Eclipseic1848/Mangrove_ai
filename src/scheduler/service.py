@@ -81,8 +81,9 @@ class SchedulerService:
     async def tick(self, now: Optional[datetime] = None) -> int:
         """执行一轮：跑完所有到点任务，返回本轮执行的任务数。"""
         now = now or datetime.now()
-        from .workspace import reconcile_pending
-        reconcile_pending(self.store)
+        from .workspace import reconcile_pending, resume_occurrence
+        for occurrence in reconcile_pending(self.store):
+            await resume_occurrence(self, occurrence, now)
         due = self.store.due_tasks(now=now)
         for task in due:
             await self._run_one(task, now)

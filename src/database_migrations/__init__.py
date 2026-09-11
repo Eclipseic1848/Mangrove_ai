@@ -277,7 +277,7 @@ _PROFILE_REQUIRED_COLUMNS = {
             "digest", "run_id", "worker_id",
         ),
         "workspace_feedback": ('id', 'user_id', 'task_id', 'revision', 'output_id', 'output_sha256', 'rating', 'reasons', 'comment', 'created_at', 'status', 'admin_note', 'version', 'request_key', 'request_hash', 'deleted_at'),
-        "workspace_feedback_receipts": ('user_id', 'request_key', 'request_hash', 'task_id', 'revision', 'output_id', 'feedback_id', 'version', 'created_at', 'result'),
+        "workspace_feedback_receipts": ('user_id', 'request_key', 'request_hash', 'task_id', 'revision', 'output_id', 'feedback_id', 'version', 'created_at', 'result', 'failure_code'),
         "workspace_feedback_content_access": ('event_id', 'actor_id', 'actor_role', 'idempotency_key', 'reason', 'action', 'feedback_id', 'message_id', 'conv_id', 'owner_id', 'request_digest', 'response_digest', 'content_bytes', 'truncated', 'result', 'failure_code', 'created_at', 'source_identity_json'),
     },
     "scheduler": {

@@ -120,7 +120,9 @@ function LifecycleDialog({task,ownerId,mode}:{task:WorkspaceTask;ownerId:string;
       const response=await api.get(`/api/semantic-workspace/tasks/${encodeURIComponent(task.task_id)}/feedback?revision=${revision}&output_id=${encodeURIComponent(String(pending.payload.output_id))}&idempotency_key=${encodeURIComponent(pending.key)}`);
       const original=response.receipt??response.feedback;
       if(original?.request_key!==pending.key)throw new Error("尚未确认原反馈版本");
-      if(response.receipt&&(original.task_id!==task.task_id||original.revision!==revision||original.output_id!==pending.payload.output_id||original.result!=="saved"))throw new Error("原反馈收据身份不匹配");
+      if(response.receipt&&(original.task_id!==task.task_id||original.revision!==revision||original.output_id!==pending.payload.output_id))throw new Error("原反馈收据身份不匹配");
+      if(response.receipt&&original.result==="rejected")throw Object.assign(new Error("原反馈请求已明确拒绝，可修改后重试。"),{rejected:true});
+      if(response.receipt&&original.result!=="saved")throw new Error("原反馈收据状态未知");
       return {data:original,done:true};
     });
   }

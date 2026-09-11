@@ -33,7 +33,7 @@ def test_plan_freezes_exact_workspace_revision(tmp_path,monkeypatch,source_kind)
     with sqlite3.connect(settings.webui_db_path) as conn:
         conn.execute("UPDATE users SET role='admin' WHERE user_id='user-a'")
     scheduler_path=migrated_profile_database(tmp_path/"scheduler.db",profile="scheduler")
-    # 官方显式迁移已创建0021/0002；Repository只检查，不隐式建表。
+    # 官方显式迁移已创建0019/0002；Repository只检查，不隐式建表。
     schedules=ScheduleStore(str(scheduler_path))
     monkeypatch.setattr("src.api.routes.tasks.get_schedule_store",lambda:schedules)
     document,_=_uploads(tmp_path)
@@ -265,6 +265,53 @@ def test_feedback_prior_request_remains_queryable_after_another_update(tmp_path,
         altered=client.post(path,json={**original,'comment':'不得借旧键新建第三版','expected_version':2},headers={'Idempotency-Key':'feedback-key-a'})
         assert altered.status_code==409,altered.text
         assert client.get(path,params={'revision':1,'output_id':original['output_id']}).json()['feedback']['version']==2
+
+        rejected_payload={**original,'comment':'过期版本不得覆盖','expected_version':0}
+        rejected=client.post(path,json=rejected_payload,headers={'Idempotency-Key':'feedback-key-rejected'})
+        assert rejected.status_code==409 and rejected.headers.get('X-Mangrove-Lifecycle-Outcome')=='rejected'
+        receipt=client.get(path,params={'revision':1,'output_id':original['output_id'],'idempotency_key':'feedback-key-rejected'})
+        assert receipt.status_code==200,receipt.text
+        assert receipt.json()['receipt']=={
+            'task_id':consumer['task_id'],'revision':1,'output_id':original['output_id'],
+            'version':0,'created_at':receipt.json()['receipt']['created_at'],
+            'request_key':'feedback-key-rejected','result':'rejected','failure_code':'http_409',
+            'id':0,'receipt_only':True,
+        }
+        replay_rejected=client.post(path,json=rejected_payload,headers={'Idempotency-Key':'feedback-key-rejected'})
+        assert replay_rejected.status_code==409
+        assert replay_rejected.headers.get('X-Mangrove-Lifecycle-Outcome')=='rejected'
+        assert replay_rejected.json()['detail']=='原反馈请求已明确拒绝'
+
+
+def test_service_restart_resumes_claimed_occurrence_before_workspace_task(tmp_path,monkeypatch):
+    from src import account_execution as execution
+    from src.api.auth import get_store
+    from src.api.routes import tasks as task_routes
+    from src.scheduler.service import SchedulerService
+    from src.scheduler.workspace import occurrences
+
+    runtime=CoverageAwareWebPiRuntime()
+    client=_client(tmp_path,monkeypatch,role='admin',pi_runtime=runtime)
+    with client:
+        schedule,_,_=_scheduled_formal(client,tmp_path,monkeypatch)
+        schedules=task_routes.get_schedule_store()
+        task=schedules.get(schedule)
+        task['_manual_request_key']='restart-before-workspace-task'
+        binding=get_store().account_execution_binding('user-a','schedule',schedule)
+        auth=execution.ExecutionAuthorization('user-a',binding['generation'])
+        with execution.execution_context(auth):
+            _,claimed=schedules.claim_execution(schedule,expected_task=task,manual=True)
+        occurrence_id=claimed['_workspace_occurrence']
+        assert next(row for row in occurrences(schedules,'user-a',schedule) if row['occurrence_id']==occurrence_id)['state']=='claimed'
+
+        before=len(runtime.requests)
+        restarted=SchedulerService(schedules,runner=lambda *args:pytest.fail('不能绕过统一工作台'))
+        client.portal.call(restarted.tick,datetime.now())
+        recovered=next(row for row in occurrences(schedules,'user-a',schedule) if row['occurrence_id']==occurrence_id)
+        assert recovered['state']=='completed' and recovered['workspace_task_id']
+        assert len(runtime.requests)==before+1
+        client.portal.call(restarted.tick,datetime.now())
+        assert len(runtime.requests)==before+1
 
 
 def test_occurrence_retains_first_revision_when_later_revision_runs_and_fails(tmp_path,monkeypatch):

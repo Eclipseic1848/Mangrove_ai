@@ -189,6 +189,18 @@ test("141 原反馈被新版覆盖后仍按原键确认收据，不重发或伪�
  await page.getByRole("button",{name:"修改反馈",exact:true}).click();await expect(page.getByRole("button",{name:"提交反馈",exact:true})).toBeEnabled();
 });
 
+test("141 原反馈失败回执可解除未知等待且不重发",async({page})=>{
+ await mockWorkspace(page);const fixture=previewIdentityFixture("本人",2);let posts=0,receipt:any=null;
+ await page.route("**/api/semantic-workspace/tasks/identity-task*",route=>route.fulfill({json:fixture.detail}));
+ await page.route("**/api/semantic-workspace/tasks/identity-task/turns",route=>route.fulfill({json:{turns:[],results:[],proposals:[]}}));
+ await page.route("**/api/semantic-workspace/tasks/identity-task/feedback*",route=>{
+  if(route.request().method()==="GET"){const key=new URL(route.request().url()).searchParams.get("idempotency_key");return route.fulfill({json:{feedback:null,receipt:key===receipt?.request_key?receipt:null}});}
+  posts++;receipt={request_key:route.request().headers()["idempotency-key"],version:0,task_id:"identity-task",revision:2,output_id:"本人-V2-output",result:"rejected",failure_code:"http_409",id:0,receipt_only:true};return route.fulfill({status:503,json:{detail:"响应未知"}});
+ });
+ await page.goto("/data-prep?task=identity-task&revision=2");await page.getByRole("button",{name:"反馈正式结果",exact:true}).click();await page.getByRole("button",{name:"提交反馈",exact:true}).click();await expect(page.getByText(/结果尚未确认，请查询原请求/)).toBeVisible();
+ await page.getByRole("button",{name:"查询原请求",exact:true}).click();await expect(page.getByText(/原反馈请求已明确拒绝，可修改后重试/)).toBeVisible();await expect(page.getByRole("button",{name:"提交反馈",exact:true})).toBeEnabled();expect(posts).toBe(1);
+});
+
 test("141 两个执行查询共用在途门，原次终态不会被旧列表覆盖",async({page})=>{
  await mockWorkspace(page);const entered=responseBarrier(),release=responseBarrier();let queries=0;
  await page.route("**/api/tasks",route=>route.fulfill({json:[{task_id:"s-order",name:"顺序计划",source:"workspace",status:"active",user_input:"证据",trigger_type:"cron",cron_expr:"0 9 * * *",run_count:0}]}));await page.route("**/api/tasks/templates",route=>route.fulfill({json:[]}));

@@ -7,23 +7,6 @@ from zoneinfo import ZoneInfo,ZoneInfoNotFoundError
 from fastapi import HTTPException
 from src import account_execution as execution
 
-SCHEMA = """
-CREATE TABLE scheduled_workspace_bindings (
- schedule_id TEXT PRIMARY KEY REFERENCES scheduled_tasks(task_id), owner_id TEXT NOT NULL,
- source_task_id TEXT NOT NULL, source_revision INTEGER NOT NULL, payload_json TEXT NOT NULL,
- contract_json TEXT NOT NULL, request_key TEXT NOT NULL, request_hash TEXT NOT NULL,
- timezone TEXT NOT NULL, UNIQUE(owner_id,request_key)
-);
-CREATE TABLE scheduled_workspace_occurrences (
- occurrence_id TEXT PRIMARY KEY, schedule_id TEXT NOT NULL REFERENCES scheduled_tasks(task_id),
- owner_id TEXT NOT NULL, config_hash TEXT NOT NULL, due_at TEXT NOT NULL, manual INTEGER NOT NULL,
- request_key TEXT NOT NULL, state TEXT NOT NULL, workspace_task_id TEXT,
- workspace_revision INTEGER, runtime_run_id TEXT, output_ids_json TEXT NOT NULL DEFAULT '[]',
- error_code TEXT, generation INTEGER NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
- UNIQUE(owner_id,request_key)
-);
-"""
-
 def encoded(value):
     return json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(",",":"))
 
@@ -135,6 +118,7 @@ def observe_occurrence(row):
         claim=conn.execute("SELECT task_id FROM agentic_runtime_idempotency WHERE user_id=? AND idempotency_key=?",(row["owner_id"],row["request_key"])).fetchone()
     task_id=row["workspace_task_id"] or (claim["task_id"] if claim else None)
     if not task_id:return result
+    result["workspace_task_id"]=task_id
     task=web.get_semantic_workspace_task(row["owner_id"],task_id)
     if task is None:return result
     revision=row.get('workspace_revision') or 1
@@ -189,11 +173,26 @@ def reconcile_pending(store):
         bindings={(row["owner_user_id"],row["resource_id"]):row["generation"] for row in web_conn.execute("SELECT * FROM account_execution_bindings WHERE resource_kind='schedule' AND state='active'")}
         with store._conn() as conn:
             rows=[dict(row) for row in conn.execute("SELECT * FROM scheduled_workspace_occurrences")]
+    resumable=[]
     for row in rows:
         if bindings.get((row["owner_id"],row["schedule_id"]))!=row["generation"]:continue
         row["output_ids"]=json.loads(row["output_ids_json"])
-        try:settle_occurrence(store,execution.ExecutionAuthorization(row["owner_id"],row["generation"]),observe_occurrence(row))
+        try:
+            observed=observe_occurrence(row)
+            settle_occurrence(store,execution.ExecutionAuthorization(row["owner_id"],row["generation"]),observed)
+            if observed["state"] in {"claimed","creating"} and not observed.get("workspace_task_id"):resumable.append(observed)
         except execution.ExecutionDenied:continue
+    return resumable
+
+
+async def resume_occurrence(service,row,now):
+    """仅续跑尚未建立工作台幂等领取的原 occurrence。"""
+    task=service.store.get(row["schedule_id"])
+    if task is None:return
+    task["_workspace_occurrence"]=row["occurrence_id"]
+    auth=execution.ExecutionAuthorization(row["owner_id"],row["generation"])
+    with execution.execution_context(auth):
+        await execute_occurrence(service,task,now,bool(row["manual"]))
 
 def next_workspace_time(task,zone_name,now=None):
     """新计划使用显式时区；旧计划的宿主本地时间合同不变。"""
