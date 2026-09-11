@@ -1253,6 +1253,14 @@ def apply_migrations(
                 if locked_before != before:
                     raise RuntimeError("取得写锁后数据库 revision 或 Schema 已变化")
                 source_database_sha256 = _file_sha256(database)
+                wal_path = database.with_name(database.name + "-wal")
+                if (
+                    expected_source_sha256 is not None
+                    and wal_path.is_file()
+                    and wal_path.stat().st_size > 0
+                ):
+                    # 主文件摘要不覆盖已提交 WAL；必须停写并 checkpoint 后重新确认。
+                    raise ValueError("源数据库存在非空 WAL，主文件 SHA-256 无法确认完整快照")
                 if existed and locked_before.state == "unknown":
                     raise SchemaNotCurrentError(
                         "现有数据库 Schema 未被识别，拒绝猜测迁移"

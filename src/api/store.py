@@ -19,7 +19,7 @@ import uuid
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Collection, Dict, Iterator, List, Optional, Tuple
 
 from src import account_execution as execution
 from .feedback_audit import REASONS, fixed_reasons
@@ -3302,15 +3302,39 @@ class WebUIStore:
 
     def list_pending_semantic_workspace_tasks(
         self,
+        *,
+        statuses: tuple[str, ...] = ("queued", "running", "cancelling"),
+        limit: int = 256,
+        exclude_task_ids: Collection[str] = (),
+        after: tuple[str, str] | None = None,
     ) -> List[Dict[str, Any]]:
-        """启动恢复专用；仅返回尚未终结且未删除的任务及 owner。"""
+        """恢复专用；有界返回尚未终结且未删除的任务及 owner。"""
 
+        allowed = {"queued", "running", "cancelling"}
+        selected = tuple(dict.fromkeys(statuses))
+        excluded = tuple(sorted(set(exclude_task_ids)))
+        if not selected or not set(selected).issubset(allowed):
+            raise ValueError("恢复任务状态无效")
+        if limit < 1 or limit > 256 or len(excluded) > 258:
+            raise ValueError("恢复扫描范围无效")
+        where = [
+            "deleted_at IS NULL",
+            "status IN (" + ",".join("?" for _ in selected) + ")",
+        ]
+        values: list[Any] = list(selected)
+        if excluded:
+            where.append("task_id NOT IN (" + ",".join("?" for _ in excluded) + ")")
+            values.extend(excluded)
+        if after is not None:
+            where.append("(created_at > ? OR (created_at = ? AND task_id > ?))")
+            values.extend((after[0], after[0], after[1]))
+        values.append(limit)
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM semantic_workspace_tasks "
-                "WHERE deleted_at IS NULL "
-                "AND status IN ('queued', 'running', 'cancelling') "
-                "ORDER BY created_at"
+                "WHERE " + " AND ".join(where)
+                + " ORDER BY created_at, task_id LIMIT ?",
+                values,
             ).fetchall()
         result: List[Dict[str, Any]] = []
         for row in rows:

@@ -23,7 +23,7 @@ from tests.test_pi_runtime_workspace_api import BlockingPiRuntime, _client
 
 
 def test_fifty_owner_durable_control(tmp_path, monkeypatch, record_property):
-    # 持续负载明确为5次/秒；0表示50请求突发压力，不把两者的结果混用。
+    # 持续负载为全部Owner聚合5次/秒；0表示50请求突发压力，不把两者结果混用。
     arrival_rate = float(os.environ.get("MANGROVE_LOAD_ARRIVAL_RATE", "5"))
     if arrival_rate < 0 or not math.isfinite(arrival_rate):
         raise ValueError("负载到达率必须为有限非负数")
