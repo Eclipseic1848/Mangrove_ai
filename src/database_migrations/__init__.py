@@ -104,8 +104,8 @@ class RestoreVerification:
 
 
 _PROFILE_HEADS = {
-    "webui": "webui_0018",
-    "scheduler": "scheduler_0001",
+    "webui": "webui_0019",
+    "scheduler": "scheduler_0002",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
 }
@@ -276,6 +276,9 @@ _PROFILE_REQUIRED_COLUMNS = {
         "capability_platform_validation_leases": (
             "digest", "run_id", "worker_id",
         ),
+        "workspace_feedback": ('id', 'user_id', 'task_id', 'revision', 'output_id', 'output_sha256', 'rating', 'reasons', 'comment', 'created_at', 'status', 'admin_note', 'version', 'request_key', 'request_hash', 'deleted_at'),
+        "workspace_feedback_receipts": ('user_id', 'request_key', 'request_hash', 'task_id', 'revision', 'output_id', 'feedback_id', 'version', 'created_at', 'result'),
+        "workspace_feedback_content_access": ('event_id', 'actor_id', 'actor_role', 'idempotency_key', 'reason', 'action', 'feedback_id', 'message_id', 'conv_id', 'owner_id', 'request_digest', 'response_digest', 'content_bytes', 'truncated', 'result', 'failure_code', 'created_at', 'source_identity_json'),
     },
     "scheduler": {
         "scheduled_tasks": (
@@ -293,6 +296,8 @@ _PROFILE_REQUIRED_COLUMNS = {
             "report_path",
             "json_path",
         ),
+        "scheduled_workspace_bindings": ('schedule_id', 'owner_id', 'source_task_id', 'source_revision', 'payload_json', 'contract_json', 'request_key', 'request_hash', 'timezone'),
+        "scheduled_workspace_occurrences": ('occurrence_id', 'schedule_id', 'owner_id', 'config_hash', 'due_at', 'manual', 'request_key', 'state', 'workspace_task_id', 'workspace_revision', 'runtime_run_id', 'output_ids_json', 'error_code', 'generation', 'created_at', 'updated_at'),
     },
     "legacy_app": {
         "collected_items": (
@@ -721,7 +726,7 @@ def _profile_schema_gaps(
         f"{row[0]}:{row[1]}": _schema_object_sha256(row)
         for row in rows
         if str(row[0]) != "table"
-        and str(row[2]) in owned_tables
+        and (str(row[2]) in owned_tables or (str(row[0]) == "view" and f"view:{row[1]}" in expected))
         and not str(row[1]).startswith("sqlite_")
     }
     missing_table_contracts = {

@@ -7,7 +7,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Header
+from pydantic import BaseModel, ConfigDict, Field
 from fastapi.responses import FileResponse
 
 from src.scheduler import Schedule, TASK_TEMPLATES, compute_next_run, parse_schedule
@@ -31,6 +32,51 @@ def _trigger_to_schedule_str(trigger: TriggerIn) -> str:
         return f"once@{trigger.run_at or ''}"
     raise HTTPException(status_code=422, detail=f"未知触发类型: {trigger.type!r}")
 
+
+class WorkspacePlanIn(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    task_id:str=Field(min_length=1,max_length=160)
+    revision:int=Field(ge=1)
+    name:str=Field(min_length=1,max_length=160)
+    trigger:TriggerIn
+    timezone:str=Field(min_length=1,max_length=80)
+    repeat_external_confirmed:bool=False
+
+@router.post("/from-workspace",status_code=201,openapi_extra={"x-mangrove-task-control":True})
+def create_workspace_plan(body:WorkspacePlanIn,idempotency_key:str=Header(alias="Idempotency-Key"),user=Depends(get_execution_user)):
+    from src.scheduler.workspace import create_plan
+    store=get_schedule_store()
+    try:return create_plan(store,user,body,idempotency_key)
+    except (HTTPException,ValueError) as original:
+        exc=original if isinstance(original,HTTPException) else HTTPException(422,"计划时间无效，请检查时区、日期与频率")
+        from src.api.auth import get_store
+        from src import account_execution
+        # 与创建同样的两库锁序；不能把尚在提交中的同key误标成确定未保存。
+        with get_store().account_execution_transaction(account_execution.current_authorization()):
+            with store._conn() as conn:
+                exists=conn.execute("SELECT 1 FROM scheduled_workspace_bindings WHERE owner_id=? AND request_key=?",(user["user_id"],idempotency_key)).fetchone()
+        if not exists:exc.headers={**(exc.headers or {}),"X-Mangrove-Lifecycle-Outcome":"rejected"}
+        raise exc
+
+@router.get("/workspace-plans/by-key")
+def workspace_plan_by_key(idempotency_key:str,user=Depends(get_current_user)):
+    from src.scheduler.workspace import public_binding
+    store=get_schedule_store()
+    with store._conn() as conn:
+        row=conn.execute("SELECT * FROM scheduled_workspace_bindings WHERE owner_id=? AND request_key=?",(user["user_id"],idempotency_key)).fetchone()
+    if row is None:raise HTTPException(404,"原计划尚未登记；这不代表创建失败或已取消")
+    return {**store.get(row["schedule_id"]),"workspace":public_binding(row)}
+
+@router.get("/{sched_id}/occurrences")
+def workspace_occurrences(sched_id:str,idempotency_key:str|None=None,user=Depends(get_current_user)):
+    _owned_task(sched_id,user)
+    from src.scheduler.workspace import occurrences,observe_occurrence
+    from src.scheduler.workspace import prior_manual
+    rows=occurrences(get_schedule_store(),user["user_id"],sched_id)
+    if idempotency_key is not None:
+        old=prior_manual(get_schedule_store(),user["user_id"],sched_id,idempotency_key)
+        rows=[old] if old else []
+    return {"items":[observe_occurrence(row) for row in rows]}
 
 @router.get("/templates")
 def list_templates(user=Depends(get_current_user)) -> List[Dict[str, Any]]:
@@ -76,7 +122,15 @@ def recent_runs(
 
 @router.get("")
 def list_tasks(user=Depends(get_current_user)) -> List[Dict[str, Any]]:
-    return get_schedule_store().list_active(owner_user_id=user["user_id"])
+    from src.scheduler.workspace import binding,public_binding
+    store=get_schedule_store();rows=store.list_active(owner_user_id=user["user_id"])
+    with store._conn() as conn:
+        rows.extend(dict(row) for row in conn.execute("SELECT * FROM scheduled_tasks WHERE owner_user_id=? AND source='workspace' AND status NOT IN ('active','paused') ORDER BY created_at DESC",(user["user_id"],)))
+    for row in rows:
+        if row.get("source")=="workspace":
+            frozen=binding(store,row["task_id"])
+            row["workspace"]=public_binding(frozen) if frozen else None
+    return rows
 
 
 @router.post("", openapi_extra={"x-mangrove-task-control": True})
@@ -138,6 +192,10 @@ def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_execution_use
     task = _owned_task(sched_id, user)
     store = get_schedule_store()
 
+    if task.get("source")=="workspace":
+        from src.scheduler.workspace import update_plan
+        return update_plan(store,user,task,body)
+
     if body.status is not None:
         if body.status not in ("active", "paused"):
             raise HTTPException(status_code=422, detail="status 仅支持 active/paused")
@@ -192,9 +250,25 @@ def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_execution_use
 
 
 @router.post("/{sched_id}/run_now", openapi_extra={"x-mangrove-task-control": True})
-async def run_task_now_endpoint(sched_id: str, user=Depends(get_execution_user)):
+async def run_task_now_endpoint(sched_id: str, idempotency_key: str | None = Header(default=None,alias="Idempotency-Key"), user=Depends(get_execution_user)):
     """立即执行一次，不影响原定 next_run_at/status。"""
-    _owned_task(sched_id, user)
+    task=_owned_task(sched_id,user)
+    if task.get("source")=="workspace":
+        from src.scheduler.workspace import prior_manual
+        if not idempotency_key or len(idempotency_key)>200:raise HTTPException(422,"立即执行需要原幂等键")
+        old=prior_manual(get_schedule_store(),user["user_id"],sched_id,idempotency_key)
+        if old:return {"occurrence":old}
+        try:outcome=await get_scheduler_service().run_task_now(sched_id,request_key=idempotency_key)
+        except ExecutionDenied:
+            from src.api.auth import get_store
+            from src import account_execution
+            with get_store().account_execution_transaction(account_execution.current_authorization()):
+                prior=prior_manual(get_schedule_store(),user["user_id"],sched_id,idempotency_key)
+            if prior:return {"occurrence":prior}
+            raise HTTPException(409,"原次执行尚未收口，请查看原任务",headers={"X-Mangrove-Lifecycle-Outcome":"rejected"}) from None
+        occurrence=prior_manual(get_schedule_store(),user["user_id"],sched_id,idempotency_key)
+        if outcome=="running" and occurrence is None:raise HTTPException(409,"原次执行尚未收口，请查看原任务",headers={"X-Mangrove-Lifecycle-Outcome":"rejected"})
+        return {"occurrence":occurrence}
     outcome = await get_scheduler_service().run_task_now(sched_id)
     if outcome == "not_found":
         raise HTTPException(status_code=404, detail="任务不存在")

@@ -71,8 +71,8 @@ class SchedulerService:
         while not self._stop.is_set():
             try:
                 await self.tick()
-            except Exception:
-                logger.exception("调度器轮询出错（已忽略，继续下一轮）")
+            except Exception as exc:
+                logger.error("调度器轮询失败，下一轮继续 error_type=%s", type(exc).__name__)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.poll_interval)
             except asyncio.TimeoutError:
@@ -81,6 +81,8 @@ class SchedulerService:
     async def tick(self, now: Optional[datetime] = None) -> int:
         """执行一轮：跑完所有到点任务，返回本轮执行的任务数。"""
         now = now or datetime.now()
+        from .workspace import reconcile_pending
+        reconcile_pending(self.store)
         due = self.store.due_tasks(now=now)
         for task in due:
             await self._run_one(task, now)
@@ -113,6 +115,10 @@ class SchedulerService:
     async def _run_one_body(
         self, task: Dict[str, Any], now: datetime, *, keep_next_run: bool
     ) -> None:
+        if task.get("_workspace_occurrence"):
+            from .workspace import execute_occurrence
+            await execute_occurrence(self,task,now,keep_next_run)
+            return
         task_id = task["task_id"]
         # 计算下次执行：cron/interval 续算下一匹配（受 start_date/end_date 生效区间钳制）；
         # once 无后续；keep_next_run（立即执行）不重算，沿用原定计划
@@ -176,8 +182,9 @@ class SchedulerService:
                 report_path=str(outputs.get("report_md") or ""),
                 json_path=str(outputs.get("json") or ""),
             )
-            logger.info("定时任务%s task_id=%s next=%s %s",
-                        "完成" if ok else "失败（流程内错误）", task_id, next_run, summary[:120])
+            # 结果正文只保存在Owner任务历史，运行日志不得复制正文。
+            logger.info("定时任务%s task_id=%s next=%s",
+                        "完成" if ok else "失败（流程内错误）", task_id, next_run)
         except execution.ExecutionDenied:
             # 已返回的执行可以确认停止；安全点抛错尚不能证明子工作者静默。
             # 两者均丢弃旧代正文，且不阻断其它账号的调度。
@@ -188,8 +195,9 @@ class SchedulerService:
             record_unknown_stop("执行超时或等待被取消，停止状态待确认")
             if asyncio.current_task().cancelling():
                 raise
-        except Exception:
-            logger.exception("定时任务执行失败，停止状态待确认 task_id=%s", task_id)
+        except Exception as exc:
+            # 异常可能含Provider正文或凭据，仅记录错误类别。
+            logger.error("定时任务执行失败，停止状态待确认 task_id=%s error_type=%s", task_id, type(exc).__name__)
             record_unknown_stop("执行失败，停止状态待确认")
         finally:
             if returned:
@@ -204,7 +212,7 @@ class SchedulerService:
         # 无 await 期间持 SQL 锁；执行中的任务到安全点后提交自己的停止证明。
         return self.store.reconcile_account_execution(owner, before_generation)
 
-    async def run_task_now(self, task_id: str) -> str:
+    async def run_task_now(self, task_id: str, request_key: str | None = None) -> str:
         """手动「立即执行一次」，不影响原定 next_run_at/status。
 
         返回 "started"（已开始执行）| "not_found"（任务不存在）| "running"（正在执行中，跳过）。
@@ -214,6 +222,7 @@ class SchedulerService:
             return "not_found"
         if task_id in self._running_ids:
             return "running"
+        if task.get("source")=="workspace":task["_manual_request_key"]=request_key
         await self._run_one(task, datetime.now(), keep_next_run=True)
         return "started"
 

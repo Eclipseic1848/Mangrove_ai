@@ -47,8 +47,8 @@ def test_preflight_reports_every_outdated_database_before_startup(tmp_path: Path
 
     assert completed.returncode == 1
     assert "数据库迁移预检失败" in completed.stdout
-    assert "webui: legacy -> webui_0018" in completed.stdout
-    assert "scheduler: legacy -> scheduler_0001" in completed.stdout
+    assert "webui: legacy -> webui_0019" in completed.stdout
+    assert "scheduler: legacy -> scheduler_0002" in completed.stdout
     assert "python -m src.database_migrations apply --profile webui" in completed.stdout
     assert "python -m src.database_migrations apply --profile scheduler" in completed.stdout
     assert f"--expected-source-sha256 {hashlib.sha256(webui_database.read_bytes()).hexdigest()}" in completed.stdout
