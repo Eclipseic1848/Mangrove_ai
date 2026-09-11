@@ -2722,29 +2722,14 @@ def list_tasks(
         status=task_status,
         deleted=deleted,
         limit=limit,
+        include_runtime=True,
     )
     for task in tasks:
-        runtime = _runtime_repository().get(
-            user["user_id"],
-            task["task_id"],
-            task["active_revision"],
-        )
-        task["runtime_version"] = (
-            runtime["runtime_version"].value
-            if runtime
-            else RuntimeVersion.LEGACY.value
-        )
-        task["permission_profile"] = (
-            runtime["permission_profile"].value
-            if runtime
-            else PermissionProfile.STANDARD.value
-        )
-        task["model_connection_id"] = (
-            runtime["model_connection_id"] if runtime else None
-        )
-        task["agentic_runtime_status"] = (
-            runtime["status"].value if runtime else None
-        )
+        task["runtime_version"] = RuntimeVersion(RuntimeVersion.LEGACY.value if task["runtime_version"] is None else task["runtime_version"]).value
+        task["permission_profile"] = PermissionProfile(PermissionProfile.STANDARD.value if task["permission_profile"] is None else task["permission_profile"]).value
+        if task["agentic_runtime_status"] is not None:
+            from src.agentic_runtime.models import RuntimeStatus
+            task["agentic_runtime_status"] = RuntimeStatus(task["agentic_runtime_status"]).value
     return tasks
 
 

@@ -200,6 +200,33 @@ class UploadStore:
             raise PermissionError("上传不存在或无权访问")
         return item
 
+    def _publish_upload(self, user_id, upload_id, original_name, staging_path, *, media_type, size, sha256):
+        """原件和元数据共同完成；失败仅清理本次新 UUID 对应的文件。"""
+        object_path = None
+        try:
+            objects_dir = self._user_dir(user_id, "objects")
+            destination = objects_dir / upload_id
+            # 新对象不得覆盖已有上传，即使生成标识发生意外冲突。
+            if destination.exists() or (objects_dir / f"{upload_id}.meta").exists():
+                raise FileExistsError("上传标识已存在")
+            object_path = destination
+            shutil.move(str(staging_path), str(object_path))
+            item = UploadItem(
+                upload_id=upload_id, user_id=user_id,
+                original_name=Path(original_name).name,
+                storage_path=str(object_path.resolve()), media_type=media_type,
+                size_bytes=size, sha256=sha256,
+                created_at=datetime.now(timezone.utc).isoformat(),
+            )
+            self._write_sidecar(objects_dir, item)
+            return item
+        except Exception:
+            staging_path.unlink(missing_ok=True)
+            if object_path is not None:
+                object_path.unlink(missing_ok=True)
+                object_path.with_name(f"{upload_id}.meta").unlink(missing_ok=True)
+            raise
+
     def save_bytes(
         self,
         user_id: str,
@@ -210,6 +237,8 @@ class UploadStore:
         verify_magic: bool = False,
     ) -> UploadItem:
         """保存字节流为已验证上传。超限拒绝并清理 staging。"""
+        if len(data) > self.max_bytes:
+            raise ValueError(f"上传大小 {len(data)} 超过上限 {self.max_bytes} 字节")
         if verify_magic:
             self._verify_magic(data, original_name)
             if Path(original_name).suffix.lower() in IMAGE_EXTENSIONS:
@@ -231,23 +260,10 @@ class UploadStore:
             staging_path.unlink(missing_ok=True)
             raise
 
-        objects_dir = self._user_dir(user_id, "objects")
-        object_path = objects_dir / upload_id
-        shutil.move(str(staging_path), str(object_path))
-
-        item = UploadItem(
-            upload_id=upload_id,
-            user_id=user_id,
-            original_name=Path(original_name).name,
-            storage_path=str(object_path.resolve()),
-            media_type=media_type,
-            size_bytes=size,
-            sha256=digest.hexdigest(),
-            created_at=datetime.now(timezone.utc).isoformat(),
+        return self._publish_upload(
+            user_id, upload_id, original_name, staging_path,
+            media_type=media_type, size=size, sha256=digest.hexdigest(),
         )
-        # 元数据 sidecar（供 resolve 读回，不依赖重新读文件）
-        self._write_sidecar(objects_dir, item)
-        return item
 
     async def save_upload(
         self,
@@ -276,11 +292,11 @@ class UploadStore:
                     chunk = await stream.read(chunk_size)
                     if not chunk:
                         break
+                    if size + len(chunk) > self.max_bytes:
+                        raise ValueError(f"上传大小 {size + len(chunk)} 超过上限 {self.max_bytes} 字节")
                     fh.write(chunk)
                     digest.update(chunk)
                     size += len(chunk)
-                    if size > self.max_bytes:
-                        raise ValueError(f"上传大小 {size} 超过上限 {self.max_bytes} 字节")
             if verify_magic:
                 self._verify_magic(staging_path, original_name)
                 if Path(original_name).suffix.lower() in IMAGE_EXTENSIONS:
@@ -290,22 +306,10 @@ class UploadStore:
             staging_path.unlink(missing_ok=True)
             raise
 
-        objects_dir = self._user_dir(user_id, "objects")
-        object_path = objects_dir / upload_id
-        shutil.move(str(staging_path), str(object_path))
-
-        item = UploadItem(
-            upload_id=upload_id,
-            user_id=user_id,
-            original_name=Path(original_name).name,
-            storage_path=str(object_path.resolve()),
-            media_type=media_type,
-            size_bytes=size,
-            sha256=digest.hexdigest(),
-            created_at=datetime.now(timezone.utc).isoformat(),
+        return self._publish_upload(
+            user_id, upload_id, original_name, staging_path,
+            media_type=media_type, size=size, sha256=digest.hexdigest(),
         )
-        self._write_sidecar(objects_dir, item)
-        return item
 
     def resolve(self, user_id: str, upload_id: str) -> UploadItem:
         """解析上传项。跨用户访问抛 PermissionError。"""

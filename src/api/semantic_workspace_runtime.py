@@ -643,7 +643,7 @@ class SemanticWorkspaceManager:
         pi_runtime: PiRuntime | None = None,
         candidate_verification: CandidateVerificationService | None = None,
     ) -> None:
-        self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue(maxsize=256)
         self._workers: list[asyncio.Task[None]] = []
         self._maintenance: asyncio.Task[None] | None = None
         self._active: dict[str, asyncio.Task[None]] = {}
@@ -656,6 +656,7 @@ class SemanticWorkspaceManager:
         self._deferred_requeue: set[str] = set()
         self._delivery_retry_attempts: dict[str, int] = {}
         self._delivery_retry_after: dict[str, float] = {}
+        self._cancellation_scan_after: tuple[str, str] | None = None
         self._heavy = asyncio.Semaphore(1)
         self._candidate_verification = candidate_verification
         self._agent_kernels = dict(agent_kernels or {})
@@ -1387,10 +1388,10 @@ class SemanticWorkspaceManager:
             self._recover_interrupted_candidate_reverifications(module)
             self._resume_requested_candidate_reverifications(module)
         # 恢复必须由 Web 服务进程接管，确保 Runtime 与文档 Relay 共享同一 Grant 域。
-        for task in store.list_pending_semantic_workspace_tasks():
-            if task["status"] == "cancelling":
-                # 异步维护循环确认执行静默和资源清理，不在启动时推断终态。
-                continue
+        for task in store.list_pending_semantic_workspace_tasks(
+            statuses=("queued", "running"),
+            limit=self._queue.maxsize,
+        ):
             try:
                 authorization = self._workspace_authorization(task["user_id"], task["task_id"])
                 store.require_account_execution(authorization, "workspace", task["task_id"])
@@ -1441,6 +1442,7 @@ class SemanticWorkspaceManager:
         self._deferred_requeue.clear()
         self._delivery_retry_attempts.clear()
         self._delivery_retry_after.clear()
+        self._cancellation_scan_after = None
 
     async def _maintenance_loop(self) -> None:
         """持续接管重验孤儿，并每小时清理一次到期回收站记录。"""
@@ -1462,12 +1464,46 @@ class SemanticWorkspaceManager:
             # worker 异常退出或 Publisher 暂时失败后，持久化的非终态任务由
             # 当前进程重新接管；enqueue 会跳过仍在执行的同一 Task。
             try:
-                pending_tasks = get_store().list_pending_semantic_workspace_tasks()
+                store = get_store()
                 now = time.monotonic()
+                # 取消不占内存队列，单独优先处理，避免被大量排队任务饿死。
+                cancelling = store.list_pending_semantic_workspace_tasks(
+                    statuses=("cancelling",),
+                    limit=self._queue.maxsize,
+                    after=self._cancellation_scan_after,
+                )
+                if not cancelling:
+                    self._cancellation_scan_after = None
+                for pending in cancelling:
+                    try:
+                        authorization = self._workspace_authorization(pending["user_id"], pending["task_id"])
+                        with execution_context(authorization):
+                            await self.cancel(pending["user_id"], pending["task_id"])
+                    except Exception as exc:
+                        # 单项清理失败不能饿死同批及后续取消；不记录异常正文。
+                        _LOGGER.error(
+                            "工作台取消接管失败 task_id=%s error_type=%s",
+                            pending["task_id"],
+                            type(exc).__name__,
+                        )
+                if cancelling:
+                    last = cancelling[-1]
+                    self._cancellation_scan_after = (
+                        (last["created_at"], last["task_id"])
+                        if len(cancelling) == self._queue.maxsize
+                        else None
+                    )
+                available = self._queue.maxsize - self._queue.qsize()
+                pending_tasks = (
+                    store.list_pending_semantic_workspace_tasks(
+                        statuses=("queued", "running"),
+                        limit=available,
+                        exclude_task_ids=(*self._queued, *self._active),
+                    )
+                    if available
+                    else ()
+                )
                 for pending in pending_tasks:
-                    if pending["status"] == "cancelling":
-                        await self.cancel(pending["user_id"], pending["task_id"])
-                        continue
                     if self._delivery_retry_after.get(
                         pending["task_id"], 0.0
                     ) > now:
@@ -1709,8 +1745,13 @@ class SemanticWorkspaceManager:
             self._active.pop(task_id, None)
         if task_id in self._queued or task_id in self._active:
             return
+        # ponytail: 单进程内存最多暂存 256 项；溢出仍在持久库，由维护循环接管。
+        # 先入队再登记，避免满队列留下无法再被接管的幽灵标记。
+        try:
+            self._queue.put_nowait((user_id, task_id))
+        except asyncio.QueueFull:
+            return
         self._queued.add(task_id)
-        self._queue.put_nowait((user_id, task_id))
 
     def _workspace_authorization(self, user_id: str, task_id: str) -> ExecutionAuthorization:
         binding = get_store().account_execution_binding(user_id, "workspace", task_id)
@@ -1847,10 +1888,14 @@ class SemanticWorkspaceManager:
         running.cancel()
         with suppress(asyncio.CancelledError):
             await running
-        return (
-            store.get_semantic_workspace_task(user_id, task_id)
-            or saved
-        )
+        current = store.get_semantic_workspace_task(user_id, task_id) or saved
+        # 协程在进入自己的finally前也可能被取消；再核真实资源静默后才能补齐终态。
+        if current["status"] == "cancelling" and await self._confirm_runtime_stopped(user_id, task_id, task["active_revision"]):
+            # 清理等待期间可能已有新版本；旧资源停止证明不能取消新的活动版本。
+            current = store.get_semantic_workspace_task(user_id, task_id)
+            if current and current["active_revision"] == task["active_revision"] and current["status"] == "cancelling":
+                self._mark_cancelled(user_id, task_id, task["active_revision"])
+        return store.get_semantic_workspace_task(user_id, task_id) or current
 
     async def _confirm_runtime_stopped(self, user_id: str, task_id: str, revision: int, *, account_hold: bool = False, expected_generation: int | None = None, deletion_revision_only: bool = False) -> bool:
         store = get_store()

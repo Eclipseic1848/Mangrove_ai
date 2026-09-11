@@ -19,7 +19,7 @@ import uuid
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Collection, Dict, Iterator, List, Optional, Tuple
 
 from src import account_execution as execution
 from .feedback_audit import REASONS, fixed_reasons
@@ -410,7 +410,8 @@ class WebUIStore:
 
     def platform_request_limit(self, *, owner_user_id: str, control: bool, now: float) -> int:
         from .platform_rate_limits import consume_request_limits
-        with self._conn() as conn:
+        # 先用现有锁串行本进程写入，跨进程仍由 BEGIN IMMEDIATE 保证共享额度。
+        with self._lock, self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             return consume_request_limits(conn, owner_user_id=owner_user_id, control=control, now=now)
 
@@ -3267,38 +3268,73 @@ class WebUIStore:
         status: str | None = None,
         deleted: bool = False,
         limit: int = 100,
+        include_runtime: bool = False,
     ) -> List[Dict[str, Any]]:
-        where = ["user_id=?"]
+        where = ["t.user_id=?"]
         args: List[Any] = [user_id]
-        where.append("deleted_at IS NOT NULL" if deleted else "deleted_at IS NULL")
+        where.append("t.deleted_at IS NOT NULL" if deleted else "t.deleted_at IS NULL")
         if status:
-            where.append("status=?")
+            where.append("t.status=?")
             args.append(status)
         args.append(max(1, min(limit, 500)))
+        # 同一只读快照按 Owner、Task、Revision 连接，只投影列表所需字段。
+        projection = "t.*"
+        join = ""
+        if include_runtime:
+            projection += ", r.runtime_version AS runtime_version, r.permission_profile AS permission_profile, r.model_connection_id AS model_connection_id, r.status AS agentic_runtime_status"
+            join = " LEFT JOIN agentic_runtime_runs r ON r.user_id=t.user_id AND r.task_id=t.task_id AND r.revision=t.active_revision"
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT * FROM semantic_workspace_tasks WHERE "
+                "SELECT " + projection + " FROM semantic_workspace_tasks t" + join + " WHERE "
                 + " AND ".join(where)
-                + " ORDER BY updated_at DESC LIMIT ?",
+                + " ORDER BY t.updated_at DESC LIMIT ?",
                 args,
             ).fetchall()
-        return [
-            item
-            for row in rows
-            if (item := self._semantic_workspace_task_row(row)) is not None
-        ]
+        result = []
+        for row in rows:
+            item = self._semantic_workspace_task_row(row)
+            if item is None:
+                continue
+            if include_runtime:
+                item.update({key: row[key] for key in ("runtime_version", "permission_profile", "model_connection_id", "agentic_runtime_status")})
+            result.append(item)
+        return result
 
     def list_pending_semantic_workspace_tasks(
         self,
+        *,
+        statuses: tuple[str, ...] = ("queued", "running", "cancelling"),
+        limit: int = 256,
+        exclude_task_ids: Collection[str] = (),
+        after: tuple[str, str] | None = None,
     ) -> List[Dict[str, Any]]:
-        """启动恢复专用；仅返回尚未终结且未删除的任务及 owner。"""
+        """恢复专用；有界返回尚未终结且未删除的任务及 owner。"""
 
+        allowed = {"queued", "running", "cancelling"}
+        selected = tuple(dict.fromkeys(statuses))
+        excluded = tuple(sorted(set(exclude_task_ids)))
+        if not selected or not set(selected).issubset(allowed):
+            raise ValueError("恢复任务状态无效")
+        if limit < 1 or limit > 256 or len(excluded) > 258:
+            raise ValueError("恢复扫描范围无效")
+        where = [
+            "deleted_at IS NULL",
+            "status IN (" + ",".join("?" for _ in selected) + ")",
+        ]
+        values: list[Any] = list(selected)
+        if excluded:
+            where.append("task_id NOT IN (" + ",".join("?" for _ in excluded) + ")")
+            values.extend(excluded)
+        if after is not None:
+            where.append("(created_at > ? OR (created_at = ? AND task_id > ?))")
+            values.extend((after[0], after[0], after[1]))
+        values.append(limit)
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM semantic_workspace_tasks "
-                "WHERE deleted_at IS NULL "
-                "AND status IN ('queued', 'running', 'cancelling') "
-                "ORDER BY created_at"
+                "WHERE " + " AND ".join(where)
+                + " ORDER BY created_at, task_id LIMIT ?",
+                values,
             ).fetchall()
         result: List[Dict[str, Any]] = []
         for row in rows:
