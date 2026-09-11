@@ -292,7 +292,7 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     assert "commits =" not in config
     assert "tests/.*" not in config
     assert "evals/.*" not in config
-    assert len(ignored) == 12
+    assert len(ignored) == 21
     assert (
         "8f23acbdcb69890cc94c733bb47baa3a75d5de22:"
         "tests/test_source_account_generation.py:generic-api-key:19"
@@ -307,6 +307,9 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
         "9a428600063e4e56e2c626dea6690b6461f85eb8:"
         "src/database_migrations/schema_manifest.json:generic-api-key:100"
     ) == 1
+    assert ignored.count("115c990c60a865ceb0749b7993664d963c112251:src/database_migrations/schema_manifest.json:generic-api-key:100") == 1
+    assert ignored.count("72891b7572e1bf7c91ae90bf0905e2faead55df2:src/database_migrations/schema_manifest.json:generic-api-key:131") == 1
+    assert ignored.count("72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:56") == 1
     assert all("*" not in fingerprint for fingerprint in ignored)
     assert all(fingerprint.count(":") >= 3 for fingerprint in ignored)
 

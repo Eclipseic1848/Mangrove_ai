@@ -949,6 +949,7 @@ export function SemanticWorkspacePage() {
         source_snapshot_ids: payload.sourceSnapshotIds,
         delivery_output_ids: payload.deliveryOutputIds,
         ...payload.sourceGoal,
+        ...payload.taskContext,
         output_formats: payload.formats,
         provider: payload.provider,
         model: payload.model,

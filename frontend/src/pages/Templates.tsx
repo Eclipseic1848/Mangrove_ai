@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { TaskContextLibrary } from "@/components/workspace/TaskContextLibrary";
 import { BadgeCheck, Library, Share2, Trash2, RefreshCw, Eye, Tag, TrendingUp, Repeat } from "lucide-react";
 import { toast } from "sonner";
 import { Card, CardContent } from "@/components/ui/card";
@@ -74,6 +75,7 @@ export function Templates() {
 
 function TemplateLibrary({ user }: { user: User }) {
   const isAdmin = isAdminish(user?.role);
+  const [contextOpen, setContextOpen] = useState(false);
   const [tab, setTab] = useState<TabKey>("templates");
 
   // 模板库状态
@@ -228,6 +230,8 @@ function TemplateLibrary({ user }: { user: User }) {
 
   return (
     <>
+      <TaskContextLibrary key={user.user_id} open={contextOpen} onClose={() => setContextOpen(false)} onChanged={() => undefined} />
+      <div className="border-b px-7 py-3"><Button variant="outline" onClick={() => setContextOpen(true)}>管理任务模板与个人记忆</Button></div>
       <header className="flex items-center justify-between border-b border-border px-7 py-4">
         <div>
           <h1 className="text-lg font-semibold tracking-tight">
