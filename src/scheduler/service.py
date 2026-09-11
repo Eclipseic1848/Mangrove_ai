@@ -71,8 +71,8 @@ class SchedulerService:
         while not self._stop.is_set():
             try:
                 await self.tick()
-            except Exception:
-                logger.exception("调度器轮询出错（已忽略，继续下一轮）")
+            except Exception as exc:
+                logger.error("调度器轮询失败，下一轮继续 error_type=%s", type(exc).__name__)
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.poll_interval)
             except asyncio.TimeoutError:
@@ -176,8 +176,9 @@ class SchedulerService:
                 report_path=str(outputs.get("report_md") or ""),
                 json_path=str(outputs.get("json") or ""),
             )
-            logger.info("定时任务%s task_id=%s next=%s %s",
-                        "完成" if ok else "失败（流程内错误）", task_id, next_run, summary[:120])
+            # 结果正文只保存在 Owner 任务历史，运行日志不得复制正文。
+            logger.info("定时任务%s task_id=%s next=%s",
+                        "完成" if ok else "失败（流程内错误）", task_id, next_run)
         except execution.ExecutionDenied:
             # 已返回的执行可以确认停止；安全点抛错尚不能证明子工作者静默。
             # 两者均丢弃旧代正文，且不阻断其它账号的调度。
@@ -188,8 +189,9 @@ class SchedulerService:
             record_unknown_stop("执行超时或等待被取消，停止状态待确认")
             if asyncio.current_task().cancelling():
                 raise
-        except Exception:
-            logger.exception("定时任务执行失败，停止状态待确认 task_id=%s", task_id)
+        except Exception as exc:
+            # 异常消息及 traceback 可能含 Provider 正文或凭据，仅记录错误类别。
+            logger.error("定时任务执行失败，停止状态待确认 task_id=%s error_type=%s", task_id, type(exc).__name__)
             record_unknown_stop("执行失败，停止状态待确认")
         finally:
             if returned:
