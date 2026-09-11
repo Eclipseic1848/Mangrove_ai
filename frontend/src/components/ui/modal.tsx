@@ -78,7 +78,7 @@ export function Modal({
         onKeyDown={handleDialogKeyDown}
         className={`relative max-h-[calc(100dvh-2rem)] w-full overflow-y-auto ${wide ? "max-w-3xl" : "max-w-sm"} animate-fade-in rounded-xl border border-border bg-card p-5 shadow-xl`}
       >
-        {title && <h3 id={titleId} className="mb-3 text-base font-semibold">{title}</h3>}
+        {title && <h2 id={titleId} className="mb-3 text-base font-semibold">{title}</h2>}
         {children}
       </div>
     </div>,

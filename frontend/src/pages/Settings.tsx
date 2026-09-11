@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   Boxes, Cpu, Sparkles, Save, Moon, Sun, CircleDot, RefreshCw,
@@ -68,15 +68,19 @@ function DomainHealthPanel() {
   const [flagged, setFlagged] = useState<Record<string, DomainStat>>({});
   const [loading, setLoading] = useState(true);
   const [releasing, setReleasing] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const loadVersion = useRef(0);
 
   const load = () => {
+    const version = ++loadVersion.current;
     setLoading(true);
+    setLoadError(false);
     api.get("/api/config/domain-health")
-      .then((d) => setFlagged(d.flagged || {}))
-      .catch(() => {})
-      .finally(() => setLoading(false));
+      .then((d) => { if (version === loadVersion.current) setFlagged(d.flagged || {}); })
+      .catch(() => { if (version === loadVersion.current) setLoadError(true); })
+      .finally(() => { if (version === loadVersion.current) setLoading(false); });
   };
-  useEffect(load, []);
+  useEffect(() => { load(); return () => { loadVersion.current++; }; }, []);
 
   const release = async (domain: string) => {
     setReleasing(domain);
@@ -107,6 +111,8 @@ function DomainHealthPanel() {
       <CardContent className="space-y-2">
         {loading ? (
           <p className="py-3 text-center text-sm text-muted-foreground">加载中…</p>
+        ) : loadError ? (
+          <div className="space-y-2"><p role="alert" className="text-sm text-destructive">无法读取域名状态，不能确认是否存在被短路的域名。</p><Button variant="outline" size="sm" onClick={load}>重新读取域名状态</Button></div>
         ) : domains.length === 0 ? (
           <p className="py-3 text-center text-sm text-muted-foreground">当前没有被短路的域名</p>
         ) : (
@@ -231,6 +237,7 @@ function SettingsContent() {
   const { theme, toggle } = useTheme();
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
+  const sectionId = useId();
   const manager = isAdminish(user?.role);
   const requestedSection = searchParams.get("section") as SettingsSection | null;
   const allowedSections = SETTINGS_SECTIONS.filter((item) => !item.managerOnly || manager);
@@ -245,6 +252,9 @@ function SettingsContent() {
   const [testing, setTesting] = useState<string | null>(null); // 正在自检的 target
   const [results, setResults] = useState<Record<string, CheckResult>>({});
   const [togglingKey, setTogglingKey] = useState<string | null>(null); // 正在切换开关的 connector.key
+  const [loadErrors, setLoadErrors] = useState<string[]>([]);
+  const [loadingSettings, setLoadingSettings] = useState(false);
+  const loadVersion = useRef(0);
 
   const selectSection = (next: SettingsSection) => {
     const params = new URLSearchParams(searchParams);
@@ -253,17 +263,25 @@ function SettingsContent() {
   };
 
   const load = () => {
-    api.get("/api/overview").then(setOv).catch(() => {});
-    api.get("/api/models").then((data: Models) => {
-      setModels(data);
-      setDocumentModelRef(
-        data.document_default
-          ? `${data.document_default.provider}::${data.document_default.model}`
-          : "",
-      );
-    }).catch(() => {});
+    const version = ++loadVersion.current;
+    setLoadErrors([]);
+    setLoadingSettings(true);
+    void Promise.allSettled([api.get("/api/overview"), api.get("/api/models")]).then(([overview, modelResult]) => {
+      // 刷新和离开页面会使旧响应失效；单项失败不能伪装为空配置。
+      if (version !== loadVersion.current) return;
+      const errors: string[] = [];
+      if (overview.status === "fulfilled") setOv(overview.value);
+      else errors.push("运行概览读取失败");
+      if (modelResult.status === "fulfilled") {
+        const data: Models = modelResult.value;
+        setModels(data);
+        setDocumentModelRef(data.document_default ? `${data.document_default.provider}::${data.document_default.model}` : "");
+      } else errors.push("模型默认项读取失败");
+      setLoadErrors(errors);
+      setLoadingSettings(false);
+    });
   };
-  useEffect(load, []);
+  useEffect(() => { load(); return () => { loadVersion.current++; }; }, []);
 
   /** 切换"是否启用该服务"（不影响已保存的凭证）。仅管理员/超管可调用，其余角色 Toggle 已禁用。 */
   const toggleConnector = async (registryKey: string, connectorKey: string, next: boolean) => {
@@ -362,6 +380,7 @@ function SettingsContent() {
           <nav
             role="tablist"
             aria-label="设置分区"
+            aria-orientation="horizontal"
             className="mb-6 grid gap-2 sm:grid-cols-2 xl:grid-cols-6"
           >
             {allowedSections.map((item) => (
@@ -369,8 +388,23 @@ function SettingsContent() {
                 key={item.key}
                 type="button"
                 role="tab"
+                id={`${sectionId}-${item.key}`}
+                aria-controls={`${sectionId}-panel`}
                 aria-selected={section === item.key}
+                tabIndex={section === item.key ? 0 : -1}
                 onClick={() => selectSection(item.key)}
+                onKeyDown={(event) => {
+                  if (event.nativeEvent.isComposing) return;
+                  const index = allowedSections.findIndex(candidate => candidate.key === item.key);
+                  const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? allowedSections.length - 1
+                    : event.key === "ArrowRight" ? (index + 1) % allowedSections.length
+                      : event.key === "ArrowLeft" ? (index + allowedSections.length - 1) % allowedSections.length : null;
+                  if (nextIndex === null) return;
+                  event.preventDefault();
+                  const next = allowedSections[nextIndex];
+                  selectSection(next.key);
+                  document.getElementById(`${sectionId}-${next.key}`)?.focus();
+                }}
                 className={cn(
                   "flex items-center gap-3 rounded-xl border px-3 py-3 text-left transition",
                   section === item.key
@@ -392,7 +426,9 @@ function SettingsContent() {
             ))}
           </nav>
 
-          <div className="space-y-5">
+          {loadingSettings && <p role="status" className="mb-4 text-sm text-muted-foreground">正在加载设置…</p>}
+          {loadErrors.length > 0 && <div className="mb-4 space-y-2"><p role="alert" className="text-sm text-destructive">设置加载未完成：{loadErrors.join("；")}。已显示的内容可能不是最新状态。</p><Button variant="outline" size="sm" onClick={load}>重新加载设置</Button></div>}
+          <div role="tabpanel" id={`${sectionId}-panel`} aria-labelledby={`${sectionId}-${section}`} tabIndex={0} className="space-y-5">
             {section === "personal" && (
               <>
                 <AccountSecurity />

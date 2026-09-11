@@ -1755,7 +1755,7 @@ test.describe("统一数据工作台", () => {
     await page.getByRole("button", { name: "打开导航" }).click();
     await expect(page.getByRole("link", { name: "旧版对话" })).toBeVisible();
     await expect(page.getByRole("button", { name: "浅色主题" })).toBeVisible();
-    await page.locator("aside").getByRole("button", { name: "关闭导航" }).click();
+    await page.getByRole("dialog", { name: "全局导航", exact: true }).getByRole("button", { name: "关闭导航", exact: true }).click();
     await expect(page.getByRole("link", { name: "旧版对话" })).toBeHidden();
     await page.getByRole("button", { name: "打开导航" }).click();
     await page.keyboard.press("Escape");
