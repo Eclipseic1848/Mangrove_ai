@@ -21,6 +21,9 @@ from src.conversation_steering import (
 )
 
 
+_LEGACY_TEMPLATE_PREFIX = "legacy:"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -194,7 +197,8 @@ def _validate_context_advice(text: str) -> None:
     # 建议不能伪装编译上下文角色；实际权限/外发仍由运行时门独立核验。
     normalized = unicodedata.normalize("NFKC", text)
     normalized = "".join(char for char in normalized if unicodedata.category(char) != "Cf")
-    if re.search(r"(?im)^\s*\[(system|goal|confirmed_semantics|evidence)\]|<\s*/?\s*(system|assistant)\b|忽略.{0,20}(指令|权限|规则)|绕过.{0,12}(权限|授权|验证)|伪造.{0,12}(证据|结果)|ignore.{0,30}(instructions|system)|leak.{0,12}secrets", normalized):
+    normalized = re.sub(r"\s+", " ", normalized)
+    if re.search(r"(?i)(?:^|\s)\[(system|goal|confirmed_semantics|evidence)\]|<\s*/?\s*(system|assistant)\b|忽略.{0,20}(指令|权限|规则)|绕过.{0,12}(权限|授权|验证)|伪造.{0,12}(证据|结果)|\b(ignore|disregard|override|bypass)\b.{0,40}\b(instructions?|rules?|system|polic(?:y|ies)|permissions?)\b|\b(leak|reveal|expose)\b.{0,24}\b(secrets?|credentials?|tokens?|cookies?|passwords?|api[ _-]?keys?)\b", normalized):
         raise ValueError("模板或记忆包含控制指令，不能作为任务建议应用")
 
 
@@ -226,12 +230,15 @@ class TaskContextRepository:
 
     def put_template(self, owner_id: str, draft: TaskTemplateDraft, expected_version: int) -> FrozenTemplateRef:
         _validate_context_advice("\n".join((draft.goal_contract_draft, draft.method_draft)))
+        if draft.template_id.startswith(_LEGACY_TEMPLATE_PREFIX):
+            raise ValueError("模板编号使用了保留前缀")
         if set(draft.delivery_spec_draft) - {"formats"}:
             raise ValueError("模板只允许建议输出格式，不允许修改权限或来源")
         formats = draft.delivery_spec_draft.get("formats", [])
         if not isinstance(formats, list) or any(not isinstance(item, str) or item not in {"json", "jsonl", "csv", "xlsx", "parquet", "markdown", "txt", "pdf", "docx", "pptx", "html"} for item in formats):
             raise ValueError("模板输出格式无效")
         with self._connect() as connection:
+            # 版本号和正文摘要一起核对，未知结果重放可成功，并发编辑不能覆盖。
             connection.execute("BEGIN IMMEDIATE")
             current = connection.execute("SELECT MAX(version) FROM task_templates WHERE owner_id=? AND template_id=?", (owner_id, draft.template_id)).fetchone()[0] or 0
             existing = connection.execute("SELECT summary_sha256,status FROM task_templates WHERE owner_id=? AND template_id=? AND version=?", (owner_id,draft.template_id,draft.version)).fetchone()
@@ -247,6 +254,7 @@ class TaskContextRepository:
 
     def retire_template(self, owner_id: str, template_id: str, version: int) -> None:
         with self._connect() as connection:
+            # 只允许停用刚看过的最新版，避免另一页面的新版本被连带停用。
             connection.execute("BEGIN IMMEDIATE")
             latest = connection.execute("SELECT MAX(version) FROM task_templates WHERE owner_id=? AND template_id=?", (owner_id,template_id)).fetchone()[0]
             if latest is None:
@@ -256,6 +264,8 @@ class TaskContextRepository:
             connection.execute("UPDATE task_templates SET status='retired' WHERE owner_id=? AND template_id=?", (owner_id,template_id))
 
     def get_template(self, owner_id: str, reference: TaskTemplateRef) -> FrozenTemplateRef | None:
+        if reference.template_id.startswith(_LEGACY_TEMPLATE_PREFIX):
+            return self._get_legacy_template(owner_id, reference)
         with self._connect() as connection:
             row = connection.execute(
                 "SELECT * FROM task_templates WHERE owner_id=? "
@@ -279,9 +289,59 @@ class TaskContextRepository:
                 "WHERE owner_id=? AND purpose IN (?, 'general') AND status='active' "
                 "GROUP BY template_id ORDER BY template_id", (owner_id, purpose)
             ).fetchall()
-        return tuple(template for row in rows if (template := self.get_template(
+        stored = tuple(template for row in rows if (template := self.get_template(
             owner_id, TaskTemplateRef(template_id=row["template_id"], version=row["version"])
         )) is not None)
+        return stored + self._legacy_templates(owner_id)
+
+    def _legacy_templates(self, owner_id: str) -> tuple[FrozenTemplateRef, ...]:
+        """旧模板只做可见目录适配；执行仍统一冻结到 TaskRevision。"""
+        from src.memory import load_templates
+
+        templates = []
+        for entry in load_templates(owner_id=owner_id):
+            if entry.get("status") == "retired":
+                continue
+            try:
+                templates.append(self._legacy_template(entry))
+            except ValueError:
+                # 单条历史数据无效不能拖垮整个 Owner 的可用目录。
+                continue
+        return tuple(templates)
+
+    def _get_legacy_template(
+        self,
+        owner_id: str,
+        reference: TaskTemplateRef,
+    ) -> FrozenTemplateRef | None:
+        return next(
+            (
+                template
+                for template in self._legacy_templates(owner_id)
+                if template.template_id == reference.template_id
+                and template.version == reference.version
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _legacy_template(entry: dict[str, Any]) -> FrozenTemplateRef:
+        # 旧文件没有版本列；内容摘要提供稳定版本身份，正文变化必须生成不同引用。
+        version = int(str(entry["content_digest"])[:13], 16) + 1
+        draft = TaskTemplateDraft(
+            template_id=f"{_LEGACY_TEMPLATE_PREFIX}{entry['slug']}",
+            version=version,
+            title=str(entry["title"]),
+            source="legacy_library",
+            purpose="general",
+            goal_contract_draft="保持当前任务目标",
+            delivery_spec_draft={},
+            method_draft=str(entry["body"]),
+        )
+        return FrozenTemplateRef(
+            **draft.model_dump(mode="json"),
+            summary_sha256=_digest(draft.model_dump(mode="json")),
+        )
 
     def get_memory(self, owner_id: str, memory_id: int) -> FrozenMemoryRef | None:
         with self._connect() as connection:
@@ -426,9 +486,20 @@ class TaskContextService:
         if require_current:
             # 创建事务内再核目录；准备期间删除/失效不能凭旧预览落库。
             if preview.template:
-                row = connection.execute("SELECT summary_sha256,status FROM task_templates WHERE owner_id=? AND template_id=? AND version=?", (owner_id,preview.template.template_id,preview.template.version)).fetchone()
-                if row is None or row[1] != "active" or row[0] != preview.template.summary_sha256:
-                    raise RuntimeError("上下文已变化，请重新检查并确认")
+                if preview.template.source == "legacy_library":
+                    current = self._repository.get_template(
+                        owner_id,
+                        TaskTemplateRef(
+                            template_id=preview.template.template_id,
+                            version=preview.template.version,
+                        ),
+                    )
+                    if current is None or current.summary_sha256 != preview.template.summary_sha256:
+                        raise RuntimeError("上下文已变化，请重新检查并确认")
+                else:
+                    row = connection.execute("SELECT summary_sha256,status FROM task_templates WHERE owner_id=? AND template_id=? AND version=?", (owner_id,preview.template.template_id,preview.template.version)).fetchone()
+                    if row is None or row[1] != "active" or row[0] != preview.template.summary_sha256:
+                        raise RuntimeError("上下文已变化，请重新检查并确认")
             for memory in preview.memories:
                 row = connection.execute("SELECT text,purpose,source FROM user_memory WHERE user_id=? AND id=? AND deleted_at IS NULL", (owner_id,memory.memory_id)).fetchone()
                 if row is None or _digest(_safe_summary(row[0])) != memory.summary_sha256 or row[1] != memory.purpose or row[2] != memory.source:

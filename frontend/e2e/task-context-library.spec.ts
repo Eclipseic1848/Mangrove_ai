@@ -13,8 +13,10 @@ test.beforeEach(async ({ page }) => {
     else if (url.includes("context-templates/") && route.request().method() === "DELETE") { templates = []; result = { retired: true }; }
     else if (url.endsWith("source-acquisitions/attempt-a")) result = { attempt_id: "attempt-a", snapshot: { snapshot_id: "snapshot-a", attempt_id: "attempt-a", created_at: "2026-09-09T00:00:00Z", valid_page_count: 1, failed_page_count: 0, allowed_scope: { kind: "exact_url", normalized_url: "https://example.invalid/source" }, coverage: { status: "scope_complete" }, failures: [], artifacts: [{ artifact_id: "artifact-a", content_sha256: "b".repeat(64), title: "网页证据", final_url: "https://example.invalid/source", text_preview: "工程合成证据" }] } };
     else if (url.includes("uploads/")) result = { upload_id: "upload-a", original_name: "原始附件.csv", media_type: "text/csv", size_bytes: 24, sha256: "a".repeat(64) };
-    else if (url.endsWith("/memory/self")) { result = { ok: true }; memories.push({ memory_id: 2, summary: body.text, purpose: "general", source: "user_entered", summary_sha256: "sha256:" + "e".repeat(64) }); }
-    else if (url.includes("/memory/self/")) { memories = memories.filter(item => item.memory_id !== Number(url.split("/").pop())); }
+    else if (url.endsWith("/memory") && route.request().method() === "GET") result = { preferences: "", personal: memories.map(item => ({ id: item.memory_id, text: item.summary, created_at: "2026-09-09T00:00:00Z" })) };
+    else if (url.endsWith("/memory/self") && route.request().method() === "POST") { result = { ok: true }; memories.push({ memory_id: 2, summary: body.text, purpose: "general", source: "user_entered", summary_sha256: "sha256:" + "e".repeat(64) }); }
+    else if (url.includes("/memory/self/") && route.request().method() === "PATCH") { const item = memories.find(value => value.memory_id === Number(url.split("/").pop())); if (!item || item.summary !== body.expected_text) return route.fulfill({ status: 409, json: { detail: "记忆已变化，请刷新后再纠正" } }); item.summary = body.text; result = { ok: true }; }
+    else if (url.includes("/memory/self/") && route.request().method() === "DELETE") { memories = memories.filter(item => item.memory_id !== Number(url.split("/").pop())); }
     await route.fulfill({ json: result });
   });
 });
@@ -48,6 +50,17 @@ test("创建模板与记忆，明确失败保留编辑草稿", async ({ page }) 
   await page.unroute("**/context-templates"); await page.getByRole("button", { name: "保存新版本", exact: true }).click(); await expect(page.getByRole("dialog").getByText("新摘要模板 · V1", { exact: true })).toBeVisible();
   await page.getByRole("textbox", { name: "新增个人偏好", exact: true }).fill("金额不四舍五入"); await page.getByRole("button", { name: "保存个人记忆", exact: true }).click(); await expect(page.getByRole("dialog").getByText("金额不四舍五入", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "删除记忆 2", exact: true }).click(); await expect(page.getByText("金额不四舍五入", { exact: true })).toHaveCount(0);
+});
+test("个人记忆可纠正并保留任务输入", async ({ page }) => {
+  await page.goto("/e2e/fixtures/task-context/index.html?mode=file");
+  await page.getByRole("button", { name: "管理任务模板与记忆" }).click();
+  await page.getByRole("button", { name: "纠正记忆 1", exact: true }).click();
+  await page.getByRole("textbox", { name: "纠正个人偏好", exact: true }).fill("只使用有来源的事实");
+  await page.getByRole("button", { name: "保存纠正", exact: true }).click();
+  await expect(page.getByRole("dialog").getByText("只使用有来源的事实", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "返回原任务", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "任务要求" })).toHaveValue("按证据汇总费用，不猜测缺失值");
+  await expect(page.getByText("原始附件.csv", { exact: true })).toBeVisible();
 });
 test("旧预览迟到不能确认新要求，失败可取消选择且保留附件", async ({ page }) => {
   await page.goto("/e2e/fixtures/task-context/index.html?mode=file"); await page.getByLabel("任务模板（可选）").selectOption(JSON.stringify(["summary", 1]));
