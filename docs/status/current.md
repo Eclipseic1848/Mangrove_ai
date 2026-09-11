@@ -115,6 +115,7 @@ Mangrove 是统一数据任务平台。用户从文件或其他来源创建不�
 | 数据工作台 `/data-prep` | 可用 | 历史任务与 Legacy Delivery 仍保留兼容路径 |
 | P1-01 匿名网页统一工作台 | `ENGINEERING_VERIFIED / CLOSED` | 受控工程闭环已验；真实外部网页、Provider 与用户体验未验收 |
 | HTTP/数据库只读连接来源 #139 | `ENGINEERING_CANDIDATE` | Owner/连接版本/范围冻结与任务交付本地验证；真实外部来源、生产迁移和用户验收尚缺 |
+| 三类来源模板与个人记忆 #140 | `ENGINEERING_CANDIDATE` | 既有模板适配、Owner记忆纠正和冻结链本地通过；同提交CI、真实语义/运行实例和用户视觉验收尚缺 |
 | vNext 默认正式 Delivery | `LIVE_ACCEPTED` | 默认/Pi/Legacy、P0 回滚与 Owner 隔离已验收；不代表稳定 Release |
 | Candidate 同 Run 重验 | `LIVE_ACCEPTED` | 追加式 Attempt、独立 Provider 授权、精确 Attempt 发布；未知结果不自动重试 |
 | 11 种交付预览 | `ENGINEERING_VERIFIED` | 不等于每种格式均有生产用户验收 |

@@ -1400,7 +1400,9 @@ export function WebSourceIntake({
                       <dt className="inline">模板：</dt>
                       <dd className="inline">
                         {contextPreview.template
-                          ? `${contextPreview.template.title} · V${contextPreview.template.version} · ${contextPreview.template.source}`
+                          ? contextPreview.template.source === "legacy_library"
+                            ? `${contextPreview.template.title} · 内容版 ${contextPreview.template.summary_sha256.slice(7, 15)}`
+                            : `${contextPreview.template.title} · V${contextPreview.template.version} · ${contextPreview.template.source}`
                           : "未应用"}
                       </dd>
                     </div>

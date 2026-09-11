@@ -268,6 +268,34 @@ class WebUIStore:
             )
         return cur.rowcount > 0
 
+    def memory_update(
+        self,
+        user_id: str,
+        memory_id: int,
+        text: str,
+        expected_text: str,
+    ) -> tuple[str, Dict[str, Any] | None]:
+        """按原文并发纠正；旧 TaskRevision 使用独立快照，不会被本行更新改写。"""
+        with self._lock, self._conn() as conn:
+            updated = conn.execute(
+                "UPDATE user_memory SET text=? "
+                "WHERE id=? AND user_id=? AND deleted_at IS NULL AND text=?",
+                (text, memory_id, user_id, expected_text),
+            )
+            if updated.rowcount:
+                current = conn.execute(
+                    "SELECT id, text, purpose, source, created_at FROM user_memory "
+                    "WHERE id=? AND user_id=? AND deleted_at IS NULL",
+                    (memory_id, user_id),
+                ).fetchone()
+                return "updated", dict(current) if current is not None else None
+            current = conn.execute(
+                "SELECT 1 FROM user_memory "
+                "WHERE id=? AND user_id=? AND deleted_at IS NULL",
+                (memory_id, user_id),
+            ).fetchone()
+            return ("conflict" if current is not None else "missing"), None
+
     # ---------- 模板库/教训库定时巡检日志 ----------
     def library_dedup_scan_log_add(
         self,

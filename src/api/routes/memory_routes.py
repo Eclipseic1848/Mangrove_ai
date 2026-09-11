@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.memory import add_preference, load_preferences
 
@@ -13,6 +13,11 @@ router = APIRouter(prefix="/api/memory", tags=["memory"])
 
 class PreferenceIn(BaseModel):
     text: str
+
+
+class MemoryCorrectionIn(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    expected_text: str = Field(min_length=1, max_length=4000)
 
 
 @router.get("")
@@ -51,3 +56,26 @@ def delete_my_memory(memory_id: int, user=Depends(get_current_user)):
     if not ok:
         raise HTTPException(status_code=404, detail="记忆不存在")
     return {"ok": True}
+
+
+@router.patch("/self/{memory_id}")
+def correct_my_memory(
+    memory_id: int,
+    body: MemoryCorrectionIn,
+    user=Depends(get_current_user),
+):
+    """只纠正本人当前版本；并发变化时失败，避免覆盖另一页面的新内容。"""
+    text = body.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="记忆内容为空")
+    result, item = get_store().memory_update(
+        user["user_id"],
+        memory_id,
+        text,
+        body.expected_text,
+    )
+    if result == "missing":
+        raise HTTPException(status_code=404, detail="记忆不存在")
+    if result == "conflict":
+        raise HTTPException(status_code=409, detail="记忆已变化，请刷新后再纠正")
+    return {"ok": True, "item": item}

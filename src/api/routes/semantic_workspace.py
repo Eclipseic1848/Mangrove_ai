@@ -108,6 +108,7 @@ from src.runtime_routing import (
 )
 from src.task_context import (
     TaskContextRepository,
+    TaskTemplateDraft,
     TaskContextSelection,
     TaskContextService,
 )
@@ -781,6 +782,33 @@ def _inherit_web_contract_hook(
                                (owner_id,target_task_id,target_revision,contract["web_sources"][0]["source_snapshot_id"],json.dumps(goal_contract,ensure_ascii=False),json.dumps({"formats":list(output_formats)}),json.dumps(runtime_payload,ensure_ascii=False),datetime.now(timezone.utc).isoformat()))
 
     return bind_web_contract
+
+
+class WorkspaceTemplateSaveIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    draft: TaskTemplateDraft
+    expected_version: int = Field(ge=0)
+
+
+@router.post("/context-templates")
+def save_context_template(payload: WorkspaceTemplateSaveIn, user=Depends(get_execution_user)):
+    try:
+        return TaskContextRepository(settings.webui_db_path).put_template(user["user_id"], payload.draft, payload.expected_version).model_dump(mode="json")
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/context-templates/{template_id}")
+def retire_context_template(template_id: str, version: int = Query(ge=1), user=Depends(get_execution_user)):
+    try:
+        TaskContextRepository(settings.webui_db_path).retire_template(user["user_id"], template_id, version)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except FileExistsError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"retired": True}
 
 
 @router.get("/context-options")
@@ -2595,7 +2623,7 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
             if context_base_hook is not None:
                 context_base_hook(connection)
             _task_context_service().freeze(connection, owner_id=user_id, task_id=task_id, revision=1,
-                                           preview=context_preview, expected_preview_sha256=payload.context_preview_sha256 or "")
+                                           preview=context_preview, expected_preview_sha256=payload.context_preview_sha256 or "", require_current=True)
         transaction_hook = bind_confirmed_context
     frozen_source_contract = _source_contract(
         _freeze_goal_contract(payload, objective=user_objective, source_snapshot={"allowed_scope": {"groups": [item["allowed_scope"] for item in source_snapshots]}}) if source_snapshots else None,

@@ -20,12 +20,14 @@
 # 已核对：关联清理索引 ix_deletion_owner_key 的值是 Schema 结构摘要，仅忽略该提交的此行。
 9a428600063e4e56e2c626dea6690b6461f85eb8:src/database_migrations/schema_manifest.json:generic-api-key:100
 
-# 已核对：以下三项是 Schema 结构摘要，仅忽略报告命中的历史提交与行。
+# 同一索引结构摘要在Issue #137合并基线再次命中；仅豁免已核实的这条合并历史行。
 115c990c60a865ceb0749b7993664d963c112251:src/database_migrations/schema_manifest.json:generic-api-key:100
+
+# 已核对：Issue #141 的两项值是 Schema 结构摘要，仅忽略该历史提交的精确行。
 72891b7572e1bf7c91ae90bf0905e2faead55df2:src/database_migrations/schema_manifest.json:generic-api-key:131
 72891b7572e1bf7c91ae90bf0905e2faead55df2:src/database_migrations/schema_manifest.json:generic-api-key:142
 
-# 已核对：工作区生命周期回归中的固定幂等键均为合成测试值，仅忽略报告命中的历史行。
+# 已核对：Issue #141 回归使用临时库和静态 synthetic 幂等键，仅忽略该历史提交的精确行。
 72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:56
 72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:84
 72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:87
