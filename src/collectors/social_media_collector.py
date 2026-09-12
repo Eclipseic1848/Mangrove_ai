@@ -26,7 +26,7 @@ from src.config.settings import settings
 from src.conductor.task_spec import AnalysisType, DataType, TaskSpec
 
 from src.conductor.targets import content_id_from_url
-from .base import BaseCollector, CollectedItem, CollectResult
+from .base import BaseCollector, CollectedItem, CollectFailureKind, CollectResult
 from .registry import register
 
 logger = logging.getLogger(__name__)
@@ -69,23 +69,26 @@ _PLATFORM_CN = {"dy": "抖音", "xhs": "小红书", "wb": "微博", "bili": "B�
                 "ks": "快手", "zhihu": "知乎", "tieba": "贴吧"}
 
 
-def _diagnose_mc_failure(platform: str, output: str) -> str:
+def _diagnose_mc_failure(platform: str, output: str) -> tuple[str, CollectFailureKind]:
     """把 MediaCrawler 子进程原始报错翻译成用户可操作的一句话，避免把整段 traceback 抛给用户。"""
     cn = _PLATFORM_CN.get(platform, platform)
     env_name = (_COOKIE_ATTR.get(platform) or "").upper()  # 如 mc_cookie_xhs -> MC_COOKIE_XHS
     text = output or ""
-    if "登录已过期" in text or "Login state result: False" in text or "登录失败" in text:
+    # 登录流程常把环境故障也写成“登录失败”；只有明确的登录态证据才判 Cookie 失效。
+    if "CAPTCHA" in text or "Verifytype" in text or "验证码" in text:
+        return f"{cn}触发验证码风控，建议开启代理IP池换 IP 或稍后重试", CollectFailureKind.RISK_CONTROL
+    if "IPBlock" in text or "IP_ERROR" in text or "访问频次" in text:
+        return f"{cn}访问频次过高被限制，建议开启代理IP池或降低采集频率", CollectFailureKind.RISK_CONTROL
+    if any(marker in text for marker in ("net::ERR_", "ConnectionError", "ConnectTimeout", "ReadTimeout", "ProxyError", "连接失败", "网络错误")):
+        return f"{cn}采集网络异常，请检查网络、VPN 或代理后重试", CollectFailureKind.NETWORK
+    if "登录已过期" in text or "Login state result: False" in text:
         tip = f"{cn}登录已过期"
         if env_name:
-            tip += f"，请更新 .env 的 {env_name}（重新登录{cn}后导出最新 Cookie）"
-        return tip
-    if "CAPTCHA" in text or "Verifytype" in text or "验证码" in text:
-        return f"{cn}触发验证码风控，建议开启代理IP池换 IP 或稍后重试"
-    if "IPBlock" in text or "IP_ERROR" in text or "访问频次" in text:
-        return f"{cn}访问频次过高被限制，建议开启代理IP池或降低采集频率"
+            tip += f"，请在当前任务 Owner 的采集账号设置中更新 {env_name}"
+        return tip, CollectFailureKind.AUTH_INVALID
     # 兜底：只取最后一行非空信息，不吐整段 traceback
     last = next((ln.strip() for ln in reversed(text.splitlines()) if ln.strip()), "")
-    return f"{cn}采集失败：{last[:120]}" if last else f"{cn}采集失败"
+    return (f"{cn}采集失败：{last[:120]}" if last else f"{cn}采集失败"), CollectFailureKind.UNKNOWN
 
 
 def _proxy_env() -> dict:
@@ -340,7 +343,13 @@ class SocialMediaCollector(BaseCollector):
             fallback = await direct_fallback()
             if fallback:
                 return fallback
-            return CollectResult(False, self.name, message=_diagnose_mc_failure(platform, text))
+            message, failure_kind = _diagnose_mc_failure(platform, text)
+            return CollectResult(
+                False,
+                self.name,
+                message=message,
+                failure_kind=failure_kind,
+            )
 
         # 只读本次运行后新生成的 JSON（按 mtime 过滤，避免读到历史旧数据）
         data_dir = mc_dir / "data"
@@ -360,7 +369,12 @@ class SocialMediaCollector(BaseCollector):
             fallback = await direct_fallback()
             if fallback:
                 return fallback
-            return CollectResult(False, self.name, message="MediaCrawler 未产出可解析结果")
+            return CollectResult(
+                False,
+                self.name,
+                message="MediaCrawler 未产出可解析结果",
+                failure_kind=CollectFailureKind.NO_DATA,
+            )
 
         # 区分评论与帖子；VOC 优先用评论（无评论则回退帖子）
         comments = [r for r in records if r.get("comment_id")]
@@ -404,7 +418,12 @@ class SocialMediaCollector(BaseCollector):
             fallback = await direct_fallback()
             if fallback:
                 return fallback
-            return CollectResult(False, self.name, message="MediaCrawler 未返回与目标链接一致的内容")
+            return CollectResult(
+                False,
+                self.name,
+                message="MediaCrawler 未返回与目标链接一致的内容",
+                failure_kind=CollectFailureKind.NO_DATA,
+            )
         kind = "评论" if use_comments else "帖子"
         return CollectResult(True, self.name, items=items, message=f"采集 {len(items)} 条社媒{kind}数据")
 

@@ -126,6 +126,7 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
             "success": False,
             "count": 0,
             "message": result.message or "",
+            "failure_kind": result.failure_kind.value if result.failure_kind else None,
         })
         metrics_record(name, False, elapsed_ms)
         domain_health_record(name, spec.urls, False)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List
 
 from src.conductor.task_spec import TaskSpec
@@ -30,6 +31,16 @@ class CollectedItem:
         }
 
 
+class CollectFailureKind(str, Enum):
+    """采集失败的稳定分类；用户文案变化不能改写恢复决策。"""
+
+    AUTH_INVALID = "auth_invalid"
+    RISK_CONTROL = "risk_control"
+    NETWORK = "network"
+    NO_DATA = "no_data"
+    UNKNOWN = "unknown"
+
+
 @dataclass
 class CollectResult:
     """一次采集的结果汇总。"""
@@ -37,6 +48,7 @@ class CollectResult:
     collector: str
     items: List[CollectedItem] = field(default_factory=list)
     message: str = ""
+    failure_kind: CollectFailureKind | None = None
 
     @property
     def has_data(self) -> bool:

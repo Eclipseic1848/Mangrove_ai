@@ -3,7 +3,7 @@
 - 管理员/超管：GET /api/config 全量分组；PUT/DELETE /api/config/{key} 设置/重置全局覆盖（热生效）。
 - 普通用户：GET /api/config/self 白名单内自助项（自己的 API Key/平台 Cookie，按用户隔离）；
   PUT/DELETE /api/config/self/{key}。
-- POST /api/config/verify {"target": ...}：逐项/逐组连通验证；普通用户验证时套用其个人覆盖。
+- POST /api/config/verify {"target": ..., "scope": ...}：逐项/逐组连通验证；self 验证套用本人覆盖。
 
 安全：密钥值只回掩码（尾4位），前端永远拿不到全文；键必须在 REGISTRY 白名单内。
 """
@@ -13,7 +13,7 @@ import asyncio
 import logging
 import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from src.config import runtime_config as rc
 from src.config.settings import settings
-from src.config.user_ctx import set_user_overrides
+from src.config.user_ctx import user_overrides_context
 
 from ..auth import get_current_user, get_store, is_admin_role, require_admin
 
@@ -36,6 +36,7 @@ class ConfigValueIn(BaseModel):
 
 class VerifyIn(BaseModel):
     target: str  # 组名或键名，如 llm_deepseek / tavily_api_key / smtp / cookies:jd_cookie
+    scope: Literal["global", "self"] = "global"
 
 
 # ---------- 模型列表（供前端下拉选择） ----------
@@ -198,17 +199,23 @@ _ECOMMERCE_UA = (
 )
 
 
+class _CookieProbeError(RuntimeError):
+    """携带稳定状态的验证失败；展示文案不参与状态判定。"""
+
+    def __init__(self, status: Literal["invalid", "unknown"], detail: str) -> None:
+        super().__init__(detail)
+        self.status = status
+
+
 def _classify_ecommerce_probe(
     landed_url: str, status_code: int, cn: str, login_markers: tuple, best_effort: bool,
 ) -> str:
-    """纯函数：根据探测请求最终落地的 URL + 状态码判定 Cookie 状态，返回结论文案；
-    判定为失效/无法判断时抛 RuntimeError（消息含"无法判断"四字表示"测不准，非确定失效"）。
-    """
+    """根据最终 URL 与状态码判定 Cookie，并用异常类型携带稳定状态。"""
     if any(marker in landed_url for marker in login_markers):
-        raise RuntimeError(f"{cn} 登录状态已失效，请重新导出 Cookie")
+        raise _CookieProbeError("invalid", f"{cn} 登录状态已失效，请重新导出 Cookie")
     if status_code != 200:
         hint = "，可能是反爬拦截而非 Cookie 失效" if best_effort else "，请稍后重试确认"
-        raise RuntimeError(f"{cn} 无法判断 Cookie 状态（HTTP {status_code}）{hint}")
+        raise _CookieProbeError("unknown", f"{cn} 无法判断 Cookie 状态（HTTP {status_code}）{hint}")
     return f"{cn} Cookie 有效（{landed_url}）"
 
 
@@ -219,13 +226,13 @@ async def _verify_ecommerce_cookie(cookie_key: str) -> str:
     probe = _ECOMMERCE_PROBES[cookie_key]
     cookie = (effective(cookie_key) or "").strip()
     if not cookie:
-        raise RuntimeError(f"{probe['cn']} 未配置 Cookie")
+        raise _CookieProbeError("unknown", f"{probe['cn']} 未配置 Cookie")
     headers = {"User-Agent": _ECOMMERCE_UA, "Cookie": cookie}
     try:
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
             r = await c.get(probe["url"], headers=headers)
     except Exception as e:  # noqa: BLE001 网络异常也是"测不了"，不该冒充"Cookie失效"
-        raise RuntimeError(f"{probe['cn']} 探测请求失败：{e}")
+        raise _CookieProbeError("unknown", f"{probe['cn']} 探测请求失败：{e}") from e
     return _classify_ecommerce_probe(
         str(r.url), r.status_code, probe["cn"], probe["login_markers"], probe["best_effort"],
     )
@@ -238,29 +245,33 @@ async def _verify_mc_cookie(cookie_key: str) -> str:
     前端对这类目标会先弹确认框（仿 Slack 侧效应验证），不会被误触。
     """
     from src.collectors.registry import get_registry
+    from src.collectors.base import CollectFailureKind
     from src.collectors.social_media_collector import _platform_cookie
     from src.conductor.task_spec import TaskSpec
 
     entry = _MC_COOKIE_PLATFORM.get(cookie_key)
     if not entry:
-        raise RuntimeError("未知的平台 Cookie 项")
+        raise _CookieProbeError("unknown", "未知的平台 Cookie 项")
     platform_cn, platform_code = entry
     if not _platform_cookie(platform_code):
-        raise RuntimeError(f"{platform_cn} 未配置 Cookie，无需探测（未配置时走扫码登录，不受此项影响）")
+        raise _CookieProbeError("unknown", f"{platform_cn} 未配置 Cookie")
     collector = get_registry().get("mediacrawler")
     if collector is None or not collector.is_available():
-        raise RuntimeError("MediaCrawler 未配置（MEDIACRAWLER_PATH），无法探测")
+        raise _CookieProbeError("unknown", "MediaCrawler 未配置（MEDIACRAWLER_PATH），无法探测")
     spec = TaskSpec(intent="Cookie 连通验证", platforms=[platform_cn], keywords=["你好"], max_items=1)
     result = await collector.collect(spec)
-    if result.success:
+    if result.has_data:
         return f"{platform_cn} Cookie 有效（真实登录并采到 {len(result.items)} 条数据）"
     msg = result.message or ""
     # 唯一真正"没崩溃、只是没搜到内容"的情况：进程正常退出但没解析出数据。
     # 其余（启动失败/运行超时/退出码非0的登录过期/验证码/频次/IP 等诊断）都是采集本身没跑成功，
     # 必须算验证失败——此前误把这些也归为"未产出数据"，会把真实故障显示成绿色的"未报错"。
     if msg == "MediaCrawler 未产出可解析结果":
-        return f"{platform_cn} 登录未报错，但本次探测未产出数据（{msg}）"
-    raise RuntimeError(msg or "MediaCrawler 采集失败，原因未知")
+        raise _CookieProbeError("unknown", f"{platform_cn} 无法判断 Cookie 状态：本次探测未取得数据")
+    raise _CookieProbeError(
+        "invalid" if result.failure_kind is CollectFailureKind.AUTH_INVALID else "unknown",
+        msg or "MediaCrawler 采集失败，原因未知",
+    )
 
 
 async def _verify_http(url: str, name: str, ok_codes=(200,)) -> str:
@@ -280,6 +291,11 @@ _COOKIE_HEALTH_KEYS = (
     "mc_cookie_xhs", "mc_cookie_dy", "mc_cookie_wb", "mc_cookie_bili", "mc_cookie_zhihu",
     "mc_cookie_ks", "mc_cookie_tieba", "jd_cookie", "tb_cookie", "pdd_cookie",
 )
+
+
+def _cookie_failure_status(error: Exception) -> str:
+    """只有探测层明确标记的鉴权拒绝才能宣告失效。"""
+    return error.status if isinstance(error, _CookieProbeError) else "unknown"
 
 
 # CDP 模式常见的本机浏览器安装位置：MediaCrawler 自身会自动探测，这里只做轻量文件系统
@@ -412,30 +428,37 @@ async def _verify_target(target: str) -> str:
 async def verify_config(body: VerifyIn, user=Depends(get_current_user)):
     """连通验证。普通用户验证时套用其个人覆盖（验的是"他自己任务会用到的配置"）。"""
     is_admin = user.get("role") in ("admin", "super_admin")
-    if not is_admin:
+    verify_self = body.scope == "self" or not is_admin
+    overrides = None
+    if verify_self:
         # 普通用户只允许验证自助项相关目标
         allowed = {"llm_deepseek", "llm_qwen", "deepseek_api_key", "qwen_api_key", "cookies"}
         if body.target not in allowed and not body.target.startswith(("mc_cookie_", "jd_cookie", "tb_cookie", "pdd_cookie")):
             raise HTTPException(status_code=403, detail="无权验证该项")
         mine = get_store().config_all(user["user_id"]) or {}
-        set_user_overrides({k: v for k, v in mine.items() if k in rc.USER_KEYS})
-    try:
-        detail = await _verify_target(body.target)
-        # 只有管理员验证时测的才是全局配置中心展示的那份值；普通用户验证的是自己的
-        # 个人覆盖（见上面 set_user_overrides），写进全局表会污染管理员看到的状态。
-        if is_admin and body.target in _COOKIE_HEALTH_KEYS:
-            _record_cookie_health(body.target, "valid", detail, checked_by="manual")
-        return {"ok": True, "detail": detail}
-    except HTTPException as exc:
-        detail = rc.redact_sensitive_text(str(exc.detail))[:300]
-        raise HTTPException(
-            status_code=exc.status_code,
-            detail=detail,
-            headers=exc.headers,
-        ) from exc
-    except Exception as e:  # noqa: BLE001 验证失败把原因回前端
-        detail = rc.redact_sensitive_text(str(e))[:300]
-        if is_admin and body.target in _COOKIE_HEALTH_KEYS:
-            status = "unknown" if "无法判断" in detail else "invalid"
-            _record_cookie_health(body.target, status, detail, checked_by="manual")
-        return {"ok": False, "detail": detail}
+        overrides = {k: v for k, v in mine.items() if k in rc.USER_KEYS}
+    # 管理员也能维护“我的采集账号”；显式 self 必须验证本人值，不能误用全局 Cookie。
+    with user_overrides_context(overrides or {}):
+        try:
+            detail = await _verify_target(body.target)
+            # 只有全局验证才更新管理员配置中心的健康状态，避免个人结果污染全局状态。
+            if is_admin and not verify_self and body.target in _COOKIE_HEALTH_KEYS:
+                _record_cookie_health(body.target, "valid", detail, checked_by="manual")
+            return {"ok": True, "detail": detail}
+        except HTTPException as exc:
+            detail = rc.redact_sensitive_text(str(exc.detail))[:300]
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail=detail,
+                headers=exc.headers,
+            ) from exc
+        except Exception as e:  # noqa: BLE001 验证失败把原因回前端
+            detail = rc.redact_sensitive_text(str(e))[:300]
+            if is_admin and not verify_self and body.target in _COOKIE_HEALTH_KEYS:
+                _record_cookie_health(
+                    body.target,
+                    _cookie_failure_status(e),
+                    detail,
+                    checked_by="manual",
+                )
+            return {"ok": False, "detail": detail}
