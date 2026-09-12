@@ -40,6 +40,7 @@ import { TaskTimeline } from "@/components/workspace/TaskTimeline";
 import { WorkspaceLifecycleActions, type FeedbackRequest } from "@/components/workspace/WorkspaceLifecycleActions";
 import { Markdown } from "@/components/Markdown";
 import { WorkspaceTaskSidebar } from "@/components/workspace/WorkspaceTaskSidebar";
+import { detachStoredSourceAcquisition, settleDetachedSourceAcquisitions } from "@/components/workspace/WebSourceIntake";
 import {
   answerWorkspaceTask,
   cancelWorkspaceTask,
@@ -106,6 +107,24 @@ type ModelConnection = {
   }>;
 };
 type ModelConnectionsResponse = { items: ModelConnection[] };
+
+let runtimeSourceScope: string | null = null;
+function sourceScope() {
+  if (runtimeSourceScope) return runtimeSourceScope;
+  try {
+    const saved = sessionStorage.getItem("mangrove_web_source_scope");
+    const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
+    runtimeSourceScope = navigation?.type === "reload" && saved ? saved : nanoid();
+    sessionStorage.setItem("mangrove_web_source_scope", runtimeSourceScope);
+  } catch { runtimeSourceScope = nanoid(); }
+  return runtimeSourceScope;
+}
+
+function renewSourceScope() {
+  runtimeSourceScope = nanoid();
+  try { sessionStorage.setItem("mangrove_web_source_scope", runtimeSourceScope); } catch { /* 当前页面仍持有会话身份。 */ }
+  return runtimeSourceScope;
+}
 
 function AnswerReferences({ context, onViewSource }: { context: PublicResultContext | null; onViewSource: (ref: Record<string, unknown>, revision: number) => void }) {
   if (!context) return <p className="text-xs text-muted-foreground">未附结构化引用</p>;
@@ -705,6 +724,10 @@ export function SemanticWorkspacePage() {
     return () => media.removeEventListener("change", update);
   }, []);
   const [composerDraft, setComposerDraft] = useState<WebIntakeDraft | null>(null);
+  const newTaskSourceRecovery = useRef<string | null>(null);
+  const [newTaskSourceScope, setNewTaskSourceScope] = useState(sourceScope);
+  const [newTaskSession, setNewTaskSession] = useState(0);
+  const [detachedSourceCleanup, setDetachedSourceCleanup] = useState(0);
   const [sourceEditorIdentity, setSourceEditorIdentity] = useState<string | null>(null);
   const sourceEditAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const [sourceEditUnknown, setSourceEditUnknown] = useState(false);
@@ -756,6 +779,17 @@ export function SemanticWorkspacePage() {
     prompt: string;
     formats: string[];
   } | null>(null);
+
+  useEffect(() => {
+    if (!user?.user_id) return;
+    let active = true;
+    let timer: number | undefined;
+    const settle = () => void settleDetachedSourceAcquisitions(user.user_id).then(retry => {
+      if (active && retry) timer = window.setTimeout(settle, 1_000);
+    });
+    settle();
+    return () => { active = false; if (timer) window.clearTimeout(timer); };
+  }, [detachedSourceCleanup, user?.user_id]);
 
 
   const tasks = useQuery({
@@ -1075,13 +1109,34 @@ export function SemanticWorkspacePage() {
 
 
 
-  const useExample = (example: WorkspaceGuidance["examples"][number]) => {
-
-    setSelectedTaskId(null);
+  const resetNewTaskDraft = () => {
+    const owner = user?.user_id ?? "current";
+    if (!detachStoredSourceAcquisition(owner, newTaskSourceScope, newTaskSourceRecovery.current)) {
+      toast.error("无法安全保存上一份网页读取状态，请稍后重试新建任务");
+      return false;
+    }
+    try {
+      // 用户明确新建任务后不再恢复上一份草稿；来源请求另行保留身份并安全停止。
+      localStorage.removeItem(`mangrove_workspace_draft_${owner}_new`);
+      localStorage.removeItem(`mangrove_workspace_draft_${owner}_new_files`);
+    } catch {
+      // 存储不可用时仍重置当前页面状态。
+    }
+    setComposerDraft(null);
     setDraftUploads([]);
     setSelectedUploadId(null);
     setInspectorOpen(false);
-    setComposerDraft(null);
+    setNewTaskSession(value => value + 1);
+    setNewTaskSourceScope(renewSourceScope());
+    setDetachedSourceCleanup(value => value + 1);
+    newTaskSourceRecovery.current = null;
+    return true;
+  };
+
+  const useExample = (example: WorkspaceGuidance["examples"][number]) => {
+
+    if (!resetNewTaskDraft()) return;
+    setSelectedTaskId(null);
     setExampleSeed({
       key: `${example.id}:${Date.now()}`,
       prompt: example.prompt,
@@ -1185,14 +1240,11 @@ export function SemanticWorkspacePage() {
             setFilter(nextFilter);
           }}
           onNew={() => {
-            setComposerDraft(null);
+            if (!resetNewTaskDraft()) return;
             setExampleSeed(null);
             if (narrow) setNavigationOpen(false);
             setRecycleBin(false);
             setSelectedTaskId(null);
-            setDraftUploads([]);
-            setSelectedUploadId(null);
-            setInspectorOpen(false);
 
           }}
           onToggleRecycleBin={() => {
@@ -1347,12 +1399,13 @@ export function SemanticWorkspacePage() {
                     <div>
                     <WorkspaceSourceComposer
                     ownerId={user?.user_id ?? "current"}
+                    sourceStorageScope={newTaskSourceScope}
                     unified
                     onConfigureModels={() => setSettingsOpen(true)}
                     draft={composerDraft}
                     onDraftChange={setComposerDraft}
                     active={!settingsOpen && !recoveringCreate}
-                    key={`${user?.user_id}:${exampleSeed?.key || "new-task"}`}
+                    key={`${user?.user_id}:${exampleSeed?.key || `new-task:${newTaskSession}`}`}
                     initialPrompt={exampleSeed?.prompt}
                     initialFormats={exampleSeed?.formats}
                     modelOptions={models.data?.options}
@@ -1372,6 +1425,7 @@ export function SemanticWorkspacePage() {
                     }
                     grayCapabilities={grayCapabilities.data?.items ?? []}
                     onUploadsChange={handleDraftUploadsChange}
+                    onSourceAcquisitionRecoveryChange={raw => { newTaskSourceRecovery.current = raw; }}
                     onSubmit={submitNew}
                     />
                     </div>
