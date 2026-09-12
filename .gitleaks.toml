@@ -29,17 +29,17 @@ paths = ['''^evals/generalization-g1-independent/freeze\.json$''']
 regexes = ['''sources/ih_safe_35_forbidden_token\.pdf''']
 
 [[allowlists]]
-description = "Schema manifest 的 64 位值均为受测试冻结的结构摘要"
+description = "Schema manifest 中 Secret 表的 64 位值是结构摘要"
 targetRules = ["generic-api-key"]
 condition = "AND"
 regexTarget = "line"
 paths = ['''^src/database_migrations/schema_manifest\.json$''']
-regexes = ['''^\s*"[^"]+"\s*:\s*"[0-9a-f]{64}"\s*,?\s*$''']
+regexes = ['''"(?:model_connection_secrets|runtime_config_secrets)"\s*:\s*"[0-9a-f]{64}"''']
 
 [[allowlists]]
-description = "工作台生命周期测试幂等键不是凭据"
+description = "反馈审计表及不可变触发器的值是结构摘要"
 targetRules = ["generic-api-key"]
 condition = "AND"
 regexTarget = "line"
-paths = ['''^tests/test_workspace_lifecycle\.py$''']
-regexes = ['''(?:Idempotency-Key|idempotency_key)["']?\s*(?:=|:)''']
+paths = ['''^src/database_migrations/schema_manifest\.json$''']
+regexes = ['''^\s*"(?:feedback_content_access|trigger:feedback_content_access_no_(?:delete|replace|update))"\s*:\s*"[0-9a-f]{64}"\s*,?\s*$''']
