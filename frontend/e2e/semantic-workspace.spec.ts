@@ -2866,6 +2866,13 @@ test.describe("统一数据工作台", () => {
       results: [{ result_id: "result-actions", task_id: task.task_id, turn_id: "turn-actions", delta_id: "delta-actions", action: "answer", acknowledgement: "已完成", answer: "华东合计 42", proposal_id: null, run_id: null, revision: 1 }],
       proposals: [],
     } }));
+    const regenerated: Array<{ body: Record<string, unknown>; key: string | undefined }> = [];
+    await page.route("**/api/semantic-workspace/tasks/task-message-actions/turns/result-actions/regenerate", route => {
+      regenerated.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] });
+      return regenerated.length === 1
+        ? route.fulfill({ status: 503, json: { detail: "重新生成结果未知" } })
+        : route.fulfill({ json: { result_id: "result-regenerated", task_id: task.task_id, turn_id: "turn-regenerated", delta_id: "delta-regenerated", action: "answer_only", acknowledgement: "已回答", answer: "华东合计 43", proposal_id: null, run_id: null, revision: 1 } });
+    });
 
     await page.goto("/data-prep");
     await page.getByRole("button", { name: /消息操作检查/ }).click();
@@ -2888,7 +2895,20 @@ test.describe("统一数据工作台", () => {
     await expect(page.getByRole("textbox", { name: "继续对话" })).toHaveValue("把华东单独汇总");
     await expect(page.getByLabel("对话记录").locator("p").getByText("把华东单独汇总", { exact: true })).toBeVisible();
 
-    await expect(page.getByRole("button", { name: "重新生成" })).toHaveCount(0);
+    await page.getByRole("button", { name: "重新生成" }).click();
+    await expect(page.getByText("会再次向已选外部模型发送本任务必要数据", { exact: false })).toBeVisible();
+    await page.getByRole("button", { name: "确认重新生成" }).click();
+    await expect(page.getByText("重新生成结果未知")).toBeVisible();
+    await expect.poll(() => page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith("mangrove_regenerate_")).length)).toBe(1);
+    await page.reload();
+    await page.getByRole("button", { name: "重新生成" }).click();
+    await page.getByRole("button", { name: "确认重新生成" }).click();
+    await expect(page.getByText("已重新生成回答")).toBeVisible();
+    expect(regenerated).toHaveLength(2);
+    expect(regenerated[0]).toMatchObject({ body: { expected_revision: 1, external_api_confirmed: true } });
+    expect(regenerated[0].key).toBeTruthy();
+    expect(regenerated[1].key).toBe(regenerated[0].key);
+    await expect.poll(() => page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith("mangrove_regenerate_")).length)).toBe(0);
   });
 
   test("待确认任务可收起后重新打开，并可随时取消", async ({ page }) => {

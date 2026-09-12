@@ -58,6 +58,37 @@ class _ApiStatusRewriter:
         )
 
 
+class _CountingStatusRewriter:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.contexts: list[tuple[str, ...]] = []
+
+    async def rewrite(self, turn: RawUserTurn, request: SteeringRequest) -> ContextDelta:
+        self.calls += 1
+        self.contexts.append(tuple(item.text for item in request.relevant_turns))
+        normalize = "口径" in turn.text
+        return ContextDelta(
+            delta_id=f"delta-regenerate-{self.calls}",
+            owner_id=turn.owner_id,
+            task_id=turn.task_id,
+            inherited_revision=request.revision,
+            source_turn_ids=tuple(item.turn_id for item in request.relevant_turns) + (turn.turn_id,),
+            intent=TurnIntent.NORMALIZATION if normalize else TurnIntent.STATUS_QUESTION,
+            confidence=DeltaConfidence.HIGH,
+            normalized_text="重新回答原消息",
+            direct_answer=None if normalize else f"第 {self.calls} 次回答",
+        )
+
+
+class _FailingStatusRewriter:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def rewrite(self, _turn: RawUserTurn, _request: SteeringRequest) -> ContextDelta:
+        self.calls += 1
+        raise RuntimeError("模拟模型调用后结果未知")
+
+
 class _ApiMaterialRewriter:
     async def rewrite(
         self,
@@ -164,6 +195,151 @@ def test_running_followup_uses_turn_api_without_creating_revision(
             "/api/semantic-workspace/tasks/workspace-1/turns",
             json={"text": "进度？"},
         ).status_code == 404
+
+
+def test_regenerate_binds_source_message_and_replays_without_another_model_call(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = migrated_webui_database(tmp_path / "regenerate.db")
+    seed_execution_owner(database, "user-a")
+    seed_execution_owner(database, "user-b")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
+    auth_mod._store = None
+    user = {"value": "user-a"}
+    app = FastAPI()
+    app.include_router(semantic_workspace.router)
+    app.dependency_overrides[get_current_user] = lambda: {
+        "user_id": user["value"], "role": "user", "execution_generation": 0,
+    }
+    rewriter = _CountingStatusRewriter()
+    monkeypatch.setattr(semantic_workspace, "build_context_rewriter", lambda _request, **_kwargs: rewriter)
+    store = get_store()
+    store.create_semantic_workspace_task(
+        "user-a", task_id="regenerate-task", title="重生成", objective_text="检查状态",
+        upload_ids=[], output_formats=["json"], provider="local", model="qwen-local",
+        external_api_confirmed=False,
+    )
+    store.update_semantic_workspace_task("user-a", "regenerate-task", status="running")
+
+    with TestClient(app) as client:
+        source = client.post(
+            "/api/semantic-workspace/tasks/regenerate-task/turns",
+            headers={"Idempotency-Key": "source"}, json={"text": "现在进度？"},
+        ).json()
+        path = f"/api/semantic-workspace/tasks/regenerate-task/turns/{source['result_id']}/regenerate"
+        regenerated = client.post(
+            path, headers={"Idempotency-Key": "regenerate-once"},
+            json={"expected_revision": 1},
+        )
+        assert regenerated.status_code == 200, regenerated.text
+        assert regenerated.json()["answer"] == "第 2 次回答"
+        assert regenerated.json()["result_id"] != source["result_id"]
+        assert client.post(
+            path, headers={"Idempotency-Key": "regenerate-once"},
+            json={"expected_revision": 1},
+        ).json() == regenerated.json()
+        assert rewriter.calls == 2
+        public_events = client.get("/api/semantic-workspace/tasks/regenerate-task").json()["events"]
+        assert all(event["event_type"] != "message.regeneration_claimed" for event in public_events)
+
+        user["value"] = "user-b"
+        assert client.post(
+            path, headers={"Idempotency-Key": "other-owner"},
+            json={"expected_revision": 1},
+        ).status_code == 404
+
+        user["value"] = "user-a"
+        store.create_semantic_workspace_task(
+            "user-a", task_id="external-task", title="外部重生成", objective_text="检查状态",
+            upload_ids=[], output_formats=["json"], provider="deepseek", model="deepseek-chat",
+            external_api_confirmed=True,
+        )
+        store.update_semantic_workspace_task("user-a", "external-task", status="running")
+        external_source = client.post(
+            "/api/semantic-workspace/tasks/external-task/turns",
+            headers={"Idempotency-Key": "external-source"}, json={"text": "外部模型进度？"},
+        ).json()
+        external_path = f"/api/semantic-workspace/tasks/external-task/turns/{external_source['result_id']}/regenerate"
+        rejected = client.post(
+            external_path, headers={"Idempotency-Key": "external-regenerate"},
+            json={"expected_revision": 1},
+        )
+        assert rejected.status_code == 422
+        confirmed = client.post(
+            external_path, headers={"Idempotency-Key": "external-regenerate"},
+            json={"expected_revision": 1, "external_api_confirmed": True},
+        )
+        assert confirmed.status_code == 200, confirmed.text
+
+        store.create_semantic_workspace_task(
+            "user-a", task_id="context-task", title="上下文重生成", objective_text="检查状态",
+            upload_ids=[], output_formats=["json"], provider="local", model="qwen-local",
+            external_api_confirmed=False,
+        )
+        store.update_semantic_workspace_task("user-a", "context-task", status="running")
+        client.post("/api/semantic-workspace/tasks/context-task/turns", json={"text": "采用旧口径"})
+        target = client.post("/api/semantic-workspace/tasks/context-task/turns", json={"text": "目标问题"}).json()
+        client.post("/api/semantic-workspace/tasks/context-task/turns", json={"text": "采用新口径"})
+        exact = client.post(
+            f"/api/semantic-workspace/tasks/context-task/turns/{target['result_id']}/regenerate",
+            headers={"Idempotency-Key": "exact-context"}, json={"expected_revision": 1},
+        )
+        assert exact.status_code == 200, exact.text
+        assert rewriter.contexts[-1] == ("采用旧口径",)
+
+        provider_calls: list[str] = []
+        def race_builder(_request, *, before_call=None):
+            store.update_semantic_workspace_task("user-a", "context-task", cancel_requested=True)
+            class RaceRewriter:
+                async def rewrite(self, turn, request):
+                    if before_call:
+                        before_call()
+                    provider_calls.append(turn.turn_id)
+                    return await rewriter.rewrite(turn, request)
+            return RaceRewriter()
+        monkeypatch.setattr(semantic_workspace, "build_context_rewriter", race_builder)
+        raced = client.post(
+            f"/api/semantic-workspace/tasks/context-task/turns/{target['result_id']}/regenerate",
+            headers={"Idempotency-Key": "revision-race"}, json={"expected_revision": 1},
+        )
+        assert raced.status_code == 409
+        assert provider_calls == []
+
+
+def test_regenerate_unknown_result_never_repeats_model_call(tmp_path, monkeypatch) -> None:
+    database = migrated_webui_database(tmp_path / "regenerate-unknown.db")
+    seed_execution_owner(database, "user-a")
+    monkeypatch.setattr(settings, "webui_db_path", str(database))
+    auth_mod._store = None
+    app = FastAPI()
+    app.include_router(semantic_workspace.router)
+    app.dependency_overrides[get_current_user] = lambda: {
+        "user_id": "user-a", "role": "user", "execution_generation": 0,
+    }
+    source_rewriter = _CountingStatusRewriter()
+    monkeypatch.setattr(semantic_workspace, "build_context_rewriter", lambda _request, **_kwargs: source_rewriter)
+    store = get_store()
+    store.create_semantic_workspace_task(
+        "user-a", task_id="unknown-task", title="重生成", objective_text="检查状态",
+        upload_ids=[], output_formats=["json"], provider="local", model="qwen-local",
+        external_api_confirmed=False,
+    )
+    store.update_semantic_workspace_task("user-a", "unknown-task", status="running")
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        source = client.post(
+            "/api/semantic-workspace/tasks/unknown-task/turns",
+            headers={"Idempotency-Key": "source"}, json={"text": "现在进度？"},
+        ).json()
+        failing = _FailingStatusRewriter()
+        monkeypatch.setattr(semantic_workspace, "build_context_rewriter", lambda _request, **_kwargs: failing)
+        path = f"/api/semantic-workspace/tasks/unknown-task/turns/{source['result_id']}/regenerate"
+        assert client.post(path, headers={"Idempotency-Key": "unknown"}, json={"expected_revision": 1}).status_code == 500
+        replay = client.post(path, headers={"Idempotency-Key": "unknown"}, json={"expected_revision": 1})
+        assert replay.status_code == 409
+        assert "结果未知" in replay.json()["detail"]
+        assert failing.calls == 1
 
 
 def test_material_followup_only_creates_confirmation_proposal(

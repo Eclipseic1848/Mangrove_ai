@@ -56,6 +56,7 @@ import {
   publishCandidateVerification,
   refreshWorkspaceSource,
   restoreWorkspaceTask,
+  regenerateWorkspaceTurn,
   resumeAccountWorkspaceTask,
   sendWorkspaceTurn,
   streamWorkspaceTask,
@@ -136,7 +137,13 @@ function copyAnswerFallback(text: string) {
   }
 }
 
-function ConversationActions({ content }: { content: string }) {
+function ConversationActions({ content, canRegenerate, regenerating, requiresExternalConfirmation, onRegenerate }: {
+  content: string;
+  canRegenerate: boolean;
+  regenerating: boolean;
+  requiresExternalConfirmation: boolean;
+  onRegenerate: (externalApiConfirmed: boolean) => Promise<void>;
+}) {
   const shareAnswer = async () => {
     if (typeof navigator.share !== "function") {
       toast.error("当前浏览器不支持系统分享，请复制后自行发送");
@@ -158,6 +165,17 @@ function ConversationActions({ content }: { content: string }) {
           <AlertDialog.Title className="font-semibold">分享这条回答？</AlertDialog.Title>
           <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">只把当前回答正文交给系统分享面板；不会创建公开链接，也不会额外附带原始资料、下载凭据或任务访问权限。</AlertDialog.Description>
           <div className="mt-5 flex justify-end gap-2"><AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm hover:bg-muted">取消</AlertDialog.Cancel><AlertDialog.Action className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground" onClick={() => void shareAnswer()}>打开系统分享</AlertDialog.Action></div>
+        </AlertDialog.Content>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
+    <AlertDialog.Root>
+      <AlertDialog.Trigger asChild><button type="button" disabled={!canRegenerate || regenerating} title={canRegenerate ? undefined : "请先回到最新版本"} className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"><RotateCcw className="h-3.5 w-3.5" />{regenerating ? "重新生成中" : "重新生成"}</button></AlertDialog.Trigger>
+      <AlertDialog.Portal>
+        <AlertDialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
+        <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(90vw,440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl">
+          <AlertDialog.Title className="font-semibold">重新生成这条回答？</AlertDialog.Title>
+          <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">系统会按原始用户消息和当前任务版本再次请求本任务模型。{requiresExternalConfirmation ? "这会再次向已选外部模型发送本任务必要数据，并可能产生费用。" : "原回答会保留。"}</AlertDialog.Description>
+          <div className="mt-5 flex justify-end gap-2"><AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm hover:bg-muted">取消</AlertDialog.Cancel><AlertDialog.Action className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground" onClick={() => void onRegenerate(requiresExternalConfirmation)}>确认重新生成</AlertDialog.Action></div>
         </AlertDialog.Content>
       </AlertDialog.Portal>
     </AlertDialog.Root>
@@ -709,6 +727,7 @@ export function SemanticWorkspacePage() {
   const [resultDraft, setResultDraft] = useState<{ identity: string; context: ResultSelection & { label: string } } | null>(null);
   const [followupBusy, setFollowupBusy] = useState(false);
   const [resendDraft, setResendDraft] = useState<{ scope: string; key: string; text: string } | null>(null);
+  const [regeneratingMessageId, setRegeneratingMessageId] = useState<string | null>(null);
   const rerunFlight = useRef(false);
 
   const [liveFeed, setLiveFeed] = useState<{ identity: string; events: WorkspaceEvent[] }>({ identity: "", events: [] });
@@ -832,6 +851,39 @@ export function SemanticWorkspacePage() {
     } catch (error) {
       if (answerScope.current === capturedScope && answerRound.current === question.round_id) toast.error(error instanceof Error ? error.message : "提交回答失败");
       throw error;
+    }
+  };
+  const regenerateMessage = async (resultId: string, revision: number, externalApiConfirmed: boolean) => {
+    if (!task || revision !== (task.current_revision ?? task.active_revision) || revision !== viewingRevision) {
+      toast.error("只有当前版本的回答可以重新生成，请先回到最新版本。");
+      return;
+    }
+    const storageKey = `mangrove_regenerate_${user?.user_id}_${task.task_id}_${resultId}`;
+    let idempotencyKey: string;
+    try {
+      const stored = localStorage.getItem(storageKey);
+      idempotencyKey = stored && /^[A-Za-z0-9_-]{1,128}$/.test(stored) ? stored : nanoid();
+      localStorage.setItem(storageKey, idempotencyKey);
+    } catch {
+      toast.error("浏览器无法安全保存重新生成标识，本次未发送。");
+      return;
+    }
+    setRegeneratingMessageId(resultId);
+    try {
+      await regenerateWorkspaceTurn(task.task_id, resultId, revision, externalApiConfirmed, idempotencyKey);
+      try { localStorage.removeItem(storageKey); } catch { /* 残留键只会重放已完成的同一请求。 */ }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-task", task.task_id] }),
+        queryClient.invalidateQueries({ queryKey: ["workspace-turns", user?.user_id, task.task_id] }),
+      ]);
+      toast.success("已重新生成回答");
+    } catch (error) {
+      if (error instanceof ApiError && error.status < 500 && !error.message.includes("结果未知")) {
+        try { localStorage.removeItem(storageKey); } catch { /* 服务端已明确拒绝，残留键不会造成重复调用。 */ }
+      }
+      toast.error(error instanceof Error ? error.message : "重新生成结果未知，原请求已保留");
+    } finally {
+      setRegeneratingMessageId(current => current === resultId ? null : current);
     }
   };
   const retryCurrentTask = async (externalApiConfirmed: boolean) => {
@@ -1694,11 +1746,23 @@ export function SemanticWorkspacePage() {
                               {response && <p className="text-muted-foreground">{response.acknowledgement}</p>}
                               {answer && <div aria-label="Mangrove 回答"><Markdown safeResources>{answer}</Markdown></div>}
                               {answer && <AnswerReferences context={context && context.revision === (message?.revision ?? response?.revision) ? context : null} onViewSource={viewSource} />}
-                              {answer && <ConversationActions content={answer} />}
+                              {answer && response && <ConversationActions
+                                content={answer}
+                                canRegenerate={response.revision === (task.current_revision ?? task.active_revision) && viewingRevision === response.revision}
+                                regenerating={regeneratingMessageId === response.result_id}
+                                requiresExternalConfirmation={Boolean(task.model_connection_id || task.agentic_runtime?.model_connection_id || task.provider !== "local")}
+                                onRegenerate={confirmed => regenerateMessage(response.result_id, response.revision, confirmed)}
+                              />}
                             </article>;
                           })}
                           {messages.filter(message => !conversation.data?.turns?.some(turn => turn.turn_id === message.turn_id)).map(message => (
-                            <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown><AnswerReferences context={message.result_context?.revision === message.revision ? readPublicResultContext(message.result_context) : null} onViewSource={viewSource} /><ConversationActions content={message.content} /></article>
+                            <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown><AnswerReferences context={message.result_context?.revision === message.revision ? readPublicResultContext(message.result_context) : null} onViewSource={viewSource} /><ConversationActions
+                              content={message.content}
+                              canRegenerate={message.revision === (task.current_revision ?? task.active_revision) && viewingRevision === message.revision}
+                              regenerating={regeneratingMessageId === message.message_id}
+                              requiresExternalConfirmation={Boolean(task.model_connection_id || task.agentic_runtime?.model_connection_id || task.provider !== "local")}
+                              onRegenerate={confirmed => regenerateMessage(message.message_id, message.revision, confirmed)}
+                            /></article>
                           ))}
                         </section>
                         {task.status === "completed" && (
