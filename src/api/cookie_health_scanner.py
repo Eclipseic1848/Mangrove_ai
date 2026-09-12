@@ -55,7 +55,12 @@ class CookieHealthScanner:
     async def _run_one_scan(self) -> None:
         # 延迟导入，避免 config_routes 与本模块之间的循环导入；_COOKIE_HEALTH_KEYS 是
         # 10 个 Cookie key 的唯一权威列表（config_routes.py 里定义），这里直接复用，不重复声明。
-        from src.api.routes.config_routes import _COOKIE_HEALTH_KEYS, _record_cookie_health, _verify_target
+        from src.api.routes.config_routes import (
+            _COOKIE_HEALTH_KEYS,
+            _cookie_failure_status,
+            _record_cookie_health,
+            _verify_target,
+        )
 
         logger.info("Cookie 健康巡检：开始一轮扫描（%d 项）", len(_COOKIE_HEALTH_KEYS))
         for key in _COOKIE_HEALTH_KEYS:
@@ -66,8 +71,12 @@ class CookieHealthScanner:
                 _record_cookie_health(key, "valid", detail, checked_by="scheduled")
             except Exception as e:  # noqa: BLE001 单项失败不影响本轮其余项，也不该崩掉循环
                 detail = str(e)[:500]
-                status = "unknown" if "无法判断" in detail else "invalid"
-                _record_cookie_health(key, status, detail, checked_by="scheduled")
+                _record_cookie_health(
+                    key,
+                    _cookie_failure_status(e),
+                    detail,
+                    checked_by="scheduled",
+                )
             await self._sleep(_BETWEEN_ITEM_SECONDS)
         logger.info("Cookie 健康巡检：本轮扫描完成")
 

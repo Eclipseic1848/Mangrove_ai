@@ -3,7 +3,7 @@
 
 导入本包即完成内置采集器的注册（通过各模块底部的 register(...)）。
 """
-from .base import BaseCollector, CollectedItem, CollectResult
+from .base import BaseCollector, CollectedItem, CollectFailureKind, CollectResult
 from .registry import register, get_registry, select_collectors
 
 # 导入即注册内置采集器（顺序无关，按 tier 排序使用）
@@ -35,6 +35,7 @@ from .platforms import (  # noqa: F401  平台词表/归一/站点域名解析
 __all__ = [
     "BaseCollector",
     "CollectedItem",
+    "CollectFailureKind",
     "CollectResult",
     "register",
     "get_registry",

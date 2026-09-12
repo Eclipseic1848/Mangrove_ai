@@ -259,6 +259,16 @@ def apply_global_overrides(store) -> int:
     return n
 
 
+def _mark_cookie_health_stale(store, key: str, action: str) -> None:
+    if REGISTRY[key]["group"] != "cookies":
+        return
+    # 健康证据只绑定旧凭证；替换或回落后继续显示“有效”会误导后续任务。
+    try:
+        store.cookie_health_set(key, "unknown", f"Cookie 已{action}，等待重新验证", "configuration")
+    except Exception:  # noqa: BLE001 配置已提交，旁路状态失败不能伪装成整次保存失败
+        logger.warning("Cookie 配置已更新，但健康状态重置失败 key=%s", key)
+
+
 def set_global(store, key: str, raw: str, updated_by: str = "") -> None:
     """管理员设置全局覆盖：校验→落库→热生效。"""
     _snapshot_baseline()
@@ -268,6 +278,7 @@ def set_global(store, key: str, raw: str, updated_by: str = "") -> None:
     store.config_set("global", key, raw, updated_by)
     setattr(settings, key, value)
     _after_set(key)
+    _mark_cookie_health_stale(store, key, "更新")
 
 
 def reset_global(store, key: str) -> None:
@@ -279,6 +290,7 @@ def reset_global(store, key: str) -> None:
     if key in _BASELINE:
         setattr(settings, key, _BASELINE[key])
     _after_set(key)
+    _mark_cookie_health_stale(store, key, "重置")
 
 
 def mask_value(key: str, raw: Optional[str]) -> str:
