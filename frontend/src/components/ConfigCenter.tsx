@@ -104,12 +104,12 @@ function CookieHealthBadge({ health }: { health?: CookieHealth | null }) {
   );
 }
 
-function useVerify() {
+function useVerify(scope: "global" | "self" = "global") {
   const [verifying, setVerifying] = useState<string | null>(null);
   const run = async (target: string) => {
     setVerifying(target);
     try {
-      const r = await api.post("/api/config/verify", { target });
+      const r = await api.post("/api/config/verify", { target, scope });
       r.ok ? toast.success(r.detail) : toast.error(r.detail);
     } catch (e: any) {
       toast.error(e.message || "验证失败");
@@ -423,7 +423,7 @@ export function AdminConfigCenter() {
               </select>
             ) : (
               <Input placeholder="输入新值" value={val} onChange={(e) => setVal(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && save()} />
+                onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && save()} />
             )}
           </>
         )}
@@ -461,7 +461,7 @@ export function SelfConfigCenter() {
   const [edit, setEdit] = useState<CfgItem | null>(null);
   const [val, setVal] = useState("");
   const [guideOpen, setGuideOpen] = useState(false);
-  const { verifying, run } = useVerify();
+  const { verifying, run } = useVerify("self");
   const [confirmTarget, setConfirmTarget] = useState<string | null>(null);
 
   const runOrConfirm = (target: string) => {
@@ -557,7 +557,7 @@ export function SelfConfigCenter() {
         {edit && <GuideStepsInline configKey={edit.key} />}
         <Input placeholder={edit?.key.includes("cookie") ? "粘贴从浏览器导出的 Cookie" : "输入 API Key"}
           value={val} onChange={(e) => setVal(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && save()} />
+          onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && save()} />
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="outline" size="sm" onClick={() => setEdit(null)}>取消</Button>
           <Button size="sm" disabled={!val.trim()} onClick={save}>保存</Button>

@@ -221,6 +221,89 @@ test("普通用户只看到个人范围并可配置自己的 Provider 连接", a
   await expect(page.getByText("连接已验证并保存")).toBeVisible();
 });
 
+for (const role of ["user", "admin"] as const) {
+  test(`${role} 从本人采集账号验证本人 Cookie`, async ({ page }) => {
+    await mockSettings(page, role);
+    await page.setViewportSize(role === "user" ? { width: 390, height: 844 } : { width: 1366, height: 768 });
+    let verified: Record<string, unknown> | null = null;
+    await page.route("**/api/config/self", (route) => route.fulfill({
+      json: {
+        items: [{
+          key: "mc_cookie_dy",
+          label: "抖音 Cookie",
+          secret: true,
+          group: "cookies",
+          set: true,
+          value: "····本人",
+        }],
+      },
+    }));
+    await page.route("**/api/config/verify", (route) => {
+      verified = route.request().postDataJSON();
+      return route.fulfill({ json: { ok: true, detail: "本人 Cookie 有效" } });
+    });
+
+    await page.goto("/settings");
+    await page.getByRole("tab", { name: "采集账号" }).click();
+    const row = page.locator("div").filter({ hasText: /^抖音 Cookie/ }).last();
+    await row.getByRole("button", { name: "验证", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await page.getByRole("button", { name: "开始验证", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await expect.poll(() => verified).not.toBeNull();
+    expect(verified).toEqual({ target: "mc_cookie_dy", scope: "self" });
+    if (role === "user") {
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    }
+  });
+}
+
+test("390px 下本人 Cookie 修改支持输入法与失败重试，并可清除", async ({ page }) => {
+  await mockSettings(page, "user");
+  await page.setViewportSize({ width: 390, height: 844 });
+  let configured = true;
+  let writes = 0;
+  await page.route("**/api/config/self/mc_cookie_dy", (route) => {
+    writes += 1;
+    if (route.request().method() === "PUT" && writes === 1) {
+      return route.fulfill({ status: 503, json: { detail: "配置服务暂时不可用" } });
+    }
+    configured = route.request().method() === "PUT";
+    return route.fulfill({ json: { ok: true, key: "mc_cookie_dy" } });
+  });
+  await page.route("**/api/config/self", (route) => route.fulfill({
+    json: {
+      items: [{
+        key: "mc_cookie_dy",
+        label: "抖音 Cookie",
+        secret: true,
+        group: "cookies",
+        set: configured,
+        value: configured ? "····7700" : "",
+      }],
+    },
+  }));
+
+  await page.goto("/settings");
+  await page.getByRole("tab", { name: "采集账号" }).click();
+  await page.getByRole("button", { name: "修改", exact: true }).click();
+  const input = page.getByPlaceholder("粘贴从浏览器导出的 Cookie");
+  await input.fill("synthetic-cookie-7700");
+  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
+  expect(writes).toBe(0);
+  await input.dispatchEvent("compositionend", { data: "7700" });
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("配置服务暂时不可用")).toBeVisible();
+  await expect(input).toHaveValue("synthetic-cookie-7700");
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("抖音 Cookie 已保存")).toBeVisible();
+  await expect(page.getByText("····7700")).toBeVisible();
+  await page.getByRole("button", { name: "清除", exact: true }).click();
+  await expect(page.getByText("（未配置，用系统默认）")).toBeVisible();
+  expect(writes).toBe(3);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
+
 test("管理员从能力卡片创建验证并渐进查看步骤缺口", async ({ page }) => {
   await mockSettings(page, "admin");
   let validationRun: Record<string, any> | null = null;
