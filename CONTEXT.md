@@ -336,6 +336,12 @@ _Avoid_: 用户角色、个人连接、可变全局配置
 访问数据库、HTTP API 或其他受控来源的用户级或管理员级连接配置；任务只保存引用。
 _Avoid_: 模型连接、任务内凭证
 
+**连接来源选择（ConnectorSourceSelection）**：
+任务所有者从其一个 SourceConnection 的固定版本中选择的只读范围，包括表、字段、过滤、分页和数量
+上限；它的身份只由连接、版本与选择内容决定，不含凭据，也不随一次读取尝试的命名空间变化。
+读取前必须重新核对 Owner、连接版本与范围，变化即失败关闭。
+_Avoid_: 任意 SQL、跨 Owner 连接、把 attempt_id 当选择身份
+
 **认证来源连接（AuthenticatedSourceConnection）**：
 任务所有者扫码登录成功后自动保存的认证来源配置；它只保存该 Owner 隔离的 SecretRef 与当前
 连接版本，由该 Owner 的后续任务复用直到登录状态再次失效。不同 Owner 不共享 Cookie、

@@ -34,3 +34,12 @@
 72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:98
 72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:151
 72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:199
+
+# 已核对：Issue #141 独立分支的值分别为 Schema 结构摘要与静态 synthetic 幂等键，仅忽略这些精确历史行。
+e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:src/database_migrations/schema_manifest.json:generic-api-key:247
+e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:56
+e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:84
+e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:87
+e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:98
+e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:151
+e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:199

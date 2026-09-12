@@ -123,7 +123,7 @@ class PiCandidateAdapter:
             source_hashes[upload_id] = upload.sha256
             source_refs.append(f"{upload_id}:{upload.sha256}")
         for source_ref in task_revision.get("source_refs", []):
-            if source_ref.get("kind") != "web_artifact":
+            if source_ref.get("kind") not in {"web_artifact", "connector_artifact"}:
                 continue
             artifact_id = str(source_ref["artifact_id"])
             source_sha256 = str(source_ref["sha256"])
