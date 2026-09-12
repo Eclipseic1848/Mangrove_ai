@@ -130,7 +130,7 @@
       "trigger:runtime_rollout_events_no_update": "0f8b9a824cc6070262ccafa60b844d3cdf329feaf390788e8b7c2d806703283a",
       "trigger:runtime_routing_migrations_no_delete": "e77508732f154e31e87508a2c35493a4d7e3ae77cc7c4b53d88ac374d612e25c",
       "trigger:runtime_routing_migrations_no_update": "80766f49adfab6edee5c2524e9a5739e37c13bc0f563d3e082306a9ff7a0f46e",
-      "trigger:source_artifacts_no_delete": "36cc5060d35ee32aa45223ecd9cdf3e136a69ce5cc3fb9fb399688f02da8eae4",
+      "trigger:source_artifacts_no_delete": "24146668ed5919f99a054c1c3256b2d8b42659bba74c6f9250acee315c809c43",
       "trigger:source_artifacts_no_update": "b7ee24504167e65c2b1e06bba6f5e2b96bea7789cb81aa5af762e9a6c9840ab2",
       "trigger:source_page_failures_no_delete": "1ba9d8aa6952ec5004b83552fd047ff01eda92ffa7e22e88789284788e717e94",
       "trigger:source_page_failures_no_update": "04a4e1b7daee179567b212d706821cf95ebc5e79071f83f355444d35f0ac22a6",
@@ -145,7 +145,7 @@
       "trigger:workspace_feedback_audit_no_update": "615f0290caf8f928fa1bacfdcb410572ceb7aa90868160093fb9e98443192804",
       "view:feedback_management": "22e528c6281c434384b399ae8c92549b031d6d010909d8ed644013510f9bf54f"
     },
-    "revision": "webui_0019",
+    "revision": "webui_0020",
     "tables": {
       "account_execution_bindings": "792d18e3f5416745c405e022cc798847f4a44d9c1123e58e3900e724c60e0cfd",
       "account_execution_holds": "985dd26ff02bf54e43557d05f72b11d5c97c3f3f18294bb3451afd2748e64db3",
@@ -228,7 +228,7 @@
       "semantic_workspace_events": "e43755ceaadc329f0c65d8c6196523270a1ae82944400e1038147bb104e193cc",
       "semantic_workspace_revisions": "3ac1e970dde8bdce3924ab2cc97a4476b7fd8f848b6dec4bd435c449baefedf8",
       "semantic_workspace_tasks": "2b67ae4060ef3bb42604662eec52346a8126477c8efc57544fb046d2b2ca7feb",
-      "source_acquisition_attempts": "c7424d106533f0752f06e6d080dd8f437db8bcf5703b087d7183290d9ee821e8",
+      "source_acquisition_attempts": "86cd55b21a94390b5966e89dea6d66702cc865c0c9d7d8e61c04d59ba3c1873c",
       "source_artifacts": "4f989bb2ffa9b86dac48bd172d619593132d636507ac2a9902298ccd6c67941a",
       "source_deletion_operations": "300c89458228b5906a4ffa37864ce2c4ac9104291d1165c752b1937f7b2ca977",
       "source_deletions": "6245bdce7364a6d4d56bce14170da29ca7b4810963733d161a854399824c48fc",

@@ -1,8 +1,8 @@
 """显式工作台生命周期迁移；已有对象先完整校验，不重写未知结构。"""
 from alembic import op
 import sqlite3
-revision='webui_0019'
-down_revision='webui_0018'
+revision='webui_0020'
+down_revision='webui_0019'
 branch_labels=None
 depends_on=None
 operation_summary=('新增冻结计划/正式反馈工作台持久结构',)

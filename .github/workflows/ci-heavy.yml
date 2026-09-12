@@ -104,6 +104,7 @@ jobs:
               tests/test_vnext_delivery_publisher.py tests/test_candidate_reverification_publish.py tests/test_g1_formal_delivery_evaluation.py \
               tests/test_progressive_clarification.py tests/test_workspace_answer_persistence.py tests/test_workspace_revision_safety.py tests/test_progressive_clarification_evaluation.py \
               tests/test_semantic_plan_compiler.py tests/test_issue98_workbench_closeout.py tests/test_web_source_delivery_api.py tests/test_workspace_lifecycle.py \
+              tests/test_connector_sources.py tests/test_connector_source_contract.py tests/test_connector_source_delivery.py \
               tests/test_workspace_canvas.py tests/test_workspace_canvas_migration.py tests/test_pi_runtime_workspace_api.py \
               tests/test_semantic_table_execution.py tests/test_source_inspectors.py tests/test_semantic_delivery.py \
               tests/test_database_migrations.py tests/test_database_migrations_components.py \
