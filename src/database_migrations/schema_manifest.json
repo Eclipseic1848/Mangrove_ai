@@ -26,11 +26,12 @@
     "objects": {
       "index:idx_runs_task": "6d7421c5b093d5849032fc9c581e94642ee1d02b93df008fe8bf6d601c242382"
     },
-    "revision": "scheduler_0002",
+    "revision": "scheduler_0003",
     "tables": {
       "alembic_version": "691ed6fce5f31a9b013517c6b69e28441a10825af909745693a8fa7b7a627981",
       "scheduled_task_runs": "2d8621465dd8a93f54949dee0b9631b67ab051dfbd69bc0ea28f638e8eab6816",
       "scheduled_tasks": "760ebbec5f4cb5b561494b473bb8548dc3a85a1da9073390f569cadd1ccaa309",
+      "scheduled_credential_blocks": "901ebf3b79817602fde3f5f9b6e879050e9519a7b6ece76ed2ded014b2903a56",
       "scheduled_workspace_bindings": "94383c87c32c8a58805a0d72c58fa9a0dc169e51aa6c78ad2a29cb4f5fe1789e",
       "scheduled_workspace_occurrences": "b49d93fda510f1aa75caf427d92d5772b5ee7efd434f358850b5975e79af0b1b"
     }

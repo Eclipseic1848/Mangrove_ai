@@ -11,7 +11,9 @@ Web UI 用户与会话持久化（标准库 sqlite3，跨平台、无第三方�
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import secrets
 import sqlite3
 import threading
 import time
@@ -34,6 +36,8 @@ from src.config.secret_refs import (
 )
 from src.model_connections.vault import VaultDecryptionError
 from src.services.managed_paths import ManagedPathCodec
+
+_CONFIG_IDENTITY_ROUNDS = 200_000
 
 
 def _now() -> str:
@@ -80,7 +84,7 @@ class WebUIStore:
         scope: str,
         key: str,
         value: str,
-    ) -> tuple[str, object]:
+    ) -> tuple[str, object, str]:
         """在写操作前完整验证旧 Ref 的身份与可解密性。"""
 
         secret_id = parse_secret_ref(value)
@@ -93,12 +97,12 @@ class WebUIStore:
             raise SecretRefResolutionError("SecretRef 无法解析")
         vault = load_vault(self.db_path)
         try:
-            vault.decrypt(str(row["ciphertext"]))
+            plaintext = vault.decrypt(str(row["ciphertext"]))
         except VaultDecryptionError as exc:
             raise SecretRefResolutionError(
                 "运行时配置 Vault 无法解密 SecretRef"
             ) from exc
-        return secret_id, vault
+        return secret_id, vault, plaintext
 
     def config_all(self, scope: str) -> Dict[str, str]:
         """取某作用域的全部覆盖：{key: value}。scope='global' 或 user_id。"""
@@ -131,6 +135,70 @@ class WebUIStore:
                     ) from exc
         return result
 
+    def _effective_config_secret(
+        self, conn: sqlite3.Connection, scope: str, key: str,
+    ) -> str:
+        for candidate in ((scope, "global") if scope != "global" else ("global",)):
+            row = conn.execute(
+                "SELECT value FROM runtime_config WHERE scope=? AND key=?",
+                (candidate, key),
+            ).fetchone()
+            if row is not None:
+                _secret_id, _vault, value = self._resolve_existing_config_secret(
+                    conn, scope=candidate, key=key, value=str(row["value"]),
+                )
+                return value
+        from src.config.settings import settings
+
+        return str(getattr(settings, key, "") or "")
+
+    def config_identity(
+        self,
+        scope: str,
+        key: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> str:
+        """返回当前有效 Secret 的加盐校验值，不保存或返回明文。"""
+        if key not in RUNTIME_CONFIG_SECRET_KEYS:
+            raise ValueError("配置身份只支持 SecretRef")
+        context = nullcontext(connection) if connection is not None else self._conn()
+        with context as conn:
+            value = self._effective_config_secret(conn, scope, key)
+        salt = secrets.token_bytes(16)
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", value.encode("utf-8"), salt, _CONFIG_IDENTITY_ROUNDS,
+        )
+        return f"pbkdf2-sha256:{_CONFIG_IDENTITY_ROUNDS}:{salt.hex()}:{digest.hex()}"
+
+    def config_identity_matches(
+        self,
+        scope: str,
+        key: str,
+        identity: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> bool:
+        """校验当前有效 Secret 是否仍与持久失效收据相同。"""
+        if key not in RUNTIME_CONFIG_SECRET_KEYS:
+            raise ValueError("配置身份只支持 SecretRef")
+        try:
+            algorithm, rounds, salt_hex, expected = identity.split(":", 3)
+            if algorithm != "pbkdf2-sha256" or int(rounds) != _CONFIG_IDENTITY_ROUNDS:
+                raise ValueError
+            salt = bytes.fromhex(salt_hex)
+            if len(salt) != 16 or len(bytes.fromhex(expected)) != 32:
+                raise ValueError
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise SecretRefResolutionError("配置身份无法校验") from exc
+        context = nullcontext(connection) if connection is not None else self._conn()
+        with context as conn:
+            value = self._effective_config_secret(conn, scope, key)
+        actual = hashlib.pbkdf2_hmac(
+            "sha256", value.encode("utf-8"), salt, _CONFIG_IDENTITY_ROUNDS,
+        ).hex()
+        return hmac.compare_digest(actual, expected)
+
     def config_set(self, scope: str, key: str, value: str, updated_by: str = "") -> None:
         with self._lock, self._conn() as conn:
             if key in RUNTIME_CONFIG_SECRET_KEYS:
@@ -140,12 +208,15 @@ class WebUIStore:
                 ).fetchone()
                 previous_id = None
                 if previous is not None:
-                    previous_id, vault = self._resolve_existing_config_secret(
+                    previous_id, vault, previous_value = self._resolve_existing_config_secret(
                         conn,
                         scope=scope,
                         key=key,
                         value=str(previous["value"]),
                     )
+                    # 同值重存不是凭据轮换；保留原 Ref，避免绕过失效恢复门。
+                    if previous_value == value:
+                        return
                 else:
                     vault = load_or_create_vault(self.db_path)
                 secret_id = str(uuid.uuid4())
@@ -189,7 +260,7 @@ class WebUIStore:
                 (scope, key),
             ).fetchone()
             if key in RUNTIME_CONFIG_SECRET_KEYS and previous is not None:
-                secret_id, _vault = self._resolve_existing_config_secret(
+                secret_id, _vault, _plaintext = self._resolve_existing_config_secret(
                     conn,
                     scope=scope,
                     key=key,

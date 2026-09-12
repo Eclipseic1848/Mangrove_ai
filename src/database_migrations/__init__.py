@@ -105,7 +105,7 @@ class RestoreVerification:
 
 _PROFILE_HEADS = {
     "webui": "webui_0019",
-    "scheduler": "scheduler_0002",
+    "scheduler": "scheduler_0003",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
 }
@@ -298,6 +298,7 @@ _PROFILE_REQUIRED_COLUMNS = {
         ),
         "scheduled_workspace_bindings": ('schedule_id', 'owner_id', 'source_task_id', 'source_revision', 'payload_json', 'contract_json', 'request_key', 'request_hash', 'timezone'),
         "scheduled_workspace_occurrences": ('occurrence_id', 'schedule_id', 'owner_id', 'config_hash', 'due_at', 'manual', 'request_key', 'state', 'workspace_task_id', 'workspace_revision', 'runtime_run_id', 'output_ids_json', 'error_code', 'generation', 'created_at', 'updated_at'),
+        "scheduled_credential_blocks": ('task_id', 'owner_user_id', 'credential_key', 'credential_identity', 'execution_task_id', 'generation', 'manual', 'resume_requested', 'created_at'),
     },
     "legacy_app": {
         "collected_items": (

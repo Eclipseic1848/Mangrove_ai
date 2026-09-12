@@ -349,6 +349,7 @@ class SocialMediaCollector(BaseCollector):
                 self.name,
                 message=message,
                 failure_kind=failure_kind,
+                credential_key=_COOKIE_ATTR.get(platform) if failure_kind is CollectFailureKind.AUTH_INVALID else None,
             )
 
         # 只读本次运行后新生成的 JSON（按 mtime 过滤，避免读到历史旧数据）

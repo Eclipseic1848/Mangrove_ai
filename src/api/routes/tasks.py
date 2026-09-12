@@ -127,6 +127,10 @@ def list_tasks(user=Depends(get_current_user)) -> List[Dict[str, Any]]:
     with store._conn() as conn:
         rows.extend(dict(row) for row in conn.execute("SELECT * FROM scheduled_tasks WHERE owner_user_id=? AND source='workspace' AND status NOT IN ('active','paused') ORDER BY created_at DESC",(user["user_id"],)))
     for row in rows:
+        block=store.credential_block(row["task_id"])
+        if block and block["resume_requested"]:
+            block=None
+        row["credential_block"]={"credential_key":block["credential_key"]} if block else None
         if row.get("source")=="workspace":
             frozen=binding(store,row["task_id"])
             row["workspace"]=public_binding(frozen) if frozen else None
@@ -201,6 +205,12 @@ def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_execution_use
             raise HTTPException(status_code=422, detail="status 仅支持 active/paused")
         if body.status == "paused":
             store.set_status(sched_id, "paused")
+            return {"ok": True}
+        if task["status"] == "active" or store.credential_block(sched_id) is not None:
+            try:
+                store.set_status(sched_id, "active")
+            except ExecutionDenied as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from None
             return {"ok": True}
         # 恢复：原定时刻可能已过去，需重算 next_run_at
         cur_sched = Schedule(

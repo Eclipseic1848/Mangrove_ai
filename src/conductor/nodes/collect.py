@@ -127,9 +127,19 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
             "count": 0,
             "message": result.message or "",
             "failure_kind": result.failure_kind.value if result.failure_kind else None,
+            "credential_key": result.credential_key,
         })
         metrics_record(name, False, elapsed_ms)
         domain_health_record(name, spec.urls, False)
+        if result.failure_kind and result.failure_kind.value == "auth_invalid":
+            # 确定失效不能被公开兜底数据掩盖，否则计划会在错误来源上继续模型与交付。
+            return {
+                "raw_dataset": [],
+                "collector_used": "",
+                "collector_notes": notes,
+                "collector_attempts": attempts,
+                "error": f"认证来源已失效：{result.message}",
+            }
         # 社媒采集器失败且原因可操作（登录过期/风控/频次）时，记为面向用户的提示
         if name == "mediacrawler" and result.message:
             notes.append(f"⚠️ {result.message}")

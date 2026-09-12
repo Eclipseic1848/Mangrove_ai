@@ -21,6 +21,24 @@ test("141 当前任务可明确冻结为自动计划，网页不静默刷新", a
   await expect(dialog.getByRole("link",{name:"查看自动任务",exact:true})).toHaveAttribute("href","/tasks");
 });
 
+test("186 Cookie 失效计划引导本人更新且不能绕过恢复门", async ({page})=>{
+  await mockWorkspace(page);
+  await page.setViewportSize({width:390,height:844});
+  await page.route("**/api/tasks/templates",route=>route.fulfill({json:[]}));
+  await page.route(/\/api\/tasks$/,route=>route.fulfill({json:[{
+    task_id:"cookie-plan",name:"本人社媒计划",source:"manual",status:"paused",
+    user_input:"读取本人授权数据",trigger_type:"once",run_at:"2026-09-12T09:00:00",
+    next_run_at:"2026-09-12T09:00:00",run_count:1,last_run_at:"2026-09-12T09:00:00",
+    last_success:0,last_error:"所有采集器均未取得数据",
+    credential_block:{credential_key:"mc_cookie_xhs"},
+  }]}));
+  await page.goto("/tasks");
+  await expect(page.getByText("采集账号 Cookie 已失效。",{exact:false})).toBeVisible();
+  await expect(page.getByRole("link",{name:"更新本人 Cookie",exact:true})).toHaveAttribute("href","/settings?section=credentials");
+  await expect(page.getByRole("button",{name:"立即执行",exact:true})).toBeDisabled();
+  expect(await page.locator("body").evaluate(node=>node.scrollWidth<=node.clientWidth)).toBe(true);
+});
+
 test("141 自动计划立即执行未知后刷新只查原次，正式结果回同一任务版本", async ({ page }) => {
   await mockWorkspace(page);
   const plan={task_id:"schedule-one",name:"冻结资料计划",source:"workspace",status:"active",user_input:"比较证据",trigger_type:"cron",cron_expr:"0 9 * * *",run_count:0,workspace:{source_task_id:"identity-task",source_revision:2,timezone:"Asia/Shanghai"}};

@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   CalendarClock, Trash2, RefreshCw, Clock, CheckCircle2, XCircle,
   FileText, Download, ArrowLeft, Braces, Plus, Pencil, Play,
@@ -49,6 +50,7 @@ interface Task {
   name?: string | null;
   source?: string; // auto | manual | template
   workspace?: { timezone:string };
+  credential_block?: { credential_key:string } | null;
   status?: string; // active | paused
   user_input: string;
   trigger_type: string;
@@ -731,6 +733,13 @@ export function Tasks() {
                             上次（{t.last_run_at}）：{lastSummary(t)}
                           </p>
                         )}
+                        {t.credential_block && (
+                          <p role="status" className="mt-2 text-xs text-destructive">
+                            采集账号 Cookie 已失效。请先
+                            <Link className="mx-1 underline underline-offset-2" to="/settings?section=credentials">更新本人 Cookie</Link>
+                            ，再点击恢复。
+                          </p>
+                        )}
                         {t.source === "workspace" && <WorkspaceScheduleActions key={`${getSessionState().user?.user_id}:${t.task_id}`} ownerId={getSessionState().user?.user_id ?? ""} scheduleId={t.task_id} canRun={t.status === "active" || t.status === "paused"} />}
                       </div>
                       <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
@@ -740,7 +749,7 @@ export function Tasks() {
                           title={t.status === "paused" ? "已暂停，点击恢复" : "启用中，点击暂停"}
                           onChange={() => toggleEnabled(t)}
                         />
-                        {t.source !== "workspace" && <Button variant="outline" size="sm" className="gap-1.5" disabled={runningNow.has(t.task_id)}
+                        {t.source !== "workspace" && <Button variant="outline" size="sm" className="gap-1.5" disabled={runningNow.has(t.task_id) || !!t.credential_block}
                           onClick={() => runNow(t)} title="立即执行一次">
                           <Play className="h-3.5 w-3.5" /> 立即执行
                         </Button>}
