@@ -46,12 +46,12 @@ def test_forward_backfills_without_rewriting_roots_and_restore_is_exact(tmp_path
         conn.commit()
     before = database.read_bytes()
     target = migrations.DatabaseTarget('webui', database)
-    assert migrations.inspect_database(target).pending_revisions == ('webui_0012', 'webui_0013', 'webui_0014', 'webui_0015', 'webui_0016', 'webui_0017', 'webui_0018', 'webui_0019', 'webui_0020')
+    assert migrations.inspect_database(target).pending_revisions == ('webui_0012', 'webui_0013', 'webui_0014', 'webui_0015', 'webui_0016', 'webui_0017', 'webui_0018', 'webui_0019', 'webui_0020', 'webui_0021')
     with pytest.raises(migrations.SchemaNotCurrentError):
         migrations.inspect_database(target).require_current()
     assert database.read_bytes() == before
     receipt = migrations.apply_migrations(target, tmp_path / 'backup.db', expected_source_sha256=hashlib.sha256(before).hexdigest())
-    assert receipt.applied_revisions == ('webui_0012', 'webui_0013', 'webui_0014', 'webui_0015', 'webui_0016', 'webui_0017', 'webui_0018', 'webui_0019', 'webui_0020')
+    assert receipt.applied_revisions == ('webui_0012', 'webui_0013', 'webui_0014', 'webui_0015', 'webui_0016', 'webui_0017', 'webui_0018', 'webui_0019', 'webui_0020', 'webui_0021')
     with closing(sqlite3.connect(database)) as conn:
         assert conn.execute('SELECT ' + ','.join(original_columns) + ' FROM users').fetchall() == roots['users']
         assert conn.execute('SELECT ' + ','.join(publication_columns) + ' FROM delivery_publish_intents').fetchall() == roots['delivery_publish_intents']

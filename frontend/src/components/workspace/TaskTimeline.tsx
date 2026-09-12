@@ -520,6 +520,7 @@ export function TaskTimeline({
   onCancel,
   onRecycle,
   onRetry,
+  externalConnection = false,
   onRefreshSource,
   onGapAction,
   onRevisionChange,
@@ -532,7 +533,8 @@ export function TaskTimeline({
   onRefreshQuestion: () => void;
   onCancel: () => Promise<void>;
   onRecycle: () => Promise<void>;
-  onRetry: (unchanged?: boolean) => void | Promise<void>;
+  onRetry: (unchanged?: boolean, externalApiConfirmed?: boolean) => void | Promise<void>;
+  externalConnection?: boolean;
   onRefreshSource: (externalApiConfirmed: boolean, targetSourceSnapshotId?: string) => Promise<void>;
   onGapAction: (
     action: "accept_gap" | "reject_gap" | "supplement_source" | "refresh_source",
@@ -545,6 +547,7 @@ export function TaskTimeline({
   const [progressOpen, setProgressOpen] = useState(false);
   const [eventsOpen, setEventsOpen] = useState(true);
   const [retryingUnknown, setRetryingUnknown] = useState(false);
+  const [retryExternalConfirmed, setRetryExternalConfirmed] = useState(false);
   const [refreshingSource, setRefreshingSource] = useState(false);
   const allWebSources = task.web_sources ?? (task.web_source ? [task.web_source] : []);
   const webSources = allWebSources.flatMap(source => source.snapshot ? [{ ...source, snapshot: source.snapshot }] : []);
@@ -1331,7 +1334,7 @@ export function TaskTimeline({
                 </p>
               )}
               {task.failure?.error_code === "MODEL_OUTCOME_UNKNOWN" ? (
-                <AlertDialog.Root>
+                <AlertDialog.Root onOpenChange={(open) => { if (!open) setRetryExternalConfirmed(false); }}>
                   <AlertDialog.Trigger asChild>
                     <button
                       type="button"
@@ -1351,15 +1354,16 @@ export function TaskTimeline({
                         平台无法确认模型是否已经收到上一次请求。重新执行会创建新版本，
                         并可能产生重复调用和费用。
                       </AlertDialog.Description>
+                      {externalConnection && <label className="mt-3 flex items-start gap-2 rounded-lg border p-3 text-sm"><input type="checkbox" className="mt-0.5" checked={retryExternalConfirmed} onChange={(event) => setRetryExternalConfirmed(event.target.checked)} /><span>我确认把当前任务范围内的必要数据再次发送到已选外部模型连接。</span></label>}
                       <div className="mt-5 flex justify-end gap-2">
                         <AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm hover:bg-muted">
                           取消
                         </AlertDialog.Cancel>
                         <AlertDialog.Action
-                          disabled={retryingUnknown || task.source_integrity?.can_rerun === false}
+                          disabled={retryingUnknown || task.source_integrity?.can_rerun === false || (externalConnection && !retryExternalConfirmed)}
                           onClick={() => {
                             setRetryingUnknown(true);
-                            void Promise.resolve(onRetry(true)).finally(() => {
+                            void Promise.resolve(onRetry(true, retryExternalConfirmed)).finally(() => {
                               setRetryingUnknown(false);
                             });
                           }}

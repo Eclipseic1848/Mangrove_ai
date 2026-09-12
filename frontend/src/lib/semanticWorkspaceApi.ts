@@ -419,6 +419,20 @@ export function sendWorkspaceTurn(
   );
 }
 
+export function regenerateWorkspaceTurn(
+  taskId: string,
+  resultId: string,
+  expectedRevision: number,
+  externalApiConfirmed: boolean,
+  idempotencyKey: string,
+): Promise<SteeringResult> {
+  return api.post(
+    `${BASE}/tasks/${taskId}/turns/${resultId}/regenerate`,
+    { expected_revision: expectedRevision, external_api_confirmed: externalApiConfirmed },
+    { "Idempotency-Key": idempotencyKey },
+  );
+}
+
 export function decideWorkspaceRevision(
   taskId: string,
   proposalId: string,

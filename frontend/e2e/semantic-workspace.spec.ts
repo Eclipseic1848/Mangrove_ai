@@ -1755,7 +1755,7 @@ test.describe("统一数据工作台", () => {
     await page.getByRole("button", { name: "打开导航" }).click();
     await expect(page.getByRole("link", { name: "旧版对话" })).toBeVisible();
     await expect(page.getByRole("button", { name: "浅色主题" })).toBeVisible();
-    await page.locator("aside").getByRole("button", { name: "关闭导航" }).click();
+    await page.getByRole("dialog", { name: "全局导航", exact: true }).getByRole("button", { name: "关闭导航", exact: true }).click();
     await expect(page.getByRole("link", { name: "旧版对话" })).toBeHidden();
     await page.getByRole("button", { name: "打开导航" }).click();
     await page.keyboard.press("Escape");
@@ -2849,6 +2849,87 @@ test.describe("统一数据工作台", () => {
     await expect(page.getByLabel("结果版本")).toHaveValue("2");
   });
 
+  test("回答操作使用真实浏览器能力并把历史消息编辑为新草稿", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await mockWorkspace(page);
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "share", {
+        configurable: true,
+        value: async ({ text }: ShareData) => localStorage.setItem("shared-answer", text || ""),
+      });
+    });
+    const task = { ...workspaceTask("task-message-actions", "completed", "消息操作检查"), model_connection_id: "connection-external" };
+    await page.route("**/api/semantic-workspace/tasks?*", route => route.fulfill({ json: [task] }));
+    await page.route("**/api/semantic-workspace/tasks/task-message-actions", route => route.fulfill({ json: workspaceDetail(task) }));
+    await page.route("**/api/semantic-workspace/tasks/task-message-actions/turns", route => route.fulfill({ json: {
+      turns: [{ turn_id: "turn-actions", revision: 1, text: "把华东单独汇总" }],
+      results: [{ result_id: "result-actions", task_id: task.task_id, turn_id: "turn-actions", delta_id: "delta-actions", action: "answer", acknowledgement: "已完成", answer: "华东合计 42", proposal_id: null, run_id: null, revision: 1 }],
+      proposals: [],
+    } }));
+    const regenerated: Array<{ body: Record<string, unknown>; key: string | undefined }> = [];
+    const feedback: Array<{ body: Record<string, unknown>; key: string | undefined }> = [];
+    await page.route("**/api/semantic-workspace/tasks/task-message-actions/feedback*", route => {
+      if (route.request().method() === "GET") return route.fulfill({ json: { feedback: null, receipt: null } });
+      feedback.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] });
+      return route.fulfill({ json: { feedback_id: 1, version: 1 } });
+    });
+    await page.route("**/api/semantic-workspace/tasks/task-message-actions/turns/result-actions/regenerate", route => {
+      regenerated.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] });
+      return regenerated.length === 1
+        ? route.fulfill({ status: 503, json: { detail: "重新生成结果未知" } })
+        : route.fulfill({ json: { result_id: "result-regenerated", task_id: task.task_id, turn_id: "turn-regenerated", delta_id: "delta-regenerated", action: "answer_only", acknowledgement: "已回答", answer: "华东合计 43", proposal_id: null, run_id: null, revision: 1 } });
+    });
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /消息操作检查/ }).click();
+    await expect(page.getByLabel("Mangrove 回答")).toContainText("华东合计 42");
+
+    await expect(page.getByRole("button", { name: "有帮助" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "需要改进" })).toBeVisible();
+    await page.getByRole("button", { name: "需要改进" }).click();
+    const feedbackDialog = page.getByRole("dialog");
+    await expect(feedbackDialog.getByText("反馈当前回答", { exact: true })).toBeVisible();
+    await expect(feedbackDialog.getByRole("combobox", { name: "评价", exact: true })).toHaveValue("down");
+    await expect(feedbackDialog.getByRole("button", { name: "提交反馈" })).toBeEnabled();
+    await feedbackDialog.getByRole("button", { name: "提交反馈" }).click();
+    await expect.poll(() => feedback.length).toBe(1);
+    expect(feedback[0]).toMatchObject({ body: { revision: 1, result_id: "result-actions", rating: "down", expected_version: 0 } });
+    expect(feedback[0].key).toBeTruthy();
+    await feedbackDialog.getByRole("button", { name: "返回任务" }).click();
+
+    await page.getByRole("button", { name: "复制" }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("华东合计 42");
+    await page.getByRole("button", { name: "分享" }).click();
+    await expect(page.getByText("不会创建公开链接", { exact: false })).toBeVisible();
+    await page.getByRole("button", { name: "打开系统分享" }).click();
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("shared-answer"))).toBe("华东合计 42");
+
+    const composer = page.getByRole("textbox", { name: "继续对话" });
+    await composer.fill("这是尚未发送的草稿");
+    await page.getByRole("button", { name: "编辑为新消息" }).click();
+    await expect(composer).toHaveValue("这是尚未发送的草稿");
+    await expect(page.getByText("输入框已有未发送内容；请先发送或清空，再编辑历史消息")).toBeVisible();
+    await composer.fill("");
+    await page.getByRole("button", { name: "编辑为新消息" }).click();
+    await expect(page.getByRole("textbox", { name: "继续对话" })).toHaveValue("把华东单独汇总");
+    await expect(page.getByLabel("对话记录").locator("p").getByText("把华东单独汇总", { exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "重新生成" }).click();
+    await expect(page.getByText("会再次向已选外部模型发送本任务必要数据", { exact: false })).toBeVisible();
+    await page.getByRole("button", { name: "确认重新生成" }).click();
+    await expect(page.getByText("重新生成结果未知")).toBeVisible();
+    await expect.poll(() => page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith("mangrove_regenerate_")).length)).toBe(1);
+    await page.reload();
+    await page.getByRole("button", { name: "重新生成" }).click();
+    await page.getByRole("button", { name: "确认重新生成" }).click();
+    await expect(page.getByText("已重新生成回答")).toBeVisible();
+    expect(regenerated).toHaveLength(2);
+    expect(regenerated[0]).toMatchObject({ body: { expected_revision: 1, external_api_confirmed: true } });
+    expect(regenerated[0].key).toBeTruthy();
+    expect(regenerated[1].key).toBe(regenerated[0].key);
+    await expect.poll(() => page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith("mangrove_regenerate_")).length)).toBe(0);
+  });
+
   test("待确认任务可收起后重新打开，并可随时取消", async ({ page }) => {
     await mockWorkspace(page);
     let status = "needs_input";
@@ -3531,8 +3612,13 @@ test.describe("统一数据工作台", () => {
         diagnostic_ref: "pi-run-unknown",
       },
     };
+    const otherFailedTask = { ...failedTask, task_id: "task-model-unknown-other", title: "另一模型结果待确认" };
     await page.route("**/api/semantic-workspace/tasks?*", (route) =>
-      route.fulfill({ json: [failedTask] }));
+      route.fulfill({ json: [failedTask, otherFailedTask] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-model-unknown-other",
+      (route) => route.fulfill({ json: workspaceDetail(otherFailedTask) }),
+    );
     await page.route(
       "**/api/semantic-workspace/tasks/task-model-unknown",
       (route) => route.fulfill({
@@ -3540,10 +3626,15 @@ test.describe("统一数据工作台", () => {
       }),
     );
     let revisionPayload: Record<string, unknown> | null = null;
+    let revisionCalls = 0;
+    const idempotencyKeys: string[] = [];
     await page.route(
       "**/api/semantic-workspace/tasks/task-model-unknown/revisions",
       async (route) => {
+        revisionCalls += 1;
+        idempotencyKeys.push(route.request().headers()["idempotency-key"] || "");
         revisionPayload = await route.request().postDataJSON();
+        if (revisionCalls === 1) return route.fulfill({ status: 500, json: { detail: "unknown" } });
         await route.fulfill({
           status: 202,
           json: { revision: 2 },
@@ -3552,14 +3643,39 @@ test.describe("统一数据工作台", () => {
     );
 
     await page.goto("/data-prep");
-    await page.getByRole("button", { name: /模型结果待确认/ }).click();
+    await page.getByRole("button", { name: /^模型结果待确认/ }).click();
     const notice = page.getByTestId("task-failure-explanation");
     await expect(notice).toContainText("模型请求结果不确定");
     await notice.getByRole("button", { name: "重新执行" }).click();
     await expect(page.getByRole("alertdialog")).toContainText(
       "可能产生重复调用和费用",
     );
-    await page.getByRole("button", { name: "确认重新执行" }).click();
+    await page.getByLabel("我确认把当前任务范围内的必要数据再次发送到已选外部模型连接。").check();
+    await page.evaluate(() => {
+      const url = new URL(window.location.href);
+      url.searchParams.set("task", "task-model-unknown-other");
+      window.history.pushState({}, "", url);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await expect(page.getByRole("alertdialog")).toHaveCount(0);
+    await page.getByTestId("task-failure-explanation").getByRole("button", { name: "重新执行" }).click();
+    await expect(page.getByLabel("我确认把当前任务范围内的必要数据再次发送到已选外部模型连接。")).not.toBeChecked();
+    await expect(page.getByRole("button", { name: "确认重新执行" })).toBeDisabled();
+    await page.getByRole("button", { name: "取消" }).click();
+    await page.getByRole("button", { name: /^模型结果待确认/ }).click();
+    await page.getByTestId("task-failure-explanation").getByRole("button", { name: "重新执行" }).click();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const confirmRetry = page.getByRole("button", { name: "确认重新执行" });
+      await expect(confirmRetry).toBeDisabled();
+      if (attempt === 0) expect((await new AxeBuilder({ page }).include('[role="alertdialog"]').analyze()).violations).toEqual([]);
+      await page.getByLabel("我确认把当前任务范围内的必要数据再次发送到已选外部模型连接。").check();
+      await confirmRetry.click();
+      if (attempt === 0) {
+        await page.reload();
+        await page.getByRole("button", { name: /^模型结果待确认/ }).click();
+        await page.getByTestId("task-failure-explanation").getByRole("button", { name: "重新执行" }).click();
+      }
+    }
 
     await expect.poll(() => revisionPayload).not.toBeNull();
     expect(revisionPayload).toEqual({
@@ -3567,6 +3683,9 @@ test.describe("统一数据工作台", () => {
       external_api_confirmed: true,
       expected_active_revision: 1,
     });
+    expect(revisionCalls).toBe(2);
+    expect(idempotencyKeys[0]).toBeTruthy();
+    expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
   });
 
   test("后序完成事件会收口前序遗留开始态", async ({ page }) => {

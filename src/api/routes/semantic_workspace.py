@@ -483,6 +483,15 @@ class WorkspaceTurnIn(BaseModel):
         return value.strip()
 
 
+class WorkspaceRegenerateIn(BaseModel):
+    """按原始用户消息重新请求回答，不伪造为普通重发。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    expected_revision: int = Field(ge=1)
+    external_api_confirmed: bool = False
+
+
 class CandidateReverificationIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -986,7 +995,7 @@ def _public_workspace_events(events):
     public = []
     for event in events:
         # 本票的消费占位是内部恢复事实，不是用户进度或业务正文。
-        if event.get("event_type") in {"clarification.accepted", "clarification.send_claimed", "clarification.consumed"}:
+        if event.get("event_type") in {"clarification.accepted", "clarification.send_claimed", "clarification.consumed", "message.regeneration_claimed"}:
             continue
         projected = {**event, "details": dict(event.get("details") or {})}
         if projected["details"].get("question"):
@@ -2082,11 +2091,18 @@ def resolve_reusable_sources(payload: ReusableSourceSelection, user=Depends(get_
 class WorkspaceFeedbackIn(BaseModel):
     model_config=ConfigDict(extra="forbid")
     revision:int=Field(ge=1)
-    output_id:str=Field(min_length=1,max_length=200)
+    output_id:str|None=Field(default=None,min_length=1,max_length=200)
+    result_id:str|None=Field(default=None,min_length=1,max_length=200)
     rating:Literal["up","down"]
     reasons:list[str]=Field(default_factory=list,max_length=7)
     comment:str=Field(default="",max_length=10000)
     expected_version:int=Field(ge=0)
+
+    @model_validator(mode="after")
+    def one_feedback_target(self):
+        if (self.output_id is None)==(self.result_id is None):
+            raise ValueError("反馈必须且只能绑定一个正式结果或回答")
+        return self
 
 @router.post("/tasks/{task_id}/feedback")
 def submit_workspace_feedback(task_id:str,payload:WorkspaceFeedbackIn,idempotency_key:str=Header(alias="Idempotency-Key"),user=Depends(get_execution_user)):
@@ -2099,11 +2115,12 @@ def submit_workspace_feedback(task_id:str,payload:WorkspaceFeedbackIn,idempotenc
         raise
 
 @router.get("/tasks/{task_id}/feedback")
-def read_workspace_feedback(task_id:str,revision:int,output_id:str,idempotency_key:str|None=None,user=Depends(get_current_user)):
+def read_workspace_feedback(task_id:str,revision:int,output_id:str|None=None,result_id:str|None=None,idempotency_key:str|None=None,user=Depends(get_current_user)):
     _task_or_404(user["user_id"],task_id)
+    if (output_id is None)==(result_id is None):raise HTTPException(422,"反馈必须且只能绑定一个正式结果或回答")
     from src.api.workspace_feedback import get_feedback,get_receipt
-    result={"feedback":get_feedback(get_store(),user["user_id"],task_id,revision,output_id)}
-    if idempotency_key is not None:result['receipt']=get_receipt(get_store(),user['user_id'],task_id,revision,output_id,idempotency_key)
+    result={"feedback":get_feedback(get_store(),user["user_id"],task_id,revision,output_id=output_id,result_id=result_id)}
+    if idempotency_key is not None:result['receipt']=get_receipt(get_store(),user['user_id'],task_id,revision,output_id=output_id,result_id=result_id,key=idempotency_key)
     return result
 
 @router.post("/tasks", status_code=status.HTTP_202_ACCEPTED, openapi_extra={"x-mangrove-task-control": True})
@@ -2942,7 +2959,106 @@ async def steer_task(
     return await _steer_task(user, task_id, payload, idempotency_key)
 
 
-async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context=None):
+@router.post("/tasks/{task_id}/turns/{result_id}/regenerate")
+async def regenerate_turn(
+    task_id: str,
+    result_id: str,
+    payload: WorkspaceRegenerateIn,
+    idempotency_key: Annotated[str, Header(min_length=1, max_length=200)],
+    user=Depends(get_execution_user),
+):
+    """绑定原回答身份并只发送一次新的模型请求。"""
+
+    user_id = user["user_id"]
+    task = _task_or_404(user_id, task_id)
+    revision = int(task["active_revision"])
+    if payload.expected_revision != revision:
+        raise HTTPException(status.HTTP_409_CONFLICT, "任务版本已变化，请刷新后再重新生成")
+
+    repository = _steering_repository()
+    source_result = repository.get_result(user_id, result_id)
+    if source_result is None or source_result.task_id != task_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "原回答不存在或无权访问")
+    if source_result.revision != revision or not source_result.answer:
+        raise HTTPException(status.HTTP_409_CONFLICT, "只有当前版本的完整回答可以重新生成")
+    source_turn = repository.get_turn(user_id, source_result.turn_id)
+    if source_turn is None or source_turn.task_id != task_id or source_turn.revision != revision:
+        raise HTTPException(status.HTTP_409_CONFLICT, "原回答绑定的用户消息不完整")
+    source_delta = repository.get_delta(user_id, source_result.delta_id)
+    if source_delta is None or not source_delta.source_turn_ids or source_delta.source_turn_ids[-1] != source_turn.turn_id:
+        raise HTTPException(status.HTTP_409_CONFLICT, "原回答绑定的上下文不完整")
+    context_turn_ids = source_delta.source_turn_ids[:-1]
+    relevant_turns = tuple(repository.get_turn(user_id, turn_id) for turn_id in context_turn_ids)
+    if any(turn is None for turn in relevant_turns):
+        raise HTTPException(status.HTTP_409_CONFLICT, "原回答绑定的上下文不完整")
+    prior_delta = None
+    if relevant_turns:
+        prior_result = repository.get_result_for_turn(user_id, relevant_turns[-1].turn_id)
+        prior_delta = repository.get_delta(user_id, prior_result.delta_id) if prior_result else None
+        if prior_delta is None or prior_delta.source_turn_ids != context_turn_ids:
+            raise HTTPException(status.HTTP_409_CONFLICT, "原回答绑定的上下文不完整")
+
+    runtime = _runtime_repository().get(user_id, task_id, revision) or {}
+    if (
+        runtime.get("model_connection_id")
+        or task.get("model_connection_id")
+        or (task.get("provider") or "local").lower() != "local"
+    ) and not payload.external_api_confirmed:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "重新生成会再次调用外部模型，请确认本次数据外发")
+
+    request_hash = hashlib.sha256(json.dumps(
+        [result_id, revision, payload.external_api_confirmed],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    key_hash = hashlib.sha256(json.dumps(
+        [user_id, task_id, idempotency_key],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    effective_key = f"regenerate:{hashlib.sha256(json.dumps([task_id, result_id, idempotency_key], separators=(',', ':')).encode('utf-8')).hexdigest()}"
+    claim_token = uuid.uuid4().hex
+    store = get_store()
+    events = store.list_semantic_workspace_events(user_id, task_id)
+    claim = store.append_semantic_workspace_event(
+        user_id,
+        task_id,
+        event_id=f"message-regenerate:{key_hash}",
+        stage=events[-1]["stage"] if events else "understand",
+        event_type="message.regeneration_claimed",
+        summary="已接收消息重新生成请求",
+        details={"source_result_id": result_id, "request_hash": request_hash, "_claim_token": claim_token},
+    )
+    if claim.get("details", {}).get("request_hash") != request_hash:
+        raise HTTPException(status.HTTP_409_CONFLICT, "相同幂等键不能重新生成另一条回答")
+    if claim.get("details", {}).get("_claim_token") != claim_token:
+        turn = next((item for item in repository.list_turns(user_id, task_id, revision=revision) if item.idempotency_key == effective_key), None)
+        result = repository.get_result_for_turn(user_id, turn.turn_id) if turn else None
+        if result is None:
+            raise HTTPException(status.HTTP_409_CONFLICT, "本次重新生成已发送，结果未知；禁止自动重复请求模型")
+        return _public_steering_payload(result.model_dump(mode="json"))
+
+    selection = ResultSelection.model_validate(source_turn.result_context.model_dump(include={"revision", "output_id", "representation_sha256", "item_ref"})) if source_turn.result_context else None
+    result = await _steer_task(
+        user,
+        task_id,
+        WorkspaceTurnIn(text=source_turn.text, external_api_confirmed=payload.external_api_confirmed, result_context=selection),
+        effective_key,
+        replay_context=(relevant_turns, prior_delta),
+    )
+    store.append_semantic_workspace_event(
+        user_id,
+        task_id,
+        event_id=f"message-regenerated:{result['result_id']}",
+        stage=claim["stage"],
+        event_type="message.regenerated",
+        summary="已重新生成回答",
+        details={"source_result_id": result_id, "steering_result_id": result["result_id"], "revision": revision},
+    )
+    return result
+
+
+async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context=None, replay_context=None):
 
     user_id = user["user_id"]
     task = _task_or_404(user_id, task_id)
@@ -2952,7 +3068,9 @@ async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context
     result_context = _resolve_result_context(user_id, task_id, payload.result_context) if payload.result_context else None
     relevant_turns = ()
     prior_delta = None
-    if answer_context and answer_context.get("origin_turn_id"):
+    if replay_context is not None:
+        relevant_turns, prior_delta = replay_context
+    elif answer_context and answer_context.get("origin_turn_id"):
         origin_result = _steering_repository().get_result_for_turn(user_id, answer_context["origin_turn_id"])
         if origin_result is None or origin_result.revision != task["active_revision"]:
             raise ValueError("原澄清回合已失效")
@@ -2976,7 +3094,7 @@ async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context
         verify_current()
         if answer_context:
             get_store().claim_workspace_answer(user_id, task_id, answer_context["answer_turn_id"])
-    if not answer_context:
+    if not answer_context and replay_context is None:
         business_result = next((result for turn in reversed(_steering_repository().list_turns(user_id, task_id, revision=int(task["active_revision"]))) if (result := _steering_repository().get_result_for_turn(user_id, turn.turn_id)) is not None and result.action in {SteeringAction.NORMALIZED_NO_MATERIAL_CHANGE, SteeringAction.REVISION_PROPOSAL}), None)
         if business_result:
             prior_delta = _steering_repository().get_delta(user_id, business_result.delta_id)
@@ -3013,13 +3131,13 @@ async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context
     try:
         service = ConversationSteering(
             _steering_repository(),
-            build_context_rewriter(request, before_call=verify_current) if selection or answer_context else build_context_rewriter(request),
+            build_context_rewriter(request, before_call=verify_current) if selection or answer_context or replay_context is not None else build_context_rewriter(request),
             before_result_call=claim_answer if answer_context or selection else None,
         )
         result = await service.handle_turn(request)
     except (ValueError, GrantError) as exc:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT if answer_context or payload.result_context or isinstance(exc, ResultContextConflict) else status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_409_CONFLICT if answer_context or replay_context is not None or payload.result_context or isinstance(exc, ResultContextConflict) else status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
     except Exception as exc:

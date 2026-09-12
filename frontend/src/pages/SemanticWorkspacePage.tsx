@@ -7,13 +7,18 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import {
   ArrowLeft,
+  Copy,
   FileSearch,
   HelpCircle,
   LayoutTemplate,
   Loader2,
+  Pencil,
   RotateCcw,
   Search,
+  Share2,
   Sparkles,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   X,
 } from "lucide-react";
@@ -32,7 +37,7 @@ import {
 import { SourcePreviewPanel, initialSourceView, type SourceViewState } from "@/components/workspace/SourcePreviewPanel";
 import { TaskDeletionDialog } from "@/components/workspace/TaskDeletionDialog";
 import { TaskTimeline } from "@/components/workspace/TaskTimeline";
-import { WorkspaceLifecycleActions } from "@/components/workspace/WorkspaceLifecycleActions";
+import { WorkspaceLifecycleActions, type FeedbackRequest } from "@/components/workspace/WorkspaceLifecycleActions";
 import { Markdown } from "@/components/Markdown";
 import { WorkspaceTaskSidebar } from "@/components/workspace/WorkspaceTaskSidebar";
 import {
@@ -54,6 +59,7 @@ import {
   publishCandidateVerification,
   refreshWorkspaceSource,
   restoreWorkspaceTask,
+  regenerateWorkspaceTurn,
   resumeAccountWorkspaceTask,
   sendWorkspaceTurn,
   streamWorkspaceTask,
@@ -109,6 +115,82 @@ function AnswerReferences({ context, onViewSource }: { context: PublicResultCont
   </div>;
 }
 
+function copyAnswer(text: string) {
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(text).then(() => toast.success("已复制回答")).catch(() => copyAnswerFallback(text));
+    return;
+  }
+  copyAnswerFallback(text);
+}
+
+function copyAnswerFallback(text: string) {
+  const input = document.createElement("textarea");
+  input.value = text;
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.appendChild(input);
+  input.select();
+  try {
+    if (!document.execCommand("copy")) throw new Error("copy failed");
+    toast.success("已复制回答");
+  } catch {
+    toast.error("复制失败，请手动选择正文");
+  } finally {
+    document.body.removeChild(input);
+  }
+}
+
+function ConversationActions({ content, canFeedback, canRegenerate, regenerating, requiresExternalConfirmation, onFeedback, onRegenerate }: {
+  content: string;
+  canFeedback: boolean;
+  canRegenerate: boolean;
+  regenerating: boolean;
+  requiresExternalConfirmation: boolean;
+  onFeedback: (rating: "up" | "down") => void;
+  onRegenerate: (externalApiConfirmed: boolean) => Promise<void>;
+}) {
+  const shareAnswer = async () => {
+    if (typeof navigator.share !== "function") {
+      toast.error("当前浏览器不支持系统分享，请复制后自行发送");
+      return;
+    }
+    try {
+      await navigator.share({ title: "Mangrove 回答", text: content });
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "AbortError")) toast.error("系统分享失败，请复制后自行发送");
+    }
+  };
+  return <div className="mt-2 flex flex-wrap gap-1 text-xs text-muted-foreground" role="group" aria-label="回答操作">
+    <button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => copyAnswer(content)}><Copy className="h-3.5 w-3.5" />复制</button>
+    {canFeedback && <>
+      <button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onFeedback("up")}><ThumbsUp className="h-3.5 w-3.5" />有帮助</button>
+      <button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onFeedback("down")}><ThumbsDown className="h-3.5 w-3.5" />需要改进</button>
+    </>}
+    <AlertDialog.Root>
+      <AlertDialog.Trigger asChild><button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"><Share2 className="h-3.5 w-3.5" />分享</button></AlertDialog.Trigger>
+      <AlertDialog.Portal>
+        <AlertDialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
+        <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(90vw,440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl">
+          <AlertDialog.Title className="font-semibold">分享这条回答？</AlertDialog.Title>
+          <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">只把当前回答正文交给系统分享面板；不会创建公开链接，也不会额外附带原始资料、下载凭据或任务访问权限。</AlertDialog.Description>
+          <div className="mt-5 flex justify-end gap-2"><AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm hover:bg-muted">取消</AlertDialog.Cancel><AlertDialog.Action className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground" onClick={() => void shareAnswer()}>打开系统分享</AlertDialog.Action></div>
+        </AlertDialog.Content>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
+    <AlertDialog.Root>
+      <AlertDialog.Trigger asChild><button type="button" disabled={!canRegenerate || regenerating} title={canRegenerate ? undefined : "请先回到最新版本"} className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"><RotateCcw className="h-3.5 w-3.5" />{regenerating ? "重新生成中" : "重新生成"}</button></AlertDialog.Trigger>
+      <AlertDialog.Portal>
+        <AlertDialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
+        <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(90vw,440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl">
+          <AlertDialog.Title className="font-semibold">重新生成这条回答？</AlertDialog.Title>
+          <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">系统会按原始用户消息和当前任务版本再次请求本任务模型。{requiresExternalConfirmation ? "这会再次向已选外部模型发送本任务必要数据，并可能产生费用。" : "原回答会保留。"}</AlertDialog.Description>
+          <div className="mt-5 flex justify-end gap-2"><AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm hover:bg-muted">取消</AlertDialog.Cancel><AlertDialog.Action className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground" onClick={() => void onRegenerate(requiresExternalConfirmation)}>确认重新生成</AlertDialog.Action></div>
+        </AlertDialog.Content>
+      </AlertDialog.Portal>
+    </AlertDialog.Root>
+  </div>;
+}
+
 function taskRecoveryError(error: unknown) {
   if (!(error instanceof ApiError)) {
     return "任务详情暂时无法读取，请稍后重新加载。";
@@ -131,6 +213,7 @@ function FollowupComposer({
   resultContext,
   onClearResultContext,
   onBusyChange,
+  draftRequest,
 }: {
   task: WorkspaceTask;
   scopeIdentity: string;
@@ -141,6 +224,7 @@ function FollowupComposer({
   resultContext: (ResultSelection & { label: string }) | null;
   onClearResultContext: () => void;
   onBusyChange: (busy: boolean) => void;
+  draftRequest: { key: string; text: string } | null;
   onDecision: (
     proposalId: string,
     mode: "cancel_now" | "after_safe_point" | "new_task",
@@ -184,6 +268,18 @@ function FollowupComposer({
     setText("");
     setConfirmedProposal(null);
   }, [task.task_id]);
+  useEffect(() => {
+    if (!draftRequest) return;
+    if (text.trim()) {
+      toast.info("输入框已有未发送内容；请先发送或清空，再编辑历史消息");
+      requestAnimationFrame(() => inputRef.current?.focus());
+      return;
+    }
+    setAnswerMode(null);
+    setText(draftRequest.text);
+    onClearResultContext();
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, [draftRequest]);
   useEffect(() => { latestIdentity.current = currentIdentity; return () => { latestIdentity.current = null; }; }, []);
   useLayoutEffect(() => {
     // 新轮次可继续编辑；旧请求不能清理新一轮的忙碌状态。
@@ -639,6 +735,11 @@ export function SemanticWorkspacePage() {
   const pendingSource = useRef<{ taskId: string; revision: number; evidence: Record<string, unknown> } | null>(null);
   const [resultDraft, setResultDraft] = useState<{ identity: string; context: ResultSelection & { label: string } } | null>(null);
   const [followupBusy, setFollowupBusy] = useState(false);
+  const [resendDraft, setResendDraft] = useState<{ scope: string; key: string; text: string } | null>(null);
+  const [regeneratingMessageId, setRegeneratingMessageId] = useState<string | null>(null);
+  const feedbackRequestId = useRef(0);
+  const [feedbackRequest, setFeedbackRequest] = useState<FeedbackRequest | null>(null);
+  const rerunFlight = useRef(false);
 
   const [liveFeed, setLiveFeed] = useState<{ identity: string; events: WorkspaceEvent[] }>({ identity: "", events: [] });
   const setLiveEvents = (events: WorkspaceEvent[]) => setLiveFeed({ identity: "", events });
@@ -761,6 +862,77 @@ export function SemanticWorkspacePage() {
     } catch (error) {
       if (answerScope.current === capturedScope && answerRound.current === question.round_id) toast.error(error instanceof Error ? error.message : "提交回答失败");
       throw error;
+    }
+  };
+  const regenerateMessage = async (resultId: string, revision: number, externalApiConfirmed: boolean) => {
+    if (!task || revision !== (task.current_revision ?? task.active_revision) || revision !== viewingRevision) {
+      toast.error("只有当前版本的回答可以重新生成，请先回到最新版本。");
+      return;
+    }
+    const storageKey = `mangrove_regenerate_${user?.user_id}_${task.task_id}_${resultId}`;
+    let idempotencyKey: string;
+    try {
+      const stored = localStorage.getItem(storageKey);
+      idempotencyKey = stored && /^[A-Za-z0-9_-]{1,128}$/.test(stored) ? stored : nanoid();
+      localStorage.setItem(storageKey, idempotencyKey);
+    } catch {
+      toast.error("浏览器无法安全保存重新生成标识，本次未发送。");
+      return;
+    }
+    setRegeneratingMessageId(resultId);
+    try {
+      await regenerateWorkspaceTurn(task.task_id, resultId, revision, externalApiConfirmed, idempotencyKey);
+      try { localStorage.removeItem(storageKey); } catch { /* 残留键只会重放已完成的同一请求。 */ }
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-task", task.task_id] }),
+        queryClient.invalidateQueries({ queryKey: ["workspace-turns", user?.user_id, task.task_id] }),
+      ]);
+      toast.success("已重新生成回答");
+    } catch (error) {
+      if (error instanceof ApiError && error.status < 500 && !error.message.includes("结果未知")) {
+        try { localStorage.removeItem(storageKey); } catch { /* 服务端已明确拒绝，残留键不会造成重复调用。 */ }
+      }
+      toast.error(error instanceof Error ? error.message : "重新生成结果未知，原请求已保留");
+    } finally {
+      setRegeneratingMessageId(current => current === resultId ? null : current);
+    }
+  };
+  const retryCurrentTask = async (externalApiConfirmed: boolean) => {
+    if (!task || rerunFlight.current) return;
+    if (task.source_integrity?.can_rerun === false) {
+      toast.error("来源已删除，不能按原来源重跑；请先核对本次资料。");
+      return;
+    }
+    const externalConnection = Boolean(task.agentic_runtime?.model_connection_id ?? task.model_connection_id);
+    if (externalConnection && !externalApiConfirmed) return;
+    const storageKey = `mangrove_task_retry_${user?.user_id ?? "unknown"}_${task.task_id}_${task.active_revision}`;
+    let idempotencyKey: string;
+    try {
+      const stored = localStorage.getItem(storageKey);
+      idempotencyKey = stored && /^[A-Za-z0-9_-]{1,128}$/.test(stored) ? stored : nanoid();
+      localStorage.setItem(storageKey, idempotencyKey);
+    } catch {
+      toast.error("浏览器无法安全保存重试标识，本次未重新执行。");
+      return;
+    }
+    const capturedScope = readingIdentity;
+    rerunFlight.current = true;
+    try {
+      await createWorkspaceRevision(task.task_id, "保持原要求，重新执行", task.active_revision, undefined, externalApiConfirmed, undefined, idempotencyKey);
+      try { localStorage.removeItem(storageKey); } catch { /* 同一幂等键残留只会重放已完成请求。 */ }
+      if (answerScope.current === capturedScope) setSelectedRevision(null);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-task", task.task_id] }),
+        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-tasks"] }),
+      ]);
+      if (answerScope.current === capturedScope) toast.success("已创建新版本，正在重新执行");
+    } catch (error) {
+      if (error instanceof WorkspaceRevisionError && error.rejected) {
+        try { localStorage.removeItem(storageKey); } catch { /* 服务端已明确拒绝，残留键不会造成重复执行。 */ }
+      }
+      if (answerScope.current === capturedScope) toast.error(error instanceof WorkspaceRevisionError && error.rejected ? error.message : "重新执行结果未知，请刷新任务核对；不会自动重发。");
+    } finally {
+      rerunFlight.current = false;
     }
   };
   useLayoutEffect(() => {
@@ -1358,9 +1530,11 @@ export function SemanticWorkspacePage() {
                             {accountResumeFeedback && <button type="button" className="ml-3 mt-3 underline" onClick={() => void detail.refetch()}>刷新任务状态</button>}
                           </section>
                         )}
-                        {user && <WorkspaceLifecycleActions key={`${user.user_id}:${task.task_id}:${task.viewing_revision ?? task.active_revision}`} ownerId={user.user_id} task={task} />}
+                        {user && <WorkspaceLifecycleActions feedbackRequest={feedbackRequest} key={`lifecycle:${user.user_id}:${task.task_id}:${task.viewing_revision ?? task.active_revision}`} ownerId={user.user_id} task={task} />}
                         <TaskTimeline
+                          key={`${user?.user_id}:${task.task_id}:${task.active_revision}`}
                           task={task}
+                          externalConnection={Boolean(task.agentic_runtime?.model_connection_id ?? task.model_connection_id)}
                           connectionLabel={modelConnections.data?.items.find(connection => connection.connection_id === (task.agentic_runtime?.model_connection_id ?? task.model_connection_id))?.display_name}
                           clarificationTurnIds={conversation.data?.turns.map(turn => turn.turn_id)}
                           liveEvents={liveEvents}
@@ -1409,7 +1583,7 @@ export function SemanticWorkspacePage() {
                               );
                             }
                           }}
-                          onRetry={async (unchanged = false) => {
+                          onRetry={async (unchanged = false, externalApiConfirmed = false) => {
                             if (task.source_integrity?.can_rerun === false) { toast.error("来源已删除，不能按原来源重跑；请先核对本次资料。"); return; }
                             if (!unchanged) {
                               document
@@ -1417,33 +1591,7 @@ export function SemanticWorkspacePage() {
                                 ?.scrollIntoView({ behavior: "smooth" });
                               return;
                             }
-                            try {
-                              await createWorkspaceRevision(
-                                task.task_id,
-                                "保持原要求，重新执行",
-                                task.active_revision,
-                                undefined,
-                                true,
-                              );
-                              await Promise.all([
-                                queryClient.invalidateQueries({
-                                  queryKey: [
-                                    "semantic-workspace-task",
-                                    task.task_id,
-                                  ],
-                                }),
-                                queryClient.invalidateQueries({
-                                  queryKey: ["semantic-workspace-tasks"],
-                                }),
-                              ]);
-                              toast.success("已创建新版本并重新执行");
-                            } catch (error) {
-                              toast.error(
-                                error instanceof Error
-                                  ? error.message
-                                  : "重新执行失败",
-                              );
-                            }
+                            await retryCurrentTask(externalApiConfirmed);
                           }}
                           onRefreshSource={async (externalApiConfirmed, targetSourceSnapshotId) => {
                             const expectedRevision = task.current_revision
@@ -1606,14 +1754,31 @@ export function SemanticWorkspacePage() {
                             const clarification = task.clarification_history?.find(entry => entry.turn_id === turn.turn_id);
                             return <article key={turn.turn_id} className="space-y-2 border-b pb-4 text-sm leading-7">
                               {clarification && <p className="text-muted-foreground">{clarification.question.prompt}</p>}
-                              <p className="whitespace-pre-wrap font-medium">{turn.text}</p>
+                              <div className="flex items-start gap-2"><p className="min-w-0 flex-1 whitespace-pre-wrap font-medium">{turn.text}</p><button type="button" disabled={followupBusy} className="inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50" onClick={() => setResendDraft({ scope: readingIdentity, key: nanoid(), text: turn.text })}><Pencil className="h-3.5 w-3.5" />编辑为新消息</button></div>
                               {response && <p className="text-muted-foreground">{response.acknowledgement}</p>}
                               {answer && <div aria-label="Mangrove 回答"><Markdown safeResources>{answer}</Markdown></div>}
                               {answer && <AnswerReferences context={context && context.revision === (message?.revision ?? response?.revision) ? context : null} onViewSource={viewSource} />}
+                              {answer && response && <ConversationActions
+                                content={answer}
+                                canFeedback={viewingRevision === response.revision}
+                                canRegenerate={response.revision === (task.current_revision ?? task.active_revision) && viewingRevision === response.revision}
+                                regenerating={regeneratingMessageId === response.result_id}
+                                requiresExternalConfirmation={Boolean(task.model_connection_id || task.agentic_runtime?.model_connection_id || task.provider !== "local")}
+                                onFeedback={rating => setFeedbackRequest({id:++feedbackRequestId.current,taskId:task.task_id,revision:response.revision,resultId:response.result_id,rating})}
+                                onRegenerate={confirmed => regenerateMessage(response.result_id, response.revision, confirmed)}
+                              />}
                             </article>;
                           })}
                           {messages.filter(message => !conversation.data?.turns?.some(turn => turn.turn_id === message.turn_id)).map(message => (
-                            <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown><AnswerReferences context={message.result_context?.revision === message.revision ? readPublicResultContext(message.result_context) : null} onViewSource={viewSource} /></article>
+                            <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown><AnswerReferences context={message.result_context?.revision === message.revision ? readPublicResultContext(message.result_context) : null} onViewSource={viewSource} /><ConversationActions
+                              content={message.content}
+                              canFeedback={viewingRevision === message.revision}
+                              canRegenerate={message.revision === (task.current_revision ?? task.active_revision) && viewingRevision === message.revision}
+                              regenerating={regeneratingMessageId === message.message_id}
+                              requiresExternalConfirmation={Boolean(task.model_connection_id || task.agentic_runtime?.model_connection_id || task.provider !== "local")}
+                              onFeedback={rating => setFeedbackRequest({id:++feedbackRequestId.current,taskId:task.task_id,revision:message.revision,resultId:message.message_id,rating})}
+                              onRegenerate={confirmed => regenerateMessage(message.message_id, message.revision, confirmed)}
+                            /></article>
                           ))}
                         </section>
                         {task.status === "completed" && (
@@ -1796,6 +1961,7 @@ export function SemanticWorkspacePage() {
                             key={`${user?.user_id}:${task.task_id}`}
                             task={task}
                             scopeIdentity={readingIdentity}
+                            draftRequest={resendDraft?.scope === readingIdentity ? resendDraft : null}
                             onAnswer={answerQuestion}
                             onRefreshQuestion={() => { void detail.refetch(); }}
                             resultContext={resultDraft?.identity === resultIdentity ? resultDraft.context : null}
