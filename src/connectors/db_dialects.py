@@ -247,8 +247,18 @@ class PostgresqlDialect(DbDialect):
     def introspect(self, engine: Engine, schema: Optional[str] = None) -> SchemaInfo:
         insp = inspect(engine)
         sch = schema or "public"
+        with engine.connect() as conn:
+            readable = set(conn.execute(text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema=:schema AND table_type='BASE TABLE' "
+                "AND has_table_privilege("
+                "quote_ident(table_schema)||'.'||quote_ident(table_name), 'SELECT')"
+            ), {"schema": sch}).scalars())
         tables = []
         for tname in insp.get_table_names(schema=sch):
+            # 目录信息也属于来源边界；无 SELECT 权限的表名不能向用户泄漏。
+            if tname not in readable:
+                continue
             cols = insp.get_columns(tname, schema=sch)
             pk = list((insp.get_pk_constraint(tname, schema=sch) or {}).get("constrained_columns") or [])
             count = 0
@@ -403,6 +413,30 @@ def build_keyset_query(
 def classify_error(exc: Exception, dialect: str) -> str:
     """把驱动异常分类为 'fatal' 或 'retryable'。"""
     return get_dialect(dialect).classify_error(exc)
+
+
+def classify_source_error(exc: Exception, dialect: str) -> Optional[str]:
+    """只把驱动明确标识的鉴权/权限失败投影为公开错误码。"""
+    original = getattr(exc, "orig", exc)
+    if dialect == "mysql":
+        args = getattr(original, "args", ())
+        code = args[0] if args and isinstance(args[0], int) else None
+        if code == 1045:
+            return "authorization_expired"
+        if code in {1044, 1142, 1143, 1227}:
+            return "permission_denied"
+    elif dialect == "postgresql":
+        code = getattr(original, "pgcode", None)
+        if code in {"28000", "28P01"}:
+            return "authorization_expired"
+        if code == "42501":
+            return "permission_denied"
+        message = str(original).lower()
+        if "password authentication failed" in message:
+            return "authorization_expired"
+        if "permission denied" in message:
+            return "permission_denied"
+    return None
 
 
 def normalize_value(v: Any) -> Any:

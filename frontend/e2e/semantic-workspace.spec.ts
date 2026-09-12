@@ -6054,7 +6054,7 @@ test("#137 已删网页空快照保留整组，明确移除后才可换新资料
   const posts: Record<string, unknown>[] = [];
   await page.route("**/api/semantic-workspace/tasks/identity-task/revisions", route => { posts.push(route.request().postDataJSON()); return route.fulfill({ status: 503, json: { detail: "合成测试保留修订未知" } }); });
   await page.goto("/data-prep?task=identity-task");
-  await expect(page.getByText("网页来源组已清理：deleted-web-group", { exact: false })).toBeVisible();
+  await expect(page.getByText("来源组已清理：deleted-web-group", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "查看结果", exact: true }).click();
   await expect(page.getByText("A-V2-正文", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "编辑本次资料", exact: true }).click();
