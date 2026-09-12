@@ -17,6 +17,8 @@ import {
   Search,
   Share2,
   Sparkles,
+  ThumbsDown,
+  ThumbsUp,
   Trash2,
   X,
 } from "lucide-react";
@@ -35,7 +37,7 @@ import {
 import { SourcePreviewPanel, initialSourceView, type SourceViewState } from "@/components/workspace/SourcePreviewPanel";
 import { TaskDeletionDialog } from "@/components/workspace/TaskDeletionDialog";
 import { TaskTimeline } from "@/components/workspace/TaskTimeline";
-import { WorkspaceLifecycleActions } from "@/components/workspace/WorkspaceLifecycleActions";
+import { WorkspaceLifecycleActions, type FeedbackRequest } from "@/components/workspace/WorkspaceLifecycleActions";
 import { Markdown } from "@/components/Markdown";
 import { WorkspaceTaskSidebar } from "@/components/workspace/WorkspaceTaskSidebar";
 import {
@@ -138,11 +140,13 @@ function copyAnswerFallback(text: string) {
   }
 }
 
-function ConversationActions({ content, canRegenerate, regenerating, requiresExternalConfirmation, onRegenerate }: {
+function ConversationActions({ content, canFeedback, canRegenerate, regenerating, requiresExternalConfirmation, onFeedback, onRegenerate }: {
   content: string;
+  canFeedback: boolean;
   canRegenerate: boolean;
   regenerating: boolean;
   requiresExternalConfirmation: boolean;
+  onFeedback: (rating: "up" | "down") => void;
   onRegenerate: (externalApiConfirmed: boolean) => Promise<void>;
 }) {
   const shareAnswer = async () => {
@@ -158,6 +162,10 @@ function ConversationActions({ content, canRegenerate, regenerating, requiresExt
   };
   return <div className="mt-2 flex flex-wrap gap-1 text-xs text-muted-foreground" role="group" aria-label="回答操作">
     <button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => copyAnswer(content)}><Copy className="h-3.5 w-3.5" />复制</button>
+    {canFeedback && <>
+      <button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onFeedback("up")}><ThumbsUp className="h-3.5 w-3.5" />有帮助</button>
+      <button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onFeedback("down")}><ThumbsDown className="h-3.5 w-3.5" />需要改进</button>
+    </>}
     <AlertDialog.Root>
       <AlertDialog.Trigger asChild><button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"><Share2 className="h-3.5 w-3.5" />分享</button></AlertDialog.Trigger>
       <AlertDialog.Portal>
@@ -729,6 +737,8 @@ export function SemanticWorkspacePage() {
   const [followupBusy, setFollowupBusy] = useState(false);
   const [resendDraft, setResendDraft] = useState<{ scope: string; key: string; text: string } | null>(null);
   const [regeneratingMessageId, setRegeneratingMessageId] = useState<string | null>(null);
+  const feedbackRequestId = useRef(0);
+  const [feedbackRequest, setFeedbackRequest] = useState<FeedbackRequest | null>(null);
   const rerunFlight = useRef(false);
 
   const [liveFeed, setLiveFeed] = useState<{ identity: string; events: WorkspaceEvent[] }>({ identity: "", events: [] });
@@ -1520,7 +1530,7 @@ export function SemanticWorkspacePage() {
                             {accountResumeFeedback && <button type="button" className="ml-3 mt-3 underline" onClick={() => void detail.refetch()}>刷新任务状态</button>}
                           </section>
                         )}
-                        {user && <WorkspaceLifecycleActions key={`${user.user_id}:${task.task_id}:${task.viewing_revision ?? task.active_revision}`} ownerId={user.user_id} task={task} />}
+                        {user && <WorkspaceLifecycleActions feedbackRequest={feedbackRequest} key={`lifecycle:${user.user_id}:${task.task_id}:${task.viewing_revision ?? task.active_revision}`} ownerId={user.user_id} task={task} />}
                         <TaskTimeline
                           key={`${user?.user_id}:${task.task_id}:${task.active_revision}`}
                           task={task}
@@ -1750,9 +1760,11 @@ export function SemanticWorkspacePage() {
                               {answer && <AnswerReferences context={context && context.revision === (message?.revision ?? response?.revision) ? context : null} onViewSource={viewSource} />}
                               {answer && response && <ConversationActions
                                 content={answer}
+                                canFeedback={Boolean(task.delivery?.outputs.length) && viewingRevision === response.revision}
                                 canRegenerate={response.revision === (task.current_revision ?? task.active_revision) && viewingRevision === response.revision}
                                 regenerating={regeneratingMessageId === response.result_id}
                                 requiresExternalConfirmation={Boolean(task.model_connection_id || task.agentic_runtime?.model_connection_id || task.provider !== "local")}
+                                onFeedback={rating => setFeedbackRequest({id:++feedbackRequestId.current,taskId:task.task_id,revision:response.revision,rating})}
                                 onRegenerate={confirmed => regenerateMessage(response.result_id, response.revision, confirmed)}
                               />}
                             </article>;
@@ -1760,9 +1772,11 @@ export function SemanticWorkspacePage() {
                           {messages.filter(message => !conversation.data?.turns?.some(turn => turn.turn_id === message.turn_id)).map(message => (
                             <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown><AnswerReferences context={message.result_context?.revision === message.revision ? readPublicResultContext(message.result_context) : null} onViewSource={viewSource} /><ConversationActions
                               content={message.content}
+                              canFeedback={Boolean(task.delivery?.outputs.length) && viewingRevision === message.revision}
                               canRegenerate={message.revision === (task.current_revision ?? task.active_revision) && viewingRevision === message.revision}
                               regenerating={regeneratingMessageId === message.message_id}
                               requiresExternalConfirmation={Boolean(task.model_connection_id || task.agentic_runtime?.model_connection_id || task.provider !== "local")}
+                              onFeedback={rating => setFeedbackRequest({id:++feedbackRequestId.current,taskId:task.task_id,revision:message.revision,rating})}
                               onRegenerate={confirmed => regenerateMessage(message.message_id, message.revision, confirmed)}
                             /></article>
                           ))}

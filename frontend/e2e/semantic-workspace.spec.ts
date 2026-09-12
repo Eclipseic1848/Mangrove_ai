@@ -2859,14 +2859,28 @@ test.describe("统一数据工作台", () => {
       });
     });
     const task = { ...workspaceTask("task-message-actions", "completed", "消息操作检查"), model_connection_id: "connection-external" };
+    const delivery = {
+      delivery_id: "message-actions-delivery", run_id: "message-actions-run", plan_id: "message-actions-plan",
+      status: "published", requested_formats: ["xlsx"], created_at: task.created_at,
+      outputs: [{ output_id: "message-actions-output", format: "xlsx", filename: "消息操作.xlsx",
+        media_type: "application/octet-stream", sha256: "1".repeat(64), size_bytes: 64,
+        qa: { openable: true, checks: ["消息操作-QA"], warnings: [] },
+        download_url: "/api/semantic-delivery/outputs/message-actions-output" }],
+    };
     await page.route("**/api/semantic-workspace/tasks?*", route => route.fulfill({ json: [task] }));
-    await page.route("**/api/semantic-workspace/tasks/task-message-actions", route => route.fulfill({ json: workspaceDetail(task) }));
+    await page.route("**/api/semantic-workspace/tasks/task-message-actions", route => route.fulfill({ json: workspaceDetail(task, { delivery }) }));
     await page.route("**/api/semantic-workspace/tasks/task-message-actions/turns", route => route.fulfill({ json: {
       turns: [{ turn_id: "turn-actions", revision: 1, text: "把华东单独汇总" }],
       results: [{ result_id: "result-actions", task_id: task.task_id, turn_id: "turn-actions", delta_id: "delta-actions", action: "answer", acknowledgement: "已完成", answer: "华东合计 42", proposal_id: null, run_id: null, revision: 1 }],
       proposals: [],
     } }));
     const regenerated: Array<{ body: Record<string, unknown>; key: string | undefined }> = [];
+    const feedback: Array<{ body: Record<string, unknown>; key: string | undefined }> = [];
+    await page.route("**/api/semantic-workspace/tasks/task-message-actions/feedback*", route => {
+      if (route.request().method() === "GET") return route.fulfill({ json: { feedback: null, receipt: null } });
+      feedback.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] });
+      return route.fulfill({ json: { feedback_id: 1, version: 1 } });
+    });
     await page.route("**/api/semantic-workspace/tasks/task-message-actions/turns/result-actions/regenerate", route => {
       regenerated.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] });
       return regenerated.length === 1
@@ -2877,6 +2891,19 @@ test.describe("统一数据工作台", () => {
     await page.goto("/data-prep");
     await page.getByRole("button", { name: /消息操作检查/ }).click();
     await expect(page.getByLabel("Mangrove 回答")).toContainText("华东合计 42");
+
+    await expect(page.getByRole("button", { name: "有帮助" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "需要改进" })).toBeVisible();
+    await page.getByRole("button", { name: "需要改进" }).click();
+    const feedbackDialog = page.getByRole("dialog");
+    await expect(feedbackDialog.getByText("反馈当前版本的正式结果", { exact: true })).toBeVisible();
+    await expect(feedbackDialog.getByRole("combobox", { name: "评价", exact: true })).toHaveValue("down");
+    await expect(feedbackDialog.getByRole("button", { name: "提交反馈" })).toBeEnabled();
+    await feedbackDialog.getByRole("button", { name: "提交反馈" }).click();
+    await expect.poll(() => feedback.length).toBe(1);
+    expect(feedback[0]).toMatchObject({ body: { revision: 1, output_id: "message-actions-output", rating: "down", expected_version: 0 } });
+    expect(feedback[0].key).toBeTruthy();
+    await feedbackDialog.getByRole("button", { name: "返回任务" }).click();
 
     await page.getByRole("button", { name: "复制" }).click();
     await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("华东合计 42");

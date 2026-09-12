@@ -5,6 +5,7 @@ import { api, getSessionState, authenticatedFetch, readAuthenticatedJson } from 
 import type { WorkspaceTask } from "@/types/semanticWorkspace";
 
 type Pending = { key: string; payload: Record<string, unknown> };
+export type FeedbackRequest = { id: number; taskId: string; revision: number; rating: "up" | "down" };
 export type Draft = {repeatExternal?:boolean; name: string; frequency: string; time: string; hours: string; once: string; timezone: string; output: string; rating: string; comment: string; version: number };
 const button="rounded-lg border px-3 py-2 text-sm hover:bg-muted disabled:opacity-50";
 const field="mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm";
@@ -80,20 +81,25 @@ function initialDraft(task:Pick<WorkspaceTask,"title"|"delivery">):Draft {
   return {name:task.title,frequency:"daily",time:"09:00",hours:"24",once:"",timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,output:task.delivery?.outputs[0]?.output_id??"",rating:"up",comment:"",version:0};
 }
 
-export function WorkspaceLifecycleActions({task,ownerId}:{task:WorkspaceTask;ownerId:string}) {
+export function WorkspaceLifecycleActions({task,ownerId,feedbackRequest}:{task:WorkspaceTask;ownerId:string;feedbackRequest?:FeedbackRequest|null}) {
   const revision=task.viewing_revision??task.active_revision;
   return <div className="flex flex-wrap gap-2 py-2">
     <LifecycleDialog key={`plan:${task.task_id}:${revision}`} task={task} ownerId={ownerId} mode="plan" />
-    {Boolean(task.delivery?.outputs.length)&&<LifecycleDialog key={`feedback:${task.task_id}:${revision}`} task={task} ownerId={ownerId} mode="feedback" />}
+    {Boolean(task.delivery?.outputs.length)&&<LifecycleDialog key={`feedback:${task.task_id}:${revision}`} task={task} ownerId={ownerId} mode="feedback" feedbackRequest={feedbackRequest} />}
   </div>;
 }
 
-function LifecycleDialog({task,ownerId,mode}:{task:WorkspaceTask;ownerId:string;mode:"plan"|"feedback"}) {
+function LifecycleDialog({task,ownerId,mode,feedbackRequest}:{task:WorkspaceTask;ownerId:string;mode:"plan"|"feedback";feedbackRequest?:FeedbackRequest|null}) {
   const revision=task.viewing_revision??task.active_revision;
   const state=useLifecycleDraft(ownerId,`${mode}.${task.task_id}.${revision}`,initialDraft(task));
   const [open,setOpen]=useState(false),[abandon,setAbandon]=useState(false);
   const locked=state.busy||Boolean(state.pending)||state.obsolete;
   const draft=state.draft;
+  const handledFeedbackRequest=useRef(0);
+  useEffect(()=>{
+    if(mode!=="feedback"||!feedbackRequest||feedbackRequest.taskId!==task.task_id||feedbackRequest.revision!==revision||handledFeedbackRequest.current===feedbackRequest.id)return;
+    handledFeedbackRequest.current=feedbackRequest.id;state.change({rating:feedbackRequest.rating});setOpen(true);
+  },[mode,feedbackRequest]);
   const [feedback,setFeedback]=useState<{output:string;version:number;comment:string}|null>(null),[feedbackError,setFeedbackError]=useState(""),[reload,setReload]=useState(0);
   useEffect(()=>{
     if(!open||mode!=="feedback"||state.pending)return;
