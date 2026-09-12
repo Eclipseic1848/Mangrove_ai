@@ -32,6 +32,7 @@ import {
 import { SourcePreviewPanel, initialSourceView, type SourceViewState } from "@/components/workspace/SourcePreviewPanel";
 import { TaskDeletionDialog } from "@/components/workspace/TaskDeletionDialog";
 import { TaskTimeline } from "@/components/workspace/TaskTimeline";
+import { WorkspaceLifecycleActions } from "@/components/workspace/WorkspaceLifecycleActions";
 import { Markdown } from "@/components/Markdown";
 import { WorkspaceTaskSidebar } from "@/components/workspace/WorkspaceTaskSidebar";
 import {
@@ -1357,6 +1358,7 @@ export function SemanticWorkspacePage() {
                             {accountResumeFeedback && <button type="button" className="ml-3 mt-3 underline" onClick={() => void detail.refetch()}>刷新任务状态</button>}
                           </section>
                         )}
+                        {user && <WorkspaceLifecycleActions key={`${user.user_id}:${task.task_id}:${task.viewing_revision ?? task.active_revision}`} ownerId={user.user_id} task={task} />}
                         <TaskTimeline
                           task={task}
                           connectionLabel={modelConnections.data?.items.find(connection => connection.connection_id === (task.agentic_runtime?.model_connection_id ?? task.model_connection_id))?.display_name}

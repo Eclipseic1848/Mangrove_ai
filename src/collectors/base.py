@@ -49,6 +49,7 @@ class CollectResult:
     items: List[CollectedItem] = field(default_factory=list)
     message: str = ""
     failure_kind: CollectFailureKind | None = None
+    credential_key: str | None = None
 
     @property
     def has_data(self) -> bool:

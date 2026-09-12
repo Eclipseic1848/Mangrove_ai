@@ -120,6 +120,25 @@ def test_secret_config_update_atomically_replaces_old_ciphertext(
     assert "second-secret" not in rows[0][1]
 
 
+def test_secret_config_same_value_keeps_identity(tmp_path: Path) -> None:
+    store, database = _store(tmp_path)
+    store.config_set("user-a", "mc_cookie_xhs", "synthetic-same-cookie", "user-a")
+    before = store.config_identity("user-a", "mc_cookie_xhs")
+    with sqlite3.connect(database) as connection:
+        before_ref = connection.execute(
+            "SELECT value FROM runtime_config WHERE scope='user-a' AND key='mc_cookie_xhs'"
+        ).fetchone()[0]
+
+    store.config_set("user-a", "mc_cookie_xhs", "synthetic-same-cookie", "user-a")
+
+    with sqlite3.connect(database) as connection:
+        after_ref = connection.execute(
+            "SELECT value FROM runtime_config WHERE scope='user-a' AND key='mc_cookie_xhs'"
+        ).fetchone()[0]
+    assert after_ref == before_ref
+    assert store.config_identity_matches("user-a", "mc_cookie_xhs", before)
+
+
 def test_secret_config_update_rejects_old_ref_owned_by_another_scope(
     tmp_path: Path,
 ) -> None:
@@ -370,7 +389,7 @@ def test_webui_0004_migrates_legacy_plaintext_and_backup_has_no_plaintext(
     backup = tmp_path / "webui-after-secretref.db"
     shutil.copy2(database, backup)
     # 先冻结 webui_0004 专属备份，再升到当前头供 Repository 失败关闭门使用。
-    _upgrade(database, "webui_0019")
+    _upgrade(database, "webui_0020")
 
     store = WebUIStore(str(database))
     assert store.config_all("global")["smtp_password"] == "legacy-smtp-secret-4400"
@@ -393,7 +412,7 @@ def test_webui_0004_migrates_legacy_plaintext_and_backup_has_no_plaintext(
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("webui_0019",)
+        ).fetchone() == ("webui_0020",)
         values = {
             row[0]
             for row in connection.execute(
@@ -692,6 +711,42 @@ def test_social_login_failure_caused_by_environment_remains_unknown(
 
     assert "登录已过期" not in detail
     assert failure_kind.value == expected
+
+
+def test_mediacrawler_auth_failure_carries_owner_cookie_identity_without_plaintext(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from src.collectors.social_media_collector import SocialMediaCollector
+    from src.conductor.task_spec import TaskSpec
+    from src.config.user_ctx import user_overrides_context
+
+    class FailedProcess:
+        returncode = 1
+
+        async def communicate(self):
+            return b"Login state result: False", b""
+
+    observed = []
+
+    async def create_process(*args, **kwargs):
+        observed.append((args, kwargs))
+        return FailedProcess()
+
+    monkeypatch.setattr(settings, "mediacrawler_path", str(tmp_path))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    with user_overrides_context({"mc_cookie_xhs": "synthetic-owner-cookie"}):
+        result = asyncio.run(SocialMediaCollector().collect(TaskSpec(
+            intent="读取本人授权的小红书数据",
+            platforms=["小红书"],
+            keywords=["合成测试"],
+            max_items=1,
+        )))
+
+    assert "synthetic-owner-cookie" in observed[0][0]
+    assert result.failure_kind.value == "auth_invalid"
+    assert result.credential_key == "mc_cookie_xhs"
+    assert "synthetic-owner-cookie" not in repr(result)
 
 
 def test_global_cookie_change_invalidates_previous_health(

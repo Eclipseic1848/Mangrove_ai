@@ -2079,6 +2079,33 @@ def resolve_reusable_sources(payload: ReusableSourceSelection, user=Depends(get_
     return {"items": resolve_choices(user["user_id"], payload.upload_ids, payload.source_snapshot_ids, payload.delivery_output_ids)}
 
 
+class WorkspaceFeedbackIn(BaseModel):
+    model_config=ConfigDict(extra="forbid")
+    revision:int=Field(ge=1)
+    output_id:str=Field(min_length=1,max_length=200)
+    rating:Literal["up","down"]
+    reasons:list[str]=Field(default_factory=list,max_length=7)
+    comment:str=Field(default="",max_length=10000)
+    expected_version:int=Field(ge=0)
+
+@router.post("/tasks/{task_id}/feedback")
+def submit_workspace_feedback(task_id:str,payload:WorkspaceFeedbackIn,idempotency_key:str=Header(alias="Idempotency-Key"),user=Depends(get_execution_user)):
+    from src.api.workspace_feedback import record_rejection,submit_feedback
+    store=get_store()
+    try:return submit_feedback(store,user,task_id,payload,idempotency_key)
+    except HTTPException as exc:
+        if record_rejection(store,user,task_id,payload,idempotency_key,exc.status_code):
+            exc.headers={**(exc.headers or {}),"X-Mangrove-Lifecycle-Outcome":"rejected"}
+        raise
+
+@router.get("/tasks/{task_id}/feedback")
+def read_workspace_feedback(task_id:str,revision:int,output_id:str,idempotency_key:str|None=None,user=Depends(get_current_user)):
+    _task_or_404(user["user_id"],task_id)
+    from src.api.workspace_feedback import get_feedback,get_receipt
+    result={"feedback":get_feedback(get_store(),user["user_id"],task_id,revision,output_id)}
+    if idempotency_key is not None:result['receipt']=get_receipt(get_store(),user['user_id'],task_id,revision,output_id,idempotency_key)
+    return result
+
 @router.post("/tasks", status_code=status.HTTP_202_ACCEPTED, openapi_extra={"x-mangrove-task-control": True})
 async def create_task(
     payload: WorkspaceTaskCreateIn,
@@ -2104,7 +2131,7 @@ async def create_task(
         raise
 
 
-async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *, mark_claim_started):
+async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *, mark_claim_started, frozen_config_guard=None):
     user_id = user["user_id"]
     user_objective = payload.objective_text
     idempotency_payload = payload.model_dump(
@@ -2354,6 +2381,8 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
             or set(payload.capability_need.output_formats) != actual_outputs):
             raise HTTPException(409, "工具匹配与当前文件或输出格式不一致，请重新匹配；网页来源尚无可复用格式合同")
     source_refs, source_snapshots = _resolve_mixed_sources(user_id, payload.upload_ids, payload.source_snapshot_ids or (), payload.delivery_output_ids)
+    if frozen_config_guard is not None:
+        frozen_config_guard(payload,source_refs,connection_binding)
     source_snapshot = source_snapshots[0] if source_snapshots else None
     for source_snapshot_item in source_snapshots:
         if (
@@ -2629,6 +2658,13 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
         _freeze_goal_contract(payload, objective=user_objective, source_snapshot={"allowed_scope": {"groups": [item["allowed_scope"] for item in source_snapshots]}}) if source_snapshots else None,
         source_snapshots,
     )
+    if frozen_config_guard is not None:
+        frozen_base_hook=transaction_hook
+        def bind_frozen_schedule(connection):
+            if frozen_base_hook is not None:frozen_base_hook(connection)
+            # 调度冻结配置在创建提交前再次核对，不拿后来的默认模型补旧授权。
+            frozen_config_guard(payload,source_refs,connection_binding)
+        transaction_hook=bind_frozen_schedule
     first_line = payload.objective_text.splitlines()[0].strip()
     title = first_line[:40] + ("…" if len(first_line) > 40 else "")
     store = get_store()
