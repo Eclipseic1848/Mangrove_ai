@@ -180,6 +180,42 @@ def test_running_followup_uses_turn_api_without_creating_revision(
         assert result["run_id"] == "run-existing"
         assert result["revision"] == 1
 
+        feedback = client.post(
+            "/api/semantic-workspace/tasks/workspace-1/feedback",
+            headers={"Idempotency-Key": "message-feedback-1"},
+            json={
+                "revision": 1,
+                "result_id": result["result_id"],
+                "rating": "up",
+                "reasons": [],
+                "comment": "回答清楚",
+                "expected_version": 0,
+            },
+        )
+        assert feedback.status_code == 200, feedback.text
+        assert feedback.json()["result_id"] == result["result_id"]
+        assert feedback.json()["turn_id"] == result["turn_id"]
+        assert feedback.json()["run_id"] == "run-existing"
+        restored = client.get(
+            "/api/semantic-workspace/tasks/workspace-1/feedback",
+            params={"revision": 1, "result_id": result["result_id"]},
+        )
+        assert restored.status_code == 200, restored.text
+        assert restored.json()["feedback"]["comment"] == "回答清楚"
+        with store._conn() as connection:
+            saved = connection.execute(
+                "SELECT id,target_kind,result_id,turn_id,run_id FROM workspace_feedback"
+            ).fetchone()
+            assert tuple(saved)[1:] == (
+                "message", result["result_id"], result["turn_id"], "run-existing",
+            )
+            from src.api.feedback_audit import feedback_content
+            _, audited = feedback_content(connection, -saved["id"])
+        assert audited["answer_kind"] == "message"
+        assert audited["content"]["question"] == "现在做到哪了？"
+        assert audited["content"]["answer"] == "当前状态是 running，任务不会重启。"
+        assert audited["source"]["result_id"] == result["result_id"]
+
         detail = client.get(
             "/api/semantic-workspace/tasks/workspace-1"
         ).json()
@@ -194,6 +230,10 @@ def test_running_followup_uses_turn_api_without_creating_revision(
         assert client.post(
             "/api/semantic-workspace/tasks/workspace-1/turns",
             json={"text": "进度？"},
+        ).status_code == 404
+        assert client.get(
+            "/api/semantic-workspace/tasks/workspace-1/feedback",
+            params={"revision": 1, "result_id": result["result_id"]},
         ).status_code == 404
 
 

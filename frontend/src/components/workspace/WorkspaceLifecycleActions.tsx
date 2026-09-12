@@ -5,8 +5,8 @@ import { api, getSessionState, authenticatedFetch, readAuthenticatedJson } from 
 import type { WorkspaceTask } from "@/types/semanticWorkspace";
 
 type Pending = { key: string; payload: Record<string, unknown> };
-export type FeedbackRequest = { id: number; taskId: string; revision: number; rating: "up" | "down" };
-export type Draft = {repeatExternal?:boolean; name: string; frequency: string; time: string; hours: string; once: string; timezone: string; output: string; rating: string; comment: string; version: number };
+export type FeedbackRequest = { id: number; taskId: string; revision: number; resultId: string; rating: "up" | "down" };
+export type Draft = {repeatExternal?:boolean; name: string; frequency: string; time: string; hours: string; once: string; timezone: string; output: string; result: string; rating: string; comment: string; version: number };
 const button="rounded-lg border px-3 py-2 text-sm hover:bg-muted disabled:opacity-50";
 const field="mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm";
 
@@ -78,18 +78,18 @@ function validPlanDraft(draft:Draft) {
 }
 
 function initialDraft(task:Pick<WorkspaceTask,"title"|"delivery">):Draft {
-  return {name:task.title,frequency:"daily",time:"09:00",hours:"24",once:"",timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,output:task.delivery?.outputs[0]?.output_id??"",rating:"up",comment:"",version:0};
+  return {name:task.title,frequency:"daily",time:"09:00",hours:"24",once:"",timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,output:task.delivery?.outputs[0]?.output_id??"",result:"",rating:"up",comment:"",version:0};
 }
 
 export function WorkspaceLifecycleActions({task,ownerId,feedbackRequest}:{task:WorkspaceTask;ownerId:string;feedbackRequest?:FeedbackRequest|null}) {
   const revision=task.viewing_revision??task.active_revision;
   return <div className="flex flex-wrap gap-2 py-2">
     <LifecycleDialog key={`plan:${task.task_id}:${revision}`} task={task} ownerId={ownerId} mode="plan" />
-    {Boolean(task.delivery?.outputs.length)&&<LifecycleDialog key={`feedback:${task.task_id}:${revision}`} task={task} ownerId={ownerId} mode="feedback" feedbackRequest={feedbackRequest} />}
+    <LifecycleDialog key={`feedback:${task.task_id}:${revision}`} task={task} ownerId={ownerId} mode="feedback" feedbackRequest={feedbackRequest} showTrigger={Boolean(task.delivery?.outputs.length)} />
   </div>;
 }
 
-function LifecycleDialog({task,ownerId,mode,feedbackRequest}:{task:WorkspaceTask;ownerId:string;mode:"plan"|"feedback";feedbackRequest?:FeedbackRequest|null}) {
+function LifecycleDialog({task,ownerId,mode,feedbackRequest,showTrigger=true}:{task:WorkspaceTask;ownerId:string;mode:"plan"|"feedback";feedbackRequest?:FeedbackRequest|null;showTrigger?:boolean}) {
   const revision=task.viewing_revision??task.active_revision;
   const state=useLifecycleDraft(ownerId,`${mode}.${task.task_id}.${revision}`,initialDraft(task));
   const [open,setOpen]=useState(false),[abandon,setAbandon]=useState(false);
@@ -98,20 +98,22 @@ function LifecycleDialog({task,ownerId,mode,feedbackRequest}:{task:WorkspaceTask
   const handledFeedbackRequest=useRef(0);
   useEffect(()=>{
     if(mode!=="feedback"||!feedbackRequest||feedbackRequest.taskId!==task.task_id||feedbackRequest.revision!==revision||handledFeedbackRequest.current===feedbackRequest.id)return;
-    handledFeedbackRequest.current=feedbackRequest.id;state.change({rating:feedbackRequest.rating});setOpen(true);
+    handledFeedbackRequest.current=feedbackRequest.id;state.change({result:feedbackRequest.resultId,output:"",rating:feedbackRequest.rating,version:0});setOpen(true);
   },[mode,feedbackRequest]);
-  const [feedback,setFeedback]=useState<{output:string;version:number;comment:string}|null>(null),[feedbackError,setFeedbackError]=useState(""),[reload,setReload]=useState(0);
+  const feedbackTarget=draft.result||draft.output;
+  const feedbackParam=draft.result?"result_id":"output_id";
+  const [feedback,setFeedback]=useState<{target:string;version:number;comment:string}|null>(null),[feedbackError,setFeedbackError]=useState(""),[reload,setReload]=useState(0);
   useEffect(()=>{
-    if(!open||mode!=="feedback"||state.pending)return;
+    if(!open||mode!=="feedback"||state.pending||!feedbackTarget)return;
     let active=true;setFeedback(null);setFeedbackError("");
-    api.get(`/api/semantic-workspace/tasks/${encodeURIComponent(task.task_id)}/feedback?revision=${revision}&output_id=${encodeURIComponent(draft.output)}`).then(data=>{
-      if(active&&getSessionState().user?.user_id===ownerId)setFeedback({output:draft.output,version:data.feedback?.version??0,comment:data.feedback?.comment??""});
+    api.get(`/api/semantic-workspace/tasks/${encodeURIComponent(task.task_id)}/feedback?revision=${revision}&${feedbackParam}=${encodeURIComponent(feedbackTarget)}`).then(data=>{
+      if(active&&getSessionState().user?.user_id===ownerId)setFeedback({target:feedbackTarget,version:data.feedback?.version??0,comment:data.feedback?.comment??""});
     }).catch(()=>{if(active)setFeedbackError("当前反馈读取失败，请重试读取；草稿仍保留。");});
     return()=>{active=false;};
-  },[open,mode,draft.output,Boolean(state.pending),reload]);
-  const feedbackReady=feedback?.output===draft.output;
+  },[open,mode,feedbackTarget,feedbackParam,Boolean(state.pending),reload]);
+  const feedbackReady=feedback?.target===feedbackTarget;
   function payload() {
-    if(mode==="feedback")return {revision,output_id:draft.output,rating:draft.rating,reasons:[],comment:draft.comment,expected_version:feedback?.version??draft.version};
+    if(mode==="feedback")return {revision,[feedbackParam]:feedbackTarget,rating:draft.rating,reasons:[],comment:draft.comment,expected_version:feedback?.version??draft.version};
     const [hour,minute]=draft.time.split(":").map(Number);
     const trigger=draft.frequency==="daily"?{type:"cron",cron_expr:`${minute} ${hour} * * *`}:draft.frequency==="interval"?{type:"interval",interval_seconds:Number(draft.hours)*3600}:{type:"once",run_at:draft.once};
     return {task_id:task.task_id,revision,name:draft.name,trigger,timezone:draft.timezone,repeat_external_confirmed:Boolean(draft.repeatExternal)};
@@ -123,18 +125,20 @@ function LifecycleDialog({task,ownerId,mode,feedbackRequest}:{task:WorkspaceTask
         if(data.workspace?.source_task_id!==task.task_id||data.workspace?.source_revision!==revision)throw new Error("原计划身份不匹配");
         return {data,done:true};
       }
-      const response=await api.get(`/api/semantic-workspace/tasks/${encodeURIComponent(task.task_id)}/feedback?revision=${revision}&output_id=${encodeURIComponent(String(pending.payload.output_id))}&idempotency_key=${encodeURIComponent(pending.key)}`);
+      const targetParam=pending.payload.result_id?"result_id":"output_id";
+      const target=pending.payload[targetParam];
+      const response=await api.get(`/api/semantic-workspace/tasks/${encodeURIComponent(task.task_id)}/feedback?revision=${revision}&${targetParam}=${encodeURIComponent(String(target))}&idempotency_key=${encodeURIComponent(pending.key)}`);
       const original=response.receipt??response.feedback;
       if(original?.request_key!==pending.key)throw new Error("尚未确认原反馈版本");
-      if(response.receipt&&(original.task_id!==task.task_id||original.revision!==revision||original.output_id!==pending.payload.output_id))throw new Error("原反馈收据身份不匹配");
+      if(response.receipt&&(original.task_id!==task.task_id||original.revision!==revision||original[targetParam]!==target))throw new Error("原反馈收据身份不匹配");
       if(response.receipt&&original.result==="rejected")throw Object.assign(new Error("原反馈请求已明确拒绝，可修改后重试。"),{rejected:true});
       if(response.receipt&&original.result!=="saved")throw new Error("原反馈收据状态未知");
       return {data:original,done:true};
     });
   }
   return <>
-    <button type="button" className={button} onClick={()=>setOpen(true)} disabled={mode==="plan"&&revision!==task.active_revision}>{mode==="plan"?"设为自动任务":"反馈正式结果"}</button>
-    <Modal open={open} onClose={()=>setOpen(false)} title={mode==="plan"?"创建自动任务":"反馈当前版本的正式结果"}>
+    {(mode==="plan"||showTrigger)&&<button type="button" className={button} onClick={()=>{if(mode==="feedback")state.change({result:"",output:task.delivery?.outputs[0]?.output_id??"",version:0});setOpen(true);}} disabled={mode==="plan"&&revision!==task.active_revision}>{mode==="plan"?"设为自动任务":"反馈正式结果"}</button>}
+    <Modal open={open} onClose={()=>setOpen(false)} title={mode==="plan"?"创建自动任务":draft.result?"反馈当前回答":"反馈当前版本的正式结果"}>
       <div onKeyDownCapture={event=>{if(event.key==="Escape"&&event.nativeEvent.isComposing)event.stopPropagation();}}>
       <p className="mb-3 text-sm text-foreground">{task.title} · V{revision}。关闭面板会保留本机草稿和待确认请求。</p>
       {mode==="plan"?<div className="space-y-3">
@@ -152,10 +156,10 @@ function LifecycleDialog({task,ownerId,mode,feedbackRequest}:{task:WorkspaceTask
         {state.result?.receipt_only&&<p>原请求已保存为反馈 V{state.result.version}；当前反馈可能已有更新。</p>}
         {feedback?.comment&&<p className="whitespace-pre-wrap break-words text-sm">已保存说明：{feedback.comment}</p>}
         {feedbackError&&<p role="alert">{feedbackError}<button className={button} onClick={()=>setReload(value=>value+1)}>重新读取反馈</button></p>}
-        <label className="block text-sm">评价哪个正式文件<select className={field} value={draft.output} disabled={locked} onChange={event=>state.change({output:event.target.value,version:0})}>{task.delivery?.outputs.map(output=><option key={output.output_id} value={output.output_id}>{output.filename}</option>)}</select></label>
+        {draft.result?<p className="text-sm">评价当前回答</p>:<label className="block text-sm">评价哪个正式文件<select className={field} value={draft.output} disabled={locked} onChange={event=>state.change({output:event.target.value,result:"",version:0})}>{task.delivery?.outputs.map(output=><option key={output.output_id} value={output.output_id}>{output.filename}</option>)}</select></label>}
         <label className="block text-sm">评价<select className={field} value={draft.rating} disabled={locked} onChange={event=>state.change({rating:event.target.value})}><option value="up">有帮助</option><option value="down">需要改进</option></select></label>
         <label className="block text-sm">补充说明<textarea className={field} maxLength={10000} value={draft.comment} disabled={locked} onChange={event=>state.change({comment:event.target.value})}/></label>
-        <p className="text-xs text-muted-foreground">反馈绑定此任务版本和正式文件。管理员默认只看管理信息；查看问题、版本回答摘要和说明需填写原因并留审计记录。</p>
+        <p className="text-xs text-muted-foreground">反馈绑定此任务版本和{draft.result?"当前回答":"正式文件"}。管理员默认只看管理信息；查看问题、回答和说明需填写原因并留审计记录。</p>
       </div>}
       {mode==="feedback"&&state.pending&&<div className="mt-3 space-y-2">
         {abandon?<><p>原反馈可能已保存，此操作不会撤销服务端反馈。只放弃本机等待，之后先读取当前版本；不会重发原请求。</p><button type="button" className={button} autoFocus onClick={()=>setAbandon(false)}>保留原请求继续等待</button><button type="button" className={button} disabled={state.busy||state.obsolete} onClick={()=>{state.abandon();setAbandon(false);setReload(value=>value+1);}}>明确放弃本地等待</button></>:<button type="button" className={button} disabled={state.busy||state.obsolete} onClick={()=>setAbandon(true)}>放弃本地待确认</button>}
@@ -165,7 +169,7 @@ function LifecycleDialog({task,ownerId,mode,feedbackRequest}:{task:WorkspaceTask
       <div className="mt-4 flex flex-wrap gap-2">
         <button type="button" className={button} onClick={()=>setOpen(false)}>返回任务</button>
         {mode==="feedback"&&state.result&&!state.pending&&<button type="button" className={button} onClick={()=>{state.editAgain();setReload(value=>value+1);}}>修改反馈</button>}
-        {state.pending?<button type="button" className={button} disabled={state.busy||state.obsolete} onClick={()=>void query()}>查询原请求</button>:!state.result&&<button type="button" className={button} disabled={locked||(mode==="plan"&&!validPlanDraft(draft))||(mode==="plan"&&task.external_api_confirmed&&!draft.repeatExternal)||!draft.name.trim()||(mode==="feedback"&&(!draft.output||!feedbackReady))||(mode==="plan"&&draft.frequency==="once"&&!draft.once)} onClick={()=>void state.send(mode==="plan"?"/api/tasks/from-workspace":`/api/semantic-workspace/tasks/${encodeURIComponent(task.task_id)}/feedback`,payload())}>{mode==="plan"?"确认创建计划":"提交反馈"}</button>}
+        {state.pending?<button type="button" className={button} disabled={state.busy||state.obsolete} onClick={()=>void query()}>查询原请求</button>:!state.result&&<button type="button" className={button} disabled={locked||(mode==="plan"&&!validPlanDraft(draft))||(mode==="plan"&&task.external_api_confirmed&&!draft.repeatExternal)||!draft.name.trim()||(mode==="feedback"&&(!feedbackTarget||!feedbackReady))||(mode==="plan"&&draft.frequency==="once"&&!draft.once)} onClick={()=>void state.send(mode==="plan"?"/api/tasks/from-workspace":`/api/semantic-workspace/tasks/${encodeURIComponent(task.task_id)}/feedback`,payload())}>{mode==="plan"?"确认创建计划":"提交反馈"}</button>}
       </div>
       </div>
     </Modal>

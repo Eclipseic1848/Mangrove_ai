@@ -2091,11 +2091,18 @@ def resolve_reusable_sources(payload: ReusableSourceSelection, user=Depends(get_
 class WorkspaceFeedbackIn(BaseModel):
     model_config=ConfigDict(extra="forbid")
     revision:int=Field(ge=1)
-    output_id:str=Field(min_length=1,max_length=200)
+    output_id:str|None=Field(default=None,min_length=1,max_length=200)
+    result_id:str|None=Field(default=None,min_length=1,max_length=200)
     rating:Literal["up","down"]
     reasons:list[str]=Field(default_factory=list,max_length=7)
     comment:str=Field(default="",max_length=10000)
     expected_version:int=Field(ge=0)
+
+    @model_validator(mode="after")
+    def one_feedback_target(self):
+        if (self.output_id is None)==(self.result_id is None):
+            raise ValueError("反馈必须且只能绑定一个正式结果或回答")
+        return self
 
 @router.post("/tasks/{task_id}/feedback")
 def submit_workspace_feedback(task_id:str,payload:WorkspaceFeedbackIn,idempotency_key:str=Header(alias="Idempotency-Key"),user=Depends(get_execution_user)):
@@ -2108,11 +2115,12 @@ def submit_workspace_feedback(task_id:str,payload:WorkspaceFeedbackIn,idempotenc
         raise
 
 @router.get("/tasks/{task_id}/feedback")
-def read_workspace_feedback(task_id:str,revision:int,output_id:str,idempotency_key:str|None=None,user=Depends(get_current_user)):
+def read_workspace_feedback(task_id:str,revision:int,output_id:str|None=None,result_id:str|None=None,idempotency_key:str|None=None,user=Depends(get_current_user)):
     _task_or_404(user["user_id"],task_id)
+    if (output_id is None)==(result_id is None):raise HTTPException(422,"反馈必须且只能绑定一个正式结果或回答")
     from src.api.workspace_feedback import get_feedback,get_receipt
-    result={"feedback":get_feedback(get_store(),user["user_id"],task_id,revision,output_id)}
-    if idempotency_key is not None:result['receipt']=get_receipt(get_store(),user['user_id'],task_id,revision,output_id,idempotency_key)
+    result={"feedback":get_feedback(get_store(),user["user_id"],task_id,revision,output_id=output_id,result_id=result_id)}
+    if idempotency_key is not None:result['receipt']=get_receipt(get_store(),user['user_id'],task_id,revision,output_id=output_id,result_id=result_id,key=idempotency_key)
     return result
 
 @router.post("/tasks", status_code=status.HTTP_202_ACCEPTED, openapi_extra={"x-mangrove-task-control": True})

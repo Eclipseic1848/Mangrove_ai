@@ -21,7 +21,8 @@ interface Overview {
 
 interface FeedbackItem {
   source_kind?: "message" | "workspace";
-  task_id?: string; revision?: number; output_id?: string; output_sha256?: string;
+  task_id?: string; revision?: number; target_kind?: "output" | "message"; output_id?: string; output_sha256?: string;
+  result_id?: string; turn_id?: string; run_id?: string | null;
   id: number;
   rating: "up" | "down";
   user_id: string;
@@ -36,7 +37,7 @@ interface FeedbackItem {
 }
 
 interface AuditContent {
-  answer_kind?: "revision_summary";
+  answer_kind?: "revision_summary" | "message";
   event_id: string;
   content: { question: string | null; answer: string | null; comment: string | null; admin_note: string | null };
   truncated: boolean;
@@ -391,7 +392,7 @@ function FeedbackPage({ actorId, actorRole }: { actorId: string; actorRole: stri
                       )}
                       <span className="text-muted-foreground">{it.created_at}</span>
                       <span className="text-muted-foreground" title={userLabel(it)}>{userLabel(it)}</span>
-                      {it.source_kind === "workspace" && <span className="break-all text-xs">工作台 · {it.task_id} · V{it.revision} · 正式结果 {it.output_id}</span>}
+                      {it.source_kind === "workspace" && <span className="break-all text-xs">工作台 · {it.task_id} · V{it.revision} · {it.target_kind === "message" ? `回答 ${it.result_id}` : `正式结果 ${it.output_id}`}</span>}
                       <Badge variant={sm.variant} className="text-[11px]">{sm.label}</Badge>
                       {it.reasons.map((r) => (
                         <Badge key={r} variant="warning" className="text-[11px]">{r}</Badge>

@@ -1760,11 +1760,11 @@ export function SemanticWorkspacePage() {
                               {answer && <AnswerReferences context={context && context.revision === (message?.revision ?? response?.revision) ? context : null} onViewSource={viewSource} />}
                               {answer && response && <ConversationActions
                                 content={answer}
-                                canFeedback={Boolean(task.delivery?.outputs.length) && viewingRevision === response.revision}
+                                canFeedback={viewingRevision === response.revision}
                                 canRegenerate={response.revision === (task.current_revision ?? task.active_revision) && viewingRevision === response.revision}
                                 regenerating={regeneratingMessageId === response.result_id}
                                 requiresExternalConfirmation={Boolean(task.model_connection_id || task.agentic_runtime?.model_connection_id || task.provider !== "local")}
-                                onFeedback={rating => setFeedbackRequest({id:++feedbackRequestId.current,taskId:task.task_id,revision:response.revision,rating})}
+                                onFeedback={rating => setFeedbackRequest({id:++feedbackRequestId.current,taskId:task.task_id,revision:response.revision,resultId:response.result_id,rating})}
                                 onRegenerate={confirmed => regenerateMessage(response.result_id, response.revision, confirmed)}
                               />}
                             </article>;
@@ -1772,11 +1772,11 @@ export function SemanticWorkspacePage() {
                           {messages.filter(message => !conversation.data?.turns?.some(turn => turn.turn_id === message.turn_id)).map(message => (
                             <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown><AnswerReferences context={message.result_context?.revision === message.revision ? readPublicResultContext(message.result_context) : null} onViewSource={viewSource} /><ConversationActions
                               content={message.content}
-                              canFeedback={Boolean(task.delivery?.outputs.length) && viewingRevision === message.revision}
+                              canFeedback={viewingRevision === message.revision}
                               canRegenerate={message.revision === (task.current_revision ?? task.active_revision) && viewingRevision === message.revision}
                               regenerating={regeneratingMessageId === message.message_id}
                               requiresExternalConfirmation={Boolean(task.model_connection_id || task.agentic_runtime?.model_connection_id || task.provider !== "local")}
-                              onFeedback={rating => setFeedbackRequest({id:++feedbackRequestId.current,taskId:task.task_id,revision:message.revision,rating})}
+                              onFeedback={rating => setFeedbackRequest({id:++feedbackRequestId.current,taskId:task.task_id,revision:message.revision,resultId:message.message_id,rating})}
                               onRegenerate={confirmed => regenerateMessage(message.message_id, message.revision, confirmed)}
                             /></article>
                           ))}
