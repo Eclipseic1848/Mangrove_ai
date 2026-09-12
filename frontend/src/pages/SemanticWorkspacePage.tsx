@@ -243,8 +243,14 @@ function FollowupComposer({
   }, [task.task_id]);
   useEffect(() => {
     if (!draftRequest) return;
+    if (text.trim()) {
+      toast.info("输入框已有未发送内容；请先发送或清空，再编辑历史消息");
+      requestAnimationFrame(() => inputRef.current?.focus());
+      return;
+    }
     setAnswerMode(null);
     setText(draftRequest.text);
+    onClearResultContext();
     requestAnimationFrame(() => inputRef.current?.focus());
   }, [draftRequest]);
   useEffect(() => { latestIdentity.current = currentIdentity; return () => { latestIdentity.current = null; }; }, []);
@@ -1684,7 +1690,7 @@ export function SemanticWorkspacePage() {
                             const clarification = task.clarification_history?.find(entry => entry.turn_id === turn.turn_id);
                             return <article key={turn.turn_id} className="space-y-2 border-b pb-4 text-sm leading-7">
                               {clarification && <p className="text-muted-foreground">{clarification.question.prompt}</p>}
-                              <div className="flex items-start gap-2"><p className="min-w-0 flex-1 whitespace-pre-wrap font-medium">{turn.text}</p><button type="button" disabled={followupBusy} className="inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50" onClick={() => { setResultDraft(null); setResendDraft({ scope: readingIdentity, key: nanoid(), text: turn.text }); }}><Pencil className="h-3.5 w-3.5" />编辑为新消息</button></div>
+                              <div className="flex items-start gap-2"><p className="min-w-0 flex-1 whitespace-pre-wrap font-medium">{turn.text}</p><button type="button" disabled={followupBusy} className="inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50" onClick={() => setResendDraft({ scope: readingIdentity, key: nanoid(), text: turn.text })}><Pencil className="h-3.5 w-3.5" />编辑为新消息</button></div>
                               {response && <p className="text-muted-foreground">{response.acknowledgement}</p>}
                               {answer && <div aria-label="Mangrove 回答"><Markdown safeResources>{answer}</Markdown></div>}
                               {answer && <AnswerReferences context={context && context.revision === (message?.revision ?? response?.revision) ? context : null} onViewSource={viewSource} />}

@@ -53,13 +53,16 @@ test("N2 设置窄屏导航约束焦点且Escape返回触发按钮", async ({ pa
   await page.keyboard.press("Escape"); await expect(drawer).toHaveCount(0); await expect(trigger).toBeFocused();
 });
 
-test("N3 从原任务经设置到管理后按精确任务修订返回", async ({ page }) => {
+test("N3 所有辅助页都按精确任务修订返回", async ({ page }) => {
   await mockPages(page); await page.setViewportSize({ width: 1440, height: 900 }); await page.goto("/data-prep?task=synthetic-task&revision=3&unrelated=excluded");
-  await page.getByRole("button", { name: "打开导航", exact: true }).click(); await page.getByRole("link", { name: "设置", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "设置", exact: true })).toBeVisible();
-  await page.getByRole("link", { name: "用户管理", exact: true }).click();
-  await page.getByRole("link", { name: "返回原任务", exact: true }).click();
-  await expect(page).toHaveURL(/\/data-prep\?task=synthetic-task&revision=3$/);
+  for (const label of ["设置", "用户管理", "自动化任务", "模板库", "记忆", "反馈管理"]) {
+    await page.getByRole("button", { name: "打开导航", exact: true }).click();
+    await page.getByRole("dialog", { name: "全局导航" }).getByRole("link", { name: label, exact: true }).click();
+    const back = page.getByRole("link", { name: "返回原任务", exact: true });
+    await expect(back).toHaveAttribute("href", "/data-prep?task=synthetic-task&revision=3");
+    await back.click();
+    await expect(page).toHaveURL(/\/data-prep\?task=synthetic-task&revision=3$/);
+  }
 });
 
 for (const role of ["user", "admin", "super_admin"]) test(`N4 ${role}菜单保留角色边界与现有模型分区`, async ({ page }) => {

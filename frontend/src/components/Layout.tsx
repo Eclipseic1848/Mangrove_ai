@@ -50,7 +50,7 @@ export function Layout() {
     for (const key of ["task", "revision"]) if (current.has(key)) target.set(key, current.get(key)!);
     workspaceReturn.current = { ownerId: user.user_id, to: `/data-prep${target.size ? `?${target}` : ""}`, hasTask: Boolean(target.get("task")) };
   }
-  const returnTarget = ["/settings", "/admin"].includes(location.pathname) ? workspaceReturn.current : null;
+  const returnTarget = ["/settings", "/admin", "/tasks", "/templates", "/memory", "/feedback"].includes(location.pathname) ? workspaceReturn.current : null;
   const pageLabel = [...NAV, ...NAV_ADMIN].find(item => item.to === location.pathname)?.label || "Mangrove";
   const NavigationContainer = drawer ? "div" : "aside";
 

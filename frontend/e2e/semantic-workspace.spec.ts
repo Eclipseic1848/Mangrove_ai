@@ -2878,6 +2878,12 @@ test.describe("统一数据工作台", () => {
     await page.getByRole("button", { name: "打开系统分享" }).click();
     await expect.poll(() => page.evaluate(() => localStorage.getItem("shared-answer"))).toBe("华东合计 42");
 
+    const composer = page.getByRole("textbox", { name: "继续对话" });
+    await composer.fill("这是尚未发送的草稿");
+    await page.getByRole("button", { name: "编辑为新消息" }).click();
+    await expect(composer).toHaveValue("这是尚未发送的草稿");
+    await expect(page.getByText("输入框已有未发送内容；请先发送或清空，再编辑历史消息")).toBeVisible();
+    await composer.fill("");
     await page.getByRole("button", { name: "编辑为新消息" }).click();
     await expect(page.getByRole("textbox", { name: "继续对话" })).toHaveValue("把华东单独汇总");
     await expect(page.getByLabel("对话记录").locator("p").getByText("把华东单独汇总", { exact: true })).toBeVisible();
