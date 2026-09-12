@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+from unittest.mock import MagicMock, Mock
 
 import pytest
 from sqlalchemy import create_engine, inspect
 
+import src.connectors.db_dialects as db_dialects
 from src.connectors.db_dialects import (
     DbDialect,
     DbCredentials,
@@ -95,6 +97,25 @@ class TestIntrospectSqlite:
         assert len(info.tables) >= 2
         names = {t.name for t in info.tables}
         assert names >= {"a", "b"}
+
+
+def test_postgresql_introspection_hides_tables_without_select(monkeypatch):
+    inspector = Mock()
+    inspector.get_table_names.return_value = ["readable", "hidden"]
+    inspector.get_columns.return_value = [{"name": "id"}]
+    inspector.get_pk_constraint.return_value = {"constrained_columns": ["id"]}
+    monkeypatch.setattr(db_dialects, "inspect", lambda engine: inspector)
+    connection = Mock()
+    connection.execute.return_value.scalars.return_value = ["readable"]
+    connection.exec_driver_sql.return_value.fetchone.return_value = (1,)
+    connection.exec_driver_sql.return_value.scalar.return_value = "16"
+    engine = MagicMock()
+    engine.connect.return_value.__enter__.return_value = connection
+
+    result = POSTGRESQL.introspect(engine, "public")
+
+    assert [table.name for table in result.tables] == ["readable"]
+    inspector.get_columns.assert_called_once_with("readable", schema="public")
 
 
 # ---------------- 只读会话 (sqlite 真库) ----------------

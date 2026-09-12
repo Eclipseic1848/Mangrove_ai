@@ -2,7 +2,7 @@
 
 > status: `P1_01_ENGINEERING_COMPLETE / REMEDIATION_IN_PROGRESS`
 >
-> last_verified: 2026-09-09（#137 关联清理工程实现；合并状态现场核对 GitHub）
+> last_verified: 2026-09-11（#139 HTTP/数据库只读来源工程完成；远端状态现场核对 GitHub）
 >
 > authoritative_branch: `main`
 >
@@ -16,9 +16,9 @@
 
 ## 0. 当前 P1 状态
 
-- 当前整改权威为 [#113](https://github.com/Eclipseic1848/Mangrove_ai/issues/113)，#136 已由 PR #173 合并关闭。
-- #137 已完成关联感知的任务与资料清理工程实现；规格见 docs/plans/2026-09-09-related-deletion-spec.md。保留回收与恢复，永久清理先确认完整关联，默认保留共享；独占原件和结果一并清理，保留任务及独立正式结果。删除意图阻止新读取/冻结/发布，精确运行停止及既有执行锁通过后才清理正文和缓存；失败沿原操作恢复，旧删除身份和停止事实支持后续任务清理。详情、事件和历史绑定响应保护实际返回版本，绑定样例与未发布副本纳入清理。只在临时数据库验证 webui_0018，生产及真实业务数据/备份清理保留独立人工门。本地审查与隔离验证已完成；实际同提交CI、合并状态以关联PR为准，不代表真实Worker、模型或平台验收。
-- 后续按依赖处理 #138；不代表 P1 完成、发布或真实平台登录资格。
+- 当前整改权威为 [#113](https://github.com/Eclipseic1848/Mangrove_ai/issues/113)。#138 由用户暂停；管理员或用户自行填写 Cookie 后稳定只读取数是后续独立优化，不属于 #138。
+- #139 已完成 HTTP/数据库只读来源工程闭环：真实 GitHub HTTPS 与 MySQL/PostgreSQL 实库均经产品连接、范围冻结和来源获取入口验证；两个 Owner 使用不同只读账号、表与数据，重复水位在安全断点后同 Attempt 续读完整，跨 Owner 与数据库权限双层隔离。PostgreSQL Schema 发现现只展示具备 `SELECT` 权限的表。生产连接、生产迁移、部署和发布均未执行。
+- #140 已完成并关闭。后续按依赖处理 #141；普通“继续”不解除 #138 暂停，也不代表 P1 完成或发布资格。
 
 ### 历史 P1-01 核验快照（2026-09-04）
 
@@ -114,8 +114,8 @@ Mangrove 是统一数据任务平台。用户从文件或其他来源创建不�
 | 公域采集与 Conductor | 可用 | 企业 API、业务系统、对象存储和统一生产 Adapter 尚未完成 |
 | 数据工作台 `/data-prep` | 可用 | 历史任务与 Legacy Delivery 仍保留兼容路径 |
 | P1-01 匿名网页统一工作台 | `ENGINEERING_VERIFIED / CLOSED` | 受控工程闭环已验；真实外部网页、Provider 与用户体验未验收 |
-| HTTP/数据库只读连接来源 #139 | `ENGINEERING_CANDIDATE` | Owner/连接版本/范围冻结与任务交付本地验证；真实外部来源、生产迁移和用户验收尚缺 |
-| 三类来源模板与个人记忆 #140 | `ENGINEERING_CANDIDATE` | 既有模板适配、Owner记忆纠正和冻结链本地通过；同提交CI、真实语义/运行实例和用户视觉验收尚缺 |
+| HTTP/数据库只读连接来源 #139 | `ENGINEERING_VERIFIED` | 真实 HTTPS 与 MySQL/PostgreSQL、双 Owner、断点续读、只读权限及统一任务交付已验证；不代表生产连接、部署或发布 |
+| 三类来源模板与个人记忆 #140 | `ENGINEERING_VERIFIED / CLOSED` | 既有模板、Owner 记忆纠正和冻结链已闭合；不代表生产运行或发布 |
 | vNext 默认正式 Delivery | `LIVE_ACCEPTED` | 默认/Pi/Legacy、P0 回滚与 Owner 隔离已验收；不代表稳定 Release |
 | Candidate 同 Run 重验 | `LIVE_ACCEPTED` | 追加式 Attempt、独立 Provider 授权、精确 Attempt 发布；未知结果不自动重试 |
 | 11 种交付预览 | `ENGINEERING_VERIFIED` | 不等于每种格式均有生产用户验收 |

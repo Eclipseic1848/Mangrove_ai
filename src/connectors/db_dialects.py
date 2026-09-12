@@ -247,8 +247,18 @@ class PostgresqlDialect(DbDialect):
     def introspect(self, engine: Engine, schema: Optional[str] = None) -> SchemaInfo:
         insp = inspect(engine)
         sch = schema or "public"
+        with engine.connect() as conn:
+            readable = set(conn.execute(text(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema=:schema AND table_type='BASE TABLE' "
+                "AND has_table_privilege("
+                "quote_ident(table_schema)||'.'||quote_ident(table_name), 'SELECT')"
+            ), {"schema": sch}).scalars())
         tables = []
         for tname in insp.get_table_names(schema=sch):
+            # 目录信息也属于来源边界；无 SELECT 权限的表名不能向用户泄漏。
+            if tname not in readable:
+                continue
             cols = insp.get_columns(tname, schema=sch)
             pk = list((insp.get_pk_constraint(tname, schema=sch) or {}).get("constrained_columns") or [])
             count = 0
