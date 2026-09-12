@@ -10,6 +10,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
@@ -117,6 +118,25 @@ def test_secret_config_update_atomically_replaces_old_ciphertext(
     assert rows[0][0] == "global"
     assert "first-secret" not in rows[0][1]
     assert "second-secret" not in rows[0][1]
+
+
+def test_secret_config_same_value_keeps_identity(tmp_path: Path) -> None:
+    store, database = _store(tmp_path)
+    store.config_set("user-a", "mc_cookie_xhs", "synthetic-same-cookie", "user-a")
+    before = store.config_identity("user-a", "mc_cookie_xhs")
+    with sqlite3.connect(database) as connection:
+        before_ref = connection.execute(
+            "SELECT value FROM runtime_config WHERE scope='user-a' AND key='mc_cookie_xhs'"
+        ).fetchone()[0]
+
+    store.config_set("user-a", "mc_cookie_xhs", "synthetic-same-cookie", "user-a")
+
+    with sqlite3.connect(database) as connection:
+        after_ref = connection.execute(
+            "SELECT value FROM runtime_config WHERE scope='user-a' AND key='mc_cookie_xhs'"
+        ).fetchone()[0]
+    assert after_ref == before_ref
+    assert store.config_identity_matches("user-a", "mc_cookie_xhs", before)
 
 
 def test_secret_config_update_rejects_old_ref_owned_by_another_scope(
@@ -369,7 +389,7 @@ def test_webui_0004_migrates_legacy_plaintext_and_backup_has_no_plaintext(
     backup = tmp_path / "webui-after-secretref.db"
     shutil.copy2(database, backup)
     # 先冻结 webui_0004 专属备份，再升到当前头供 Repository 失败关闭门使用。
-    _upgrade(database, "webui_0019")
+    _upgrade(database, "webui_0020")
 
     store = WebUIStore(str(database))
     assert store.config_all("global")["smtp_password"] == "legacy-smtp-secret-4400"
@@ -392,7 +412,7 @@ def test_webui_0004_migrates_legacy_plaintext_and_backup_has_no_plaintext(
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("webui_0019",)
+        ).fetchone() == ("webui_0020",)
         values = {
             row[0]
             for row in connection.execute(
@@ -594,6 +614,275 @@ def test_config_api_masks_secret_and_diagnostic_error(tmp_path: Path, monkeypatc
     assert verified.status_code == 200
     assert "api-secret-6600" not in verified.text
     assert verified.json() == {"ok": False, "detail": "SMTP rejected [SECRET]"}
+
+
+def test_admin_can_verify_personal_cookie_without_falling_back_to_global(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store, _database = _store(tmp_path)
+    store.config_set("admin-a", "mc_cookie_xhs", "personal-cookie", "admin-a")
+    monkeypatch.setattr(config_routes, "get_store", lambda: store)
+    monkeypatch.setattr(settings, "mc_cookie_xhs", "global-cookie")
+
+    async def identify_cookie(_target: str) -> str:
+        from src.config.user_ctx import effective
+
+        return "个人 Cookie" if effective("mc_cookie_xhs") == "personal-cookie" else "全局 Cookie"
+
+    monkeypatch.setattr(config_routes, "_verify_target", identify_cookie)
+    app = FastAPI()
+    app.include_router(config_routes.router)
+    app.dependency_overrides[get_current_user] = lambda: {
+        "user_id": "admin-a",
+        "role": "admin",
+    }
+    client = TestClient(app)
+
+    personal = client.post(
+        "/api/config/verify",
+        json={"target": "mc_cookie_xhs", "scope": "self"},
+    )
+    global_value = client.post(
+        "/api/config/verify",
+        json={"target": "mc_cookie_xhs", "scope": "global"},
+    )
+
+    assert personal.json() == {"ok": True, "detail": "个人 Cookie"}
+    assert global_value.json() == {"ok": True, "detail": "全局 Cookie"}
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (config_routes._CookieProbeError("invalid", "小红书登录已过期"), "invalid"),
+        (config_routes._CookieProbeError("unknown", "小红书触发验证码风控"), "unknown"),
+        (RuntimeError("小红书采集网络连接失败"), "unknown"),
+    ],
+)
+def test_global_cookie_health_only_marks_clear_auth_rejection_invalid(
+    tmp_path: Path,
+    monkeypatch,
+    error: Exception,
+    expected: str,
+) -> None:
+    store, _database = _store(tmp_path)
+    monkeypatch.setattr(config_routes, "get_store", lambda: store)
+
+    async def fail(_target: str) -> str:
+        raise error
+
+    monkeypatch.setattr(config_routes, "_verify_target", fail)
+    app = FastAPI()
+    app.include_router(config_routes.router)
+    app.dependency_overrides[get_current_user] = lambda: {
+        "user_id": "admin-a",
+        "role": "admin",
+    }
+
+    response = TestClient(app).post(
+        "/api/config/verify",
+        json={"target": "mc_cookie_xhs", "scope": "global"},
+    )
+
+    assert response.json() == {"ok": False, "detail": str(error)}
+    assert store.cookie_health_all()["mc_cookie_xhs"]["status"] == expected
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("Login failed: CAPTCHA Verifytype required", "risk_control"),
+        ("Login failed: ConnectionError net::ERR_PROXY_CONNECTION_FAILED", "network"),
+        ("登录失败：WAF 403", "unknown"),
+        ("登录失败：VPN disconnected", "unknown"),
+    ],
+)
+def test_social_login_failure_caused_by_environment_remains_unknown(
+    output: str,
+    expected: str,
+) -> None:
+    from src.collectors.social_media_collector import _diagnose_mc_failure
+
+    detail, failure_kind = _diagnose_mc_failure(
+        "xhs",
+        output,
+    )
+
+    assert "登录已过期" not in detail
+    assert failure_kind.value == expected
+
+
+def test_mediacrawler_auth_failure_carries_owner_cookie_identity_without_plaintext(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from src.collectors.social_media_collector import SocialMediaCollector
+    from src.conductor.task_spec import TaskSpec
+    from src.config.user_ctx import user_overrides_context
+
+    class FailedProcess:
+        returncode = 1
+
+        async def communicate(self):
+            return b"Login state result: False", b""
+
+    observed = []
+
+    async def create_process(*args, **kwargs):
+        observed.append((args, kwargs))
+        return FailedProcess()
+
+    monkeypatch.setattr(settings, "mediacrawler_path", str(tmp_path))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+    with user_overrides_context({"mc_cookie_xhs": "synthetic-owner-cookie"}):
+        result = asyncio.run(SocialMediaCollector().collect(TaskSpec(
+            intent="读取本人授权的小红书数据",
+            platforms=["小红书"],
+            keywords=["合成测试"],
+            max_items=1,
+        )))
+
+    assert "synthetic-owner-cookie" in observed[0][0]
+    assert result.failure_kind.value == "auth_invalid"
+    assert result.credential_key == "mc_cookie_xhs"
+    assert "synthetic-owner-cookie" not in repr(result)
+
+
+def test_global_cookie_change_invalidates_previous_health(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    store, _database = _store(tmp_path)
+    monkeypatch.setattr(settings, "mc_cookie_xhs", "synthetic-env-cookie")
+    store.cookie_health_set(
+        "mc_cookie_xhs",
+        "valid",
+        "旧 Cookie 验证通过",
+        "manual",
+    )
+
+    runtime_config.set_global(
+        store,
+        "mc_cookie_xhs",
+        "synthetic-new-cookie",
+        "admin-a",
+    )
+    assert store.cookie_health_all()["mc_cookie_xhs"]["status"] == "unknown"
+
+    store.cookie_health_set(
+        "mc_cookie_xhs",
+        "valid",
+        "覆盖 Cookie 验证通过",
+        "manual",
+    )
+    runtime_config.reset_global(store, "mc_cookie_xhs")
+    assert store.cookie_health_all()["mc_cookie_xhs"]["status"] == "unknown"
+
+
+def test_social_cookie_probe_without_data_is_unknown_not_success(monkeypatch) -> None:
+    from src.api.routes.config_routes import _verify_mc_cookie
+    from src.collectors.base import CollectFailureKind, CollectResult
+    from src.collectors import registry
+    from src.config.user_ctx import user_overrides_context
+
+    class EmptyCollector:
+        def is_available(self) -> bool:
+            return True
+
+        async def collect(self, _spec):
+            return CollectResult(
+                True,
+                "mediacrawler",
+                message="MediaCrawler 未产出可解析结果",
+                failure_kind=CollectFailureKind.NO_DATA,
+            )
+
+    monkeypatch.setattr(registry, "get_registry", lambda: {"mediacrawler": EmptyCollector()})
+
+    with user_overrides_context({"mc_cookie_xhs": "synthetic-cookie"}):
+        with pytest.raises(RuntimeError, match="无法判断 Cookie 状态"):
+            asyncio.run(_verify_mc_cookie("mc_cookie_xhs"))
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (config_routes._CookieProbeError("invalid", "小红书登录已过期"), "invalid"),
+        (config_routes._CookieProbeError("unknown", "小红书触发验证码风控"), "unknown"),
+    ],
+)
+def test_scheduled_cookie_scan_uses_same_failure_classification(
+    monkeypatch,
+    error: Exception,
+    expected: str,
+) -> None:
+    scanner = CookieHealthScanner()
+    recorded: list[tuple[str, str]] = []
+
+    async def fail(_key: str) -> str:
+        raise error
+
+    async def skip_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(config_routes, "_COOKIE_HEALTH_KEYS", ("mc_cookie_xhs",))
+    monkeypatch.setattr(config_routes, "_verify_target", fail)
+    monkeypatch.setattr(
+        config_routes,
+        "_record_cookie_health",
+        lambda key, status, _message, **_kwargs: recorded.append((key, status)),
+    )
+    monkeypatch.setattr(scanner, "_sleep", skip_sleep)
+
+    asyncio.run(scanner._run_one_scan())
+
+    assert recorded == [("mc_cookie_xhs", expected)]
+
+
+def test_cookie_backed_collector_uses_each_owner_then_global_fallback(
+    monkeypatch,
+) -> None:
+    from src.collectors.ecommerce_collector import EcommerceCollector
+    from src.config.user_ctx import user_overrides_context
+
+    monkeypatch.setattr(settings, "tb_cookie", "cookie-global")
+
+    async def collect(owner: str, overrides: dict[str, str]):
+        requests: list[httpx.Request] = []
+
+        def respond(request: httpx.Request) -> httpx.Response:
+            requests.append(request)
+            return httpx.Response(
+                200,
+                text=f"<html><head><title>{owner}</title></head><body>隔离商品资料</body></html>",
+                request=request,
+            )
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
+            with user_overrides_context(overrides):
+                item = await EcommerceCollector()._scrape_one_product(
+                    client,
+                    "taobao",
+                    "10001",
+                )
+        return requests, item
+
+    async def run():
+        return await asyncio.gather(
+            collect("owner-a", {"tb_cookie": "cookie-owner-a"}),
+            collect("owner-b", {"tb_cookie": "cookie-owner-b"}),
+            collect("fallback", {}),
+        )
+
+    for (requests, item), expected in zip(
+        asyncio.run(run()),
+        ("cookie-owner-a", "cookie-owner-b", "cookie-global"),
+        strict=True,
+    ):
+        assert len(requests) == 1
+        assert requests[0].headers["cookie"] == expected
+        assert item is not None and "隔离商品资料" in item.content
 
 
 def test_runtime_config_log_redacts_secret_from_reload_failure(

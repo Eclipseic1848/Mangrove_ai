@@ -11,7 +11,9 @@ Web UI 用户与会话持久化（标准库 sqlite3，跨平台、无第三方�
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
+import secrets
 import sqlite3
 import threading
 import time
@@ -34,6 +36,8 @@ from src.config.secret_refs import (
 )
 from src.model_connections.vault import VaultDecryptionError
 from src.services.managed_paths import ManagedPathCodec
+
+_CONFIG_IDENTITY_ROUNDS = 200_000
 
 
 def _now() -> str:
@@ -80,7 +84,7 @@ class WebUIStore:
         scope: str,
         key: str,
         value: str,
-    ) -> tuple[str, object]:
+    ) -> tuple[str, object, str]:
         """在写操作前完整验证旧 Ref 的身份与可解密性。"""
 
         secret_id = parse_secret_ref(value)
@@ -93,12 +97,12 @@ class WebUIStore:
             raise SecretRefResolutionError("SecretRef 无法解析")
         vault = load_vault(self.db_path)
         try:
-            vault.decrypt(str(row["ciphertext"]))
+            plaintext = vault.decrypt(str(row["ciphertext"]))
         except VaultDecryptionError as exc:
             raise SecretRefResolutionError(
                 "运行时配置 Vault 无法解密 SecretRef"
             ) from exc
-        return secret_id, vault
+        return secret_id, vault, plaintext
 
     def config_all(self, scope: str) -> Dict[str, str]:
         """取某作用域的全部覆盖：{key: value}。scope='global' 或 user_id。"""
@@ -131,6 +135,70 @@ class WebUIStore:
                     ) from exc
         return result
 
+    def _effective_config_secret(
+        self, conn: sqlite3.Connection, scope: str, key: str,
+    ) -> str:
+        for candidate in ((scope, "global") if scope != "global" else ("global",)):
+            row = conn.execute(
+                "SELECT value FROM runtime_config WHERE scope=? AND key=?",
+                (candidate, key),
+            ).fetchone()
+            if row is not None:
+                _secret_id, _vault, value = self._resolve_existing_config_secret(
+                    conn, scope=candidate, key=key, value=str(row["value"]),
+                )
+                return value
+        from src.config.settings import settings
+
+        return str(getattr(settings, key, "") or "")
+
+    def config_identity(
+        self,
+        scope: str,
+        key: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> str:
+        """返回当前有效 Secret 的加盐校验值，不保存或返回明文。"""
+        if key not in RUNTIME_CONFIG_SECRET_KEYS:
+            raise ValueError("配置身份只支持 SecretRef")
+        context = nullcontext(connection) if connection is not None else self._conn()
+        with context as conn:
+            value = self._effective_config_secret(conn, scope, key)
+        salt = secrets.token_bytes(16)
+        digest = hashlib.pbkdf2_hmac(
+            "sha256", value.encode("utf-8"), salt, _CONFIG_IDENTITY_ROUNDS,
+        )
+        return f"pbkdf2-sha256:{_CONFIG_IDENTITY_ROUNDS}:{salt.hex()}:{digest.hex()}"
+
+    def config_identity_matches(
+        self,
+        scope: str,
+        key: str,
+        identity: str,
+        *,
+        connection: sqlite3.Connection | None = None,
+    ) -> bool:
+        """校验当前有效 Secret 是否仍与持久失效收据相同。"""
+        if key not in RUNTIME_CONFIG_SECRET_KEYS:
+            raise ValueError("配置身份只支持 SecretRef")
+        try:
+            algorithm, rounds, salt_hex, expected = identity.split(":", 3)
+            if algorithm != "pbkdf2-sha256" or int(rounds) != _CONFIG_IDENTITY_ROUNDS:
+                raise ValueError
+            salt = bytes.fromhex(salt_hex)
+            if len(salt) != 16 or len(bytes.fromhex(expected)) != 32:
+                raise ValueError
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise SecretRefResolutionError("配置身份无法校验") from exc
+        context = nullcontext(connection) if connection is not None else self._conn()
+        with context as conn:
+            value = self._effective_config_secret(conn, scope, key)
+        actual = hashlib.pbkdf2_hmac(
+            "sha256", value.encode("utf-8"), salt, _CONFIG_IDENTITY_ROUNDS,
+        ).hex()
+        return hmac.compare_digest(actual, expected)
+
     def config_set(self, scope: str, key: str, value: str, updated_by: str = "") -> None:
         with self._lock, self._conn() as conn:
             if key in RUNTIME_CONFIG_SECRET_KEYS:
@@ -140,12 +208,15 @@ class WebUIStore:
                 ).fetchone()
                 previous_id = None
                 if previous is not None:
-                    previous_id, vault = self._resolve_existing_config_secret(
+                    previous_id, vault, previous_value = self._resolve_existing_config_secret(
                         conn,
                         scope=scope,
                         key=key,
                         value=str(previous["value"]),
                     )
+                    # 同值重存不是凭据轮换；保留原 Ref，避免绕过失效恢复门。
+                    if previous_value == value:
+                        return
                 else:
                     vault = load_or_create_vault(self.db_path)
                 secret_id = str(uuid.uuid4())
@@ -189,7 +260,7 @@ class WebUIStore:
                 (scope, key),
             ).fetchone()
             if key in RUNTIME_CONFIG_SECRET_KEYS and previous is not None:
-                secret_id, _vault = self._resolve_existing_config_secret(
+                secret_id, _vault, _plaintext = self._resolve_existing_config_secret(
                     conn,
                     scope=scope,
                     key=key,
@@ -959,18 +1030,18 @@ class WebUIStore:
 
         with self._conn() as conn:
             total_up = conn.execute(
-                "SELECT COUNT(*) FROM message_feedback WHERE rating='up'"
+                "SELECT COUNT(*) FROM feedback_management WHERE rating='up'"
             ).fetchone()[0]
             total_down = conn.execute(
-                "SELECT COUNT(*) FROM message_feedback WHERE rating='down'"
+                "SELECT COUNT(*) FROM feedback_management WHERE rating='down'"
             ).fetchone()[0]
             total_pending = conn.execute(
-                "SELECT COUNT(*) FROM message_feedback WHERE status='pending'"
+                "SELECT COUNT(*) FROM feedback_management WHERE status='pending'"
             ).fetchone()[0]
             total_sessions = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
             # 点踩原因分布（reasons 是 JSON 数组字符串，Python 层解析统计）
             down_rows = conn.execute(
-                "SELECT reasons FROM message_feedback WHERE rating='down' "
+                "SELECT reasons FROM feedback_management WHERE rating='down' "
                 "AND reasons IS NOT NULL AND reasons != ''"
             ).fetchall()
             reason_counts: Counter = Counter()
@@ -979,7 +1050,7 @@ class WebUIStore:
                     reason_counts[reason] += 1
             # 按天趋势
             all_rows = conn.execute(
-                "SELECT rating, created_at FROM message_feedback ORDER BY created_at"
+                "SELECT rating, created_at FROM feedback_management ORDER BY created_at"
             ).fetchall()
             daily_map: Dict[str, Dict[str, int]] = defaultdict(lambda: {"up": 0, "down": 0})
             for r in all_rows:
@@ -1033,20 +1104,20 @@ class WebUIStore:
         with self._conn() as conn:
             conn.create_function("feedback_has_reason", 2, lambda raw, value: value in fixed_reasons(raw))
             total = conn.execute(
-                f"SELECT COUNT(*) FROM message_feedback f{where_sql}", params
+                f"SELECT COUNT(*) FROM feedback_management f{where_sql}", params
             ).fetchone()[0]
             rows = conn.execute(
-                f"""SELECT f.id, f.message_id, f.conv_id, f.user_id, f.rating,
+                f"""SELECT f.id, f.message_id, f.conv_id, f.user_id, f.rating, f.source_kind, f.task_id, f.revision, f.output_id, f.output_sha256,
                            f.reasons, f.created_at, f.status,
                            COALESCE(length(f.comment),0)>0 AS has_comment,
                            COALESCE(length(f.admin_note),0)>0 AS has_admin_note,
                            u.display_name, u.username,
-                           EXISTS(SELECT 1 FROM messages m JOIN conversations c ON c.conv_id=m.conv_id
+                           CASE WHEN f.source_kind='workspace' THEN EXISTS(SELECT 1 FROM semantic_workspace_revisions r JOIN semantic_workspace_tasks t ON t.task_id=r.task_id AND t.user_id=r.user_id JOIN formal_delivery_outputs o ON o.output_id=f.output_id AND o.sha256=f.output_sha256 JOIN formal_delivery_runs d ON d.delivery_id=o.delivery_id AND d.owner_id=f.user_id AND d.task_id=f.task_id AND d.task_revision=f.revision WHERE r.user_id=f.user_id AND r.task_id=f.task_id AND r.revision=f.revision AND t.deleted_at IS NULL) ELSE EXISTS(SELECT 1 FROM messages m JOIN conversations c ON c.conv_id=m.conv_id
                              JOIN users owner ON owner.user_id=c.user_id
                              WHERE m.id=f.message_id AND m.conv_id=f.conv_id
-                             AND m.role='assistant' AND c.user_id=f.user_id) AS content_available
-                    FROM message_feedback f LEFT JOIN users u ON f.user_id=u.user_id
-                    {where_sql} ORDER BY f.id DESC LIMIT ? OFFSET ?""",
+                             AND m.role='assistant' AND c.user_id=f.user_id) END AS content_available
+                    FROM feedback_management f LEFT JOIN users u ON f.user_id=u.user_id
+                    {where_sql} ORDER BY f.created_at DESC,f.id DESC LIMIT ? OFFSET ?""",
                 params + [limit, offset],
             ).fetchall()
         items = []
@@ -1063,24 +1134,27 @@ class WebUIStore:
         from .feedback_audit import require_admin, feedback_content, digest
         if status is not None and status not in ('pending', 'resolved', 'ignored'):
             raise ValueError('反馈状态无效')
+        table='workspace_feedback' if fb_id<0 else 'message_feedback'
+        record_id=abs(fb_id)
+        audit_table='workspace_feedback_content_access' if fb_id<0 else 'feedback_content_access'
         with self._lock, self._conn() as conn:
             conn.execute('BEGIN IMMEDIATE')
             if admin_note is ...:
-                conn.execute('UPDATE message_feedback SET status=COALESCE(?,status) WHERE id=?', (status, fb_id))
+                conn.execute(f'UPDATE {table} SET status=COALESCE(?,status) WHERE id=?', (status, record_id))
                 return
             require_admin(conn, actor_id)
-            old = conn.execute('SELECT admin_note FROM message_feedback WHERE id=?', (fb_id,)).fetchone()
+            old = conn.execute(f'SELECT admin_note FROM {table} WHERE id=?', (record_id,)).fetchone()
             if old and old['admin_note']:
                 row, payload = feedback_content(conn, fb_id)
                 if payload['truncated']:
                     raise PermissionError('截断正文不能用于覆盖旧备注')
                 # 旧备注必须是本人实际看过的当前内容，不能沿用另一个对象或旧内容的证据。
-                if conn.execute('''SELECT 1 FROM feedback_content_access
-                    WHERE actor_id=? AND feedback_id=? AND message_id=? AND conv_id=? AND owner_id=?
+                if conn.execute(f'''SELECT 1 FROM {audit_table}
+                    WHERE actor_id=? AND feedback_id=? AND message_id IS ? AND conv_id IS ? AND owner_id=?
                     AND response_digest=? LIMIT 1''',
                     (actor_id,fb_id,row['message_id'],row['conv_id'],row['user_id'],digest(payload))).fetchone() is None:
                     raise PermissionError('请先审计查看当前备注')
-            conn.execute('UPDATE message_feedback SET status=COALESCE(?,status),admin_note=? WHERE id=?', (status,admin_note,fb_id))
+            conn.execute(f'UPDATE {table} SET status=COALESCE(?,status),admin_note=? WHERE id=?', (status,admin_note,record_id))
 
     def audit_feedback_content(self, fb_id: int, *, actor_id: str, reason: str, idempotency_key: str) -> Dict[str, Any]:
         """先持久化不可变证据；提交失败时调用方拿不到正文。"""
@@ -1095,7 +1169,9 @@ class WebUIStore:
     def delete_feedback_admin(self, fb_id: int) -> None:
         """管理员删除一条反馈（按 feedback id，区别于用户取消自己的反馈）。"""
         with self._lock, self._conn() as conn:
-            conn.execute("DELETE FROM message_feedback WHERE id=?", (fb_id,))
+            if fb_id<0:
+                conn.execute("UPDATE workspace_feedback SET deleted_at=? WHERE id=?",(_now(),-fb_id))
+            else:conn.execute("DELETE FROM message_feedback WHERE id=?", (fb_id,))
 
     def user_owns_task(self, user_id: str, task_id: str) -> bool:
         """该 task_id 是否属于用户的会话任务或数据准备任务。"""
@@ -4054,6 +4130,7 @@ class WebUIStore:
         if deletion_operation_id is None:
             raise ValueError('需要关联清理确认')
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             operation=conn.execute("SELECT state FROM source_deletion_operations WHERE owner_id=? AND task_id=? AND operation_id=?",(user_id,task_id,deletion_operation_id)).fetchone()
             if operation is None or operation[0]!='cleaning' or conn.execute("SELECT 1 FROM source_deletions WHERE owner_id=? AND operation_id=? AND state!='deleted'",(user_id,deletion_operation_id)).fetchone():
                 raise ValueError('关联清理尚未完成')
@@ -4064,6 +4141,11 @@ class WebUIStore:
             ).fetchone()
             if owner is None:
                 return False
+            # 任务正文只有在实际响应读取退出后才能清理，审计事件保留。
+            if conn.execute("SELECT 1 FROM source_read_uses WHERE owner_id=? AND task_id=? AND state!='completed' LIMIT 1",(user_id,task_id)).fetchone():
+                raise ValueError('source_in_use')
+            conn.execute('DELETE FROM workspace_feedback WHERE user_id=? AND task_id=?',(user_id,task_id))
+            conn.execute('DELETE FROM workspace_feedback_receipts WHERE user_id=? AND task_id=?',(user_id,task_id))
             for table in ('source_refresh_intents','task_revision_contexts','web_task_contracts','conversation_raw_turns','conversation_context_deltas','conversation_revision_proposals','conversation_revision_decisions','conversation_steering_results'):
                 conn.execute('DELETE FROM '+table+' WHERE owner_id=? AND task_id=?',(user_id,task_id))
             self._create_semantic_workspace_audit_tombstone(

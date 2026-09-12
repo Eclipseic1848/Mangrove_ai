@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   CalendarClock, Trash2, RefreshCw, Clock, CheckCircle2, XCircle,
   FileText, Download, ArrowLeft, Braces, Plus, Pencil, Play,
@@ -12,7 +13,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { Markdown } from "@/components/Markdown";
-import { api, downloadFile } from "@/lib/api";
+import { api, downloadFile, getSessionState } from "@/lib/api";
+import { WorkspaceScheduleActions } from "@/components/workspace/WorkspaceLifecycleActions";
 import { cn } from "@/lib/utils";
 
 /** 开关样式沿用设置页「连接器/增强」的 Toggle（同一套视觉语言）。 */
@@ -47,6 +49,8 @@ interface Task {
   task_id: string;
   name?: string | null;
   source?: string; // auto | manual | template
+  workspace?: { timezone:string };
+  credential_block?: { credential_key:string } | null;
   status?: string; // active | paused
   user_input: string;
   trigger_type: string;
@@ -97,7 +101,7 @@ const TEMPLATE_ICONS: Record<string, typeof Sparkles> = {
   one_time_collection: Zap,
 };
 
-const SOURCE_LABEL: Record<string, string> = { auto: "自动识别", manual: "手动创建", template: "模板创建" };
+const SOURCE_LABEL: Record<string, string> = { auto: "自动识别", manual: "手动创建", template: "模板创建", workspace: "工作台冻结计划" };
 const WEEKDAY_NAMES = ["日", "一", "二", "三", "四", "五", "六"];
 
 /** 触发方式的人话描述：cron/interval 拼时间点，once 给具体时刻。 */
@@ -162,6 +166,7 @@ interface FormState {
   runAt: string; // datetime-local
   startDate: string;
   endDate: string;
+  frozen?: boolean;
 }
 
 const EMPTY_FORM: FormState = {
@@ -291,8 +296,10 @@ function TaskFormModal({
         </div>
         <div>
           <label className="mb-1 block text-sm text-muted-foreground">提示词</label>
+          {f.frozen && <p className="mb-2 text-sm">资料、目标、模型与模板已冻结，此处只调整时间和名称。需改资料时请回工作台创建新版本。</p>}
           <textarea
             value={f.prompt}
+            readOnly={f.frozen}
             onChange={(e) => setF({ ...f, prompt: e.target.value })}
             placeholder="像对话一样描述要采集分析什么，例如：采集汽车之家上小米SU7的最新评论并输出口碑分析"
             rows={3}
@@ -578,7 +585,7 @@ export function Tasks() {
   };
 
   const openEdit = (t: Task) => {
-    setFormState({ mode: "edit", taskId: t.task_id, form: taskToForm(t) });
+    setFormState({ mode: "edit", taskId: t.task_id, form: { ...taskToForm(t), frozen: t.source === "workspace" } });
   };
 
   const openHistory = async (t: Task) => {
@@ -693,6 +700,7 @@ export function Tasks() {
                           <p className="truncate text-sm font-medium">{t.name || t.user_input}</p>
                           <Badge variant="outline">{SOURCE_LABEL[t.source || "auto"] || "自动识别"}</Badge>
                           {t.status === "paused" && <Badge variant="secondary">已暂停</Badge>}
+                          {t.source === "workspace" && t.status !== "active" && t.status !== "paused" && <Badge variant="secondary">{t.status === "cancelled" ? "已取消" : "已结束"}</Badge>}
                           {t.last_run_at && (
                             t.last_success ? (
                               <span className="inline-flex items-center gap-1 text-xs text-emerald-500">
@@ -712,6 +720,7 @@ export function Tasks() {
                             <Clock className="h-3 w-3" /> 下次：{t.next_run_at || "—"}
                           </span>
                           <span>已执行 {t.run_count} 次</span>
+                          {t.workspace && <span>时区：{t.workspace.timezone}</span>}
                           {(t.start_date || t.end_date) && (
                             <span>生效期 {t.start_date || "…"} ~ {t.end_date || "…"}</span>
                           )}
@@ -724,21 +733,30 @@ export function Tasks() {
                             上次（{t.last_run_at}）：{lastSummary(t)}
                           </p>
                         )}
+                        {t.credential_block && (
+                          <p role="status" className="mt-2 text-xs text-destructive">
+                            采集账号 Cookie 已失效。请先
+                            <Link className="mx-1 underline underline-offset-2" to="/settings?section=credentials">更新本人 Cookie</Link>
+                            ，再点击恢复。
+                          </p>
+                        )}
+                        {t.source === "workspace" && <WorkspaceScheduleActions key={`${getSessionState().user?.user_id}:${t.task_id}`} ownerId={getSessionState().user?.user_id ?? ""} scheduleId={t.task_id} canRun={t.status === "active" || t.status === "paused"} />}
                       </div>
                       <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
                         <Toggle
-                          checked={t.status !== "paused"}
+                          checked={t.source === "workspace" ? t.status === "active" : t.status !== "paused"}
+                          disabled={t.source === "workspace" && t.status !== "active" && t.status !== "paused"}
                           title={t.status === "paused" ? "已暂停，点击恢复" : "启用中，点击暂停"}
                           onChange={() => toggleEnabled(t)}
                         />
-                        <Button variant="outline" size="sm" className="gap-1.5" disabled={runningNow.has(t.task_id)}
+                        {t.source !== "workspace" && <Button variant="outline" size="sm" className="gap-1.5" disabled={runningNow.has(t.task_id) || !!t.credential_block}
                           onClick={() => runNow(t)} title="立即执行一次">
                           <Play className="h-3.5 w-3.5" /> 立即执行
-                        </Button>
-                        <Button variant="outline" size="sm" className="gap-1.5" onClick={() => openEdit(t)}>
+                        </Button>}
+                        <Button variant="outline" size="sm" className="gap-1.5" disabled={t.source === "workspace" && t.status !== "active" && t.status !== "paused"} onClick={() => openEdit(t)}>
                           <Pencil className="h-3.5 w-3.5" /> 编辑
                         </Button>
-                        {t.run_count > 0 && (
+                        {t.source !== "workspace" && t.run_count > 0 && (
                           <Button variant="outline" size="sm" className="gap-1.5" onClick={() => openHistory(t)}>
                             <FileText className="h-3.5 w-3.5" /> 历史
                           </Button>

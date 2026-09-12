@@ -96,10 +96,36 @@ class ScheduleStore:
                 row = conn.execute("SELECT * FROM scheduled_tasks WHERE task_id=?", (task_id,)).fetchone()
                 if row is None or row["owner_user_id"] != auth.owner_user_id or row["status"] not in ({"active", "paused"} if manual else {"active"}):
                     raise execution.ExecutionDenied("计划不可执行")
+                block = conn.execute(
+                    "SELECT * FROM scheduled_credential_blocks WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+                if block and not block["resume_requested"]:
+                    raise execution.ExecutionDenied("请先更新本人 Cookie，再恢复原计划")
+                if block and web.config_identity_matches(
+                    auth.owner_user_id,
+                    block["credential_key"],
+                    block["credential_identity"],
+                    connection=web_conn,
+                ):
+                    raise execution.ExecutionDenied("请先更新本人 Cookie，再恢复原计划")
                 task = dict(row)
                 # 领取与核对同事务：旧队列不能执行已改期或已恢复的新计划。
-                if task != {key: value for key, value in expected_task.items() if key != "_execution_generation"}:
+                if task != {key: value for key, value in expected_task.items() if key not in {
+                    "_execution_generation", "_manual_request_key",
+                    "_credential_resume_task_id", "_credential_resume_manual",
+                }}:
                     raise execution.ExecutionDenied("计划已更新，请重新读取")
+                if block:
+                    expected_id = expected_task.get("_credential_resume_task_id")
+                    if not expected_id or expected_id != block["execution_task_id"]:
+                        raise execution.ExecutionDenied("Cookie 恢复执行已变化")
+                    task["_credential_resume_task_id"] = block["execution_task_id"]
+                    task["_credential_resume_manual"] = bool(block["manual"])
+                if task.get("source")=="workspace":
+                    from .workspace import claim_occurrence
+                    if manual:task["_manual_request_key"]=expected_task.get("_manual_request_key")
+                    task["_workspace_occurrence"]=claim_occurrence(conn,task,manual,auth.generation)
                 execution.set_execution_state(web_conn, auth, "schedule", task_id, state="active", now=time.time())
         return auth, task
 
@@ -147,6 +173,7 @@ class ScheduleStore:
         interval_seconds: Optional[int] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        transaction_hook=None,
     ) -> str:
         """新增一条定时任务，返回 task_id。owner_user_id 用于 Web UI 多用户归属。
 
@@ -174,6 +201,8 @@ class ScheduleStore:
                         name, source, interval_seconds, start_date, end_date,
                     ),
                 )
+                if transaction_hook is not None:
+                    transaction_hook(conn, task_id)
         return task_id
 
     def get(self, task_id: str) -> Optional[Dict[str, Any]]:
@@ -182,6 +211,137 @@ class ScheduleStore:
                 "SELECT * FROM scheduled_tasks WHERE task_id=?", (task_id,)
             ).fetchone()
         return dict(row) if row else None
+
+    def credential_block(self, task_id: str) -> Optional[Dict[str, Any]]:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM scheduled_credential_blocks WHERE task_id=?",
+                (task_id,),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def pause_for_credentials(
+        self,
+        task_id: str,
+        *,
+        credential_key: str,
+        execution_task_id: str,
+        summary: str,
+        manual: bool,
+    ) -> None:
+        """记录确定失效并暂停；只保存加盐校验值，不保存 Cookie。"""
+        from src.api.auth import get_store
+        from src.config.runtime_config import REGISTRY
+
+        if REGISTRY.get(credential_key, {}).get("group") != "cookies":
+            raise ValueError("计划恢复凭据必须是 Cookie 配置")
+        auth = execution.current_authorization()
+        web = get_store()
+        with web.account_execution_transaction(auth, "schedule", task_id) as web_conn:
+            identity = web.config_identity(
+                auth.owner_user_id, credential_key, connection=web_conn,
+            )
+            with self._lock, self._conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                task = conn.execute(
+                    "SELECT owner_user_id FROM scheduled_tasks WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+                if task is None or task["owner_user_id"] != auth.owner_user_id:
+                    raise execution.ExecutionDenied("计划所属账号不匹配")
+                now = _iso(datetime.now())
+                conn.execute(
+                    "INSERT INTO scheduled_credential_blocks "
+                    "(task_id,owner_user_id,credential_key,credential_identity,execution_task_id,"
+                    "generation,manual,resume_requested,created_at) "
+                    "VALUES (?,?,?,?,?,?,?,0,?) "
+                    "ON CONFLICT(task_id) DO UPDATE SET credential_key=excluded.credential_key,"
+                    "credential_identity=excluded.credential_identity,execution_task_id=excluded.execution_task_id,"
+                    "generation=excluded.generation,manual=excluded.manual,"
+                    "resume_requested=0,created_at=excluded.created_at",
+                    (
+                        task_id, auth.owner_user_id, credential_key, identity,
+                        execution_task_id, auth.generation, int(manual), now,
+                    ),
+                )
+                conn.execute(
+                    "UPDATE scheduled_tasks SET status='paused',last_run_at=?,last_success=0,"
+                    "last_result='',last_error=?,run_count=run_count+1 WHERE task_id=?",
+                    (now, summary, task_id),
+                )
+                conn.execute(
+                    "INSERT INTO scheduled_task_runs "
+                    "(task_id,run_at,success,summary,report_path,json_path) VALUES (?,?,0,?,'','')",
+                    (task_id, now, summary),
+                )
+            if not execution.confirm_execution_stopped(
+                web_conn,
+                auth.owner_user_id,
+                "schedule",
+                task_id,
+                expected_generation=auth.generation,
+                now=time.time(),
+            ):
+                raise execution.ExecutionDenied("计划暂停状态已变化")
+
+    def resume_after_credentials(self, task_id: str) -> bool:
+        """仅当当前 Owner 的有效 Cookie 身份已变化时恢复原到期执行。"""
+        from src.api.auth import get_store
+
+        auth = execution.current_authorization()
+        web = get_store()
+        with web.account_execution_transaction(auth) as web_conn:
+            with self._lock, self._conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                task = conn.execute(
+                    "SELECT owner_user_id,status FROM scheduled_tasks WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+                if task is None or task["owner_user_id"] != auth.owner_user_id:
+                    raise execution.ExecutionDenied("计划所属账号不匹配")
+                block = conn.execute(
+                    "SELECT * FROM scheduled_credential_blocks WHERE task_id=? AND owner_user_id=?",
+                    (task_id, auth.owner_user_id),
+                ).fetchone()
+                if block is None:
+                    if task["status"] == "active":
+                        return True
+                    raise execution.ExecutionDenied("计划没有可恢复的 Cookie 失效收据")
+                if web.config_identity_matches(
+                    auth.owner_user_id,
+                    block["credential_key"],
+                    block["credential_identity"],
+                    connection=web_conn,
+                ):
+                    raise execution.ExecutionDenied("请先更新本人 Cookie，再恢复原计划")
+                authority = execution._binding(
+                    web_conn, auth.owner_user_id, "schedule", task_id,
+                )
+                # 前次响应可能丢失：收据已排队且授权已恢复时保持同一待执行事实。
+                if not (
+                    block["resume_requested"]
+                    and authority
+                    and authority["generation"] == auth.generation
+                    and authority["state"] == "idle"
+                ):
+                    execution.resume_execution(
+                        web_conn,
+                        auth,
+                        "schedule",
+                        task_id,
+                        expected_generation=block["generation"],
+                        now=time.time(),
+                    )
+                conn.execute(
+                    "UPDATE scheduled_tasks SET status='active' WHERE task_id=?",
+                    (task_id,),
+                )
+                conn.execute(
+                    "UPDATE scheduled_credential_blocks SET resume_requested=1 "
+                    "WHERE task_id=? AND credential_identity=?",
+                    (task_id, block["credential_identity"]),
+                )
+        return True
 
     def list_active(self, owner_user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """列出进行中的定时任务（含暂停中的，前端靠 status 渲染开关）。
@@ -203,7 +363,7 @@ class ScheduleStore:
         return [dict(r) for r in rows]
 
     def due_tasks(self, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
-        """返回 next_run_at <= now 且仍 active 的任务（到点待执行）。"""
+        """返回已到点任务，以及 Cookie 更新后待恢复的原次执行。"""
         from src.api.auth import get_store
 
         now = now or datetime.now()
@@ -215,9 +375,15 @@ class ScheduleStore:
                                "SELECT owner_user_id, resource_id, generation FROM account_execution_bindings WHERE resource_kind='schedule'")}
             with self._conn() as conn:
                 rows = conn.execute(
-                    """SELECT * FROM scheduled_tasks
-                       WHERE status='active' AND next_run_at IS NOT NULL AND next_run_at <= ?
-                       ORDER BY next_run_at""",
+                    """SELECT t.*,
+                              b.execution_task_id AS _credential_resume_task_id,
+                              b.manual AS _credential_resume_manual
+                       FROM scheduled_tasks t
+                       LEFT JOIN scheduled_credential_blocks b
+                         ON b.task_id=t.task_id AND b.resume_requested=1
+                       WHERE (t.status='active' AND t.next_run_at IS NOT NULL AND t.next_run_at <= ?)
+                          OR (t.status='active' AND b.task_id IS NOT NULL)
+                       ORDER BY t.next_run_at""",
                     (_iso(now),),
                 ).fetchall()
         return [{**dict(row), "_execution_generation": generations.get((row["owner_user_id"], row["task_id"]))}
@@ -280,6 +446,55 @@ class ScheduleStore:
                 (task_id, _iso(datetime.now()), 1 if success else 0, summary, report_path, json_path),
             )
 
+    def finish_run(
+        self,
+        task_id: str,
+        *,
+        success: bool,
+        result: str,
+        error: str,
+        next_run_at: Optional[datetime],
+        keep_schedule: bool,
+        summary: str,
+        report_path: str,
+        json_path: str,
+        credential_execution_task_id: str | None,
+    ) -> None:
+        """原子记录结果、历史，并消费对应的 Cookie 恢复收据。"""
+        now = _iso(datetime.now())
+        with self._execution_write(task_id) as conn:
+            if keep_schedule:
+                conn.execute(
+                    "UPDATE scheduled_tasks SET last_run_at=?,last_success=?,last_result=?,"
+                    "last_error=?,run_count=run_count+1 WHERE task_id=?",
+                    (now, int(success), result, error, task_id),
+                )
+            else:
+                new_status = "active" if next_run_at else "done"
+                conn.execute(
+                    "UPDATE scheduled_tasks SET last_run_at=?,last_success=?,last_result=?,"
+                    "last_error=?,run_count=run_count+1,"
+                    "next_run_at=CASE WHEN status='active' THEN ? ELSE next_run_at END,"
+                    "status=CASE WHEN status='active' THEN ? ELSE status END WHERE task_id=?",
+                    (
+                        now, int(success), result, error,
+                        _iso(next_run_at), new_status, task_id,
+                    ),
+                )
+            conn.execute(
+                "INSERT INTO scheduled_task_runs "
+                "(task_id,run_at,success,summary,report_path,json_path) VALUES (?,?,?,?,?,?)",
+                (task_id, now, int(success), summary, report_path, json_path),
+            )
+            if credential_execution_task_id:
+                deleted = conn.execute(
+                    "DELETE FROM scheduled_credential_blocks WHERE task_id=? "
+                    "AND execution_task_id=? AND resume_requested=1",
+                    (task_id, credential_execution_task_id),
+                ).rowcount
+                if deleted != 1:
+                    raise execution.ExecutionDenied("Cookie 恢复收据已变化")
+
     def list_runs(self, task_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         """某任务的执行历史，新→旧。"""
         with self._conn() as conn:
@@ -302,9 +517,25 @@ class ScheduleStore:
         self, task_id: str, status: str, *, next_run_at: Optional[datetime] = None
     ) -> bool:
         """切换任务状态（active/paused）。暂停不动 next_run_at；恢复时传入重算后的值。"""
-        if self.get(task_id) is None:
+        current = self.get(task_id)
+        if current is None:
             return False
+        block = self.credential_block(task_id)
+        if status == "active" and block is not None:
+            return self.resume_after_credentials(task_id)
+        if status == "active" and current["status"] == "active" and next_run_at is None:
+            from src.api.auth import get_store
+
+            get_store().require_account_execution(
+                execution.current_authorization(), "schedule", task_id,
+            )
+            return True
         with self._execution_write(task_id, resume=status == "active") as conn:
+            if status == "paused" and block and block["resume_requested"]:
+                conn.execute(
+                    "DELETE FROM scheduled_credential_blocks WHERE task_id=?",
+                    (task_id,),
+                )
             if next_run_at is not None:
                 cur = conn.execute(
                     "UPDATE scheduled_tasks SET status=?, next_run_at=? WHERE task_id=?",

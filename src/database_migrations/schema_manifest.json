@@ -26,11 +26,14 @@
     "objects": {
       "index:idx_runs_task": "6d7421c5b093d5849032fc9c581e94642ee1d02b93df008fe8bf6d601c242382"
     },
-    "revision": "scheduler_0001",
+    "revision": "scheduler_0003",
     "tables": {
       "alembic_version": "691ed6fce5f31a9b013517c6b69e28441a10825af909745693a8fa7b7a627981",
       "scheduled_task_runs": "2d8621465dd8a93f54949dee0b9631b67ab051dfbd69bc0ea28f638e8eab6816",
-      "scheduled_tasks": "760ebbec5f4cb5b561494b473bb8548dc3a85a1da9073390f569cadd1ccaa309"
+      "scheduled_tasks": "760ebbec5f4cb5b561494b473bb8548dc3a85a1da9073390f569cadd1ccaa309",
+      "scheduled_credential_blocks": "901ebf3b79817602fde3f5f9b6e879050e9519a7b6ece76ed2ded014b2903a56",
+      "scheduled_workspace_bindings": "94383c87c32c8a58805a0d72c58fa9a0dc169e51aa6c78ad2a29cb4f5fe1789e",
+      "scheduled_workspace_occurrences": "b49d93fda510f1aa75caf427d92d5772b5ee7efd434f358850b5975e79af0b1b"
     }
   },
   "webui": {
@@ -136,9 +139,13 @@
       "trigger:task_revision_contexts_no_delete": "2c9f81a67fc900da32836d2578fc2e8eef6740bb8b8b9b9cfed3a2cd0ff20205",
       "trigger:task_revision_contexts_no_update": "0bf76d1de4c16763ef0133a1a94d573fb73e2ed16223d8dd24e20b53054759fc",
       "trigger:web_task_contracts_no_delete": "8c3a98e6e3b53476208c4a42667fd84cbdf2ec99c216408a0086e245e1f6de9c",
-      "trigger:web_task_contracts_no_update": "f70469242d490e4d28c884d7d2669bf72b3d3cd123ebefce630f33aab25274c0"
+      "trigger:web_task_contracts_no_update": "f70469242d490e4d28c884d7d2669bf72b3d3cd123ebefce630f33aab25274c0",
+      "trigger:workspace_feedback_audit_no_delete": "6a7121e8f912bcf395a4db0c358e3175bf258af9ef8497c9bd80e102105cc99e",
+      "trigger:workspace_feedback_audit_no_replace": "c4de2fde36fd012732cb903d08bd8292b46dc10eed035b10c3b48a80b9aabda7",
+      "trigger:workspace_feedback_audit_no_update": "615f0290caf8f928fa1bacfdcb410572ceb7aa90868160093fb9e98443192804",
+      "view:feedback_management": "22e528c6281c434384b399ae8c92549b031d6d010909d8ed644013510f9bf54f"
     },
-    "revision": "webui_0019",
+    "revision": "webui_0020",
     "tables": {
       "account_execution_bindings": "792d18e3f5416745c405e022cc798847f4a44d9c1123e58e3900e724c60e0cfd",
       "account_execution_holds": "985dd26ff02bf54e43557d05f72b11d5c97c3f3f18294bb3451afd2748e64db3",
@@ -236,7 +243,10 @@
       "user_memory": "e1bfd5b266fa24edcb77ca839b6720ae36d2c5b0d8cfee978c8b569638e6f05d",
       "user_ui_state": "888c5edf2b614dbe4a7f182c0387adb2ca41817268e3402597f430d8f593de52",
       "users": "d2b56f4abf511db2fe2aa490ae7f2c6995315016ccb6ff040f556076c5d0786e",
-      "web_task_contracts": "0e507fbef5813ef63eb6b5ea66e3e91bfada909afd0f1ef5ef7a8ed5336756a5"
+      "web_task_contracts": "0e507fbef5813ef63eb6b5ea66e3e91bfada909afd0f1ef5ef7a8ed5336756a5",
+      "workspace_feedback": "acc273b17a277e59103d02bb162059b32687d3f596942ae56c455301ee31417e",
+      "workspace_feedback_content_access": "68cacc5fbe8a134287599a7a66820e1ff4db6846c89265cd218618cd7fe88c40",
+      "workspace_feedback_receipts": "62be046a41a38d858c714ce3739138ee0256dc5c6ac84c7a8839889961057eac"
     }
   }
 }

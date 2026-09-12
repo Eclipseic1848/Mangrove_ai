@@ -26,9 +26,9 @@ def test_feedback_audit_upgrade_preserves_history_and_restore(tmp_path):
         history = conn.execute('SELECT * FROM message_feedback').fetchall()
     before = database.read_bytes()
     target = migrations.DatabaseTarget('webui', database)
-    assert migrations.inspect_database(target).pending_revisions == ('webui_0013', 'webui_0014', 'webui_0015', 'webui_0016', 'webui_0017', 'webui_0018', 'webui_0019')
+    assert migrations.inspect_database(target).pending_revisions == ('webui_0013', 'webui_0014', 'webui_0015', 'webui_0016', 'webui_0017', 'webui_0018', 'webui_0019', 'webui_0020')
     receipt = migrations.apply_migrations(target, tmp_path / 'backup.db', expected_source_sha256=hashlib.sha256(before).hexdigest())
-    assert receipt.applied_revisions == ('webui_0013', 'webui_0014', 'webui_0015', 'webui_0016', 'webui_0017', 'webui_0018', 'webui_0019')
+    assert receipt.applied_revisions == ('webui_0013', 'webui_0014', 'webui_0015', 'webui_0016', 'webui_0017', 'webui_0018', 'webui_0019', 'webui_0020')
     with closing(sqlite3.connect(database)) as conn:
         assert conn.execute('SELECT * FROM message_feedback').fetchall() == history
         assert conn.execute('SELECT count(*) FROM feedback_content_access').fetchone()[0] == 0

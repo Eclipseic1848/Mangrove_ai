@@ -1,8 +1,10 @@
 """账号停用与调度计划的授权屏障；仅使用临时显式迁移库。"""
 import asyncio
 from datetime import datetime
+from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 from src.scheduler.store import ScheduleStore
 from src.scheduler.service import SchedulerService
@@ -291,4 +293,226 @@ async def test_old_due_snapshot_cannot_run_rescheduled_future_task(fixture, chan
     # 新一轮读取到期事实后，合法恢复的计划仍能正常执行。
     await service.tick(future)
     assert calls == [first, second]
+    assert len(store.list_runs(second)) == 1
+
+
+@pytest.mark.asyncio
+async def test_cookie_expiry_resumes_same_schedule_run_once_after_owner_replaces_cookie(
+    fixture, monkeypatch,
+):
+    from src.api.routes import tasks as task_routes
+    from src.api.schemas import TaskPatchIn
+
+    web, store, owner, auth = fixture
+    web.config_set(owner, "mc_cookie_xhs", "synthetic-cookie-before")
+    task_id = add(store, auth)
+    calls = []
+
+    async def runner(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return {
+                "reply": "其它公开来源取得了兜底数据",
+                "collector_attempts": [{
+                    "collector": "mediacrawler",
+                    "success": False,
+                    "failure_kind": "auth_invalid",
+                    "credential_key": "mc_cookie_xhs",
+                }],
+            }
+        return {"reply": "恢复完成"}
+
+    await SchedulerService(store, runner=runner).tick(datetime(2026, 9, 6, 1))
+    assert store.get(task_id)["status"] == "paused"
+    assert web.account_execution_binding(owner, "schedule", task_id)["state"] == "paused"
+    block = store.credential_block(task_id)
+    assert block["credential_key"] == "mc_cookie_xhs"
+    assert "synthetic-cookie-before" not in str(block)
+    assert b"synthetic-cookie-before" not in Path(store.db_path).read_bytes()
+
+    monkeypatch.setattr(task_routes, "get_schedule_store", lambda: store)
+    listed = task_routes.list_tasks({"user_id": owner})[0]
+    assert listed["credential_block"] == {"credential_key": "mc_cookie_xhs"}
+    assert "credential_identity" not in str(listed)
+    with execution_context(auth):
+        with pytest.raises(HTTPException, match="更新本人 Cookie"):
+            task_routes.update_task(task_id, TaskPatchIn(status="active"), {"user_id": owner})
+        web.config_set(owner, "mc_cookie_xhs", "synthetic-cookie-before")
+        with pytest.raises(HTTPException, match="更新本人 Cookie"):
+            task_routes.update_task(task_id, TaskPatchIn(status="active"), {"user_id": owner})
+        web.config_delete(owner, "mc_cookie_xhs")
+        web.config_set("global", "mc_cookie_xhs", "synthetic-cookie-before")
+        with pytest.raises(HTTPException, match="更新本人 Cookie"):
+            task_routes.update_task(task_id, TaskPatchIn(status="active"), {"user_id": owner})
+        web.config_set(owner, "mc_cookie_xhs", "synthetic-cookie-after")
+        assert task_routes.update_task(task_id, TaskPatchIn(status="active"), {"user_id": owner}) == {"ok": True}
+        # 第一次响应即使丢失，重复恢复也只是读取同一激活事实，不会再次触发执行。
+        assert task_routes.update_task(task_id, TaskPatchIn(status="active"), {"user_id": owner}) == {"ok": True}
+    assert len(calls) == 1
+    assert store.credential_block(task_id)["resume_requested"] == 1
+    assert task_routes.list_tasks({"user_id": owner})[0]["credential_block"] is None
+
+    restarted = SchedulerService(store, runner=runner)
+    await restarted.tick(datetime(2026, 9, 6, 1))
+    assert len(calls) == 2
+    assert calls[0]["task_id"] == calls[1]["task_id"]
+    assert len(store.list_runs(task_id)) == 2
+    assert store.credential_block(task_id) is None
+    await restarted.tick(datetime(2026, 9, 6, 1))
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_manual_cookie_resume_survives_restart_without_changing_schedule(fixture):
+    web, store, owner, auth = fixture
+    web.config_set(owner, "mc_cookie_xhs", "synthetic-manual-before")
+    task_id = add(store, auth)
+    calls = []
+
+    async def runner(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return {"error": "认证失效", "collector_attempts": [{
+                "collector": "mediacrawler", "success": False,
+                "failure_kind": "auth_invalid", "credential_key": "mc_cookie_xhs",
+            }]}
+        return {"reply": "同一手动执行已恢复"}
+
+    with execution_context(auth):
+        await SchedulerService(store, runner=runner).run_task_now(task_id)
+        web.config_set(owner, "mc_cookie_xhs", "synthetic-manual-after")
+        store.set_status(task_id, "active")
+
+    restarted = SchedulerService(store, runner=runner)
+    await restarted.tick(datetime(2026, 9, 5))
+    await restarted.tick(datetime(2026, 9, 5))
+    assert len(calls) == 2
+    assert calls[0]["task_id"] == calls[1]["task_id"]
+    assert store.get(task_id)["next_run_at"] == datetime(2026, 9, 6).isoformat()
+    assert store.credential_block(task_id) is None
+
+
+@pytest.mark.asyncio
+async def test_personal_secret_is_redacted_before_scheduler_persistence(fixture):
+    web, store, owner, auth = fixture
+    secret = "synthetic-personal-cookie-redaction"
+    web.config_set(owner, "mc_cookie_xhs", secret)
+    task_id = add(store, auth)
+
+    async def runner(*args, **kwargs):
+        return {"error": f"upstream echoed {secret}"}
+
+    await SchedulerService(store, runner=runner).tick(datetime(2026, 9, 6, 1))
+    task = store.get(task_id)
+    assert secret not in task["last_error"]
+    assert "[SECRET]" in task["last_error"]
+    assert secret not in str(store.list_runs(task_id))
+    assert secret.encode() not in Path(store.db_path).read_bytes()
+
+
+@pytest.mark.asyncio
+async def test_collect_stops_on_definite_auth_invalid_before_public_fallback(monkeypatch):
+    from src.collectors import CollectFailureKind, CollectResult
+    from src.conductor.nodes.collect import collect_node
+    from src.conductor.task_spec import TaskSpec
+
+    fallback_calls = []
+
+    class InvalidCookie:
+        async def collect(self, spec):
+            return CollectResult(
+                False, "mediacrawler", message="登录状态已失效",
+                failure_kind=CollectFailureKind.AUTH_INVALID,
+                credential_key="mc_cookie_xhs",
+            )
+
+    class PublicFallback:
+        async def collect(self, spec):
+            fallback_calls.append(spec)
+            return CollectResult(True, "public")
+
+    monkeypatch.setattr(
+        "src.conductor.nodes.collect.get_registry",
+        lambda: {"mediacrawler": InvalidCookie(), "public": PublicFallback()},
+    )
+    result = await collect_node({
+        "task_spec": TaskSpec(intent="读取本人授权数据", keywords=["合成"]),
+        "collector_candidates": ["mediacrawler", "public"],
+    })
+
+    assert result["error"].startswith("认证来源已失效")
+    assert result["collector_attempts"][0]["credential_key"] == "mc_cookie_xhs"
+    assert fallback_calls == []
+
+
+@pytest.mark.asyncio
+async def test_resume_postprocessing_failure_never_replays_external_action(
+    fixture, monkeypatch,
+):
+    web, store, owner, auth = fixture
+    web.config_set(owner, "mc_cookie_xhs", "synthetic-post-before")
+    task_id = add(store, auth)
+    calls = []
+
+    async def runner(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 1:
+            return {"error": "认证失效", "collector_attempts": [{
+                "collector": "mediacrawler", "success": False,
+                "failure_kind": "auth_invalid", "credential_key": "mc_cookie_xhs",
+            }]}
+        return {"reply": "外部动作已返回"}
+
+    with execution_context(auth):
+        await SchedulerService(store, runner=runner).run_task_now(task_id)
+        web.config_set(owner, "mc_cookie_xhs", "synthetic-post-after")
+        store.set_status(task_id, "active")
+
+    def fail_finish(*args, **kwargs):
+        raise RuntimeError("synthetic-postprocessing-failure")
+
+    monkeypatch.setattr(store, "finish_run", fail_finish)
+    restarted = SchedulerService(store, runner=runner)
+    await restarted.tick(datetime(2026, 9, 5))
+    await restarted.tick(datetime(2026, 9, 5))
+    assert len(calls) == 2
+    assert store.credential_block(task_id)["resume_requested"] == 1
+    assert web.account_execution_binding(owner, "schedule", task_id)["state"] == "cleanup_failed"
+
+
+@pytest.mark.asyncio
+async def test_unclaimable_manual_resume_does_not_block_other_owner(fixture):
+    web, store, owner, auth = fixture
+    web.config_set(owner, "mc_cookie_xhs", "synthetic-block-before")
+    with execution_context(auth):
+        first = store.add(
+            user_input="先执行", provider=None, model=None, trigger_type="once",
+            cron_expr=None, run_at=datetime(2026, 9, 5),
+            next_run_at=datetime(2026, 9, 5), owner_user_id=owner,
+        )
+    calls = []
+
+    async def runner(*args, **kwargs):
+        calls.append(kwargs["session_id"])
+        if len(calls) == 1:
+            return {"error": "认证失效", "collector_attempts": [{
+                "collector": "mediacrawler", "success": False,
+                "failure_kind": "auth_invalid", "credential_key": "mc_cookie_xhs",
+            }]}
+        return {"reply": "其它账号完成"}
+
+    with execution_context(auth):
+        await SchedulerService(store, runner=runner).run_task_now(first)
+        web.config_set(owner, "mc_cookie_xhs", "synthetic-block-after")
+        store.set_status(first, "active")
+    web.confirm_account_execution_stopped(
+        owner, "schedule", first, auth.generation, cleanup_failed=True,
+    )
+
+    other = web.create_user("resume-other", "synthetic-unused")["user_id"]
+    second = add(store, web.capture_account_execution(other))
+    calls.clear()
+    await SchedulerService(store, runner=runner).tick(datetime(2026, 9, 6, 1))
+
+    assert calls == [f"scheduler:{second}"]
     assert len(store.list_runs(second)) == 1

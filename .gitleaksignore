@@ -43,3 +43,6 @@ e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:gener
 e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:98
 e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:151
 e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:199
+
+# 已核对：Issue #186 的 scheduled_credential_blocks 值是 Schema 结构摘要，仅忽略该历史提交的精确行。
+71948135456e009bdbd4744faff48f6645553fd2:src/database_migrations/schema_manifest.json:generic-api-key:34

@@ -2,7 +2,7 @@
 
 > status: `P1_01_ENGINEERING_COMPLETE / REMEDIATION_IN_PROGRESS`
 >
-> last_verified: 2026-09-11（#139 HTTP/数据库只读来源工程完成；远端状态现场核对 GitHub）
+> last_verified: 2026-09-12（#141/#186 本地工程与用户验收通过；远端状态现场核对 GitHub）
 >
 > authoritative_branch: `main`
 >
@@ -16,9 +16,9 @@
 
 ## 0. 当前 P1 状态
 
-- 当前整改权威为 [#113](https://github.com/Eclipseic1848/Mangrove_ai/issues/113)。#138 由用户暂停；管理员或用户自行填写 Cookie 后稳定只读取数是后续独立优化，不属于 #138。
-- #139 已完成 HTTP/数据库只读来源工程闭环：真实 GitHub HTTPS 与 MySQL/PostgreSQL 实库均经产品连接、范围冻结和来源获取入口验证；两个 Owner 使用不同只读账号、表与数据，重复水位在安全断点后同 Attempt 续读完整，跨 Owner 与数据库权限双层隔离。PostgreSQL Schema 发现现只展示具备 `SELECT` 权限的表。生产连接、生产迁移、部署和发布均未执行。
-- #140 已完成并关闭。后续按依赖处理 #141；普通“继续”不解除 #138 暂停，也不代表 P1 完成或发布资格。
+- 当前整改权威为 [#113](https://github.com/Eclipseic1848/Mangrove_ai/issues/113)。#138 由用户暂停；#186 已补齐管理员全局与用户本人手填 Cookie 的 Owner 隔离、验证、确定失效暂停和原计划显式恢复链，并通过本地阶段用户验收。真实站点、生产 Cookie/Secret、部署和目标服务器仍未验收。
+- #139 已完成、合并并关闭：真实 GitHub HTTPS 与 MySQL/PostgreSQL 实库均经产品连接、范围冻结和来源获取入口验证；两个 Owner 使用不同只读账号、表与数据，重复水位在安全断点后同 Attempt 续读完整，跨 Owner 与数据库权限双层隔离。PostgreSQL Schema 发现只展示具备 `SELECT` 权限的表。生产连接、生产迁移、部署和发布均未执行。
+- #140 已完成并关闭。#141 已完成自动计划、原身份恢复和反馈生命周期的本地工程及用户验收；PR #187 已合并，PR #183 与 #141/#186 的最终远端状态须现场查询 GitHub。普通“继续”不解除 #138 暂停，也不代表 P1 完成或发布资格。
 
 ### 历史 P1-01 核验快照（2026-09-04）
 
@@ -48,7 +48,8 @@
   生产迁移已完成，本工单未授权的是新增迁移、恢复覆盖、备份处置与 Key/Secret 轮换。
   这些证据等级不得互相替代。
 - Agent-Reach 调研继续作为有效候选知识源；不整包安装，不自动启用 OpenCLI/xiaohongshu-mcp。
-  认证来源未来仍须按 Owner 隔离 Cookie/SecretRef，明确失效时暂停同一 Run 并由该 Owner 扫码。
+  当前认证来源按 Owner 隔离 Cookie/SecretRef，本人配置优先、管理员全局配置只作兜底；明确失效时
+  暂停原计划并由该 Owner 更换 Cookie 后显式继续。#138 扫码路线继续暂停。
 - 已清理可再生旧产物：`.scratch/**`、`test-results/**`、`frontend/premium-audit.json`，共约
   118 MB，进入 Windows 回收站；源代码、测试、ADR、规格、正式证据、数据库、备份与他人改动未删。
 

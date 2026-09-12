@@ -28,7 +28,7 @@ def test_result_context_migration_preserves_original_turn_and_restore(tmp_path):
     assert database.read_bytes() == before
     target = migrations.DatabaseTarget("webui", database)
     receipt = migrations.apply_migrations(target, tmp_path / "backup.db", expected_source_sha256=hashlib.sha256(before).hexdigest())
-    assert receipt.applied_revisions == ("webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019")
+    assert receipt.applied_revisions == ("webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020")
     turn = SqliteSteeringRepository(str(database)).get_turn("owner", "turn-old")
     assert turn.text == "原始追问"
     assert turn.result_context is None
