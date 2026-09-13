@@ -280,15 +280,21 @@ def test_dependency_group_gate_checks_frontend_dependency_security() -> None:
     node_security = workflow.split(
         "  node-evaluation-security:", maxsplit=1
     )[1].split("  frontend-e2e:", maxsplit=1)[0]
+    frontend_security = node_security.split(
+        "      - name: 验证前端依赖安全边界", maxsplit=1
+    )[1].split("      - name: 上传评测依赖证据", maxsplit=1)[0]
 
     assert "if: inputs.gate == 'dependency-groups'" in node_security
-    assert "working-directory: frontend" in node_security
-    assert "npm ci --ignore-scripts --no-audit --no-fund" in node_security
+    assert "working-directory: frontend" in frontend_security
+    assert "npm ci --ignore-scripts --no-audit --no-fund" in frontend_security
     assert (
         "node ../scripts/ci/check_browserslist_security.cjs node_modules"
-        in node_security
+        in frontend_security
     )
-    assert "npm audit --audit-level=high --json > security-audit.json" in node_security
+    assert (
+        "npm audit --audit-level=high --json > security-audit.json"
+        in frontend_security
+    )
     assert "node-evaluation-security-evidence" in node_security
     assert "frontend/browserslist-security.log" in node_security
     assert "frontend/security-audit.json" in node_security
