@@ -265,6 +265,27 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  frontend-dependency-security:
+    if: inputs.gate == 'dependency-groups'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: 验证前端依赖安全边界
+        run: |
+          set -euo pipefail
+          npm ci --ignore-scripts --no-audit --no-fund
+          node ../scripts/ci/check_browserslist_security.cjs node_modules
+
   frontend-e2e:
     if: inputs.gate == 'full-regression' || inputs.gate == 'account-execution' || inputs.gate == 'cancellation' || inputs.gate == 'frontend-e2e' || inputs.gate == 'platform-sessions' || inputs.gate == 'external-readonly' || inputs.gate == 'model-onboarding' || inputs.gate == 'unified-workspace'
     runs-on: ubuntu-latest

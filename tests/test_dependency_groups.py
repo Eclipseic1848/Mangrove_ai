@@ -273,6 +273,22 @@ def test_each_dependency_group_has_an_independent_clean_install_gate() -> None:
     ) in workflow
 
 
+def test_dependency_group_gate_checks_frontend_dependency_security() -> None:
+    workflow = (PROJECT_ROOT / ".github/workflows/ci-heavy.yml").read_text(
+        encoding="utf-8"
+    )
+    frontend_security = workflow.split(
+        "  frontend-dependency-security:", maxsplit=1
+    )[1].split("  frontend-e2e:", maxsplit=1)[0]
+
+    assert "if: inputs.gate == 'dependency-groups'" in frontend_security
+    assert "npm ci --ignore-scripts --no-audit --no-fund" in frontend_security
+    assert (
+        "node ../scripts/ci/check_browserslist_security.cjs node_modules"
+        in frontend_security
+    )
+
+
 def test_dependency_group_import_smoke_cli_has_all_public_groups() -> None:
     completed = subprocess.run(
         [
