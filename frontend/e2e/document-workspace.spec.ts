@@ -1408,6 +1408,8 @@ test.describe("文档智能抽取工作台", () => {
       savedValue = route.request().postDataJSON().value;
       return route.fulfill({ json: { ok: true } });
     });
+    await page.route("**/api/capability-governance/packs", (route) => route.fulfill({ json: { items: [] } }));
+    await page.route("**/api/capability-governance/validations", (route) => route.fulfill({ json: { items: [] } }));
 
     await page.goto("/settings");
     await page.getByLabel("文档抽取默认模型").selectOption("qwen::qwen-plus");
