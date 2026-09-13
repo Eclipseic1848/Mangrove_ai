@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentPr
 import { TaskContextLibrary } from "./TaskContextLibrary";
 import { TaskComposer, type WebIntakeDraft } from "./TaskComposer";
 import { ConnectorSourceIntake } from "./ConnectorSourceIntake";
-import { WebSourceIntake } from "./WebSourceIntake";
+import { hasRestorableStoredSourceAcquisition, migrateLegacyStoredSourceAcquisition, WebSourceIntake } from "./WebSourceIntake";
 import { getSourceAcquisition, getTaskContextOptions, previewTaskContext, type TaskContextPreview, type TaskTemplateOption, type OwnerMemoryOption } from "@/lib/semanticWorkspaceApi";
 import { ConnectorScopeFacts } from "./ConnectorScopeFacts";
 import type { SourceSnapshot } from "@/types/semanticWorkspace";
@@ -25,17 +25,20 @@ type Choice = { snapshotId: string; attemptId: string; snapshot?: SourceSnapshot
 type Props = Omit<ComposerProps, "onSubmit" | "onReadWeb"> & {
   ownerId: string;
   draftScope?: string;
+  sourceStorageScope?: string;
   initialSources?: SourceSnapshot[];
   initialUnavailableSourceIds?: string[];
   initialReusableSources?: ReusableSource[];
   preserveContext?: boolean;
+  onSourceAcquisitionRecoveryChange?: (raw: string | null) => void;
   onSubmit: (payload: SourceTaskPayload) => Promise<void>;
 };
 const splitLines = (value: string) => value.split(/[\n,，]/).map(item => item.trim()).filter(Boolean);
 
-export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSources = [], initialUnavailableSourceIds = [], initialReusableSources = [], preserveContext = false, onSubmit, ...props }: Props) {
+export function WorkspaceSourceComposer({ ownerId, draftScope = "new", sourceStorageScope, initialSources = [], initialUnavailableSourceIds = [], initialReusableSources = [], preserveContext = false, onSourceAcquisitionRecoveryChange, onSubmit, ...props }: Props) {
   const storageKey = `mangrove_workspace_draft_${ownerId}_${draftScope}`;
   const filesKey = `${storageKey}_files`;
+  const activeSourceScope = sourceStorageScope ?? draftScope;
   const [saved] = useState(() => {
     try { return JSON.parse(localStorage.getItem(storageKey) || "null") as { draft?: WebIntakeDraft; sources?: Choice[]; history?: ReusableSource[]; mustInclude?: string; exclusions?: string; quantity?: string | null; completeness?: string | null; templateId?: string; templateVersion?: number; memoryIds?: number[] } | null; } catch { return null; }
   });
@@ -46,7 +49,10 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   const [restoringHistory, setRestoringHistory] = useState(true);
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerTrigger = useRef<HTMLElement | null>(null);
-  const [webOpen, setWebOpen] = useState(() => { try { return Boolean(localStorage.getItem(`mangrove_web_source_attempt_${ownerId}${draftScope === "new" ? "" : `_${draftScope}`}`)); } catch { return false; } });
+  const [webOpen, setWebOpen] = useState(() => {
+    if (sourceStorageScope) migrateLegacyStoredSourceAcquisition(ownerId, sourceStorageScope);
+    return hasRestorableStoredSourceAcquisition(ownerId, activeSourceScope);
+  });
   const [connectorOpen, setConnectorOpen] = useState(false);
   const [webPrompt, setWebPrompt] = useState("");
   const [acquiring, setAcquiring] = useState(false);
@@ -230,10 +236,10 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
       }} />}
     {webOpen && <section aria-label="网页资料" className="rounded-xl border p-3">
       <button type="button" disabled={acquiring} onClick={closeWeb} className="mb-3 rounded-lg border px-3 py-2 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">返回当前资料</button>
-      <WebSourceIntake draft={draft} initialPrompt={webPrompt} ownerId={ownerId} storageScope={draftScope === "new" ? undefined : draftScope}
+      <WebSourceIntake draft={draft} initialPrompt={webPrompt} ownerId={ownerId} storageScope={activeSourceScope}
         allowLocalRuntime={Boolean(props.allowLocalPiRuntime)} localModels={(props.modelOptions ?? []).filter(item => item.provider === "local").map(item => ({ model: item.model, label: item.label }))}
         defaultLocalModel={draft?.localModel ?? null} modelConnections={props.modelConnections ?? []} defaultConnectionId={draft?.connectionId ?? null} defaultConnectionModel={draft?.connectionModel ?? null}
-        onTaskCreated={() => undefined} onAcquisitionBusy={setAcquiring} onSourceSelected={(snapshot, attemptId) => {
+        onTaskCreated={() => undefined} onAcquisitionBusy={setAcquiring} onAcquisitionRecoveryChange={onSourceAcquisitionRecoveryChange} onSourceSelected={(snapshot, attemptId) => {
           setSources(current => current.some(item => item.snapshotId === snapshot.snapshot_id) ? current : [...current, { snapshotId: snapshot.snapshot_id, attemptId, snapshot }]);
           const next = draft ?? { prompt: webPrompt, connectionId: null, connectionModel: null, localModel: props.defaultModel?.model ?? null };
           updateDraft({ ...next, prompt: next.prompt || snapshot.allowed_scope.query || "", formats: next.formats?.length ? next.formats : ["markdown"] });

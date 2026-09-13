@@ -211,7 +211,9 @@ for (const change of [{ user_id: "admin-b", role: "admin" }, { user_id: "admin-a
 test("普通用户无反馈管理正文入口", async ({ page }) => {
   let reads = 0;
   await setup(page, async (route) => { reads++; return route.fulfill({ status: 403, json: {} }); }, { ...actor, role: "user" });
-  await expect(page).not.toHaveURL(/\/feedback$/);
+  await expect(page).toHaveURL(/\/feedback$/);
+  await expect(page.getByRole("heading", { name: "无权访问此页面", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "返回任务工作台", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "审计查看业务内容" })).toHaveCount(0);
   expect(reads).toBe(0);
 });

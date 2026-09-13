@@ -1,4 +1,4 @@
-import { Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth, isAdminish } from "@/lib/auth";
 import { Layout } from "@/components/Layout";
 import { Login } from "@/pages/Login";
@@ -25,10 +25,19 @@ function Protected({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
-// 仅管理员/超级管理员可进；其余重定向到概览
+function RouteNotice({ forbidden = false }: { forbidden?: boolean }) {
+  return <section className="mx-auto w-full max-w-2xl space-y-4 p-6">
+    <p className="text-sm text-muted-foreground">{forbidden ? "403 · 权限不足" : "404 · 页面不存在"}</p>
+    <h1 className="text-xl font-semibold">{forbidden ? "无权访问此页面" : "页面不存在"}</h1>
+    <p className="text-sm text-muted-foreground">{forbidden ? "你的当前角色不能访问此页面，管理内容未显示。" : "请检查页面地址，或返回任务工作台继续。"}</p>
+    <Link to="/data-prep" className="inline-block rounded-md px-2 py-1 text-primary underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">返回任务工作台</Link>
+  </section>;
+}
+
+// 仅管理员/超级管理员可进；拒绝页不挂载管理组件或请求业务正文。
 function AdminOnly({ children }: { children: React.ReactNode }) {
   const { user } = useAuth();
-  if (!isAdminish(user?.role)) return <Navigate to="/" replace />;
+  if (!isAdminish(user?.role)) return <RouteNotice forbidden />;
   return <>{children}</>;
 }
 
@@ -52,8 +61,8 @@ export default function App() {
         <Route path="/settings" element={<Settings />} />
         <Route path="/admin" element={<AdminOnly><Admin /></AdminOnly>} />
         <Route path="/feedback" element={<AdminOnly><Feedback /></AdminOnly>} />
+        <Route path="*" element={<RouteNotice />} />
       </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }

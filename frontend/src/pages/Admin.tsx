@@ -68,6 +68,7 @@ export function Admin() {
   const [allowReg, setAllowReg] = useState<boolean | null>(null);
   // 搜索/筛选/分页
   const [q, setQ] = useState("");
+  const [searchComposing, setSearchComposing] = useState(false);
   const [debouncedQ, setDebouncedQ] = useState("");
   const [roleFilter, setRoleFilter] = useState<string>("");
   const [statusFilter, setStatusFilter] = useState<string>("");
@@ -82,16 +83,19 @@ export function Admin() {
   const [form, setForm] = useState({ username: "", password: "", display_name: "", role: "user" });
   // 重开同一用户或继续编辑也是新草稿，旧提交只能收口它提交时的版本。
   const editorGeneration = useRef(0);
+  const [editorError, setEditorError] = useState("");
   const editDraft = (update: () => void) => {
     editorGeneration.current += 1;
+    setEditorError("");
     update();
   };
 
   // 搜索框输入防抖 300ms 再触发请求
   useEffect(() => {
+    if (searchComposing) return;
     const t = setTimeout(() => setDebouncedQ(q), 300);
     return () => clearTimeout(t);
-  }, [q]);
+  }, [q, searchComposing]);
 
   // 筛选或分页变化时请求列表；筛选变化且不在第 1 页时先回到第 1 页，避免同一渲染里
   // 用旧 page 多打一次请求（那次请求可能因网络时序覆盖正确结果，是真实竞态而非无害浪费）
@@ -175,8 +179,10 @@ export function Admin() {
       await api.patch(`/api/admin/users/${u.user_id}`, body);
       toast.success(okMsg);
       load();
+      return true;
     } catch (e: any) {
       toast.error(e.message || "操作失败");
+      return false;
     }
   };
 
@@ -225,8 +231,9 @@ export function Admin() {
   const resetPwd = async () => {
     if (!pwdTarget || newPwd.length < 6) return;
     const generation = editorGeneration.current;
-    await patch(pwdTarget, { password: newPwd }, "已重置密码");
+    const saved = await patch(pwdTarget, { password: newPwd }, "已重置密码");
     if (generation !== editorGeneration.current) return;
+    if (!saved) { setEditorError("重置密码未收到成功确认，已保留输入，请核对后重试。"); return; }
     editorGeneration.current += 1;
     setPwdTarget(null);
     setNewPwd("");
@@ -236,8 +243,9 @@ export function Admin() {
     const name = newName.trim();
     if (!nameTarget || !name || name.length > 32) return;
     const generation = editorGeneration.current;
-    await patch(nameTarget, { display_name: name }, "已修改昵称");
+    const saved = await patch(nameTarget, { display_name: name }, "已修改昵称");
     if (generation !== editorGeneration.current) return;
+    if (!saved) { setEditorError("修改昵称未收到成功确认，已保留输入，请核对后重试。"); return; }
     editorGeneration.current += 1;
     setNameTarget(null);
     setNewName("");
@@ -337,17 +345,24 @@ export function Admin() {
                 )}
               </CardTitle>
               <div className="flex flex-wrap gap-2">
-                <div className="relative min-w-[200px] flex-1">
+                <div className="min-w-[200px] flex-1">
+                  <label htmlFor="admin-user-search" className="mb-1 block text-xs text-muted-foreground">搜索用户</label>
+                  <div className="relative">
                   <Search className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
                   <Input
+                    id="admin-user-search"
                     className="pl-8"
                     placeholder="搜索用户名/昵称…"
                     value={q}
                     onChange={(e) => setQ(e.target.value)}
+                    onCompositionStart={() => setSearchComposing(true)}
+                    onCompositionEnd={(e) => { setQ(e.currentTarget.value); setSearchComposing(false); }}
                   />
+                  </div>
                 </div>
+                <label className="text-xs text-muted-foreground">筛选角色
                 <select
-                  className="h-9 rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="mt-1 block h-9 rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   value={roleFilter}
                   onChange={(e) => setRoleFilter(e.target.value)}
                 >
@@ -355,8 +370,10 @@ export function Admin() {
                     <option key={r} value={r}>{r === "" ? "全部角色" : roleLabel(r)}</option>
                   ))}
                 </select>
+                </label>
+                <label className="text-xs text-muted-foreground">筛选状态
                 <select
-                  className="h-9 rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  className="mt-1 block h-9 rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   value={statusFilter}
                   onChange={(e) => setStatusFilter(e.target.value)}
                 >
@@ -364,6 +381,7 @@ export function Admin() {
                     <option key={s.value} value={s.value}>{s.label}</option>
                   ))}
                 </select>
+                </label>
               </div>
             </CardHeader>
             <CardContent className="space-y-2">
@@ -402,7 +420,7 @@ export function Admin() {
                       ) : u.disabled ? (
                         <Badge variant="danger">已禁用</Badge>
                       ) : (
-                        <span className="inline-flex items-center gap-1 text-xs text-emerald-500">
+                        <span className="inline-flex items-center gap-1 text-xs text-emerald-700 dark:text-emerald-400">
                           <CheckCircle2 className="h-3.5 w-3.5" /> 正常
                         </span>
                       )}
@@ -513,12 +531,18 @@ export function Admin() {
       {/* 新建用户 */}
       <Modal open={creating} onClose={() => editDraft(() => setCreating(false))} title="新建用户">
         <div className="space-y-3">
-          <Input placeholder="用户名（≥2位）" value={form.username}
+          <div><label htmlFor="admin-create-username" className="mb-1 block text-sm">用户名</label>
+          <Input id="admin-create-username" placeholder="用户名（≥2位）" value={form.username}
             onChange={(e) => editDraft(() => setForm({ ...form, username: e.target.value }))} />
-          <Input placeholder="昵称（可选）" value={form.display_name}
+          </div>
+          <div><label htmlFor="admin-create-name" className="mb-1 block text-sm">昵称（可选）</label>
+          <Input id="admin-create-name" placeholder="昵称（可选）" value={form.display_name}
             onChange={(e) => editDraft(() => setForm({ ...form, display_name: e.target.value }))} />
-          <Input type="password" placeholder="密码（≥6位）" value={form.password}
+          </div>
+          <div><label htmlFor="admin-create-password" className="mb-1 block text-sm">初始密码</label>
+          <Input id="admin-create-password" type="password" placeholder="密码（≥6位）" value={form.password}
             onChange={(e) => editDraft(() => setForm({ ...form, password: e.target.value }))} />
+          </div>
           <div className="flex items-center gap-2 text-sm">
             <span className="text-muted-foreground">角色</span>
             <div className="flex gap-1">
@@ -539,9 +563,11 @@ export function Admin() {
 
       {/* 重置密码 */}
       <Modal open={!!pwdTarget} onClose={() => editDraft(() => setPwdTarget(null))} title={`重置密码 · ${pwdTarget?.username ?? ""}`}>
-        <Input type="password" placeholder="新密码（≥6位）" value={newPwd}
+        <label htmlFor="admin-new-password" className="mb-1 block text-sm">新密码</label>
+        <Input id="admin-new-password" type="password" placeholder="新密码（≥6位）" value={newPwd}
           onChange={(e) => editDraft(() => setNewPwd(e.target.value))}
-          onKeyDown={(e) => e.key === "Enter" && resetPwd()} />
+          onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && resetPwd()} />
+        {editorError && <p role="alert" className="mt-2 text-sm text-destructive">{editorError}</p>}
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="outline" size="sm" onClick={() => editDraft(() => setPwdTarget(null))}>取消</Button>
           <Button size="sm" disabled={newPwd.length < 6} onClick={resetPwd}>确定</Button>
@@ -550,9 +576,11 @@ export function Admin() {
 
       {/* 修改昵称 */}
       <Modal open={!!nameTarget} onClose={() => editDraft(() => setNameTarget(null))} title={`修改昵称 · @${nameTarget?.username ?? ""}`}>
-        <Input placeholder="新昵称（1~32 字符）" value={newName}
+        <label htmlFor="admin-new-name" className="mb-1 block text-sm">新昵称</label>
+        <Input id="admin-new-name" placeholder="新昵称（1~32 字符）" value={newName}
           onChange={(e) => editDraft(() => setNewName(e.target.value))}
-          onKeyDown={(e) => e.key === "Enter" && renameUser()} />
+          onKeyDown={(e) => e.key === "Enter" && !e.nativeEvent.isComposing && e.nativeEvent.keyCode !== 229 && renameUser()} />
+        {editorError && <p role="alert" className="mt-2 text-sm text-destructive">{editorError}</p>}
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="outline" size="sm" onClick={() => editDraft(() => setNameTarget(null))}>取消</Button>
           <Button size="sm" disabled={!newName.trim() || newName.trim().length > 32} onClick={renameUser}>确定</Button>

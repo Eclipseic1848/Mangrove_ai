@@ -93,7 +93,7 @@ def test_webui_0010_preserves_source_history_and_supports_recovery(tmp_path: Pat
         connection.commit()
     before = database.read_bytes()
     target = DatabaseTarget("webui", database)
-    assert inspect_database(target).pending_revisions == ("webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020")
+    assert inspect_database(target).pending_revisions == ("webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020", "webui_0021")
     with pytest.raises(SchemaNotCurrentError):
         WebUIStore(str(database))
     assert database.read_bytes() == before
@@ -103,7 +103,7 @@ def test_webui_0010_preserves_source_history_and_supports_recovery(tmp_path: Pat
         expected_source_sha256=hashlib.sha256(before).hexdigest(),
     )
     assert receipt.source_revision == "webui_0009"
-    assert receipt.applied_revisions == ("webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020")
+    assert receipt.applied_revisions == ("webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020", "webui_0021")
     with closing(sqlite3.connect(database)) as connection:
         columns = {row[1]: row for row in connection.execute(
             "PRAGMA table_info(source_acquisition_attempts)"
@@ -172,7 +172,7 @@ def test_current_webui_installs_component_schemas_and_evidence(tmp_path: Path) -
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("webui_0020",)
+        ).fetchone() == ("webui_0021",)
         candidate_rows = connection.execute(
             "SELECT migration_id, backup_sha256 "
             "FROM candidate_verification_migrations ORDER BY migration_id"
@@ -308,7 +308,7 @@ def test_current_webui_resumes_known_history_without_rewriting_evidence(
             )
         connection.commit()
 
-    _upgrade(database, "webui_0020")
+    _upgrade(database, "webui_0021")
 
     attempts = SqliteCandidateVerificationRepository(database).list_for_candidate(
         "owner-a",
@@ -360,3 +360,46 @@ def test_webui_0003_refuses_unbound_recovery_point(tmp_path: Path) -> None:
         match="webui_0003 必须绑定中央恢复点 SHA-256",
     ):
         _upgrade(database, "webui_0003", backup_sha256=None)
+
+
+def test_webui_0021_preserves_formal_output_feedback(tmp_path: Path) -> None:
+    database = tmp_path / "feedback-targets.db"
+    _upgrade(database, "webui_0020")
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute(
+            "INSERT INTO workspace_feedback "
+            "(user_id,task_id,revision,output_id,output_sha256,rating,reasons,comment,created_at,version,request_key,request_hash) "
+            "VALUES ('owner-a','task-a',2,'output-a',?,'up','[]','保留说明','2026-09-12T00:00:00+00:00',1,'feedback-a',?)",
+            ("a" * 64, "b" * 64),
+        )
+        feedback_id = connection.execute(
+            "SELECT id FROM workspace_feedback"
+        ).fetchone()[0]
+        connection.execute(
+            "INSERT INTO workspace_feedback_receipts VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                "owner-a", "feedback-a", "b" * 64, "task-a", 2,
+                "output-a", feedback_id, 1, "2026-09-12T00:00:00+00:00",
+                "saved", None,
+            ),
+        )
+        connection.commit()
+    before = database.read_bytes()
+
+    receipt = apply_migrations(
+        DatabaseTarget("webui", database),
+        tmp_path / "before-feedback-targets.db",
+        expected_source_sha256=hashlib.sha256(before).hexdigest(),
+    )
+
+    assert receipt.applied_revisions == ("webui_0021",)
+    with closing(sqlite3.connect(database)) as connection:
+        assert connection.execute(
+            "SELECT target_kind,output_id,output_sha256,result_id,turn_id,run_id,comment "
+            "FROM workspace_feedback"
+        ).fetchone() == ("output", "output-a", "a" * 64, None, None, None, "保留说明")
+        assert connection.execute(
+            "SELECT target_kind,output_id,result_id,turn_id,run_id,result "
+            "FROM workspace_feedback_receipts"
+        ).fetchone() == ("output", "output-a", None, None, None, "saved")
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)

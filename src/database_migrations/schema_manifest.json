@@ -104,6 +104,8 @@
       "index:ix_source_read_uses_owner_state": "79249bb9da3b16a6b3b8e55fa07379053eb9e1b4cccdef57e8c46983de4b0655",
       "index:ix_source_read_uses_owner_task": "6f20413050a69cfa6a2903e6e52285113d657a77c59e01d9280c89ff20034f66",
       "index:uq_candidate_verification_active_candidate": "be83a84aa0139b97d938e4b8832b88bf331ead31a03140370269367dd949bcab",
+      "index:uq_workspace_feedback_message": "d494cf6408a35c031cd55c54f90ab3cc18ca2947158de0741d4acc7754a813ba",
+      "index:uq_workspace_feedback_output": "227da5d677fb2d6a7cd098fb13bb8dfe7a3568f02482caa39704a78c17c4b085",
       "trigger:candidate_coverage_no_delete": "99b9f7ccb3e9887b4292ffc3a814c0a8d77a6618875f82d4ff5d0a06d432dd38",
       "trigger:candidate_coverage_no_update": "5ac1480454aea6d4028ed0dbbace42a92780eb5e829c767d1e9ee1625df29679",
       "trigger:candidate_reverification_authorities_insert_guard": "b0a20af9fc5e6552373daf7ee789b1c22e7f8c78ce5dfc2d651c5cca8ac18065",
@@ -143,9 +145,9 @@
       "trigger:workspace_feedback_audit_no_delete": "6a7121e8f912bcf395a4db0c358e3175bf258af9ef8497c9bd80e102105cc99e",
       "trigger:workspace_feedback_audit_no_replace": "c4de2fde36fd012732cb903d08bd8292b46dc10eed035b10c3b48a80b9aabda7",
       "trigger:workspace_feedback_audit_no_update": "615f0290caf8f928fa1bacfdcb410572ceb7aa90868160093fb9e98443192804",
-      "view:feedback_management": "22e528c6281c434384b399ae8c92549b031d6d010909d8ed644013510f9bf54f"
+      "view:feedback_management": "68a6ad6ebaf7a6c874ce37d4b6359a62a6365cc4e0cda83d91e0a547a0bec4b8"
     },
-    "revision": "webui_0020",
+    "revision": "webui_0021",
     "tables": {
       "account_execution_bindings": "792d18e3f5416745c405e022cc798847f4a44d9c1123e58e3900e724c60e0cfd",
       "account_execution_holds": "985dd26ff02bf54e43557d05f72b11d5c97c3f3f18294bb3451afd2748e64db3",
@@ -244,9 +246,9 @@
       "user_ui_state": "888c5edf2b614dbe4a7f182c0387adb2ca41817268e3402597f430d8f593de52",
       "users": "d2b56f4abf511db2fe2aa490ae7f2c6995315016ccb6ff040f556076c5d0786e",
       "web_task_contracts": "0e507fbef5813ef63eb6b5ea66e3e91bfada909afd0f1ef5ef7a8ed5336756a5",
-      "workspace_feedback": "acc273b17a277e59103d02bb162059b32687d3f596942ae56c455301ee31417e",
+      "workspace_feedback": "de980938b2bd65829342c4cfd84ddd3da1e60eb3f9074e2722c392fc11327f7e",
       "workspace_feedback_content_access": "68cacc5fbe8a134287599a7a66820e1ff4db6846c89265cd218618cd7fe88c40",
-      "workspace_feedback_receipts": "62be046a41a38d858c714ce3739138ee0256dc5c6ac84c7a8839889961057eac"
+      "workspace_feedback_receipts": "a2d4eace32837b56f81c2e23c7a4f111056f8669ad7275b659116df6ae7d7cf9"
     }
   }
 }

@@ -313,6 +313,14 @@ function responseBarrier() {
   return { promise, release };
 }
 
+async function currentWebSourceStorage(page: Page) {
+  return page.evaluate(() => {
+    const scope = sessionStorage.getItem("mangrove_web_source_scope");
+    const key = scope ? `mangrove_web_source_attempt_u1_${scope}` : "mangrove_web_source_attempt_u1";
+    return { key, value: key ? localStorage.getItem(key) : null };
+  });
+}
+
 async function loginAsB(page: Page) {
   await page.getByPlaceholder("至少 2 位").fill("owner-b");
   await page.getByPlaceholder("至少 6 位").fill("synthetic-password");
@@ -791,8 +799,289 @@ test.describe("#134 公开搜索", () => {
     expect(keys).toHaveLength(requestsBeforeReload);
     expect(new Set(keys).size).toBe(1);
     for (const body of bodies) expect(body).toEqual(bodies[0]);
-    const stored = await page.evaluate(() => JSON.parse(localStorage.getItem("mangrove_web_source_attempt_u1")!));
+    const stored = JSON.parse((await currentWebSourceStorage(page)).value!);
     expect(stored).toMatchObject({ query: "电池回收研究", time_range: "week", domains: ["example.com"], scope_kind: "public_search" });
+  });
+
+  test("网页获取结果未知时新建任务会清空旧草稿并允许刷新", async ({ page }) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    const requested = responseBarrier();
+    const release = responseBarrier();
+    const keys: string[] = [];
+    let cancels = 0;
+    await page.route("**/api/semantic-workspace/source-acquisitions", async route => {
+      keys.push(route.request().headers()["idempotency-key"]);
+      const callIndex = keys.length;
+      if (callIndex === 1) {
+        requested.release();
+        await release.promise;
+      }
+      if (callIndex === 2) return route.abort("connectionfailed");
+      return route.fulfill({ status: 202, json: {
+        ...searchAttempt(route.request().headers()["idempotency-key"], 0),
+        status: "acquiring", finished_at: null, error_code: null, error_message: null, search_report: null,
+      } });
+    });
+    await page.route("**/api/semantic-workspace/source-acquisitions/search-attempt/cancel", route => {
+      cancels += 1;
+      return route.fulfill({ json: { ...searchAttempt(keys[0], 0), status: "canceled", error_code: null, error_message: null } });
+    });
+
+    await page.goto("/data-prep");
+    await page.getByLabel("任务要求", { exact: true }).fill("中信私银相关数据");
+    await page.getByRole("button", { name: "开始执行", exact: true }).click();
+    await page.getByRole("button", { name: "搜索并读取", exact: true }).click();
+    await requested.promise;
+    const activeStorage = await currentWebSourceStorage(page);
+    expect(activeStorage.key).not.toBeNull();
+    await expect(page.getByRole("button", { name: "正在搜索与读取", exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "新建任务", exact: true }).click();
+    await expect(page.getByRole("region", { name: "搜索公开网页" })).toHaveCount(0);
+    await expect(page.getByLabel("任务要求", { exact: true })).toHaveValue("");
+    await expect(page.getByLabel("任务要求", { exact: true })).toBeEnabled();
+    await expect.poll(() => keys.length).toBe(2);
+    expect(cancels).toBe(0);
+    expect(new Set(keys).size).toBe(1);
+    expect(await page.evaluate(storageKey => localStorage.getItem(storageKey!), activeStorage.key)).not.toBeNull();
+    expect(await page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith("mangrove_web_source_detached_u1_")))).toBe(true);
+
+    await page.evaluate(({ storageKey }) => {
+      const other = JSON.parse(localStorage.getItem(storageKey!)!);
+      localStorage.setItem(storageKey!, JSON.stringify({ ...other, idempotency_key: "other-tab-key", query: "另一页面的新请求" }));
+    }, { storageKey: activeStorage.key });
+    const lateResponse = page.waitForResponse("**/api/semantic-workspace/source-acquisitions");
+    release.release();
+    await (await lateResponse).finished();
+    await page.evaluate(() => new Promise(resolve => setTimeout(resolve, 0)));
+    expect(JSON.parse((await page.evaluate(storageKey => localStorage.getItem(storageKey!), activeStorage.key))!).idempotency_key).toBe("other-tab-key");
+    await page.evaluate(storageKey => localStorage.removeItem(storageKey!), activeStorage.key);
+    await page.reload();
+    await expect(page.getByRole("region", { name: "搜索公开网页" })).toHaveCount(0);
+    await expect(page.getByLabel("任务要求", { exact: true })).toHaveValue("");
+    await expect.poll(() => cancels).toBe(1);
+    await expect.poll(() => keys.length).toBe(3);
+    expect(new Set(keys).size).toBe(1);
+    expect(await page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith("mangrove_web_source_detached_u1_")))).toBe(false);
+    await page.getByRole("button", { name: "公开网页", exact: true }).click();
+    await expect(page.getByLabel("精确网址")).toHaveValue("");
+  });
+
+  test("网页获取在内存中执行且存储不可用时不会丢失恢复身份", async ({ page }) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    const requested = responseBarrier();
+    const release = responseBarrier();
+    await page.route("**/api/semantic-workspace/source-acquisitions", async route => {
+      requested.release();
+      await release.promise;
+      return route.fulfill({ status: 202, json: { ...searchAttempt(route.request().headers()["idempotency-key"], 0), status: "acquiring" } });
+    });
+    await page.goto("/data-prep");
+    await page.getByLabel("任务要求", { exact: true }).fill("保持当前未知读取");
+    await page.getByRole("button", { name: "开始执行", exact: true }).click();
+    await page.getByRole("button", { name: "搜索并读取", exact: true }).click();
+    await requested.promise;
+    await page.evaluate(() => {
+      const original = Storage.prototype.setItem;
+      (window as unknown as { restoreStorageSetItem: () => void }).restoreStorageSetItem = () => { Storage.prototype.setItem = original; };
+      Storage.prototype.setItem = function (key, value) {
+        if (key.startsWith("mangrove_web_source_detached_u1_")) throw new DOMException("quota", "QuotaExceededError");
+        return original.call(this, key, value);
+      };
+    });
+
+    await page.getByRole("button", { name: "新建任务", exact: true }).click();
+    await expect(page.getByText("无法安全保存上一份网页读取状态", { exact: false })).toBeVisible();
+    await expect(page.getByRole("region", { name: "搜索公开网页" })).toBeVisible();
+    await page.evaluate(() => (window as unknown as { restoreStorageSetItem: () => void }).restoreStorageSetItem());
+    release.release();
+  });
+
+  test("网页获取首次持久化失败后仍可用内存身份安全新建", async ({ page }) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    const requested = responseBarrier();
+    const release = responseBarrier();
+    const keys: string[] = [];
+    let cancels = 0;
+    await page.route("**/api/semantic-workspace/source-acquisitions", async route => {
+      keys.push(route.request().headers()["idempotency-key"]);
+      if (keys.length === 1) {
+        requested.release();
+        await release.promise;
+      }
+      return route.fulfill({ status: 202, json: {
+        ...searchAttempt(route.request().headers()["idempotency-key"], 0),
+        status: "acquiring", finished_at: null, error_code: null, error_message: null, search_report: null,
+      } });
+    });
+    await page.route("**/api/semantic-workspace/source-acquisitions/search-attempt/cancel", route => {
+      cancels += 1;
+      return route.fulfill({ json: { ...searchAttempt(keys[0], 0), status: "canceled", error_code: null, error_message: null } });
+    });
+    await page.goto("/data-prep");
+    await page.getByLabel("任务要求", { exact: true }).fill("首次存储失败仍保留身份");
+    await page.getByRole("button", { name: "开始执行", exact: true }).click();
+    await page.evaluate(() => {
+      const original = Storage.prototype.setItem;
+      (window as unknown as { restoreStorageSetItem: () => void }).restoreStorageSetItem = () => { Storage.prototype.setItem = original; };
+      Storage.prototype.setItem = function (key, value) {
+        if (key.startsWith("mangrove_web_source_attempt_u1_")) throw new DOMException("quota", "QuotaExceededError");
+        return original.call(this, key, value);
+      };
+    });
+    await page.getByRole("button", { name: "搜索并读取", exact: true }).click();
+    await requested.promise;
+    expect((await currentWebSourceStorage(page)).value).toBeNull();
+    await page.evaluate(() => (window as unknown as { restoreStorageSetItem: () => void }).restoreStorageSetItem());
+
+    await page.getByRole("button", { name: "新建任务", exact: true }).click();
+    await expect(page.getByRole("region", { name: "搜索公开网页" })).toHaveCount(0);
+    await expect(page.getByLabel("任务要求", { exact: true })).toHaveValue("");
+    await expect.poll(() => keys.length).toBe(2);
+    await expect.poll(() => cancels).toBe(1);
+    expect(new Set(keys).size).toBe(1);
+    expect(await page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith("mangrove_web_source_detached_u1_")))).toBe(false);
+    release.release();
+  });
+
+  test("旧版网页恢复状态换新会话后会安全停止并清理", async ({ page }) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    await page.addInitScript(() => localStorage.setItem("mangrove_web_source_attempt_u1", JSON.stringify({
+      attempt_id: "legacy-attempt", idempotency_key: "legacy-key", status: "acquiring", url: "", purpose: "旧版公开搜索",
+      scope_kind: "public_search", query: "旧版查询", time_range: "any", domains: [], page_limit: 10,
+      completeness_mode: "exploratory", required_valid_pages: null,
+    })));
+    let gets = 0;
+    let cancels = 0;
+    await page.route("**/api/semantic-workspace/source-acquisitions/legacy-attempt", route => {
+      gets += 1;
+      return route.fulfill({ json: { ...searchAttempt("legacy-key", 0), attempt_id: "legacy-attempt", status: "acquiring" } });
+    });
+    await page.route("**/api/semantic-workspace/source-acquisitions/legacy-attempt/cancel", route => {
+      cancels += 1;
+      return route.fulfill({ json: { ...searchAttempt("legacy-key", 0), attempt_id: "legacy-attempt", status: "canceled" } });
+    });
+
+    await page.goto("/data-prep");
+    await expect(page.getByRole("region", { name: "搜索公开网页" })).toBeVisible();
+    await expect.poll(() => gets).toBeGreaterThan(0);
+    const oldScope = await page.evaluate(() => sessionStorage.getItem("mangrove_web_source_scope"));
+    expect(await page.evaluate(() => localStorage.getItem("mangrove_web_source_attempt_u1"))).toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem("mangrove_web_source_legacy_claimed_u1"))).not.toBeNull();
+
+    await page.evaluate(() => sessionStorage.removeItem("mangrove_web_source_scope"));
+    await page.reload();
+    await expect(page.getByRole("region", { name: "搜索公开网页" })).toHaveCount(0);
+    await expect.poll(() => cancels).toBe(1);
+    expect(await page.evaluate(scope => localStorage.getItem(`mangrove_web_source_attempt_u1_${scope}`), oldScope)).toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem("mangrove_web_source_legacy_claimed_u1"))).toBeNull();
+    expect(await page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith("mangrove_web_source_detached_u1_")))).toBe(false);
+  });
+
+  test("旧版恢复标记写入失败时保留原恢复身份", async ({ page }) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    await page.addInitScript(() => {
+      localStorage.setItem("mangrove_web_source_attempt_u1", JSON.stringify({
+        attempt_id: "legacy-attempt", idempotency_key: "legacy-key", status: "succeeded", url: "", purpose: "旧版公开搜索",
+        scope_kind: "public_search", query: "旧版查询", time_range: "any", domains: [], page_limit: 10,
+        completeness_mode: "exploratory", required_valid_pages: null,
+      }));
+      const original = Storage.prototype.setItem;
+      (window as unknown as { restoreStorageSetItem: () => void }).restoreStorageSetItem = () => { Storage.prototype.setItem = original; };
+      Storage.prototype.setItem = function (key, value) {
+        if (key === "mangrove_web_source_legacy_claimed_u1") throw new DOMException("quota", "QuotaExceededError");
+        return original.call(this, key, value);
+      };
+    });
+    await page.route("**/api/semantic-workspace/source-acquisitions/legacy-attempt", route =>
+      route.fulfill({ json: { ...searchAttempt("legacy-key", 0), attempt_id: "legacy-attempt", status: "succeeded" } }));
+
+    await page.goto("/data-prep");
+    await expect(page.getByRole("region", { name: "搜索公开网页" })).toBeVisible();
+    expect((await currentWebSourceStorage(page)).value).not.toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem("mangrove_web_source_legacy_claimed_u1"))).toBeNull();
+    expect(await page.evaluate(() => localStorage.getItem("mangrove_web_source_attempt_u1"))).not.toBeNull();
+    await page.evaluate(() => (window as unknown as { restoreStorageSetItem: () => void }).restoreStorageSetItem());
+  });
+
+  test("读取网页恢复状态失败时阻止新建任务", async ({ page }) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    await page.goto("/data-prep");
+    await page.getByLabel("任务要求", { exact: true }).fill("保留当前草稿");
+    const storageKey = (await currentWebSourceStorage(page)).key;
+    await page.evaluate(key => {
+      localStorage.setItem(key, JSON.stringify({
+        attempt_id: null, idempotency_key: "hidden-key", url: "", purpose: "隐藏中的读取", scope_kind: "public_search",
+        query: "隐藏查询", time_range: "any", domains: [], page_limit: 10, completeness_mode: "exploratory", required_valid_pages: null,
+      }));
+      const original = Storage.prototype.getItem;
+      (window as unknown as { restoreStorageGetItem: () => void }).restoreStorageGetItem = () => { Storage.prototype.getItem = original; };
+      Storage.prototype.getItem = function (candidate) {
+        if (candidate === key) throw new DOMException("blocked", "SecurityError");
+        return original.call(this, candidate);
+      };
+    }, storageKey);
+
+    await page.getByRole("button", { name: "新建任务", exact: true }).click();
+    await expect(page.getByText("无法安全保存上一份网页读取状态", { exact: false })).toBeVisible();
+    await expect(page.getByLabel("任务要求", { exact: true })).toHaveValue("保留当前草稿");
+    await page.evaluate(() => (window as unknown as { restoreStorageGetItem: () => void }).restoreStorageGetItem());
+  });
+
+  test("连续新建任务会收口清理期间新增的网页请求", async ({ page }) => {
+    await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
+    await mockWorkspace(page);
+    const firstCleanup = responseBarrier();
+    const releaseFirstCleanup = responseBarrier();
+    const keys: string[] = [];
+    const canceledKeys: string[] = [];
+    await page.route("**/api/semantic-workspace/source-acquisitions", route => {
+      const key = route.request().headers()["idempotency-key"];
+      keys.push(key);
+      return route.fulfill({ status: 202, json: {
+        ...searchAttempt(key, 0), attempt_id: `attempt-${key}`, status: "acquiring", finished_at: null,
+      } });
+    });
+    await page.route(/\/api\/semantic-workspace\/source-acquisitions\/attempt-[^/]+$/, async route => {
+      const attemptId = new URL(route.request().url()).pathname.split("/").pop()!;
+      const key = attemptId.slice("attempt-".length);
+      if (key === keys[0]) {
+        firstCleanup.release();
+        await releaseFirstCleanup.promise;
+      }
+      return route.fulfill({ json: { ...searchAttempt(key, 0), attempt_id: attemptId, status: "acquiring" } });
+    });
+    await page.route(/\/api\/semantic-workspace\/source-acquisitions\/attempt-[^/]+\/cancel$/, route => {
+      const attemptId = new URL(route.request().url()).pathname.split("/").at(-2)!;
+      const key = attemptId.slice("attempt-".length);
+      canceledKeys.push(key);
+      return route.fulfill({ json: { ...searchAttempt(key, 0), attempt_id: attemptId, status: "canceled" } });
+    });
+
+    await page.goto("/data-prep");
+    await page.getByLabel("任务要求", { exact: true }).fill("第一份读取");
+    await page.getByRole("button", { name: "开始执行", exact: true }).click();
+    await page.getByRole("button", { name: "搜索并读取", exact: true }).click();
+    await expect(page.getByRole("button", { name: "取消获取", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "新建任务", exact: true }).click();
+    await firstCleanup.promise;
+
+    await page.getByLabel("任务要求", { exact: true }).fill("第二份读取");
+    await page.getByRole("button", { name: "开始执行", exact: true }).click();
+    await page.getByRole("button", { name: "搜索并读取", exact: true }).click();
+    await expect.poll(() => new Set(keys).size).toBe(2);
+    await page.getByRole("button", { name: "新建任务", exact: true }).click();
+    releaseFirstCleanup.release();
+
+    await expect.poll(() => new Set(canceledKeys).size).toBe(2);
+    expect(new Set(canceledKeys)).toEqual(new Set(keys));
+    expect(await page.evaluate(() => Object.keys(localStorage).some(key => key.startsWith("mangrove_web_source_detached_u1_")))).toBe(false);
   });
 
   test("手机暗色键盘与中文输入不自动联网，清空保持焦点", async ({ page }, testInfo) => {
@@ -1107,7 +1396,7 @@ test.describe("统一数据工作台", () => {
     await expect(page.getByText("网址不在允许范围", { exact: true })).toBeVisible();
     await expect(page.getByLabel("精确网址")).toBeEnabled();
     await expect(page.getByRole("button", { name: "获取网页", exact: true })).toBeEnabled();
-    expect(await page.evaluate(() => localStorage.getItem("mangrove_web_source_attempt_u1"))).toBeNull();
+    expect((await currentWebSourceStorage(page)).value).toBeNull();
   });
 
   test("来源长首请求可取得停止身份并跨刷新等待已停止", async ({ page }, testInfo) => {
@@ -1755,7 +2044,7 @@ test.describe("统一数据工作台", () => {
     await page.getByRole("button", { name: "打开导航" }).click();
     await expect(page.getByRole("link", { name: "旧版对话" })).toBeVisible();
     await expect(page.getByRole("button", { name: "浅色主题" })).toBeVisible();
-    await page.locator("aside").getByRole("button", { name: "关闭导航" }).click();
+    await page.getByRole("dialog", { name: "全局导航", exact: true }).getByRole("button", { name: "关闭导航", exact: true }).click();
     await expect(page.getByRole("link", { name: "旧版对话" })).toBeHidden();
     await page.getByRole("button", { name: "打开导航" }).click();
     await page.keyboard.press("Escape");
@@ -2849,6 +3138,87 @@ test.describe("统一数据工作台", () => {
     await expect(page.getByLabel("结果版本")).toHaveValue("2");
   });
 
+  test("回答操作使用真实浏览器能力并把历史消息编辑为新草稿", async ({ page, context }) => {
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await mockWorkspace(page);
+    await page.addInitScript(() => {
+      Object.defineProperty(navigator, "share", {
+        configurable: true,
+        value: async ({ text }: ShareData) => localStorage.setItem("shared-answer", text || ""),
+      });
+    });
+    const task = { ...workspaceTask("task-message-actions", "completed", "消息操作检查"), model_connection_id: "connection-external" };
+    await page.route("**/api/semantic-workspace/tasks?*", route => route.fulfill({ json: [task] }));
+    await page.route("**/api/semantic-workspace/tasks/task-message-actions", route => route.fulfill({ json: workspaceDetail(task) }));
+    await page.route("**/api/semantic-workspace/tasks/task-message-actions/turns", route => route.fulfill({ json: {
+      turns: [{ turn_id: "turn-actions", revision: 1, text: "把华东单独汇总" }],
+      results: [{ result_id: "result-actions", task_id: task.task_id, turn_id: "turn-actions", delta_id: "delta-actions", action: "answer", acknowledgement: "已完成", answer: "华东合计 42", proposal_id: null, run_id: null, revision: 1 }],
+      proposals: [],
+    } }));
+    const regenerated: Array<{ body: Record<string, unknown>; key: string | undefined }> = [];
+    const feedback: Array<{ body: Record<string, unknown>; key: string | undefined }> = [];
+    await page.route("**/api/semantic-workspace/tasks/task-message-actions/feedback*", route => {
+      if (route.request().method() === "GET") return route.fulfill({ json: { feedback: null, receipt: null } });
+      feedback.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] });
+      return route.fulfill({ json: { feedback_id: 1, version: 1 } });
+    });
+    await page.route("**/api/semantic-workspace/tasks/task-message-actions/turns/result-actions/regenerate", route => {
+      regenerated.push({ body: route.request().postDataJSON(), key: route.request().headers()["idempotency-key"] });
+      return regenerated.length === 1
+        ? route.fulfill({ status: 503, json: { detail: "重新生成结果未知" } })
+        : route.fulfill({ json: { result_id: "result-regenerated", task_id: task.task_id, turn_id: "turn-regenerated", delta_id: "delta-regenerated", action: "answer_only", acknowledgement: "已回答", answer: "华东合计 43", proposal_id: null, run_id: null, revision: 1 } });
+    });
+
+    await page.goto("/data-prep");
+    await page.getByRole("button", { name: /消息操作检查/ }).click();
+    await expect(page.getByLabel("Mangrove 回答")).toContainText("华东合计 42");
+
+    await expect(page.getByRole("button", { name: "有帮助" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "需要改进" })).toBeVisible();
+    await page.getByRole("button", { name: "需要改进" }).click();
+    const feedbackDialog = page.getByRole("dialog");
+    await expect(feedbackDialog.getByText("反馈当前回答", { exact: true })).toBeVisible();
+    await expect(feedbackDialog.getByRole("combobox", { name: "评价", exact: true })).toHaveValue("down");
+    await expect(feedbackDialog.getByRole("button", { name: "提交反馈" })).toBeEnabled();
+    await feedbackDialog.getByRole("button", { name: "提交反馈" }).click();
+    await expect.poll(() => feedback.length).toBe(1);
+    expect(feedback[0]).toMatchObject({ body: { revision: 1, result_id: "result-actions", rating: "down", expected_version: 0 } });
+    expect(feedback[0].key).toBeTruthy();
+    await feedbackDialog.getByRole("button", { name: "返回任务" }).click();
+
+    await page.getByRole("button", { name: "复制" }).click();
+    await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe("华东合计 42");
+    await page.getByRole("button", { name: "分享" }).click();
+    await expect(page.getByText("不会创建公开链接", { exact: false })).toBeVisible();
+    await page.getByRole("button", { name: "打开系统分享" }).click();
+    await expect.poll(() => page.evaluate(() => localStorage.getItem("shared-answer"))).toBe("华东合计 42");
+
+    const composer = page.getByRole("textbox", { name: "继续对话" });
+    await composer.fill("这是尚未发送的草稿");
+    await page.getByRole("button", { name: "编辑为新消息" }).click();
+    await expect(composer).toHaveValue("这是尚未发送的草稿");
+    await expect(page.getByText("输入框已有未发送内容；请先发送或清空，再编辑历史消息")).toBeVisible();
+    await composer.fill("");
+    await page.getByRole("button", { name: "编辑为新消息" }).click();
+    await expect(page.getByRole("textbox", { name: "继续对话" })).toHaveValue("把华东单独汇总");
+    await expect(page.getByLabel("对话记录").locator("p").getByText("把华东单独汇总", { exact: true })).toBeVisible();
+
+    await page.getByRole("button", { name: "重新生成" }).click();
+    await expect(page.getByText("会再次向已选外部模型发送本任务必要数据", { exact: false })).toBeVisible();
+    await page.getByRole("button", { name: "确认重新生成" }).click();
+    await expect(page.getByText("重新生成结果未知")).toBeVisible();
+    await expect.poll(() => page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith("mangrove_regenerate_")).length)).toBe(1);
+    await page.reload();
+    await page.getByRole("button", { name: "重新生成" }).click();
+    await page.getByRole("button", { name: "确认重新生成" }).click();
+    await expect(page.getByText("已重新生成回答")).toBeVisible();
+    expect(regenerated).toHaveLength(2);
+    expect(regenerated[0]).toMatchObject({ body: { expected_revision: 1, external_api_confirmed: true } });
+    expect(regenerated[0].key).toBeTruthy();
+    expect(regenerated[1].key).toBe(regenerated[0].key);
+    await expect.poll(() => page.evaluate(() => Object.keys(localStorage).filter(key => key.startsWith("mangrove_regenerate_")).length)).toBe(0);
+  });
+
   test("待确认任务可收起后重新打开，并可随时取消", async ({ page }) => {
     await mockWorkspace(page);
     let status = "needs_input";
@@ -3531,8 +3901,13 @@ test.describe("统一数据工作台", () => {
         diagnostic_ref: "pi-run-unknown",
       },
     };
+    const otherFailedTask = { ...failedTask, task_id: "task-model-unknown-other", title: "另一模型结果待确认" };
     await page.route("**/api/semantic-workspace/tasks?*", (route) =>
-      route.fulfill({ json: [failedTask] }));
+      route.fulfill({ json: [failedTask, otherFailedTask] }));
+    await page.route(
+      "**/api/semantic-workspace/tasks/task-model-unknown-other",
+      (route) => route.fulfill({ json: workspaceDetail(otherFailedTask) }),
+    );
     await page.route(
       "**/api/semantic-workspace/tasks/task-model-unknown",
       (route) => route.fulfill({
@@ -3540,10 +3915,15 @@ test.describe("统一数据工作台", () => {
       }),
     );
     let revisionPayload: Record<string, unknown> | null = null;
+    let revisionCalls = 0;
+    const idempotencyKeys: string[] = [];
     await page.route(
       "**/api/semantic-workspace/tasks/task-model-unknown/revisions",
       async (route) => {
+        revisionCalls += 1;
+        idempotencyKeys.push(route.request().headers()["idempotency-key"] || "");
         revisionPayload = await route.request().postDataJSON();
+        if (revisionCalls === 1) return route.fulfill({ status: 500, json: { detail: "unknown" } });
         await route.fulfill({
           status: 202,
           json: { revision: 2 },
@@ -3552,14 +3932,39 @@ test.describe("统一数据工作台", () => {
     );
 
     await page.goto("/data-prep");
-    await page.getByRole("button", { name: /模型结果待确认/ }).click();
+    await page.getByRole("button", { name: /^模型结果待确认/ }).click();
     const notice = page.getByTestId("task-failure-explanation");
     await expect(notice).toContainText("模型请求结果不确定");
     await notice.getByRole("button", { name: "重新执行" }).click();
     await expect(page.getByRole("alertdialog")).toContainText(
       "可能产生重复调用和费用",
     );
-    await page.getByRole("button", { name: "确认重新执行" }).click();
+    await page.getByLabel("我确认把当前任务范围内的必要数据再次发送到已选外部模型连接。").check();
+    await page.evaluate(() => {
+      const url = new URL(window.location.href);
+      url.searchParams.set("task", "task-model-unknown-other");
+      window.history.pushState({}, "", url);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await expect(page.getByRole("alertdialog")).toHaveCount(0);
+    await page.getByTestId("task-failure-explanation").getByRole("button", { name: "重新执行" }).click();
+    await expect(page.getByLabel("我确认把当前任务范围内的必要数据再次发送到已选外部模型连接。")).not.toBeChecked();
+    await expect(page.getByRole("button", { name: "确认重新执行" })).toBeDisabled();
+    await page.getByRole("button", { name: "取消" }).click();
+    await page.getByRole("button", { name: /^模型结果待确认/ }).click();
+    await page.getByTestId("task-failure-explanation").getByRole("button", { name: "重新执行" }).click();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const confirmRetry = page.getByRole("button", { name: "确认重新执行" });
+      await expect(confirmRetry).toBeDisabled();
+      if (attempt === 0) expect((await new AxeBuilder({ page }).include('[role="alertdialog"]').analyze()).violations).toEqual([]);
+      await page.getByLabel("我确认把当前任务范围内的必要数据再次发送到已选外部模型连接。").check();
+      await confirmRetry.click();
+      if (attempt === 0) {
+        await page.reload();
+        await page.getByRole("button", { name: /^模型结果待确认/ }).click();
+        await page.getByTestId("task-failure-explanation").getByRole("button", { name: "重新执行" }).click();
+      }
+    }
 
     await expect.poll(() => revisionPayload).not.toBeNull();
     expect(revisionPayload).toEqual({
@@ -3567,6 +3972,9 @@ test.describe("统一数据工作台", () => {
       external_api_confirmed: true,
       expected_active_revision: 1,
     });
+    expect(revisionCalls).toBe(2);
+    expect(idempotencyKeys[0]).toBeTruthy();
+    expect(idempotencyKeys[1]).toBe(idempotencyKeys[0]);
   });
 
   test("后序完成事件会收口前序遗留开始态", async ({ page }) => {

@@ -1107,12 +1107,14 @@ class WebUIStore:
                 f"SELECT COUNT(*) FROM feedback_management f{where_sql}", params
             ).fetchone()[0]
             rows = conn.execute(
-                f"""SELECT f.id, f.message_id, f.conv_id, f.user_id, f.rating, f.source_kind, f.task_id, f.revision, f.output_id, f.output_sha256,
+                f"""SELECT f.id, f.message_id, f.conv_id, f.user_id, f.rating, f.source_kind, f.task_id, f.revision, f.target_kind, f.output_id, f.output_sha256, f.result_id, f.turn_id, f.run_id,
                            f.reasons, f.created_at, f.status,
                            COALESCE(length(f.comment),0)>0 AS has_comment,
                            COALESCE(length(f.admin_note),0)>0 AS has_admin_note,
                            u.display_name, u.username,
-                           CASE WHEN f.source_kind='workspace' THEN EXISTS(SELECT 1 FROM semantic_workspace_revisions r JOIN semantic_workspace_tasks t ON t.task_id=r.task_id AND t.user_id=r.user_id JOIN formal_delivery_outputs o ON o.output_id=f.output_id AND o.sha256=f.output_sha256 JOIN formal_delivery_runs d ON d.delivery_id=o.delivery_id AND d.owner_id=f.user_id AND d.task_id=f.task_id AND d.task_revision=f.revision WHERE r.user_id=f.user_id AND r.task_id=f.task_id AND r.revision=f.revision AND t.deleted_at IS NULL) ELSE EXISTS(SELECT 1 FROM messages m JOIN conversations c ON c.conv_id=m.conv_id
+                           CASE WHEN f.source_kind='workspace' AND f.target_kind='output' THEN EXISTS(SELECT 1 FROM semantic_workspace_revisions r JOIN semantic_workspace_tasks t ON t.task_id=r.task_id AND t.user_id=r.user_id JOIN formal_delivery_outputs o ON o.output_id=f.output_id AND o.sha256=f.output_sha256 JOIN formal_delivery_runs d ON d.delivery_id=o.delivery_id AND d.owner_id=f.user_id AND d.task_id=f.task_id AND d.task_revision=f.revision WHERE r.user_id=f.user_id AND r.task_id=f.task_id AND r.revision=f.revision AND t.deleted_at IS NULL)
+                             WHEN f.source_kind='workspace' AND f.target_kind='message' THEN EXISTS(SELECT 1 FROM semantic_workspace_revisions r JOIN semantic_workspace_tasks t ON t.task_id=r.task_id AND t.user_id=r.user_id JOIN conversation_steering_results result ON result.result_id=f.result_id AND result.owner_id=f.user_id AND result.task_id=f.task_id AND result.turn_id=f.turn_id JOIN conversation_raw_turns turn ON turn.turn_id=f.turn_id AND turn.owner_id=f.user_id AND turn.task_id=f.task_id AND turn.revision=f.revision WHERE r.user_id=f.user_id AND r.task_id=f.task_id AND r.revision=f.revision AND t.deleted_at IS NULL AND CAST(json_extract(result.payload_json,'$.revision') AS INTEGER)=f.revision AND json_extract(result.payload_json,'$.run_id') IS f.run_id AND json_extract(result.payload_json,'$.answer') IS NOT NULL)
+                             ELSE EXISTS(SELECT 1 FROM messages m JOIN conversations c ON c.conv_id=m.conv_id
                              JOIN users owner ON owner.user_id=c.user_id
                              WHERE m.id=f.message_id AND m.conv_id=f.conv_id
                              AND m.role='assistant' AND c.user_id=f.user_id) END AS content_available

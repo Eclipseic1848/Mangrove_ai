@@ -69,8 +69,8 @@ def feedback_content(conn, feedback_id):
         truncated = truncated or lo < len(original)
     payload = {'content': content, 'truncated': truncated, 'content_bytes': len(encoded(content))}
     if feedback_id<0:
-        payload["source"]={key:row[key] for key in ("source_kind","task_id","revision","output_id","output_sha256")}
-        payload["answer_kind"]="revision_summary"
+        payload["source"]={key:row[key] for key in ("source_kind","task_id","revision","target_kind","output_id","output_sha256","result_id","turn_id","run_id")}
+        payload["answer_kind"]="message" if row["target_kind"]=="message" else "revision_summary"
     return row, payload
 
 

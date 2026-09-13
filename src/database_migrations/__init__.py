@@ -104,7 +104,7 @@ class RestoreVerification:
 
 
 _PROFILE_HEADS = {
-    "webui": "webui_0020",
+    "webui": "webui_0021",
     "scheduler": "scheduler_0003",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
@@ -277,8 +277,8 @@ _PROFILE_REQUIRED_COLUMNS = {
         "capability_platform_validation_leases": (
             "digest", "run_id", "worker_id",
         ),
-        "workspace_feedback": ('id', 'user_id', 'task_id', 'revision', 'output_id', 'output_sha256', 'rating', 'reasons', 'comment', 'created_at', 'status', 'admin_note', 'version', 'request_key', 'request_hash', 'deleted_at'),
-        "workspace_feedback_receipts": ('user_id', 'request_key', 'request_hash', 'task_id', 'revision', 'output_id', 'feedback_id', 'version', 'created_at', 'result', 'failure_code'),
+        "workspace_feedback": ('id', 'user_id', 'task_id', 'revision', 'target_kind', 'output_id', 'output_sha256', 'result_id', 'turn_id', 'run_id', 'rating', 'reasons', 'comment', 'created_at', 'status', 'admin_note', 'version', 'request_key', 'request_hash', 'deleted_at'),
+        "workspace_feedback_receipts": ('user_id', 'request_key', 'request_hash', 'task_id', 'revision', 'target_kind', 'output_id', 'result_id', 'turn_id', 'run_id', 'feedback_id', 'version', 'created_at', 'result', 'failure_code'),
         "workspace_feedback_content_access": ('event_id', 'actor_id', 'actor_role', 'idempotency_key', 'reason', 'action', 'feedback_id', 'message_id', 'conv_id', 'owner_id', 'request_digest', 'response_digest', 'content_bytes', 'truncated', 'result', 'failure_code', 'created_at', 'source_identity_json'),
     },
     "scheduler": {
