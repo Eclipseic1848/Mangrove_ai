@@ -6,7 +6,21 @@ test("数据库连接管理与表列选择闭环", async ({ page }) => {
   await page.route("**/api/auth/me", (route) => route.fulfill({
     json: { access_token: "e2e-token", user_id: "u1", username: "tester", display_name: "测试员", role: "admin" },
   }));
+  await page.route("**/api/models", (route) => route.fulfill({
+    json: { options: [], available: [], default: null, document_default: null },
+  }));
   await page.route("**/api/data-tasks", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/data-tasks/document-units", (route) => route.fulfill({ json: [] }));
+  await page.route("**/api/data-tasks/document-workspace", (route) => route.fulfill({
+    json: {
+      upload_ids: [],
+      checked_upload_ids: [],
+      active_task_id: null,
+      active_unit_id: null,
+      selected_upload_id: null,
+      updated_at: "2026-07-23T00:00:00Z",
+    },
+  }));
   await page.route("**/api/data-sources/connections", async (route) => {
     if (route.request().method() === "POST") {
       saved = true;

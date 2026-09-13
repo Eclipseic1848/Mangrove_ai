@@ -284,7 +284,18 @@ jobs:
         run: |
           set -euo pipefail
           npm ci --ignore-scripts --no-audit --no-fund
-          node ../scripts/ci/check_browserslist_security.cjs node_modules
+          node ../scripts/ci/check_browserslist_security.cjs node_modules | tee browserslist-security.log
+          npm audit --audit-level=high --json > security-audit.json
+      - name: 上传前端依赖安全证据
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6fb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: frontend-dependency-security-evidence
+          path: |
+            frontend/browserslist-security.log
+            frontend/security-audit.json
+          if-no-files-found: warn
+          retention-days: 14
 
   frontend-e2e:
     if: inputs.gate == 'full-regression' || inputs.gate == 'account-execution' || inputs.gate == 'cancellation' || inputs.gate == 'frontend-e2e' || inputs.gate == 'platform-sessions' || inputs.gate == 'external-readonly' || inputs.gate == 'model-onboarding' || inputs.gate == 'unified-workspace'

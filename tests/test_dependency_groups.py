@@ -287,6 +287,10 @@ def test_dependency_group_gate_checks_frontend_dependency_security() -> None:
         "node ../scripts/ci/check_browserslist_security.cjs node_modules"
         in frontend_security
     )
+    assert "npm audit --audit-level=high --json > security-audit.json" in frontend_security
+    assert "frontend-dependency-security-evidence" in frontend_security
+    assert "frontend/browserslist-security.log" in frontend_security
+    assert "frontend/security-audit.json" in frontend_security
 
 
 def test_dependency_group_import_smoke_cli_has_all_public_groups() -> None:
