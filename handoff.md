@@ -1,182 +1,385 @@
-# Mangrove 零上下文交接
+# Mangrove 零上下文交接：来源并发读取已修复，等待人工验证
 
-> 状态：`P1_01_ENGINEERING_COMPLETE / REMEDIATION_IN_PROGRESS`
+> 状态：`OLD_REMEDIATION_STOPPED / LOCAL_WORKSPACE_UX_ITERATION / HUMAN_VALIDATION_NEXT`
 >
-> 最后核验：2026-09-09
+> 最后现场核验：2026-09-13 America/Los_Angeles
 >
 > 公开仓库：`Eclipseic1848/Mangrove_ai`
+>
+> 远端主线：`main@ec4cf0593e7e858bb0ddb5b8a47af2fc9ed3302c`
 
-本文件写给完全没有上下文的新会话。先读 `AGENTS.md`、`docs/status/current.md`、`CONTEXT.md`，
-再现场读取 GitHub、Git 与运行态。历史计划是证据，不是当前状态。
+这份文件写给一个完全没有上下文的新会话。
 
-## 0. 当前接手位置：#137
+## 0. 先读这一节：用户最新决定与工作边界
 
-#136 已由 PR #173 合并关闭。#137 已完成关联感知的任务与资料清理工程实现；规格见 docs/plans/2026-09-09-related-deletion-spec.md。保留回收与恢复，永久清理先确认完整关联，默认保留共享；独占原件和结果一并清理，保留任务及独立正式结果。删除意图阻止新读取/冻结/发布，精确运行停止及既有执行锁通过后才清理正文和缓存；失败沿原操作恢复，旧删除身份和停止事实支持后续任务清理。详情、事件和历史绑定响应保护实际返回版本，绑定样例与未发布副本纳入清理。只在临时数据库验证 webui_0018，生产及真实业务数据/备份清理保留独立人工门。本地审查与隔离验证已完成；实际同提交CI、合并状态以关联PR为准，不代表真实Worker、模型或平台验收。
+### 2026-09-13 最新交接：`source_in_use` 修复与关机收尾
 
-门禁通过并关闭 #137 后，按依赖继续 #138；真实平台登录/凭据/新增依赖仍按工单人工门执行。
+用户最新授权：修复 PDF 任务执行失败与原件预览失败；完成后更新本文件、上传 GitHub，
+确认上传成功后正常关机。本次 Git 授权只覆盖当前修复与交接，不包含其他本地在制代码，
+不创建 PR、不合并 main、不创建 Tag/Release、不部署、不迁移或清理真实数据。
 
-沿用现有 checkout；保留其他任务与用户改动，仅精确暂存本票文件。工作树中的规划文档、冻结评测数据及本机脚本可能有独立工作，不能清理或整体提交。
-所有前端相关工作用 Astra high，其余委派用 Astra low；主会话协调用 Astra medium，实际档位须核会话记录。
-Git 权限按当前用户授权及 AGENTS.md 执行；真实秘密、生产迁移/恢复、发布与不可逆操作保留独立门。
+- 根因：预览响应与 Pi/CoreMind 原件读取持有同一来源独占锁，正常只读操作互相阻挡；
+  Pi 以 `PI_RUNTIME_FAILED / source_in_use` 失败，原件读取接口返回 409。
+- 实现：`src/source_acquisition/reuse.py` 共用短锁提交读使用记录，读取期间由持久 `active`
+  事实保护；冻结、预览与执行可同时读取。删除仍与登记互斥，最后一个读者退出前不能删除；
+  `unknown` 继续阻止物理清理，不按 TTL 清除。Owner、SHA、冻结修订与删除意图检查保留。
+- 回归：新增 `tests/test_source_read_concurrency.py` 先复现 4 个失败，修复后 5 项通过，
+  包括跨进程读取与最后读者保护。既有 `test_reusable_sources.py`、
+  `test_reusable_sources_api.py`、`test_reusable_sources_runtime.py`、
+  `test_source_deletion_api.py` 共 51 项通过。Standards/Spec 两路只读审查均无必修项。
+- 验证使用合成资料与隔离数据库；调用实际 HTTP 读取/创建接口和 Pi/CoreMind 来源读取代码，
+  未调用真实模型、采集站点或执行用户的报销单。不能将上述 56 项通过写成真实 PDF 交付验收。
+- 本机后端由已有开发重载器加载修改；关机前 8088 健康检查通过。本次不改前端，仍使用此前
+  已构建的自然语言工作台。关机后各服务需重新启动，不能套用下方旧端口监听快照。
+- 上传白名单：本文件、来源读取模块、新增并发回归，以及状态台账的本次修复摘要。
+  当前工作区其他大量未提交改动仍只保留在本机，不得把远端提交称为整个工作台改造的备份。
+- Git 定位：现有分支 `codex/issue-140-universal-context`；修复前 HEAD 为
+  `1956ab91abac49a0f1180993b8f7e0e929eac12f`，现场远端分支相同；main 仍为页首 SHA。
+  本次提交/推送结果以该分支最新提交及远端 SHA 为准，不在提交正文中循环回写自身 SHA。
+- 关机条件：验证完成且远端 SHA 与本地提交相同后，执行正常关机；不强制丢弃未保存程序。
+  本文件记录关机前状态，不宣称已观测到操作系统断电。
 
-下面是 2026-09-04 的历史交接记录，不是当前 Issues 或服务状态。
+下次接手：先确认分支和未提交文件归属，再按用户需要启动本机服务；请用户在原失败任务中
+重试形成新版本，并同时打开原件预览，验证实际报销单提取及 JSON/CSV 正式交付。旧失败记录
+保留，不改数据库把失败伪装成成功，不自动消费模型额度。旧 R0–R6、#138 和 P2 仍不恢复。
 
-## 1. 历史工作目标（2026-09-04）
+以下为此前人工审核交接及历史证据；权限与运行态冲突时以上面的最新交接为准。
 
-本轮目标是自主完成 GitHub 当时剩余的 Issues，执行相称验证、PR/CI/受保护合并与关闭，然后清理
-过期产物并留下零上下文交接。该目标已完成：2026-09-04 现场查询 Open Issues 为 0。
+2026-09-13 补充：用户已开始人工审核，并在本会话逐项授权本地工作台界面与无附件对话
+改造。新授权的范围、实现和核验证据见 `docs/status/current.md` 第 0 节开头；本文件下方
+“新计划前不修改”是旧停点，不能用它否定用户这次明确的新授权。旧 R0–R6、#138 和 P2
+仍不恢复。保持现有脏工作树；本次修复与交接的 Git 授权见上文，其他发布或真实模型验收未授权。
 
-这不是“整个 P1 已完成”。完成的是 P1 决策地图与 P1-01 匿名网页首个纵切片；P1-02～P1-05、
-HTTP/数据库/认证来源、真实用户验收与发布仍是后续路线。
+用户认为上一轮整改已经跑偏，决定结束当前会话和旧整改方案。下一步由用户在新会话中对
+Mangrove 做人工全面审核，然后提供新的整改计划。
 
-## 2. 已完成什么
+在用户给出新计划前：
 
-### GitHub 收口
+- 不继续旧 R0–R6 工单，不恢复 #138，不自动启动 P2 #146/#147。
+- 不修改代码、数据库、服务、真实站点、凭据、GitHub Issue/PR、Tag、Release 或部署。
+- 可以按用户要求做只读盘点、解释和人工验收协助。
+- 旧 Issue/PR、计划和报告只能作为证据，不能当作当前执行指令。
+- `CLOSED / NOT_PLANNED` 只表示旧方案终止，绝不等于完成或验收通过。
 
-- #83～#98 已全部关闭；父票 #81 已在全部决策子票完成后关闭。
-- CoreMind 0.7.1 薄 Adapter：PR #107 合入
-  `main@12170eebf1d2f4bad5c86c2a6c38d0bef0a4f998`，关闭 #97。
-- 锁定 CoreMind 身份：源码 `75b706a20ca4cdddef71cbcc0dd90b8b424ddd99`；wheel
-  `3fa5301c444da2e3bdaca51bd4800b1bdbcb6dc68e3abef4b39197bde3625e74`；Worker
-  `ba4590a68841e520dcd3a91e206ca9e346d10fd9a23b3ed4c560f59707cfa71e`；Protocol 2.0 fingerprint
-  `sha256:94c8e093979be73a13ecc1090167454567d0602a70b065ceffeed4cb1eca4ce3`。完整身份见 PR #107。
-- P1-01 工程收口：PR #110 合入
-  `main@5adeacf3aecbd55bd5fe771a35d25a4caa195af3`，关闭 #98；随后以证据评论关闭 #83 与 #81。
-- PR #110 minimum-ci run `33925622082`：`backend-fast`、`frontend-build`、`secret-scan` 全绿。
+用户工作偏好仍有效：
 
-### 产品与工程结果
+- Ponytail full 管实现；Caveman 只管表达，不能省略理解、验证和安全措施。
+- 主会话使用 GPT-5.6-Sol high；需要委派时固定 GPT-5.6-Sol medium。
+- 全程简体中文；代码注释中文；文本 UTF-8。
 
-- `/data-prep` 保持统一数据工作台：文件/来源、自然语言任务、预览、任务修订、追问、模板/记忆、
-  Candidate、正式 Delivery、预览与下载能力继续沿同一生命周期工作。
-- 受控匿名网页可幂等形成唯一正式 Delivery；Publisher 重启只恢复发布，不重复抓取、模型调用或
-  Delivery；Owner B 无法读取、恢复、取消、重试、验证、发布、预览、下载或复用 Owner A 的事实。
-- CoreMind 通过 `AgentKernel` 薄 Adapter 接入；Mangrove 继续拥有 Owner、TaskRevision、模型选择、
-  外发确认、Verifier、Publisher 和正式 Delivery 权威。
-- 工作记录默认折叠，展示时间、实际行动、工具、模型、Token 与 unknown，不展示逐字思维链、
-  Cookie、Secret、系统 Prompt、宿主路径或原始大日志。
-- 启动前数据库迁移预检会只读检查 WebUI/Scheduler schema；落后时给出受源 SHA 保护的显式命令并
-  失败关闭。`start_all.bat` 继续是本机忽略文件，不进入 Git。
-- 已保留 Agent-Reach 调研。结论是吸收渠道目录、后端路由、真实体检与修复处方；具体开源工具按
-  精确版本逐个进入现有 Capability/Source 边界，不整包安装，不自动启用 OpenCLI 或
-  xiaohongshu-mcp。
+## 1. 当前现场身份
 
-### 验证证据
+### 1.1 Git 与工作区
 
-- Issue #98 后端组合：`235 passed, 1 skipped`。
-- 后端固定种子全量：`2352 passed, 13 skipped, 1 deselected`。唯一 deselect 是其他任务正在修改的
-  G1 freeze 自校验；未覆盖或重建该资产。
-- 前端正式构建：exit 0；完整 Playwright：`77 passed`，其中统一数据工作台 40 项并含明暗主题 axe。
-- 固定 Pi/CoreMind 0.7.1 golden：`1 passed`，覆盖运行中取消、无迟到事件与资源清理。
-- UTF-8：1249 个文件通过；`git diff --check` 通过。
-- Standards + Spec 双轴终审：无问题。
-- `start_all.bat --no-pause`：exit 0。最后复核时 8088、5173、8080、3002、1200 均监听；8088
-  与 5173 返回 HTTP 200；`/api/health` 返回 `{"ok":true,"service":"mangrove-webui"}`。
+| 项 | 当前事实 |
+| --- | --- |
+| 本地目录 | 当前工作区根目录（本机路径不入库） |
+| 本地分支 | `codex/issue-140-universal-context` |
+| 本次修复前 HEAD | `1956ab91abac49a0f1180993b8f7e0e929eac12f` |
+| 远端 main | `ec4cf0593e7e858bb0ddb5b8a47af2fc9ed3302c` |
+| 差异 | 本地 checkout 落后于远端，且有大量未提交工作 |
+| 远端 Tag/Release | 无 |
+| GitHub About | 描述“面向在线/离线与公域/私域数据的智能数据任务平台”；Homepage 为空 |
 
-精确根命令保留在 `docs/status/current.md` 第 0.1 节。本轮结论是 `ENGINEERING_VERIFIED`，不是
-真实外部网页/Provider 用户验收、生产资格或发布证明。
+当前 checkout 不是可安全切换或清理的干净主线。以下内容属于用户或历史任务 WIP，必须保留：
 
-### 清理结果
+- 已修改：`CONTEXT.md`、`docs/status/current.md`、`docker/phase4b/entrypoint.sh`、
+  `src/api/routes/document_tools.py`、迁移 `webui_0013`/`webui_0015`、
+  `evals/generalization-g1*` 冻结文件。
+- 未跟踪：`UX-CONTRACT.md`、ADR-0039、两份 2026-09-04 统一工作台计划、
+  根目录 `premium-audit.json`。
+- 禁止：切分支、stash、clean、reset、批量暂存、回滚或覆盖这些文件。
+- `docs/status/current.md` 仍含旧整改的部分滚动状态；以本交接和 GitHub 现场为当前停点，
+  新计划开始时再按文件归属做正式状态收口。
 
-已确认并移入 Windows 回收站：
+### 1.2 当前运行态
 
-- `.scratch/**`：旧 P0/P1 草稿、临时数据库副本、CI/PR 载荷与可抛弃原型；
-- `test-results/**`：旧 Playwright 失败上下文；
-- `frontend/premium-audit.json`：旧审计生成物。
+2026-09-12 最后只读检查：
 
-共约 118 MB，可从回收站恢复。没有删除源代码、测试、ADR、规格、正式执行证据、生产数据库、
-备份或他人未提交改动。
+- 8088、5173、8080、3002、1200 均有监听。
+- `http://127.0.0.1:8088/api/health` 返回
+  `{"ok":true,"service":"mangrove-webui"}`。
+- 本轮没有停止或重启服务。
+- 运行中的前端可能仍来自本地旧 checkout；不能因为远端 #142 已合并就断言当前浏览器已加载
+  新构建。用户此前看到“新建任务仍显示旧任务执行中”，应先核对构建来源和重启事实。
 
-## 3. 当前卡在哪
+## 2. 我们刚才在做什么
 
-没有阻塞，也没有未完成的 GitHub Issue。
+旧任务是 GitHub 整改地图 #113 下的 R0–R6：把 Mangrove 收敛成一个面向非技术用户的统一数据
+工作台，覆盖文件、公开网页、已有资料、只读连接、模型处理、来源证据、正式交付、复用、删除、
+模板、记忆、自动任务、反馈、多人运维和最终验收。
 
-以下事项故意不在本轮完成：
+这条执行路线现在已经停止。当前没有活动实现任务。当前任务是：
 
-- Issue #98 没有调用真实外部网页或真实 Provider，没有新增生产迁移或用户验收；
-- 没有部署、Tag、GitHub Release、npm/PyPI 或其他真实外部发布；
-- 没有处置历史备份、轮换 Key/Secret 或改变权限；
-- 仍有 Dependabot PR #27、#77、#104、#108、#109，尚未逐项做依赖与安全评估。
+1. 结束旧整改；
+2. 保留可核验成果和失败证据；
+3. 清除明确可再生的旧缓存与失效执行入口；
+4. 给人工全面审核和新整改计划留下可信起点。
 
-这些是后续工作或人工门，不是本轮失败。
+## 3. 已经完成了什么
 
-## 4. 接手后怎么开始
+### 3.1 已进入远端 main 的近期成果
 
-没有需要自动继续的在制 Issue。新会话先运行只读检查：
+远端 `main@ec4cf05` 已包含：
+
+| 工单 | 远端结果 | 证据边界 |
+| --- | --- | --- |
+| #139 | PR #182 合并为 `49c3451`，Issue COMPLETED | HTTP/数据库只读连接进入统一任务；不代表生产数据库迁移或目标部署 |
+| #140 | PR #175 合并为 `a82b6a4`，Issue COMPLETED | 模板与 Owner 记忆通用；不代表真实业务语义或生产用户验收 |
+| #186 | PR #187 合并为 `5196817`，Issue COMPLETED | 管理员/用户手填 Cookie 的 Owner 隔离与恢复工程链；不等于 #138 扫码验收或真实站点资格 |
+| #141 | PR #183 合并为 `47ad957`，Issue COMPLETED | 自动计划与反馈进入统一生命周期；真实 Provider/部署仍独立 |
+| #142 | PR #185 合并为 `ec4cf05`，Issue COMPLETED | 统一页面体验并修复新建任务状态串线；当前运行前端是否更新仍须现场确认 |
+
+更早已完成并合入的范围：
+
+- P0 #54–#60：vNext 默认链路、显式迁移、SecretRef、依赖分组、minimum-ci、
+  主分支 Ruleset 和文档治理基线。证据等级各不相同，不能统称生产发布。
+- P1-01 #83–#98：匿名网页首个 `Source → TaskRevision → Delivery` 工程闭环，
+  CoreMind 0.7.1 薄 Adapter 通过 PR #107/#110 合入。
+- R0 #114–#123：安全、会话、Owner、取消、分页、缓存、任务上下文、前端竞态和慢遥测。
+- F0 #124：统一用户旅程和交互原型。
+- R1 #125–#133 与 #159：运行前契约、外部永久只读、统一输入/流式/画布、模糊需求、
+  图片/OCR、工具复用和模型配置。
+- R2 #132/#134：完整原件导出与无 URL 公开搜索工程链。
+- R3 #135–#137：混合来源、资料/结果复用和关联感知删除。
+
+“Issue COMPLETED”只证明该票约定范围有相应证据；不能自动外推为真实站点、所有 Provider、
+生产数据、目标服务器、普通用户开放或稳定 Release。
+
+### 3.2 #144 已取得但未合入的工程证据
+
+关闭的 Draft PR #188 保留在分支
+`codex/issue-144-independent@e5ade2d51dc1cd7900d5c55c50c2f1e70709d7db`：
+
+- 前端 Playwright：483/483。
+- 远端 frontend-e2e run `34733474748`：SUCCESS。
+- 依赖安全重门 run `34734282703`：五组 Python、评测依赖、Browserslist、npm audit
+  和证据上传全部 SUCCESS。
+- final-SHA minimum-ci run `34734470578`：三项 SUCCESS。
+- 受控范围内 High/Critical 为 0；Standards + Spec 无 Required。
+- 仍缺人工视觉、真实站点/凭据/业务数据/模型/预算和目标服务器门，所以没有合入 main。
+
+### 3.3 本次收尾清理
+
+已关闭并保留历史的失效 Codex Draft PR：
+
+- #176 被合并的 #185 替代；
+- #177 被独立 #184 替代；
+- #178 被合并的 #183 替代；
+- #179 被合并的 #182 替代；
+- #180 被独立 #188 替代；
+- #181 对应已终止的 #138；
+- #184 对应已终止的 #143；
+- #188 对应已终止的 #144。
+
+这些 PR 的分支、提交、CI 和讨论均未删除。当前仍有 6 个 Dependabot PR
+#27/#77/#104/#108/#109/#168，必须逐项做兼容与安全评估，不能自动合并。
+
+已移入 Windows 回收站、可恢复：
+
+- `.pytest_cache`、`.pytest-tmp`；
+- 根目录及 `src/tests/scripts` 下的 Python `__pycache__`；
+- `frontend/test-results`；
+- 2026-07 的根目录 `backend_stdout.log`、`backend_stderr.log`。
+
+明确保留：
+
+- `.artifacts`：约 32.6 GiB，含 #138/#139/#140 冻结证据、失败记录、候选和复现环境；
+- `data`：活动数据库、WAL、备份、上传、能力和治理证据；
+- `logs`：当前服务仍在写入；
+- `downloads`、`local-audits`、`tmp`、`.hypothesis`；
+- `frontend/dist`：当前 8088 同源构建可能正在使用；
+- 所有 dirty/untracked WIP。
+
+## 4. 哪些工单终止但没有完成
+
+2026-09-13 UTC，以下 Issue 按用户决定以 `CLOSED / NOT_PLANNED` 收尾：
+
+### #138 通用网站登录态、重新认证与原任务恢复
+
+已保留：
+
+- 通用生命周期、Owner/站点/账号隔离和原 Attempt/Run 恢复的工程候选；
+- B 站二维码面板作用域真实诊断：主判据 4/4 找到；
+- XHS 观测链超时边界修复与冻结证据。
+
+未完成：
+
+- 小红书与 B 站两站真实扫码、账号身份、加密保存复用、失效重登、正文只读取数和原任务续行；
+- 候选未按独立 main 边界落地；旧 PR #181 是跨票堆叠，已关闭且不得直接合并。
+
+#186 的手填 Cookie 路线是独立能力，不能补写成 #138 已完成。
+
+### #143 多人运行、资源上限、恢复与 8088 运维门
+
+关闭的 Draft PR #184 保留
+`codex/issue-143-independent@2b727830d2f2a0577e0d5ae4ed188d40f85c42b2`。
+
+已保留：
+
+- final-SHA minimum-ci、受影响测试、50 Owner 聚合 5 req/s 持续负载、
+  取消/恢复、隔离备份恢复和本地启动门证据；
+- 用户已认可本地工程阶段。
+
+未完成：
+
+- 目标 Linux/GPU 服务器尚未到位；
+- TLS 终止、真实生产 WAL/恢复、外部告警送达、持续可用性与目标环境性能未验；
+- 本机 50 请求同刻突发持久可见 P95 约 4.79–5.08 秒，未达到 2 秒目标。
+
+### #144 黄金任务与真实用户体验验收
+
+工程证据见 §3.2。未完成：
+
+- 用户本人完整视觉旅程；
+- Chrome 实际 200%、390px、明暗主题、键盘和中文 IME；
+- 本人 Cookie 与真实站点、脱敏业务数据、真实模型/Key/预算；
+- #143 的目标服务器现场门。
+
+### #145 双入口退役、失效内容清理与 P1 版本候选
+
+本票没有实施：
+
+- 未退役旧入口或唯一功能；
+- 未完成全局孤儿引用证明和真实新用户旅程；
+- 未形成 P1 最终候选清单；
+- 未删除真实数据、备份、测试或历史证据；
+- 未创建 Tag、Release 或部署。
+
+## 5. 当前卡在哪里
+
+当前不是工程代码卡住，而是决策和真实验收停点：
+
+1. 用户要先人工全面审核产品，再决定哪些成果保留、哪些重做。
+2. 目标服务器未到位，部署/TLS/生产恢复/监控/真实性能无法完成。
+3. 真实站点、本人账号/Cookie、真实业务样本、模型 Key 和费用范围仍需用户逐项授权。
+4. 本地 checkout 落后且 dirty，不能安全承接新主线实现。
+5. 主线仍有 GitHub 报告的依赖风险；PR #188 含一组已验证修复候选但未合入。
+6. 父票 #113 仍 OPEN，但正文清单和“继续逐单实施”建议已过期。已在 #113 留言说明旧路线停止。
+7. #146/#147 是 P2 占位，正文仍写被 #145 阻塞；新计划形成前不要据此自动启动或改写。
+
+## 6. 下一步计划
+
+新会话应按以下顺序工作：
+
+1. 只读核验：
+   - 当前 `origin/main`、Open Issues、Open PR、Tag/Release；
+   - 本地 dirty 文件归属；
+   - 8088 实际构建来源、版本和数据库迁移状态；
+   - 用户人工审核使用的代表账号、数据与场景。
+2. 协助用户逐项人工审核，不边验收边偷偷修代码。分别记录：
+   - 产品缺陷；
+   - 体验偏好；
+   - 数据/权限/安全问题；
+   - 部署环境缺口；
+   - 已通过且无需重做的能力。
+3. 用户确认审核结论后，写一份新的整改地图。旧 #113 只作历史参考，不默认复用旧顺序。
+4. 对关闭 Draft 候选逐个决定：
+   - #184 的运维修复是否重放到最新 main；
+   - #188 的依赖/黄金门是否选择性重放；
+   - #181 不得直接合并，若仍需要登录能力，应从最新 main 重新规格化。
+5. 新实现必须从现场核验后的 `origin/main` 建立干净、独立、可追溯分支；不要在当前 dirty
+   checkout 上切换或堆叠。
+6. 每张新票保持：最小根因修复、回归测试、Standards + Spec、同提交 CI、真实人工门分离。
+7. 完成新计划约定的真实用户、真实数据、目标部署和发布门后，才讨论 P1 候选或版本发布。
+
+最短只读命令：
 
 ```powershell
-git status --short
-git fetch origin main
-git rev-parse origin/main
+git status --short --branch
+git ls-remote origin refs/heads/main
 gh issue list --repo Eclipseic1848/Mangrove_ai --state open --limit 100
 gh pr list --repo Eclipseic1848/Mangrove_ai --state open --limit 100
+gh release list --repo Eclipseic1848/Mangrove_ai
 ```
 
-然后由用户选择下一条明确纵切片或依赖 PR 分诊。不要凭本文件自动进入新阶段、安装工具、迁移数据
-或发布版本。
+## 7. 项目总体 Roadmap
 
-## 5. 必须保护的本地状态
+| 阶段 | 含义 | 当前事实 |
+| --- | --- | --- |
+| P0 | 迁移、SecretRef、依赖分组、CI、分支保护与发布治理基线 | 已完成不同等级工程/本机/远端门；不是稳定发布 |
+| P1-01 | 匿名网页来源到正式 Delivery 的首个纵切片与 CoreMind Adapter | 已工程收口；不是整个 P1 |
+| R0–R3 | 安全正确性、统一输入/画布、文件/网页、混合/复用/删除 | 对应工单已合入 main |
+| R4 | 登录来源、HTTP/数据库、Cookie | #139/#186 已合入；#138 旧扫码路线终止且未完成 |
+| R5 | 模板、记忆、自动任务、反馈、统一页面 | #140/#141/#142 已合入 |
+| R6 | 多人部署、黄金验收、旧入口退役和版本收口 | 旧方案终止；#143–#145 未完成 |
+| 人工全面审核 | 用户按真实产品旅程重新判断当前 main | 下一步 |
+| 新整改计划 | 根据审核结果重新拆票、排序和验收 | 等待用户 |
+| P2 | #146 音视频；#147 外部程序只读获取本人数据/结果 | 后期占位，不自动启动 |
 
-下列未提交改动属于用户或其他任务，不得暂存、覆盖、恢复、清理或据此重建：
+长期稳定产品边界不变：
 
-- `docker/phase4b/entrypoint.sh`；
-- `evals/generalization-g1-independent*/freeze.json`；
-- `evals/generalization-g1-independent*/heldout_manifest.json`；
-- `evals/generalization-g1-independent*/self-check-report.json`；
-- `evals/generalization-g1/fixtures.json`。
+- 8088 是统一产品入口，5173 只是开发入口。
+- 外部系统永久只读；不支持外部数据库写回、社交写操作、业务结果投递。
+- TaskRevision、Owner、来源快照、连接版本、外发确认和能力 digest 必须冻结。
+- Candidate、Parquet、AST 或“验证通过”都不是正式交付；
+  只有 `delivery_published` 且完整性/QA 通过的 `output_id` 才是 Delivery。
+- 普通用户、管理员、超级管理员是产品角色；没有“高级用户”权限角色。
+- 管理员跨 Owner 读取业务正文必须说明原因并留下不可变审计。
 
-本机 CoreMind checkout 由专属任务持有；Mangrove 任务不得编辑、测试、切分支、提交、推送、回滚、
-清理或 stash。任何 Git 提交都使用精确文件 allowlist。
+## 8. 版本计划
 
-## 6. 总体 Roadmap
+当前没有可发布版本计划：
 
-| 阶段 | 状态 | 目标与边界 |
-|---|---|---|
-| P0 | 已完成 | 可持续迭代基线、显式迁移、SecretRef、依赖安全、CI 与主分支保护 |
-| P1-01 | 已完成工程闭环 | 匿名网页统一工作台、部分结果语义、工作记录、CoreMind Adapter |
-| 后续来源纵切片 | 未规格化 | HTTP、数据库、认证网页分别进入同一 Source→TaskRevision→Delivery 生命周期 |
-| P1-02 | 未实现 | 深化统一任务生命周期，逐项迁入仍有价值的旧工作区能力，不做全量重写 |
-| P1-03 | 未实现 | 认证、可观测性、SLO、TLS/CSP 与远程多人运行 |
-| P1-04 | 未实现 | 配额、成本、外发、审计、回滚齐备后分批开放平台能力 |
-| P1-05 | 未实现 | 组件测试、包体预算、性能与无障碍治理 |
-| P2 | 未启动 | Linux/GPU、远程 MCP/Registry、多媒体、多节点、对象存储/PostgreSQL；须有真实需求和环境 |
+- 远端无 Tag、无 GitHub Release。
+- 当前 main 是公开开发基线，不是稳定生产版本。
+- 本地 `v0.0.4` 只代表历史语义；`v0.0.8` 从未作为远端 Tag/Release 发布。
+- 没有确定下一 semver、发布日期、部署日期或普通用户开放时间。
 
-小红书等认证来源的既定产品语义：只有明确 Cookie 失效时才暂停同一 Run，并向当前 Owner 展示
-二维码；谁扫码，登录态就只保存到谁的 Owner 隔离连接，后续任务复用到下次明确失效。网络或平台
-异常只能标记“登录状态未知”，不能误报失效。真实账号、条款、外发和费用仍须用户确认。
+新版本只能按以下门推进：
 
-## 7. 版本计划
+1. 用户完成人工全面审核并确认新范围；
+2. 新整改计划完成，选定候选全部基于最新 main 重放和验证；
+3. 真实用户/数据/模型/权限门通过；
+4. 目标服务器部署、TLS、备份恢复、监控、性能与安全门通过；
+5. 依赖与供应链重新扫描，High/Critical 按发布政策处理；
+6. README、Code of Conduct、Contributing、MIT License、Security 和 GitHub About
+   按顶层 Phase 同步门复核；
+7. 用户另行授权 Tag、Release、部署和受众开放。
 
-- 远端当前没有 Tag 或 GitHub Release；本地历史版本语义不是公开版本。
-- P1-01 完成是工程里程碑，不自动产生版本或发布。
-- 下一版本号应在后续 P1 范围、真实验收与发布清单冻结后决定。
-- Tag、GitHub Release、npm/PyPI、部署及其他外部发布始终是人工门。
-- P1-01 收口已检查 README、Code of Conduct、Contributing、MIT License、Security 与 GitHub
-  About；现有内容仍准确，无需为了制造差异而改写。
+在这些门完成前，只能称为开发基线或工程候选。
 
-## 8. 绝对不要再踩的坑
+## 9. 绝对不要再踩的坑
 
-1. 不要创建 worktree 或额外“分支文件夹”；只在现有 checkout 工作。
-2. 不要触碰 CoreMind 本机仓库；只使用正式提交、制品 digest、CI 和锁定测试证据。
-3. 不要把 Candidate、Verifier 通过、Runtime 成功或 CI 绿色说成正式 Delivery 或用户验收。
-4. 不要把 Token unknown 记成 0，也不要用 Runtime 估算替代 Provider 原生账本。
-5. 不要硬编码维护者旧局域网 IP；8088 是产品入口，地址由本机当前 IPv4 决定。
-6. 不要绕过 AgentKernel 直接依赖 `_pi_runtime` 或 CoreMind 内部类型。
-7. 不要用 `git add .`、`git add -A`、`git commit -a`、`git clean` 或 `git reset --hard`。
-8. 不要为了“清理”删除有效 ADR、规格、测试、恢复点、真实数据或他人未提交改动。
-9. 不要整包安装 Agent-Reach 或自动跟随浮动 `main/latest`；逐个候选固定版本、digest、许可证、
-   只读能力、Owner/SecretRef 与外发边界。
-10. 不要把“能扫码”简化成共享 Cookie。每个 Owner 的登录态、版本、撤销与恢复必须隔离。
-11. 不要为了简短省略验证、安全、权限、可访问性或数据保护。
+1. **不要把关闭当完成。** #138/#143/#144/#145 是 NOT_PLANNED。
+2. **不要把测试当真实资格。** Mock、合成 HTML、HTTP 200、CI 全绿、本地容器探针都不能替代
+   真实站点、真实 Provider、真实数据、真实部署或用户认可。
+3. **不要再把 VPN 当已证实原因。** 开关 TUN 对照已推翻该假设。
+4. **不要把探针没看见当站点没提供。** B 站二维码曾因面板作用域切到右半边而产生假阴性。
+5. **不要把 #186 写进 #138 完成证据。** 手填 Cookie 与扫码/重认证是两条独立路线。
+6. **不要合并旧堆叠 PR。** #176–#181 已关闭；#181 尤其跨票堆叠。
+7. **不要直接合并关闭的 #184/#188。** 它们只能作为候选，在最新 main 上重新审查或重放。
+8. **不要碰当前 dirty checkout。** 禁止 switch/stash/clean/reset/批量暂存；先确认每个 WIP 归属。
+9. **不要删除失败证据。** `.artifacts`、数据库、备份、冻结文件、测试源码和用户资料必须保留。
+10. **不要用网络未知清除 Cookie。** 只有明确失效才能要求 Owner 更新；Secret 不得进入日志、
+    模型正文或导出。
+11. **不要放宽外部写操作。** 搜索/详情/获准数据读取可以；发布、评论、点赞、收藏、下单、
+    数据库写回和结果投递继续拒绝。
+12. **不要绕过显式迁移。** Mangrove Schema 只经 `src/database_migrations`；生产迁移、
+    恢复覆盖、备份处置和 Key 轮换分别授权。
+13. **不要误认运行版本。** 远端 main 前进不代表本机 8088/5173 已重建或重启。
+14. **不要自动处理 Dependabot PR。** 精确核版本、行为、lockfile、许可证和受影响测试。
+15. **不要启用 Agent-Reach/OpenCLI/xiaohongshu-mcp。** 仍等待用户精确信号
+    `CoreMind ready`，并必须保留 Owner/SourceSnapshot/TaskRevision/Verifier/Delivery 边界。
+16. **不要虚构版本。** 工程完成不自动产生 semver、Tag、Release、部署或受众开放。
 
-## 9. 权威证据
+## 10. 证据与权威入口
 
-- 当前状态：`docs/status/current.md`
-- 领域语义：`CONTEXT.md`
-- P1-01 规格：`docs/plans/2026-08-27-p1-01-anonymous-web-source-unified-workbench-spec.md`
-- Runtime 决策：`docs/adr/0035-unified-data-workbench-and-coremind-runtime-adapter.md`
-- 单一工作台边界：`docs/adr/0036-single-workspace-with-verified-runtime-inheritance.md`
-- CoreMind 原型：`docs/plans/2026-08-27-p1-coremind-agentkernel-prototype-report.md`
-- Agent-Reach：`docs/research/2026-08-31-agent-reach-mangrove-assessment.md`
-- 远端实现：PR #107、PR #110、CI run `33925622082`。
+按优先级读取：
 
-GitHub Issue、PR、CI、默认分支 SHA、依赖告警与服务状态都是易变事实，接手时必须现场重取。
+1. `AGENTS.md`：仓库规则和稳定产品边界。
+2. 本文件：当前会话停点和恢复边界。
+3. GitHub 现场：`main`、#113、#138–#147、#159、#186、相关 PR/CI。
+4. `docs/status/current.md`：产品/生产风险历史台账；其中旧整改滚动状态已过期，需与 GitHub
+   现场和本文件对照。
+5. `CONTEXT.md`：领域术语。
+6. ADR-0035/0036/0039：Runtime、单工作台与外部永久只读/资料生命周期决策。
+7. `docs/plans/2026-09-04-unified-data-lifecycle-remediation-plan.md`：旧整改产品范围证据，
+   不是当前进度或下一步。
+8. `.artifacts/issue-138`、`.artifacts/issue-139`、`.artifacts/issue-140`：本地冻结证据；
+   不要编辑、覆盖或批量清理。
+
+## 11. 给新会话的一句话
+
+先协助用户审核当前产品，不要继续旧工单。所有修改、合并、部署、真实站点和凭据操作都等用户
+的新整改计划；旧成果按证据选择性复用，旧失败和未完成门必须原样保留。
