@@ -182,6 +182,10 @@ async function mockWorkspace(
       sha256: "0".repeat(64),
     },
   }));
+  await page.route("**/api/data-sources/uploads/*", (route) => route.fulfill({
+    status: 404,
+    json: { detail: "测试来源不存在" },
+  }));
   await page.route("**/api/data-tasks/preview", (route) => route.fulfill({
     json: {
       schema: {

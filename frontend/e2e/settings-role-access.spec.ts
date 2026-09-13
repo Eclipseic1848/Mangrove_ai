@@ -120,10 +120,19 @@ async function mockSettings(
   await page.route("**/api/model-connections", (route) => route.fulfill({
     json: { items: [] },
   }));
+  await page.route("**/api/model-connections/preferences/default", (route) => route.fulfill({
+    json: { preference: null },
+  }));
   await page.route("**/api/capability-governance/packs", (route) => route.fulfill({
     json: { items: [] },
   }));
   await page.route("**/api/capability-governance/validations", (route) => route.fulfill({
+    json: { items: [] },
+  }));
+  await page.route("**/api/capability-governance/admin/review", (route) => route.fulfill({
+    json: { items: [] },
+  }));
+  await page.route("**/api/capability-governance/admin/platform-candidates", (route) => route.fulfill({
     json: { items: [] },
   }));
   await page.route(

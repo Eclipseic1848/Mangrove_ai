@@ -81,6 +81,10 @@ export async function mockWorkspace(
   await page.route("**/api/semantic-workspace/tasks/*/stream*", route => route.fulfill({ contentType: "text/event-stream", body: "" }));
   await page.route("**/api/settings/onboarding/model-connections", route => route.fulfill({ json: { completed: true } }));
   await page.route("**/api/semantic-workspace/tasks/*/turns", route => route.fulfill({ json: { turns: [], results: [], proposals: [] } }));
+  await page.route("**/api/semantic-workspace/tasks/*/preview?*", route => {
+    const revision = Number(new URL(route.request().url()).searchParams.get("revision") || 2);
+    return route.fulfill({ json: previewIdentityFixture("本人", revision).preview });
+  });
   await page.route("**/api/models", (route) => route.fulfill({
     json: {
       options: [
