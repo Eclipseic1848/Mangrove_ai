@@ -107,6 +107,31 @@ class SequenceDiscoveryClient:
         return text, 0.95
 
 
+@pytest.mark.asyncio
+async def test_ordinal_discovery_advances_in_small_batches(tmp_path):
+    source = _digital_pdf(tmp_path / "many.pdf", tuple(f"Receipt {i}" for i in range(12)))
+    broker = DocumentToolBroker(retriever=DocumentRetrievalModule(execution_root=tmp_path))
+    grant = broker.issue_grant(owner_user_id="a", task_id="batch", revision=1,
+                               run_id="batch-run", sources=(source,))
+    async def call(operation, **payload):
+        return await broker.call(grant_token=grant.token, operation=operation, payload=payload)
+    await call("inspect_source", source_id=source.upload_id)
+    await call("freeze_coverage", authorized_scope={"source_ids": [source.upload_id]},
+               result_cardinality="ordinal", result_ordinal=5, completeness="strict",
+               ordering="页码升序", required_fields=[], object_boundary="完整报销单，可能跨页",
+               stop_semantics="证明第五份的边界后停止", interpretation="第五份报销单", confidence="high")
+    seen = []
+    for size in (5, 5, 2):
+        result = await call("discover_content", source_id=source.upload_id, query="Receipt")
+        assert len(result["observed_unit_ids"]) == size
+        assert not set(seen).intersection(result["observed_unit_ids"])
+        seen.extend(result["observed_unit_ids"])
+    assert result["next_unit_ids"] == []
+    assert len(seen) == 12
+    with pytest.raises(Exception, match="已完成发现"):
+        await call("discover_content", source_id=source.upload_id, query="Receipt")
+
+
 def _uploaded_image(path: Path, *, orientation: int = 1) -> SourceInput:
     image = Image.new("RGB", (320, 200), "white")
     exif = Image.Exif()

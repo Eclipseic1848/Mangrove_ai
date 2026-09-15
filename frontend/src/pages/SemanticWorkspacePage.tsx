@@ -32,8 +32,10 @@ import {
 import { SourcePreviewPanel, initialSourceView, type SourceViewState } from "@/components/workspace/SourcePreviewPanel";
 import { TaskDeletionDialog } from "@/components/workspace/TaskDeletionDialog";
 import { TaskTimeline } from "@/components/workspace/TaskTimeline";
+import { DraftResultPanel, DraftPreview, initialDraftView, type Draft, type DraftViewState } from "@/components/workspace/DraftResultPanel";
 import { Markdown } from "@/components/Markdown";
 import { WorkspaceTaskSidebar } from "@/components/workspace/WorkspaceTaskSidebar";
+import { CollectionHistory } from "@/components/workspace/CollectionHistory";
 import {
   answerWorkspaceTask,
   cancelWorkspaceTask,
@@ -541,6 +543,8 @@ export function SemanticWorkspacePage() {
   const [accountResumeError, setAccountResumeError] = useState<{ key: string; message: string; unknown: boolean } | null>(null);
   const [accountResumeConfirmed, setAccountResumeConfirmed] = useState<string | null>(null);
   const { user } = useAuth();
+  const [composerEpoch, setComposerEpoch] = useState(0);
+  const composerEpochRef = useRef(0);
   const accountResumeOwner = useRef(user?.user_id);
   accountResumeOwner.current = user?.user_id;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -548,10 +552,12 @@ export function SemanticWorkspacePage() {
   selectionParams.current = searchParams;
   // 选择保留在站内地址，重新登录后仍读取同一任务与修订；正文仍经 Owner 鉴权获取。
   const selectedTaskId = searchParams.get("task") || null;
+  const selectedConversationId = searchParams.get("conversation") || null;
   const revision = Number(searchParams.get("revision"));
   const selectedRevision = Number.isSafeInteger(revision) && revision > 0 ? revision : null;
   const setSelectedTaskId = (taskId: string | null) => {
     const next = new URLSearchParams(selectionParams.current);
+    next.delete("conversation");
     if (taskId) next.set("task", taskId);
     else next.delete("task");
     next.delete("revision");
@@ -577,6 +583,7 @@ export function SemanticWorkspacePage() {
     try { stored = JSON.parse(localStorage.getItem(storageKey) || "null"); } catch { return; }
     if (!stored?.payload || !stored.idempotency_key) return;
     let current = true;
+    const epoch = composerEpochRef.current;
     const draftKey = `mangrove_workspace_draft_${user.user_id}_new`;
     const savedDraft = localStorage.getItem(draftKey), savedFiles = localStorage.getItem(`${draftKey}_files`);
     createAttemptRef.current = { fingerprint: stored.fingerprint, key: stored.idempotency_key };
@@ -588,7 +595,7 @@ export function SemanticWorkspacePage() {
       localStorage.removeItem(storageKey);
       if (localStorage.getItem(draftKey) === savedDraft && localStorage.getItem(`${draftKey}_files`) === savedFiles) { localStorage.removeItem(draftKey); localStorage.removeItem(`${draftKey}_files`); }
       createAttemptRef.current = null;
-      setSelectedTaskId(created.task_id);
+      if (epoch === composerEpochRef.current) setSelectedTaskId(created.task_id);
       void queryClient.invalidateQueries({ queryKey: ["semantic-workspace-tasks"] });
       toast.success("已恢复上次任务");
     }).catch(error => {
@@ -617,12 +624,15 @@ export function SemanticWorkspacePage() {
   >("all");
   const [recycleBin, setRecycleBin] = useState(false);
   const [deletionTarget, setDeletionTarget] = useState<{ task_id: string; title: string } | null>(null);
-  const newTask = !selectedTaskId && !recycleBin;
+  const newTask = !selectedTaskId && !selectedConversationId && !recycleBin;
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorExpanded, setInspectorExpanded] = useState(false);
   const fullInspector = narrow || inspectorExpanded;
-  const [inspectorKind, setInspectorKind] = useState<"source" | "result">("source");
-  const previewedDraft = useRef(false);
+  const [inspectorKind, setInspectorKind] = useState<"source" | "result" | "draft">("source");
+  const [previewDraft, setPreviewDraft] = useState<{ identity: string; draft: Draft } | null>(null);
+  const openedDraft = useRef("");
+  const [draftActionsTarget, setDraftActionsTarget] = useState<HTMLDivElement | null>(null);
+  const previewedDraft = useRef<string[]>([]);
   const previewedResults = useRef(new Set<string>());
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
   const [taskSourceSelection, setTaskSourceSelection] = useState<{
@@ -632,7 +642,7 @@ export function SemanticWorkspacePage() {
   } | null>(null);
   const [draftUploads, setDraftUploads] = useState<UploadItem[]>([]);
   const [canvasView, setCanvasView] = useState<{
-    identity: string; outputId: string | null; results: Record<string, ResultViewState>; sources: Record<string, SourceViewState>;
+    identity: string; outputId: string | null; results: Record<string, ResultViewState>; sources: Record<string, SourceViewState>; draft?: DraftViewState;
   }>({ identity: "", outputId: null, results: {}, sources: {} });
   const canvasIdentityRef = useRef("");
   const pendingSource = useRef<{ taskId: string; revision: number; evidence: Record<string, unknown> } | null>(null);
@@ -660,6 +670,12 @@ export function SemanticWorkspacePage() {
     queryKey: ["semantic-workspace-tasks", recycleBin],
     queryFn: () => listWorkspaceTasks(recycleBin),
     refetchInterval: 3_000,
+  });
+  const collectionHistory = useQuery<Array<{ conv_id: string; title: string; status: import("@/types/semanticWorkspace").WorkspaceTaskStatus; updated_at: string }>>({
+    queryKey: ["collection-history", user?.user_id],
+    queryFn: () => api.get("/api/chat/history"),
+    refetchInterval: 3000,
+    enabled: Boolean(user?.user_id) && !recycleBin,
   });
   const guidance = useQuery({
     queryKey: ["semantic-workspace-guidance"],
@@ -815,6 +831,17 @@ export function SemanticWorkspacePage() {
     task?.delivery?.delivery_id,
   ]);
   canvasIdentityRef.current = resultIdentity;
+  const showDraft = useCallback((draft: Draft, open = false) => {
+    setPreviewDraft({ identity: resultIdentity, draft });
+    const firstDraft = openedDraft.current !== resultIdentity;
+    openedDraft.current = resultIdentity;
+    const typing = ["TEXTAREA", "INPUT"].includes(document.activeElement?.tagName ?? "");
+    if (open || (firstDraft && !narrow && !typing)) {
+      setInspectorKind("draft");
+      setInspectorOpen(true);
+      if (open) requestAnimationFrame(() => document.querySelector<HTMLSelectElement>('select[aria-label="初稿文件"]')?.focus());
+    }
+  }, [resultIdentity, narrow]);
   // 在渲染阶段切换身份，缓存命中与旧组件卸载也不能写回前一修订的阅读状态。
   if (canvasView.identity !== resultIdentity) {
     setCanvasView({ identity: resultIdentity, outputId: null, results: {}, sources: {} });
@@ -847,10 +874,10 @@ export function SemanticWorkspacePage() {
   useEffect(() => {
     if (!task?.delivery || task.status !== "completed" || previewedResults.current.has(resultIdentity)) return;
     previewedResults.current.add(resultIdentity);
-    if (inspectorOpen || document.activeElement?.tagName === "TEXTAREA") return;
+    if (inspectorKind !== "draft" && (inspectorOpen || document.activeElement?.tagName === "TEXTAREA")) return;
     setInspectorKind("result");
     setInspectorOpen(true);
-  }, [resultIdentity, task?.status, task?.delivery, inspectorOpen]);
+  }, [resultIdentity, task?.status, task?.delivery, inspectorOpen, inspectorKind]);
 
   useEffect(() => {
     if (!selectedTaskId || !task) return;
@@ -919,28 +946,32 @@ export function SemanticWorkspacePage() {
   const handleDraftUploadsChange = useCallback((uploads: UploadItem[]) => {
     setDraftUploads(uploads);
     if (!uploads.length) {
-      previewedDraft.current = false;
+      previewedDraft.current = [];
       setSelectedUploadId(null);
       setInspectorOpen(false);
       return;
     }
-    if (!previewedDraft.current) {
-      previewedDraft.current = true;
-      // 上传返回不能切走用户正在输入的内容；预览入口仍常驻。
-      if (document.activeElement?.tagName !== "TEXTAREA") setInspectorOpen(true);
+    const added = uploads.find(upload => !previewedDraft.current.includes(upload.upload_id));
+    previewedDraft.current = uploads.map(upload => upload.upload_id);
+    if (added) {
+      // 桌面并排打开预览但不抢焦点；手机全屏预览不能遮住正在输入的内容。
+      if (!narrow) setInspectorExpanded(false);
+      if (!narrow || document.activeElement?.tagName !== "TEXTAREA") setInspectorOpen(true);
       setInspectorKind("source");
     }
     setSelectedUploadId((current) =>
-      current && uploads.some((upload) => upload.upload_id === current)
+      added ? added.upload_id : current && uploads.some((upload) => upload.upload_id === current)
         ? current
         : uploads[0].upload_id,
     );
-  }, []);
+  }, [narrow]);
 
-  const submitNew = async (payload: SourceTaskPayload) => {
+  const submitNew = async (payload: SourceTaskPayload, draftScope = "new") => {
+    const epoch = composerEpochRef.current;
+    const navigation = selectionParams.current.toString();
     const storageKey = `mangrove_web_task_attempt_${user?.user_id}`;
     const owner = user?.user_id;
-    const draftKey = `mangrove_workspace_draft_${owner}_new`;
+    const draftKey = `mangrove_workspace_draft_${owner}_${draftScope}`;
     const savedDraft = localStorage.getItem(draftKey), savedFiles = localStorage.getItem(`${draftKey}_files`);
     try {
       const requestPayload = {
@@ -980,10 +1011,12 @@ export function SemanticWorkspacePage() {
       if (localStorage.getItem(draftKey) === savedDraft && localStorage.getItem(`${draftKey}_files`) === savedFiles) { localStorage.removeItem(draftKey); localStorage.removeItem(`${draftKey}_files`); }
       localStorage.removeItem(storageKey);
       createAttemptRef.current = null;
-      setSelectedTaskId(created.task_id);
-
-      setRecycleBin(false);
-      setLiveEvents([]);
+      // 旧创建请求仍保存结果，但不能把用户从新草稿切回旧任务。
+      if (epoch === composerEpochRef.current && navigation === selectionParams.current.toString()) {
+        setSelectedTaskId(created.task_id);
+        setRecycleBin(false);
+        setLiveEvents([]);
+      }
       await queryClient.invalidateQueries({
         queryKey: ["semantic-workspace-tasks"],
       });
@@ -996,13 +1029,21 @@ export function SemanticWorkspacePage() {
 
   const taskNavigation = (
           <WorkspaceTaskSidebar
-          tasks={tasks.data || []}
-          activeTaskId={selectedTaskId}
+          tasks={[...(tasks.data || []), ...(recycleBin ? [] : collectionHistory.data || []).map(item => ({ ...item, task_id: `conversation:${item.conv_id}` }))].sort((a, b) => b.updated_at.localeCompare(a.updated_at))}
+          activeTaskId={selectedConversationId ? `conversation:${selectedConversationId}` : selectedTaskId}
           filter={filter}
           recycleBin={recycleBin}
           storage={storage.data}
           onSelect={(taskId) => {
             if (narrow) setNavigationOpen(false);
+            if (taskId.startsWith("conversation:")) {
+              const next = new URLSearchParams();
+              next.set("conversation", taskId.slice("conversation:".length));
+              selectionParams.current = next;
+              setSearchParams(next);
+              setInspectorOpen(false);
+              return;
+            }
             setSelectedTaskId(taskId);
 
             setLiveEvents([]);
@@ -1012,7 +1053,22 @@ export function SemanticWorkspacePage() {
             setFilter(nextFilter);
           }}
           onNew={() => {
-            setComposerDraft(null);
+            try {
+              // 只清理新任务输入缓存，不删除服务端任务、文件或未知创建请求。
+              const draftKey = `mangrove_workspace_draft_${user?.user_id ?? "current"}_new`;
+              localStorage.removeItem(draftKey);
+              localStorage.removeItem(`${draftKey}_files`);
+              localStorage.removeItem(`mangrove_web_source_attempt_${user?.user_id ?? "current"}`);
+            } catch {
+              toast.error("无法重置浏览器草稿，请检查浏览器存储权限后重试");
+              return;
+            }
+            setComposerDraft(current => current ? {
+              prompt: "", formats: [], connectionId: current.connectionId,
+              connectionModel: current.connectionModel, localModel: current.localModel,
+            } : null);
+            // 新身份触发卸载，中止旧等待并使迟到回调失效。
+            setComposerEpoch(++composerEpochRef.current);
             setExampleSeed(null);
             if (narrow) setNavigationOpen(false);
             setRecycleBin(false);
@@ -1129,57 +1185,74 @@ export function SemanticWorkspacePage() {
         ) : navigationOpen && taskNavigation}
 
         <div className="min-w-0 flex-1">
-          {newTask ? (
+          {selectedConversationId ? <CollectionHistory key={`${user?.user_id}:${selectedConversationId}`} convId={selectedConversationId}
+            composerProps={{ modelOptions: models.data?.options, defaultModel: models.data?.default,
+              allowPiRuntime: Boolean(models.data?.pi_runtime_enabled), allowLocalPiRuntime: canUseLocalPiRuntime,
+              modelConnections: verifiedModelConnections,
+              defaultConnectionId: modelPreference.data?.preference?.connection_id ?? null,
+              defaultConnectionModel: modelPreference.data?.preference?.model_id ?? null,
+              grayCapabilities: grayCapabilities.data?.items ?? [], onSubmit: payload => submitNew(payload, `conversation_${selectedConversationId}`) }} /> : newTask ? (
             <Group orientation="horizontal" className="h-full min-h-0" defaultLayout={{ draft: 58, preview: 42 }}>
               <Panel id="draft" minSize="0px" className={cn("min-w-0", fullInspector && inspectorOpen && draftUploads.length > 0 && "hidden")}>
               <div className="h-full overflow-y-auto">
                 <div
                   className={cn(
-                    "mx-auto max-w-5xl",
+                    "mx-auto flex min-h-full max-w-5xl flex-col",
                     draftUploads.length
                       ? "px-3 pb-4 pt-2"
-                      : "px-4 pb-12 pt-8 sm:px-8 sm:pt-14",
+                      : "px-4 pb-6 pt-8 sm:px-8 sm:pt-14",
                   )}
                 >
-                {draftUploads.length === 0 ? (
+                {draftUploads.length === 0 && !composerDraft?.conversation?.length && !composerDraft?.chatAttempt ? (
                   <>
-                    <div className="mx-auto max-w-3xl text-center">
+                    <div className="mx-auto my-auto w-full max-w-3xl py-8 text-center">
                       <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/10 text-primary">
                         <Sparkles className="h-5 w-5" />
                       </div>
                       <h2 className="mt-5 text-2xl font-semibold tracking-tight">
-                        想处理什么资料？
+                        今天想完成什么？
                       </h2>
                       <p className="mt-2 text-sm text-muted-foreground">
-                        描述想得到的结果，添加文件或提供具体公开网址。
+                        直接说说你的想法，也可以添加文件一起处理。
                       </p>
+                      <div className="mt-8 grid gap-3 text-left sm:grid-cols-2" aria-label="任务灵感">
+                        {guidance.data?.examples.slice(0, 4).map(example => (
+                          <button key={example.id} type="button" className="rounded-2xl border p-4 transition-colors hover:border-primary/40 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => {
+                            setComposerDraft(current => ({ prompt: example.prompt, formats: example.output_formats, connectionId: current?.connectionId ?? null, connectionModel: current?.connectionModel ?? null, localModel: current?.localModel ?? null }));
+                            requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务要求"]')?.focus());
+                          }}>
+                            <span className="text-xs text-primary">{example.category}</span>
+                            <span className="mt-3 block text-sm font-medium">{example.title}</span>
+                            <span className="mt-1 block text-xs leading-5 text-muted-foreground">{example.description}</span>
+                          </button>
+                        ))}
+                      </div>
                     </div>
 
                   </>
-                ) : (
+                ) : draftUploads.length > 0 ? (
                   <div className="mx-auto mb-2 hidden max-w-3xl md:block">
                     <h2 className="text-lg font-semibold">核对文件并说明目标</h2>
                     <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                      文件已添加，可打开预览核对内容，再说明要筛选、汇总或提取什么。
+                      右侧查看文件，在下方直接告诉我你的要求。
                     </p>
                   </div>
-                )}
+                ) : null}
 
                 <div
                   className={cn(
-                    "mx-auto max-w-3xl",
-                    draftUploads.length === 0 && "mt-6",
+                    "mx-auto w-full max-w-3xl",
+                    composerDraft?.conversation?.length || composerDraft?.chatAttempt ? "flex flex-1 flex-col pt-6" : draftUploads.length === 0 ? "mt-8" : "mt-auto pt-6",
                   )}
                 >
-                    <div>
+                    <div className="flex flex-1 flex-col">
                     <WorkspaceSourceComposer
                     ownerId={user?.user_id ?? "current"}
                     unified
-                    onConfigureModels={() => setSettingsOpen(true)}
                     draft={composerDraft}
                     onDraftChange={setComposerDraft}
                     active={!settingsOpen && !recoveringCreate}
-                    key={`${user?.user_id}:${exampleSeed?.key || "new-task"}`}
+                    key={`${user?.user_id}:${exampleSeed?.key || "new-task"}:${composerEpoch}`}
                     initialPrompt={exampleSeed?.prompt}
                     initialFormats={exampleSeed?.formats}
                     modelOptions={models.data?.options}
@@ -1188,14 +1261,10 @@ export function SemanticWorkspacePage() {
                     allowLocalPiRuntime={canUseLocalPiRuntime}
                     modelConnections={verifiedModelConnections}
                     defaultConnectionId={
-                      modelPreference.data?.preference?.available
-                        ? modelPreference.data.preference.connection_id
-                        : null
+                      modelPreference.data?.preference?.connection_id ?? null
                     }
                     defaultConnectionModel={
-                      modelPreference.data?.preference?.available
-                        ? modelPreference.data.preference.model_id
-                        : null
+                      modelPreference.data?.preference?.model_id ?? null
                     }
                     grayCapabilities={grayCapabilities.data?.items ?? []}
                     onUploadsChange={handleDraftUploadsChange}
@@ -1275,8 +1344,8 @@ export function SemanticWorkspacePage() {
               orientation="horizontal"
               className="h-full min-h-0"
               defaultLayout={{
-                content: inspectorOpen ? 68 : 100,
-                source: inspectorOpen ? 32 : 0,
+                content: inspectorOpen ? 55 : 100,
+                source: inspectorOpen ? 45 : 0,
               }}
             >
               <Panel id="content" minSize="0px" className={cn("min-w-0", fullInspector && inspectorOpen && "hidden")}>
@@ -1357,6 +1426,18 @@ export function SemanticWorkspacePage() {
                             {accountResumeFeedback && <button type="button" className="ml-3 mt-3 underline" onClick={() => void detail.refetch()}>刷新任务状态</button>}
                           </section>
                         )}
+                        {task.source_contract?.owner_acceptance && task.status === "completed" && (
+                          <p className="mx-auto max-w-4xl border-b px-6 py-4 text-sm" role="status">正式结果 · 用户接受初稿；未完成的系统检查仍为未验证。</p>
+                        )}
+                        {viewingRevision && task.status !== "completed" && <DraftResultPanel
+                          key={`${user?.user_id}:${task.task_id}:${viewingRevision}`}
+                          taskId={task.task_id} revision={viewingRevision} ownerId={user?.user_id}
+                          status={task.status} active={viewingRevision === task.active_revision}
+                          onAccepted={revision => setSelectedRevision(revision)}
+                          onPreview={showDraft}
+                          actionsTarget={draftActionsTarget}
+                          onModify={closeInspector}
+                        />}
                         <TaskTimeline
                           task={task}
                           connectionLabel={modelConnections.data?.items.find(connection => connection.connection_id === (task.agentic_runtime?.model_connection_id ?? task.model_connection_id))?.display_name}
@@ -1614,9 +1695,6 @@ export function SemanticWorkspacePage() {
                             <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown><AnswerReferences context={message.result_context?.revision === message.revision ? readPublicResultContext(message.result_context) : null} onViewSource={viewSource} /></article>
                           ))}
                         </section>
-                        {task.status === "completed" && (
-                          <p className="text-sm text-muted-foreground">正式结果已生成，可在文件侧栏核对并下载。</p>
-                        )}
                         {task.status === "candidate_ready" && (
                           <CandidatePreview
                             task={task}
@@ -1702,6 +1780,12 @@ export function SemanticWorkspacePage() {
                           />
                         )}
                         <div id="workspace-revision-composer" className="mx-auto mb-6 max-w-4xl px-6">
+                          {task.status === "completed" && (
+                            <p className="mb-3 text-sm text-muted-foreground">
+                              正式结果已生成。
+                              <button type="button" className="ml-2 rounded text-primary underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { setInspectorKind("result"); setInspectorOpen(true); }}>查看正式结果</button>
+                            </p>
+                          )}
                           {viewingRevision === (task.current_revision ?? task.active_revision) && ["completed", "failed", "cancelled", "candidate_ready"].includes(task.status) && <>
                             <button type="button" aria-expanded={sourceEditorIdentity === resultIdentity} onClick={() => setSourceEditorIdentity(current => current === resultIdentity ? null : resultIdentity)} className="rounded-lg border px-3 py-2 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">编辑本次资料</button>
                             {(() => {
@@ -1884,11 +1968,16 @@ export function SemanticWorkspacePage() {
                   {!fullInspector && <Separator className="w-1 border-x bg-border/50 transition-colors hover:bg-primary/30" />}
                   <Panel
                     id="source"
-                    minSize={fullInspector ? "100%" : "280px"}
+                    minSize={fullInspector ? "100%" : "360px"}
                     maxSize={fullInspector ? "100%" : "65%"}
                     className="bg-background"
                   >
-                    {inspectorKind === "result" ? (
+                    {inspectorKind === "draft" && previewDraft?.identity === resultIdentity && task.status !== "completed" ? (
+                      <DraftPreview key={resultIdentity} draft={previewDraft.draft} onClose={closeInspector} actionsRef={setDraftActionsTarget}
+                        expanded={inspectorExpanded} onToggleExpand={narrow ? undefined : () => setInspectorExpanded(value => !value)}
+                        viewState={canvasView.draft ?? initialDraftView}
+                        onViewStateChange={draft => setCanvasView(current => current.identity === resultIdentity ? { ...current, draft } : current)} />
+                    ) : inspectorKind === "result" ? (
                       <div className="h-full overflow-auto p-3" ref={element => { if (element) element.scrollTop = resultView.bodyTop ?? 0; }}
                         onScroll={event => updateCanvasResult({ bodyTop: event.currentTarget.scrollTop })}>
                         <button type="button" className="mb-3 rounded-lg border px-3 py-2 text-xs hover:bg-muted" onClick={closeInspector}>关闭结果预览</button>

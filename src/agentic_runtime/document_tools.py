@@ -402,6 +402,16 @@ class DocumentToolBroker:
         )
         self._assert_units_authorized(ledger, requested_units)
         if operation == "discover_content":
+            pending_units = ()
+            if not requested_units and contract.result_cardinality.value == "ordinal":
+                # ponytail: 序数查找每批最多五页；只限制发现批次，不把第 N 份等同第 N 页。
+                pending_units = tuple(
+                    unit for unit in grant.inspected_units.get(source_id, ())
+                    if unit in ledger.authorized_unit_ids and unit not in ledger.observed_unit_ids
+                )
+                if not pending_units:
+                    raise DocumentToolError("已完成发现；如需复核，请显式指定 unit_ids")
+                requested_units = pending_units[:5]
             result = await self._invoke(
                 grant,
                 self._retriever.discover(
@@ -414,6 +424,10 @@ class DocumentToolBroker:
             self._record_discovery(grant, ledger, result)
             return {
                 **result,
+                **({"next_unit_ids": [
+                    unit for unit in grant.inspected_units.get(source_id, ())
+                    if unit in ledger.authorized_unit_ids and unit not in grant.ledger.observed_unit_ids
+                ][:5]} if contract.result_cardinality.value == "ordinal" else {}),
                 "coverage": grant.ledger.public_progress(),
             }
         if operation == "read_evidence":

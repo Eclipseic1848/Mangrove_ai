@@ -14,6 +14,7 @@ import { PipelineTracker } from "@/components/PipelineTracker";
 import { NodeStream, type NodeEntry } from "@/components/NodeStream";
 import { api, downloadFile, streamChat } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { copyText, fmtTime, formatTokenUsage, type TokenUsage } from "@/lib/messageActions";
 
 interface FileRef { name: string; url: string; mime: string }
 interface Msg {
@@ -29,41 +30,10 @@ interface Msg {
   grade?: any;
   meta?: { collector?: string; item_count?: number; data_type?: string; record_counts?: Record<string, number>; quality?: any };
   id?: number;
-  tokenUsage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number; calls: number };
+  tokenUsage?: TokenUsage;
   feedback?: { rating: "up" | "down"; reasons?: string[]; comment?: string };
 }
 
-/** 时间戳格式化（本地化短格式）。 */
-function fmtTime(iso?: string): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return "";
-  return d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
-}
-
-/** 复制文本到剪贴板（http 非 secure context 下 navigator.clipboard 不可用，回退 execCommand）。 */
-function copyText(text: string) {
-  if (navigator.clipboard && window.isSecureContext) {
-    navigator.clipboard.writeText(text).then(() => toast.success("已复制")).catch(() => copyFallback(text));
-    return;
-  }
-  copyFallback(text);
-}
-function copyFallback(text: string) {
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.style.position = "fixed";
-  ta.style.opacity = "0";
-  document.body.appendChild(ta);
-  ta.select();
-  try {
-    document.execCommand("copy");
-    toast.success("已复制");
-  } catch {
-    toast.error("复制失败");
-  }
-  document.body.removeChild(ta);
-}
 interface Conv { conv_id: string; title: string; updated_at: string }
 interface ModelOpt { provider: string; model: string; label: string }
 
@@ -822,9 +792,9 @@ function MessageBubble({ msg, onAction, onLike, onDislike }: { msg: Msg; onActio
           {msg.tokenUsage && msg.tokenUsage.calls > 0 && (
             <span
               className="ml-auto text-[11px] text-muted-foreground"
-              title={`输入 ${msg.tokenUsage.prompt_tokens} / 输出 ${msg.tokenUsage.completion_tokens} / 共 ${msg.tokenUsage.total_tokens}（${msg.tokenUsage.calls} 次调用）`}
+              title={`${formatTokenUsage(msg.tokenUsage)}（${msg.tokenUsage.calls} 次调用）`}
             >
-              🪙 {msg.tokenUsage.prompt_tokens}↑ / {msg.tokenUsage.completion_tokens}↓ · 共 {msg.tokenUsage.total_tokens}
+              {formatTokenUsage(msg.tokenUsage)}
             </span>
           )}
         </div>

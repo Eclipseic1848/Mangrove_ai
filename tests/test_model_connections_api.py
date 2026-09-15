@@ -81,6 +81,37 @@ def _client(
     return test_app, TestClient(test_app)
 
 
+def test_old_catalog_models_remain_frozen_but_are_not_new_task_choices(tmp_path):
+    repository = ModelConnectionRepository(str(migrated_webui_database(tmp_path / "catalog-history.db")))
+    broker = ConnectionBroker(repository=repository, vault=FernetCredentialVault.generate())
+    saved = repository.create_managed(created_by="admin-a", display_name="历史 DeepSeek", base_url="https://api.deepseek.com",
+        model="deepseek-v4-flash", api_format="openai_chat_completions", locality="public_external", ciphertext=None,
+        key_hint="", verified_at="2026-09-01T00:00:00", preset_id="deepseek", preset_version="2026-09-08.1")
+    _, client = _client(broker=broker)
+    model = client.get("/api/model-connections").json()["items"][0]["models"][0]
+    assert model["model_id"] == "deepseek-v4-flash"
+    assert model["status"] == "available"
+    assert model["current_catalog"] is False
+    assert broker.freeze_connection("user-a", saved["connection_id"]).model == "deepseek-v4-flash"
+
+
+def test_local_default_preference_requires_admin_and_current_configuration(tmp_path):
+    broker = ConnectionBroker(
+        repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
+        vault=FernetCredentialVault.generate(),
+    )
+    app, client = _client(broker=broker)
+    app.dependency_overrides[get_current_user] = lambda: {"user_id": "admin-a", "role": "admin"}
+    body = {"connection_id": "__local__", "model_id": settings.llm_model_name}
+    assert client.put("/api/model-connections/preferences/default", json=body).status_code == 200
+    assert client.get("/api/model-connections/preferences/default").json()["preference"]["model_id"] == settings.llm_model_name
+    assert client.put("/api/model-connections/preferences/default", json={**body, "model_id": "not-configured"}).status_code == 400
+    assert client.delete("/api/model-connections/preferences/default").status_code == 200
+    assert client.get("/api/model-connections/preferences/default").json()["preference"] is None
+    app.dependency_overrides[get_current_user] = lambda: {"user_id": "user-a", "role": "user"}
+    assert client.put("/api/model-connections/preferences/default", json=body).status_code == 400
+
+
 def test_authenticated_user_sees_eight_verified_provider_presets_without_internal_endpoint():
     _, client = _client()
     response = client.get("/api/model-connections/presets")
@@ -97,7 +128,7 @@ def test_authenticated_user_sees_eight_verified_provider_presets_without_interna
         "zhipu",
         "xai",
     ]
-    assert all(3 <= len(item["models"]) <= 4 for item in payload["items"])
+    assert all(2 <= len(item["models"]) <= 4 for item in payload["items"])
     assert all(item["recommended_model"] in item["models"] for item in payload["items"])
     assert all(
         len(item["model_catalog"]) == len(item["models"])
@@ -109,9 +140,12 @@ def test_authenticated_user_sees_eight_verified_provider_presets_without_interna
     flash = next(
         item
         for item in deepseek["model_catalog"]
-        if item["model_id"] == "deepseek-v4-flash"
+        if item["model_id"] == "deepseek-flash"
     )
-    assert flash["display_name"] == "DeepSeek V4 Flash（0731 正式版）"
+    assert flash["display_name"] == "DeepSeek V4.1 Flash"
+    assert deepseek["models"] == ["deepseek-flash", "deepseek-v4-pro"]
+    qwen = next(item for item in payload["items"] if item["preset_id"] == "qwen")
+    assert qwen["models"] == ["qwen3.8-max", "qwen3.8-flash"]
     assert "base_url" not in response.text
     assert "api_format" not in response.text
     assert all("api_key" not in item for item in payload["items"])
@@ -194,7 +228,7 @@ def test_user_configures_and_lists_personal_preset_connection(tmp_path):
     assert saved.status_code == 200
     assert saved.json()["owner_scope"] == "user_personal"
     assert saved.json()["preset_id"] == "deepseek"
-    assert saved.json()["preset_version"] == "2026-09-08.1"
+    assert saved.json()["preset_version"] == "2026-09-15.1"
     assert saved.json()["display_name"] == "DeepSeek"
     assert saved.json()["model"] == "deepseek-v4-pro"
     assert saved.json()["default_model"] == "deepseek-v4-pro"
@@ -296,7 +330,7 @@ def test_personal_connection_keeps_independent_model_results_and_available_defau
 
     def provider(request: httpx.Request) -> httpx.Response:
         model = json.loads(request.content)["model"]
-        if model != "deepseek-v4-flash":
+        if model != "deepseek-flash":
             return httpx.Response(
                 403,
                 json={"error": {"message": "SENSITIVE_NO_MODEL_PERMISSION"}},
@@ -333,21 +367,22 @@ def test_personal_connection_keeps_independent_model_results_and_available_defau
         json={
             "display_name": "DeepSeek 主连接",
             "verify_all": True, "api_key": "sk-personal-multi-model-1234",
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
         },
     )
 
     assert response.status_code == 201
     payload = response.json()
-    assert payload["model"] == "deepseek-v4-flash"
-    assert payload["default_model"] == "deepseek-v4-flash"
+    assert payload["model"] == "deepseek-flash"
+    assert payload["default_model"] == "deepseek-flash"
     assert payload["available_model_count"] == 1
     assert payload["models"][:2] == [
         {
-            "model_id": "deepseek-v4-flash",
-            "display_name": "DeepSeek V4 Flash（0731 正式版）",
+            "model_id": "deepseek-flash",
+            "display_name": "DeepSeek V4.1 Flash",
+            "current_catalog": True,
             "catalog_role": "balanced",
-            "catalog_version": "2026-09-08.1",
+            "catalog_version": "2026-09-15.1",
             "status": "available",
             "enabled": True,
             "is_default": True,
@@ -358,8 +393,9 @@ def test_personal_connection_keeps_independent_model_results_and_available_defau
         {
             "model_id": "deepseek-v4-pro",
             "display_name": "DeepSeek V4 Pro",
+            "current_catalog": True,
             "catalog_role": "quality",
-            "catalog_version": "2026-09-08.1",
+            "catalog_version": "2026-09-15.1",
             "status": "model_access_denied",
             "enabled": False,
             "is_default": False,
@@ -372,8 +408,7 @@ def test_personal_connection_keeps_independent_model_results_and_available_defau
     assert b"SENSITIVE_PROVIDER_RESPONSE" not in raw_db
     assert b"SENSITIVE_NO_MODEL_PERMISSION" not in raw_db
 
-    assert payload["models"][2]["model_id"] == "deepseek-v4-flash-vision-exp"
-    assert payload["models"][2]["status"] == "model_access_denied"
+    assert len(payload["models"]) == 2
 
 
 
@@ -408,7 +443,7 @@ def test_all_recommended_models_failing_does_not_create_connection_or_secret(
     assert response.status_code == 400
     assert "密钥无效" in response.json()["detail"]
     results = response.json()["model_results"]
-    assert len(results) == 3
+    assert len(results) == 2
     assert all(item["status"] == "credentials_invalid" and not item["enabled"] for item in results)
     assert "SENSITIVE_INVALID_CREDENTIAL" not in response.text
     assert client.get("/api/model-connections").json()["items"] == []
@@ -441,7 +476,7 @@ def test_each_model_validation_failure_has_stable_product_status(
 ):
     def provider(request: httpx.Request) -> httpx.Response:
         model = json.loads(request.content)["model"]
-        if model == "deepseek-v4-flash":
+        if model == "deepseek-flash":
             return httpx.Response(
                 200,
                 json={"choices": [{"message": {"content": "OK"}}]},
@@ -514,7 +549,7 @@ def test_user_retries_failed_model_changes_default_and_controls_model_state(tmp_
         json={
             "display_name": "DeepSeek 多模型",
             "api_key": "sk-retry-model-secret-1234",
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
         },
     ).json()
     connection_id = created["connection_id"]
@@ -548,7 +583,7 @@ def test_user_retries_failed_model_changes_default_and_controls_model_state(tmp_
     )
     restored_default = client.put(
         f"/api/model-connections/{connection_id}/default-model",
-        json={"model": "deepseek-v4-flash"},
+        json={"model": "deepseek-flash"},
     )
     reenabled = client.patch(
         f"/api/model-connections/{connection_id}/models/deepseek-v4-pro",
@@ -556,7 +591,7 @@ def test_user_retries_failed_model_changes_default_and_controls_model_state(tmp_
     )
 
     assert requests == [
-        "deepseek-v4-flash",
+        "deepseek-flash",
         "deepseek-v4-pro",
     ]
     assert retried.status_code == 200
@@ -568,7 +603,7 @@ def test_user_retries_failed_model_changes_default_and_controls_model_state(tmp_
     assert disabled_default.json()["default_model"] is None
     assert restored_default.status_code == 200
     assert restored_default.json()["status"] == "verified"
-    assert restored_default.json()["default_model"] == "deepseek-v4-flash"
+    assert restored_default.json()["default_model"] == "deepseek-flash"
     pro = next(
         item
         for item in restored_default.json()["models"]
@@ -646,7 +681,7 @@ def test_admin_publishes_provider_preset_with_required_key(tmp_path):
     assert saved.status_code == 201
     assert saved.json()["owner_scope"] == "platform_shared"
     assert saved.json()["preset_id"] == "deepseek"
-    assert saved.json()["preset_version"] == "2026-09-08.1"
+    assert saved.json()["preset_version"] == "2026-09-15.1"
     assert saved.json()["display_name"] == "平台 DeepSeek"
     assert saved.json()["model"] == "deepseek-v4-pro"
     assert saved.json()["key_hint"] == "2468"
@@ -662,7 +697,7 @@ def test_manager_publishes_multiple_platform_connections_with_partial_models(
 ):
     def provider(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
-        if payload["model"] != "deepseek-v4-flash":
+        if payload["model"] != "deepseek-flash":
             return httpx.Response(403, json={"error": {"message": "not entitled"}})
         return httpx.Response(
             200,
@@ -685,7 +720,7 @@ def test_manager_publishes_multiple_platform_connections_with_partial_models(
             "/api/model-connections/managed/presets/deepseek",
             json={
                 "display_name": name,
-                "model": "deepseek-v4-flash",
+                "model": "deepseek-flash",
                 "verify_all": True, "api_key": key,
             },
         )
@@ -706,15 +741,14 @@ def test_manager_publishes_multiple_platform_connections_with_partial_models(
     for item in member_items:
         assert item["owner_scope"] == "platform_shared"
         assert item["key_hint"] == ""
-        assert item["default_model"] == "deepseek-v4-flash"
+        assert item["default_model"] == "deepseek-flash"
         assert item["available_model_count"] == 1
         assert [
             (model["model_id"], model["status"], model["enabled"])
             for model in item["models"]
         ] == [
-            ("deepseek-v4-flash", "available", True),
+            ("deepseek-flash", "available", True),
             ("deepseek-v4-pro", "model_access_denied", False),
-            ("deepseek-v4-flash-vision-exp", "model_access_denied", False),
         ]
     assert "platform-primary-1111" not in member.get("/api/model-connections").text
     assert "platform-backup-2222" not in member.get("/api/model-connections").text
@@ -744,7 +778,7 @@ async def test_only_manager_controls_platform_models_and_disabling_revokes_grant
         "/api/model-connections/managed/presets/deepseek",
         json={
             "display_name": "平台 DeepSeek",
-            "model": "deepseek-v4-flash",
+            "model": "deepseek-flash",
             "verify_all": True, "api_key": "platform-secret-2468",
         },
     ).json()
@@ -1332,7 +1366,7 @@ def test_imported_official_preset_can_retry_through_clash_fake_ip(tmp_path):
         display_name="导入的平台 DeepSeek",
         base_url="https://api.deepseek.com",
         api_format="openai_chat_completions",
-        model="deepseek-v4-flash",
+        model="deepseek-flash",
         api_key="legacy-secret-1234",  # gitleaks:allow -- 测试假值
         preset_id="deepseek",
     )
@@ -1340,15 +1374,15 @@ def test_imported_official_preset_can_retry_through_clash_fake_ip(tmp_path):
 
     response = admin.post(
         f"/api/model-connections/{imported['connection_id']}/models/retry",
-        json={"model_ids": ["deepseek-v4-flash", "deepseek-v4-pro"]},
+        json={"model_ids": ["deepseek-flash", "deepseek-v4-pro"]},
     )
 
     assert response.status_code == 200
     assert response.json()["status"] == "verified"
     assert {
-        item["status"] for item in response.json()["models"] if item["model_id"] in {"deepseek-v4-flash", "deepseek-v4-pro"}
+        item["status"] for item in response.json()["models"] if item["model_id"] in {"deepseek-flash", "deepseek-v4-pro"}
     } == {"available"}
-    assert response.json()["models"][2]["status"] == "pending_validation"
+    assert len(response.json()["models"]) == 2
 
 
 def test_manager_discovers_four_protocols_but_user_cannot_probe_custom_endpoint(

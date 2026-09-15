@@ -18,9 +18,11 @@ import asyncio
 import json
 import logging
 import os
+import signal
+import subprocess
 import sys
-import time
 from pathlib import Path
+from tempfile import TemporaryDirectory, TemporaryFile
 
 from src.config.settings import settings
 from src.conductor.task_spec import AnalysisType, DataType, TaskSpec
@@ -251,6 +253,11 @@ class SocialMediaCollector(BaseCollector):
         return bool(_resolve_platform(spec))
 
     async def collect(self, spec: TaskSpec) -> CollectResult:
+        # 验证、不同 Owner 和并发任务不能共享按日期追加的结果文件。
+        with TemporaryDirectory(prefix="mangrove-mc-") as run_dir:
+            return await self._collect(spec, Path(run_dir))
+
+    async def _collect(self, spec: TaskSpec, run_dir: Path) -> CollectResult:
         if not self.is_available():
             return CollectResult(False, self.name, message="MediaCrawler 未配置（MEDIACRAWLER_PATH）")
         platform = _resolve_platform(spec)
@@ -289,11 +296,11 @@ class SocialMediaCollector(BaseCollector):
             )
 
         cmd = (_build_detail_cmd(python_exe, platform, direct_urls, want_comments, cookie, max_notes) if direct_urls else _build_cmd(python_exe, platform, keywords, want_comments, cookie, max_notes))
+        cmd += ["--save_data_path", str(run_dir)]
         # 日志不打印 cookie 明文，避免泄露登录态
         safe_cmd = [("***" if i and cmd[i - 1] == "--cookies" else a) for i, a in enumerate(cmd)]
         logger.info("调用 MediaCrawler: %s (cwd=%s, 登录=%s)",
                     " ".join(safe_cmd), mc_dir, "cookie" if cookie else "扫码/会话")
-        run_start = time.time()
         # 把“动态采集间隔区间”以环境变量注入子进程，供 MediaCrawler 的 config 读取，
         # 实现每次 sleep 在 [min, max] 间随机、模拟真人节奏规避频次风控。
         env = os.environ.copy()
@@ -313,20 +320,39 @@ class SocialMediaCollector(BaseCollector):
         if cdp_env:
             logger.info("MediaCrawler 启用 CDP 模式（连接本机真实浏览器）")
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(mc_dir),
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            # 超时读 settings（与 collect 节点外层一致），避免内层写死后改 .env 不生效
-            mc_timeout = settings.collect_timeout_mediacrawler_seconds
-            try:
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=mc_timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
-                return CollectResult(False, self.name, message=f"MediaCrawler 运行超时（{mc_timeout:.0f}s）")
+            # 文件承接输出，避免子进程继承 PIPE 或输出缓冲满时阻塞超时回收。
+            with TemporaryFile(mode="w+b") as process_output:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(mc_dir),
+                    env=env,
+                    stdout=process_output,
+                    stderr=asyncio.subprocess.STDOUT,
+                    **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}),
+                )
+                mc_timeout = settings.collect_timeout_mediacrawler_seconds
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=mc_timeout)
+                except asyncio.TimeoutError:
+                    return CollectResult(False, self.name, message=f"MediaCrawler 运行超时（{mc_timeout:.0f}s）")
+                finally:
+                    # 只回收本次创建的进程树，且回收有界；不触碰共享浏览器或未知进程。
+                    if proc.returncode is None:
+                        try:
+                            if os.name == "nt":
+                                await asyncio.to_thread(
+                                    subprocess.run, ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    timeout=5, creationflags=subprocess.CREATE_NO_WINDOW,
+                                )
+                            else:
+                                os.killpg(proc.pid, signal.SIGKILL)
+                        finally:
+                            if proc.returncode is None:
+                                proc.kill()
+                            await asyncio.wait_for(proc.wait(), timeout=5)
+                process_output.seek(0)
+                stdout = process_output.read()
         except Exception as e:
             # 部分异常（如某些 OSError）str() 为空，只报错误类型看不出原因；
             # 完整堆栈记日志备查，用户看到的消息至少带上异常类型名。
@@ -342,13 +368,10 @@ class SocialMediaCollector(BaseCollector):
                 return fallback
             return CollectResult(False, self.name, message=_diagnose_mc_failure(platform, text))
 
-        # 只读本次运行后新生成的 JSON（按 mtime 过滤，避免读到历史旧数据）
-        data_dir = mc_dir / "data"
-        all_json = list(data_dir.rglob("*.json")) if data_dir.exists() else []
-        fresh = [p for p in all_json if p.stat().st_mtime >= run_start - 5]
-        fresh.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        # 只读本次调用、当前平台的产物；共享历史文件的修改时间不能证明数据归属。
+        data_dir = run_dir / {"dy": "douyin", "wb": "weibo", "ks": "kuaishou"}.get(platform, platform) / "json"
         records: list = []
-        for jf in fresh[:20]:
+        for jf in sorted(data_dir.glob("*.json")):
             try:
                 _flatten_records(json.loads(jf.read_text(encoding="utf-8")), records)
             except Exception:
@@ -365,6 +388,11 @@ class SocialMediaCollector(BaseCollector):
         # 区分评论与帖子；VOC 优先用评论（无评论则回退帖子）
         comments = [r for r in records if r.get("comment_id")]
         contents = [r for r in records if not r.get("comment_id")]
+        if not direct_urls:
+            expected_keywords = {word.strip() for word in keywords.split(",") if word.strip()}
+            # 搜索来源缺失或串词时失败关闭，不能把别的任务结果交给分析器。
+            if not contents or any(str(r.get("source_keyword") or "").strip() not in expected_keywords for r in contents):
+                return CollectResult(False, self.name, message="采集结果的搜索词与本次任务不一致或缺失，已拒绝使用")
         use_comments = want_comments and bool(comments)
         chosen = comments if use_comments else (contents or records)
 
@@ -387,6 +415,7 @@ class SocialMediaCollector(BaseCollector):
                         "platform": platform,
                         "kind": "comment" if rec.get("comment_id") else "post",
                         "collection_mode": "direct" if direct_urls else "discovery",
+                        "source_keyword": rec.get("source_keyword") or "",
                         "requested_url": requested_url,
                         "canonical_url": canonical_url,
                         "content_id": content_id,

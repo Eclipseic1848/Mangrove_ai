@@ -839,6 +839,27 @@ class WebUIStore:
             row = conn.execute("SELECT * FROM conversations WHERE conv_id=?", (conv_id,)).fetchone()
         return dict(row) if row else None
 
+    def list_chat_history(self, user_id: str) -> List[Dict[str, Any]]:
+        """复用已持久化的会话和末条消息，不创建第二份业务历史。"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT c.conv_id,c.title,c.updated_at,m.role,m.content,m.meta_json "
+                "FROM conversations c JOIN messages m ON m.id="
+                "(SELECT MAX(id) FROM messages WHERE conv_id=c.conv_id) "
+                "WHERE c.user_id=? ORDER BY c.updated_at DESC", (user_id,),
+            ).fetchall()
+        items = []
+        for row in rows:
+            meta = json.loads(row["meta_json"] or "{}")
+            kind = meta.get("kind")
+            status = "needs_input" if row["role"] != "assistant" or kind == "clarification" else "completed"
+            if kind == "cancelled" or row["content"].startswith("❌ 用户已取消"):
+                status = "cancelled"
+            elif kind == "error" or row["content"].startswith("❌ 任务执行失败"):
+                status = "failed"
+            items.append({"conv_id": row["conv_id"], "title": row["title"], "updated_at": row["updated_at"], "status": status})
+        return items
+
     def rename_conversation(self, conv_id: str, title: str) -> None:
         with self._lock, self._conn() as conn:
             conn.execute(
@@ -3669,6 +3690,7 @@ class WebUIStore:
         table_output_contracts: List[Dict[str, Any]] | None = None,
         expected_revision: int | None = None,
         expected_cancel_generation: int | None = None,
+        require_not_deleted: bool = False,
         account_resume_generation: int | None = None,
         transaction_hook: Callable[[sqlite3.Connection], None] | None = None,
     ) -> Dict[str, Any]:
@@ -3699,6 +3721,8 @@ class WebUIStore:
             if task is None:
                 raise KeyError("工作台任务不存在或无权访问")
             revision = int(task["active_revision"]) + 1
+            if require_not_deleted and task.get("deleted_at"):
+                raise RuntimeError("任务已移入回收站，禁止迟到操作恢复任务")
             if expected_cancel_generation is not None and task["cancel_generation"] != expected_cancel_generation:
                 # 与版本创建共用写事务；停止期间的异步准备不得重新启动任务。
                 raise RuntimeError("任务已收到新的停止请求，禁止提交迟到 Revision")

@@ -1,4 +1,5 @@
 import AxeBuilder from "@axe-core/playwright";
+import { createServer } from "node:http";
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const guidance = {
@@ -50,6 +51,8 @@ async function mockWorkspace(
   theme: "light" | "dark" = "light",
   role = "admin",
 ) {
+  // 合成页面未声明的接口不能落到本机真实服务。
+  await page.route("**/api/**", route => route.fulfill({ status: 404, json: {} }));
   await page.addInitScript(({ selectedTheme }) => {
     localStorage.setItem("mangrove_token", "e2e-token");
     localStorage.setItem("mangrove_theme", selectedTheme);
@@ -64,6 +67,9 @@ async function mockWorkspace(
   }));
   await page.route("**/api/semantic-workspace/tasks?*", (route) =>
     route.fulfill({ json: [] }));
+  await page.route("**/api/chat/history", route => route.fulfill({ json: [] }));
+  await page.route("**/api/chat/feedback**", route => route.fulfill({ json: { feedback: {} } }));
+  await page.route("**/api/conversations/*/messages", route => route.fulfill({ json: [] }));
   await page.route("**/api/semantic-workspace/guidance", (route) =>
     route.fulfill({ json: guidance }));
   await page.route("**/api/semantic-workspace/storage", (route) =>
@@ -82,6 +88,7 @@ async function mockWorkspace(
   await page.route("**/api/semantic-workspace/tasks/*/stream*", route => route.fulfill({ contentType: "text/event-stream", body: "" }));
   await page.route("**/api/settings/onboarding/model-connections", route => route.fulfill({ json: { completed: true } }));
   await page.route("**/api/semantic-workspace/tasks/*/turns", route => route.fulfill({ json: { turns: [], results: [], proposals: [] } }));
+  await page.route("**/api/semantic-workspace/tasks/*/draft?*", route => route.fulfill({ json: { draft: null } }));
   await page.route("**/api/models", (route) => route.fulfill({
     json: {
       options: [
@@ -197,6 +204,33 @@ async function mockWorkspace(
   await page.route("**/api/semantic-workspace/tasks/*/sources/*/preview?*", route => route.fulfill({ json: taskSourceFixture(route) }));
 }
 
+for (const available of [true, false]) test(`新任务保留本地默认模型身份：${available}`, async ({ page }) => {
+  await mockWorkspace(page);
+  await page.route("**/api/model-connections/preferences/default", route => route.fulfill({ json: { preference: {
+    connection_id: "__local__", model_id: available ? "Qwen3.6-35B-A3B" : "removed-local", available,
+  } } }));
+  await page.goto("/data-prep");
+  const picker = page.getByTestId("workspace-model-picker");
+  await expect(picker).toHaveValue(available ? JSON.stringify(["__local__", "Qwen3.6-35B-A3B"]) : "");
+  if (!available) {
+    await page.getByPlaceholder(/告诉我你想完成什么/).fill("整理需求");
+    await expect(page.getByRole("button", { name: "发送", exact: true })).toBeDisabled();
+  }
+});
+
+test("兼容云模型草稿恢复不改成本地，无附件不能误发", async ({ page }) => {
+  await mockWorkspace(page);
+  await page.addInitScript(() => localStorage.setItem("mangrove_workspace_draft_u1_new", JSON.stringify({ draft: {
+    prompt: "整理表格输出 CSV", connectionId: null, connectionModel: null, localModel: "deepseek-chat", legacyProvider: "deepseek",
+  } })));
+  await page.goto("/data-prep");
+  const picker = page.getByTestId("workspace-model-picker");
+  await expect(picker).toHaveValue("");
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeDisabled();
+  await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8") });
+  await expect(picker).toHaveValue(JSON.stringify(["deepseek", "deepseek-chat"]));
+});
+
 type WorkspaceFixture = {
   task_id: string;
   objective_text: string;
@@ -245,6 +279,309 @@ function workspaceTask(
     updated_at: "2026-07-27T00:00:01Z",
   };
 }
+
+test("历史任务编辑资料保留已退出新目录的冻结模型", async ({ page }) => {
+  await mockWorkspace(page);
+  const task = { ...workspaceTask("frozen-model", "completed", "历史模型任务"), model_connection_id: "old-cloud", model: "deepseek-v4-flash", provider: "deepseek", runtime_version: "pi" };
+  await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [{
+    connection_id: "old-cloud", owner_scope: "platform_shared", display_name: "历史连接", status: "verified", model: task.model,
+    models: [{ model_id: task.model, display_name: "历史 Flash", enabled: true, status: "available", current_catalog: false }],
+  }] } }));
+  await page.route("**/api/semantic-workspace/tasks/frozen-model", route => route.fulfill({ json: workspaceDetail(task) }));
+  const posts: unknown[] = [];
+  await page.route("**/api/semantic-workspace/tasks/frozen-model/revisions", route => {
+    posts.push(route.request().postDataJSON());
+    return route.fulfill({ status: 503, json: { detail: "合成测试保留修订未知" } });
+  });
+  await page.goto("/data-prep?task=frozen-model");
+  await page.getByRole("button", { name: "编辑本次资料", exact: true }).click();
+  const picker = page.getByTestId("workspace-model-picker");
+  await expect(picker).toHaveValue(JSON.stringify(["old-cloud", "deepseek-v4-flash"]));
+  await expect(picker).toBeDisabled();
+  await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8") });
+  await page.getByRole("button", { name: "创建新版本", exact: true }).click();
+  await expect.poll(() => posts.length).toBe(1);
+});
+
+test("初稿先展示，确认期间新稿不能替换待接受文件", async ({ page }, testInfo) => {
+  await mockWorkspace(page);
+  let task = workspaceTask("draft-task", "running", "初稿合成任务");
+  let draftId = "a".repeat(64);
+  let accepts = 0;
+  let draftReads = 0;
+  const detail = () => workspaceDetail(task, task.status === "completed" ? { delivery: {
+    delivery_id: "accepted-delivery", run_id: "accepted-run", status: "published", requested_formats: ["json"], created_at: task.created_at,
+    outputs: [{ output_id: "accepted-json", format: "json", filename: "result.json", media_type: "application/json",
+      size_bytes: 40, sha256: "a".repeat(64), qa: { openable: true, checks: [], warnings: ["用户接受，未完成验证"] }, download_url: "/api/formal-download" }],
+  } } : {});
+  await page.route("**/api/semantic-workspace/tasks?*", route => route.fulfill({ json: [task] }));
+  await page.route("**/api/semantic-workspace/tasks/draft-task?*", route => route.fulfill({ json: detail() }));
+  await page.route("**/api/semantic-workspace/tasks/draft-task", route => route.fulfill({ json: detail() }));
+  await page.route("**/api/semantic-workspace/tasks/draft-task/preview?*", route => route.fulfill({ json: {
+    kind: "document", items: [{ id: "accepted", type: "passage", label: "正式内容", content: "初稿A已接受的正式正文", evidence_refs: [] }], total: 1, offset: 0, limit: 100,
+  } }));
+  await page.route("**/api/semantic-workspace/tasks/draft-task/draft?*", route => {
+    draftReads++;
+    return route.fulfill({ json: { draft: { draft_id: draftId, revision: 1, files: [{ filename: "result.json", preview: draftId[0] === "a" ? '{"name":"初稿A"}' : '{"name":"初稿B"}', download_url: "/api/draft-download" }] } } });
+  });
+  await page.route("**/api/draft-download", route => route.fulfill({ contentType: "application/octet-stream", body: '{"name":"初稿A"}' }));
+  await page.route("**/api/semantic-workspace/tasks/draft-task/draft/accept", async route => {
+    accepts++;
+    expect(route.request().postDataJSON()).toEqual({ expected_revision: 1, draft_id: "a".repeat(64), accept_unverified: true });
+    task = { ...task, status: "completed", active_revision: 2, viewing_revision: 2, current_revision: 2,
+      source_contract: { owner_acceptance: { draft_id: "a".repeat(64), source_revision: 1 } } };
+    await route.fulfill({ json: { status: "completed", revision: 2, delivery_id: "accepted-delivery" } });
+  });
+  await page.goto("/data-prep");
+  await page.getByText("初稿合成任务", { exact: true }).first().click();
+  const panel = page.getByRole("region", { name: "初稿结果" });
+  await expect(panel).toBeVisible();
+  const previews = page.getByRole("region", { name: "初稿预览" });
+  let downloads = 0;
+  page.on("download", () => downloads++);
+  await expect(previews).toBeVisible();
+  await expect(previews.getByText(/初稿A/)).toBeVisible();
+  await expect(previews.getByLabel("初稿文件")).toHaveValue("result.json");
+  expect(downloads).toBe(0);
+  await page.screenshot({ path: testInfo.outputPath("draft-preview.png"), fullPage: true });
+  const download = page.waitForEvent("download");
+  await previews.getByRole("button", { name: "下载初稿 result.json" }).click();
+  expect((await download).suggestedFilename()).toBe("result.json");
+  expect(accepts).toBe(0);
+  await panel.getByRole("button", { name: "接受初稿并结束验证" }).click();
+  await page.getByRole("button", { name: "返回查看", exact: true }).click();
+  expect(accepts).toBe(0);
+  await panel.getByRole("button", { name: "接受初稿并结束验证" }).click();
+  const readsBefore = draftReads;
+  draftId = "b".repeat(64);
+  await expect.poll(() => draftReads).toBeGreaterThan(readsBefore);
+  await page.getByRole("button", { name: "确认接受并发布" }).click();
+  await expect(page.getByText("正式结果 · 用户接受初稿；未完成的系统检查仍为未验证。", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "关闭结果预览" })).toBeVisible();
+  await expect(page.getByText("初稿A已接受的正式正文").last()).toBeVisible();
+  await expect(page.getByText("最终验证和格式重开检查已完成，可以预览或下载。", { exact: true })).toHaveCount(0);
+  await expect(previews).toHaveCount(0);
+  await page.getByRole("button", { name: "关闭结果预览" }).click();
+  const resultLink = page.getByRole("button", { name: "查看正式结果", exact: true });
+  const editButton = page.getByRole("button", { name: "编辑本次资料", exact: true });
+  await resultLink.scrollIntoViewIfNeeded();
+  const notice = await resultLink.locator("..").boundingBox();
+  const edit = await editButton.boundingBox();
+  expect(Math.abs(notice!.x - edit!.x)).toBeLessThanOrEqual(1);
+  await page.screenshot({ path: testInfo.outputPath("aligned-result-notice.png") });
+  await resultLink.click();
+  await expect(page.getByRole("button", { name: "关闭结果预览" })).toBeVisible();
+  await expect(page.getByText("初稿A已接受的正式正文").last()).toBeVisible();
+  expect(accepts).toBe(1);
+});
+
+for (const width of [1440, 390]) test(`初稿右侧文件切换不下载且关闭后可返回：${width}`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 900 });
+  await mockWorkspace(page);
+  const task = workspaceTask("draft-preview", "cancelled", "已停止的初稿任务");
+  await page.route("**/api/semantic-workspace/tasks?*", route => route.fulfill({ json: [task] }));
+  await page.route("**/api/semantic-workspace/tasks/draft-preview", route => route.fulfill({ json: workspaceDetail(task) }));
+  await page.route("**/api/semantic-workspace/tasks/draft-preview/draft?*", route => route.fulfill({ json: { draft: {
+    draft_id: "a".repeat(64), revision: 1, files: [
+      { filename: "报销明细.csv", preview_table: [["部门", "项目", "金额"], ["工程部", "交通、住宿", "8458"]], download_url: "/api/draft-download" },
+      { filename: "报销明细.json", preview: '{"部门":"工程部","结算金额":8458}', download_url: "/api/draft-download" },
+    ],
+  } } }));
+  const errors: string[] = [];
+  const downloads: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  page.on("download", download => downloads.push(download.suggestedFilename()));
+  await page.goto("/data-prep?task=draft-preview");
+  await expect(page).toHaveTitle(/Mangrove/);
+  await expect(page.locator("vite-error-overlay, #webpack-dev-server-client-overlay")).toHaveCount(0);
+  const preview = page.getByRole("region", { name: "初稿预览" });
+  if (width === 390) await page.getByRole("button", { name: "查看初稿 · 2 个文件" }).click();
+  await expect(preview.getByRole("cell", { name: "8458" })).toBeVisible();
+  if (width === 1440) expect((await preview.boundingBox())!.x).toBeGreaterThan(width / 2);
+  await page.screenshot({ path: testInfo.outputPath(`draft-table-${width}.png`) });
+  await preview.getByLabel("初稿文件").selectOption("报销明细.json");
+  await expect(preview.getByText(/"结算金额": 8458/)).toBeVisible();
+  expect(downloads).toEqual([]);
+  await preview.getByRole("button", { name: "关闭初稿预览" }).click();
+  await expect(preview).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "接受初稿并结束验证" })).toBeVisible();
+  await page.getByRole("button", { name: "查看初稿 · 2 个文件" }).click();
+  await expect(preview).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const accessibility = await new AxeBuilder({ page }).include('[aria-label="初稿预览"]').withTags(["wcag2a", "wcag2aa"]).analyze();
+  expect(accessibility.violations).toEqual([]);
+  await page.evaluate(() => document.documentElement.classList.add("dark"));
+  // 等主题过渡完成后测最终对比度，不把动画中间色当作稳定主题。
+  await expect(preview.getByRole("button", { name: "采用这版初稿", exact: true })).toHaveCSS("color", "rgb(14, 22, 27)");
+  expect((await new AxeBuilder({ page }).include('[aria-label="初稿预览"]').withTags(["wcag2a", "wcag2aa"]).analyze()).violations).toEqual([]);
+  await page.screenshot({ path: testInfo.outputPath(`draft-dark-${width}.png`) });
+  expect(errors).toEqual([]);
+});
+
+for (const width of [1440, 390]) test(`新版初稿不打断阅读或输入：${width}`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 900 });
+  await mockWorkspace(page);
+  const task = workspaceTask("draft-update", "running", "初稿阅读连续性");
+  let version = "a";
+  let reads = 0;
+  await page.route("**/api/semantic-workspace/tasks?*", route => route.fulfill({ json: [task] }));
+  await page.route("**/api/semantic-workspace/tasks/draft-update", route => route.fulfill({ json: workspaceDetail(task) }));
+  await page.route("**/api/semantic-workspace/tasks/draft-update/draft?*", route => {
+    reads++;
+    return route.fulfill({ json: { draft: { draft_id: version.repeat(64), revision: 1, files: [
+      { filename: "表格.csv", preview_table: [["名称"], [version]], download_url: "/api/download" },
+      { filename: "结果.json", preview: JSON.stringify({ version, rows: Array.from({ length: 100 }, (_, i) => i) }), download_url: "/api/download" },
+    ] } } });
+  });
+  await page.goto("/data-prep?task=draft-update");
+  const preview = page.getByRole("region", { name: "初稿预览" });
+  if (width === 390) {
+    await expect(page.getByRole("button", { name: "查看初稿 · 2 个文件" })).toBeVisible();
+    await expect(preview).toHaveCount(0);
+    await page.getByRole("button", { name: "查看初稿 · 2 个文件" }).click();
+  }
+  await preview.getByLabel("初稿文件").selectOption("结果.json");
+  const before = reads;
+  version = "b";
+  await expect.poll(() => reads).toBeGreaterThan(before);
+  await expect(preview.getByLabel("初稿文件")).toHaveValue("结果.json");
+  await expect(preview.getByText(/"version": "a"/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "查看新版初稿" }).last()).toBeVisible();
+  await preview.getByRole("button", { name: "关闭初稿预览" }).click();
+  const input = page.getByRole("textbox", { name: "继续对话", exact: true });
+  await input.fill("请保留金额的小数位");
+  const beforeNext = reads;
+  version = "c";
+  await expect.poll(() => reads).toBeGreaterThan(beforeNext);
+  await expect(input).toBeVisible();
+  await expect(input).toBeFocused();
+  await expect(input).toHaveValue("请保留金额的小数位");
+  await expect(preview).toHaveCount(0);
+  await page.getByRole("button", { name: "查看初稿 · 2 个文件" }).click();
+  await expect(preview.getByLabel("初稿文件")).toHaveValue("结果.json");
+  if (width === 1440) {
+    await page.route("**/api/download", () => new Promise(() => {}));
+    const downloadButton = preview.getByRole("button", { name: "下载初稿 结果.json" });
+    await downloadButton.click();
+    await expect(downloadButton).toBeDisabled();
+    await preview.getByRole("button", { name: "查看新版初稿" }).click();
+    await expect(downloadButton).toBeEnabled();
+    await preview.getByRole("button", { name: "展开预览", exact: true }).click();
+    await expect(preview.getByRole("button", { name: "恢复分栏", exact: true })).toBeVisible();
+    await preview.getByRole("button", { name: "恢复分栏", exact: true }).click();
+  }
+});
+
+for (const outcome of ["conflict", "timeout"]) test(`在预览内采用初稿，等待保存时仍可阅读且不会重复提交：${outcome}`, async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await mockWorkspace(page);
+  const task = workspaceTask("draft-pending", "cancelled", "预览内采用初稿");
+  await page.route("**/api/semantic-workspace/tasks?*", route => route.fulfill({ json: [task] }));
+  await page.route("**/api/semantic-workspace/tasks/draft-pending", route => route.fulfill({ json: workspaceDetail(task) }));
+  await page.route("**/api/semantic-workspace/tasks/draft-pending/draft?*", route => route.fulfill({ json: { draft: {
+    draft_id: "a".repeat(64), revision: 1, files: [{ filename: "report.md", preview: "合成报告正文", download_url: "/api/download" }],
+  } } }));
+  let accepts = 0;
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/api/semantic-workspace/tasks/draft-pending/draft/accept", async route => {
+    accepts++; await pending;
+    await route.fulfill({ status: 409, json: { detail: "任务状态已变化，请查看当前结果后再决定" } });
+  });
+  await page.goto("/data-prep?task=draft-pending");
+  const preview = page.getByRole("region", { name: "初稿预览" });
+  await expect(preview).toBeVisible();
+  // 虚拟时钟只覆盖接受请求，不干扰页面启动和开发服务器连接。
+  await page.clock.install();
+  await preview.getByRole("button", { name: "采用这版初稿", exact: true }).click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog.getByText("report.md", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "返回查看", exact: true })).toBeFocused();
+  await dialog.getByRole("button", { name: "确认接受并发布" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(preview.getByText("合成报告正文", { exact: true })).toBeVisible();
+  await expect(preview.getByRole("button", { name: "采用这版初稿", exact: true })).toBeDisabled();
+  await expect(preview.getByRole("button", { name: "检查处理状态" })).toBeVisible();
+  if (outcome === "timeout") {
+    await expect.poll(() => accepts).toBe(1);
+    await page.clock.fastForward(31_000);
+    await expect(preview.getByRole("alert")).toContainText("发布结果尚未确认");
+  }
+  release();
+  if (outcome === "conflict") await expect(preview.getByRole("alert")).toContainText("任务状态已变化");
+  await expect(preview.getByRole("button", { name: "采用这版初稿", exact: true })).toBeDisabled();
+  await preview.getByRole("button", { name: "检查处理状态" }).click();
+  await expect(preview.getByRole("button", { name: "采用这版初稿", exact: true })).toBeEnabled();
+  expect(accepts).toBe(1);
+});
+
+test("PDF 初稿可翻页预览且不会下载文件", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 600 });
+  await mockWorkspace(page);
+  const task = workspaceTask("draft-pdf", "running", "PDF 初稿预览");
+  let draftVersion = "a";
+  await page.route("**/api/semantic-workspace/tasks?*", route => route.fulfill({ json: [task] }));
+  await page.route("**/api/semantic-workspace/tasks/draft-pdf", route => route.fulfill({ json: workspaceDetail(task) }));
+  await page.route("**/api/semantic-workspace/tasks/draft-pdf/draft?*", route => route.fulfill({ json: { draft: {
+    draft_id: draftVersion.repeat(64), revision: 1, files: [
+      { filename: "report.pdf", download_url: "/api/download", page_preview_url: `/api/draft-page?revision=1&draft=${draftVersion}` },
+      { filename: "long.json", download_url: "/api/download", preview: JSON.stringify(Array.from({ length: 100 }, (_, i) => i)) },
+    ],
+  } } }));
+  await page.route("**/api/draft-page?*", route => route.fulfill({ json: {
+    page: Number(new URL(route.request().url()).searchParams.get("page")), page_count: draftVersion === "a" ? 2 : 1,
+    image: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+  } }));
+  const downloads: string[] = [];
+  page.on("download", item => downloads.push(item.suggestedFilename()));
+  await page.goto("/data-prep?task=draft-pdf");
+  const preview = page.getByRole("region", { name: "初稿预览" });
+  await expect(preview.getByRole("img", { name: "report.pdf 第 1 页" })).toBeVisible();
+  const content = preview.getByLabel("初稿内容");
+  await expect.poll(() => preview.getByRole("img").evaluate(image => (image as HTMLImageElement).naturalWidth)).toBeGreaterThan(0);
+  await content.evaluate(element => { element.scrollTop = 100; });
+  await expect.poll(() => content.evaluate(element => element.scrollTop)).toBeGreaterThan(0);
+  const position = await content.evaluate(element => element.scrollTop);
+  await preview.getByLabel("初稿文件").selectOption("long.json");
+  await content.evaluate(element => { element.scrollTop = 200; });
+  await preview.getByLabel("初稿文件").selectOption("report.pdf");
+  await expect.poll(() => content.evaluate(element => element.scrollTop)).toBe(position);
+  await preview.getByRole("button", { name: "关闭初稿预览" }).click();
+  await page.getByRole("button", { name: "查看初稿 · 2 个文件" }).click();
+  await expect.poll(() => content.evaluate(element => element.scrollTop)).toBe(position);
+  await preview.getByRole("button", { name: "下一页", exact: true }).click();
+  await expect(preview.getByRole("img", { name: "report.pdf 第 2 页" })).toBeVisible();
+  await expect(preview.getByRole("button", { name: "下一页", exact: true })).toBeDisabled();
+  draftVersion = "b";
+  await preview.getByRole("button", { name: "查看新版初稿" }).click();
+  await expect(preview.getByRole("img", { name: "report.pdf 第 1 页" })).toBeVisible();
+  await expect(preview.getByText("第 1 / 1 页", { exact: true })).toBeVisible();
+  expect(downloads).toEqual([]);
+});
+
+test("初稿接受被拒绝时保留初稿且不冒充正式完成", async ({ page }) => {
+  await mockWorkspace(page);
+  const task = workspaceTask("draft-refused", "failed", "等待接受的初稿");
+  await page.route("**/api/semantic-workspace/tasks?*", route => route.fulfill({ json: [task] }));
+  await page.route("**/api/semantic-workspace/tasks/draft-refused", route => route.fulfill({ json: workspaceDetail(task) }));
+  await page.route("**/api/semantic-workspace/tasks/draft-refused/draft?*", route => route.fulfill({ json: { draft: {
+    draft_id: "a".repeat(64), revision: 1, files: [{ filename: "report.md", preview: "合成报告", download_url: "/api/draft-download" }],
+  } } }));
+  let accepts = 0;
+  await page.route("**/api/semantic-workspace/tasks/draft-refused/draft/accept", route => {
+    accepts++;
+    return route.fulfill({ status: 409, json: { detail: "任务状态已变化，请刷新后重试" } });
+  });
+  await page.goto("/data-prep");
+  await page.getByText("等待接受的初稿", { exact: true }).first().click();
+  await page.getByRole("button", { name: "接受初稿并结束验证" }).click();
+  await page.getByRole("button", { name: "确认接受并发布" }).click();
+  await expect(page.getByRole("alert").filter({ hasText: "任务状态已变化" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "下载初稿 report.md" })).toBeVisible();
+  await expect(page.getByText("正式结果 · 用户接受初稿；未完成的系统检查仍为未验证。", { exact: true })).toHaveCount(0);
+  expect(accepts).toBe(1);
+});
 
 function workspaceDetail(
   task: WorkspaceFixture,
@@ -455,10 +792,8 @@ test.describe("结果缓存身份隔离", () => {
     await page.getByRole("button", { name: "查看来源", exact: true }).click();
     await expect(page.getByText("A-V2-来源证据", { exact: true })).toBeVisible();
     await expect(page.getByText("A-原件私有内容", { exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "打开导航", exact: true }).click();
     await page.getByTitle("退出登录").click();
     await loginAsB(page);
-    await page.getByRole("button", { name: "打开导航", exact: true }).click();
     await page.getByRole("link", { name: "任务工作台", exact: true }).click();
     await listRequested.promise;
     await expect.soft(page.getByRole("button", { name: /A的结果任务/ })).toHaveCount(0);
@@ -676,7 +1011,8 @@ test.describe("#134 公开搜索", () => {
     });
     await page.goto("/data-prep");
     await page.getByLabel("任务要求", { exact: true }).fill("电池回收研究");
-    await page.getByRole("button", { name: "开始执行", exact: true }).click();
+    await page.locator("summary").filter({ hasText: "其他资料" }).click();
+    await openWebSources(page);
     await expect(page.getByLabel("搜索主题", { exact: true })).toHaveValue("电池回收研究");
     await expect(page.getByLabel("精确网址")).toHaveCount(0);
     expect(requests).toHaveLength(0);
@@ -726,7 +1062,8 @@ test.describe("#134 公开搜索", () => {
       });
       await page.goto("/data-prep");
       await page.getByLabel("任务要求", { exact: true }).fill("电池回收研究");
-      await page.getByRole("button", { name: "开始执行", exact: true }).click();
+      await page.locator("summary").filter({ hasText: "其他资料" }).click();
+      await openWebSources(page);
       if (scenario === "hard-nine") {
         await page.getByLabel("结果要求", { exact: true }).selectOption("hard_min_pages");
         await page.getByLabel("至少有效页数", { exact: true }).fill("10");
@@ -773,7 +1110,8 @@ test.describe("#134 公开搜索", () => {
     await page.route("**/api/semantic-workspace/source-acquisitions/search-attempt/cancel", route => { canceled = true; return route.fulfill({ json: pending() }); });
     await page.goto("/data-prep");
     await page.getByLabel("任务要求", { exact: true }).fill("电池回收研究");
-    await page.getByRole("button", { name: "开始执行", exact: true }).click();
+    await page.locator("summary").filter({ hasText: "其他资料" }).click();
+    await openWebSources(page);
     await page.getByLabel("时间范围", { exact: true }).selectOption("week");
     await page.getByLabel("限定域名（可选）").fill("example.com");
     await page.getByRole("button", { name: "搜索并读取", exact: true }).click();
@@ -786,7 +1124,8 @@ test.describe("#134 公开搜索", () => {
     await expect(page.getByRole("button", { name: "启动任务", exact: true })).toHaveCount(0);
     const requestsBeforeReload = keys.length;
     await page.reload();
-    await page.getByRole("button", { name: "公开网页", exact: true }).click();
+    await page.locator("summary").filter({ hasText: "其他资料" }).click();
+    await openWebSources(page);
     await expect(page.getByText("来源获取已停止", { exact: true })).toBeVisible();
     expect(keys).toHaveLength(requestsBeforeReload);
     expect(new Set(keys).size).toBe(1);
@@ -804,7 +1143,8 @@ test.describe("#134 公开搜索", () => {
     await page.route("**/api/semantic-workspace/source-acquisitions", route => { requests += 1; return route.fulfill({ json: searchAttempt("key", 0) }); });
     await page.goto("/data-prep");
     await page.getByLabel("任务要求", { exact: true }).fill("电池回收研究");
-    await page.getByRole("button", { name: "开始执行", exact: true }).click();
+    await page.locator("summary").filter({ hasText: "其他资料" }).click();
+    await openWebSources(page);
     const query = page.getByLabel("搜索主题", { exact: true });
     await query.focus();
     await query.dispatchEvent("compositionstart");
@@ -846,7 +1186,7 @@ test.describe("#134 公开搜索", () => {
     await page.route("**/api/semantic-workspace/tasks", route => { submitted = route.request().postDataJSON(); return route.fulfill({ json: task }); });
     await page.route("**/api/semantic-workspace/tasks/restored-search-task", route => route.fulfill({ json: workspaceDetail(task) }));
     await page.goto("/data-prep");
-    await page.getByRole("button", { name: "公开网页", exact: true }).click();
+    await openWebSources(page);
     await expect(page.getByLabel("公开搜索结果")).toContainText("本次搜索：电池回收研究");
     await page.getByRole("button", { name: "添加到当前任务", exact: true }).click();
     await expect(page.getByLabel("任务要求", { exact: true })).toHaveValue("电池回收研究");
@@ -867,8 +1207,23 @@ function mixedAttempt(index: number) {
       allowed_scope: { ...attempt.snapshot!.allowed_scope, normalized_url: url },
       artifacts: [{ ...attempt.snapshot!.artifacts[0], artifact_id: `mixed-artifact-${index}`, title: `独立说明 ${index}`, final_url: url, text_preview: `实体 E101 的来源 ${index}` }] } };
 }
+async function toggleMore(page: Page) {
+  const button = page.getByRole("button", { name: /^更多(?: · 已选 \d+)?$/, exact: true });
+  if (!(await button.isVisible())) await page.locator("summary").filter({ hasText: /^输出：/ }).click();
+  await button.click();
+}
+async function openHistorySources(page: Page) {
+  const button = page.getByRole("button", { name: "历史资料", exact: true });
+  if (!(await button.isVisible())) await page.locator("summary").filter({ hasText: "其他资料" }).click();
+  await button.click();
+}
+async function openWebSources(page: Page) {
+  const button = page.getByRole("button", { name: "公开网页", exact: true });
+  if (!(await button.isVisible())) await page.locator("summary").filter({ hasText: "其他资料" }).click();
+  await button.click();
+}
 async function addMixedWeb(page: Page, index: number) {
-  await page.getByRole("button", { name: "公开网页", exact: true }).click();
+  await openWebSources(page);
   await page.getByRole("combobox", { name: "来源方式", exact: true }).selectOption("url");
   await page.getByLabel("精确网址").fill(`https://example.com/source-${index}`);
   await page.getByRole("button", { name: "获取网页", exact: true }).click();
@@ -894,6 +1249,7 @@ test.describe("#135 混合来源", () => {
     await page.getByLabel("任务要求", { exact: true }).fill("按实体ID关联表格和公开说明");
     await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("实体ID,规模\nE101,200", "utf-8") });
     await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+    await page.locator("summary").filter({ hasText: "其他资料" }).click();
     await expect(page.getByRole("button", { name: "公开网页", exact: true })).toBeEnabled();
     await addMixedWeb(page, 1);
     await addMixedWeb(page, 2);
@@ -906,7 +1262,7 @@ test.describe("#135 混合来源", () => {
     await expect.poll(() => submitted).toMatchObject({ upload_ids: ["upload-e2e"], source_snapshot_ids: ["mixed-snapshot-1", "mixed-snapshot-2"], objective_text: "按实体ID关联表格和公开说明", output_formats: ["xlsx"] });
     expect(submitted).not.toHaveProperty("source_snapshot_id");
     expect(acquired).toBe(2);
-    await page.getByRole("button", { name: "原文件预览", exact: true }).click();
+    if (!(await page.getByLabel("预览文件").isVisible())) await page.getByRole("button", { name: "原文件预览", exact: true }).click();
     await expect(page.getByLabel("预览文件").locator("option")).toHaveCount(3);
     await page.getByLabel("预览文件").selectOption("mixed-artifact-2");
     await expect(page.getByText("第二组独立冻结摘要", { exact: true })).toBeVisible();
@@ -1100,6 +1456,7 @@ test.describe("统一数据工作台", () => {
     await page.route("**/api/semantic-workspace/source-acquisitions", (route) =>
       route.fulfill({ status: 422, json: { detail: "网址不在允许范围" } }));
     await page.goto("/data-prep");
+    await page.locator("summary").filter({ hasText: "其他资料" }).click();
     await page.getByRole("button", { name: "公开网页", exact: true }).focus();
     await page.getByRole("button", { name: "公开网页", exact: true }).press("Space");
     await page.getByLabel("精确网址").fill("https://example.com/article");
@@ -1135,6 +1492,7 @@ test.describe("统一数据工作台", () => {
       return route.fulfill({ json: saved() });
     });
     await page.goto("/data-prep");
+    await page.locator("summary").filter({ hasText: "其他资料" }).click();
     await page.getByRole("button", { name: "公开网页", exact: true }).focus();
     await page.getByRole("button", { name: "公开网页", exact: true }).press("Space");
     await page.getByLabel("精确网址").fill("https://example.com/article");
@@ -1152,6 +1510,7 @@ test.describe("统一数据工作台", () => {
     await expect(page.getByText("正在停止来源获取", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "清除网页来源" })).toHaveCount(0);
     await page.reload();
+    await page.locator("summary").filter({ hasText: "其他资料" }).click();
     await page.getByRole("button", { name: "公开网页", exact: true }).focus();
     await page.getByRole("button", { name: "公开网页", exact: true }).press("Space");
     await expect(page.getByText("正在停止来源获取", { exact: true })).toBeVisible();
@@ -1208,11 +1567,11 @@ test.describe("统一数据工作台", () => {
       await mockWorkspace(page, item.theme);
       await page.goto("/data-prep");
 
-      await expect(page.getByRole("heading", { name: "想处理什么资料？" }))
+      await expect(page.getByRole("heading", { name: "今天想完成什么？" }))
         .toBeVisible();
-      await expect(page.getByRole("button", { name: "添加模型", exact: true })).toBeVisible();
+      await expect(page.getByRole("combobox", { name: "选择模型", exact: true })).toBeVisible();
       await page.getByRole("button", { name: "帮助", exact: true }).click();
-      await expect(page.getByText("筛选并交付")).toBeVisible();
+      await expect(page.getByText("筛选并交付").last()).toBeVisible();
       await page.keyboard.press("Escape");
       await expect(page.getByRole("button", { name: "回收站" })).toBeVisible();
       await expect(page.locator("html")).toHaveClass(
@@ -1259,6 +1618,7 @@ test.describe("统一数据工作台", () => {
       route.fulfill({ json: workspaceDetail(createdTask) }));
     await page.goto("/data-prep");
 
+    await page.locator("summary").filter({ hasText: "其他资料" }).click();
     const webMode = page.getByRole("button", { name: "公开网页", exact: true });
     await webMode.focus();
     await webMode.press("Space");
@@ -1334,7 +1694,7 @@ test.describe("统一数据工作台", () => {
     await page.reload();
     await expect(page.getByRole("heading", { name: "公开网页产品摘要" })).toBeVisible();
     await page.getByRole("button", { name: "新建任务", exact: true }).click();
-    await page.getByText("公开网页", { exact: true }).click();
+    await openWebSources(page);
     await expect(page.getByLabel("精确网址")).toHaveValue("");
     await expect(page.getByRole("article", { name: "网页正文预览" })).toHaveCount(0);
   });
@@ -1402,7 +1762,7 @@ test.describe("统一数据工作台", () => {
     await page.route("**/api/semantic-workspace/tasks/web-task-exploratory", (route) =>
       route.fulfill({ json: workspaceDetail(createdTask) }));
     await page.goto("/data-prep");
-    await page.getByText("公开网页", { exact: true }).click();
+    await openWebSources(page);
     await page.getByLabel("精确网址").fill("https://example.com/");
     await page.getByRole("button", { name: "同站有限扩展" }).click();
     await page.getByLabel("最多读取页数").fill("3");
@@ -1482,7 +1842,7 @@ test.describe("统一数据工作台", () => {
       }));
 
     await page.goto("/data-prep");
-    await page.getByText("公开网页", { exact: true }).click();
+    await openWebSources(page);
     await page.getByLabel("精确网址").fill("https://example.com/");
     await page.getByRole("button", { name: "同站有限扩展" }).click();
     await page.getByLabel("最多读取页数").fill("3");
@@ -1670,7 +2030,7 @@ test.describe("统一数据工作台", () => {
     );
 
     await page.goto("/data-prep");
-    await page.getByText("公开网页", { exact: true }).click();
+    await openWebSources(page);
 
     await expect(
       page.getByRole("region", { name: "获取一个公开网页" })
@@ -1745,7 +2105,7 @@ test.describe("统一数据工作台", () => {
       route.fulfill({ status: 202, json: sourceAttempt("failed") }));
     await page.goto("/data-prep");
 
-    await page.getByText("公开网页", { exact: true }).click();
+    await openWebSources(page);
     await page.getByLabel("精确网址").fill("https://example.com/file.pdf");
     await page.getByRole("button", { name: "获取网页" }).click();
 
@@ -1753,10 +2113,10 @@ test.describe("统一数据工作台", () => {
     await expect(page.getByRole("alert")).toContainText("不是 HTML 页面");
     await expect(page.locator("html")).toHaveClass(/dark/);
     await page.getByRole("button", { name: "打开导航" }).click();
-    await expect(page.getByRole("link", { name: "旧版对话" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "任务工作台" })).toBeVisible();
     await expect(page.getByRole("button", { name: "浅色主题" })).toBeVisible();
     await page.locator("aside").getByRole("button", { name: "关闭导航" }).click();
-    await expect(page.getByRole("link", { name: "旧版对话" })).toBeHidden();
+    await expect(page.getByRole("link", { name: "任务工作台" })).toBeHidden();
     await page.getByRole("button", { name: "打开导航" }).click();
     await page.keyboard.press("Escape");
     await expect(page.getByRole("link", { name: "旧版对话" })).toBeHidden();
@@ -1770,7 +2130,7 @@ test.describe("统一数据工作台", () => {
     await mockWorkspace(page);
     await page.goto("/data-prep");
 
-    const submit = page.getByRole("button", { name: "开始执行" });
+    const submit = page.getByRole("button", { name: /^(发送|开始执行)$/ });
     await expect(submit).toBeDisabled();
     await page.locator('input[type="file"]').setInputFiles({
       name: "workload.csv",
@@ -1779,18 +2139,17 @@ test.describe("统一数据工作台", () => {
     });
     await expect(page.getByText("已上传，等待执行")).toBeVisible();
     await expect(page.getByText("张三", { exact: true })).toBeVisible();
-    await page.getByPlaceholder(/描述你想得到的结果/).fill(
+    await page.getByLabel("任务要求", { exact: true }).fill(
       "只筛选张三并输出 XLSX",
     );
-    await page.getByRole("button", { name: "更多", exact: true }).click();
-    await expect(page.getByLabel("执行模型")).toHaveValue(
-      "local::Qwen3.6-35B-A3B",
+    await toggleMore(page);
+    await expect(page.getByTestId("workspace-model-picker")).toHaveValue(
+      JSON.stringify(["__local__", "Qwen3.6-35B-A3B"]),
     );
     await expect(submit).toBeEnabled();
-    await page.getByRole("button", { name: "更多", exact: true }).click();
-    await page.getByRole("button", { name: "打开导航" }).click();
+    await toggleMore(page);
     await expect(page.getByAltText("howso@Mangrove")).toBeVisible();
-    await page.keyboard.press("Escape");
+    await expect(page.getByRole("link", { name: "任务工作台", exact: true })).toHaveAttribute("aria-current", "page");
     await expect(page.getByRole("button", { name: "新建任务" })).toBeVisible();
     if (process.env.MANGROVE_VISUAL_CAPTURE === "1") {
       await page.screenshot({
@@ -1868,7 +2227,7 @@ test.describe("统一数据工作台", () => {
     });
     await expect(page.getByText("文件格式不受支持。", { exact: false }))
       .toBeVisible();
-    await expect(page.getByRole("button", { name: "开始执行" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: /^(发送|开始执行)$/ })).toBeDisabled();
   });
 
   test("开始执行会提交推荐格式和默认模型并进入任务详情", async ({ page }) => {
@@ -1920,7 +2279,7 @@ test.describe("统一数据工作台", () => {
       buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8"),
     });
     await expect(page.getByText("张三", { exact: true })).toBeVisible();
-    await page.getByPlaceholder(/描述你想得到的结果/).fill(
+    await page.getByLabel("任务要求", { exact: true }).fill(
       "只筛选张三并输出 XLSX",
     );
     await page.getByRole("button", { name: "开始执行" }).click();
@@ -1991,14 +2350,14 @@ test.describe("统一数据工作台", () => {
       mimeType: "text/csv",
       buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8"),
     });
-    await page.getByPlaceholder(/描述你想得到的结果/).fill(
+    await page.getByLabel("任务要求", { exact: true }).fill(
       "只筛选张三并输出 CSV",
     );
-    await page.getByRole("button", { name: "更多", exact: true }).click();
+    await toggleMore(page);
     await expect(page.getByRole("radio", { name: "平台默认（推荐）" })).toHaveCount(0);
     await expect(page.getByRole("radio", { name: "增强模式（Pi）" })).toHaveCount(0);
-    await expect(page.getByLabel("执行模型")).toHaveValue(
-      "local::Qwen3.6-35B-A3B",
+    await expect(page.getByTestId("workspace-model-picker")).toHaveValue(
+      JSON.stringify(["__local__", "Qwen3.6-35B-A3B"]),
     );
     await page.getByRole("checkbox", { name: /Python 表格处理/ }).check();
     await page.getByRole("button", { name: "开始执行" }).click();
@@ -2045,13 +2404,14 @@ test.describe("统一数据工作台", () => {
       mimeType: "text/csv",
       buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8"),
     });
-    await page.getByPlaceholder(/描述你想得到的结果/).fill(
+    await page.getByLabel("任务要求", { exact: true }).fill(
       "只筛选张三并输出 XLSX",
     );
-    await page.getByRole("button", { name: "更多", exact: true }).click();
+    await toggleMore(page);
     await expect(page.getByRole("radio", { name: "平台默认（推荐）" })).toHaveCount(0);
     await expect(page.getByRole("radio", { name: "增强模式（Pi）" })).toHaveCount(0);
-    await expect(page.getByRole("button", { name: "添加模型", exact: true })).toBeVisible();
+    await expect(page.getByRole("link", { name: "设置", exact: true })).toBeVisible();
+    await expect(page.getByTestId("workspace-model-picker")).toHaveValue("");
     await expect(page.getByRole("button", { name: "开始执行" })).toBeDisabled();
     expect(submitted).toBeNull();
   });
@@ -2116,43 +2476,25 @@ test.describe("统一数据工作台", () => {
       mimeType: "text/csv",
       buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8"),
     });
-    await page.getByPlaceholder(/描述你想得到的结果/).fill(
+    await page.getByLabel("任务要求", { exact: true }).fill(
       "只筛选张三并输出 CSV",
     );
-    await page.getByRole("button", { name: "更多", exact: true }).click();
+    await toggleMore(page);
     await expect(page.getByRole("radio", { name: "平台默认（推荐）" })).toHaveCount(0);
 
-    await expect(page.getByLabel("模型连接")).toHaveValue(
-      "conn-user-deepseek",
-    );
-    await expect(
-      page.getByText("外发确认：DeepSeek · deepseek-reasoner"),
-    ).toBeVisible();
-    await page.getByLabel("本任务模型").selectOption("deepseek-chat");
-    await expect(
-      page.getByText("外发确认：DeepSeek · deepseek-chat"),
-    ).toBeVisible();
-    await expect(page.getByText(/当前任务中的表格内容与任务说明/)).toBeVisible();
-    await expect(page.getByText(/仅用于当前任务版本/)).toBeVisible();
-    await expect(page.getByRole("button", { name: "开始执行" })).toBeDisabled();
-    const accessibility = await new AxeBuilder({ page })
-      .include('[data-testid="external-model-disclosure"]')
-      .analyze();
+    const picker = page.getByTestId("workspace-model-picker");
+    await expect(picker).toHaveValue(JSON.stringify(["conn-user-deepseek", "deepseek-reasoner"]));
+    await expect(page.getByTestId("model-send-notice")).toContainText("DeepSeek");
+    await picker.selectOption(JSON.stringify(["conn-user-deepseek", "deepseek-chat"]));
+    await expect(page.getByTestId("model-send-notice")).toContainText("DeepSeek Chat");
+    await expect(page.getByTestId("model-send-notice")).toContainText("仅限当前任务");
+    await expect(page.getByRole("checkbox", { name: /确认将上述内容发送到 DeepSeek/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "开始执行" })).toBeEnabled();
+    const accessibility = await new AxeBuilder({ page }).include('[data-testid="model-send-notice"]').analyze();
     expect(accessibility.violations).toEqual([]);
-
-    await expect(page.getByRole("radio", { name: "兼容模式（Legacy）" })).toHaveCount(0);
-    await page.getByLabel("本任务模型").selectOption("deepseek-reasoner");
-    await expect(page.getByRole("checkbox", {
-      name: /确认将上述内容发送到 DeepSeek/,
-    })).not.toBeChecked();
-    await expect(page.getByLabel("本任务模型")).toHaveValue(
-      "deepseek-reasoner",
-    );
-    await page.getByLabel("本任务模型").selectOption("deepseek-chat");
-
-    await page.getByRole("checkbox", {
-      name: /确认将上述内容发送到 DeepSeek/,
-    }).check();
+    await picker.selectOption(JSON.stringify(["conn-user-deepseek", "deepseek-reasoner"]));
+    await expect(picker).toHaveValue(JSON.stringify(["conn-user-deepseek", "deepseek-reasoner"]));
+    await picker.selectOption(JSON.stringify(["conn-user-deepseek", "deepseek-chat"]));
     await page.getByRole("button", { name: "开始执行" }).click();
 
     expect(submitted).toMatchObject({
@@ -3313,7 +3655,7 @@ test.describe("统一数据工作台", () => {
     expect(viewport.scrollY).toBe(0);
     expect(viewport.scrollHeight).toBeLessThanOrEqual(viewport.innerHeight);
     const shellBounds = await Promise.all([
-      page.getByRole("button", { name: "打开导航", exact: true }).boundingBox(),
+      page.getByRole("link", { name: "任务工作台", exact: true }).boundingBox(),
       page.getByRole("button", { name: "新建任务" }).boundingBox(),
       page.getByRole("heading", { name: "任务工作台", exact: true }).boundingBox(),
     ]);
@@ -4499,7 +4841,7 @@ test.describe("统一数据工作台", () => {
     test(`${theme} 主题没有严重或致命的可访问性问题`, async ({ page }) => {
       await mockWorkspace(page, theme);
       await page.goto("/data-prep");
-      await expect(page.getByRole("heading", { name: "想处理什么资料？" }))
+      await expect(page.getByRole("heading", { name: "今天想完成什么？" }))
         .toBeVisible();
 
       const scan = await new AxeBuilder({ page }).analyze();
@@ -4518,12 +4860,11 @@ test.describe("#127 统一工作台", () => {
     await page.route("**/api/model-connections/presets", route => route.fulfill({ json: { items: [] } }));
     await page.goto("/data-prep");
     await expect(page.getByRole("radio", { name: "公开网页" })).toHaveCount(0);
-    await expect(page.getByLabel("模型连接", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("workspace-model-picker")).toBeVisible();
     await page.getByRole("textbox").first().fill("核对这份工作量表");
     await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("姓名,工作量\n张三,5", "utf-8") });
-    await page.getByRole("button", { name: "添加模型", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "模型设置", exact: true })).toBeVisible();
-    await page.getByRole("button", { name: "返回当前任务", exact: true }).click();
+    await page.goto("/settings?tab=models");
+    await page.goto("/data-prep");
     await expect(page.getByRole("textbox").first()).toHaveValue("核对这份工作量表");
     await expect(page.getByText("workload.csv").first()).toBeVisible();
     await expect(page).toHaveURL(/data-prep/);
@@ -4543,6 +4884,684 @@ test.describe("#127 统一工作台", () => {
 });
 
 
+test.describe("对话首屏与并排附件预览", () => {
+  test("输出意图：多格式、更正和排除同步到提交，普通提及不算指令", async ({ page }, testInfo) => {
+    await mockWorkspace(page);
+    const errors: string[] = [];
+    const consoleMessages: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("console", message => { if (["error", "warning"].includes(message.type())) consoleMessages.push(message.text()); });
+    let submitted: Record<string, unknown> | null = null;
+    await page.route("**/api/semantic-workspace/tasks", route => {
+      submitted = route.request().postDataJSON();
+      return route.fulfill({ status: 422, headers: { "X-Mangrove-Task-Outcome": "rejected" }, json: { detail: "隔离测试不执行模型" } });
+    });
+    await page.goto("/data-prep");
+    await expect(page).toHaveURL(/\/data-prep$/);
+    await expect(page).toHaveTitle(/Mangrove/);
+    await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("姓名,金额\n张三,10", "utf-8") });
+    const input = page.getByRole("textbox", { name: "任务要求", exact: true });
+    await input.fill("提取明细并输出 JSON 和 Excel");
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 950 });
+      if (width === 390 && await page.getByRole("button", { name: "关闭原文件预览", exact: true }).isVisible()) await page.getByRole("button", { name: "关闭原文件预览", exact: true }).click();
+      await expect(page.locator("summary").filter({ hasText: "输出：JSON、Excel · 按你的要求" })).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      await page.screenshot({ path: testInfo.outputPath(`formats-${width}.png`) });
+    }
+    expect(consoleMessages.filter(message => !message.startsWith("⚠️ React Router Future Flag Warning:"))).toEqual([]);
+    for (const [prompt, formats] of [
+      ["整理明细，同时输出 JSON 和 Excel", ["json", "xlsx"]],
+      ["输出 PDF，改为 JSON", ["json"]],
+      ["不要输出 PDF，只输出 JSON", ["json"]],
+      ["不输出 PDF，只输出 JSON", ["json"]],
+      ["不需要 PDF，输出 JSON", ["json"]],
+      ["整理名为 JSON 的字段并筛选明细", ["xlsx"]],
+      ["写一份分析报告", ["markdown"]],
+    ] as const) {
+      submitted = null;
+      await input.fill(prompt);
+      await page.getByRole("button", { name: "开始执行", exact: true }).click();
+      await expect.poll(() => submitted?.output_formats).toEqual([...formats]);
+      await expect(page.getByRole("button", { name: "开始执行", exact: true })).toBeEnabled();
+    }
+    await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
+  test("输出意图：主动选择冲突可一键按文字处理，手动选择刷新保留", async ({ page }) => {
+    await mockWorkspace(page);
+    await page.route("**/api/data-sources/uploads/upload-e2e", route => route.fulfill({ json: { upload_id: "upload-e2e", original_name: "workload.csv", media_type: "text/csv", size_bytes: 64, sha256: "0".repeat(64) } }));
+    await page.goto("/data-prep");
+    await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("姓名,金额\n张三,10", "utf-8") });
+    const input = page.getByRole("textbox", { name: "任务要求", exact: true });
+    await input.fill("输出 JSON");
+    const summary = page.locator("summary").filter({ hasText: "输出：" });
+    await summary.click();
+    await page.getByRole("button", { name: "PDF", exact: true }).click();
+    await expect(page.getByRole("alert")).toContainText("手动选择与文字要求不同");
+    await expect(page.getByRole("button", { name: "开始执行", exact: true })).toBeDisabled();
+    await page.getByRole("button", { name: "按文字要求输出", exact: true }).click();
+    await expect(summary).toHaveText("输出：JSON · 按你的要求");
+    await expect(page.getByRole("button", { name: "开始执行", exact: true })).toBeEnabled();
+    await input.fill("整理明细");
+    await page.getByRole("button", { name: "Word", exact: true }).click();
+    await expect(summary).toHaveText("输出：Word");
+    await page.reload();
+    await expect(summary).toHaveText("输出：Word");
+    await expect(input).toHaveValue("整理明细");
+    await summary.click();
+    await page.getByRole("button", { name: "自动", exact: true }).click();
+    await expect(summary).toHaveText("输出：自动");
+    await expect(page.getByText("按任务目标推荐：Excel，可在输出选项中调整。", { exact: true })).toBeVisible();
+  });
+
+  test("输出意图：PDF 上传后按文字只提交 JSON，旧默认值不阻挡", async ({ page }, testInfo) => {
+    await mockWorkspace(page);
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await page.addInitScript(() => localStorage.setItem("mangrove_workspace_draft_u1_new", JSON.stringify({ draft: {
+      prompt: "", formats: ["docx", "pdf"], connectionId: null, connectionModel: null, localModel: "Qwen3.6-35B-A3B",
+      conversation: [{ role: "user", content: "之前输出 CSV" }, { role: "assistant", content: "我建议输出 PDF" }],
+    }, sources: [], history: [] })));
+    await page.route("**/api/data-sources/uploads", route => route.fulfill({ json: {
+      upload_id: "upload-json", original_name: "报销单.pdf", media_type: "application/pdf", size_bytes: 100, sha256: "0".repeat(64),
+    } }));
+    await page.route("**/api/data-sources/uploads/*/document-preview**", route => route.fulfill({ json: { pages: [], total_pages: 0 } }));
+    await page.route("**/api/data-sources/uploads/upload-json/content", route => route.fulfill({ status: 422, json: { detail: "合成 PDF 仅验证格式选择，不展示原件" } }));
+    let submitted: Record<string, unknown> | null = null;
+    await page.route("**/api/semantic-workspace/tasks", route => {
+      submitted = route.request().postDataJSON();
+      return route.fulfill({ status: 422, json: { detail: "测试已截获提交，不启动真实任务" } });
+    });
+    await page.goto("/data-prep");
+    await page.locator('input[type="file"]').setInputFiles({ name: "报销单.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4\n", "utf-8") });
+    await page.getByRole("textbox", { name: "任务要求", exact: true }).fill("帮我将第5页的数据按照部门和报销人梳理，并输出json文件");
+    await expect(page.locator("summary").filter({ hasText: "输出：JSON · 按你的要求" })).toBeVisible();
+    await page.getByRole("button", { name: "开始执行", exact: true }).click();
+    await expect.poll(() => submitted?.output_formats).toEqual(["json"]);
+    expect(errors).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath("json-output.png") });
+  });
+  for (const surface of ["draft", "history", "fresh", "failure"]) test(`模板按钮可见、单次保存，刷新后核对服务端状态：${surface}`, async ({ page }, testInfo) => {
+    await mockWorkspace(page);
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    let available = true;
+    let saves = 0;
+    if (surface !== "fresh" && surface !== "history") await page.addInitScript(() => localStorage.setItem("mangrove_workspace_draft_u1_new", JSON.stringify({ draft: {
+      prompt: "", connectionId: null, connectionModel: null, localModel: "Qwen3.6-35B-A3B", sessionId: "template-conversation",
+      conversation: [{ id: 901, role: "assistant", content: "已生成报告，可点下方「沉淀为模板」。", created_at: "2026-09-13T05:16:00", token_usage: { calls: 1, prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } }],
+    }, sources: [], history: [] })));
+    await page.route("**/api/conversations/template-conversation/messages", route => route.fulfill({ json: [
+      { id: 901, role: "assistant", content: "已生成报告，可点下方「沉淀为模板」。", task_id: "template-task", meta: { template_available: available, token_usage: { calls: 1, prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 } } },
+    ] }));
+    await page.route("**/api/chat/running/template-conversation", route => route.fulfill({ json: { running: false, progress: [] } }));
+    await page.route("**/api/semantic-workspace/draft/turns", route => route.fulfill({ contentType: "text/event-stream", body: [
+      ["meta", { conv_id: "template-conversation" }],
+      ["result", { conv_id: "template-conversation", message_id: 901, reply: "已生成报告，可点下方「沉淀为模板」。", files: [] }],
+      ["done", {}],
+    ].map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("") }));
+    await page.route("**/api/confirm/template", async route => {
+      expect(route.request().postDataJSON()).toEqual({ task_id: "template-task" });
+      saves++;
+      await new Promise(resolve => setTimeout(resolve, 250));
+      available = false;
+      if (surface === "failure") return route.fulfill({ status: 502, json: { detail: "模型暂时不可用" } });
+      await route.fulfill({ json: { ok: true, message: "已沉淀模板「报告结构」", slug: "report-template" } });
+    });
+    await page.goto(surface === "history" ? "/data-prep?conversation=template-conversation" : "/data-prep");
+    if (surface === "fresh") {
+      await page.getByRole("textbox", { name: "任务要求", exact: true }).fill("采集小红书中信私银并生成报告");
+      await page.getByRole("textbox", { name: "任务要求", exact: true }).press("Enter");
+    }
+    const button = page.getByRole("button", { name: "沉淀为模板", exact: true });
+    await expect(button).toBeEnabled();
+    for (const width of [1440, 390]) {
+      await page.setViewportSize({ width, height: 950 });
+      await expect(button).toBeVisible();
+      await page.screenshot({ path: testInfo.outputPath(`template-button-${width}.png`) });
+      if (width === 1440) await page.getByRole("region", { name: "报告模板操作" }).screenshot({ path: testInfo.outputPath("template-action.png") });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    }
+    await button.click();
+    await expect(page.getByRole("button", { name: "正在提炼…", exact: true })).toBeDisabled();
+    if (surface === "failure") await expect(page.getByRole("alert")).toContainText("不会自动重试");
+    else await expect(page.getByText("已沉淀模板「报告结构」", { exact: true })).toBeVisible();
+    expect(saves).toBe(1);
+    await page.reload();
+    await expect(button).toHaveCount(0);
+    await expect(page.getByText(/模板操作已处理或已过期/)).toBeVisible();
+    expect(saves).toBe(1);
+    await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+    expect(errors).toEqual([]);
+  });
+
+  for (const hasIdentity of [false, true]) test(`已完成旧草稿从原会话补回反馈身份和用量，不覆盖新输入：${hasIdentity}`, async ({ page }) => {
+    await mockWorkspace(page);
+    await page.addInitScript(known => localStorage.setItem("mangrove_workspace_draft_u1_new", JSON.stringify({ draft: {
+      prompt: "尚未发送的新需求", connectionId: null, connectionModel: null, localModel: "Qwen3.6-35B-A3B",
+      conversation: [{ role: "assistant", content: "已完成的旧报告", ...(known ? { id: 653, created_at: "2026-09-13T01:39:20" } : {}) }],
+      collection: { convId: "old-completed", pending: false, prompt: "旧需求", steps: [] },
+    }, sources: [], history: [] })), hasIdentity);
+    await page.route("**/api/conversations/old-completed/messages", route => route.fulfill({ json: [
+      { id: 653, role: "assistant", content: "已完成的旧报告", created_at: "2026-09-13T01:39:20", meta: { token_usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, calls: 1 } } },
+    ] }));
+    await page.goto("/data-prep");
+    await expect(page.getByRole("button", { name: "点赞", exact: true })).toBeEnabled();
+    await expect(page.getByText("Token：10 输入 / 2 输出 · 共 12", { exact: true })).toBeVisible();
+    await expect(page.getByRole("textbox", { name: "任务要求", exact: true })).toHaveValue("尚未发送的新需求");
+  });
+
+  test("当前对话保留服务端消息身份和用量，后续发送沿用同一会话", async ({ page }) => {
+    await mockWorkspace(page);
+    const sent: any[] = [];
+    await page.route("**/api/semantic-workspace/draft/turns", async route => {
+      sent.push(route.request().postDataJSON());
+      await route.fulfill({ json: { reply: `已保存回复 ${sent.length}`, output_formats: [], conv_id: "persisted-draft", message_id: sent.length,
+        created_at: "2026-09-13T19:01:00Z", user_created_at: "2026-09-13T19:00:00Z",
+        token_usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12, calls: 1 } } });
+    });
+    await page.goto("/data-prep");
+    const input = page.getByRole("textbox", { name: "任务要求", exact: true });
+    await input.fill("先讨论需求"); await input.press("Enter");
+    await expect(page.getByText("Token：10 输入 / 2 输出 · 共 12", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "点赞", exact: true })).toBeEnabled();
+    await page.reload();
+    await expect(page.getByRole("button", { name: "点赞", exact: true })).toBeEnabled();
+    await input.fill("继续解释刚才的回复"); await input.press("Enter");
+    await expect(page.getByText("已保存回复 2", { exact: true })).toBeVisible();
+    expect(sent).toHaveLength(2);
+    expect(sent[1].conv_id).toBe("persisted-draft");
+    expect(sent[1].history).toEqual([]);
+  });
+
+  test("历史会话恢复消息操作和输入框，追问留在原会话并保存反馈", async ({ page }, testInfo) => {
+    await mockWorkspace(page);
+    const messages: any[] = [
+      { id: 11, role: "user", content: "分析这批资料", created_at: "2026-09-13T18:00:00Z" },
+      { id: 12, role: "assistant", content: "原报告：37 条有效样本。", created_at: "2026-09-13T18:01:00Z", meta: { token_usage: { prompt_tokens: 120, completion_tokens: 30, total_tokens: 150, calls: 2 } } },
+    ];
+    const feedback: Record<string, { rating: string }> = {};
+    const sent: any[] = [];
+    let copied = "";
+    await page.exposeFunction("captureCopy", (text: string) => { copied = text; });
+    await page.addInitScript(() => Object.defineProperty(navigator, "clipboard", { value: { writeText: (text: string) => (window as any).captureCopy(text) } }));
+    await page.route("**/api/chat/history", route => route.fulfill({ json: [{ conv_id: "followup-session", title: "原来的分析任务", updated_at: "2026-09-13T18:01:00Z", status: "completed" }] }));
+    await page.route("**/api/chat/running/followup-session", route => route.fulfill({ json: { running: false, progress: [] } }));
+    await page.route("**/api/conversations/followup-session/messages", route => route.fulfill({ json: messages }));
+    await page.route("**/api/chat/feedback**", async route => {
+      if (route.request().method() === "POST") {
+        const body = route.request().postDataJSON();
+        expect(body.conv_id).toBe("followup-session");
+        feedback[body.message_id] = { rating: body.rating };
+      } else if (route.request().method() === "DELETE") delete feedback[route.request().url().split("/").pop()!];
+      await route.fulfill({ json: { feedback } });
+    });
+    await page.route("**/api/semantic-workspace/draft/turns", async route => {
+      const body = route.request().postDataJSON(); sent.push(body);
+      expect(body.conv_id).toBe("followup-session");
+      expect(body.history).toEqual([]);
+      messages.push({ id: 13, role: "user", content: body.text, created_at: "2026-09-13T18:02:00Z" },
+        { id: 14, role: "assistant", content: "这 37 条是原报告中的有效样本，不需要重复采集。", created_at: "2026-09-13T18:03:00Z" });
+      await route.fulfill({ json: { reply: messages[3].content, output_formats: [], conv_id: body.conv_id, message_id: 14 } });
+    });
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    await page.goto("/data-prep?conversation=followup-session");
+    await expect(page.getByRole("textbox", { name: "任务要求", exact: true })).toBeVisible();
+    await expect(page.getByText("Token：120 输入 / 30 输出 · 共 150", { exact: true })).toBeVisible();
+    await expect(page.locator('time[datetime="2026-09-13T18:01:00Z"]')).toBeVisible();
+    await page.getByRole("button", { name: "复制回复", exact: true }).click();
+    await expect.poll(() => copied).toBe(messages[1].content);
+    await page.getByRole("button", { name: "点赞", exact: true }).click();
+    await expect(page.getByRole("button", { name: "点赞", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await page.reload();
+    await expect(page.getByRole("button", { name: "点赞", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await page.getByRole("button", { name: "点踩", exact: true }).click();
+    await expect(page.getByRole("button", { name: "点踩", exact: true })).toHaveAttribute("aria-pressed", "true");
+    await page.getByRole("button", { name: "点踩", exact: true }).click();
+    await expect(page.getByRole("button", { name: "点踩", exact: true })).toHaveAttribute("aria-pressed", "false");
+    const input = page.getByRole("textbox", { name: "任务要求", exact: true });
+    await input.fill("这 37 条是什么意思？"); await input.press("Enter");
+    await expect(page.getByText("这 37 条是原报告中的有效样本，不需要重复采集。", { exact: true })).toBeVisible();
+    await expect(input).toHaveValue("");
+    await expect(page).toHaveURL(/conversation=followup-session/);
+    await expect(page.getByText("Token：此记录未保存用量", { exact: true })).toBeVisible();
+    await page.reload();
+    await expect(page.getByText("这 37 条是原报告中的有效样本，不需要重复采集。", { exact: true })).toBeVisible();
+    expect(sent).toHaveLength(1);
+    for (const width of [1600, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await expect(input).toBeVisible();
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      await page.screenshot({ path: testInfo.outputPath(`history-followup-${width}.png`) });
+    }
+  });
+
+  test("结果返回前持续展示真实阶段，完成后可从历史打开过程和报告", async ({ page }, testInfo) => {
+    await mockWorkspace(page);
+    const collected = responseBarrier(), analyzed = responseBarrier();
+    const progress: any[] = [
+      { node: "collect", label: "采集数据", status: "started", summary: "正在读取目标来源…", sequence: 1 },
+      { node: "collect", label: "采集数据", status: "completed", summary: "累计取得 3 条资料。", sequence: 2, sources: [{ url: "https://www.xiaohongshu.com/explore/synthetic", title: "中信私银合成来源", status: "received" }] },
+      { node: "analyze", label: "分析资料", status: "started", summary: "正在分析资料…", sequence: 3 },
+    ];
+    let started = false, finished = false, executions = 0;
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    const server = createServer(async (req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", req.headers.origin || "*");
+      res.setHeader("Access-Control-Allow-Credentials", "true");
+      res.setHeader("Access-Control-Allow-Headers", req.headers["access-control-request-headers"] || "Content-Type,Authorization");
+      res.setHeader("Access-Control-Allow-Methods", "POST,OPTIONS");
+      if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
+      req.resume();
+      res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" });
+      const emit = (event: string, data: unknown) => res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+      started = true;
+      executions++;
+      emit("meta", { conv_id: "saved-progress" });
+      emit("progress", progress[0]);
+      await collected.promise;
+      emit("progress", progress[1]); emit("progress", progress[2]);
+      await analyzed.promise;
+      const completed = { node: "analyze", label: "分析资料", status: "completed", summary: "分析已完成。", sequence: 4 };
+      progress.push(completed); emit("progress", completed);
+      finished = true;
+      emit("result", { reply: "分析完成", analysis: "# 合成资料分析报告\n本次使用 3 条测试资料。", files: [{ name: "report.md", url: "/api/downloads/saved-progress/report.md" }] });
+      emit("done", {}); res.end();
+    });
+    await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address() as { port: number };
+    await page.route("**/api/semantic-workspace/draft/turns", route => route.fulfill({ status: 307, headers: { Location: `http://127.0.0.1:${address.port}/stream` } }));
+    await page.route("**/api/chat/history", route => route.fulfill({ json: started ? [{ conv_id: "saved-progress", title: "中信私银进度测试", updated_at: "2026-09-13T20:00:00Z", status: finished ? "completed" : "running" }] : [] }));
+    await page.route("**/api/chat/running/saved-progress", route => route.fulfill({ json: { running: !finished, progress } }));
+    await page.route("**/api/conversations/saved-progress/messages", route => route.fulfill({ json: [
+      { id: 1, role: "user", content: "中信私银进度测试" },
+      { id: 2, role: "assistant", content: "# 合成资料分析报告\n本次使用 3 条测试资料。", meta: { work_progress: progress, files: [{ name: "report.md", url: "/api/downloads/saved-progress/report.md" }] } },
+    ] }));
+    try {
+      await page.setViewportSize({ width: 1600, height: 1000 });
+      await page.goto("/data-prep");
+      await page.getByRole("textbox", { name: "任务要求", exact: true }).fill("中信私银进度测试");
+      await page.getByRole("textbox", { name: "任务要求", exact: true }).press("Enter");
+      await expect(page.getByRole("status")).toContainText("正在读取目标来源");
+      await expect(page.getByRole("heading", { name: "合成资料分析报告" })).toHaveCount(0);
+      collected.release();
+      await expect(page.getByRole("status")).toContainText("正在分析资料");
+      const source = page.getByRole("link", { name: /中信私银合成来源/ });
+      await expect(source).toBeVisible();
+      await expect(source).toHaveAttribute("href", "https://www.xiaohongshu.com/explore/synthetic");
+      await page.context().route("https://www.xiaohongshu.com/explore/synthetic", route => route.fulfill({ contentType: "text/html", body: "<h1>隔离验证的来源页面</h1>" }));
+      const popupPromise = page.waitForEvent("popup");
+      await source.click();
+      const popup = await popupPromise;
+      await popup.waitForLoadState();
+      expect(popup.url()).toBe("https://www.xiaohongshu.com/explore/synthetic");
+      await popup.close();
+      await page.getByText("查看执行过程（3 条）", { exact: true }).click();
+      await expect(page.getByText("累计取得 3 条资料。", { exact: true })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "合成资料分析报告" })).toHaveCount(0);
+      await expect(page.getByRole("button", { name: /中信私银进度测试/ })).toContainText("执行中");
+      for (const width of [1600, 390]) {
+        await page.setViewportSize({ width, height: 1000 });
+        await page.screenshot({ path: testInfo.outputPath(`live-progress-${width}.png`) });
+        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      }
+      await page.setViewportSize({ width: 1600, height: 1000 });
+      analyzed.release();
+      await expect(page.getByRole("heading", { name: "合成资料分析报告" })).toBeVisible();
+      if (!await page.getByRole("button", { name: "新建任务", exact: true }).isVisible()) await page.getByRole("button", { name: "任务列表开关", exact: true }).click();
+      await page.getByRole("button", { name: "新建任务", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "合成资料分析报告" })).toHaveCount(0);
+      await page.getByRole("button", { name: /中信私银进度测试/ }).click();
+      await expect(page).toHaveURL(/conversation=saved-progress/);
+      await expect(page.getByRole("heading", { name: "合成资料分析报告" })).toBeVisible();
+      await page.reload();
+      await expect(page.getByRole("button", { name: "下载 report.md" })).toBeVisible();
+      await expect(page.getByRole("link", { name: /中信私银合成来源/ })).toBeVisible();
+      await page.getByText("查看执行过程（4 条）", { exact: true }).click();
+      await expect(page.getByText("累计取得 3 条资料。", { exact: true })).toBeVisible();
+      await expect(page.getByText("分析已完成。", { exact: true })).toBeVisible();
+      await page.screenshot({ path: testInfo.outputPath("history-report.png") });
+      await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+      expect(errors).toEqual([]);
+      expect(executions).toBe(1);
+    } finally {
+      collected.release(); analyzed.release(); server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  });
+
+  test("新建任务清空旧对话附件和执行记录，刷新不恢复残留", async ({ page }, testInfo) => {
+    await mockWorkspace(page);
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    const requests: Array<{ history: unknown[] }> = [];
+    await page.route("**/api/semantic-workspace/draft/turns", route => {
+      requests.push(route.request().postDataJSON());
+      if (requests.length > 1) return route.fulfill({ json: { reply: "这是独立的新对话", output_formats: [] } });
+      return route.fulfill({ contentType: "text/event-stream", body: [
+        ["meta", { conv_id: "old-collection" }],
+        ["node", { node: "collect", label: "采集数据" }],
+        ["result", { reply: "用户已取消旧任务", files: [] }],
+        ["done", {}],
+      ].map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("") });
+    });
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    await page.goto("/data-prep");
+    const input = page.getByRole("textbox", { name: "任务要求", exact: true });
+    const picker = page.getByRole("combobox", { name: "选择模型", exact: true });
+    await expect(picker).toBeVisible();
+    await expect(picker).not.toHaveValue("");
+    const model = await picker.inputValue();
+    await input.fill("旧任务：采集小红书资料");
+    await input.press("Enter");
+    await expect(page.getByRole("article", { name: "智能体回复" })).toContainText("用户已取消旧任务");
+    await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("a,b\n1,2", "utf-8") });
+    await expect(page.getByRole("button", { name: "关闭原文件预览" })).toBeVisible();
+    await page.getByRole("button", { name: "新建任务", exact: true }).click();
+    await expect(page.getByRole("article", { name: "智能体回复" })).toHaveCount(0);
+    await expect(page.getByLabel("采集执行记录")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "关闭原文件预览" })).toHaveCount(0);
+    await expect(page.getByText("workload.csv", { exact: true })).toHaveCount(0);
+    await expect(input).toHaveValue("");
+    await expect(picker).toHaveValue(model);
+    await page.reload();
+    await expect(input).toHaveValue("");
+    await expect(page.getByLabel("采集执行记录")).toHaveCount(0);
+    await expect(page.getByRole("article", { name: "智能体回复" })).toHaveCount(0);
+    await expect(page.getByText("workload.csv", { exact: true })).toHaveCount(0);
+    await input.fill("这是一个全新的需求");
+    await input.press("Enter");
+    await expect(page.getByRole("article", { name: "智能体回复" })).toContainText("这是独立的新对话");
+    expect(requests[1].history).toEqual([]);
+    await page.getByRole("button", { name: "新建任务", exact: true }).click();
+    await expect(page.getByRole("article", { name: "智能体回复" })).toHaveCount(0);
+    for (const width of [1600, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await expect(page.getByRole("heading", { name: "今天想完成什么？" })).toBeVisible();
+      await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      await page.screenshot({ path: testInfo.outputPath(`new-task-${width}.png`) });
+    }
+    expect(errors).toEqual([]);
+  });
+
+  for (const pending of ["对话回复", "附件上传", "任务创建"]) test(`新建任务隔离迟到的${pending}`, async ({ page }) => {
+    await mockWorkspace(page);
+    const gate = responseBarrier();
+    let requested = false;
+    let finished = false;
+    const endpoint = pending === "对话回复" ? "**/api/semantic-workspace/draft/turns"
+      : pending === "附件上传" ? "**/api/data-sources/uploads" : "**/api/semantic-workspace/tasks";
+    await page.route(endpoint, async route => {
+      requested = true;
+      await gate.promise;
+      await route.fulfill({ json: pending === "对话回复" ? { reply: "旧任务的迟到回复", output_formats: [] }
+        : pending === "附件上传" ? { upload_id: "old-upload", original_name: "old.csv", media_type: "text/csv", size_bytes: 8, sha256: "0".repeat(64) }
+        : { task_id: "old-created" } });
+      finished = true;
+    });
+    await page.goto("/data-prep");
+    const input = page.getByRole("textbox", { name: "任务要求", exact: true });
+    if (pending !== "对话回复") {
+      await page.locator('input[type="file"]').setInputFiles({ name: "old.csv", mimeType: "text/csv", buffer: Buffer.from("a,b\n1,2", "utf-8") });
+      if (pending === "任务创建") await expect(page.getByRole("button", { name: "关闭原文件预览" })).toBeVisible();
+    }
+    if (pending !== "附件上传") {
+      await input.fill("旧任务的处理需求");
+      await input.press("Enter");
+    }
+    await expect.poll(() => requested).toBe(true);
+    await page.getByRole("button", { name: "新建任务", exact: true }).click();
+    await expect(input).toHaveValue("");
+    await input.fill("只属于新任务的要求");
+    gate.release();
+    await expect.poll(() => finished).toBe(true);
+    await expect(input).toHaveValue("只属于新任务的要求");
+    await expect(page.getByRole("article", { name: "智能体回复" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "关闭原文件预览" })).toHaveCount(0);
+    await expect(page).toHaveURL(/\/data-prep$/);
+    await page.reload();
+    await expect(input).toHaveValue("只属于新任务的要求");
+    await expect(page.getByRole("article", { name: "智能体回复" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "关闭原文件预览" })).toHaveCount(0);
+    await expect(page).toHaveURL(/\/data-prep$/);
+  });
+
+  test("自然语言采集在当前工作台展示执行记录和报告", async ({ page }, testInfo) => {
+    await mockWorkspace(page);
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    const requests: Array<Record<string, unknown>> = [];
+    await page.route("**/api/semantic-workspace/draft/turns", route => {
+      requests.push(route.request().postDataJSON());
+      const events = [
+        ["meta", { conv_id: "collection-demo" }],
+        ["node", { node: "collect", label: "采集数据" }],
+        ["node", { node: "analyze", label: "分析" }],
+        ["result", { conv_id: "collection-demo", kind: "output", reply: "采集分析已完成", analysis: "# 中信私银分析报告\n本次分析基于已采集的资料。", files: [{ name: "report.md", url: "/api/downloads/demo/report.md" }] }],
+        ["done", {}],
+      ].map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join("");
+      return route.fulfill({ contentType: "text/event-stream", body: events });
+    });
+    await page.goto("/data-prep");
+    const input = page.getByRole("textbox", { name: "任务要求", exact: true });
+    await input.fill("在小红书获取中信私银相关信息，并输出分析报告");
+    await input.press("Enter");
+    await expect(page.getByRole("heading", { name: "中信私银分析报告" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "下载 report.md" })).toBeVisible();
+    await expect(page.getByLabel("采集执行记录")).toContainText("采集数据");
+    await expect(page).toHaveURL(/data-prep/);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].text).toContain("小红书");
+    await page.reload();
+    await expect(page.getByRole("heading", { name: "中信私银分析报告" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "下载 report.md" })).toBeVisible();
+    for (const width of [1600, 390]) {
+      await page.setViewportSize({ width, height: 1000 });
+      await page.screenshot({ path: testInfo.outputPath(`collection-report-${width}.png`) });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+      await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+    }
+    expect(errors).toEqual([]);
+  });
+
+  test("刷新恢复采集执行并可停止，不重新发送或覆盖正在输入的需求", async ({ page }) => {
+    await mockWorkspace(page);
+    let canceled = false;
+    let sent = 0;
+    await page.route("**/api/semantic-workspace/draft/turns", route => { sent++; return route.fulfill({ status: 500 }); });
+    await page.route("**/api/chat/running/collection-restored", route => route.fulfill({ json: { running: !canceled } }));
+    await page.route("**/api/chat/collection-restored/cancel", route => { canceled = true; return route.fulfill({ json: { ok: true } }); });
+    await page.route("**/api/conversations/collection-restored/messages", route => route.fulfill({ json: [{ role: "assistant", content: "用户已取消任务", meta: {} }] }));
+    await page.addInitScript(() => localStorage.setItem("mangrove_workspace_draft_u1_new", JSON.stringify({ draft: {
+      prompt: "采集原始需求", localModel: "Qwen3.6-35B-A3B", connectionId: null, connectionModel: null,
+      collection: { convId: "collection-restored", pending: true, prompt: "采集原始需求", steps: ["采集数据"] },
+    } })));
+    await page.goto("/data-prep");
+    await expect(page.getByLabel("采集执行记录")).toContainText("任务正在后台执行");
+    await page.getByRole("textbox", { name: "任务要求", exact: true }).fill("下一步想补充的问题");
+    await page.getByRole("button", { name: "停止执行", exact: true }).click();
+    await page.getByRole("button", { name: "重新读取执行状态", exact: true }).click();
+    await expect(page.getByRole("article", { name: "智能体回复" })).toContainText("用户已取消任务");
+    await expect(page.getByRole("textbox", { name: "任务要求", exact: true })).toHaveValue("下一步想补充的问题");
+    expect(sent).toBe(0);
+  });
+
+  for (const theme of ["light", "dark"] as const) test(`简洁首屏和上传不抢输入焦点：${theme}`, async ({ page }, testInfo) => {
+    await mockWorkspace(page, theme);
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    const gate = responseBarrier();
+    await page.route("**/api/data-sources/uploads", async route => {
+      await gate.promise;
+      return route.fulfill({ json: { upload_id: "draft-preview", original_name: "workload.csv", media_type: "text/csv", size_bytes: 64, sha256: "0".repeat(64) } });
+    });
+    await page.goto("/data-prep");
+    await expect(page.getByRole("heading", { name: "今天想完成什么？" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "管理任务模板与记忆" })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "公开网页", exact: true })).not.toBeVisible();
+    await expect(page.getByLabel("执行模型", { exact: true })).not.toBeVisible();
+    await page.getByLabel("任务灵感").getByRole("button").first().click();
+    const input = page.getByRole("textbox", { name: "任务要求", exact: true });
+    await expect(input).toHaveValue(guidance.examples[0].prompt);
+    await expect(input).toBeFocused();
+    await page.screenshot({ path: testInfo.outputPath("conversation-welcome.png") });
+    await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("姓名,工作量\n张三,5", "utf-8") });
+    await input.fill("帮我筛选张三的工作量");
+    gate.release();
+    const close = page.getByRole("button", { name: "关闭原文件预览" });
+    await expect(close).toBeVisible();
+    await expect(input).toBeFocused();
+    await expect(page.getByText("张三", { exact: true })).toBeVisible();
+    await input.press("End");
+    await input.pressSequentially("，并说明结果");
+    await expect(input).toHaveValue("帮我筛选张三的工作量，并说明结果");
+    const inputBox = (await input.boundingBox())!;
+    const previewBox = (await close.boundingBox())!;
+    expect(previewBox.x).toBeGreaterThan(inputBox.x + inputBox.width);
+    await page.screenshot({ path: testInfo.outputPath("conversation-file-preview.png") });
+    await page.getByRole("button", { name: "展开预览", exact: true }).click();
+    await close.click();
+    await expect(input).toBeVisible();
+    await expect(input).toHaveValue("帮我筛选张三的工作量，并说明结果");
+    await page.route("**/api/data-sources/uploads", route => route.fulfill({ json: { upload_id: "draft-second", original_name: "second.csv", media_type: "text/csv", size_bytes: 16, sha256: "1".repeat(64) } }));
+    await page.locator('input[type="file"]').setInputFiles({ name: "second.csv", mimeType: "text/csv", buffer: Buffer.from("姓名,工作量\n李四,3", "utf-8") });
+    await expect(close).toBeVisible();
+    await expect(page.getByLabel("预览文件")).toHaveValue("draft-second");
+    await expect(input).toBeVisible();
+    await close.click();
+    const audit = await new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21aa"]).analyze();
+    expect(audit.violations).toEqual([]);
+  });
+
+  test("无附件多轮对话，刷新后带着原话创建文件任务", async ({ page }, testInfo) => {
+    await mockWorkspace(page);
+    await page.setViewportSize({ width: 1600, height: 1000 });
+    const conversations: Array<{ text: string; history: Array<{ role: string; content: string }> }> = [];
+    const tasks: Array<{ objective_text: string; output_formats: string[]; upload_ids: string[] }> = [];
+    await page.route("**/api/semantic-workspace/draft/turns", route => {
+      conversations.push(route.request().postDataJSON());
+      return route.fulfill({ json: { reply: conversations.length === 1 ? "可以，添加表格后我会按部门汇总，保留全部记录。" : "好的，输出 CSV，保留全部记录。", output_formats: conversations.length === 1 ? [] : ["csv"] } });
+    });
+    await page.route("**/api/semantic-workspace/tasks", route => {
+      tasks.push(route.request().postDataJSON());
+      return route.fulfill({ status: 503, json: { detail: "合成任务失败，检查需求保留" } });
+    });
+    await page.goto("/data-prep");
+    const input = page.getByRole("textbox", { name: "任务要求", exact: true });
+    await input.fill("按部门汇总，保留全部记录");
+    await input.press("Enter");
+    await expect(page.getByRole("article", { name: "智能体回复" })).toContainText("保留全部记录");
+    await expect(input).toHaveValue("");
+    await input.fill("输出 CSV");
+    await input.press("Enter");
+    await expect(page.getByRole("article", { name: "智能体回复" })).toHaveCount(2);
+    expect(conversations[1].history).toEqual([{ role: "user", content: "按部门汇总，保留全部记录" }, { role: "assistant", content: "可以，添加表格后我会按部门汇总，保留全部记录。" }]);
+    expect(tasks).toHaveLength(0);
+    await expect(page.getByRole("region", { name: "网页资料", exact: true })).toHaveCount(0);
+    await page.reload();
+    await expect(page.getByRole("article", { name: "智能体回复" })).toHaveCount(2);
+    await page.screenshot({ path: testInfo.outputPath("draft-conversation.png") });
+    await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("a,b\n1,2", "utf-8") });
+    await expect(page.getByRole("button", { name: "关闭原文件预览" })).toBeVisible();
+    await input.fill("按刚才的要求开始处理");
+    await input.press("Enter");
+    await expect.poll(() => tasks.length).toBe(1);
+    expect(tasks[0].objective_text).toContain("按部门汇总，保留全部记录");
+    expect(tasks[0].objective_text).toContain("输出 CSV");
+    expect(tasks[0].objective_text).toContain("当前用户要求（更正以此为准）：\n按刚才的要求开始处理");
+    expect(tasks[0].output_formats).toEqual(["csv"]);
+    expect(tasks[0].upload_ids).toEqual(["upload-e2e"]);
+    await expect(input).toHaveValue("按刚才的要求开始处理");
+  });
+
+  test("停止等待保留草稿，迟到回复不覆盖，重复发送沿用同一身份", async ({ page }) => {
+    await mockWorkspace(page);
+    const gate = responseBarrier();
+    const calls: Array<{ request_id: string }> = [];
+    await page.route("**/api/semantic-workspace/draft/turns", async route => {
+      calls.push(route.request().postDataJSON());
+      if (calls.length === 1) { await gate.promise; await route.fulfill({ json: { reply: "迟到回复不应展示", output_formats: [] } }); }
+      else await route.fulfill({ status: 409, json: { detail: "这条消息已发送或回复状态未知，不会重复请求模型" } });
+    });
+    await page.goto("/data-prep");
+    const input = page.getByRole("textbox", { name: "任务要求", exact: true });
+    await input.fill("帮我思考怎样整理订单");
+    await input.press("Enter");
+    await expect.poll(() => calls.length).toBe(1);
+    await page.getByRole("button", { name: "停止等待" }).click();
+    gate.release();
+    await expect(input).toBeEnabled();
+    await expect(input).toHaveValue("帮我思考怎样整理订单");
+    await expect(page.getByText("迟到回复不应展示", { exact: true })).toHaveCount(0);
+    await input.press("Enter");
+    await expect.poll(() => calls.length).toBe(2);
+    expect(calls[0].request_id).toBe(calls[1].request_id);
+    await expect(page.getByRole("alert")).toContainText("不会重复请求模型");
+  });
+
+  for (const width of [1600, 390]) test(`模型一次点选后直接发送：${width}`, async ({ page }, testInfo) => {
+    await mockWorkspace(page, "light", "user");
+    await page.setViewportSize({ width, height: 1000 });
+    const errors: string[] = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [{
+      connection_id: "conn-consent", owner_scope: "user_personal", preset_id: "deepseek", display_name: "我的模型",
+      model: "model-a", api_format: "openai_chat_completions", locality: "public_external", status: "verified", default_model: "model-a",
+      models: [{ model_id: "model-a", display_name: "模型 A", enabled: true, status: "available" }],
+    }, {
+      connection_id: "conn-shared", owner_scope: "platform_shared", preset_id: "deepseek", display_name: "平台共享模型",
+      model: "model-b", api_format: "openai_chat_completions", locality: "public_external", status: "verified", default_model: "model-b",
+      models: [{ model_id: "model-b", display_name: "模型 B", enabled: true, status: "available" }, { model_id: "model-disabled", display_name: "不可用模型", enabled: false, status: "available" }],
+    }] } }));
+    const bodies: Array<Record<string, unknown>> = [];
+    await page.route("**/api/semantic-workspace/tasks", route => {
+      bodies.push(route.request().postDataJSON());
+      return route.fulfill({ status: 503, json: { detail: "合成失败，检查需求保留" } });
+    });
+    const chats: Array<Record<string, unknown>> = [];
+    await page.route("**/api/semantic-workspace/draft/turns", route => { chats.push(route.request().postDataJSON()); return route.fulfill({ json: { reply: "你好，可以直接说明需求。", output_formats: [] } }); });
+    await page.goto("/data-prep");
+    const picker = page.getByRole("combobox", { name: "选择模型", exact: true });
+    await expect(picker).toBeVisible();
+    await expect(page.getByRole("combobox")).toHaveCount(1);
+    await expect(picker.locator('option', { hasText: "不可用模型" })).toHaveCount(0);
+    await picker.selectOption(JSON.stringify(["conn-shared", "model-b"]));
+    await expect(picker).toHaveValue(JSON.stringify(["conn-shared", "model-b"]));
+    await expect(page.getByTestId("model-send-notice")).toContainText("平台共享模型");
+    expect(chats).toHaveLength(0);
+    expect(bodies).toHaveLength(0);
+    await expect(page.getByTestId("external-model-disclosure")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "添加模型", exact: true })).toHaveCount(0);
+    const input = page.getByRole("textbox", { name: "任务要求", exact: true });
+    await input.fill("你好");
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    await expect.poll(() => chats.length).toBe(1);
+    expect(chats[0]).toMatchObject({ text: "你好", model_connection_id: "conn-shared", model: "model-b", external_api_confirmed: true });
+    await expect(input).toBeEnabled();
+    await expect(page.getByRole("article", { name: "智能体回复" })).toBeVisible();
+    await expect(page).toHaveURL(/\/data-prep$/);
+    expect(await page.title()).toBeTruthy();
+    await page.screenshot({ path: testInfo.outputPath("single-model-picker.png") });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("a,b\n1,2", "utf-8") });
+    await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
+    if (width < 768 && await page.getByRole("button", { name: "关闭原文件预览" }).isVisible()) await page.getByRole("button", { name: "关闭原文件预览" }).click();
+    await input.fill("筛选并汇总，保留明细");
+    const submit = page.getByRole("button", { name: "开始执行", exact: true });
+    await expect(page.getByTestId("model-send-notice")).toContainText("所选资料");
+    await expect(page.getByRole("checkbox")).toHaveCount(0);
+    await submit.click();
+    await expect.poll(() => bodies.length).toBe(1);
+    expect(bodies[0]).toMatchObject({ external_api_confirmed: true, model_connection_id: "conn-shared", model_connection_model: "model-b" });
+    expect(bodies[0].objective_text).toContain("筛选并汇总，保留明细");
+    await expect(input).toHaveValue("筛选并汇总，保留明细");
+    expect(errors).toEqual([]);
+  });
+});
+
 test.describe("#127 输入与导航边界", () => {
   const modelConnection = {
     connection_id: "conn-current", owner_scope: "user_personal", preset_id: "deepseek",
@@ -4557,17 +5576,17 @@ test.describe("#127 输入与导航边界", () => {
     await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [current] } }));
     await page.route("**/api/model-connections/presets", route => route.fulfill({ json: { items: [] } }));
     await page.goto("/data-prep");
-    await page.getByLabel("本任务模型").selectOption("model-b");
-    await page.getByRole("button", { name: "添加模型", exact: true }).click();
-    await page.getByRole("button", { name: "返回当前任务", exact: true }).click();
-    await expect(page.getByLabel("本任务模型")).toHaveValue("model-b");
+    await page.getByTestId("workspace-model-picker").selectOption(JSON.stringify(["conn-current", "model-b"]));
+    await page.goto("/settings?tab=models");
+    await page.goto("/data-prep");
+    await expect(page.getByTestId("workspace-model-picker")).toHaveValue(JSON.stringify(["conn-current", "model-b"]));
     current = { ...modelConnection, models: modelConnection.models.filter(model => model.model_id === "model-a") };
-    await page.getByRole("button", { name: "添加模型", exact: true }).click();
-    await page.getByRole("button", { name: "返回当前任务", exact: true }).click();
-    await expect(page.getByLabel("本任务模型")).toHaveValue("");
+    await page.goto("/settings?tab=models");
+    await page.goto("/data-prep");
+    await expect(page.getByTestId("workspace-model-picker")).toHaveValue("");
     await expect(page.getByText("原先选择的模型已不可用，请重新选择；不会自动替换模型。")).toBeVisible();
-    await page.getByLabel("本任务模型").selectOption("model-a");
-    await expect(page.getByText("外发确认：我的连接 · model-a")).toBeVisible();
+    await page.getByTestId("workspace-model-picker").selectOption(JSON.stringify(["conn-current", "model-a"]));
+    await expect(page.getByTestId("model-send-notice")).toContainText("model-a");
   });
 
   test("输入网址传递要求及已选模型，读取前不自动外发", async ({ page }) => {
@@ -4575,42 +5594,37 @@ test.describe("#127 输入与导航边界", () => {
     await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [modelConnection] } }));
     let acquisitions = 0;
     await page.route("**/api/semantic-workspace/source-acquisitions", route => { acquisitions++; return route.fulfill({ json: sourceAttempt("succeeded") }); });
+    await page.route("**/api/semantic-workspace/source-acquisitions/*", route => route.fulfill({ json: sourceAttempt("succeeded") }));
     await page.goto("/data-prep");
-    await page.getByLabel("本任务模型").selectOption("model-b");
+    await page.getByTestId("workspace-model-picker").selectOption(JSON.stringify(["conn-current", "model-b"]));
     const prompt = "总结 https://example.com/article 的公开说明";
     await page.getByRole("textbox", { name: "任务要求", exact: true }).fill(prompt);
-    await page.getByRole("textbox", { name: "任务要求", exact: true }).press("Enter");
+    await openWebSources(page);
     await expect(page.getByLabel("精确网址")).toHaveValue("https://example.com/article");
     expect(acquisitions).toBe(0);
     await page.getByRole("button", { name: "获取网页", exact: true }).click();
     await page.getByRole("button", { name: "添加到当前任务", exact: true }).click();
     await expect(page.getByLabel("任务要求", { exact: true })).toHaveValue(prompt);
-    await expect(page.getByLabel("模型连接", { exact: true })).toHaveValue("conn-current");
-    await expect(page.getByRole("combobox", { name: "本任务模型", exact: true })).toHaveValue("model-b");
-    await expect(page.getByRole("checkbox", { name: /我确认将上述内容/ })).not.toBeChecked();
+    await expect(page.getByTestId("model-send-notice")).toContainText("我的连接");
+    await expect(page.getByTestId("workspace-model-picker")).toHaveValue(JSON.stringify(["conn-current", "model-b"]));
+    await expect(page.getByRole("checkbox", { name: /我确认将上述内容/ })).toHaveCount(0);
     await page.getByLabel("任务要求", { exact: true }).fill(`${prompt}，提取三条结论`);
-    await page.getByRole("combobox", { name: "本任务模型", exact: true }).selectOption("model-a");
+    await page.getByTestId("workspace-model-picker").selectOption(JSON.stringify(["conn-current", "model-a"]));
 
     await expect(page.getByRole("textbox", { name: "任务要求", exact: true })).toHaveValue(`${prompt}，提取三条结论`);
-    await expect(page.getByLabel("本任务模型")).toHaveValue("model-a");
-    await page.getByRole("button", { name: "公开网页", exact: true }).click();
+    await expect(page.getByTestId("workspace-model-picker")).toHaveValue(JSON.stringify(["conn-current", "model-a"]));
+    await openWebSources(page);
     await page.getByRole("button", { name: "返回当前资料", exact: true }).click();
     await expect(page.getByLabel("任务要求", { exact: true })).toHaveValue(`${prompt}，提取三条结论`);
-    await expect(page.getByRole("combobox", { name: "本任务模型", exact: true })).toHaveValue("model-a");
+    await expect(page.getByTestId("workspace-model-picker")).toHaveValue(JSON.stringify(["conn-current", "model-a"]));
     expect(acquisitions).toBe(1);
-    await page.getByRole("button", { name: "检查上下文草案", exact: true }).click();
-    const consent = page.getByRole("checkbox", { name: /我确认将上述内容/ });
-    await consent.check();
-    await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeEnabled();
-    await page.getByRole("button", { name: "添加模型", exact: true }).click();
+    await page.goto("/settings?tab=models");
     await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [{ ...modelConnection, models: modelConnection.models.filter(model => model.model_id === "model-b") }] } }));
-    await page.getByRole("button", { name: "返回当前任务" }).click();
-    await expect(page.getByRole("textbox", { name: "任务要求", exact: true })).toBeFocused();
-    await expect(page.getByRole("combobox", { name: "本任务模型", exact: true })).toHaveValue("");
-    await consent.check();
+    await page.goto("/data-prep");
+    await expect(page.getByTestId("workspace-model-picker")).toHaveValue("");
     await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeDisabled();
-    await page.getByRole("combobox", { name: "本任务模型", exact: true }).selectOption("model-b");
-    await consent.check();
+    await page.getByTestId("workspace-model-picker").selectOption(JSON.stringify(["conn-current", "model-b"]));
+    await page.getByRole("button", { name: "检查上下文草案", exact: true }).click();
     await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeEnabled();
   });
 
@@ -4655,16 +5669,16 @@ test.describe("#127 输入与导航边界", () => {
       await route.fulfill({ json: { preference: { available: true, connection_id: "conn-current", model_id: "model-b" } } });
     });
     await page.goto("/data-prep");
-    const picker = page.getByRole("combobox", { name: "本任务模型", exact: true });
-    await expect(picker).toHaveValue("model-a");
+    const picker = page.getByTestId("workspace-model-picker");
+    await expect(picker).toHaveValue(JSON.stringify(["conn-current", "model-a"]));
     if (explicit) {
-      await picker.selectOption("model-b");
-      await picker.selectOption("model-a");
+      await picker.selectOption(JSON.stringify(["conn-current", "model-b"]));
+      await picker.selectOption(JSON.stringify(["conn-current", "model-a"]));
     }
     const received = page.waitForResponse("**/api/model-connections/preferences/default");
     preference.release();
     await received;
-    await expect(picker).toHaveValue(explicit ? "model-a" : "model-b");
+    await expect(picker).toHaveValue(JSON.stringify(["conn-current", explicit ? "model-a" : "model-b"]));
   });
 
   test("目录前后只编辑要求，不阻挡迟到默认偏好", async ({ page }) => {
@@ -4683,13 +5697,13 @@ test.describe("#127 输入与导航边界", () => {
     const input = page.getByRole("textbox", { name: "任务要求", exact: true });
     await input.fill("初稿");
     catalog.release();
-    const picker = page.getByRole("combobox", { name: "本任务模型", exact: true });
-    await expect(picker).toHaveValue("model-a");
+    const picker = page.getByTestId("workspace-model-picker");
+    await expect(picker).toHaveValue(JSON.stringify(["conn-current", "model-a"]));
     await input.fill("继续补充要求");
     const received = page.waitForResponse("**/api/model-connections/preferences/default");
     preference.release();
     await received;
-    await expect(picker).toHaveValue("model-b");
+    await expect(picker).toHaveValue(JSON.stringify(["conn-current", "model-b"]));
     await expect(input).toHaveValue("继续补充要求");
   });
 
@@ -4716,6 +5730,72 @@ test.describe("#127 输入与导航边界", () => {
     expect(submissions).toBe(0);
   });
 
+  test("桌面任务工作台保留全局导航框架", async ({ page }, testInfo) => {
+    await mockWorkspace(page);
+    await page.route("**/api/overview", route => route.fulfill({ json: {
+      collectors: [],
+      providers: { available: [], catalog: {} },
+      scheduler: { enabled: false, active_count: 0 },
+      templates: { total: 0, active: 0, draft: 0, retired: 0 },
+      conversations: 0,
+      connectors: { email: false, slack: false, embedding: false, checkpoint: false },
+      connectors_enabled: { email: false, slack: false, embedding: false, checkpoint: false },
+    } }));
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const consoleErrors: string[] = [];
+    page.on("console", message => {
+      if (message.type() === "error") consoleErrors.push(message.text());
+    });
+    await page.goto("/");
+
+    const workspaceLink = page.getByRole("link", { name: "任务工作台", exact: true });
+    await expect(workspaceLink).toBeVisible();
+    await workspaceLink.click();
+    await expect(page).toHaveURL(/\/data-prep$/);
+    await expect(page).toHaveTitle("howso@Mangrove · 数据治理智能体");
+    await expect(workspaceLink).toHaveAttribute("aria-current", "page");
+    await expect(page.getByRole("button", { name: "打开导航", exact: true })).toBeHidden();
+    await expect(page.getByRole("heading", { name: "任务工作台", exact: true })).toBeVisible();
+    const sidebar = page.getByRole("complementary", { name: "全局导航", exact: true });
+    const expandedWidth = (await sidebar.boundingBox())!.width;
+    const mainWidth = (await page.locator("main").boundingBox())!.width;
+    await page.getByRole("button", { name: "收起侧边栏", exact: true }).click();
+    await expect(page.getByRole("button", { name: "展开侧边栏", exact: true })).toHaveAttribute("aria-expanded", "false");
+    expect((await sidebar.boundingBox())!.width).toBeLessThan(expandedWidth);
+    expect((await page.locator("main").boundingBox())!.width).toBeGreaterThan(mainWidth);
+    await expect(workspaceLink).toBeVisible();
+    await expect(workspaceLink).toHaveAttribute("title", "任务工作台");
+    await page.getByRole("link", { name: "概览", exact: true }).click();
+    await expect(page.getByRole("button", { name: "展开侧边栏", exact: true })).toBeVisible();
+    await workspaceLink.click();
+    const draft = page.getByRole("textbox", { name: "任务要求", exact: true });
+    await draft.fill("收起导航时保留当前任务草稿");
+    await page.screenshot({ path: testInfo.outputPath("sidebar-collapsed.png") });
+    await page.getByRole("button", { name: "深色主题", exact: true }).click();
+    await expect(page.locator("html")).toHaveClass(/dark/);
+    expect((await new AxeBuilder({ page }).analyze()).violations).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath("sidebar-collapsed-dark.png") });
+    await page.getByRole("button", { name: "浅色主题", exact: true }).click();
+    const expand = page.getByRole("button", { name: "展开侧边栏", exact: true });
+    await expand.focus();
+    await page.keyboard.press("Enter");
+    await expect(draft).toHaveValue("收起导航时保留当前任务草稿");
+    await expect(page.getByRole("button", { name: "收起侧边栏", exact: true })).toHaveAttribute("aria-expanded", "true");
+    expect((await sidebar.boundingBox())!.width).toBe(expandedWidth);
+    await page.screenshot({ path: testInfo.outputPath("sidebar-expanded.png") });
+    await page.getByRole("button", { name: "收起侧边栏", exact: true }).click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("button", { name: "打开导航", exact: true }).click();
+    await expect(sidebar).toBeVisible();
+    expect((await sidebar.boundingBox())!.width).toBe(expandedWidth);
+    await expect(page.getByRole("button", { name: "展开侧边栏", exact: true })).toBeHidden();
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("button", { name: "打开导航", exact: true })).toBeFocused();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+    await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+    expect(consoleErrors).toEqual([]);
+  });
+
   for (const theme of ["light", "dark"] as const) for (const width of [390, 1440]) {
     test(`导航焦点和视觉 ${theme} ${width}`, async ({ page }, testInfo) => {
       await mockWorkspace(page, theme);
@@ -4723,15 +5803,18 @@ test.describe("#127 输入与导航边界", () => {
       await page.emulateMedia({ reducedMotion: "reduce" });
       await page.goto("/data-prep");
       await expect(page.getByRole("textbox", { name: "任务要求", exact: true })).toBeVisible();
-      await page.getByRole("button", { name: "打开导航", exact: true }).click();
-      await expect(page.getByRole("dialog", { name: "全局导航" })).toBeVisible();
-      await page.keyboard.press("Escape");
-      await expect(page.getByRole("button", { name: "打开导航", exact: true })).toBeFocused();
       if (width === 390) {
+        await page.getByRole("button", { name: "打开导航", exact: true }).click();
+        await expect(page.locator("aside")).toBeVisible();
+        await page.keyboard.press("Escape");
+        await expect(page.getByRole("button", { name: "打开导航", exact: true })).toBeFocused();
         await page.getByRole("button", { name: "任务列表开关", exact: true }).click();
         await expect(page.getByRole("dialog", { name: "任务列表", exact: true })).toBeVisible();
         await page.keyboard.press("Escape");
         await expect(page.getByRole("button", { name: "任务列表开关", exact: true })).toBeFocused();
+      } else {
+        await expect(page.getByRole("link", { name: "任务工作台", exact: true })).toBeVisible();
+        await expect(page.getByRole("button", { name: "打开导航", exact: true })).toBeHidden();
       }
       expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
       const accessibility = await new AxeBuilder({ page }).analyze();
@@ -4826,8 +5909,8 @@ test.describe("#133 获准工具复用", () => {
     await page.goto("/data-prep");
     await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8") });
     await expect(page.getByText("已上传，等待执行")).toBeVisible();
-    await page.getByRole("textbox", { name: "任务要求" }).fill("保留符合条件的记录");
-    await page.getByRole("button", { name: "更多", exact: true }).click();
+    await page.getByRole("textbox", { name: "任务要求" }).fill("筛选符合条件的记录");
+    await toggleMore(page);
   }
 
   test("连续任务复用精确版本，当前格式覆盖模板且不发现外部工具", async ({ page }, testInfo) => {
@@ -4852,8 +5935,8 @@ test.describe("#133 获准工具复用", () => {
         await page.goto("/data-prep");
         await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("姓名,工作量\n李四,8\n", "utf-8") });
         await expect(page.getByText("已上传，等待执行")).toBeVisible();
-        await page.getByRole("textbox", { name: "任务要求" }).fill("保留符合条件的记录");
-        await page.getByRole("button", { name: "更多", exact: true }).click();
+        await page.getByRole("textbox", { name: "任务要求" }).fill("筛选符合条件的记录");
+        await toggleMore(page);
       }
       await page.getByRole("checkbox", { name: /表格筛选工具/ }).check();
       await page.getByRole("button", { name: "复用同类工具：表格筛选工具" }).click();
@@ -4908,6 +5991,7 @@ test.describe("#133 获准工具复用", () => {
     await expect(page.getByTestId("capability-reuse-result")).not.toContainText("可复用：");
     await expect(page.getByRole("button", { name: "开始执行" })).toBeDisabled();
     await page.getByRole("button", { name: "CSV", exact: true }).click();
+    await page.getByRole("button", { name: "自动", exact: true }).click();
     await page.getByRole("button", { name: "复用同类工具：表格筛选工具" }).click();
     await expect(page.getByTestId("capability-reuse-result")).toContainText("可复用：");
     await page.getByRole("button", { name: "移除 workload.csv" }).click();
@@ -4982,14 +6066,14 @@ test.describe("#133 获准工具复用", () => {
       return route.fulfill({ json: { matches: [], gaps: [{ code: "incompatible_contract", remediation: "此工具未声明 Markdown 输入，请选择兼容工具" }] } });
     });
     await page.goto("/data-prep");
-    await page.getByRole("textbox", { name: "任务要求" }).fill("从文档筛选记录");
+    await page.getByRole("textbox", { name: "任务要求" }).fill("从文档筛选记录，输出 Word 和 PDF");
     await page.locator('input[type="file"]').setInputFiles({ name: "来源.md", mimeType: "text/markdown", buffer: Buffer.from("# 合成资料\n", "utf-8") });
     await expect(page.getByText("已上传，等待执行")).toBeVisible();
-    await page.getByRole("button", { name: "更多", exact: true }).click();
+    await toggleMore(page);
     await page.getByRole("button", { name: "复用同类工具：表格筛选工具" }).click();
     await expect(page.getByTestId("capability-reuse-result")).toContainText("此工具未声明 Markdown 输入");
     expect(request).toEqual({ need: { ...need, input_formats: ["markdown"], output_formats: ["docx", "pdf"] }, allow_discovery: false });
-    await expect(page.getByText("来源.md", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("draft").getByText("来源.md", { exact: true })).toBeVisible();
   });
 
   test("普通用户无复用入口且不会请求灰度目录", async ({ page }) => {
@@ -4999,7 +6083,7 @@ test.describe("#133 获准工具复用", () => {
     await page.goto("/data-prep");
     await page.locator('input[type="file"]').setInputFiles({ name: "workload.csv", mimeType: "text/csv", buffer: Buffer.from("姓名,工作量\n张三,5\n", "utf-8") });
     await expect(page.getByText("已上传，等待执行")).toBeVisible();
-    await page.getByRole("button", { name: "更多", exact: true }).click();
+    await toggleMore(page);
     await expect(page.getByRole("button", { name: /复用同类工具/ })).toHaveCount(0);
     await expect(page.getByText("本地任务能力（管理员灰度）")).toHaveCount(0);
     expect(grayRequests).toEqual([]);
@@ -5099,7 +6183,7 @@ test.describe("#135 修订与迟到边界", () => {
     });
     await page.getByRole("button", { name: "创建新版本", exact: true }).click();
     await expect.poll(() => requests.length).toBe(1);
-    await expect(page.getByText(rejected ? "来源无效，尚未开始" : "执行状态未确认", { exact: true })).toBeVisible();
+    await expect(page.getByRole("alert").filter({ hasText: rejected ? "来源无效，尚未开始" : "执行状态未确认" })).toBeVisible();
     await page.getByRole("button", { name: "移除网页组 独立说明 2" }).click();
     await page.getByRole("button", { name: "创建新版本", exact: true }).click();
     if (rejected) {
@@ -5107,7 +6191,7 @@ test.describe("#135 修订与迟到边界", () => {
       expect(requests[1].key).not.toBe(requests[0].key);
       expect(requests[1].body.source_snapshot_ids).toEqual(["mixed-snapshot-1"]);
     } else {
-      await expect(page.getByText("上次资料修订结果未知，请恢复原资料和要求后重试同一请求", { exact: true })).toBeVisible();
+      await expect(page.getByRole("alert").filter({ hasText: "上次资料修订结果未知，请恢复原资料和要求后重试同一请求" })).toBeVisible();
       expect(requests).toHaveLength(1);
       await expect(page.getByRole("button", { name: "恢复上次资料修订", exact: true })).toBeVisible();
     }
@@ -5159,7 +6243,7 @@ test("#135 混合资料明暗390与1440、键盘IME及取消保持焦点", async
   await prompt.dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
   await prompt.dispatchEvent("compositionend", { data: "资料" });
   expect(tasks).toBe(0);
-  await page.getByRole("button", { name: "公开网页", exact: true }).click();
+  await openWebSources(page);
   await page.getByRole("button", { name: "返回当前资料", exact: true }).focus();
   await page.keyboard.press("Enter");
   await expect(prompt).toBeFocused();
@@ -5171,6 +6255,8 @@ test("#135 混合资料明暗390与1440、键盘IME及取消保持焦点", async
       void getComputedStyle(document.querySelector('[aria-label="当前任务资料"] [role="presentation"]')!).backgroundColor;
       await Promise.all(document.getAnimations().filter(animation => animation instanceof CSSTransition).map(animation => animation.finished.catch(() => undefined)));
     }, theme);
+    const closePreview = page.getByRole("button", { name: "关闭原文件预览", exact: true });
+    if (width === 390 && await closePreview.isVisible()) await closePreview.click();
     await page.getByLabel("已选网页资料").scrollIntoViewIfNeeded();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     const scan = await new AxeBuilder({ page }).include('[aria-label="当前任务资料"]').analyze();
@@ -5201,7 +6287,7 @@ test("#135 取消新网页获取的迟到成功保留既有文件和网页组", 
   await page.locator('input[type="file"]').setInputFiles({ name: "keep.csv", mimeType: "text/csv", buffer: Buffer.from("ID\nE101", "utf-8") });
   await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
   await addMixedWeb(page, 1);
-  await page.getByRole("button", { name: "公开网页", exact: true }).click();
+  await openWebSources(page);
   await page.getByRole("combobox", { name: "来源方式", exact: true }).selectOption("url");
   await page.getByLabel("精确网址").fill("https://example.com/source-2");
   await page.getByRole("button", { name: "获取网页", exact: true }).click();
@@ -5597,7 +6683,7 @@ test("#136 当前文件和历史三类资料一次确认，预览返回且零重
   await page.getByLabel("任务要求", { exact: true }).fill("综合昨天原件、历史说明和今天文件，核对正式分析");
   await page.locator('input[type="file"]').setInputFiles({ name: "今日.csv", mimeType: "text/csv", buffer: Buffer.from("x\n1", "utf-8") });
   await expect(page.getByText("已上传，等待执行", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await openHistorySources(page);
   const dialog = page.getByRole("dialog", { name: "从历史资料添加" });
   await dialog.getByRole("button", { name: "预览 正式分析.md", exact: true }).click();
   await expect(dialog.getByText("销售金额已汇总为 200 元。", { exact: true })).toBeVisible();
@@ -5616,7 +6702,7 @@ test("#136 当前文件和历史三类资料一次确认，预览返回且零重
 });
 
 async function selectHistoricalOutput(page: Page) {
-  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await openHistorySources(page);
   await page.getByRole("dialog").getByRole("checkbox", { name: "选择 正式分析.md", exact: true }).check();
   await page.getByRole("button", { name: "添加 1 份资料", exact: true }).click();
   await expect(page.getByLabel("已选历史资料")).toContainText("正式分析.md");
@@ -5650,7 +6736,7 @@ test("#136 取消在途历史核验后迟到不能加入，保留文字并归还
   await page.route("**/api/semantic-workspace/reusable-sources/resolve", async route => { requested.release(); await release.promise; return route.fulfill({ json: { items: [reusableFixtures()[2]] } }); });
   await page.goto("/data-prep");
   await page.getByLabel("任务要求", { exact: true }).fill("保留原来的文字");
-  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await openHistorySources(page);
   await page.getByRole("checkbox", { name: "选择 正式分析.md" }).check();
   await page.getByRole("button", { name: "添加 1 份资料" }).click();
   await requested.promise;
@@ -5668,7 +6754,7 @@ test("#136 历史列表可见后失权不添加，不使用缓存正文", async 
   await page.route("**/api/semantic-workspace/reusable-sources/outputs/history-output/preview?*", route => { previews++; return route.fulfill({ json: {} }); });
   await page.goto("/data-prep");
   await page.getByLabel("任务要求", { exact: true }).fill("既有任务保持");
-  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await openHistorySources(page);
   await page.getByRole("button", { name: "预览 正式分析.md" }).click();
   await expect(page.getByRole("alert")).toContainText("所选资料不可用");
   expect(previews).toBe(0);
@@ -5690,7 +6776,7 @@ test("#136 Owner切换不恢复其他人历史引用和预览", async ({ page })
   await page.route("**/api/semantic-workspace/reusable-sources/resolve", route => { restored.push(route.request().postDataJSON()); return route.fulfill({ json: { items: [] } }); });
   await page.route("**/api/semantic-workspace/reusable-sources?*", route => route.fulfill({ json: { items: [], total: 0, next_cursor: null, snapshot_token: "u2", page_complete: true } }));
   await page.reload();
-  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await openHistorySources(page);
   await expect(page.getByText("暂无已保存的历史资料；可以先添加文件或公开网页。")).toBeVisible();
   await expect(page.getByText("正式分析.md", { exact: true })).toHaveCount(0);
   expect(restored).toEqual([]);
@@ -5705,7 +6791,7 @@ test("#136 引用清单显示非活动版本与未知导出，分页变化不拼
     return route.fulfill({ json: { source_key: "delivery_output:history-output", items: changed ? [] : [{ task_id: "older-task", revision: 1, reference_kind: "revision", use_id: null, state: "retained", in_recycle_bin: true }, { task_id: null, revision: null, reference_kind: "export", use_id: "unknown-export", state: "unknown", in_recycle_bin: null }], total: changed ? 0 : 3, unknown_uses: changed ? 0 : 1, next_cursor: changed ? null : "next", snapshot_token: changed ? "r2" : "r1", page_complete: changed } });
   });
   await page.goto("/data-prep");
-  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await openHistorySources(page);
   await page.getByRole("button", { name: "预览 正式分析.md" }).click();
   await expect(page.getByText("销售金额已汇总为 200 元。")).toBeVisible();
   await page.getByRole("button", { name: "查看出处与引用" }).click();
@@ -5729,7 +6815,7 @@ test("#136 正式交付引用跨页保留已清理原任务记录，不伪造导
       : [{ task_id: "active-consumer", revision: 2, reference_kind: "revision", use_id: null, state: "retained", in_recycle_bin: false }], total: 2, unknown_uses: 0, next_cursor: second ? null : "delivery-page", snapshot_token: "refs-with-formal-consumer", page_complete: second } });
   });
   await page.goto("/data-prep");
-  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await openHistorySources(page);
   await page.getByRole("button", { name: "预览 正式分析.md", exact: true }).click();
   await expect(page.getByText("销售金额已汇总为 200 元。", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "查看出处与引用", exact: true }).click();
@@ -5780,6 +6866,7 @@ test("#136 历史选择明暗390与1440、键盘IME和取消保留完整草稿",
   await prompt.dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
   await prompt.dispatchEvent("compositionend", { data: "资料" });
   await expect(page.getByRole("dialog")).toHaveCount(0);
+  await page.locator("summary").filter({ hasText: "其他资料" }).click();
   await page.getByRole("button", { name: "历史资料", exact: true }).focus();
   await page.keyboard.press("Enter");
   const dialog = page.getByRole("dialog", { name: "从历史资料添加" });
@@ -5811,7 +6898,7 @@ test("#136 精确引用只添加一次，同摘要不同出处仍可选", async 
   await page.route("**/api/semantic-workspace/reusable-sources/resolve", route => { const ids = route.request().postDataJSON().delivery_output_ids; return route.fulfill({ json: { items: [items[2], second].filter(item => ids.includes(item.output_id)) } }); });
   await page.goto("/data-prep");
   await selectHistoricalOutput(page);
-  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await openHistorySources(page);
   await expect(page.getByRole("checkbox", { name: "选择 正式分析.md" })).toBeDisabled();
   await page.getByRole("checkbox", { name: "选择 另一出处.md" }).check();
   await page.getByRole("button", { name: "添加 1 份资料" }).click();
@@ -5830,7 +6917,7 @@ test("#136 历史网页硬缺口不会被正式结果抵消", async ({ page }) =
   await page.route("**/api/semantic-workspace/source-acquisitions/mixed-attempt-1", route => route.fulfill({ json: attempt }));
   await page.goto("/data-prep");
   await page.getByLabel("任务要求", { exact: true }).fill("必须完整覆盖原范围");
-  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await openHistorySources(page);
   await page.getByRole("checkbox", { name: "选择 历史网页组" }).check();
   await page.getByRole("checkbox", { name: "选择 正式分析.md" }).check();
   await page.getByRole("button", { name: "添加 2 份资料" }).click();
@@ -5844,7 +6931,7 @@ test("#136 同源另一标签页更新三类草稿，旧核验迟到不覆盖", 
   await page.route("**/api/semantic-workspace/reusable-sources/resolve", async route => { requested.release(); await release.promise; return route.fulfill({ json: { items: [reusableFixtures()[2]] } }); });
   await page.goto("/data-prep");
   await page.getByLabel("任务要求", { exact: true }).fill("旧选择尚未确认");
-  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await openHistorySources(page);
   await page.getByRole("checkbox", { name: "选择 正式分析.md" }).check();
   await page.getByRole("button", { name: "添加 1 份资料" }).click();
   await requested.promise;
@@ -5887,7 +6974,7 @@ test("#136 正式结果模式确定拒绝保留集合与模型，不自动换执
 test("#136 添加核验在途不能切换预览操作，取消后迟到不添加", async ({ page }) => {
   const items = await mockReusable(page);
   await page.goto("/data-prep");
-  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await openHistorySources(page);
   await page.getByLabel("选择 正式分析.md", { exact: true }).check();
   await page.getByRole("button", { name: "预览 正式分析.md", exact: true }).click();
   await expect(page.getByText("销售金额已汇总为 200 元。", { exact: true })).toBeVisible();
@@ -5905,7 +6992,7 @@ test("#136 添加核验在途不能切换预览操作，取消后迟到不添加
   await page.getByRole("button", { name: "取消添加", exact: true }).click();
   release.release();
   await expect(page.getByRole("button", { name: "历史资料", exact: true })).toBeFocused();
-  await page.getByRole("button", { name: "历史资料", exact: true }).click();
+  await openHistorySources(page);
   await expect(page.getByLabel("选择 正式分析.md", { exact: true })).toBeEnabled();
   await expect(page.getByLabel("选择 正式分析.md", { exact: true })).not.toBeChecked();
   await page.getByRole("button", { name: "取消添加", exact: true }).click();

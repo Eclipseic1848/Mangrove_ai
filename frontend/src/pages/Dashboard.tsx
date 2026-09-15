@@ -94,7 +94,7 @@ export function Dashboard() {
 
   // to=跳转路由；anchor=页内锚点（采集器无独立页，滚动到下方"采集引擎"区块）
   const stats = [
-    { label: "我的会话", value: data?.conversations ?? "—", icon: MessagesSquare, to: "/chat" },
+    { label: "我的会话", value: data?.conversations ?? "—", icon: MessagesSquare, to: "/data-prep" },
     { label: "进行中定时任务", value: data?.scheduler.active_count ?? "—", icon: CalendarClock, to: "/tasks" },
     { label: "可用采集器", value: data ? data.collectors.filter((c) => c.available).length : "—", icon: Boxes, anchor: "collectors-section" },
     { label: "分析模板", value: data?.templates.total ?? "—", icon: Library, to: "/templates" },
@@ -122,9 +122,6 @@ export function Dashboard() {
           <p className="text-sm text-muted-foreground">智能体能力与运行状态一览</p>
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <Button variant="outline" onClick={() => navigate("/chat")}>
-            发起采集对话
-          </Button>
           <Button onClick={() => navigate("/data-prep")} className="gap-1.5">
             创建数据任务 <ArrowRight className="h-4 w-4" />
           </Button>

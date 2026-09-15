@@ -1529,6 +1529,28 @@ def test_external_provider_timeout_requires_user_retry_decision(
     assert task["failure"]["attempt_count"] == 1
 
 
+@pytest.mark.parametrize("explicit", [False, True])
+def test_local_default_is_applied_without_overwriting_explicit_model(tmp_path, monkeypatch, explicit):
+    from src.llm import provider
+
+    client = _client(tmp_path, monkeypatch, role="admin", routing_mode=RolloutMode.VNEXT_DEFAULT)
+    # 本例只验证创建时的模型冻结，隔离后台执行与关闭等待。
+    monkeypatch.setattr(runtime_mod._manager, "enqueue", lambda *_args: None)
+    document, _ = _uploads(tmp_path)
+    broker = ConnectionBroker(repository=ModelConnectionRepository(settings.webui_db_path), vault=FernetCredentialVault.generate())
+    monkeypatch.setattr(provider, "list_models", lambda: {"local": ["local-default", "local-explicit"]})
+    broker.set_usage_preference("user-a", "__local__", "local-default", allow_local=True)
+    monkeypatch.setattr(broker_mod, "_default_broker", broker)
+    body = {"objective_text": "提取附件并输出 JSON", "upload_ids": [document], "output_formats": ["json"], "runtime_version": "pi"}
+    if explicit:
+        body.update(provider="local", model="local-explicit")
+    with client:
+        response = client.post("/api/semantic-workspace/tasks", json=body)
+        assert response.status_code == 202, response.text
+        assert response.json()["model"] == ("local-explicit" if explicit else "local-default")
+        assert response.json().get("model_connection_id") is None
+
+
 def test_pi_local_gray_entry_requires_admin(tmp_path, monkeypatch) -> None:
     client = _client(
         tmp_path,

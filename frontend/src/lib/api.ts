@@ -245,9 +245,11 @@ export const api = {
     path: string,
     body?: unknown,
     headers: Record<string, string> = {},
+    signal?: AbortSignal,
   ) =>
     authenticatedFetch(path, {
       method: "POST",
+      signal,
       headers: authHeaders(headers),
       body: body ? JSON.stringify(body) : undefined,
     }).then(handle),
@@ -283,7 +285,9 @@ export async function downloadFile(url: string, filename: string, signal?: Abort
 }
 
 // ---------- SSE 聊天流 ----------
+export type ChatProgress = { node: string; label: string; status: "started" | "completed" | "waiting" | "warning" | "failed"; summary: string; sequence: number; sources?: Array<{ url: string; title: string; status: "requested" | "received" }> };
 export interface ChatEvents {
+  onProgress?: (d: ChatProgress) => void;
   onMeta?: (d: { conv_id: string }) => void;
   onNode?: (d: { node: string; label: string; view?: any }) => void;
   onResult?: (d: any) => void;
@@ -298,6 +302,7 @@ export interface ChatEvents {
 export function streamChat(
   body: { conv_id?: string | null; content: string; provider?: string; model?: string; mode?: string },
   events: ChatEvents,
+  response?: Response,
 ): () => void {
   const controller = new AbortController();
   const generation = getAuthGeneration();
@@ -335,6 +340,7 @@ export function streamChat(
       }
       else if (event === "meta") events.onMeta?.(parsed);
       else if (event === "node") events.onNode?.(parsed);
+      else if (event === "progress") events.onProgress?.(parsed);
       else if (event === "result") events.onResult?.(parsed);
       else if (event === "error") {
         finish({
@@ -346,7 +352,7 @@ export function streamChat(
     };
 
     try {
-      const res = await authenticatedFetch("/api/chat/stream", {
+      const res = response ?? await authenticatedFetch("/api/chat/stream", {
         method: "POST",
         headers: authHeaders({ Accept: "text/event-stream" }),
         body: JSON.stringify(body),

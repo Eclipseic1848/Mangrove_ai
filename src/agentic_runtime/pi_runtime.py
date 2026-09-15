@@ -20,6 +20,7 @@ import uuid
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from src.config.settings import settings
+from src.api.execution import execution_to_thread
 from src.services.upload_store import IMAGE_EXTENSIONS
 from src.candidate_verification import CandidateVerificationService
 from src.capability_catalog.models import PublicCapabilityDescriptor
@@ -35,6 +36,7 @@ from src.model_connections.catalog import runtime_context_window
 CapabilityMountResolverFn = Callable[[str, str, int], tuple[Path, ...]]
 
 from .candidate_qa import inspect_candidates
+from .verification_progress import VerificationProgress
 from .candidate_verifier import (
     BrokerSemanticJudge,
     CandidateVerifier,
@@ -100,6 +102,10 @@ _CAPABILITY_KIND_LABELS = {
 
 class PiRuntimeError(RuntimeError):
     """Pi Runtime 无法形成候选结果。"""
+
+
+class PiVerificationStalled(PiRuntimeError):
+    """证据补救无进展，保留初稿并等待用户决定。"""
 
 
 class _MainCreateRejected(PiRuntimeError):
@@ -1635,6 +1641,30 @@ class PiRuntime:
         validated_candidates = None
         validated_verification = None
         validated_coverage = None
+        candidate_progress = VerificationProgress()
+        draft_file_state = None
+
+        async def capture_draft() -> None:
+            nonlocal draft_file_state
+            from .draft_snapshot import freeze_draft
+
+            state = tuple(sorted((p.name, p.stat().st_size, p.stat().st_mtime_ns)
+                                 for p in output_dir.iterdir() if p.is_file() and p.name != "candidate-manifest.json"))
+            if not state or state == draft_file_state:
+                return
+            draft_file_state = state
+            try:
+                draft = await execution_to_thread(
+                    freeze_draft, root, owner_id=request.user_id, task_id=request.task_id,
+                    revision=request.revision, run_id=run_id, formats=request.requested_output_formats,
+                )
+            except (ValueError, OSError):
+                # 工具刚写完的文件可能尚未组成完整结果；不得登记半份初稿。
+                return
+            await on_event(RuntimeEvent(
+                event_type="draft.ready", summary="初稿已生成，可查看；后台继续验证",
+                details={"draft_id": draft["draft_id"], "formal_delivery": False},
+            ))
 
         async def verify_candidates(
             current_candidates: tuple[CandidateArtifact, ...],
@@ -1720,6 +1750,11 @@ class PiRuntime:
                 for check in current_verification.checks
                 if not check.passed
             ]
+            if not candidate_progress.observe(gaps=failed_summaries or ["验证未通过"], evidence={
+                "passed_checks": [check.code for check in current_verification.checks if check.passed],
+                "evidence_count": current_verification.evidence_count,
+            }):
+                raise PiVerificationStalled("连续两轮验证没有进展，已停止重复补救；请查看初稿及待核验事项")
             return (
                 "独立验证未通过："
                 + "；".join(failed_summaries[:3])
@@ -1735,6 +1770,7 @@ class PiRuntime:
                 on_event=on_event,
                 settled_check=check_settled_output,
                 initial_prompt=initial_prompt,
+                capture_draft=capture_draft,
             )
             clarification = self._document_clarification(request)
             if clarification is not None:
@@ -2198,7 +2234,11 @@ Mangrove 只会在不挂载用户来源的独立依赖获取阶段处理已批�
 先调用 inspect_source 观察结构，
 再调用 freeze_coverage 冻结你对范围、结果数量、完整性和停止条件的理解。之后按目标自主
 选择 discover_content 和 read_evidence；发现结果只能用于召回，最终结果必须来自
-read_evidence 返回的权威证据。你认为完成时必须调用 propose_completion；若完成门返回
+read_evidence 返回的权威证据。
+对于第 N 份对象，默认发现只返回一小批页面；按 next_unit_ids 继续，不要默认扫描全文。
+第 N 份不等于第 N 页，必须证明前序对象和跨页边界。复用已返回的证据引用，
+只补读缺失页面；不要通过 sleep 等待服务恢复，也不要换 needs 名称重复请求相同读取。
+你认为完成时必须调用 propose_completion；若完成门返回
 replan_required，应根据结构化缺口继续读取或修正结果，不能自行宣称完成。
 propose_completion 的 evidence_refs、boundary_evidence_refs 和
 required_field_evidence 都只能填写 read_evidence 返回的 evidence_ref，不能填写字段值或
@@ -2288,6 +2328,7 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
         on_event: EventSink,
         settled_check: SettledCheck,
         initial_prompt: str | None = None,
+        capture_draft: Callable[[], Awaitable[None]] | None = None,
     ) -> str:
         directory = self._lifecycle_dir((request.user_id, request.task_id, request.revision))
         journal = directory / "resources.json"
@@ -2345,6 +2386,8 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
         trace_path = trace_dir / "rpc-events.jsonl"
         settled = False
         repair_attempts = 0
+        document_failures = 0
+        verification_progress = VerificationProgress()
         final_text: list[str] = []
         try:
             async with asyncio.timeout(self.timeout_seconds):
@@ -2370,6 +2413,8 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
                             + "\n"
                         )
                         trace.flush()
+                        if event.get("type") == "tool_execution_end" and capture_draft is not None:
+                            await capture_draft()
                         message = event.get("message")
                         if (
                             isinstance(message, dict)
@@ -2418,6 +2463,29 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
                         safe_event = self._translate_event(event)
                         if safe_event is not None:
                             await on_event(safe_event)
+                            if safe_event.details.get("tool") == "propose_completion" and safe_event.event_type == "tool.failed":
+                                result = event.get("result")
+                                details = result.get("details") or {} if isinstance(result, dict) else {}
+                                decision = details.get("decision") or {}
+                                coverage = details.get("coverage") or {}
+                                evidence = {key: coverage.get(key) for key in (
+                                    "observed_unit_ids", "authoritatively_read_unit_ids", "low_quality_units",
+                                    "unknown_units", "evidence_bindings", "parser_versions",
+                                )}
+                                if not verification_progress.observe(
+                                    gaps=decision.get("gaps") or ["缺少明确的通过结论"], evidence=evidence,
+                                ):
+                                    raise PiVerificationStalled("连续两轮验证没有进展，已停止重复补救；请查看初稿及待核验事项")
+                            if safe_event.details.get("tool") in {
+                                "inspect_source", "discover_content", "read_evidence",
+                            } and safe_event.event_type in {"tool.completed", "tool.failed"}:
+                                # Shell 成功不代表文档服务恢复，不能重置连续失败预算。
+                                document_failures = document_failures + 1 if safe_event.event_type == "tool.failed" else 0
+                                if document_failures >= 3:
+                                    raise PiRuntimeError(
+                                        "文档读取连续失败 3 次，已停止无效重试；"
+                                        "请检查来源或解析服务后重新执行"
+                                    )
                         delta = event.get("assistantMessageEvent") or {}
                         if delta.get("type") == "text_delta":
                             final_text.append(str(delta.get("delta") or ""))
@@ -2558,6 +2626,15 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
         if event_type == "tool_execution_end":
             tool_name = str(event.get("toolName") or "tool")
             failed = bool(event.get("isError"))
+            result = event.get("result")
+            details = result.get("details") if isinstance(result, dict) else None
+            if tool_name == "discover_content" and isinstance(details, dict):
+                # 逐页解析失败可能以正常工具响应返回；整批无有效发现仍须计入失败预算。
+                failed = failed or bool(details.get("unknown_units") and not details.get("observed_unit_ids"))
+            if tool_name == "propose_completion":
+                decision = details.get("decision") if isinstance(details, dict) else None
+                # 工具成功返回不等于覆盖验证通过；缺少明确通过结论也不能显示完成。
+                failed = failed or not (isinstance(decision, dict) and decision.get("passed") is True)
             return RuntimeEvent(
                 event_type=(
                     "tool.failed" if failed else "tool.completed"

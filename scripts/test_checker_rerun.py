@@ -67,7 +67,7 @@ def test_checker_no_second_rerun():
 
 def test_checker_pass_no_rerun():
     """达标：不下发反馈。"""
-    payload = {"score": 90, "issues": [], "summary": "很好"}
+    payload = {"score": 90, "passed": True, "issues": [], "summary": "很好"}
     with patch("src.conductor.nodes.checker.achat", new=_fake_achat(payload)):
         out = _run(checker_node(_checker_state()))
     assert out["quality"]["passed"] is True
@@ -153,7 +153,7 @@ def test_looks_like_collection_failure_false_when_healthy():
 
 def test_checker_skips_distillation_when_data_count_low():
     """走兜底且质检通过，但采集数据条数不足 → 不应调用 distill_template，不产生 template_saved。"""
-    payload = {"score": 90, "issues": [], "summary": "很好"}
+    payload = {"score": 90, "passed": True, "issues": [], "summary": "很好"}
     old = settings.template_min_data_count
     settings.template_min_data_count = 3
     try:
@@ -170,7 +170,7 @@ def test_checker_skips_distillation_when_data_count_low():
 
 def test_checker_still_distills_healthy_fallback():
     """走兜底且质检通过，数据量充足、报告无失败叙事 → 仍应正常沉淀（回归锁定，不被新判定误拦）。"""
-    payload = {"score": 90, "issues": [], "summary": "很好"}
+    payload = {"score": 90, "passed": True, "issues": [], "summary": "很好"}
     dataset = [{"title": "a"}, {"title": "b"}, {"title": "c"}]
 
     async def fake_distill(*a, **k):
@@ -194,7 +194,7 @@ def test_checker_still_distills_healthy_fallback():
 
 def test_checker_no_template_saved_when_curator_discards():
     """Curator 判定丢弃（save_template 返回 None）→ 不产生 template_saved。"""
-    payload = {"score": 90, "issues": [], "summary": "很好"}
+    payload = {"score": 90, "passed": True, "issues": [], "summary": "很好"}
     dataset = [{"title": "a"}, {"title": "b"}, {"title": "c"}]
 
     async def fake_distill(*a, **k):
@@ -219,7 +219,7 @@ def test_checker_no_template_saved_when_curator_discards():
 
 def test_checker_records_lesson_on_collection_failure():
     """判定为采集失败（数据条数低于阈值）→ 应调用 record_failure，不受 passed/analysis_source 影响。"""
-    payload = {"score": 90, "issues": [], "summary": "很好"}
+    payload = {"score": 90, "passed": True, "issues": [], "summary": "很好"}
     old = settings.template_min_data_count
     settings.template_min_data_count = 3
     mock_record = AsyncMock()
@@ -239,7 +239,7 @@ def test_checker_records_lesson_on_collection_failure():
 
 def test_checker_no_lesson_when_healthy():
     """数据充足、无失败叙事 → 不应调用 record_failure。"""
-    payload = {"score": 90, "issues": [], "summary": "很好"}
+    payload = {"score": 90, "passed": True, "issues": [], "summary": "很好"}
     dataset = [{"title": "a"}, {"title": "b"}, {"title": "c"}]
     old = settings.template_min_data_count
     settings.template_min_data_count = 3
@@ -255,7 +255,7 @@ def test_checker_no_lesson_when_healthy():
 
 def test_checker_lesson_disabled_by_setting():
     """lesson_learning_enabled=False → 即使判定失败也不调用 record_failure。"""
-    payload = {"score": 90, "issues": [], "summary": "很好"}
+    payload = {"score": 90, "passed": True, "issues": [], "summary": "很好"}
     old_count = settings.template_min_data_count
     old_enabled = settings.lesson_learning_enabled
     settings.template_min_data_count = 3

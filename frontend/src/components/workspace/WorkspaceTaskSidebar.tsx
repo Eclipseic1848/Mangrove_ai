@@ -94,7 +94,7 @@ export function WorkspaceTaskSidebar({
   onNew,
   onToggleRecycleBin,
 }: {
-  tasks: WorkspaceTask[];
+  tasks: Pick<WorkspaceTask, "task_id" | "title" | "status" | "updated_at">[];
   activeTaskId: string | null;
   filter: "all" | "active" | "needs_input" | "completed";
   recycleBin: boolean;
@@ -122,7 +122,7 @@ export function WorkspaceTaskSidebar({
   ];
 
   return (
-    <aside className="flex h-full min-h-0 w-[280px] shrink-0 flex-col border-r bg-muted/20">
+    <aside aria-label="任务列表" className="flex h-full min-h-0 w-[280px] shrink-0 flex-col border-r bg-muted/20">
       <div className="p-3">
         <button
           type="button"

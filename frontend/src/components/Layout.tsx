@@ -1,6 +1,5 @@
-import * as Dialog from "@radix-ui/react-dialog";
 import { useEffect, useState } from "react";
-import { LayoutDashboard, MessagesSquare, CalendarClock, Moon, Sun, LogOut, Library, Brain, Settings, Users, BarChart3, Database, Menu, X } from "lucide-react";
+import { LayoutDashboard, CalendarClock, Moon, Sun, LogOut, Library, Brain, Settings, Users, BarChart3, Database, Menu, X, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { useAuth, isAdminish } from "@/lib/auth";
@@ -9,7 +8,6 @@ import { cn } from "@/lib/utils";
 
 const NAV = [
   { to: "/", label: "概览", icon: LayoutDashboard, end: true },
-  { to: "/chat", label: "旧版对话", icon: MessagesSquare, end: false },
   { to: "/data-prep", label: "任务工作台", icon: Database, end: false },
   { to: "/tasks", label: "自动化任务", icon: CalendarClock, end: false },
   { to: "/templates", label: "模板库", icon: Library, end: false },
@@ -29,8 +27,8 @@ export function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
-  const taskWorkspace = location.pathname === "/data-prep" && new URLSearchParams(location.search).get("legacy") !== "1";
   const compactDataPrep = location.pathname === "/data-prep" || location.pathname === "/settings";
 
   useEffect(() => {
@@ -40,25 +38,38 @@ export function Layout() {
   useEffect(() => {
     if (!mobileNavOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setMobileNavOpen(false);
+      if (event.key === "Escape") {
+        setMobileNavOpen(false);
+        requestAnimationFrame(() => document.querySelector<HTMLButtonElement>('[aria-label="打开导航"]')?.focus());
+      }
     };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [mobileNavOpen]);
 
   const navigation = (
-      <aside className={cn(
+      <aside aria-label="全局导航" className={cn(
         "flex w-60 shrink-0 flex-col border-r border-border bg-sidebar text-sidebar-foreground",
-        compactDataPrep && !mobileNavOpen && (taskWorkspace ? "hidden" : "max-md:hidden"),
-        compactDataPrep && mobileNavOpen && (taskWorkspace ? "fixed inset-y-0 left-0 z-50" : "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50"),
+        sidebarCollapsed && "md:w-16",
+        compactDataPrep && !mobileNavOpen && "max-md:hidden",
+        compactDataPrep && mobileNavOpen && "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50",
       )}>
-        {taskWorkspace && <Dialog.Title className="sr-only">全局导航</Dialog.Title>}
-        <div className="flex items-center gap-2.5 px-5 py-5">
-          <img src="/logo.svg" alt="howso@Mangrove" className="h-8 w-8" />
-          <div className="leading-tight">
-            <div className="text-[15px] font-semibold text-foreground">howso@Mangrove</div>
+        <div className="flex h-20 shrink-0 items-center gap-2 px-3">
+          <img src="/logo.svg" alt="howso@Mangrove" className={cn("h-8 w-8 shrink-0", sidebarCollapsed && "md:hidden")} />
+          <div className={cn("min-w-0 flex-1 leading-tight", sidebarCollapsed && "md:hidden")}>
+            <div className="truncate text-[13px] font-semibold text-foreground">howso@Mangrove</div>
             <div className="text-[11px] text-muted-foreground">数据治理智能体</div>
           </div>
+          <button
+            type="button"
+            aria-label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+            title={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"}
+            aria-expanded={!sidebarCollapsed}
+            onClick={() => setSidebarCollapsed(collapsed => !collapsed)}
+            className="mx-auto hidden h-8 w-8 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring md:flex"
+          >
+            {sidebarCollapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
+          </button>
           {compactDataPrep && mobileNavOpen && (
             <button
               type="button"
@@ -77,18 +88,20 @@ export function Layout() {
               key={item.to}
               to={item.to}
               end={item.end}
+              title={sidebarCollapsed ? item.label : undefined}
               onClick={() => setMobileNavOpen(false)}
               className={({ isActive }) =>
                 cn(
                   "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                  sidebarCollapsed && "md:justify-center md:px-0",
                   isActive
                     ? "bg-primary/12 text-teal-700 dark:text-teal-300"
                     : "text-sidebar-foreground hover:bg-accent hover:text-accent-foreground",
                 )
               }
             >
-              <item.icon className="h-[18px] w-[18px]" />
-              {item.label}
+              <item.icon className="h-[18px] w-[18px] shrink-0" />
+              <span className={cn(sidebarCollapsed && "md:sr-only")}>{item.label}</span>
             </NavLink>
           ))}
 
@@ -98,18 +111,20 @@ export function Layout() {
                 key={item.to}
                 to={item.to}
                 end={item.end}
+                title={sidebarCollapsed ? item.label : undefined}
                 onClick={() => setMobileNavOpen(false)}
                 className={({ isActive }) =>
                   cn(
                     "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
+                    sidebarCollapsed && "md:justify-center md:px-0",
                     isActive
                       ? "bg-primary/12 text-teal-700 dark:text-teal-300"
                       : "text-sidebar-foreground hover:bg-accent hover:text-accent-foreground",
                   )
                 }
               >
-                <item.icon className="h-[18px] w-[18px]" />
-                {item.label}
+                <item.icon className="h-[18px] w-[18px] shrink-0" />
+                <span className={cn(sidebarCollapsed && "md:sr-only")}>{item.label}</span>
               </NavLink>
             ))}
         </nav>
@@ -118,16 +133,17 @@ export function Layout() {
         <div className="border-t border-border p-3">
           <button
             onClick={toggle}
-            className="mb-1 flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-sidebar-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+            title={theme === "dark" ? "浅色主题" : "深色主题"}
+            className={cn("mb-1 flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm text-sidebar-foreground transition-colors hover:bg-accent hover:text-accent-foreground", sidebarCollapsed && "md:justify-center md:px-0")}
           >
             {theme === "dark" ? <Sun className="h-[18px] w-[18px]" /> : <Moon className="h-[18px] w-[18px]" />}
-            {theme === "dark" ? "浅色主题" : "深色主题"}
+            <span className={cn(sidebarCollapsed && "md:sr-only")}>{theme === "dark" ? "浅色主题" : "深色主题"}</span>
           </button>
-          <div className="flex items-center gap-2.5 rounded-md px-3 py-2">
+          <div className={cn("flex items-center gap-2.5 rounded-md px-3 py-2", sidebarCollapsed && "md:flex-col md:px-0")} title={sidebarCollapsed ? `${user?.display_name} (@${user?.username})` : undefined}>
             <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-primary/15 text-sm font-medium text-primary">
               {(user?.display_name || "U").slice(0, 1).toUpperCase()}
             </div>
-            <div className="min-w-0 flex-1">
+            <div className={cn("min-w-0 flex-1", sidebarCollapsed && "md:sr-only")}>
               <div className="truncate text-sm font-medium text-foreground">{user?.display_name}</div>
               <div className="truncate text-[11px] text-muted-foreground">@{user?.username}</div>
             </div>
@@ -150,7 +166,7 @@ export function Layout() {
             </button>
           </div>
           {/* 出品方归属（LOGO 按主题变色：浅色藏青 / 深色白） */}
-          <div className="mt-1 flex items-center justify-center gap-1.5 px-3 text-[10px] text-muted-foreground">
+          <div className={cn("mt-1 flex items-center justify-center gap-1.5 px-3 text-[10px] text-muted-foreground", sidebarCollapsed && "md:hidden")}>
             <span>出品</span>
             <img src="/howso-logo-mark.png" alt="华苏科技" className="h-3.5 w-auto dark:brightness-0 dark:invert" />
             <span>南京华苏科技</span>
@@ -161,31 +177,21 @@ export function Layout() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background">
-      {!taskWorkspace && compactDataPrep && mobileNavOpen && (
+      {compactDataPrep && mobileNavOpen && (
         <button
           type="button"
           aria-label="关闭导航背景"
           onClick={() => setMobileNavOpen(false)}
-          className={cn("fixed inset-0 z-40 bg-foreground/20", !taskWorkspace && "md:hidden")}
+          className="fixed inset-0 z-40 bg-foreground/20 md:hidden"
         />
       )}
       {/* 左侧导航 */}
-      {taskWorkspace ? (
-        <Dialog.Root open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
-          <Dialog.Portal>
-            <Dialog.Overlay className="fixed inset-0 z-40 bg-foreground/20" />
-            <Dialog.Content asChild aria-label="全局导航" aria-describedby={undefined} onCloseAutoFocus={event => {
-              event.preventDefault();
-              document.querySelector<HTMLButtonElement>('[aria-label="打开导航"]')?.focus();
-            }}>{navigation}</Dialog.Content>
-          </Dialog.Portal>
-        </Dialog.Root>
-      ) : navigation}
+      {navigation}
 
       {/* 主内容 */}
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
         {compactDataPrep && (
-          <div className={cn("h-11 shrink-0 items-center justify-between border-b bg-background px-3", taskWorkspace ? "flex" : "hidden max-md:flex")}>
+          <div className="hidden h-11 shrink-0 items-center justify-between border-b bg-background px-3 max-md:flex">
             <button
               type="button"
               aria-label={mobileNavOpen ? "关闭导航" : "打开导航"}

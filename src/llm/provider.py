@@ -33,6 +33,14 @@ from src.api.execution import execution_http_checkpoint, execution_http_checkpoi
 # 请求级 LLM token 用量累积器：chat.py pipeline 进入时 set 一个 dict，
 # achat/chat 每次调用把 resp.usage_metadata 累加进去；未 set 时零开销跳过。
 _usage_ctx: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("llm_usage", default=None)
+_bound_chat: contextvars.ContextVar[Any] = contextvars.ContextVar("bound_model_chat", default=None)
+_bound_chat_failure: contextvars.ContextVar[Optional[list[str]]] = contextvars.ContextVar("bound_model_failure", default=None)
+
+
+def verify_bound_model() -> None:
+    failure = _bound_chat_failure.get()
+    if failure:
+        raise ValueError(failure[0])
 
 
 def _collect_usage(resp: Any) -> None:
@@ -41,39 +49,22 @@ def _collect_usage(resp: Any) -> None:
     if sink is None:
         return
     um = getattr(resp, "usage_metadata", None) or {}
-    sink["prompt_tokens"] += int(um.get("input_tokens", 0))
-    sink["completion_tokens"] += int(um.get("output_tokens", 0))
-    sink["total_tokens"] += int(um.get("total_tokens", 0))
+    for source, target in (("input_tokens", "prompt_tokens"), ("output_tokens", "completion_tokens"), ("total_tokens", "total_tokens")):
+        value = um.get(source)
+        if type(value) is int and value >= 0:
+            sink[target] += value
+        else:
+            # 缺失统计不等于零消耗；部分调用缺失时只能展示已知用量。
+            sink["incomplete"] = True
+            missing = sink.setdefault("missing_fields", [])
+            if target not in missing:
+                missing.append(target)
     sink["calls"] += 1
 
 logger = logging.getLogger(__name__)
 
 # 统一的消息类型：既接受 langchain 消息，也接受 {"role","content"} 字典
 MessageLike = Union[Dict[str, str], Any]
-
-# 各供应商常见可选模型（同一 Key 即可调用旗下模型）。
-# .env 中配置的默认模型会被自动并入并置顶，因此这里只列"常见补充项"。
-# 说明：qwen 为页面展示名到 API 模型 id 的映射（Qwen3.7-千问=qwen3.7-plus 等），
-# 若某模型 id 与你账号实际不符，调用会报错，按账号实际 id 调整即可。
-COMMON_MODELS: Dict[str, List[str]] = {
-    "deepseek": ["deepseek-v4-pro", "deepseek-v4-flash"],
-    "qwen": [
-        "qwen3.7-plus",        # Qwen3.7-千问（综合助手）
-        "qwen3.7-max",         # Qwen3.7-Max（最新旗舰，长代码/复杂任务）
-        "qwen3.5-flash",       # Qwen3.5-Flash（简单任务，响应快）
-        "qwen3-max",           # Qwen3-Max（日常通用）
-        "qwen3-max-thinking",  # Qwen3-Max-Thinking（多步推理）
-    ],
-    "local": [],  # 本地模型默认以 .env(LLM_MODEL_NAME) 为准，额外本地端点见 LOCAL_MODELS
-}
-
-# 模块加载时快照 .env 基线模型名（早于 apply_global_overrides 的 setattr），
-# 确保这些模型始终出现在前端下拉列表中，不会因运行时覆盖而消失。
-_ENV_BASELINE_MODELS: Dict[str, str] = {
-    "deepseek": settings.deepseek_model,
-    "qwen": settings.qwen_model,
-    "local": settings.llm_model_name,
-}
 
 # 额外的本地模型端点：{模型名: base_url}。
 # .env 的 LLM_MODEL_NAME@LLM_BASE_URL 始终作为默认本地模型并入；这里登记其它独立端点的本地模型。
@@ -277,21 +268,17 @@ class MultiModelProvider:
     def list_models(self) -> Dict[str, List[str]]:
         """返回各供应商可选模型：{provider: [models]}。
 
-        当前默认模型置顶，再并入 .env 基线模型 + COMMON_MODELS + 额外本地端点（去重）。
-        仅含已配置可用的供应商；若没有任何可用供应商，则返回全部以便用户先看到选项。
+        只返回已配置供应商的实际模型与额外本地端点，不将预设目录冒充可用配置。
         """
-        names = self.available_providers() or list(self._profiles)
+        names = self.available_providers()
         out: Dict[str, List[str]] = {}
         for name in names:
             profile = self._profiles.get(name)
             if profile is None:
                 continue
-            extra = list(COMMON_MODELS.get(name, []))
-            if name == "local":
-                extra += list(LOCAL_MODELS.keys())  # 额外独立端点的本地模型
+            extra = list(LOCAL_MODELS) if name == "local" else []
             models: List[str] = []
-            # 顺序：当前默认 → .env 基线默认（即使被覆盖也不丢失）→ 额外模型
-            for m in [profile.model, _ENV_BASELINE_MODELS.get(name, ""), *extra]:
+            for m in [profile.model, *extra]:
                 if m and m not in models:
                     models.append(m)
             out[name] = models
@@ -309,6 +296,8 @@ class MultiModelProvider:
 
         model 为 None 时用该供应商在 .env 的默认模型；传入则覆盖（同一 Key 调用旗下其他模型）。
         """
+        if _bound_chat.get() is not None:
+            raise ValueError("当前任务必须通过已绑定连接的异步文本接口调用模型")
         connection = self.resolve_model(provider, model=model)
         name = connection.provider
         requested = connection.requested_model
@@ -425,6 +414,10 @@ class MultiModelProvider:
         max_tokens: Optional[int] = None,
     ) -> str:
         """异步对话，返回纯文本内容。"""
+        bound = _bound_chat.get()
+        if bound is not None:
+            # 工作台已冻结连接时，全部编排节点沿用该连接，禁止回退到全局模型。
+            return await bound(_inject_system_context(messages))
         chat_model = self.get_chat_model(
             provider, model=model, temperature=temperature, max_tokens=max_tokens
         )

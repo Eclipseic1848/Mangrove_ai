@@ -67,6 +67,13 @@ export default function mangroveContextGate(pi: ExtensionAPI) {
     if (event.toolName !== "bash") return;
     const input = event.input as { command?: unknown; timeout?: unknown };
     const command = typeof input.command === "string" ? input.command : "";
+    // ponytail: 拦截显式等待指令，不作为 Shell 安全解析器；总预算仍由宿主强制执行。
+    if (/\bsleep\s+(?:\d|\$)|\b(?:time|asyncio)\.sleep\s*\(/.test(command)) {
+      return {
+        block: true,
+        reason: "不要用 sleep 等待文档服务恢复。请依据工具错误调整步骤；持续失败时停止并说明缺口。",
+      };
+    }
     if (readsRuntimeSecret(command)) {
       return {
         block: true,
@@ -83,7 +90,8 @@ export default function mangroveContextGate(pi: ExtensionAPI) {
     if (
       typeof input.timeout !== "number" ||
       !Number.isFinite(input.timeout) ||
-      input.timeout <= 0
+      input.timeout <= 0 ||
+      input.timeout > DEFAULT_BASH_TIMEOUT_SECONDS
     ) {
       // Pi 的 bash 默认没有超时；单个命令不能吞掉整个任务级硬预算。
       input.timeout = DEFAULT_BASH_TIMEOUT_SECONDS;

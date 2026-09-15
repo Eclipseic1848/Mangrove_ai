@@ -236,9 +236,17 @@ class DeliveryPublishingRepository:
             if intent is None:
                 raise KeyError('发布意图不存在')
             self._require_publish(conn, command, intent)
-            if command.verification_attempt_id is not None:
+            if command.owner_acceptance is not None:
+                acceptance_revision = conn.execute(
+                    "SELECT source_contract_json FROM semantic_workspace_revisions WHERE user_id=? AND task_id=? AND revision=?",
+                    (command.owner_id, command.task_id, command.task_revision),
+                ).fetchone()
+                frozen = json.loads(acceptance_revision[0] or "{}") if acceptance_revision else {}
+                if frozen.get("owner_acceptance") != command.owner_acceptance.model_dump(mode="json"):
+                    raise ValueError("用户接受记录与冻结修订不一致")
+            if command.verification_attempt_id is not None or command.owner_acceptance is not None:
                 task = conn.execute(
-                    "SELECT active_revision, cancel_requested "
+                    "SELECT active_revision, cancel_requested, cancel_generation, deleted_at "
                     "FROM semantic_workspace_tasks "
                     "WHERE user_id=? AND task_id=?",
                     (command.owner_id, command.task_id),
@@ -250,6 +258,10 @@ class DeliveryPublishingRepository:
                     raise ValueError("活动版本已变化")
                 if bool(task["cancel_requested"]):
                     raise ValueError("任务已取消")
+                if command.owner_acceptance is not None and (
+                    task["deleted_at"] or task["cancel_generation"] != command.owner_acceptance.cancel_generation
+                ):
+                    raise ValueError("任务已取消或删除")
 
                 routing_table = conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' "
@@ -263,6 +275,7 @@ class DeliveryPublishingRepository:
                     if routing is None or bool(routing["p0_blocked"]):
                         raise ValueError("P0 发布门已阻断")
 
+            if command.verification_attempt_id is not None:
                 attempt = conn.execute(
                     "SELECT status, report_hash, candidate_set_hash "
                     "FROM candidate_verification_attempts "

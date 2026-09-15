@@ -81,6 +81,7 @@ def _resolve_model(provider: Optional[str], model: Optional[str]) -> tuple[Optio
 def _build_result(
     user_id: str, conv_id: str, state: Dict[str, Any], reply: str,
     provider: Optional[str], model: Optional[str], user_input: str,
+    *, model_connection_id: Optional[str] = None, model_connection_version: Optional[int] = None,
 ) -> Dict[str, Any]:
     """把最终 state 整理成前端可直接渲染的结构，并把 HITL 待确认动作暂存到服务端。"""
     task_id = state.get("task_id") or ""
@@ -131,6 +132,7 @@ def _build_result(
             "data_type": spec.data_type.value if spec else "generic",
             "keywords": list(getattr(spec, "keywords", []) or []) if spec else [],
             "analysis": analysis, "provider": provider, "model": model,
+            "model_connection_id": model_connection_id, "model_connection_version": model_connection_version,
         }
         actions.append("template")
     if pending:
@@ -217,26 +219,48 @@ def _build_data_prep_result(
 async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution_user)):
     store = get_store()
     user_id = user["user_id"]
+    binding = None
+    if body.model_connection_id:
+        from src.model_connections import get_default_broker, GrantError
+        if not body.external_api_confirmed:
+            raise HTTPException(422, "请确认使用所选模型处理本次任务")
+        if not body.model:
+            raise HTTPException(422, "请选择本次任务使用的模型")
+        try:
+            broker = get_default_broker()
+            binding = broker.freeze_connection(user_id, body.model_connection_id)
+            if body.model_connection_version and body.model_connection_version != binding.connection_version:
+                raise HTTPException(409, "模型连接已变化，请重新选择后发送")
+        except GrantError:
+            raise HTTPException(404, "模型连接不存在或无权访问") from None
 
     # 解析/新建会话（校验归属）
     conv_id = body.conv_id
     if conv_id:
         conv = store.get_conversation(conv_id)
         if not conv or conv["user_id"] != user_id:
-            conv_id = None
+            raise HTTPException(404, "会话不存在或无权访问")
+        active = _RUNNING.get(f"{user_id}:{conv_id}")
+        if active and not active.done() and active is not asyncio.current_task():
+            raise HTTPException(409, "当前会话仍在执行，请等待完成或停止后再发送")
     if not conv_id:
         title = body.content.strip()[:24] or "新会话"
         conv = store.create_conversation(user_id, title)
         conv_id = conv["conv_id"]
 
-    provider, model = _resolve_model(body.provider, body.model)
+    provider, model = ("bound", body.model) if binding else _resolve_model(body.provider, body.model)
 
     # 载入历史 + 追加本轮用户消息（持久化）
     history = [{"role": m["role"], "content": m["content"]} for m in store.list_messages(conv_id)]
+    if not history:
+        history = [message.model_dump() for message in body.history]
     history.append({"role": "user", "content": body.content})
     run_id = store.start_chat_execution(user_id, conv_id, body.content)
 
     queue: asyncio.Queue = asyncio.Queue()
+    progress: list[dict] = []
+    _PROGRESS[f"{user_id}:{conv_id}"] = progress
+    initial_usage = dict(_usage_ctx.get() or {})
 
     async def pipeline():
         """真正跑流水线的后台任务：事件写队列；结果无论 SSE 连接是否还在都会落库。"""
@@ -248,7 +272,7 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
             set_user_overrides({k: v for k, v in (store.config_all(user_id) or {}).items() if k in USER_KEYS})
             set_user_memories([m["text"] for m in store.memory_list(user_id)])
 
-            usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
+            usage = initial_usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
             _usage_tok = _usage_ctx.set(usage)
             hist = await compress_history(history, provider=provider, model=model)
             # 模式选择：body.mode 优先，否则按全局开关（6B 默认 data_prep，可回退 legacy_analysis）
@@ -269,7 +293,11 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
                     provider=provider, model=model, session_id=conv_id,
                 )
             async for kind, payload in stream:
-                if kind == "node":
+                if kind == "progress":
+                    item = {**payload, "sequence": len(progress) + 1}
+                    progress.append(item)
+                    queue.put_nowait({"event": "progress", "data": json.dumps(item, ensure_ascii=False)})
+                elif kind == "node":
                     node_name = payload.get("node") if isinstance(payload, dict) else payload
                     view = payload.get("view") if isinstance(payload, dict) else None
                     label = _NODE_LABELS.get(node_name)
@@ -289,7 +317,9 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
                 if state.get("inferred_quantity") and not state.get("needs_clarification"):
                     n = state["inferred_quantity"]
                     reply += f"\n\n> 💡 本次将采集约 {n} 条数据（系统默认，可随时告知调整数量）。"
-                result = _build_result(user_id, conv_id, state, reply, provider, model, body.content)
+                result = _build_result(user_id, conv_id, state, reply, provider, model, body.content,
+                                       model_connection_id=body.model_connection_id,
+                                       model_connection_version=binding.connection_version if binding else None)
             result["token_usage"] = dict(usage) if usage["calls"] else None
             # 持久化助手回复（澄清/错误/回执都记入历史，保证多轮上下文连续）
             assistant_text = result.get("reply") or reply
@@ -302,6 +332,10 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
                 for k in ("files", "grade", "collector", "item_count", "data_type", "template_status", "kind", "token_usage", "record_counts", "quality")
                 if result.get(k) not in (None, [], "")
             }
+            persist_meta["work_progress"] = progress
+            persist_meta["chat_run_id"] = run_id
+            persist_meta["model_connection_id"] = body.model_connection_id
+            persist_meta["model_id"] = model
             # 记录本轮实际用的模型（供反馈管理页展示"用了什么模型"）
             if provider or model:
                 persist_meta["model"] = f"{provider}/{model}" if (provider and model) else (model or provider)
@@ -311,9 +345,12 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
                 meta=persist_meta or None,
             )
             result["message_id"] = msg_id
+            saved_messages = store.list_messages(conv_id)
+            result["created_at"] = next(m["created_at"] for m in saved_messages if m["id"] == msg_id)
+            result["user_created_at"] = next(m["created_at"] for m in reversed(saved_messages) if m["role"] == "user")
             queue.put_nowait({"event": "result", "data": json.dumps(result, ensure_ascii=False, default=str)})
         except asyncio.CancelledError:
-            store.add_message(conv_id, "assistant", "❌ 用户已取消任务")
+            store.add_message(conv_id, "assistant", "❌ 用户已取消任务", meta={"kind": "cancelled", "work_progress": progress})
             queue.put_nowait({"event": "result", "data": json.dumps({
                 "conv_id": conv_id, "kind": "cancelled",
                 "reply": "❌ 用户已取消任务",
@@ -324,7 +361,7 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
             raise
         except Exception as e:  # noqa: BLE001
             try:
-                store.add_message(conv_id, "assistant", f"❌ 任务执行失败：{e}")
+                store.add_message(conv_id, "assistant", f"❌ 任务执行失败：{e}", meta={"kind": "error", "work_progress": progress})
             except Exception:
                 pass
             queue.put_nowait({"event": "error", "data": json.dumps({"message": str(e)}, ensure_ascii=False)})
@@ -334,6 +371,7 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
                 _usage_ctx.reset(_usage_tok)
             queue.put_nowait({"event": "done", "data": "{}"})
             _RUNNING.pop(task_key, None)
+            _PROGRESS.pop(task_key, None)
 
     task_key = f"{user_id}:{conv_id}"
     from src.account_execution import ExecutionDenied
@@ -343,11 +381,19 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
         try:
             async with running_execution(store, "chat", run_id):
                 execution_checkpoint(required=True)
-                await pipeline()
+                if binding:
+                    from src.model_connections.conductor import conductor_connection
+                    with conductor_connection(owner_id=user_id, connection_id=body.model_connection_id,
+                                              connection_version=binding.connection_version, model=body.model,
+                                              task_id=conv_id, run_id=run_id):
+                        await pipeline()
+                else:
+                    await pipeline()
         except ExecutionDenied:
             queue.put_nowait({"event": "error", "data": json.dumps({"message": "账号执行已暂停"}, ensure_ascii=False)})
             queue.put_nowait({"event": "done", "data": "{}"})
             _RUNNING.pop(task_key, None)
+            _PROGRESS.pop(task_key, None)
         except (Exception, asyncio.CancelledError):
             # 原流水线已发送失败/取消回执；运行资源的未知状态由持久绑定继续保留。
             pass
@@ -382,6 +428,17 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
 
 # 正在后台执行的会话任务注册表："user_id:conv_id" -> asyncio.Task（done 后自清）
 _RUNNING: Dict[str, asyncio.Task] = {}
+_PROGRESS: Dict[str, list[dict]] = {}
+
+
+@router.get("/history")
+def chat_history(user=Depends(get_current_user)):
+    items = get_store().list_chat_history(user["user_id"])
+    for item in items:
+        task = _RUNNING.get(f"{user['user_id']}:{item['conv_id']}")
+        if task and not task.done():
+            item["status"] = "running"
+    return items
 
 
 @router.get("/running/{conv_id}")
@@ -392,7 +449,7 @@ def chat_running(conv_id: str, user=Depends(get_current_user)):
     if not conv or conv["user_id"] != user["user_id"]:
         raise HTTPException(status_code=404, detail="会话不存在")
     task = _RUNNING.get(f"{user['user_id']}:{conv_id}")
-    return {"running": bool(task and not task.done())}
+    return {"running": bool(task and not task.done()), "progress": _PROGRESS.get(f"{user['user_id']}:{conv_id}", [])}
 
 
 @router.post("/{conv_id}/cancel")

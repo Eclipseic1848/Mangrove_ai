@@ -58,6 +58,11 @@ class PendingStore:
             entry = self._data.get(self._key(user_id, task_id))
             return {action: deepcopy(value[1]) for action, value in entry.items()} if entry is not None else None
 
+    def has_action(self, user_id: str, task_id: str, action: str) -> bool:
+        """只投影动作是否存在，不复制报告正文或把暂存载荷交给前端。"""
+        with self._lock:
+            return action in self._data.get(self._key(user_id, task_id), {})
+
     @staticmethod
     def _resource_id(task_id: str, action: str) -> str:
         return 'confirm:' + hashlib.sha256((task_id + '\0' + action).encode('utf-8')).hexdigest()

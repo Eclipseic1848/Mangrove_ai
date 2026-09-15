@@ -459,15 +459,26 @@ async def curate_template(
     return _fallback_decision(data_type, keywords, title, owner_id=owner_id)
 
 
-async def save_template(title: str, data_type: str, keywords: List[str], body: str, *, owner_id: str | None = None) -> Optional[str]:
+async def save_template(title: str, data_type: str, keywords: List[str], body: str, *, owner_id: str | None = None,
+                        local_dedup: bool = False) -> Optional[str]:
     """经 Curator 裁决后保存一个学到的模板，返回其 slug；Curator 判定"丢弃"时返回 None。
 
     Curator 裁决（LLM）在锁外；merge/new 分支在锁内重读+原子写，保护 read-modify-write。
     合并时 updates 统计（uses/quality_avg/status）保持不变，只更新 title/keywords/body。
     """
     from src.api.execution import execution_checkpoint
+    from src.llm.provider import verify_bound_model
     require_owner(owner_id)
-    decision = await curate_template(title, data_type, keywords, body, owner_id=owner_id)  # 锁外 LLM
+    if local_dedup:
+        # 确认入口只授权原模型提炼，不额外向向量、重排或裁决服务发送正文。
+        # ponytail: 关键词去重不识别同义模板；语义去重需先明确辅助服务授权。
+        duplicate = find_duplicate(data_type, keywords, owner_id=owner_id)
+        decision = ({"decision": "reuse", "slug": duplicate["slug"], "source_digest": duplicate["content_digest"]}
+                    if duplicate else {"decision": "new"})
+    else:
+        decision = await curate_template(title, data_type, keywords, body, owner_id=owner_id)  # 锁外 LLM
+    # 裁决器可能吞掉模型异常并给出降级决定；绑定连接失败必须在任何写入前停止。
+    verify_bound_model()
     # 平台待确认动作可能在裁决期间被停用；独立库调用保持原行为。
     execution_checkpoint()
     kind = decision.get("decision")

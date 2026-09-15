@@ -84,7 +84,7 @@ from src.conversation_steering import (
     build_context_rewriter,
 )
 from src.model_connections import GrantError, get_default_broker
-from src.conversation_steering.models import FrozenResultContext, ResultSelection
+from src.conversation_steering.models import FrozenResultContext, ResultSelection, RawUserTurn
 from src.conversation_steering.repository import ResultContextConflict
 from src.delivery_publishing.models import TableOutputContract
 from src.services.upload_store import IMAGE_EXTENSIONS, UploadStore
@@ -135,11 +135,35 @@ _FORMATS = {
 }
 _DOCUMENT_INPUTS = {".docx", ".pdf"} | IMAGE_EXTENSIONS
 _TABLE_INPUTS = {".xlsx", ".csv", ".tsv", ".json", ".jsonl", ".parquet"}
+_OUTPUT_FORMAT_TOKEN = r"(?:JSONL|JSON|XLSX|EXCEL|CSV|PARQUET|DOCX|WORD|PDF|PPTX|PPT|HTML|MARKDOWN|MD|TXT)(?![A-Za-z0-9_.])"
 _OUTPUT_FORMAT_PATTERN = re.compile(
-    r"(?:输出|导出|生成)(?:为|成)?\s*"
-    r"(JSONL|JSON|CSV|XLSX|DOCX|PDF|HTML|MARKDOWN|MD|TXT|PPTX)",
+    r"(?:(不要|不需要|无需|不用|不必|不)\s*)?(?:(只(?:需要|要)?|仅)\s*)?"
+    r"(输出|导出|生成|保存|改为|改成|换成|提供|不要|不需要|无需|不用|不必)(?:的)?(?:文件)?(?:格式)?(?:为|成|是)?\s*"
+    rf"({_OUTPUT_FORMAT_TOKEN}(?:\s*(?:、|,|，|和|与|及|以及|或|/|&|\+)\s*{_OUTPUT_FORMAT_TOKEN})*)",
     re.IGNORECASE,
 )
+
+
+def _output_format_intent(text: str) -> tuple[set[str], set[str], bool]:
+    requested: set[str] = set()
+    excluded: set[str] = set()
+    only = False
+    aliases = {"excel": "xlsx", "word": "docx", "ppt": "pptx", "md": "markdown"}
+    # 只校验当前用户明确指令；历史助手正文与代码示例不能变成输出授权。
+    objective = re.sub(r"```[\s\S]*?```", "", text.split("当前用户要求（更正以此为准）：\n")[-1])
+    for match in _OUTPUT_FORMAT_PATTERN.finditer(objective):
+        negative = bool(match[1]) or match[3] in {"不要", "不需要", "无需", "不用", "不必"}
+        if not negative and (match[2] or match[3] in {"改为", "改成", "换成"}):
+            requested.clear()
+            only = True
+        for value in re.findall(_OUTPUT_FORMAT_TOKEN, match[4], re.IGNORECASE):
+            value = aliases.get(value.lower(), value.lower())
+            target, other = (excluded, requested) if negative else (requested, excluded)
+            target.add(value)
+            other.discard(value)
+    return requested, excluded, only
+
+
 _HARD_SOURCE_REQUIREMENT_PATTERN = re.compile(
     r"全部|所有|完整覆盖|不得遗漏|必须\s*(?:至少\s*)?\d+"
 )
@@ -1009,6 +1033,18 @@ def _steering_messages(user_id: str, task_id: str, revision: int) -> list[dict[s
     ]
 
 
+def _revision_runtime_context(user_id: str, task_id: str, revision: int):
+    repository = _runtime_repository()
+    row = repository.get(user_id, task_id, revision)
+    if row is not None:
+        return row
+    acceptance = (get_store().get_source_contract(user_id, task_id, revision) or {}).get("owner_acceptance")
+    # 接受初稿没有新 Run；后续新任务仍须从真实来源运行继承配置并重新授权。
+    if acceptance and 0 < acceptance.get("source_revision", revision) < revision:
+        return repository.get(user_id, task_id, acceptance["source_revision"])
+    return None
+
+
 def _public_runtime(
     user_id: str,
     task_id: str,
@@ -1019,10 +1055,12 @@ def _public_runtime(
     repository = _runtime_repository()
     row = repository.get(user_id, task_id, revision)
     if row is None:
+        origin = _revision_runtime_context(user_id, task_id, revision)
         return {
-            "runtime_version": RuntimeVersion.LEGACY.value,
-            "permission_profile": PermissionProfile.STANDARD.value,
-            "model_connection_id": None,
+            "runtime_version": origin["runtime_version"].value if origin else RuntimeVersion.LEGACY.value,
+            "permission_profile": origin["permission_profile"].value if origin else PermissionProfile.STANDARD.value,
+            "model_connection_id": origin["model_connection_id"] if origin else None,
+            "model_connection_model": origin["model_connection_model"] if origin else None,
             "external_api_confirmed": False,
             "status": None,
             "candidates": [],
@@ -2079,6 +2117,147 @@ def resolve_reusable_sources(payload: ReusableSourceSelection, user=Depends(get_
     return {"items": resolve_choices(user["user_id"], payload.upload_ids, payload.source_snapshot_ids, payload.delivery_output_ids)}
 
 
+class DraftChatMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=8000)
+
+
+class DraftChatIn(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{16,80}$")
+    text: str = Field(min_length=1, max_length=8000)
+    history: list[DraftChatMessage] = Field(default_factory=list, max_length=16)
+    model: str = Field(min_length=1, max_length=200)
+    model_connection_id: str | None = Field(default=None, max_length=120)
+    external_api_confirmed: bool = False
+    conv_id: str | None = Field(default=None, max_length=120)
+
+    @model_validator(mode="after")
+    def bounded_context(self):
+        if len(self.text) + len(json.dumps([item.model_dump() for item in self.history], ensure_ascii=False)) > 16000:
+            raise ValueError("本次对话过长，请概括需求后清空对话再发送；不会静默丢弃早先要求")
+        return self
+
+
+@router.post("/draft/turns")
+async def draft_chat(payload: DraftChatIn, request: Request, user=Depends(get_execution_user)):
+    from src.api.execution import execution_checkpoint
+    from src.api.routes.chat import _RUNNING
+    from src.llm.provider import _usage_ctx
+
+    execution_checkpoint(required=True)
+    store = get_store()
+    history = [item.model_dump() for item in payload.history]
+    conversation_key = f'{user["user_id"]}:{payload.conv_id}' if payload.conv_id else None
+    if payload.conv_id:
+        conversation = store.get_conversation(payload.conv_id)
+        if not conversation or conversation["user_id"] != user["user_id"]:
+            raise HTTPException(404, "会话不存在或无权访问")
+        active = _RUNNING.get(conversation_key)
+        if active and not active.done():
+            raise HTTPException(409, "当前会话仍在执行，请等待完成或停止后再发送")
+        # 续聊以服务端本会话为准，浏览器传来的历史不能替换已保存的上下文。
+        history = [{"role": m["role"], "content": m["content"]} for m in store.list_messages(payload.conv_id)]
+        if len(json.dumps(history, ensure_ascii=False)) > 120000:
+            raise HTTPException(422, "当前会话过长，请新建任务并引用需要的报告；不会静默截断历史")
+    binding = None
+    if payload.model_connection_id:
+        if not payload.external_api_confirmed:
+            raise HTTPException(422, "请确认将本次对话发送到所选模型")
+        try:
+            binding = get_default_broker().freeze_connection(user["user_id"], payload.model_connection_id)
+        except GrantError:
+            raise HTTPException(404, "模型连接不存在或无权访问") from None
+    elif not is_admin_role(user.get("role")):
+        raise HTTPException(403, "请选择自己的连接或管理员发布的连接")
+
+    # 复用持久发送占位但不创建业务任务；草稿命名空间隔离任务创建键，未知响应不自动重发。
+    draft_id = "draft_" + hashlib.sha256(f'{user["user_id"]}:{payload.request_id}'.encode("utf-8")).hexdigest()[:32]
+    try:
+        _, claimed = _runtime_repository().claim_idempotency(
+            user["user_id"], "draft-chat:" + payload.request_id,
+            request_hash=hashlib.sha256(payload.model_dump_json().encode("utf-8")).hexdigest(),
+            proposed_task_id=draft_id,
+        )
+    except ValueError:
+        raise HTTPException(409, "同一发送标识不能用于不同内容") from None
+    if not claimed:
+        raise HTTPException(409, "这条消息已发送或回复状态未知，不会重复请求模型")
+    context = SteeringRequest(
+        owner_id=user["user_id"], task_id=draft_id, revision=1, run_id=draft_id,
+        text=payload.text, current_status="preparing_no_sources",
+        current_goal=json.dumps(history, ensure_ascii=False),
+        status_summary="仅讨论需求，尚未创建或执行任务，没有读取任何资料。",
+        provider="external" if binding else "local", model=payload.model,
+        model_connection_id=payload.model_connection_id,
+        model_connection_version=binding.connection_version if binding else None,
+        external_api_confirmed=payload.external_api_confirmed,
+        clarification_round_id=payload.request_id,
+    )
+    turn = RawUserTurn(turn_id=payload.request_id, owner_id=user["user_id"], task_id=draft_id, revision=1, text=payload.text)
+    pending = None
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
+    usage_token = _usage_ctx.set(usage)
+    if conversation_key:
+        _RUNNING[conversation_key] = asyncio.current_task()
+    try:
+        rewriter = build_context_rewriter(
+            context, before_call=lambda: execution_checkpoint(required=True),
+            system_prompt=(Path(__file__).parents[2] / "conversation_steering/prompts/prepare-v1.md").read_text(encoding="utf-8"),
+        )
+        pending = asyncio.create_task(rewriter.rewrite(turn, context))
+        while not pending.done():
+            await asyncio.wait({pending}, timeout=0.5)
+            if await request.is_disconnected():
+                # 关闭请求会撤销本次连接权利；不宣称外部供应商已经停止计费或推理。
+                raise HTTPException(499, "已停止等待回复")
+        result = await pending
+        execution_checkpoint(required=True)
+        if getattr(result, "selection_delta", {}).get("workflow") == "collection" and not getattr(result, "open_questions", ()):
+            from src.api.routes.chat import chat_stream
+            from src.api.schemas import ChatIn
+            # 复用已存在的采集/分析执行入口；传递原话和所选连接，不让模型摘要替代用户授权。
+            return await chat_stream(ChatIn(
+                conv_id=payload.conv_id, content=payload.text, history=[] if payload.conv_id else history,
+                provider="local" if not binding else None, model=payload.model,
+                model_connection_id=payload.model_connection_id,
+                model_connection_version=binding.connection_version if binding else None,
+                external_api_confirmed=payload.external_api_confirmed, mode="legacy_analysis",
+            ), request, user)
+        if not result.direct_answer or not result.direct_answer.strip() or len(result.direct_answer) > 8000:
+            raise ValueError("模型没有返回回复")
+        conv_id = payload.conv_id or store.create_conversation(user["user_id"], payload.text[:24])["conv_id"]
+        if not payload.conv_id:
+            for message in history:
+                store.add_message(conv_id, message["role"], message["content"])
+        store.add_message(conv_id, "user", payload.text)
+        token_usage = dict(usage) if usage["calls"] else None
+        message_id = store.add_message(conv_id, "assistant", result.direct_answer, meta={
+            "kind": "chat",
+            "token_usage": token_usage, "model_id": payload.model,
+            "model_connection_id": payload.model_connection_id,
+            "model": payload.model,
+        })
+        saved_messages = store.list_messages(conv_id)
+        created_at = next(m["created_at"] for m in saved_messages if m["id"] == message_id)
+        user_created_at = next(m["created_at"] for m in reversed(saved_messages) if m["role"] == "user")
+        return {"reply": result.direct_answer, "output_formats": list(result.output_delta),
+                "conv_id": conv_id, "message_id": message_id, "created_at": created_at,
+                "user_created_at": user_created_at, "token_usage": token_usage}
+    except (HTTPException, ExecutionDenied):
+        raise
+    except Exception:
+        raise HTTPException(502, "本次模型回复未成功或状态未知，未启动任务。需求已保留，不会自动重试。") from None
+    finally:
+        _usage_ctx.reset(usage_token)
+        if conversation_key and _RUNNING.get(conversation_key) is asyncio.current_task():
+            _RUNNING.pop(conversation_key, None)
+        if pending is not None and not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+
 @router.post("/tasks", status_code=status.HTTP_202_ACCEPTED, openapi_extra={"x-mangrove-task-control": True})
 async def create_task(
     payload: WorkspaceTaskCreateIn,
@@ -2240,16 +2419,22 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
     if (
         payload.runtime_version is RuntimeVersion.PI
         and payload.model_connection_id is None
+        and payload.model is None
     ):
-        preference = get_default_broker().get_usage_preference(user_id)
+        # 默认值只补充未选型的请求，不覆盖用户本次明确选择的本地模型。
+        preference = get_default_broker().get_usage_preference(user_id, allow_local=is_admin_role(user.get("role")))
         if preference is not None:
             if not preference["available"]:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="默认模型连接已失效，请重新选择",
                 )
-            payload.model_connection_id = str(preference["connection_id"])
-            payload.model_connection_model = str(preference["model_id"])
+            if preference["connection_id"] == "__local__":
+                payload.provider = "local"
+                payload.model = str(preference["model_id"])
+            else:
+                payload.model_connection_id = str(preference["connection_id"])
+                payload.model_connection_model = str(preference["model_id"])
     if (
         payload.model_connection_id is not None
         and payload.runtime_version is not RuntimeVersion.PI
@@ -2424,13 +2609,10 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
                 "文档和表格请分别创建任务。"
             ),
         )
-    requested_in_text = {
-        "markdown" if item.lower() == "md" else item.lower()
-        for item in _OUTPUT_FORMAT_PATTERN.findall(payload.objective_text)
-    }
+    requested_in_text, excluded_in_text, only_requested = _output_format_intent(user_objective)
     selected_formats = set(payload.output_formats)
     missing_formats = requested_in_text - selected_formats
-    if missing_formats:
+    if missing_formats or selected_formats & excluded_in_text or (only_requested and selected_formats - requested_in_text):
         requested_label = "、".join(
             item.upper() for item in sorted(requested_in_text)
         )
@@ -2441,7 +2623,9 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
                 f"文字要求输出 {requested_label}，"
-                f"但界面选择了 {selected_label}；请统一后再执行。"
+                f"但界面选择了 {selected_label}；"
+                + (f"文字还排除了 {'、'.join(item.upper() for item in sorted(excluded_in_text))}；" if excluded_in_text else "")
+                + "请按文字要求输出，或修改当前要求。"
             ),
         )
     repository = _runtime_repository()
@@ -3108,7 +3292,7 @@ async def _apply_confirmed_steering_revision(
     if int(task["active_revision"]) != decision.base_revision:
         raise HTTPException(status_code=409, detail="活动版本已变化，请重新确认修改")
 
-    previous_runtime = _runtime_repository().get(
+    previous_runtime = _revision_runtime_context(
         user_id,
         task_id,
         decision.base_revision,
@@ -3372,7 +3556,7 @@ async def decide_steering_revision(
         raise HTTPException(409, "当前没有继续运行的原子步骤，请选择立即停止并按补充重新开始，或创建独立任务")
     if int(task["active_revision"]) != proposal.base_revision:
         raise HTTPException(status_code=409, detail="活动版本已变化，请重新确认修改")
-    previous_runtime = _runtime_repository().get(
+    previous_runtime = _revision_runtime_context(
         user_id,
         task_id,
         proposal.base_revision,
@@ -3977,7 +4161,7 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
     effective_snapshot_id = effective_snapshot["snapshot_id"] if effective_snapshot else None
     current_web_contract = ({"goal_contract": current_contract.get("goal_contract") or {"objective": task["objective_text"]}} if current_contract else None)
     previous_goal = json.loads(json.dumps((current_contract or {}).get("goal_contract"), ensure_ascii=False))
-    previous_runtime = _runtime_repository().get(
+    previous_runtime = _revision_runtime_context(
         user_id,
         task_id,
         int(task["active_revision"]),
@@ -4735,6 +4919,178 @@ async def refresh_task_source(
         "attempt": attempt,
         "revision": revision,
     }
+
+
+def _frozen_draft(user_id: str, task_id: str, revision: int, draft_id: str | None = None):
+    from src.agentic_runtime.draft_snapshot import read_draft
+
+    runtime = _runtime_repository().get(user_id, task_id, revision)
+    if not runtime or not runtime.get("workspace_root"):
+        raise HTTPException(404, "尚无初稿")
+    if draft_id is None:
+        events = _runtime_repository().list_events(user_id, task_id, revision)
+        draft_id = next((event["details"].get("draft_id") for event in reversed(events)
+                         if event["event_type"] == "draft.ready"), None)
+    if not draft_id:
+        raise HTTPException(404, "尚无初稿")
+    root = Path(runtime["workspace_root"])
+    try:
+        draft = read_draft(root, draft_id, owner_id=user_id, task_id=task_id,
+                           revision=revision, run_id=runtime["run_id"])
+    except (OSError, ValueError, KeyError):
+        raise HTTPException(409, "初稿已失效或内容校验未通过") from None
+    return root, draft
+
+
+@router.get("/tasks/{task_id}/draft")
+@guarded_response("preview", workspace_response_refs)
+def get_task_draft(task_id: str, revision: int | None = Query(default=None, ge=1), user=Depends(get_current_user)):
+    task = _task_or_404(user["user_id"], task_id)
+    revision = revision or int(task["active_revision"])
+    accepted = (get_store().get_source_contract(user["user_id"], task_id, revision) or {}).get("owner_acceptance")
+    if accepted:
+        revision = accepted["source_revision"]
+    try:
+        root, draft = _frozen_draft(user["user_id"], task_id, revision, accepted["draft_id"] if accepted else None)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return {"draft": None}
+        raise
+    import csv
+    import io
+    from itertools import islice
+    previews = {}
+    tables = {}
+    truncated = {}
+    scopes = {}
+    for item in draft["files"]:
+        name = item["filename"]
+        path = root / "drafts" / draft["draft_id"] / name
+        if item["format"] in {"json", "csv", "markdown"}:
+            with path.open("r", encoding="utf-8", errors="replace") as stream:
+                text = stream.read(16001)
+            truncated[name] = len(text) > 16000
+            previews[name] = text[:16000]
+            if item["format"] == "csv":
+                text = previews[name]
+                try:
+                    rows = list(islice(csv.reader(io.StringIO(text.lstrip("\ufeff")), strict=True), 52))
+                    # 达到字符上限时末行可能被截断，不把它呈现为完整数据行。
+                    tables[name] = (rows[:-1] if truncated[name] and len(rows) < 52 else rows)[:51]
+                    truncated[name] = truncated[name] or len(rows) > 51
+                except csv.Error:
+                    pass  # 截断到引号字段内部时保留有界原文预览。
+        elif item["format"] == "docx":
+            # 复用正式文档预览解析，不把排版提取称为原件还原。
+            document = _file_document_preview(path, offset=0, limit=51, search="")
+            text = "\n\n".join(part["content"] for part in document["items"])
+            previews[name] = text[:16000]
+            truncated[name] = len(text) > 16000 or document["total"] > 51
+            scopes[name] = "文档文字与表格内容预览；原始排版见下载文件"
+        elif item["format"] == "xlsx":
+            from openpyxl import load_workbook
+            workbook = load_workbook(path, read_only=True, data_only=True)
+            try:
+                sheet = workbook.worksheets[0]
+                rows = [["" if value is None else str(value) for value in row]
+                        for row in sheet.iter_rows(max_row=min(sheet.max_row or 1, 52), max_col=min(sheet.max_column or 1, 50), values_only=True)]
+                tables[name] = rows[:51]
+                truncated[name] = (sheet.max_row or 0) > 51 or (sheet.max_column or 0) > 50 or len(workbook.worksheets) > 1
+                # 行列上限不足以限制长单元格；整个预览共用字符预算。
+                budget = 16000
+                bounded_rows = []
+                for row in tables[name]:
+                    bounded = []
+                    for cell in row:
+                        if len(cell) > budget:
+                            bounded.append(cell[:max(0, budget - 1)] + ("…" if budget else ""))
+                            truncated[name] = True
+                        else:
+                            bounded.append(cell)
+                        budget = max(0, budget - len(cell))
+                    bounded_rows.append(bounded)
+                    if not budget:
+                        truncated[name] = True
+                        break
+                tables[name] = bounded_rows
+                scopes[name] = f"工作表：{sheet.title}；最多前 50 数据行、50 列，其余工作表见完整文件"
+            finally:
+                workbook.close()
+    events = _runtime_repository().list_events(user["user_id"], task_id, revision)
+    created_at = next((event.get("created_at") for event in events
+                       if event["event_type"] == "draft.ready" and event["details"].get("draft_id") == draft["draft_id"]), None)
+    return {"draft": {
+        "draft_id": draft["draft_id"], "revision": revision, "status": "unverified",
+        "created_at": created_at,
+        "acceptance_pending": bool(accepted and task["status"] != "completed"),
+        "files": [{"filename": item["filename"], "format": item["format"], "size_bytes": item["size_bytes"],
+                   "preview": previews.get(item["filename"]),
+                   "preview_table": tables.get(item["filename"]),
+                   "preview_truncated": truncated.get(item["filename"]),
+                   "preview_scope": scopes.get(item["filename"]),
+                   "page_preview_url": (f"/api/semantic-workspace/tasks/{task_id}/drafts/{draft['draft_id']}/preview/{index}?revision={revision}"
+                                        if item["format"] == "pdf" else None),
+                   "download_url": f"/api/semantic-workspace/tasks/{task_id}/drafts/{draft['draft_id']}/files/{index}?revision={revision}"}
+                  for index, item in enumerate(draft["files"])],
+    }}
+
+
+@router.get("/tasks/{task_id}/drafts/{draft_id}/preview/{index}")
+@guarded_response("preview", workspace_response_refs)
+def preview_draft_pdf(task_id: str, draft_id: str, index: int, revision: int = Query(ge=1),
+                      page: int = Query(default=1, ge=1), user=Depends(get_current_user)):
+    import base64
+    from src.parsers.pdf_render import render_pdf_page_png, validate_pdf_source
+    _task_or_404(user["user_id"], task_id)
+    root, draft = _frozen_draft(user["user_id"], task_id, revision, draft_id)
+    if not 0 <= index < len(draft["files"]) or draft["files"][index]["format"] != "pdf":
+        raise HTTPException(404, "PDF 初稿不存在")
+    raw = (root / "drafts" / draft_id / draft["files"][index]["filename"]).read_bytes()
+    try:
+        count = validate_pdf_source(raw)
+        if page > count:
+            raise HTTPException(422, "页码超出初稿范围")
+        image = render_pdf_page_png(raw, page_number=page, dpi=100)
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise HTTPException(422, "该页暂时无法预览；初稿文件保留，可以下载查看") from exc
+    return {"image": "data:image/png;base64," + base64.b64encode(image).decode("ascii"),
+            "page": page, "page_count": count}
+
+
+class AcceptDraftIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1)
+    draft_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    accept_unverified: Literal[True]
+
+
+@router.post("/tasks/{task_id}/draft/accept")
+async def accept_task_draft(task_id: str, payload: AcceptDraftIn, user=Depends(get_execution_user)):
+    from src.api.workspace_draft_acceptance import DraftAcceptanceConflict, accept_draft
+
+    _task_or_404(user["user_id"], task_id)
+    try:
+        return await accept_draft(store=get_store(), manager=get_semantic_workspace_manager(),
+                                  output_root=Path(settings.semantic_execution_root), owner_id=user["user_id"],
+                                  task_id=task_id, source_revision=payload.expected_revision, draft_id=payload.draft_id)
+    except DraftAcceptanceConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (ValueError, OSError, RuntimeError, ExecutionLockTimeout) as exc:
+        # 不把解析器、文件路径或原始异常暴露给前端。
+        raise HTTPException(409, "初稿发布尚未确认完成，初稿和已有记录仍保留。请先检查处理状态；如有待发布记录，可继续同一次发布，不必重跑任务。") from exc
+
+
+@router.get("/tasks/{task_id}/drafts/{draft_id}/files/{index}")
+@guarded_response("export", workspace_response_refs)
+def download_task_draft(task_id: str, draft_id: str, index: int,
+                        revision: int = Query(ge=1), user=Depends(get_current_user)):
+    _task_or_404(user["user_id"], task_id)
+    root, draft = _frozen_draft(user["user_id"], task_id, revision, draft_id)
+    if not 0 <= index < len(draft["files"]):
+        raise HTTPException(404, "初稿文件不存在")
+    item = draft["files"][index]
+    return FileResponse(root / "drafts" / draft_id / item["filename"], filename=item["filename"],
+                        media_type="application/octet-stream", headers={"X-Mangrove-Artifact-Status": "unverified-draft"})
 
 
 @router.get("/tasks/{task_id}/candidates/{artifact_id}")

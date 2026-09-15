@@ -477,6 +477,29 @@ def _relay_headers(grant: DocumentToolGrant) -> dict[str, str]:
     }
 
 
+def test_document_retrieval_failure_is_typed_and_does_not_leak_path(tmp_path):
+    import hashlib
+    from src.agentic_runtime.document_retrieval import DocumentRetrievalModule
+
+    source = tmp_path / "private-source.pdf"
+    source.write_bytes(b"invalid synthetic PDF")
+    broker = DocumentToolBroker(retriever=DocumentRetrievalModule(execution_root=tmp_path))
+    grant = broker.issue_grant(
+        owner_user_id="user-a", task_id="task-a", revision=1, run_id="run-a",
+        sources=(SourceInput(upload_id="upload-a", original_name=source.name,
+                             host_path=source, sha256=hashlib.sha256(source.read_bytes()).hexdigest()),),
+    )
+    app = FastAPI()
+    app.include_router(document_tool_routes.router)
+    app.dependency_overrides[document_tool_routes.get_document_tool_broker] = lambda: broker
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/internal/document-tools/inspect_source",
+                               headers=_relay_headers(grant), json={"source_id": "upload-a"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "DOCUMENT_RETRIEVAL_FAILED"
+    assert str(tmp_path) not in response.text
+
+
 def _claims(grant: DocumentToolGrant, **changes: object) -> DocumentToolClaims:
     values = {
         "grant_id": grant.grant_id,

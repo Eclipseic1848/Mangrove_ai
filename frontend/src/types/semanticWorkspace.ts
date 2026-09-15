@@ -470,6 +470,7 @@ export interface WorkspaceTask {
   progress?: TaskProgressView;
   web_sources?: Array<{ source_snapshot_id: string; snapshot: SourceSnapshot | null; availability?: "unavailable"; reason_code?: "source_deleted" }>;
   source_contract?: {
+    owner_acceptance?: { source_revision: number; draft_id: string; accepted_at: string; gaps: string[] };
     schema_version: number;
     goal_contract: NonNullable<WorkspaceTask["web_source"]>["goal_contract"] | null;
     web_sources: Array<{ source_snapshot_id: string; allowed_scope: SourceSnapshot["allowed_scope"]; coverage: SourceSnapshot["coverage"] }>;

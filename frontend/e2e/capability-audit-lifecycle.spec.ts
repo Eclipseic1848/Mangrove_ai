@@ -3,6 +3,225 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 const actor = { user_id: "admin-a", username: "admin-a", display_name: "模拟管理员", role: "admin" };
 const pack = { pack_id: "audit-pack", version: "1.0.0", scope: "personal", maturity: "draft", lifecycle: "active", eligibility: "eligible", source: "governance_event", owner_id: "owner-a", digest: `sha256:${"a".repeat(64)}`, can_validate: false, promotion_gaps: ["validation_incomplete"] };
 const outcome = { status: "succeeded", content: "能力审计正文哨兵", truncated: false, failure_reason: null, event: { event_id: "cap-audit-1", result: "succeeded" } };
+
+test("任务默认模型只列已配置项，刷新保留修改，保存使用工作台偏好", async ({ page }) => {
+  let preference: object | null = null;
+  let fail = false;
+  await page.route("**/api/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return route.fulfill({ json: { ...actor, role: "super_admin" } });
+    if (path === "/api/models") return route.fulfill({ json: { options: [
+      { provider: "local", model: "Qwen3-30B-A3B", label: "本地模型" },
+      { provider: "local", model: "Qwen3.8-27B-FP8", label: "本地模型" },
+      { provider: "qwen", model: "未配置的预设", label: "未配置的预设" },
+    ], default: null } });
+    if (path === "/api/model-connections") return fail ? route.fulfill({ status: 503, json: {} }) : route.fulfill({ json: { items: [] } });
+    if (path === "/api/model-connections/preferences/default") {
+      if (route.request().method() === "PUT") { preference = route.request().postDataJSON(); return route.fulfill({ json: { ...preference, available: true } }); }
+      return route.fulfill({ json: { preference } });
+    }
+    return route.fulfill({ status: 404, json: {} });
+  });
+  await page.goto("/settings?section=personal");
+  const select = page.getByRole("combobox", { name: "默认任务模型", exact: true });
+  await expect(select).toBeVisible();
+  await expect(select.locator("option")).toHaveText(["自动选择可用模型", "Qwen3.8-27B-FP8", "Qwen3-30B-A3B"]);
+  await expect(page.getByText("旧对话流程默认模型", { exact: true })).toHaveCount(0);
+  const save = page.getByRole("button", { name: "保存默认模型", exact: true });
+  await expect(save).toBeDisabled();
+  await select.selectOption({ label: "Qwen3.8-27B-FP8" });
+  await page.getByRole("button", { name: "刷新模型列表", exact: true }).click();
+  await expect(select.locator("option:checked")).toHaveText("Qwen3.8-27B-FP8");
+  await save.click();
+  await expect(page.getByText("已保存，仅对新任务生效。", { exact: true })).toBeVisible();
+  expect(preference).toEqual({ connection_id: "__local__", model_id: "Qwen3.8-27B-FP8" });
+  fail = true;
+  await page.getByRole("button", { name: "刷新模型列表", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText("模型列表加载失败");
+});
+
+test("窄屏设置过滤云模型、失效默认需重选，退出可取消", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  let writes = 0;
+  await page.route("**/api/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() !== "GET") writes++;
+    if (path === "/api/auth/me") return route.fulfill({ json: { ...actor, role: "user" } });
+    if (path === "/api/models") return route.fulfill({ json: { options: [{ provider: "local", model: "管理员本地模型" }] } });
+    if (path === "/api/model-connections") return route.fulfill({ json: { items: [{
+      connection_id: "cloud", owner_scope: "platform_shared", status: "verified", display_name: "共享模型", model: "ready",
+      models: [{ model_id: "ready", display_name: "可用云模型", status: "available", enabled: true },
+        { model_id: "disabled", display_name: "已停用", status: "available", enabled: false },
+        { model_id: "unverified", display_name: "未验证", status: "pending", enabled: true }],
+    }] } });
+    if (path === "/api/model-connections/preferences/default") return route.fulfill({ json: { preference: { connection_id: "cloud", model_id: "disabled", available: false } } });
+    return route.fulfill({ status: 404, json: {} });
+  });
+  await page.goto("/settings");
+  const select = page.getByLabel("默认任务模型", { exact: true });
+  await expect(select.locator("option")).toHaveText(["自动选择可用模型", "原默认模型已不可用，请重新选择", "共享模型 · 可用云模型"]);
+  await expect(page.getByRole("button", { name: "保存默认模型" })).toBeDisabled();
+  await expect(page.getByLabel("当前密码", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "修改密码", exact: true }).click();
+  await page.getByLabel("显示密码", { exact: true }).check();
+  await expect(page.getByLabel("新密码", { exact: true })).toHaveAttribute("type", "text");
+  page.once("dialog", dialog => dialog.dismiss());
+  await page.getByRole("button", { name: "退出所有设备", exact: true }).click();
+  expect(writes).toBe(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.getByRole("heading", { name: "任务默认模型", exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath("settings-mobile.png"), fullPage: true });
+});
+
+test("模型仅分本地与云端，云端按供应商组织且保存原连接身份", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  let saved: unknown;
+  await page.route("**/api/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return route.fulfill({ json: actor });
+    if (path === "/api/models") return route.fulfill({ json: { options: [{ provider: "local", model: "Qwen3.8-27B-FP8" }] } });
+    if (path === "/api/model-connections") return route.fulfill({ json: { items: [
+      { connection_id: "local", locality: "local", preset_id: null, display_name: "导入的本地模型", owner_scope: "platform_shared", status: "verified", model: "Qwen3.6-35B-A3B", models: [{ model_id: "Qwen3.6-35B-A3B", display_name: "Qwen3.6-35B-A3B", enabled: true, status: "available" }] },
+      { connection_id: "cloud", locality: "public_external", preset_id: "qwen", display_name: "导入的阿里", owner_scope: "platform_shared", status: "verified", model: "qwen3.8-max", models: [{ model_id: "qwen3.8-max", display_name: "Qwen 3.8 Max", enabled: true, status: "available", current_catalog: true }, { model_id: "qwen3.7-max", display_name: "Qwen 3.7 Max", enabled: true, status: "available", current_catalog: false }] },
+    ] } });
+    if (path === "/api/model-connections/preferences/default") {
+      if (route.request().method() === "PUT") { saved = route.request().postDataJSON(); return route.fulfill({ json: saved }); }
+      return route.fulfill({ json: { preference: null } });
+    }
+    return route.fulfill({ status: 404, json: {} });
+  });
+  await page.goto("/settings");
+  const select = page.getByLabel("默认任务模型", { exact: true });
+  await expect(select.locator("optgroup")).toHaveCount(2);
+  await expect(select.locator("optgroup").nth(0)).toHaveAttribute("label", "本地模型");
+  await expect(select.locator("optgroup").nth(1)).toHaveAttribute("label", "云端模型");
+  await expect(select.locator('optgroup[label="云端模型"] option')).toHaveText(["阿里百炼 · Qwen 3.8 Max"]);
+  await select.selectOption({ label: "阿里百炼 · Qwen 3.8 Max" });
+  await page.getByRole("button", { name: "保存默认模型", exact: true }).click();
+  await expect.poll(() => saved).toEqual({ connection_id: "cloud", model_id: "qwen3.8-max" });
+  await expect(page.getByLabel("当前密码", { exact: true })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("settings-compact-desktop.png"), fullPage: true });
+  await page.getByRole("button", { name: "修改密码", exact: true }).click();
+  await page.getByLabel("当前密码", { exact: true }).fill("synthetic-only");
+  await page.getByRole("button", { name: "取消修改", exact: true }).click();
+  await page.getByRole("button", { name: "修改密码", exact: true }).click();
+  await expect(page.getByLabel("当前密码", { exact: true })).toHaveValue("");
+  expect(errors).toEqual([]);
+});
+
+test("平台本地模型去重且保留已有默认连接", async ({ page }) => {
+  let preference = { connection_id: "imported", model_id: "Qwen3.6-35B-A3B", available: true };
+  await page.route("**/api/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return route.fulfill({ json: actor });
+    if (path === "/api/models") return route.fulfill({ json: { options: [{ provider: "local", model: "Qwen3.6-35B-A3B" }, { provider: "local", model: "Qwen3.8-27B-FP8" }] } });
+    if (path === "/api/model-connections") return route.fulfill({ json: { items: [{
+      connection_id: "imported", owner_scope: "platform_shared", locality: "managed_private", display_name: "导入的本地模型", status: "verified", model: "Qwen3.6-35B-A3B",
+      models: [{ model_id: "Qwen3.6-35B-A3B", display_name: "Qwen3.6-35B-A3B", enabled: true, status: "available" }],
+    }] } });
+    if (path === "/api/model-connections/preferences/default") {
+      if (route.request().method() === "PUT") { preference = { ...route.request().postDataJSON(), available: true }; return route.fulfill({ json: preference }); }
+      return route.fulfill({ json: { preference } });
+    }
+    return route.fulfill({ status: 404, json: {} });
+  });
+  await page.goto("/settings");
+  const picker = page.getByLabel("默认任务模型", { exact: true });
+  await expect(picker.locator("optgroup option")).toHaveText(["Qwen3.8-27B-FP8", "Qwen3.6-35B-A3B"]);
+  await expect(picker).toHaveValue(JSON.stringify(["imported", "Qwen3.6-35B-A3B"]));
+  await picker.selectOption({ label: "Qwen3.8-27B-FP8" });
+  await page.getByRole("button", { name: "保存默认模型", exact: true }).click();
+  await expect(page.getByText("已保存，仅对新任务生效。", { exact: true })).toBeVisible();
+  await picker.selectOption({ label: "Qwen3.6-35B-A3B" });
+  const unsaved = await picker.inputValue();
+  await page.getByRole("button", { name: "刷新模型列表", exact: true }).click();
+  await expect(picker).toHaveValue(unsaved);
+  await expect(page.getByRole("button", { name: "保存默认模型", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "取消修改", exact: true }).click();
+  await expect(picker).toHaveValue(JSON.stringify(["__local__", "Qwen3.8-27B-FP8"]));
+});
+
+test("平台配置跳转唯一模型管理入口，旧模型编辑不再展示", async ({ page }, testInfo) => {
+  let writes = 0;
+  let failConnections = false;
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.route("**/api/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (route.request().method() !== "GET") writes++;
+    if (path === "/api/auth/me") return route.fulfill({ json: actor });
+    if (path === "/api/config") return route.fulfill({ json: { groups: [{ key: "llm_local", label: "本地模型配置", items: [] }] } });
+    if (path === "/api/config/models") return route.fulfill({ json: { models: { local: ["Qwen3.6-35B-A3B"] }, default_provider: "local", available_providers: ["local"] } });
+    if (path === "/api/model-connections/presets") return route.fulfill({ json: { items: [] } });
+    if (path === "/api/model-connections/preferences/default") return route.fulfill({ json: { preference: null } });
+    if (path === "/api/settings/onboarding/model-connections") return route.fulfill({ json: { state: "completed" } });
+    if (path === "/api/model-connections" && failConnections) return route.fulfill({ status: 503, json: {} });
+    if (path === "/api/model-connections") return route.fulfill({ json: { items: [
+      { connection_id: "local", owner_scope: "platform_shared", locality: "managed_private", status: "verified", display_name: "导入模型", models: [{ model_id: "Qwen3.6-35B-A3B", display_name: "Qwen3.6-35B-A3B", enabled: true, status: "available" }] },
+      { connection_id: "cloud", owner_scope: "platform_shared", preset_id: "qwen", status: "verified", display_name: "阿里", models: [{ model_id: "qwen3.8-max", display_name: "Qwen 3.8 Max", enabled: true, status: "available" }] },
+      { connection_id: "mine", owner_scope: "user_personal", status: "verified", display_name: "个人秘密模型", models: [{ model_id: "private-model", display_name: "个人秘密模型", enabled: true, status: "available" }] },
+    ] } });
+    return route.fulfill({ status: 404, json: {} });
+  });
+  await page.goto("/settings?section=platform");
+  const inventory = page.getByRole("region", { name: "平台模型管理", exact: true });
+  await expect(page.getByText("个人秘密模型", { exact: true })).toHaveCount(0);
+  await expect(inventory.getByRole("link", { name: "管理平台模型" })).toHaveAttribute("href", "/settings?section=models&scope=platform");
+  await page.screenshot({ path: testInfo.outputPath("platform-models-desktop.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("platform-models-mobile.png"), fullPage: true });
+  await expect(page.locator("summary").filter({ hasText: "高级：旧流程模型参数" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "本地模型配置" })).toHaveCount(0);
+  failConnections = false;
+  await inventory.getByRole("link", { name: "管理平台模型" }).click();
+  await expect(page.getByRole("tab", { name: "平台连接", exact: true })).toHaveAttribute("aria-selected", "true");
+  expect(writes).toBe(0); expect(errors).toEqual([]);
+});
+
+test("同名云模型可区分个人与平台连接", async ({ page }) => {
+  await page.route("**/api/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return route.fulfill({ json: actor });
+    if (path === "/api/models") return route.fulfill({ json: { options: [] } });
+    if (path === "/api/model-connections") return route.fulfill({ json: { items: ["user_personal", "platform_shared"].map(scope => ({
+      connection_id: scope, owner_scope: scope, preset_id: "deepseek", display_name: "DeepSeek", status: "verified", model: "deepseek-flash",
+      models: [{ model_id: "deepseek-flash", display_name: "DeepSeek V4.1 Flash", enabled: true, status: "available" }],
+    })) } });
+    if (path === "/api/model-connections/preferences/default") return route.fulfill({ json: { preference: null } });
+    return route.fulfill({ status: 404, json: {} });
+  });
+  await page.goto("/settings");
+  const options = page.getByLabel("默认任务模型", { exact: true }).locator("optgroup option");
+  await expect(options).toHaveText(["DeepSeek · DeepSeek V4.1 Flash · 我的", "DeepSeek · DeepSeek V4.1 Flash · 平台"]);
+});
+
+for (const role of ["user", "admin", "super_admin"]) test(`工具验证仅保留在管理入口：${role}`, async ({ page }) => {
+  let governanceReads = 0;
+  await page.route("**/api/**", route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/auth/me") return route.fulfill({ json: { ...actor, role } });
+    if (path === "/api/models") return route.fulfill({ json: { options: [], available: [], default: null, document_default: null } });
+    if (path.startsWith("/api/capability-governance/")) {
+      governanceReads++;
+      return route.fulfill({ json: { items: path.endsWith("/packs") ? [{ ...pack, can_validate: true }] : [] } });
+    }
+    return route.fulfill({ status: 404, json: { detail: "隔离API" } });
+  });
+  await page.goto("/settings?section=personal");
+  await expect(page.getByText("外观", { exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "我的能力验证", exact: true })).toHaveCount(0);
+  expect(governanceReads).toBe(0);
+  await page.goto("/settings?section=governance");
+  if (role === "user") {
+    await expect(page.getByRole("heading", { name: "能力治理状态", exact: true })).toHaveCount(0);
+    expect(governanceReads).toBe(0);
+  } else {
+    await expect(page.getByRole("heading", { name: "能力治理状态", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "发起验证", exact: true })).toBeVisible();
+  }
+});
 async function setup(page: Page, post: (route: Route) => Promise<void>, identity = actor) {
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;

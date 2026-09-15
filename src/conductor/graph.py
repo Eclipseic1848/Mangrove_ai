@@ -33,6 +33,7 @@ from .nodes import (
     video_enrich_node,
 )
 from .node_views import build_node_view
+from .progress import LABELS, emit_progress, completed_summary
 from .state import ConductorState
 from .targets import is_direct_video_manifest
 
@@ -130,8 +131,12 @@ def _traced(name: str, fn: Callable[[ConductorState], Awaitable[Dict[str, Any]]]
         from src.api.execution import execution_checkpoint
         execution_checkpoint()
         t0 = time.perf_counter()
+        emit_progress(name, "started", f"正在{LABELS.get(name, '处理任务')}…")
         result = await fn(state) or {}
+        from src.llm.provider import verify_bound_model
+        verify_bound_model()
         execution_checkpoint()
+        emit_progress(name, "failed" if result.get("error") else "waiting" if result.get("needs_clarification") else "completed", completed_summary(name, result))
         ms = round((time.perf_counter() - t0) * 1000)
         entry = {"node": name, "ms": ms, "summary": _node_summary(name, result, state)}
         return {**result, "trace": [entry]}
@@ -312,11 +317,13 @@ async def astream_conductor(
     if _settings.checkpoint_enabled:
         graph = await _get_checkpoint_graph()
         config = {"configurable": {"thread_id": init["task_id"]}}
-        stream = graph.astream(init, config=config, stream_mode=["updates", "values"])
+        stream = graph.astream(init, config=config, stream_mode=["updates", "values", "custom"])
     else:
-        stream = get_graph().astream(init, stream_mode=["updates", "values"])
+        stream = get_graph().astream(init, stream_mode=["updates", "values", "custom"])
     final_state: Dict[str, Any] = {}
     async for mode, chunk in stream:
+        if mode == "custom" and isinstance(chunk, dict):
+            yield ("progress", chunk)
         if mode == "values":
             final_state = chunk if isinstance(chunk, dict) else final_state
         elif mode == "updates" and isinstance(chunk, dict):

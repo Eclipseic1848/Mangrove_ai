@@ -1006,6 +1006,7 @@ export function ResultPreview({
               <FileCheck2 className="h-5 w-5 text-primary" />
               <h2 className="font-semibold">结果与正式交付</h2>
               <QualityBadge warning={hasWarnings} />
+              {task.source_contract?.owner_acceptance && <span className="text-sm text-muted-foreground">用户接受 · 部分检查未完成</span>}
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
               已通过格式重开、文件大小和 SHA-256 校验。预览仅显示当前页，下载包含全部结果。

@@ -144,6 +144,7 @@ function eventFailed(event: WorkspaceEvent) {
 function buildMilestones(
   events: WorkspaceEvent[],
   taskStatus: WorkspaceTask["status"],
+  ownerAccepted = false,
 ): TimelineMilestone[] {
   const byStage = new Map<string, WorkspaceEvent[]>();
   events.forEach((event) => {
@@ -224,9 +225,11 @@ function buildMilestones(
     const failure =
       [...stageEvents].reverse().find(eventFailed)
       || (stage === failureStage ? taskFailure : null);
-    const inferredCompletion =
-      index < furthestObserved
-      || (taskStatus === "completed" && index <= stageOrder.indexOf("deliver"));
+    // 用户接受只证明交付完成，不能倒推此前所有检查通过。
+    const inferredCompletion = ownerAccepted
+      ? taskStatus === "completed" && stage === "deliver"
+      : index < furthestObserved
+        || (taskStatus === "completed" && index <= stageOrder.indexOf("deliver"));
 
     if (failure) {
       return {
@@ -265,7 +268,7 @@ function buildMilestones(
     return {
       stage,
       status: "pending",
-      summary: "尚未开始",
+      summary: ownerAccepted ? "未确认完成，保留原检查记录" : "尚未开始",
       created_at: null,
     };
   });
@@ -569,7 +572,7 @@ export function TaskTimeline({
       && event.details.recovery_status === "pending",
   );
   const milestones = useMemo(() => {
-    if (!task.progress) return buildMilestones(events, task.status);
+    if (!task.progress || task.source_contract?.owner_acceptance) return buildMilestones(events, task.status, Boolean(task.source_contract?.owner_acceptance));
     return task.progress.stages.map((stage) => {
       const latest = [...task.progress!.events]
         .reverse()
@@ -581,7 +584,7 @@ export function TaskTimeline({
         created_at: latest?.created_at || null,
       };
     });
-  }, [events, task.progress, task.status]);
+  }, [events, task.progress, task.status, task.source_contract?.owner_acceptance]);
   const completedMilestones = milestones.filter(
     (milestone) => milestone.status === "completed",
   ).length;
@@ -1269,7 +1272,8 @@ export function TaskTimeline({
       </Collapsible.Root>
 
       {(task.status === "failed"
-        || task.failure?.error_code === "MODEL_OUTCOME_UNKNOWN") && (
+        || task.failure?.error_code === "MODEL_OUTCOME_UNKNOWN"
+        || task.failure?.error_code === "VERIFICATION_STALLED") && (
         <div
           data-testid="task-failure-explanation"
           className="mt-3 rounded-2xl border border-destructive/20 bg-destructive/[0.04] p-4"
@@ -1278,7 +1282,7 @@ export function TaskTimeline({
             <AlertCircle className="mt-0.5 h-5 w-5 text-destructive" />
             <div className="min-w-0 flex-1">
               <h3 className="text-sm font-semibold">
-                {task.failure?.error_code === "MODEL_OUTCOME_UNKNOWN"
+                {["MODEL_OUTCOME_UNKNOWN", "VERIFICATION_STALLED"].includes(task.failure?.error_code ?? "")
                   ? "等待你的决定"
                   : "任务未完成"}
               </h3>
@@ -1397,7 +1401,9 @@ export function TaskTimeline({
       {task.status === "completed" && (
         <div className="mt-3 flex items-center gap-3 rounded-2xl border border-emerald-500/20 bg-emerald-500/[0.05] p-4 text-sm text-emerald-700 dark:text-emerald-300">
           <CheckCircle2 className="h-5 w-5" />
-          最终验证和格式重开检查已完成，可以预览或下载。
+          {task.source_contract?.owner_acceptance
+            ? "已按你接受的初稿保存正式结果；未完成的系统检查仍为未验证。"
+            : "最终验证和格式重开检查已完成，可以预览或下载。"}
         </div>
       )}
       {task.status === "candidate_ready" && (

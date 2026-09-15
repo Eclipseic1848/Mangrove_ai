@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { BookOpen, ChevronDown, ChevronRight, Loader2, Pencil, Play, RotateCcw, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
@@ -80,7 +81,7 @@ function slowVerifyConfirmText(): string {
 /** best-effort：反爬较激进、结果仅供参考的 Cookie（拼多多）。 */
 const BEST_EFFORT_COOKIE_KEYS = new Set(["pdd_cookie"]);
 
-/** 旧模型配置仍被 Conductor 等旧流程读取；只降级展示，不迁移或删除。 */
+/** 旧参数仅留给后台兼容读取，不再提供第二处模型编辑入口。 */
 const LEGACY_MODEL_GROUPS = ["llm_default", "document_extraction", "llm_deepseek", "llm_qwen", "llm_local"];
 
 /** 管理员平台配置按用途分区；旧模型配置单独放进折叠兼容区。 */
@@ -131,6 +132,8 @@ const PROVIDER_MODEL_KEY: Record<string, string> = {
 export function AdminConfigCenter() {
   const [groups, setGroups] = useState<CfgGroup[]>([]);
   const [models, setModels] = useState<ModelData | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [open, setOpen] = useState<Set<string>>(new Set());
   const [edit, setEdit] = useState<CfgItem | null>(null);
   const [val, setVal] = useState("");            // 主值（非级联：文本/下拉值；级联：选中的供应商）
@@ -148,6 +151,7 @@ export function AdminConfigCenter() {
 
   const load = async () => {
     const ts = Date.now();
+    setLoading(true); setLoadError("");
     try {
       const [d, m] = await Promise.all([
         api.get(`/api/config?_=${ts}`),
@@ -156,8 +160,8 @@ export function AdminConfigCenter() {
       setGroups((d as any).groups || []);
       setModels(m as ModelData);
     } catch {
-      /* 静默：网络抖动时不刷旧数据即可 */
-    }
+      setLoadError("平台配置加载失败，已保留上次显示的内容，请刷新重试。");
+    } finally { setLoading(false); }
   };
   useEffect(() => { load(); }, []);
 
@@ -237,16 +241,22 @@ export function AdminConfigCenter() {
     <Card>
       <CardHeader>
         <div className="flex items-center justify-between gap-2">
-          <CardTitle className="text-base">平台配置（全局，改完即时生效）</CardTitle>
+          <CardTitle className="text-base">平台配置</CardTitle>
           <Button variant="outline" size="sm" className="h-7 gap-1.5" onClick={() => setGuideOpen(true)}>
             <BookOpen className="h-3.5 w-3.5" /> 使用指南
           </Button>
         </div>
         <p className="text-xs text-muted-foreground">
-          密钥/Cookie/端点等运行时可改；「已覆盖」为前端保存的值，「.env 兜底」为服务器默认。重置即恢复默认，不影响 Agent 运行。
+          管理采集服务与基础设施。修改会影响相关服务；重置恢复服务器默认，请先确认运行中任务是否依赖该配置。
         </p>
       </CardHeader>
       <CardContent className="space-y-3">
+        <section aria-labelledby="platform-models-title" className="flex flex-wrap items-center justify-between gap-3 rounded-lg border p-4">
+          <div><h2 id="platform-models-title" className="text-base font-semibold">平台模型管理</h2>
+            <p className="mt-2 text-sm text-muted-foreground">本地模型、云端服务的添加与维护统一在“模型与连接”操作。</p></div>
+          <Link to="/settings?section=models&scope=platform" className="rounded-md border px-3 py-2 text-sm text-primary focus-visible:ring-2 focus-visible:ring-ring">管理平台模型</Link>
+        </section>
+        {loadError && <p role="alert" className="text-sm text-destructive">{loadError}</p>}
         {(() => {
           const byKey = new Map(groups.map((g) => [g.key, g]));
           const categorized = new Set([
@@ -328,22 +338,6 @@ export function AdminConfigCenter() {
           };
           return (
             <>
-              {LEGACY_MODEL_GROUPS.some((key) => byKey.has(key)) && (
-                <details className="rounded-xl border border-amber-500/30 bg-amber-500/[0.03]">
-                  <summary className="cursor-pointer px-4 py-3 text-sm font-medium">
-                    旧流程兼容
-                    <span className="ml-2 text-xs font-normal text-muted-foreground">
-                      Conductor、本地模型和旧文档流程仍在读取；暂不迁移或删除
-                    </span>
-                  </summary>
-                  <div className="space-y-1.5 border-t border-amber-500/20 p-3">
-                    {LEGACY_MODEL_GROUPS
-                      .map((key) => byKey.get(key))
-                      .filter((group): group is CfgGroup => !!group)
-                      .map(renderGroup)}
-                  </div>
-                </details>
-              )}
               {GROUP_CATEGORIES.map((cat) => {
                 const catGroups = cat.groups.map((k) => byKey.get(k)).filter((g): g is CfgGroup => !!g);
                 if (!catGroups.length) return null;
@@ -363,7 +357,7 @@ export function AdminConfigCenter() {
             </>
           );
         })()}
-        {!groups.length && <p className="py-3 text-center text-sm text-muted-foreground">加载中…</p>}
+        {!loading && !loadError && !groups.length && <p className="py-3 text-center text-sm text-muted-foreground">暂无其他平台配置。</p>}
       </CardContent>
 
       <Modal open={!!edit} onClose={() => setEdit(null)} title={`修改 · ${edit?.label ?? ""}`}>

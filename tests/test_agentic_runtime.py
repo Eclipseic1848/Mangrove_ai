@@ -1878,6 +1878,15 @@ async def test_main_predicted_name_collision_never_deletes_foreign_owner(tmp_pat
     assert removed == ["f" * 64]
 
 
+@pytest.mark.parametrize("passed", [False, None, True])
+def test_coverage_completion_requires_explicit_pass(passed):
+    event = PiRuntime._translate_event({
+        "type": "tool_execution_end", "toolName": "propose_completion", "isError": False,
+        "result": {"details": {"decision": {"passed": passed}}},
+    })
+    assert event.event_type == ("tool.completed" if passed is True else "tool.failed")
+
+
 def test_pi_runtime_resolves_local_relay_in_docker_network(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1920,9 +1929,11 @@ def test_pi_runtime_resolves_local_relay_in_docker_network(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("document_failures", [False, True, "unknown", "quality"])
 async def test_pi_runtime_stops_after_ambiguous_provider_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    document_failures: bool | str,
 ) -> None:
     class MemoryStdin:
         def __init__(self) -> None:
@@ -1941,7 +1952,7 @@ async def test_pi_runtime_stops_after_ambiguous_provider_error(
             return None
 
     stdout = asyncio.StreamReader()
-    for event in (
+    events = (
         {
             "type": "message_end",
             "message": {
@@ -1951,7 +1962,28 @@ async def test_pi_runtime_stops_after_ambiguous_provider_error(
             },
         },
         {"type": "agent_settled"},
-    ):
+    )
+    if document_failures:
+        events = tuple(
+            event
+            for tool in ("read_evidence", "inspect_source", "discover_content")
+            for event in (
+                {"type": "tool_execution_end",
+                 "toolName": "discover_content" if document_failures == "unknown" else tool,
+                 "isError": document_failures != "unknown",
+                 "result": {"details": {"observed_unit_ids": [], "unknown_units": ["page:1"]}}},
+                {"type": "tool_execution_end", "toolName": "bash", "isError": False},
+            )
+        ) + ({"type": "agent_settled"},)
+    if document_failures == "quality":
+        events = tuple({
+            "type": "tool_execution_end", "toolName": "propose_completion", "isError": False,
+            "result": {"details": {
+                "decision": {"passed": False, "gaps": ["关键字段缺少依据"]},
+                "coverage": {"evidence_bindings": [], "cache_hits": i},
+            }},
+        } for i in range(3)) + ({"type": "agent_settled"},)
+    for event in events:
         stdout.feed_data((json.dumps(event) + "\n").encode("utf-8"))
     stdout.feed_eof()
     stderr = asyncio.StreamReader()
@@ -1985,7 +2017,7 @@ async def test_pi_runtime_stops_after_ambiguous_provider_error(
     source = tmp_path / "source.csv"
     source.write_text("name,value\nsynthetic,1\n", encoding="utf-8")
 
-    with pytest.raises(PiRuntimeError, match="结果不确定"):
+    with pytest.raises(PiRuntimeError, match="验证没有进展" if document_failures == "quality" else "连续失败" if document_failures else "结果不确定"):
         await runtime._run_rpc(
             PiRuntimeRequest(
                 user_id="owner-a",

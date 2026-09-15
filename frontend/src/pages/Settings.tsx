@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import {
   Boxes, Cpu, Sparkles, Save, Moon, Sun, CircleDot, RefreshCw,
   Play, Loader2, CheckCircle2, XCircle, ShieldAlert, Unlock, UserRound,
-  KeyRound, SlidersHorizontal, Activity, ShieldCheck,
+  KeyRound, SlidersHorizontal, Activity, ShieldCheck, LogOut,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,24 +17,13 @@ import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ModelConnectionsPanel } from "@/pages/settings/ModelConnectionsPanel";
 import { CapabilityGovernancePanel } from "@/pages/settings/CapabilityGovernancePanel";
+import { TaskModelSettings } from "@/pages/settings/TaskModelSettings";
 
 interface Overview {
   collectors: { name: string; tier: number; available: boolean }[];
   scheduler: { enabled: boolean; active_count: number };
   connectors: { email: boolean; slack: boolean; embedding: boolean; checkpoint: boolean };
   connectors_enabled: { email: boolean; slack: boolean; embedding: boolean; checkpoint: boolean };
-}
-interface ModelOption {
-  provider: string;
-  model: string;
-  label: string;
-}
-interface Models {
-  options: ModelOption[];
-  available: string[];
-  default: ModelOption | null;
-  document_default: ModelOption | null;
-  document_default_source: "user" | "global";
 }
 
 const COLLECTOR_CN: Record<string, string> = {
@@ -178,15 +167,23 @@ function AccountSecurity() {
   const [newPassword, setNewPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [showPasswords, setShowPasswords] = useState(false);
+  const [editingPassword, setEditingPassword] = useState(false);
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0 p-4">
+        <div className="space-y-1">
         <CardTitle className="text-base">登录与密码</CardTitle>
-        <p className="text-xs text-muted-foreground">修改密码会退出所有设备。后台任务继续运行，重新登录后可继续查看。</p>
+        <p className="text-xs text-muted-foreground">管理登录安全；退出登录不会停止后台任务。</p>
+        </div>
+        <Button variant="outline" size="sm" disabled={busy} aria-expanded={editingPassword} aria-controls="password-editor" onClick={() => {
+          setEditingPassword(!editingPassword); setCurrentPassword(""); setNewPassword(""); setShowPasswords(false); setError("");
+        }}>{editingPassword ? "取消修改" : "修改密码"}</Button>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <form className="max-w-md space-y-3" onSubmit={async (event) => {
+      <CardContent className="space-y-3 px-4 pb-4 pt-0">
+        {editingPassword && <form id="password-editor" className="max-w-2xl space-y-3 rounded-lg border bg-muted/20 p-3" onSubmit={async (event) => {
           event.preventDefault();
+          if (busy) return;
           setBusy(true);
           setError("");
           try {
@@ -198,20 +195,26 @@ function AccountSecurity() {
           }
         }}>
           <input type="hidden" name="username" autoComplete="username" value={user?.username || ""} />
+          <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1.5">
             <label htmlFor="current-password" className="text-sm">当前密码</label>
-            <Input id="current-password" name="current_password" type="password" autoComplete="current-password"
+            <Input id="current-password" name="current_password" type={showPasswords ? "text" : "password"} autoComplete="current-password"
               value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required disabled={busy} />
           </div>
           <div className="space-y-1.5">
             <label htmlFor="new-password" className="text-sm">新密码</label>
-            <Input id="new-password" name="new_password" type="password" autoComplete="new-password" minLength={6}
+            <Input id="new-password" name="new_password" type={showPasswords ? "text" : "password"} autoComplete="new-password" minLength={6} aria-describedby="password-help"
               value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required disabled={busy} />
           </div>
+          </div>
+          <p id="password-help" className="text-xs text-muted-foreground">新密码至少 6 个字符。</p>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={showPasswords} disabled={busy} onChange={event => setShowPasswords(event.target.checked)} />显示密码</label>
           {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
           <Button type="submit" disabled={busy || !currentPassword || newPassword.length < 6}>修改密码并退出所有设备</Button>
-        </form>
-        <Button variant="outline" disabled={busy} onClick={async () => {
+        </form>}
+        {!editingPassword && error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        <Button variant="outline" className="min-h-11 border-red-300 bg-red-50 text-red-700 hover:border-red-400 hover:bg-red-100 hover:text-red-800 focus-visible:ring-red-500 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300 dark:hover:bg-red-950/60 dark:hover:text-red-200" disabled={busy} onClick={async () => {
+          if (busy || !window.confirm("退出所有设备（包括当前设备）？后台任务会继续运行，你需要重新登录。")) return;
           setBusy(true);
           setError("");
           try {
@@ -221,7 +224,7 @@ function AccountSecurity() {
           } finally {
             setBusy(false);
           }
-        }}>退出所有设备</Button>
+        }}><LogOut aria-hidden="true" />退出所有设备</Button>
       </CardContent>
     </Card>
   );
@@ -239,9 +242,6 @@ function SettingsContent() {
     : "personal";
   const currentSection = SETTINGS_SECTIONS.find((item) => item.key === section)!;
   const [ov, setOv] = useState<Overview | null>(null);
-  const [models, setModels] = useState<Models | null>(null);
-  const [documentModelRef, setDocumentModelRef] = useState("");
-  const [savingDocumentModel, setSavingDocumentModel] = useState(false);
   const [testing, setTesting] = useState<string | null>(null); // 正在自检的 target
   const [results, setResults] = useState<Record<string, CheckResult>>({});
   const [togglingKey, setTogglingKey] = useState<string | null>(null); // 正在切换开关的 connector.key
@@ -254,14 +254,6 @@ function SettingsContent() {
 
   const load = () => {
     api.get("/api/overview").then(setOv).catch(() => {});
-    api.get("/api/models").then((data: Models) => {
-      setModels(data);
-      setDocumentModelRef(
-        data.document_default
-          ? `${data.document_default.provider}::${data.document_default.model}`
-          : "",
-      );
-    }).catch(() => {});
   };
   useEffect(load, []);
 
@@ -294,37 +286,6 @@ function SettingsContent() {
     }
   };
 
-  const saveDocumentModel = async () => {
-    if (!documentModelRef) return;
-    setSavingDocumentModel(true);
-    try {
-      await api.put("/api/config/self/document_extraction_model", {
-        value: documentModelRef,
-      });
-      toast.success("文档抽取默认模型已保存到当前用户");
-      window.dispatchEvent(new CustomEvent("mangrove:config-changed"));
-      load();
-    } catch (e: any) {
-      toast.error(e.message || "保存失败");
-    } finally {
-      setSavingDocumentModel(false);
-    }
-  };
-
-  const resetDocumentModel = async () => {
-    setSavingDocumentModel(true);
-    try {
-      await api.del("/api/config/self/document_extraction_model");
-      toast.success("已恢复管理员或 .env 中的文档抽取默认模型");
-      window.dispatchEvent(new CustomEvent("mangrove:config-changed"));
-      load();
-    } catch (e: any) {
-      toast.error(e.message || "恢复失败");
-    } finally {
-      setSavingDocumentModel(false);
-    }
-  };
-
   // target 为 null 表示不可主动自检，仅展示配置状态
   // enabledKey：对应配置中心的开关字段（管理员可用它临时启停服务，不影响已保存的凭证）
   const connectors: {
@@ -350,29 +311,27 @@ function SettingsContent() {
           </div>
           <p className="text-sm text-muted-foreground">{currentSection.description}</p>
         </div>
-        {section === "personal" || section === "diagnostics" ? (
+        {section === "diagnostics" ? (
           <Button variant="outline" size="sm" onClick={load} className="gap-1.5">
             <RefreshCw className="h-4 w-4" /> 刷新
           </Button>
         ) : null}
       </header>
 
-      <div className="flex-1 overflow-y-auto px-7 py-6">
+      <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-7 sm:py-6">
         <div className="mx-auto max-w-6xl">
           <nav
-            role="tablist"
             aria-label="设置分区"
-            className="mb-6 grid gap-2 sm:grid-cols-2 xl:grid-cols-6"
+            className="mb-6 flex gap-2 overflow-x-auto pb-2"
           >
             {allowedSections.map((item) => (
               <button
                 key={item.key}
                 type="button"
-                role="tab"
-                aria-selected={section === item.key}
+                aria-current={section === item.key ? "page" : undefined}
                 onClick={() => selectSection(item.key)}
                 className={cn(
-                  "flex items-center gap-3 rounded-xl border px-3 py-3 text-left transition",
+                  "flex shrink-0 items-center gap-2 rounded-lg border px-3 py-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                   section === item.key
                     ? "border-primary bg-primary/5 shadow-sm ring-2 ring-primary/10"
                     : "border-border/70 hover:bg-muted/40",
@@ -381,12 +340,6 @@ function SettingsContent() {
                 <item.icon className={cn("h-4 w-4 shrink-0", section === item.key ? "text-primary" : "text-muted-foreground")} />
                 <span className="min-w-0">
                   <span className="block text-sm font-medium">{item.label}</span>
-                  <span className={cn(
-                    "block truncate text-xs",
-                    section === item.key ? "text-foreground/75" : "text-muted-foreground",
-                  )}>
-                    {item.description}
-                  </span>
                 </span>
               </button>
             ))}
@@ -395,7 +348,7 @@ function SettingsContent() {
           <div className="space-y-5">
             {section === "personal" && (
               <>
-                <AccountSecurity />
+                <TaskModelSettings key={user?.user_id} />
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base">外观</CardTitle>
@@ -414,71 +367,12 @@ function SettingsContent() {
                   </CardContent>
                 </Card>
 
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2 text-base">
-                      <Cpu className="h-4 w-4 text-primary" /> 个人任务默认项
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">旧对话流程默认模型</span>
-                      <span className="font-medium">{models?.default?.label || "—"}</span>
-                    </div>
-                    <div className="space-y-2 rounded-md border border-border/60 p-3">
-                      <div>
-                        <div className="text-sm font-medium">文档抽取默认模型</div>
-                        <div className="text-xs text-muted-foreground">
-                          当前用户可覆盖平台默认；文档工作区仍可按单个任务临时切换。
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <select
-                          aria-label="文档抽取默认模型"
-                          value={documentModelRef}
-                          onChange={(event) => setDocumentModelRef(event.target.value)}
-                          className="h-9 min-w-0 flex-1 rounded-md border bg-background px-3 text-sm"
-                        >
-                          {(models?.options ?? []).map((option) => (
-                            <option
-                              key={`${option.provider}::${option.model}`}
-                              value={`${option.provider}::${option.model}`}
-                            >
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                        <Button
-                          size="sm"
-                          disabled={!documentModelRef || savingDocumentModel}
-                          onClick={saveDocumentModel}
-                          className="bg-teal-700 text-white hover:bg-teal-800"
-                        >
-                          {savingDocumentModel ? <Loader2 className="h-4 w-4 animate-spin" /> : "保存"}
-                        </Button>
-                        {models?.document_default_source === "user" && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={savingDocumentModel}
-                            onClick={resetDocumentModel}
-                          >
-                            恢复平台默认
-                          </Button>
-                        )}
-                      </div>
-                      <p className="text-xs text-amber-700 dark:text-amber-300">
-                        选择云模型时，解析后的文档文本会发送到对应 Provider；任务执行前仍会展示外发摘要。
-                      </p>
-                    </div>
-                  </CardContent>
-                </Card>
+                <AccountSecurity />
 
-                <CapabilityGovernancePanel ownerOnly />
               </>
             )}
 
-            {section === "models" && <ModelConnectionsPanel isManager={manager} />}
+            {section === "models" && <ModelConnectionsPanel isManager={manager} initialScope={searchParams.get("scope") === "personal" ? "personal" : "platform"} />}
             {section === "credentials" && <SelfConfigCenter />}
             {section === "platform" && manager && <AdminConfigCenter />}
             {section === "governance" && manager && <CapabilityGovernancePanel />}

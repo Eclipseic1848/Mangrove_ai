@@ -1,5 +1,5 @@
 import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { api, downloadFile, authenticatedFetch, getAuthGeneration, revalidateStreamSession, ApiError, readAuthenticatedJson } from "@/lib/api";
+import { api, downloadFile, authenticatedFetch, getAuthGeneration, revalidateStreamSession, ApiError, readAuthenticatedJson, streamChat, type ChatEvents } from "@/lib/api";
 import type {
   WorkspaceEvent,
   WorkspaceMessage,
@@ -22,6 +22,43 @@ import type {
 } from "@/types/semanticWorkspace";
 
 const BASE = "/api/semantic-workspace";
+
+export type DraftChatMessage = { role: "user" | "assistant"; content: string; files?: Array<{ name: string; url: string }>; id?: number; created_at?: string; token_usage?: import("@/lib/messageActions").TokenUsage | null; work_progress?: import("@/lib/api").ChatProgress[] };
+export async function sendDraftTurn(payload: {
+  request_id: string; text: string; history: DraftChatMessage[]; model: string;
+  model_connection_id: string | null; external_api_confirmed: boolean;
+  conv_id?: string;
+}, signal: AbortSignal, events: ChatEvents = {}): Promise<{ reply: string; output_formats: string[]; files?: DraftChatMessage["files"]; conv_id?: string; message_id?: number; created_at?: string; user_created_at?: string; token_usage?: DraftChatMessage["token_usage"] }> {
+  const response = await authenticatedFetch(`${BASE}/draft/turns`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal,
+  });
+  if (response.ok && response.headers.get("content-type")?.includes("text/event-stream")) {
+    // 复用旧采集流的解析和登录检查，不再次提交请求。
+    return new Promise((resolve, reject) => {
+      let received = false;
+      let stop = () => {};
+      const cancel = () => { stop(); reject(new Error("已停止等待执行结果")); };
+      stop = streamChat({ content: payload.text }, {
+        ...events,
+        onResult: result => {
+          received = true;
+          resolve({ reply: [result.reply, result.analysis].filter(Boolean).join("\n\n"), output_formats: [], files: result.files,
+            conv_id: result.conv_id, message_id: result.message_id, created_at: result.created_at, user_created_at: result.user_created_at, token_usage: result.token_usage });
+        },
+        onError: error => reject(new Error(error.message)),
+        onDone: () => {
+          signal.removeEventListener("abort", cancel);
+          if (!received) reject(new Error("执行连接已结束，请查看已保存的任务状态，不会重复采集。"));
+        },
+      }, response);
+      signal.addEventListener("abort", cancel, { once: true });
+      if (signal.aborted) cancel();
+    });
+  }
+  const body = await readAuthenticatedJson(response);
+  if (!response.ok) throw new ApiError(response.status, typeof body?.detail === "string" ? body.detail : "对话未成功，需求已保留，请检查模型与对话长度。");
+  return body;
+}
 
 function sourcePageQuery(cursor?: string | null, token?: string) {
   const query = new URLSearchParams({ limit: "30" });

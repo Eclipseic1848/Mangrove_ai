@@ -43,7 +43,7 @@ from src.agentic_runtime.kernel import (
     PiAgentKernelAdapter,
 )
 from src.agentic_runtime.coremind_runtime import CoreMindAgentKernelAdapter
-from src.agentic_runtime.pi_runtime import PiRuntime
+from src.agentic_runtime.pi_runtime import PiRuntime, PiVerificationStalled
 from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.api.auth import get_store
 from src.api.execution import execution_lock, execution_to_thread
@@ -1466,7 +1466,10 @@ class SemanticWorkspaceManager:
                 now = time.monotonic()
                 for pending in pending_tasks:
                     if pending["status"] == "cancelling":
-                        await self.cancel(pending["user_id"], pending["task_id"])
+                        # 维护只恢复已存在的停止意图，不能制造新的用户取消代数。
+                        # 沿用任务冻结身份进行清理，不借用维护线程的空授权。
+                        with execution_context(self._workspace_authorization(pending["user_id"], pending["task_id"])):
+                            await self.cancel(pending["user_id"], pending["task_id"], for_revision=True)
                         continue
                     if self._delivery_retry_after.get(
                         pending["task_id"], 0.0
@@ -2529,6 +2532,28 @@ class SemanticWorkspaceManager:
                 str(exc) or exc.__class__.__name__,
                 failure,
             )
+        except PiVerificationStalled as exc:
+            # 必须先确认容器与来源读取停止，不能只改界面状态而继续花费模型预算。
+            if not await self._confirm_runtime_stopped(user_id, task_id, revision):
+                return
+            current = store.get_semantic_workspace_task(user_id, task_id)
+            if current and current.get("cancel_requested"):
+                self._mark_cancelled(user_id, task_id, revision)
+                return
+            events = AgenticRuntimeRepository(settings.webui_db_path).list_events(user_id, task_id, revision)
+            failure = {"error_code": "VERIFICATION_STALLED", "stage": "verify", "cause_summary": str(exc),
+                       "attempt_count": 1, "elapsed_ms": max(0, int((time.monotonic() - started) * 1000)),
+                       "source_read": any(event["event_type"] == "tool.completed" and event["details"].get("tool") in {"read", "read_evidence"} for event in events),
+                       "intermediate_created": any(event["event_type"] == "draft.ready" for event in events), "delivery_published": False,
+                       "next_actions": ["查看初稿和待核验事项", "满意后接受初稿", "补充资料或修改要求后再执行"]}
+            AgenticRuntimeRepository(settings.webui_db_path).update(user_id, task_id, revision,
+                status=RuntimeStatus.NEEDS_INPUT, failure=failure)
+            store.update_semantic_workspace_task(user_id, task_id, expected_active_revision=revision,
+                status="needs_input", error=None, question=None, failure=failure)
+            store.update_semantic_workspace_revision(user_id, task_id, revision, status="needs_input")
+            store.append_semantic_workspace_event(user_id, task_id, stage="needs_input", event_type="owner_action.requested",
+                summary="验证没有新增可信证据，已停止重复补救；初稿保留供你决定",
+                details={"error_code": "VERIFICATION_STALLED", "revision": revision})
         except Exception as exc:  # noqa: BLE001
             cancelling = store.get_semantic_workspace_task(user_id, task_id)
             if cancelling and cancelling.get("cancel_requested"):

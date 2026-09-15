@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sqlite3
 import threading
 import uuid
@@ -12,6 +13,7 @@ from pathlib import Path
 
 from src.database_migrations import DatabaseTarget, inspect_database
 from src import account_execution as execution
+from .catalog import PRESETS_BY_ID
 
 
 
@@ -34,6 +36,18 @@ def _public_row(
         (row["connection_id"],),
     ).fetchall()
     default_model = row["model"] if row["status"] == "verified" else None
+    preset = PRESETS_BY_ID.get(row["preset_id"])
+    newer_platform_models: set[str] = set()
+    if preset and row["owner_scope"] == "platform_shared" and row["preset_version"] != preset.version:
+        newer_platform_models = {item[0] for item in conn.execute(
+            "SELECT m.model_id FROM model_connections c JOIN model_connection_models m "
+            "ON m.connection_id=c.connection_id WHERE c.owner_scope='platform_shared' "
+            "AND c.preset_id=? AND c.preset_version=? AND c.status='verified' "
+            "AND m.status='available' AND m.enabled=1",
+            (preset.preset_id, preset.version),
+        )}
+    superseded = bool(conn.execute("SELECT 1 FROM model_configuration_versions WHERE previous_id=?", (row["connection_id"],)).fetchone())
+    edited = bool(conn.execute("SELECT 1 FROM model_configuration_versions WHERE connection_id=?", (row["connection_id"],)).fetchone())
     public_models = [
         {
             "model_id": item["model_id"],
@@ -46,6 +60,8 @@ def _public_row(
             "verified_at": item["verified_at"],
             "error_code": item["error_code"],
             "usage_status": item["usage_status"],
+            # 旧模型保持可追溯和历史装载；新任务列表只采用当前预设型号，不改写验证状态。
+            "current_catalog": (edited or preset is None or item["model_id"] in preset.models) and item["model_id"] not in newer_platform_models and not superseded,
         }
         for item in models
     ]
@@ -80,6 +96,65 @@ class ModelConnectionRepository:
         inspect_database(
             DatabaseTarget(profile="webui", path=Path(self.db_path))
         ).require_current()
+
+    def configuration(self, connection_id: str, actor: str, can_manage: bool) -> dict:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT c.*, s.ciphertext, COALESCE(v.thinking, 'default') AS thinking "
+                "FROM model_connections c LEFT JOIN model_connection_secrets s ON s.secret_id=c.secret_id "
+                "LEFT JOIN model_configuration_versions v ON v.connection_id=c.connection_id "
+                "WHERE c.connection_id=? AND ((c.owner_scope='user_personal' AND c.owner_user_id=?) "
+                "OR (c.owner_scope='platform_shared' AND ?))", (connection_id, actor, int(can_manage)),
+            ).fetchone()
+            if row is None:
+                raise ValueError("连接不存在或无权修改")
+            result = dict(row)
+            result["models"] = [dict(item) for item in conn.execute("SELECT * FROM model_connection_models WHERE connection_id=? ORDER BY catalog_order", (connection_id,))]
+            result["superseded"] = bool(conn.execute("SELECT 1 FROM model_configuration_versions WHERE previous_id=?", (connection_id,)).fetchone())
+            result["version"] = hashlib.sha256(json.dumps(result, sort_keys=True).encode("utf-8")).hexdigest()
+            return result
+
+    def configuration_edit(self, actor: str, operation_id: str) -> dict | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM model_configuration_edits WHERE actor_id=? AND operation_id=?", (actor, operation_id)).fetchone()
+            return dict(row) if row else None
+
+    def begin_configuration_edit(self, actor: str, operation_id: str, connection_id: str, version: str, request_hash: str, config: dict, ciphertext: str | None) -> bool:
+        with self._lock, self._conn() as conn:
+            cursor = conn.execute("INSERT OR IGNORE INTO model_configuration_edits (actor_id, operation_id, connection_id, expected_version, request_hash, config_json, ciphertext, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'testing', ?)", (actor, operation_id, connection_id, version, request_hash, json.dumps(config, ensure_ascii=False), ciphertext, _now()))
+            conn.commit()
+            return cursor.rowcount == 1
+
+    def finish_configuration_test(self, actor: str, operation_id: str, state: str, results: list) -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute("UPDATE model_configuration_edits SET state=?, results_json=? WHERE actor_id=? AND operation_id=? AND state='testing'", (state, json.dumps(results, ensure_ascii=False), actor, operation_id))
+            conn.commit()
+
+    def apply_configuration_edit(self, actor: str, operation_id: str, connection_id: str, can_manage: bool) -> str:
+        with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            edit = conn.execute("SELECT * FROM model_configuration_edits WHERE actor_id=? AND operation_id=? AND connection_id=?", (actor, operation_id, connection_id)).fetchone()
+            if not edit:
+                raise ValueError("请先验证配置")
+            if edit["state"] == "applied":
+                return str(edit["replacement_id"])
+            current = self.configuration(connection_id, actor, can_manage)
+            if current["version"] != edit["expected_version"] or current["superseded"]:
+                raise ValueError("配置已变化，请重新加载并验证")
+            if edit["state"] != "verified":
+                raise ValueError("验证尚未通过，原配置未修改")
+            config = json.loads(edit["config_json"])
+            replacement, now = str(uuid.uuid4()), _now()
+            secret_id = str(uuid.uuid4()) if edit["ciphertext"] else None
+            if secret_id:
+                conn.execute("INSERT INTO model_connection_secrets (secret_id, owner_user_id, ciphertext, created_at) VALUES (?, ?, ?, ?)", (secret_id, current["owner_user_id"], edit["ciphertext"], now))
+            conn.execute("INSERT INTO model_connections (connection_id, owner_scope, owner_user_id, preset_id, preset_version, display_name, base_url, model, api_format, locality, secret_id, status, key_hint, verified_at, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'verified', ?, ?, ?, ?, ?)", (replacement, current["owner_scope"], current["owner_user_id"], current["preset_id"], current["preset_version"], config["display_name"], config["base_url"], config["model"], current["api_format"], config["locality"], secret_id, config["key_hint"], now, actor, now, now))
+            self._replace_connection_models(conn, connection_id=replacement, default_model=config["model"], model_results=json.loads(edit["results_json"]), now=now)
+            # 不覆盖旧连接和密钥，历史任务继续使用冻结版本；新任务目录仅呈现新版本。
+            conn.execute("INSERT INTO model_configuration_versions (connection_id, previous_id, thinking, created_at) VALUES (?, ?, ?, ?)", (replacement, connection_id, config["thinking"], now))
+            conn.execute("UPDATE model_configuration_edits SET state='applied', replacement_id=?, ciphertext=NULL WHERE actor_id=? AND operation_id=?", (replacement, actor, operation_id))
+            conn.commit()
+            return replacement
 
 
 
@@ -701,6 +776,8 @@ class ModelConnectionRepository:
         owner_user_id: str,
         connection_id: str,
         model_id: str,
+        *,
+        allow_local: bool = False,
     ) -> dict[str, object]:
         """保存用户自己的默认连接和已验证模型。"""
 
@@ -713,6 +790,7 @@ class ModelConnectionRepository:
                   ON m.connection_id=c.connection_id
                 WHERE c.connection_id=? AND c.status='verified'
                   AND m.model_id=? AND m.status='available' AND m.enabled=1
+                  AND NOT EXISTS (SELECT 1 FROM model_configuration_versions v WHERE v.previous_id=c.connection_id)
                   AND (
                     (c.owner_scope='user_personal' AND c.owner_user_id=?)
                     OR c.owner_scope='platform_shared'
@@ -720,7 +798,7 @@ class ModelConnectionRepository:
                 """,
                 (connection_id, model_id, owner_user_id),
             ).fetchone()
-            if row is None:
+            if row is None and not (allow_local and connection_id == "__local__"):
                 raise ValueError("默认模型必须属于当前用户可用的已验证连接")
             now = _now()
             conn.execute(
@@ -734,6 +812,11 @@ class ModelConnectionRepository:
             conn.commit()
         return self.get_usage_preference(owner_user_id) or {}
 
+    def clear_usage_preference(self, owner_user_id: str) -> None:
+        with self._lock, self._conn() as conn:
+            conn.execute("DELETE FROM model_usage_preferences WHERE owner_user_id=?", (owner_user_id,))
+            conn.commit()
+
     def get_usage_preference(self, owner_user_id: str) -> dict[str, object] | None:
         """读取偏好；连接失效时返回失效状态，不自动选择替代连接。"""
 
@@ -742,7 +825,8 @@ class ModelConnectionRepository:
                 """
                 SELECT p.connection_id, p.model_id, p.updated_at,
                        c.display_name, c.owner_scope, c.status AS connection_status,
-                       m.status AS model_status, m.enabled
+                       m.status AS model_status, m.enabled,
+                       EXISTS (SELECT 1 FROM model_configuration_versions v WHERE v.previous_id=p.connection_id) AS superseded
                 FROM model_usage_preferences AS p
                 LEFT JOIN model_connections AS c ON c.connection_id=p.connection_id
                 LEFT JOIN model_connection_models AS m
@@ -758,6 +842,7 @@ class ModelConnectionRepository:
             row["connection_status"] == "verified"
             and row["model_status"] == "available"
             and row["enabled"]
+            and not row["superseded"]
         )
         return result
 
@@ -1008,6 +1093,8 @@ class ModelConnectionRepository:
             )
             if not allowed:
                 return False
+            if conn.execute("SELECT 1 FROM model_configuration_versions WHERE connection_id=? OR previous_id=?", (connection_id, connection_id)).fetchone():
+                raise ValueError("此连接有历史配置版本，请停用而非删除，以保留任务追溯")
             conn.execute(
                 "UPDATE model_connection_grants "
                 "SET revoked_at=COALESCE(revoked_at, ?), "
@@ -1090,7 +1177,7 @@ class ModelConnectionRepository:
                 SELECT
                     g.*, c.status AS connection_status,
                     c.secret_id AS current_secret_id,
-                    s.ciphertext
+                    s.ciphertext, COALESCE(v.thinking, 'default') AS thinking
                 FROM model_connection_grants AS g
                 JOIN model_connections AS c
                     ON c.connection_id=g.connection_id
@@ -1098,6 +1185,8 @@ class ModelConnectionRepository:
                     ON u.user_id=g.owner_user_id AND u.disabled=0 AND u.pending=0
                 LEFT JOIN model_connection_secrets AS s
                     ON s.secret_id=g.secret_id
+                LEFT JOIN model_configuration_versions AS v
+                    ON v.connection_id=g.connection_id
                 WHERE g.token_hash=?
                 """,
                 (token_hash,),
