@@ -9,7 +9,7 @@ annotated-types==0.7.0
 anthropic==0.77.0
 # Scrapling 0.4.9 fetchers 要求 AnyIO >=4.13；Starlette/OpenAI/MCP 均兼容 4.x。
 # 4.14.0 已通过五组 Python 3.13 clean resolution、pip check 与 import smoke。
-anyio==4.14.0
+anyio==4.14.2
 asyncer==0.0.12
 attrs==25.4.0
 bidict==0.23.1
