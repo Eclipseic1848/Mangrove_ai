@@ -80,7 +80,7 @@ export default function mangroveDocumentTools(pi: ExtensionAPI) {
     parameters: Type.Object({
       authorized_scope: Type.Object({
         source_ids: Type.Array(Type.String()),
-        unit_ids: Type.Optional(Type.Array(Type.String())),
+        unit_ids: Type.Optional(Type.Array(Type.String(), { description: "仅当用户明确限制页码或内容单元时填写。它是整个任务的检索边界，不是首批读取页面；查找文件中的第 N 个对象时省略，使用 discover_content 的 unit_ids 或 next_unit_ids 分批读取。" })),
       }),
       result_cardinality: Type.Union([
         Type.Literal("first"),

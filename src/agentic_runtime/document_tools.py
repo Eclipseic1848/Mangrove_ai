@@ -603,6 +603,14 @@ class DocumentToolBroker:
                     normalized_scope["source_ids"] = normalized_source_ids
                     normalized_payload["authorized_scope"] = normalized_scope
             draft = CoverageContractDraft.model_validate(normalized_payload)
+            # 不确定的页码限制不能成为不可改写的边界；拒绝本次提议，允许重新规划。
+            # 仅约束新冻结调用，历史契约恢复和已确认的用户限制保持原样。
+            if draft.authorized_scope.unit_ids and draft.confidence.value == "low":
+                raise DocumentToolError(
+                    "尚未确认页码范围，本次未冻结。请核对用户是否明确限定页面；"
+                    "未限定时省略 authorized_scope.unit_ids，用 discover_content 分批读取；"
+                    "有歧义时调用 request_clarification，不得仅提高 confidence 绕过确认。"
+                )
             inspected = tuple(
                 unit_id
                 for source_id in draft.authorized_scope.source_ids

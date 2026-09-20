@@ -32,6 +32,10 @@ _EXT_MIME: dict[str, str] = {
     ".json": "application/json",
     ".jsonl": "application/x-ndjson",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".doc": "application/msword",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".parquet": "application/vnd.apache.parquet",
     ".txt": "text/plain",
     ".html": "text/html",
@@ -81,6 +85,7 @@ _ZIP_FAMILY = {
     "application/zip",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
 
 
@@ -93,7 +98,7 @@ def _magic_matches(detected_mime: Optional[str], expected_mime: Optional[str], e
     if detected_mime == expected_mime:
         return True
     # zip 容器族互认（xlsx/docx/zip 共享 zip 容器）
-    if detected_mime in _ZIP_FAMILY and ext.lower() in {".xlsx", ".docx", ".zip"}:
+    if detected_mime in _ZIP_FAMILY and ext.lower() in {".xlsx", ".docx", ".pptx", ".zip"}:
         return True
     return False
 

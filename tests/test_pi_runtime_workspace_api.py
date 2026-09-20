@@ -600,6 +600,11 @@ def _client(
     routing_mode: RolloutMode | None = RolloutMode.ADMIN_GRAY,
     migrate_schema: bool = True,
 ) -> TestClient:
+    async def reject_real_async_http(_transport, request):
+        raise AssertionError(f"工作台模拟测试不得访问真实 HTTP：{request.url.host}")
+
+    # MockTransport/ASGITransport 不受影响；新学习路径也不能意外访问真实模型。
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", reject_real_async_http)
     monkeypatch.setattr(
         settings, "webui_db_path", str(tmp_path / "workspace.db")
     )
@@ -2885,10 +2890,24 @@ def test_admin_cannot_request_reverification_for_another_owner(
             ).fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("interrupt_publication", [False, True])
 def test_passed_candidate_reverification_requires_explicit_idempotent_publish(
     tmp_path,
     monkeypatch,
+    interrupt_publication,
 ) -> None:
+    from src.memory import templates
+    methods = tmp_path / "methods"
+    methods.mkdir()
+    (methods / "parse-document.md").write_text(
+        "---\nowner_id: user-a\nscope: owner\ntitle: 附件提取\ndata_type: workspace_document\n"
+        "keywords: [读取附件]\nstatus: active\n---\n按原始字段整理 JSON，保留缺失项。\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(templates, "TEMPLATES_DIR", methods)
+    if interrupt_publication:
+        from src.api import semantic_workspace_runtime
+        monkeypatch.setattr(semantic_workspace_runtime, "REVERIFICATION_RECOVERY_POLL_SECONDS", 0.1)
     runtime = InconclusivePiRuntime()
     verifier = _StaticReportVerifier(FakePiRuntime()._verification_report())
     monkeypatch.setattr(
@@ -2965,6 +2984,7 @@ def test_passed_candidate_reverification_requires_explicit_idempotent_publish(
             raise AssertionError(f"完整候选重验未进入 passed 终态：{latest}")
         assert current["delivery"] is None
         assert current["agentic_runtime"]["awaiting_publication"] is True
+        assert templates.load_templates(owner_id="user-a")[0]["uses"] == 0
         assert runtime.start_calls == 1
         assert runtime.resume_calls == []
         assert verifier.semantic_retry_calls == 1
@@ -3015,6 +3035,23 @@ def test_passed_candidate_reverification_requires_explicit_idempotent_publish(
                 json={"expected_revision": 1},
             )
 
+        if interrupt_publication:
+            from src.delivery_publishing.service import DeliveryPublisher
+            publish = DeliveryPublisher.publish
+
+            def interrupted_publish(self, *args, **kwargs):
+                publish(self, *args, **kwargs)
+                raise OSError("模拟正式发布落库后、工作台完成前中断")
+
+            with monkeypatch.context() as patch:
+                patch.setattr(DeliveryPublisher, "publish", interrupted_publish)
+                interrupted_response = publish_same_request(0)
+                assert interrupted_response.status_code == 409
+                deadline = time.monotonic() + 5
+                while templates.load_templates(owner_id="user-a")[0]["uses"] == 0 and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                assert templates.load_templates(owner_id="user-a")[0]["uses"] == 1
+
         with ThreadPoolExecutor(max_workers=2) as executor:
             first, replay = tuple(
                 executor.map(publish_same_request, range(2))
@@ -3023,6 +3060,8 @@ def test_passed_candidate_reverification_requires_explicit_idempotent_publish(
         assert first.json()["provenance"]["verification_attempt_id"] == attempt_id
         assert replay.status_code == 200, replay.text
         assert replay.json()["delivery_id"] == first.json()["delivery_id"]
+        assert templates.load_templates(owner_id="user-a")[0]["uses"] == 1
+        assert templates.load_templates(owner_id="user-a")[0]["verified_uses"] == 1
         conflict = client.post(
             publish_path,
             headers={"Idempotency-Key": "publish-other-request"},

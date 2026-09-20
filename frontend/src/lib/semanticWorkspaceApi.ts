@@ -1,5 +1,5 @@
 import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { api, downloadFile, authenticatedFetch, getAuthGeneration, revalidateStreamSession, ApiError, readAuthenticatedJson, streamChat, type ChatEvents } from "@/lib/api";
+import { api, downloadFile, authenticatedFetch, getAuthGeneration, revalidateStreamSession, ApiError, readAuthenticatedJson, streamChat, ChatConnectionInterrupted, type ChatEvents } from "@/lib/api";
 import type {
   WorkspaceEvent,
   WorkspaceMessage,
@@ -45,7 +45,7 @@ export async function sendDraftTurn(payload: {
           resolve({ reply: [result.reply, result.analysis].filter(Boolean).join("\n\n"), output_formats: [], files: result.files,
             conv_id: result.conv_id, message_id: result.message_id, created_at: result.created_at, user_created_at: result.user_created_at, token_usage: result.token_usage });
         },
-        onError: error => reject(new Error(error.message)),
+        onError: error => reject(error.code === "stream_interrupted" ? new ChatConnectionInterrupted(error.message) : new Error(error.message)),
         onDone: () => {
           signal.removeEventListener("abort", cancel);
           if (!received) reject(new Error("执行连接已结束，请查看已保存的任务状态，不会重复采集。"));
@@ -519,6 +519,7 @@ export function getWorkspacePreview(
     sortDirection?: "asc" | "desc";
     revision?: number;
     outputId?: string;
+    signal?: AbortSignal;
   },
 ): Promise<WorkspacePreview> {
   const query = new URLSearchParams({
@@ -530,7 +531,34 @@ export function getWorkspacePreview(
   if (params.sortBy) query.set("sort_by", params.sortBy);
   if (params.revision) query.set("revision", String(params.revision));
   if (params.outputId) query.set("output_id", params.outputId);
-  return api.get(`${BASE}/tasks/${taskId}/preview?${query}`);
+  return api.get(`${BASE}/tasks/${taskId}/preview?${query}`, { signal: params.signal });
+}
+
+export async function workspaceResultText(taskId: string, revision: number, outputId?: string): Promise<string> {
+  const parts: string[] = [];
+  const signal = AbortSignal.timeout(15000);
+  let offset = 0, total = 1, identity = "", bytes = 0;
+  while (offset < total) {
+    const page = await getWorkspacePreview(taskId, { revision, outputId, offset, limit: 500, signal });
+    const key = JSON.stringify([page.task_id, page.revision, page.delivery_id, page.output_id, page.representation?.sha256]);
+    if (page.task_id !== taskId || page.revision !== revision || (outputId && page.output_id !== outputId)
+      || (identity && identity !== key)) throw new Error("结果版本已变化，请刷新后重试");
+    identity = key;
+    total = page.total;
+    // ponytail: 剪贴板仅承载两兆字节/一万条，超过上限用已有文件下载，绝不静默复制半份结果。
+    if (total > 10000) throw new Error("结果较大，请在正式结果中下载完整文件");
+    const cell = (value: unknown) => /[\t\r\n"]/.test(String(value ?? "")) ? `"${String(value ?? "").replace(/"/g, '""')}"` : String(value ?? "");
+    const lines = page.kind === "table"
+      ? [...(offset === 0 ? [page.columns.map(cell).join("\t")] : []), ...page.rows.map(row => page.columns.map(column => cell(row[column])).join("\t"))]
+      : page.items.map(item => [item.label, item.content].filter(Boolean).join("\n"));
+    const text = lines.join("\n"); bytes += new TextEncoder().encode(text).length + 1;
+    if (bytes > 2 * 1024 * 1024) throw new Error("结果较大，请在正式结果中下载完整文件");
+    parts.push(text);
+    const count = page.kind === "table" ? page.rows.length : page.items.length;
+    if (!count && offset < total) throw new Error("结果未完整读取，请重试或下载文件");
+    offset += count;
+  }
+  return parts.join("\n");
 }
 
 export function getWorkspaceStorage(): Promise<WorkspaceStorage> {

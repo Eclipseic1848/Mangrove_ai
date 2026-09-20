@@ -1,5 +1,6 @@
 """合成任务走真实初稿接受和 Publisher，不调用模型。"""
 import pytest
+from types import SimpleNamespace
 
 from src.account_execution import ExecutionAuthorization, execution_context
 from src.agentic_runtime.draft_snapshot import freeze_draft
@@ -13,6 +14,59 @@ from tests.account_execution_helpers import seed_execution_owner
 from tests.database_migration_helpers import migrated_webui_database
 
 
+def test_draft_review_requires_explicit_same_run_decision_and_survives_restart(draft_task, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.api.auth import get_current_user
+    from src.api.routes import semantic_workspace as routes
+    from src.api.semantic_workspace_runtime import SemanticWorkspaceManager
+    store, root, draft = draft_task
+    repo = AgenticRuntimeRepository(store.db_path)
+    (root / "session").mkdir()
+    session = root / "session" / "run.jsonl"
+    session.write_text('{}\n', encoding="utf-8")
+    repo.update("a", "t", 1, status=RuntimeStatus.NEEDS_INPUT, session_file="session/run.jsonl")
+    repo.append_event("a", "t", 1, event_type="draft.ready", summary="等待决定", details={"draft_id": draft["draft_id"]})
+    store.publish_workspace_question("a", "t", {
+        "kind": "plan", "purpose": "control", "continuation": "unavailable",
+        "question_id": "draft-review:" + draft["draft_id"], "draft_review_id": draft["draft_id"],
+        "draft_review_run_id": "r", "prompt": "初稿已生成", "options": [], "allow_free_text": False,
+    }, expected_revision=1)
+    request = SimpleNamespace(user_id="a", task_id="t", revision=1)
+    assert SemanticWorkspaceManager._draft_review_required(request)
+    assert store.list_pending_semantic_workspace_tasks() == []
+    app = FastAPI()
+    app.include_router(routes.router)
+    owner = {"user_id": "a", "execution_generation": 0}
+    app.dependency_overrides[get_current_user] = lambda: owner
+    enqueued = []
+    monkeypatch.setattr(routes, "get_semantic_workspace_manager", lambda: SimpleNamespace(enqueue=lambda *args: enqueued.append(args)))
+    payload = {"expected_revision": 1, "draft_id": draft["draft_id"]}
+    with TestClient(app) as client:
+        assert client.get("/api/semantic-workspace/tasks/t/draft?revision=1").json()["draft"]["review_waiting"]
+        owner["user_id"] = "b"
+        assert client.post("/api/semantic-workspace/tasks/t/draft/verify", json=payload).status_code == 404
+        owner["user_id"] = "a"
+        repo.update("a", "t", 1, session_file="missing.jsonl")
+        assert client.post("/api/semantic-workspace/tasks/t/draft/verify", json=payload).status_code == 409
+        assert enqueued == []
+        repo.update("a", "t", 1, session_file="session/run.jsonl")
+        response = client.post("/api/semantic-workspace/tasks/t/draft/verify", json=payload)
+        assert response.status_code == 200, response.text
+        assert store.get_semantic_workspace_task("a", "t")["active_revision"] == 1
+        assert not SemanticWorkspaceManager._draft_review_required(request)
+        store.update_semantic_workspace_task("a", "t", status="running")
+        assert client.post("/api/semantic-workspace/tasks/t/draft/verify", json=payload).status_code == 200
+        assert len(enqueued) == 1
+        repo.update("a", "t", 1, run_id="other-run")
+        assert SemanticWorkspaceManager._draft_review_required(request)
+        assert client.post("/api/semantic-workspace/tasks/t/draft/verify", json=payload).status_code in {404, 409}
+        repo.update("a", "t", 1, run_id="r")
+        store.update_semantic_workspace_task("a", "t", status="cancelled", cancel_requested=True)
+        assert client.post("/api/semantic-workspace/tasks/t/draft/verify", json=payload).status_code == 409
+        assert len(enqueued) == 1
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("initial_status", ["failed", "cancelled"])
 @pytest.mark.parametrize("name,content,fmt", [("document.json", '{"name":"测试"}', "json"),
@@ -24,6 +78,9 @@ async def test_accept_draft_publishes_same_bytes_without_rerunning_and_replays(t
     monkeypatch.setattr(settings, "webui_db_path", str(db))
     monkeypatch.setattr(settings, "semantic_execution_root", str(tmp_path))
     store = WebUIStore(str(db), semantic_paths=ManagedPathCodec(tmp_path / "deliveries", legacy_anchor=("data", "semantic-executions")))
+    # 执行安全点复用认证 Store；绑定本例临时库，避免借用其他测试留下的全局实例。
+    import src.api.auth as auth
+    monkeypatch.setattr(auth, "_store", store)
     root = tmp_path / "run"
     (root / "output").mkdir(parents=True)
     (root / "output" / name).write_text(content, encoding="utf-8")
@@ -50,7 +107,7 @@ async def test_accept_draft_publishes_same_bytes_without_rerunning_and_replays(t
 
 
 @pytest.fixture
-def draft_task(tmp_path, monkeypatch):
+def draft_task(tmp_path, monkeypatch, request):
     db = migrated_webui_database(tmp_path / "db.sqlite")
     seed_execution_owner(db, "a")
     monkeypatch.setattr(settings, "webui_db_path", str(db))
@@ -65,7 +122,8 @@ def draft_task(tmp_path, monkeypatch):
     with execution_context(ExecutionAuthorization("a", 0)):
         from src.source_acquisition.reuse import uploads
         upload = uploads().save_bytes("a", "source.csv", b"name,value\nA,2\n", media_type="text/csv")
-        store.create_semantic_workspace_task("a", task_id="t", title="合成任务", objective_text="整理",
+        store.create_semantic_workspace_task("a", task_id="t", title="合成任务", objective_text=getattr(request, 'param', {}).get('objective', '整理'),
+            source_contract={'notification_user_text': getattr(request, 'param', {}).get('user_text', getattr(request, 'param', {}).get('objective', '整理'))},
             upload_ids=[upload.upload_id], source_refs=[{"upload_id": upload.upload_id, "sha256": upload.sha256}],
             output_formats=["json"], provider="local", model=None, external_api_confirmed=False)
         store.update_semantic_workspace_task("a", "t", status="failed")
@@ -223,6 +281,42 @@ def test_draft_routes_preview_download_accept_and_owner_isolation(draft_task, mo
         assert context["external_api_confirmed"] is False
         assert context.get("run_id") is None
         assert routes._revision_runtime_context("a", "t", 2)["run_id"] == "r"
+
+
+def test_reopening_accepted_draft_keeps_source_execution_usage(draft_task, monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.api.auth import get_current_user
+    from src.api.routes import semantic_workspace as routes
+    store, _, draft = draft_task
+    monkeypatch.setattr(routes, "get_semantic_workspace_manager", lambda: None)
+    for event_type, details in [("runtime.preparing", {}), ("provider.usage", {"input_tokens": 120, "output_tokens": 30, "total_tokens": 150}), ("run.failed", {})]:
+        store.append_semantic_workspace_event("a", "t", stage="execute", event_type=event_type, summary="合成执行记录",
+            details={"revision": 1, "run_id": "r", "runtime_event_type": event_type, **details})
+    app = FastAPI(); app.include_router(routes.router)
+    owner = {"user_id": "a", "execution_generation": 0}
+    app.dependency_overrides[get_current_user] = lambda: owner
+    with TestClient(app) as client:
+        before = client.get("/api/semantic-workspace/tasks/t?revision=1")
+        assert before.status_code == 200
+        assert before.json()["work_session"]["usage"]["total_tokens"] == 150
+        accepted = client.post("/api/semantic-workspace/tasks/t/draft/accept", json={"expected_revision": 1, "draft_id": draft["draft_id"], "accept_unverified": True})
+        assert accepted.status_code == 200
+        for _ in range(2):
+            reopened = client.get("/api/semantic-workspace/tasks/t").json()
+            assert reopened["viewing_revision"] == 2
+            assert reopened["work_session"] is not None
+            assert reopened["work_session"]["revision"] == 1
+            assert reopened["work_session"]["usage"] == before.json()["work_session"]["usage"]
+            assert reopened["agentic_runtime"].get("run_id") is None
+        source_contract = store.get_semantic_workspace_revision("a", "t", 2)["source_contract"]
+        store.create_semantic_workspace_revision("a", "t", objective_text="合成后续任务", output_formats=["json"],
+            change_summary="后续修订", source_contract=source_contract, expected_revision=3)
+        later = client.get("/api/semantic-workspace/tasks/t").json()
+        assert later["viewing_revision"] == 3
+        assert later["work_session"] is None
+        owner["user_id"] = "b"
+        assert client.get("/api/semantic-workspace/tasks/t").status_code == 404
 
 
 def test_csv_draft_preview_is_bounded_json_not_a_download(draft_task, monkeypatch):

@@ -1,3 +1,4 @@
+import { beijingTime } from "@/lib/beijingTime";
 import { useEffect, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { ApiError } from "@/lib/api";
@@ -11,7 +12,7 @@ export function reusableSelection(items: ReusableSource[]): SourceSelection {
   return { upload_ids: items.filter(item => item.kind === "upload").map(sourceId), source_snapshot_ids: items.filter(item => item.kind === "snapshot").map(sourceId), delivery_output_ids: items.filter(item => item.kind === "delivery_output").map(sourceId) };
 }
 export function ReusableSourceFacts({ item }: { item: ReusableSource }) {
-  const time = item.acquired_at && !Number.isNaN(Date.parse(item.acquired_at)) ? new Date(item.acquired_at).toLocaleString() : null;
+  const time = item.acquired_at && !Number.isNaN(Date.parse(item.acquired_at)) ? beijingTime(item.acquired_at) : null;
   return <div className="space-y-1 break-words text-xs text-muted-foreground">
     <p>{item.identity === "derived" ? "正式处理结果 · 非原件" : "原始资料"}</p>
     <p>{item.kind === "upload" ? "曾用于" : "来源"}：{item.origin?.task_id || "来源任务未记录"} · {item.origin?.revision ? `V${item.origin.revision}` : "版本未记录"}</p>
@@ -127,7 +128,7 @@ export function ReusableSourcePicker({ selectedKeys, onAdd, onClose }: { selecte
             <div className="min-w-0 flex-1"><p className="break-all font-medium">{item.label}{selectedKeys.includes(item.source_key) ? " · 已添加" : ""}</p><ReusableSourceFacts item={item} /></div>
             <button type="button" ref={node => { if (node) previewButtons.current.set(item.source_key, node); else previewButtons.current.delete(item.source_key); }} aria-label={`预览 ${item.label}`} className={button} disabled={busy || item.availability !== "available"} onClick={() => void show(item)}>预览</button>
           </div>)}
-          {catalog && !catalog.total && <p>暂无已保存的历史资料；可以先添加文件或公开网页。</p>}
+          {catalog && !catalog.total && <p>暂无历史资料。可以先上传文件，或在输入框描述需要读取的网页。</p>}
           {catalog?.next_cursor && <button type="button" disabled={busy} className={button} onClick={() => void load(true)}>加载更多</button>}
           {!catalog && !busy && <button type="button" className={button} onClick={() => void load()}>重新读取历史资料</button>}
         </div>}

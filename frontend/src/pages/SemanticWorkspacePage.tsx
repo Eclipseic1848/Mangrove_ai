@@ -1,3 +1,5 @@
+import { beijingTime } from "@/lib/beijingTime";
+import { PageGuide } from "@/components/onboarding/PageGuide";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
@@ -7,13 +9,13 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import {
   ArrowLeft,
+  ArrowUp,
   FileSearch,
-  HelpCircle,
   LayoutTemplate,
   Loader2,
+  PanelLeftClose,
+  PanelLeftOpen,
   RotateCcw,
-  Search,
-  Sparkles,
   Trash2,
   X,
 } from "lucide-react";
@@ -22,6 +24,8 @@ import { api, ApiError } from "@/lib/api";
 import { isAdminish, useAuth } from "@/lib/auth";
 import { ModelConnectionsPanel } from "@/pages/settings/ModelConnectionsPanel";
 import { type WebIntakeDraft } from "@/components/workspace/TaskComposer";
+import { ResultNotification } from "@/components/workspace/ResultNotification";
+import { MessageFooter, MessageTimestamp } from "@/components/workspace/MessageFooter";
 import { WorkspaceSourceComposer, type SourceTaskPayload } from "@/components/workspace/WorkspaceSourceComposer";
 import {
   CandidatePreview,
@@ -35,6 +39,7 @@ import { TaskTimeline } from "@/components/workspace/TaskTimeline";
 import { DraftResultPanel, DraftPreview, initialDraftView, type Draft, type DraftViewState } from "@/components/workspace/DraftResultPanel";
 import { Markdown } from "@/components/Markdown";
 import { WorkspaceTaskSidebar } from "@/components/workspace/WorkspaceTaskSidebar";
+import { WorkspaceExamples } from "@/components/workspace/WorkspaceExamples";
 import { CollectionHistory } from "@/components/workspace/CollectionHistory";
 import {
   answerWorkspaceTask,
@@ -45,9 +50,9 @@ import {
   WorkspaceTaskError,
   decideCandidateGap,
   decideWorkspaceRevision,
-  getWorkspaceGuidance,
   getWorkspaceStorage,
   getWorkspaceTask,
+  workspaceResultText,
   listGrayCapabilities,
   listWorkspaceTasks,
   recycleWorkspaceTask,
@@ -68,7 +73,6 @@ import type {
 import type {
   WorkspaceEvent,
   WorkspaceMessage,
-  WorkspaceGuidance,
   SteeringResult,
   WorkspaceTask,
   WorkspaceQuestion,
@@ -106,7 +110,7 @@ function AnswerReferences({ context, onViewSource }: { context: PublicResultCont
   if (!context) return <p className="text-xs text-muted-foreground">未附结构化引用</p>;
   return <div className="space-y-2 border-l-2 border-primary/40 pl-3 text-xs" aria-label="本次追问引用的结果和来源">
     <p>本次追问引用的结果/来源：{context.label} · V{context.revision}</p>
-    {context.source_refs.length ? <div className="flex flex-wrap gap-2">{context.source_refs.map((ref, index) => <button type="button" key={index} className="rounded-lg border px-3 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onViewSource({ ...ref }, context.revision)}>来源 {index + 1}{ref.page ? ` · 第${ref.page}页` : ref.row_number ? ` · 第${ref.row_number}行` : ""}{ref.read_at ? ` · ${new Date(ref.read_at).toLocaleString()}` : ""}</button>)}</div> : <p className="text-muted-foreground">该结果未附原始来源。</p>}
+    {context.source_refs.length ? <div className="flex flex-wrap gap-2">{context.source_refs.map((ref, index) => <button type="button" key={index} className="rounded-lg border px-3 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onViewSource({ ...ref }, context.revision)}>来源 {index + 1}{ref.page ? ` · 第${ref.page}页` : ref.row_number ? ` · 第${ref.row_number}行` : ""}{ref.read_at ? ` · ${beijingTime(ref.read_at)}` : ""}</button>)}</div> : <p className="text-muted-foreground">该结果未附原始来源。</p>}
   </div>;
 }
 
@@ -132,6 +136,7 @@ function FollowupComposer({
   resultContext,
   onClearResultContext,
   onBusyChange,
+  onCancelTarget,
 }: {
   task: WorkspaceTask;
   scopeIdentity: string;
@@ -142,6 +147,7 @@ function FollowupComposer({
   resultContext: (ResultSelection & { label: string }) | null;
   onClearResultContext: () => void;
   onBusyChange: (busy: boolean) => void;
+  onCancelTarget: (target: HTMLDivElement | null) => void;
   onDecision: (
     proposalId: string,
     mode: "cancel_now" | "after_safe_point" | "new_task",
@@ -348,17 +354,20 @@ function FollowupComposer({
         placeholder={isAnswer ? "补充这项问题需要的信息；不会替代外发或修改确认" : "可询问进度和原因，也可提出修改；系统会先说明是否影响当前任务"}
         className="w-full min-h-16 max-h-40 [field-sizing:content] resize-none overflow-y-auto bg-transparent px-1 text-sm leading-6 outline-none placeholder:text-muted-foreground/70"
       />
-      <div className="mt-2 flex items-center gap-3 border-t pt-2">
+      <div className="mt-2 flex items-center gap-3 border-t pt-2 [&:has([data-stop-slot]:not([hidden])_button)>.send-action]:hidden">
         <span className="text-[11px] text-muted-foreground">
           Enter 发送 · Shift + Enter 换行
         </span>
+        <div data-stop-slot ref={onCancelTarget} hidden={Boolean(text.trim()) || isAnswer} className="ml-auto" />
         <button
           type="button"
           disabled={busy || (isAnswer ? !answerText.trim() || !answerTargetCurrent || !questionAvailable || feedback?.unknown : !text.trim() || contextExpired)}
           onClick={() => void submit()}
-          className="ml-auto rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground disabled:opacity-45"
+          aria-label={busy ? "正在理解" : isAnswer ? "提交回答" : "发送"}
+          title={busy ? "正在理解" : isAnswer ? "提交回答" : "发送"}
+          className="send-action ml-auto inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-45"
         >
-          {busy ? "正在理解" : isAnswer ? "提交回答" : "发送"}
+          {busy ? <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin motion-reduce:animate-none" /> : <ArrowUp aria-hidden="true" className="h-5 w-5" />}
         </button>
       </div>
       {pendingResults.map(result => (
@@ -416,105 +425,6 @@ function FollowupComposer({
   );
 }
 
-function GuidanceDialog({
-  guidance,
-  open,
-  onOpenChange,
-  onUseExample,
-}: {
-  guidance?: WorkspaceGuidance;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onUseExample: (example: WorkspaceGuidance["examples"][number]) => void;
-}) {
-  const [query, setQuery] = useState("");
-  const examples = (guidance?.examples || []).filter((example) =>
-    `${example.title} ${example.description} ${example.category}`
-      .toLowerCase()
-      .includes(query.toLowerCase()),
-  );
-  return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45 backdrop-blur-[2px]" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex h-[min(82vh,760px)] w-[min(92vw,920px)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border bg-background shadow-2xl">
-          <div className="flex items-start justify-between border-b p-5">
-            <div>
-              <Dialog.Title className="font-semibold">
-                使用帮助与场景示例
-              </Dialog.Title>
-              <Dialog.Description className="mt-1 text-sm text-muted-foreground">
-                当前示例全部使用已经交付的表格和文档能力。
-              </Dialog.Description>
-            </div>
-            <Dialog.Close className="rounded-lg p-2 text-muted-foreground hover:bg-muted">
-              <X className="h-4 w-4" />
-            </Dialog.Close>
-          </div>
-          <div className="grid min-h-0 flex-1 overflow-y-auto md:grid-cols-[260px_1fr]">
-            <aside className="border-r bg-muted/20 p-5">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                三步开始
-              </h3>
-              <div className="mt-4 space-y-4">
-                {guidance?.onboarding.map((item, index) => (
-                  <div key={item.title} className="flex gap-3">
-                    <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">
-                      {index + 1}
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium">{item.title}</p>
-                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                        {item.description}
-                      </p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </aside>
-            <div className="min-h-0 overflow-y-auto p-5">
-              <div className="relative mb-4">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <input
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder="搜索示例"
-                  className="h-10 w-full rounded-xl border bg-background pl-9 pr-3 text-sm outline-none focus:border-primary"
-                />
-              </div>
-              <div className="grid gap-3 md:grid-cols-2">
-                {examples.map((example) => (
-                  <button
-                    key={example.id}
-                    type="button"
-                    onClick={() => {
-                      onUseExample(example);
-                      onOpenChange(false);
-                    }}
-                    className="rounded-xl border p-4 text-left transition-colors hover:border-primary/35 hover:bg-primary/[0.03]"
-                  >
-                    <span className="text-[10px] font-medium uppercase tracking-wide text-primary">
-                      {example.category}
-                    </span>
-                    <h3 className="mt-1 text-sm font-semibold">
-                      {example.title}
-                    </h3>
-                    <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                      {example.description}
-                    </p>
-                    <p className="mt-3 text-[11px] text-muted-foreground">
-                      需要：{example.required_inputs}
-                    </p>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
-  );
-}
 
 export function SemanticWorkspacePage() {
   const queryClient = useQueryClient();
@@ -632,6 +542,7 @@ export function SemanticWorkspacePage() {
   const [previewDraft, setPreviewDraft] = useState<{ identity: string; draft: Draft } | null>(null);
   const openedDraft = useRef("");
   const [draftActionsTarget, setDraftActionsTarget] = useState<HTMLDivElement | null>(null);
+  const [cancelTarget, setCancelTarget] = useState<HTMLDivElement | null>(null);
   const previewedDraft = useRef<string[]>([]);
   const previewedResults = useRef(new Set<string>());
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
@@ -658,12 +569,6 @@ export function SemanticWorkspacePage() {
   const followLatest = useRef(true);
   const [awayFromLatest, setAwayFromLatest] = useState(false);
   const scrollPositions = useRef(new Map<string, { top: number; follow: boolean }>());
-  const [helpOpen, setHelpOpen] = useState(false);
-  const [exampleSeed, setExampleSeed] = useState<{
-    key: string;
-    prompt: string;
-    formats: string[];
-  } | null>(null);
 
 
   const tasks = useQuery({
@@ -676,10 +581,6 @@ export function SemanticWorkspacePage() {
     queryFn: () => api.get("/api/chat/history"),
     refetchInterval: 3000,
     enabled: Boolean(user?.user_id) && !recycleBin,
-  });
-  const guidance = useQuery({
-    queryKey: ["semantic-workspace-guidance"],
-    queryFn: getWorkspaceGuidance,
   });
   const models = useQuery<ModelsResponse>({
     queryKey: ["models"],
@@ -724,15 +625,17 @@ export function SemanticWorkspacePage() {
       const status = query.state.data?.status;
       const verificationStatus = query.state.data?.agentic_runtime
         ?.latest_verification_attempt?.status;
+      const notificationPending = status === "completed" && /@|邮件|邮箱|slack|email/i.test(query.state.data?.objective_text ?? "")
+        && Date.now() - Date.parse(query.state.data?.updated_at ?? "") < 120_000;
       return (
         status && ["queued", "running", "cancelling", "pausing"].includes(status)
-      ) || ["requested", "running"].includes(verificationStatus ?? "")
+      ) || notificationPending || ["requested", "running"].includes(verificationStatus ?? "")
         ? 2_000
         : false;
     },
   });
   const conversation = useQuery<{
-    turns: Array<{ turn_id: string; text: string; revision: number }>;
+    turns: Array<{ turn_id: string; text: string; revision: number; created_at?: string }>;
     results: SteeringResult[];
     proposals: Array<{ proposal_id: string; base_revision: number; status: string }>;
   }>({
@@ -742,7 +645,7 @@ export function SemanticWorkspacePage() {
   });
   const task = detail.data;
   const viewingRevision = task?.viewing_revision ?? task?.current_revision ?? task?.active_revision;
-  const runId = task?.agentic_runtime?.run_id ?? task?.work_session?.run_id ?? task?.run_id ?? (typeof task?.run?.run_id === "string" ? task.run.run_id : null);
+  const runId = task?.agentic_runtime?.run_id ?? (task?.work_session && task.work_session.revision === viewingRevision ? task.work_session.run_id : null) ?? task?.run_id ?? (typeof task?.run?.run_id === "string" ? task.run.run_id : null);
   const subscriptionIdentity = JSON.stringify([user?.user_id, selectedTaskId, selectedRevision, viewingRevision, runId]);
   const selectedSubscription = useRef(subscriptionIdentity);
   // 同步阻断上一身份的迟到回调和首帧缓存，不能等 effect 清理。
@@ -929,19 +832,6 @@ export function SemanticWorkspacePage() {
 
 
 
-  const useExample = (example: WorkspaceGuidance["examples"][number]) => {
-
-    setSelectedTaskId(null);
-    setDraftUploads([]);
-    setSelectedUploadId(null);
-    setInspectorOpen(false);
-    setComposerDraft(null);
-    setExampleSeed({
-      key: `${example.id}:${Date.now()}`,
-      prompt: example.prompt,
-      formats: example.output_formats,
-    });
-  };
 
   const handleDraftUploadsChange = useCallback((uploads: UploadItem[]) => {
     setDraftUploads(uploads);
@@ -1069,7 +959,6 @@ export function SemanticWorkspacePage() {
             } : null);
             // 新身份触发卸载，中止旧等待并使迟到回调失效。
             setComposerEpoch(++composerEpochRef.current);
-            setExampleSeed(null);
             if (narrow) setNavigationOpen(false);
             setRecycleBin(false);
             setSelectedTaskId(null);
@@ -1111,19 +1000,23 @@ export function SemanticWorkspacePage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {user && <TaskDeletionDialog key={user.user_id} ownerId={user.user_id} target={deletionTarget} currentTaskId={selectedTaskId} onClose={() => setDeletionTarget(null)} onCompleted={operation => {
-        if (selectedTaskId === operation.task_id) setSelectedTaskId(null);
-        void Promise.all(["semantic-workspace-task", "semantic-workspace-tasks", "semantic-workspace-storage", "workspace-task-source", "workspace-task-derived-source", "workspace-source-file"].map(key => queryClient.invalidateQueries({ queryKey: [key] })));
-      }} />}
-      <header className="flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-background px-3 py-2">
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-background px-7 py-4">
         <div>
-          <h1 className="text-sm font-semibold">任务工作台</h1>
-          <p className="text-[11px] text-muted-foreground">
+          <h1 className="text-lg font-semibold tracking-tight">任务工作台</h1>
+          <p className="text-sm text-muted-foreground">
             表格与文档的理解、执行、验证和正式交付
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button type="button" aria-label="任务列表开关" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(value => !value)} className="rounded-lg border px-3 py-2 text-xs hover:bg-muted">任务列表</button>
+        <div className="flex flex-wrap items-center gap-2">
+          <PageGuide page={newTask ? "workspace.new" : "workspace.task"} ready={newTask || Boolean(task)} />
+          {user && <TaskDeletionDialog key={user.user_id} ownerId={user.user_id} target={deletionTarget} currentTaskId={selectedTaskId} onClose={() => setDeletionTarget(null)} onCompleted={operation => {
+            if (selectedTaskId === operation.task_id) setSelectedTaskId(null);
+            void Promise.all(["semantic-workspace-task", "semantic-workspace-tasks", "semantic-workspace-storage", "workspace-task-source", "workspace-task-derived-source", "workspace-source-file"].map(key => queryClient.invalidateQueries({ queryKey: [key] })));
+          }} />}
+          <button id="task-list-toggle" type="button" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(value => !value)} className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+            {navigationOpen ? <PanelLeftClose aria-hidden="true" className="h-3.5 w-3.5" /> : <PanelLeftOpen aria-hidden="true" className="h-3.5 w-3.5" />}
+            {navigationOpen ? "收起任务列表" : "展开任务列表"}
+          </button>
           {(newTask ? draftUploads.length > 0 : Boolean(task?.uploads?.length || taskWebSources.some(source => source.snapshot?.artifacts.length) || task?.delivery_output_ids?.length)) ? (
             <button
               type="button"
@@ -1135,23 +1028,9 @@ export function SemanticWorkspacePage() {
             </button>
           ) : null}
           {task?.delivery && !newTask && <button type="button" className="rounded-lg border px-3 py-2 text-xs hover:bg-muted" onClick={() => { setInspectorKind("result"); setInspectorOpen(true); }}>查看结果</button>}
-          <button
-            type="button"
-            onClick={() => setHelpOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted"
-          >
-            <HelpCircle className="h-3.5 w-3.5" />
-            帮助
-          </button>
         </div>
       </header>
 
-      <GuidanceDialog
-        guidance={guidance.data}
-        open={helpOpen}
-        onOpenChange={setHelpOpen}
-        onUseExample={useExample}
-      />
 
       {settingsOpen && (
         <section className="min-h-0 flex-1 overflow-y-auto p-4" aria-label="模型设置">
@@ -1175,7 +1054,7 @@ export function SemanticWorkspacePage() {
               <Dialog.Overlay className="fixed inset-0 z-40 bg-foreground/20" />
               <Dialog.Content aria-describedby={undefined} className="fixed inset-y-0 left-0 z-50 max-w-[90vw] bg-background" onCloseAutoFocus={event => {
                 event.preventDefault();
-                document.querySelector<HTMLButtonElement>('[aria-label="任务列表开关"]')?.focus();
+                document.getElementById("task-list-toggle")?.focus();
               }}>
                 <Dialog.Title className="sr-only">任务列表</Dialog.Title>
                 {taskNavigation}
@@ -1200,36 +1079,17 @@ export function SemanticWorkspacePage() {
                     "mx-auto flex min-h-full max-w-5xl flex-col",
                     draftUploads.length
                       ? "px-3 pb-4 pt-2"
-                      : "px-4 pb-6 pt-8 sm:px-8 sm:pt-14",
+                      : "px-4 pb-3 pt-6 sm:px-8",
                   )}
                 >
                 {draftUploads.length === 0 && !composerDraft?.conversation?.length && !composerDraft?.chatAttempt ? (
-                  <>
-                    <div className="mx-auto my-auto w-full max-w-3xl py-8 text-center">
-                      <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-                        <Sparkles className="h-5 w-5" />
-                      </div>
-                      <h2 className="mt-5 text-2xl font-semibold tracking-tight">
-                        今天想完成什么？
-                      </h2>
-                      <p className="mt-2 text-sm text-muted-foreground">
-                        直接说说你的想法，也可以添加文件一起处理。
-                      </p>
-                      <div className="mt-8 grid gap-3 text-left sm:grid-cols-2" aria-label="任务灵感">
-                        {guidance.data?.examples.slice(0, 4).map(example => (
-                          <button key={example.id} type="button" className="rounded-2xl border p-4 transition-colors hover:border-primary/40 hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => {
-                            setComposerDraft(current => ({ prompt: example.prompt, formats: example.output_formats, connectionId: current?.connectionId ?? null, connectionModel: current?.connectionModel ?? null, localModel: current?.localModel ?? null }));
-                            requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务要求"]')?.focus());
-                          }}>
-                            <span className="text-xs text-primary">{example.category}</span>
-                            <span className="mt-3 block text-sm font-medium">{example.title}</span>
-                            <span className="mt-1 block text-xs leading-5 text-muted-foreground">{example.description}</span>
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                  </>
+                  <div className="flex flex-1 flex-col justify-center">
+                  <WorkspaceExamples hasPrompt={Boolean(composerDraft?.prompt.trim())} onFill={prompt => {
+                    setComposerDraft(current => ({ ...current, prompt: current?.prompt.trim() ? `${current.prompt}\n\n${prompt}` : prompt,
+                      connectionId: current?.connectionId ?? null, connectionModel: current?.connectionModel ?? null, localModel: current?.localModel ?? null }));
+                    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务要求"]')?.focus());
+                  }} />
+                  </div>
                 ) : draftUploads.length > 0 ? (
                   <div className="mx-auto mb-2 hidden max-w-3xl md:block">
                     <h2 className="text-lg font-semibold">核对文件并说明目标</h2>
@@ -1242,8 +1102,9 @@ export function SemanticWorkspacePage() {
                 <div
                   className={cn(
                     "mx-auto w-full max-w-3xl",
-                    composerDraft?.conversation?.length || composerDraft?.chatAttempt ? "flex flex-1 flex-col pt-6" : draftUploads.length === 0 ? "mt-8" : "mt-auto pt-6",
+                    composerDraft?.conversation?.length || composerDraft?.chatAttempt ? "flex flex-1 flex-col pt-6" : "mt-auto pt-6",
                   )}
+                  data-task-composer
                 >
                     <div className="flex flex-1 flex-col">
                     <WorkspaceSourceComposer
@@ -1252,9 +1113,7 @@ export function SemanticWorkspacePage() {
                     draft={composerDraft}
                     onDraftChange={setComposerDraft}
                     active={!settingsOpen && !recoveringCreate}
-                    key={`${user?.user_id}:${exampleSeed?.key || "new-task"}:${composerEpoch}`}
-                    initialPrompt={exampleSeed?.prompt}
-                    initialFormats={exampleSeed?.formats}
+                    key={`${user?.user_id}:new-task:${composerEpoch}`}
                     modelOptions={models.data?.options}
                     defaultModel={models.data?.default}
                     allowPiRuntime={Boolean(models.data?.pi_runtime_enabled)}
@@ -1439,6 +1298,7 @@ export function SemanticWorkspacePage() {
                           onModify={closeInspector}
                         />}
                         <TaskTimeline
+                          cancelTarget={cancelTarget}
                           task={task}
                           connectionLabel={modelConnections.data?.items.find(connection => connection.connection_id === (task.agentic_runtime?.model_connection_id ?? task.model_connection_id))?.display_name}
                           clarificationTurnIds={conversation.data?.turns.map(turn => turn.turn_id)}
@@ -1686,13 +1546,16 @@ export function SemanticWorkspacePage() {
                             return <article key={turn.turn_id} className="space-y-2 border-b pb-4 text-sm leading-7">
                               {clarification && <p className="text-muted-foreground">{clarification.question.prompt}</p>}
                               <p className="whitespace-pre-wrap font-medium">{turn.text}</p>
+                              <MessageTimestamp value={turn.created_at} />
                               {response && <p className="text-muted-foreground">{response.acknowledgement}</p>}
                               {answer && <div aria-label="Mangrove 回答"><Markdown safeResources>{answer}</Markdown></div>}
                               {answer && <AnswerReferences context={context && context.revision === (message?.revision ?? response?.revision) ? context : null} onViewSource={viewSource} />}
+                              {answer && (message || response) && <MessageFooter content={answer} createdAt={message?.created_at ?? response?.created_at}
+                                workspace={{ taskId: task.task_id, revision: message?.revision ?? response!.revision, resultId: message?.message_id ?? response!.result_id }} />}
                             </article>;
                           })}
                           {messages.filter(message => !conversation.data?.turns?.some(turn => turn.turn_id === message.turn_id)).map(message => (
-                            <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown><AnswerReferences context={message.result_context?.revision === message.revision ? readPublicResultContext(message.result_context) : null} onViewSource={viewSource} /></article>
+                            <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown><AnswerReferences context={message.result_context?.revision === message.revision ? readPublicResultContext(message.result_context) : null} onViewSource={viewSource} /><MessageFooter content={message.content} createdAt={message.created_at} workspace={{ taskId: task.task_id, revision: message.revision, resultId: message.message_id }} /></article>
                           ))}
                         </section>
                         {task.status === "candidate_ready" && (
@@ -1780,11 +1643,21 @@ export function SemanticWorkspacePage() {
                           />
                         )}
                         <div id="workspace-revision-composer" className="mx-auto mb-6 max-w-4xl px-6">
+                          {task.status === "completed" && task.delivery && viewingRevision === (task.current_revision ?? task.active_revision) && <div className="mb-3">
+                            <ResultNotification key={`${task.task_id}:${viewingRevision}`} taskId={task.task_id} revision={viewingRevision} outputs={task.delivery.outputs}
+                              onSent={() => { void queryClient.invalidateQueries({ queryKey: ["semantic-workspace-task"] }); }} />
+                            {(task.events ?? []).filter(event => event.event_type.startsWith("notification.") && event.event_type !== "notification.intent").slice(-1).map(event => <p key={event.event_id} role="status" className="mt-2 text-sm">{event.summary}</p>)}
+                          </div>}
                           {task.status === "completed" && (
-                            <p className="mb-3 text-sm text-muted-foreground">
+                            <div className="mb-3 text-sm text-muted-foreground"><p>
                               正式结果已生成。
                               <button type="button" className="ml-2 rounded text-primary underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { setInspectorKind("result"); setInspectorOpen(true); }}>查看正式结果</button>
-                            </p>
+                            </p><MessageFooter content={task.summary || "正式结果已生成。"} copyLabel="复制结果" createdAt={task.delivery?.created_at ?? (task.work_session?.revision === viewingRevision ? task.work_session?.ended_at ?? undefined : undefined)}
+                              copyContent={() => workspaceResultText(task.task_id, viewingRevision!, selectedOutputId ?? undefined)}
+                              workspace={{ taskId: task.task_id, revision: viewingRevision! }} usageLabel={task.work_session && task.work_session.revision !== viewingRevision ? `来源执行 V${task.work_session.revision}` : "本次任务版本"}
+                              usage={task.work_session?.usage.call_count ? { calls: task.work_session.usage.call_count, prompt_tokens: task.work_session.usage.input_tokens ?? 0, completion_tokens: task.work_session.usage.output_tokens ?? 0, total_tokens: task.work_session.usage.total_tokens,
+                                incomplete: task.work_session.usage.unknown_call_count > 0,
+                                missing_fields: [...(task.work_session.usage.input_tokens === null ? ["prompt_tokens"] : []), ...(task.work_session.usage.output_tokens === null ? ["completion_tokens"] : []), ...(task.work_session.usage.unknown_call_count === task.work_session.usage.call_count ? ["total_tokens"] : [])] } : null} /></div>
                           )}
                           {viewingRevision === (task.current_revision ?? task.active_revision) && ["completed", "failed", "cancelled", "candidate_ready"].includes(task.status) && <>
                             <button type="button" aria-expanded={sourceEditorIdentity === resultIdentity} onClick={() => setSourceEditorIdentity(current => current === resultIdentity ? null : resultIdentity)} className="rounded-lg border px-3 py-2 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">编辑本次资料</button>
@@ -1875,6 +1748,7 @@ export function SemanticWorkspacePage() {
                             <span>设置用于新任务，当前版本保持原模型。</span>
                           </div>
                           <FollowupComposer
+                            onCancelTarget={setCancelTarget}
                             key={`${user?.user_id}:${task.task_id}`}
                             task={task}
                             scopeIdentity={readingIdentity}

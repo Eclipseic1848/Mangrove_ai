@@ -253,11 +253,11 @@ export const api = {
       headers: authHeaders(headers),
       body: body ? JSON.stringify(body) : undefined,
     }).then(handle),
-  patch: (path: string, body?: unknown) =>
-    authenticatedFetch(path, { method: "PATCH", headers: authHeaders(), body: body ? JSON.stringify(body) : undefined }).then(handle),
+  patch: (path: string, body?: unknown, signal?: AbortSignal) =>
+    authenticatedFetch(path, { method: "PATCH", signal, headers: authHeaders(), body: body ? JSON.stringify(body) : undefined }).then(handle),
   put: (path: string, body?: unknown) =>
     authenticatedFetch(path, { method: "PUT", headers: authHeaders(), body: body ? JSON.stringify(body) : undefined }).then(handle),
-  del: (path: string) => authenticatedFetch(path, { method: "DELETE", headers: authHeaders() }).then(handle),
+  del: (path: string, signal?: AbortSignal) => authenticatedFetch(path, { method: "DELETE", signal, headers: authHeaders() }).then(handle),
 };
 
 /** 下载产出文件（带鉴权），触发浏览器保存。 */
@@ -291,9 +291,11 @@ export interface ChatEvents {
   onMeta?: (d: { conv_id: string }) => void;
   onNode?: (d: { node: string; label: string; view?: any }) => void;
   onResult?: (d: any) => void;
-  onError?: (d: { message: string }) => void;
+  onError?: (d: { message: string; code?: "stream_interrupted" }) => void;
   onDone?: () => void;
 }
+
+export class ChatConnectionInterrupted extends Error {}
 
 /**
  * 发起聊天并解析 SSE 流（POST + fetch 流式读取，统一 Cookie 鉴权）。
@@ -307,7 +309,7 @@ export function streamChat(
   const controller = new AbortController();
   const generation = getAuthGeneration();
   let finished = false;
-  const finish = (error?: { message: string }) => {
+  const finish = (error?: { message: string; code?: "stream_interrupted" }) => {
     if (finished) return;
     // 先冻结终态，避免重复 done、取消或迟到事件再次修改调用者状态。
     finished = true;
@@ -333,7 +335,9 @@ export function streamChat(
         controller.abort();
         try {
           const current = await revalidateStreamSession(generation);
-          finish({ message: current ? "会话有效，本次聊天连接已结束，请查看结果后再继续。" : SESSION_EXPIRED });
+          finish(current
+            ? { message: "实时进度连接已中断，任务结果尚待确认，请勿重复提交。", code: "stream_interrupted" }
+            : { message: SESSION_EXPIRED });
         } catch (error) {
           finish({ message: error instanceof Error ? error.message : SESSION_EXPIRED });
         }

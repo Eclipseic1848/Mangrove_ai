@@ -131,8 +131,8 @@ def history(owner_id):
     values = {}
     with closing(sqlite3.connect(settings.webui_db_path)) as connection:
         connection.row_factory=sqlite3.Row
-        connection.execute("BEGIN")
-        for row in connection.execute("SELECT snapshot_id FROM source_snapshots WHERE owner_id=?",(owner_id,)):
+        # 先读完游标再跨连接核验，避免列表读锁阻塞其他任务提交；选择时仍重新核验来源。
+        for row in connection.execute("SELECT snapshot_id FROM source_snapshots WHERE owner_id=?",(owner_id,)).fetchall():
             identity=row[0]
             snapshot=SourceAcquisitionRepository(settings.webui_db_path).get_snapshot(owner_id,identity,include_preview=False)
             if snapshot is None:
@@ -142,7 +142,7 @@ def history(owner_id):
             if not snapshot["valid_page_count"] or snapshot["coverage"]["status"]=="hard_insufficient":
                 values["snapshot:"+identity].update(availability="unavailable",reason_code="source_coverage_insufficient")
         for table,column in (("formal_delivery_outputs","owner_id"),("semantic_delivery_outputs","user_id")):
-            for row in connection.execute(f"SELECT output_id,delivery_id,run_id,filename,media_type,size_bytes,sha256,created_at FROM {table} WHERE {column}=?",(owner_id,)):
+            for row in connection.execute(f"SELECT output_id,delivery_id,run_id,filename,media_type,size_bytes,sha256,created_at FROM {table} WHERE {column}=?",(owner_id,)).fetchall():
                 item=dict(row);identity=item.pop("output_id")
                 producer=connection.execute("SELECT task_id,task_revision FROM formal_delivery_runs WHERE owner_id=? AND delivery_id=?",(owner_id,item["delivery_id"])).fetchone()
                 values["delivery_output:"+identity]=dict(source_key="delivery_output:"+identity,kind="delivery_output",identity="derived",label=item["filename"],output_id=identity,acquired_at=item["created_at"],time_kind="generated",media_type=item["media_type"],size_bytes=item["size_bytes"],sha256=item["sha256"],origin=dict(task_id=producer[0] if producer else None,revision=producer[1] if producer else None,run_id=item["run_id"],delivery_id=item["delivery_id"]),availability="available",reason_code=None,limitations=["使用时重新核验"])

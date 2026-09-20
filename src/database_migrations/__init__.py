@@ -104,13 +104,19 @@ class RestoreVerification:
 
 
 _PROFILE_HEADS = {
-    "webui": "webui_0019",
-    "scheduler": "scheduler_0001",
+    "webui": "webui_0022",
+    "scheduler": "scheduler_0004",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
 }
 _PROFILE_REQUIRED_COLUMNS = {
     "webui": {
+        "library_learning_receipts": ("owner_id", "task_id", "revision", "run_id", "kind", "state"),
+        "operations_events": ("event_id", "occurred_at", "actor_id", "kind"),
+        "operations_outcomes": ("event_id", "result", "changes_json"),
+        "operations_policy": ("retention_days", "started_at", "version"),
+        "operations_presence": ("actor_id", "actor_role", "session_ref", "tab_id", "active_seconds"),
+        "operations_views": ("owner_id", "view_id", "filters_json"),
         "model_configuration_edits": ("actor_id", "operation_id", "connection_id", "state"),
         "model_configuration_versions": ("connection_id", "previous_id", "thinking"),
         "feedback_content_access": ("event_id", "actor_id", "feedback_id", "request_digest", "response_digest"),
@@ -133,7 +139,7 @@ _PROFILE_REQUIRED_COLUMNS = {
         ),
         "memory_hit_log": ("hit",),
         "library_dedup_scan_log": ("details",),
-        "message_feedback": ("status", "admin_note"),
+        "message_feedback": ("status", "admin_note", "task_id", "revision", "result_id"),
         "data_prep_tasks": ("checkpoint_json", "unit_id"),
         "document_workspaces": (
             "checked_upload_ids_json",
@@ -281,6 +287,9 @@ _PROFILE_REQUIRED_COLUMNS = {
     },
     "scheduler": {
         "scheduled_tasks": (
+            "time_zone",
+            "model_connection_id",
+            "model_connection_version",
             "owner_user_id",
             "name",
             "source",

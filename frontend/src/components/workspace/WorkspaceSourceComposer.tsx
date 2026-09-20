@@ -1,3 +1,4 @@
+import { beijingTime } from "@/lib/beijingTime";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
 import { TaskContextLibrary } from "./TaskContextLibrary";
 import { TaskComposer, type WebIntakeDraft } from "./TaskComposer";
@@ -11,11 +12,12 @@ import { ReusableSourcePicker, ReusableSourceFacts, reusableSelection, sourceId 
 import { sendDraftTurn } from "@/lib/semanticWorkspaceApi";
 import { nanoid } from "nanoid/non-secure";
 import { Markdown } from "@/components/Markdown";
-import { api, downloadFile } from "@/lib/api";
+import { api, downloadFile, ChatConnectionInterrupted } from "@/lib/api";
 import { outputSelection, resolveOutputFormats } from "@/lib/outputFormats";
 import { CollectionProgress } from "./CollectionProgress";
 import { MessageFooter } from "./MessageFooter";
 import { TemplateAction } from "./TemplateAction";
+import { Loader2, Square } from "lucide-react";
 
 type ComposerProps = ComponentProps<typeof TaskComposer>;
 export type SourceTaskPayload = Parameters<ComposerProps["onSubmit"]>[0] & {
@@ -28,7 +30,7 @@ export type SourceTaskPayload = Parameters<ComposerProps["onSubmit"]>[0] & {
   };
 };
 type Choice = { snapshotId: string; attemptId: string; snapshot?: SourceSnapshot; error?: string };
-type Props = Omit<ComposerProps, "onSubmit" | "onReadWeb"> & {
+type Props = Omit<ComposerProps, "onSubmit"> & {
   ownerId: string;
   draftScope?: string;
   initialSources?: SourceSnapshot[];
@@ -56,7 +58,7 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerTrigger = useRef<HTMLElement | null>(null);
   const [webOpen, setWebOpen] = useState(() => { try { return Boolean(localStorage.getItem(`mangrove_web_source_attempt_${ownerId}${draftScope === "new" ? "" : `_${draftScope}`}`)); } catch { return false; } });
-  const [webPrompt, setWebPrompt] = useState("");
+  const webPrompt = draft?.prompt ?? "";
   const [acquiring, setAcquiring] = useState(false);
   const [stale, setStale] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -73,7 +75,10 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   const [preview, setPreview] = useState<{ identity: string; value: TaskContextPreview } | null>(null);
   const [reviewing, setReviewing] = useState(false);
   const [error, setError] = useState("");
+  const [connectionNotice, setConnectionNotice] = useState("");
   const [chatting, setChatting] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const stopPending = useRef(false);
   const [collectionCheck, setCollectionCheck] = useState(0);
   const chatRequest = useRef<AbortController | null>(null);
   const generation = useRef(0);
@@ -157,7 +162,7 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   };
   const updateDraft = (next: WebIntakeDraft) => { parentDraft.current = next; setDraft(next); props.onDraftChange?.(next); };
   const savedSession = draft?.sessionId ?? draft?.collection?.convId;
-  const needsSavedMetadata = Boolean(draft?.conversation?.some(message => message.role === "assistant" && (!message.id || !message.created_at || !message.token_usage)));
+  const needsSavedMetadata = Boolean(draft?.conversation?.some(message => !message.created_at || (message.role === "assistant" && (!message.id || !message.token_usage))));
   const [metadataRetry, setMetadataRetry] = useState(0);
   const [metadataError, setMetadataError] = useState("");
   useEffect(() => {
@@ -191,6 +196,7 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
         const status = await api.get(`/api/chat/running/${draft.collection!.convId}`);
         if (!active) return;
         if (status.running) {
+          setError("");
           if (status.progress?.length) updateDraft({ ...(parentDraft.current ?? draft), collection: { ...draft.collection!, progress: status.progress } });
           timer = setTimeout(restore, 2000); return;
         }
@@ -204,7 +210,8 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
           conversation: [...(draft.conversation ?? []), { role: "user", content: draft.collection!.prompt },
             { role: "assistant", content: last.content, files: last.meta?.files, id: last.id, created_at: last.created_at, token_usage: last.meta?.token_usage, work_progress: last.meta?.work_progress }] });
         setError("");
-      } catch (reason) { if (active) setError(reason instanceof Error ? reason.message : "执行状态暂时无法读取"); }
+        setConnectionNotice("");
+      } catch { if (active) { setError(""); setConnectionNotice("暂时无法获取最新进度，请稍后重新读取执行状态，勿重复提交。"); } }
     };
     void restore();
     return () => { active = false; clearTimeout(timer); };
@@ -220,7 +227,7 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
     const requestGeneration = generation.current;
     chatRequest.current = controller;
     updateDraft({ ...next, sessionId, collection: undefined, chatAttempt: attempt });
-    setChatting(payload.text); setError("");
+    setChatting(payload.text); setError(""); setConnectionNotice("");
     let collection: WebIntakeDraft["collection"];
     try {
       const result = await sendDraftTurn({ ...payload, request_id: attempt.requestId }, controller.signal, {
@@ -245,7 +252,13 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
         conversation: [...(next.conversation ?? []), { role: "user", content: payload.text, created_at: result.user_created_at }, { role: "assistant", content: result.reply, id: result.message_id, created_at: result.created_at, token_usage: result.token_usage, work_progress: collection?.progress, ...(result.files?.length ? { files: result.files } : {}) }], formats: result.output_formats.length ? result.output_formats : next.formats });
       requestAnimationFrame(() => container.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务要求"]')?.focus());
     } catch (reason) {
-      if (requestGeneration === generation.current && !controller.signal.aborted) setError(reason instanceof Error ? reason.message : "回复未成功，需求已保留");
+      if (requestGeneration === generation.current && !controller.signal.aborted) {
+        // 连接状态不是执行结果；已有会话由只读回查恢复，不重发任务。
+        if (reason instanceof ChatConnectionInterrupted) {
+          setError("");
+          setConnectionNotice(collection ? "正在恢复任务进度…" : "暂时无法获取最新进度，请稍后查看历史记录，勿重复提交。");
+        } else setError(reason instanceof Error ? reason.message : "回复未成功，需求已保留");
+      }
       throw reason;
     } finally {
       if (chatRequest.current === controller) { chatRequest.current = null; setChatting(null); }
@@ -267,20 +280,32 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
       </article>)}
       {(chatting || draft?.collection?.pending) && <p className="ml-8 whitespace-pre-wrap rounded-2xl bg-muted px-4 py-3">{chatting || draft?.collection?.prompt}</p>}
       {(chatting || draft?.collection?.pending || (draft?.collection && !draft.conversation?.some(message => message.work_progress?.length))) && <CollectionProgress pending={Boolean(chatting || draft?.collection?.pending)} preparing={!draft?.collection} progress={draft?.collection?.progress} steps={draft?.collection?.steps} />}
-      {chatting && !draft?.collection && <button type="button" className="rounded-lg border px-3 py-2 text-xs focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { chatRequest.current?.abort(); setError("已停止等待回复，需求已保留；外部模型可能仍在处理，不会自动重发。"); }}>停止等待</button>}
-      {draft?.collection?.pending && <button type="button" className="rounded-lg border px-3 py-2 text-xs" onClick={() => void api.post(`/api/chat/${draft.collection!.convId}/cancel`).then(() => chatRequest.current?.abort()).catch(reason => setError(reason instanceof Error ? reason.message : "停止执行未成功"))}>停止执行</button>}
       {draft?.collection?.pending && !chatting && <button type="button" className="ml-2 rounded-lg border px-3 py-2 text-xs" onClick={() => setCollectionCheck(value => value + 1)}>重新读取执行状态</button>}
     </section> : null}
+    {connectionNotice && <p role="status" className="rounded-lg border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">{connectionNotice}</p>}
     {error && <p role="alert" className="rounded-lg border border-destructive/30 px-3 py-2 text-sm text-destructive">{error}</p>}
     {metadataError && <p role="alert" className="text-sm text-amber-700">{metadataError}<button type="button" className="ml-2 underline" onClick={() => setMetadataRetry(value => value + 1)}>重新读取</button></p>}
     <TaskComposer {...props} draft={draft} onDraftChange={updateDraft} active={props.active !== false && !stale} uploadStorageKey={filesKey}
+      stopAction={(chatting || draft?.collection?.pending) ? <button type="button" disabled={stopping || props.active === false || stale} aria-label={stopping ? "正在停止" : draft?.collection?.pending ? "停止执行" : "停止等待"} title={stopping ? "正在停止" : draft?.collection?.pending ? "停止执行" : "停止等待"} className="ml-auto inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-45" onClick={async () => {
+        if (stopPending.current) return;
+        stopPending.current = true; setStopping(true);
+        const request = chatRequest.current;
+        const stopGeneration = generation.current;
+        try {
+          if (draft?.collection?.pending) await api.post(`/api/chat/${draft.collection.convId}/cancel`);
+          else setError("已停止等待回复，需求已保留；外部模型可能仍在处理，不会自动重发。");
+          // 迟到的取消回执只影响发起时的连接，不能中断后来创建的任务。
+          request?.abort();
+          if (stopGeneration === generation.current) setCollectionCheck(value => value + 1);
+        } catch (reason) { if (stopGeneration === generation.current) setError(reason instanceof Error ? reason.message : "停止执行未成功"); }
+        finally { stopPending.current = false; setStopping(false); }
+      }}>{stopping ? <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin motion-reduce:animate-none" /> : <Square aria-hidden="true" className="h-3.5 w-3.5 fill-current" />}</button> : undefined}
       onChat={props.unified ? props.onChat ?? chat : undefined}
       webSourceCount={sources.length} additionalSourceCount={history.length} additionalInputFormats={history.map(item => { const format = item.label.split(".").pop()?.toLowerCase() || ""; return format === "md" ? "markdown" : format; })}
       sourceBusy={props.sourceBusy || acquiring || submitting || restoringHistory} submitBlocked={props.submitBlocked || stale || Boolean(draft?.collection?.pending) || !ready || !contextReady || webOpen || pickerOpen || libraryOpen}
       onPickSources={() => { pickerTrigger.current = document.activeElement as HTMLElement; setPickerOpen(true); }}
       sourceIdentity={sourceIdentity}
       onUploadsChange={value => { setUploads(value); props.onUploadsChange?.(value); }}
-      onReadWeb={value => { updateDraft(value); setWebPrompt(value.prompt); setWebOpen(true); }}
       onSubmit={async payload => {
         if (stale || !ready || !contextReady || webOpen || pickerOpen || libraryOpen) return;
         const requestGeneration = generation.current;
@@ -315,7 +340,7 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
         {sources.map(source => <div key={source.snapshotId} className="rounded-xl border p-3 text-xs">
           <div className="flex items-start justify-between gap-3"><div className="min-w-0 break-words">
             <p className="font-medium">{source.snapshot?.allowed_scope.query || source.snapshot?.artifacts[0]?.title || source.snapshotId}</p>
-            <p className="mt-1 text-muted-foreground">{source.snapshot ? `${source.snapshot.valid_page_count} 页正文 · ${source.snapshot.failed_page_count} 页失败 · ${new Date(source.snapshot.created_at).toLocaleString("zh-CN")}` : source.error || "正在恢复网页来源…"}</p>
+            <p className="mt-1 text-muted-foreground">{source.snapshot ? `${source.snapshot.valid_page_count} 页正文 · ${source.snapshot.failed_page_count} 页失败 · ${beijingTime(source.snapshot.created_at)}` : source.error || "正在恢复网页来源…"}</p>
           </div><button type="button" disabled={submitting} aria-label={`移除网页组 ${source.snapshot?.allowed_scope.query || source.snapshot?.artifacts[0]?.title || source.snapshotId}`} className="shrink-0 rounded border px-2 py-1 hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { generation.current += 1; setSources(current => current.filter(item => item.snapshotId !== source.snapshotId)); }}>移除此组</button></div>
           {source.snapshot && <p className="mt-2 text-muted-foreground">{source.snapshot.coverage.status === "scope_complete" ? "已覆盖授权范围" : source.snapshot.coverage.status === "hard_insufficient" ? "硬性目标未满足" : "覆盖范围仍有未知，不代表完整"}{source.snapshot.coverage.search_report && ` · 发现 ${source.snapshot.coverage.search_report.discovered_count} 条链接 · 尚未读到正文 ${source.snapshot.coverage.search_report.candidates.filter(item => item.status !== "read").length} 条`}</p>}
           {source.snapshot?.allowed_scope.kind === "public_search" && <p className="mt-1 text-muted-foreground">时间：{({ any: "不限", day: "最近一天", week: "最近一周", month: "最近一月", year: "最近一年" })[source.snapshot.allowed_scope.time_range ?? "any"]} · 域名：{source.snapshot.allowed_scope.domains?.join("、") || "公开网页不限域名"}</p>}

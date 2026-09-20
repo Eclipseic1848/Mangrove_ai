@@ -1,13 +1,17 @@
+import { beijingTime } from "@/lib/beijingTime";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { nanoid } from "nanoid/non-secure";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import {
   AlertCircle,
+  BarChart3,
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   CircleStop,
   Clock3,
   FileCheck2,
@@ -28,6 +32,7 @@ import type {
   WorkspaceTask,
 } from "@/types/semanticWorkspace";
 import { workspaceStatusLabel } from "./WorkspaceTaskSidebar";
+import { MessageTimestamp } from "./MessageFooter";
 
 const STAGE_LABELS: Record<string, string> = {
   queued: "等待执行",
@@ -275,11 +280,7 @@ function buildMilestones(
 }
 
 function formatTime(value: string) {
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date(value));
+  return beijingTime(value);
 }
 
 function formatElapsed(milliseconds: number) {
@@ -520,6 +521,7 @@ export function TaskTimeline({
   onAnswer,
   onRefreshQuestion,
   onCancel,
+  cancelTarget,
   onRecycle,
   onRetry,
   onRefreshSource,
@@ -533,6 +535,7 @@ export function TaskTimeline({
   onAnswer: (question: WorkspaceQuestion, answer: string, key: string) => Promise<WorkspaceTask>;
   onRefreshQuestion: () => void;
   onCancel: () => Promise<void>;
+  cancelTarget?: HTMLElement | null;
   onRecycle: () => Promise<void>;
   onRetry: (unchanged?: boolean) => void | Promise<void>;
   onRefreshSource: (externalApiConfirmed: boolean, targetSourceSnapshotId?: string) => Promise<void>;
@@ -629,7 +632,7 @@ export function TaskTimeline({
     || 0;
 
   return (
-    <section className="mx-auto w-full max-w-4xl px-6 py-6">
+    <section data-guide="task-timeline" className="mx-auto w-full max-w-4xl px-6 py-6">
       {task.status === "needs_input" && (task.viewing_revision ?? task.current_revision ?? task.active_revision) === (task.current_revision ?? task.active_revision) && task.question && task.question.purpose !== "business" && task.question.purpose !== "control" && (
         <QuestionDialog key={`${task.task_id}:${task.viewing_revision}:${task.question.round_id ?? task.question.question_id}`} question={task.question} onAnswer={onAnswer} onRefreshQuestion={onRefreshQuestion} />
       )}
@@ -643,7 +646,7 @@ export function TaskTimeline({
             <p className="mt-1 break-all text-xs leading-5 text-muted-foreground">
               {selectedWebSource.snapshot.artifacts[0]?.final_url}
               {" · "}
-              {new Date(selectedWebSource.snapshot.created_at).toLocaleString("zh-CN")}
+              {beijingTime(selectedWebSource.snapshot.created_at)}
               {" · "}
               {selectedWebSource.snapshot.valid_page_count} 个有效页面
               {" · "}
@@ -767,8 +770,10 @@ export function TaskTimeline({
           <p className="mt-2 max-w-2xl whitespace-pre-wrap text-sm leading-6 text-muted-foreground">
             {task.objective_text}
           </p>
+          <MessageTimestamp value={task.revisions?.find(item => item.revision === (task.viewing_revision ?? task.active_revision))?.created_at ?? ((task.viewing_revision ?? task.active_revision) === 1 ? task.created_at : undefined)} />
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          {cancelTarget && createPortal(<>
           {task.status === "cancelling" && (
             <button
               type="button"
@@ -777,10 +782,11 @@ export function TaskTimeline({
                 setRetryingStop(true);
                 void onCancel().finally(() => setRetryingStop(false));
               }}
-              className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted disabled:opacity-50"
+              aria-label={retryingStop ? "正在重试停止" : "重试停止"}
+              title={retryingStop ? "正在重试停止" : "重试停止"}
+              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-45"
             >
-              <RotateCcw className="h-3.5 w-3.5" />
-              {retryingStop ? "正在重试停止" : "重试停止"}
+              {retryingStop ? <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin motion-reduce:animate-none" /> : <Square aria-hidden="true" className="h-3.5 w-3.5 fill-current" />}
             </button>
           )}
           {canCancel && task.status !== "cancelling" && (
@@ -788,10 +794,12 @@ export function TaskTimeline({
               <AlertDialog.Trigger asChild>
                 <button
                   type="button"
-                  className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted"
+                  disabled={retryingStop}
+                  aria-label={retryingStop ? "正在停止" : "停止"}
+                  title={retryingStop ? "正在停止" : "停止"}
+                  className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-45"
                 >
-                  <Square className="h-3.5 w-3.5" />
-                  取消任务
+                  {retryingStop ? <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin motion-reduce:animate-none" /> : <Square aria-hidden="true" className="h-3.5 w-3.5 fill-current" />}
                 </button>
               </AlertDialog.Trigger>
               <AlertDialog.Portal>
@@ -808,7 +816,10 @@ export function TaskTimeline({
                       继续执行
                     </AlertDialog.Cancel>
                     <AlertDialog.Action
-                      onClick={() => void onCancel()}
+                      onClick={() => {
+                        setRetryingStop(true);
+                        void onCancel().finally(() => setRetryingStop(false));
+                      }}
                       className="rounded-lg bg-destructive px-3 py-2 text-sm font-medium text-destructive-foreground"
                     >
                       确认取消
@@ -818,6 +829,7 @@ export function TaskTimeline({
               </AlertDialog.Portal>
             </AlertDialog.Root>
           )}
+          </>, cancelTarget)}
           {["completed", "candidate_ready", "failed", "cancelled"].includes(
             task.status,
           ) && (
@@ -1119,7 +1131,11 @@ export function TaskTimeline({
         </Collapsible.Trigger>
         <Dialog.Root key={`${task.task_id}:${task.viewing_revision}:${workSession?.run_id}`}>
           <Dialog.Trigger asChild>
-            <button type="button" className="mb-4 rounded-lg border px-3 py-2 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">查看本次用量</button>
+            <button type="button" className="mb-4 inline-flex min-h-10 items-center gap-2 rounded-lg border border-primary/40 bg-primary/10 px-4 py-2 text-sm font-semibold text-teal-800 shadow-sm transition-colors hover:border-primary hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background dark:text-teal-200 motion-reduce:transition-none">
+              <BarChart3 aria-hidden="true" className="h-4 w-4 shrink-0" />
+              <span>查看本次用量</span>
+              <ChevronRight aria-hidden="true" className="h-4 w-4 shrink-0" />
+            </button>
           </Dialog.Trigger>
           <Dialog.Portal>
             <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
@@ -1129,14 +1145,15 @@ export function TaskTimeline({
                 <Dialog.Close aria-label="关闭用量" className="rounded-lg p-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"><X className="h-4 w-4" /></Dialog.Close>
               </div>
               <Dialog.Description className="mt-2 text-xs text-muted-foreground">当前查看版本的执行记录。未报告的用量显示未知。</Dialog.Description>
+              {workSession && workSession.revision !== (task.viewing_revision ?? task.active_revision) && <p className="mt-2 text-xs text-muted-foreground">用量来自 V{workSession.revision} 的执行；当前版本接受初稿，未新增模型调用。</p>}
               <div tabIndex={0} role="region" aria-label="执行用量详情" className="mt-4 min-h-0 space-y-4 overflow-y-auto text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 <p>{usageLabel}</p>
                 <p>模型：{task.agentic_runtime?.model_connection_model || task.web_source?.runtime_binding.model || task.model || "型号未记录"}<br />连接：{connectionLabel || (task.model_connection_id ? "原连接不可用" : "任务冻结配置")}</p>
                 {workSession && <>
                   <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2">
-                    <dt>状态</dt><dd>{workspaceStatusLabel(task.status)}</dd>
-                    <dt>开始时间</dt><dd>{workSession.started_at ? new Date(workSession.started_at).toLocaleString("zh-CN") : "时间未记录"}</dd>
-                    <dt>结束时间</dt><dd>{workSession.ended_at ? new Date(workSession.ended_at).toLocaleString("zh-CN") : ["completed", "cancelled", "failed", "candidate_ready"].includes(task.status) ? "时间未记录" : "尚未结束"}</dd>
+                    <dt>状态</dt><dd>{workspaceStatusLabel((workSession.status || task.status) as WorkspaceTask["status"])}</dd>
+                    <dt>开始时间</dt><dd>{workSession.started_at ? beijingTime(workSession.started_at) : "时间未记录"}</dd>
+                    <dt>结束时间</dt><dd>{workSession.ended_at ? beijingTime(workSession.ended_at) : ["completed", "cancelled", "failed", "candidate_ready"].includes(task.status) ? "时间未记录" : "尚未结束"}</dd>
                     <dt>工作耗时</dt><dd>{workSession.started_at ? formatElapsed(workSession.work_duration_ms) : "时间未记录"}</dd>
                     <dt>等待耗时</dt><dd>{workSession.started_at ? formatElapsed(workSession.waiting_duration_ms) : "时间未记录"}</dd>
                     <dt>行动记录</dt><dd>{workSession.action_count} 个行动 · {workSession.tool_call_count} 次工具 · 已处理 {workSession.handled_retry_count} 次重试</dd>
@@ -1146,7 +1163,7 @@ export function TaskTimeline({
                   {!!workSession.provider_usage?.length && <ol className="space-y-3 border-t pt-3" aria-label="模型调用明细">
                     {workSession.provider_usage.map((usage, index) => <li key={index} className="break-words text-xs leading-6">
                       <p className="font-medium">{usage.model} · {usage.purpose}</p>
-                      <p>{new Date(usage.created_at).toLocaleString("zh-CN")} · {usage.request_count} 次请求</p>
+                      <p>{beijingTime(usage.created_at)} · {usage.request_count} 次请求</p>
                       <p>输入 {tokens(usage.input_tokens)} · 输出 {tokens(usage.output_tokens)} · 缓存 {tokens(usage.cache_tokens)} · 总计 {tokens(usage.total_tokens)}</p>
                     </li>)}
                   </ol>}

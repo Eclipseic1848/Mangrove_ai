@@ -37,7 +37,7 @@ import {
   Loader2,
   Paperclip,
   RefreshCw,
-  Send,
+  ArrowUp,
   Settings2,
   Trash2,
   UploadCloud,
@@ -271,7 +271,6 @@ export type WebIntakeDraft = {
 export function TaskComposer({
   compact = false,
   unified = false,
-  onReadWeb,
   onChat,
   onPickSources,
   draft,
@@ -288,6 +287,7 @@ export function TaskComposer({
   additionalSourceCount = 0,
   additionalInputFormats = [],
   sourceBusy = false,
+  stopAction,
   submitBlocked = false,
   sourceIdentity = "",
   modelLocked = false,
@@ -303,7 +303,6 @@ export function TaskComposer({
 }: {
   compact?: boolean;
   unified?: boolean;
-  onReadWeb?: (draft: WebIntakeDraft) => void;
   onChat?: (draft: WebIntakeDraft, externalApiConfirmed: boolean) => Promise<void>;
   onPickSources?: () => void;
   draft?: WebIntakeDraft | null;
@@ -337,6 +336,7 @@ export function TaskComposer({
   additionalSourceCount?: number;
   additionalInputFormats?: string[];
   sourceBusy?: boolean;
+  stopAction?: ReactNode;
   submitBlocked?: boolean;
   sourceIdentity?: string;
   modelLocked?: boolean;
@@ -450,8 +450,18 @@ export function TaskComposer({
   useLayoutEffect(() => {
     const input = promptRef.current;
     if (!active || !input || !input.getClientRects().length) return;
-    input.style.height = "auto";
-    input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
+    const resize = () => {
+      input.style.height = "auto";
+      // 高度上限由 CSS 随视口约束；超限保留原生滚动条。
+      input.style.height = `${input.scrollHeight}px`;
+    };
+    resize();
+    let width = input.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (input.clientWidth !== width) { width = input.clientWidth; resize(); }
+    });
+    observer.observe(input);
+    return () => observer.disconnect();
   }, [active, prompt]);
   useEffect(() => {
     if (!allowPiRuntime && runtimeSelection === "pi") {
@@ -697,6 +707,9 @@ export function TaskComposer({
       "image/jpeg": [".jpg", ".jpeg"],
       "image/webp": [".webp"],
       "application/pdf": [".pdf"],
+      "application/vnd.ms-excel": [".xls"],
+      "application/msword": [".doc"],
+      "application/vnd.ms-powerpoint": [".ppt"],
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
       "application/vnd.openxmlformats-officedocument.presentationml.presentation": [".pptx"],
@@ -780,12 +793,6 @@ export function TaskComposer({
     receivedDraft.current = nextDraft;
     if (change.prompt !== undefined || change.formats !== undefined) setExternalApiConfirmed(false);
     onDraftChange?.(nextDraft);
-  };
-  const readWeb = () => {
-    if (!active || submitting || sourceBusy) return;
-    receivedDraft.current = currentDraft;
-    onDraftChange?.(currentDraft);
-    onReadWeb?.(currentDraft);
   };
 
   const reuseCapability = async (capability: GrayCapability) => {
@@ -1041,8 +1048,9 @@ export function TaskComposer({
   return (
     <div
       {...getRootProps()}
+      data-guide="workspace-composer"
       className={cn(
-        "relative rounded-2xl border bg-background shadow-[0_18px_60px_-38px_hsl(var(--primary)/0.65)] transition-colors",
+        "relative rounded-2xl border bg-background dark:bg-card shadow-[0_18px_60px_-38px_hsl(var(--primary)/0.65)] transition-colors",
         isDragActive && "border-primary bg-primary/[0.03]",
         compact ? "p-3" : "p-4",
       )}
@@ -1123,7 +1131,7 @@ export function TaskComposer({
             ? "继续提出修改，例如：增加按地区汇总，并同时输出 JSON"
             : "告诉我你想完成什么，也可以拖入或粘贴文件…"
         }
-        className="w-full min-h-16 max-h-40 resize-none overflow-y-auto bg-transparent px-1 text-[15px] leading-7 outline-none placeholder:text-muted-foreground/70"
+        className="w-full min-h-16 max-h-[min(320px,40dvh)] resize-none overflow-y-auto [scrollbar-gutter:stable] bg-transparent px-1 text-[15px] leading-7 outline-none placeholder:text-muted-foreground/70"
       />
       {kind === "mixed" && runtimeSelection === "legacy" && (
         <div className="mt-2 flex items-start gap-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
@@ -1157,7 +1165,21 @@ export function TaskComposer({
         </div>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3">
-        <button
+        {onPickSources ? <details className="relative" onKeyDown={event => {
+          if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); }
+        }}>
+          <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring">
+            <Paperclip aria-hidden="true" className="h-3.5 w-3.5" />添加文件<ChevronDown aria-hidden="true" className="h-3 w-3" />
+          </summary>
+          <div className="absolute bottom-full left-0 z-20 mb-2 w-48 space-y-1 rounded-xl border bg-background p-2 shadow-lg">
+            <button type="button" disabled={!active || submitting || sourceBusy} onClick={event => {
+              const menu = event.currentTarget.closest("details"); if (menu) { menu.open = false; menu.querySelector("summary")?.focus(); } open();
+            }} className="w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">上传本地文件</button>
+            <button type="button" disabled={!active || submitting || sourceBusy} onClick={event => {
+              const menu = event.currentTarget.closest("details"); if (menu) { menu.open = false; menu.querySelector("summary")?.focus(); } onPickSources();
+            }} className="w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">选择历史任务文件</button>
+          </div>
+        </details> : <button
           type="button"
           onClick={open}
           disabled={submitting}
@@ -1165,14 +1187,7 @@ export function TaskComposer({
         >
           <Paperclip className="h-3.5 w-3.5" />
           添加文件
-        </button>
-        {(unified || onPickSources) && <details className="relative">
-          <summary className="cursor-pointer rounded-lg px-2 py-1.5 text-xs text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring">其他资料</summary>
-          <div className="absolute bottom-full left-0 z-20 mb-2 w-48 space-y-1 rounded-xl border bg-background p-2 shadow-lg">
-            {unified && <button type="button" onClick={readWeb} disabled={submitting || sourceBusy} className="w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-muted disabled:opacity-50">公开网页</button>}
-            {onPickSources && <button type="button" onClick={onPickSources} disabled={!active || submitting || sourceBusy} className="w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">历史资料</button>}
-          </div>
-        </details>}
+        </button>}
         <details open={unified ? undefined : true}>
         <summary className={cn("cursor-pointer rounded-lg px-2 py-1.5 text-xs text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring", !unified && "hidden")}>{unified ? `输出：${formatSelection === "manual" ? formats.map(format => FORMAT_LABELS[format]).join("、") || "请选择" : resolvedOutput.explicit ? `${formats.map(format => FORMAT_LABELS[format]).join("、")} · 按你的要求` : "自动"}` : "输出选项"}</summary>
         <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -1239,7 +1254,7 @@ export function TaskComposer({
           <option value="" disabled>{selectableModels.length ? "请选择可用模型" : "暂无模型，请在设置中配置"}</option>
           {[...new Set(selectableModels.map(item => item.group))].map(group => <optgroup key={group} label={group}>{selectableModels.filter(item => item.group === group).map(item => <option key={JSON.stringify([item.connectionId, item.model])} value={JSON.stringify([item.connectionId, item.model])}>{item.label}</option>)}</optgroup>)}
         </select>}
-        <button
+        {stopAction || <button
           type="button"
           onClick={() => void submit()}
           disabled={
@@ -1254,15 +1269,16 @@ export function TaskComposer({
             || (kind === "mixed" && runtimeSelection === "legacy")
             || piSelectionInvalid
           }
-          className="ml-auto inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-45"
+          aria-label={compact ? "创建新版本" : unified && !items.length && !webSourceCount && !additionalSourceCount ? "发送" : webSourceCount ? "启动任务" : "开始执行"}
+          title={compact ? "创建新版本" : "发送"}
+          className="ml-auto inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-45"
         >
           {submitting ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
+            <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin motion-reduce:animate-none" />
           ) : (
-            <Send className="h-4 w-4" />
+            <ArrowUp aria-hidden="true" className="h-5 w-5" />
           )}
-          {compact ? "创建新版本" : unified && !items.length && !webSourceCount && !additionalSourceCount ? "发送" : webSourceCount ? "启动任务" : "开始执行"}
-        </button>
+        </button>}
       </div>
       {formatConflict && <p role="alert" className="mt-2 text-sm text-amber-700">手动选择与文字要求不同。<button type="button" className="ml-2 underline focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { setFormatSelection("auto"); updateDraft({ formatSelection: "auto" }); }}>按文字要求输出</button>，或修改上方要求。</p>}
       {unified && formatSelection === "auto" && prompt.trim() && !resolvedOutput.explicit && <p className="mt-2 text-xs text-muted-foreground">按任务目标推荐：{formats.map(format => FORMAT_LABELS[format]).join("、")}，可在输出选项中调整。</p>}

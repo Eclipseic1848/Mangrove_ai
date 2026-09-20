@@ -22,7 +22,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from src.conductor.context import compress_history
@@ -81,7 +81,7 @@ def _resolve_model(provider: Optional[str], model: Optional[str]) -> tuple[Optio
 def _build_result(
     user_id: str, conv_id: str, state: Dict[str, Any], reply: str,
     provider: Optional[str], model: Optional[str], user_input: str,
-    *, model_connection_id: Optional[str] = None, model_connection_version: Optional[int] = None,
+    *, model_connection_id: Optional[str] = None, model_connection_version: Optional[str] = None,
 ) -> Dict[str, Any]:
     """把最终 state 整理成前端可直接渲染的结构，并把 HITL 待确认动作暂存到服务端。"""
     task_id = state.get("task_id") or ""
@@ -98,16 +98,22 @@ def _build_result(
         return {"conv_id": conv_id, "task_id": task_id, "kind": "error",
                 "reply": f"❌ {state.get('error')}"}
 
-    # 定时任务：暂存待确认
+    # 定时任务：复用一次性动作领取后直接创建。
     if state.get("schedule_request"):
         pending_store.put(user_id, task_id, {"schedule": {
             "schedule": state["schedule_request"], "user_input": user_input,
             "provider": provider, "model": model,
+            "model_connection_id": model_connection_id,
+            "model_connection_version": model_connection_version,
             "intent": getattr(spec, "intent", "") if spec else "",
         }})
-        return {"conv_id": conv_id, "task_id": task_id, "kind": "schedule",
-                "reply": state.get("reply") or "已识别为定时任务，确认后创建。",
-                "schedule": str(state["schedule_request"])}
+        from .tasks import create_task
+        from ..schemas import ScheduleIn
+        # 用户原话中的明确执行要求即为创建授权，复用已有的一次性动作领取与校验。
+        receipt = create_task(ScheduleIn(task_id=task_id), user={"user_id": user_id})
+        return {"conv_id": conv_id, "task_id": task_id, "kind": "schedule_created",
+                "reply": f"已创建定时任务，下次执行：{receipt['next_run_at']}（服务器时间）。可在「自动化任务」查看、暂停或修改。",
+                "scheduled_task_id": receipt["task_id"], "next_run_at": receipt["next_run_at"]}
 
     # 正常产出
     outputs = state.get("outputs", {}) or {}
@@ -251,7 +257,10 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
     provider, model = ("bound", body.model) if binding else _resolve_model(body.provider, body.model)
 
     # 载入历史 + 追加本轮用户消息（持久化）
-    history = [{"role": m["role"], "content": m["content"]} for m in store.list_messages(conv_id)]
+    saved_history = store.list_messages(conv_id)
+    from src.notifications import pending_user_text
+    notification_text = pending_user_text(saved_history, body.content)
+    history = [{"role": m["role"], "content": m["content"]} for m in saved_history]
     if not history:
         history = [message.model_dump() for message in body.history]
     history.append({"role": "user", "content": body.content})
@@ -289,7 +298,7 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
                 )
             else:
                 stream = astream_conductor(
-                    user_input=body.content, messages=hist,
+                    user_input=notification_text, messages=hist,
                     provider=provider, model=model, session_id=conv_id,
                 )
             async for kind, payload in stream:
@@ -317,9 +326,15 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
                 if state.get("inferred_quantity") and not state.get("needs_clarification"):
                     n = state["inferred_quantity"]
                     reply += f"\n\n> 💡 本次将采集约 {n} 条数据（系统默认，可随时告知调整数量）。"
-                result = _build_result(user_id, conv_id, state, reply, provider, model, body.content,
+                result = _build_result(user_id, conv_id, state, reply, provider, model, notification_text,
                                        model_connection_id=body.model_connection_id,
                                        model_connection_version=binding.connection_version if binding else None)
+            if result.get('kind') == 'clarification':
+                result['notification_user_text'] = notification_text
+            if result.get("kind") == "output":
+                from src.notifications import auto_conductor
+                await auto_conductor(store, user_id, 'chat:' + run_id, notification_text,
+                                     state, result, provider=provider, model=model)
             result["token_usage"] = dict(usage) if usage["calls"] else None
             # 持久化助手回复（澄清/错误/回执都记入历史，保证多轮上下文连续）
             assistant_text = result.get("reply") or reply
@@ -329,7 +344,7 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
             # 不持久化一次性 HITL 动作(actions/schedule)，它们依赖服务端暂存，重载后不可再确认。
             persist_meta = {
                 k: result.get(k)
-                for k in ("files", "grade", "collector", "item_count", "data_type", "template_status", "kind", "token_usage", "record_counts", "quality")
+                for k in ("files", "grade", "collector", "item_count", "data_type", "template_status", "kind", "token_usage", "record_counts", "quality", "notification", "notification_user_text", "scheduled_task_id", "next_run_at")
                 if result.get(k) not in (None, [], "")
             }
             persist_meta["work_progress"] = progress
@@ -467,8 +482,8 @@ class FeedbackIn(BaseModel):
     message_id: int
     conv_id: str
     rating: str  # 'up' | 'down'
-    reasons: Optional[List[str]] = None
-    comment: Optional[str] = None
+    reasons: Optional[List[str]] = Field(default=None, max_length=7)
+    comment: Optional[str] = Field(default=None, max_length=5000)
 
 
 @router.post("/feedback")
@@ -478,6 +493,9 @@ def submit_feedback(body: FeedbackIn, user=Depends(get_execution_user)):
     user_id = user["user_id"]
     if body.rating not in ("up", "down"):
         raise HTTPException(status_code=400, detail="rating 必须为 up/down")
+    from src.api.feedback_audit import REASONS
+    if any(reason not in REASONS for reason in body.reasons or []):
+        raise HTTPException(422, '反馈原因无效')
     conv = store.get_conversation(body.conv_id)
     if not conv or conv["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="会话不存在")

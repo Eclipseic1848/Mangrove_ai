@@ -1,3 +1,4 @@
+import { beijingTime } from "@/lib/beijingTime";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { WebIntakeDraft } from "./TaskComposer";
 import {
@@ -1094,7 +1095,7 @@ export function WebSourceIntake({
                   {snapshot.artifacts.map((item) => (
                     <li key={item.artifact_id} className="break-all">
                       <span className="text-emerald-700 dark:text-emerald-300">成功</span>
-                      {" · "}{item.final_url}{" · "}{new Date(item.read_at).toLocaleString("zh-CN")}
+                      {" · "}{item.final_url}{" · "}{beijingTime(item.read_at)}
                     </li>
                   ))}
                   {snapshot.failures.map((item) => (
@@ -1111,7 +1112,7 @@ export function WebSourceIntake({
           <dl className="mt-4 grid gap-x-6 gap-y-3 border-y py-4 text-xs sm:grid-cols-3">
             <div>
               <dt className="text-muted-foreground">读取时间</dt>
-              <dd className="mt-1 font-medium">{new Date(artifact.read_at).toLocaleString("zh-CN")}</dd>
+              <dd className="mt-1 font-medium">{beijingTime(artifact.read_at)}</dd>
             </div>
             <div>
               <dt className="text-muted-foreground">内容类型 / 大小</dt>

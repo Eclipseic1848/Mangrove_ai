@@ -646,6 +646,7 @@ class SemanticWorkspaceManager:
         self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
         self._workers: list[asyncio.Task[None]] = []
         self._maintenance: asyncio.Task[None] | None = None
+        self._learning_worker: asyncio.Task[None] | None = None
         self._active: dict[str, asyncio.Task[None]] = {}
         self._reverification_tasks: set[asyncio.Task[None]] = set()
         self._reverification_task_context: dict[
@@ -670,6 +671,7 @@ class SemanticWorkspaceManager:
             from src.source_acquisition.reuse import workspace_source_read_context
             runtime = pi_runtime or PiRuntime(
                 source_read_context=workspace_source_read_context,
+                draft_review_required=self._draft_review_required,
                 capability_mount_resolver=DefaultCapabilityMounts(
                     db_path=settings.webui_db_path,
                     oci_layout_path=settings.capability_oci_layout_path,
@@ -1078,6 +1080,9 @@ class SemanticWorkspaceManager:
             candidate_resolver=adapter.resolve_candidates,
             gate_reader=publication_gate,
         )
+        # 显式发布的旧状态不一定会自动恢复，必须在发布之前保存学习意图。
+        # 恢复查询只接管 succeeded 交付，因此失败的发布不会提前累计使用。
+        await self._queue_delivery_learning(owner_id, task_id, expected_revision, command.run_id)
         try:
             delivery = await execution_to_thread(
                 publisher.publish,
@@ -1117,6 +1122,7 @@ class SemanticWorkspaceManager:
             _LOGGER.exception("显式正式交付发布失败")
             raise ValueError("显式正式交付发布失败，请查看任务状态") from exc
 
+        await self._record_delivery_learning(owner_id, task_id, expected_revision, command.run_id, delivery.delivery_id)
         current = store.get_semantic_workspace_task(owner_id, task_id)
         if current is not None and current["status"] != "completed":
             try:
@@ -1362,6 +1368,16 @@ class SemanticWorkspaceManager:
                     attempt.attempt_id,
                 )
 
+    @staticmethod
+    def _draft_review_required(request: PiRuntimeRequest) -> bool:
+        task = get_store().get_semantic_workspace_task(request.user_id, request.task_id)
+        question = (task or {}).get("question") or {}
+        runtime = AgenticRuntimeRepository(settings.webui_db_path).get(request.user_id, request.task_id, request.revision)
+        # 继续核对只对所有者明确批准的同一版本、同一 Run 生效。
+        return not (task and task["active_revision"] == request.revision and runtime
+                    and question.get("draft_review_approved") is True
+                    and question.get("draft_review_run_id") == runtime.get("run_id"))
+
     def start(self) -> None:
         if self._workers:
             return
@@ -1377,6 +1393,9 @@ class SemanticWorkspaceManager:
         self._maintenance = asyncio.create_task(
             self._maintenance_loop(),
             name="semantic-workspace-maintenance",
+        )
+        self._learning_worker = asyncio.create_task(
+            self._learning_loop(), name="semantic-workspace-learning",
         )
         try:
             module = self._candidate_verification_module()
@@ -1422,9 +1441,13 @@ class SemanticWorkspaceManager:
             task.cancel()
         if self._maintenance is not None:
             self._maintenance.cancel()
+        if self._learning_worker is not None:
+            self._learning_worker.cancel()
         tasks = [*self._active.values(), *self._workers]
         if self._maintenance is not None:
             tasks.append(self._maintenance)
+        if self._learning_worker is not None:
+            tasks.append(self._learning_worker)
         for task in reverification_tasks:
             # 异常已由专用 done callback 记录；关闭流程只负责消费，不能二次击穿 lifespan。
             with suppress(asyncio.CancelledError, Exception):
@@ -1437,10 +1460,48 @@ class SemanticWorkspaceManager:
         self._reverification_task_context.clear()
         self._workers.clear()
         self._maintenance = None
+        self._learning_worker = None
         self._queued.clear()
         self._deferred_requeue.clear()
         self._delivery_retry_attempts.clear()
         self._delivery_retry_after.clear()
+
+    async def _learning_loop(self) -> None:
+        """单并发消费持久学习回执，慢模型不阻塞任务恢复与取消。"""
+        while True:
+            await asyncio.sleep(REVERIFICATION_RECOVERY_POLL_SECONDS)
+            try:
+                from src.memory.workspace_learning import pending_template_uses, pending_lesson_failures, distill_failed_lesson
+                pending_learning = await asyncio.to_thread(pending_template_uses, settings.webui_db_path)
+                pending_learning += await asyncio.to_thread(pending_lesson_failures, settings.webui_db_path)
+                for learning in pending_learning:
+                    try:
+                        owner_id, task_id = learning["owner_id"], learning["task_id"]
+                        task = get_store().get_semantic_workspace_task(owner_id, task_id)
+                        if not task or task.get("deleted_at"):
+                            continue
+                        task_revision = get_store().get_semantic_workspace_revision(owner_id, task_id, learning["revision"])
+                        # 恢复沿用任务持久授权，不借维护线程绕过账号停用。
+                        with execution_context(self._workspace_authorization(owner_id, task_id)):
+                            self._require_workspace_execution(owner_id, task_id)
+                            if "delivery_id" not in learning:
+                                if not task_revision or task_revision["status"] != "candidate_ready":
+                                    continue
+                                state = await distill_failed_lesson(settings.webui_db_path, owner_id=owner_id,
+                                    task_id=task_id, revision=learning["revision"], run_id=learning["run_id"])
+                                get_store().append_semantic_workspace_event(owner_id, task_id, stage="learn",
+                                    event_type="learning_feedback", summary="失败教训已保存为本人草稿" if state == "applied" else "本次未保存失败教训",
+                                    details={"learning_state": state, "revision": learning["revision"], "run_id": learning["run_id"]})
+                                continue
+                            await self._record_delivery_learning(owner_id, task_id, learning["revision"],
+                                learning["run_id"], learning["delivery_id"],
+                                include_new=bool(task_revision and task_revision["status"] == "completed"))
+                    except ExecutionDenied:
+                        continue
+                    except Exception:
+                        _LOGGER.warning("方法统计补记暂时失败，下一轮重试", exc_info=True)
+            except Exception:
+                _LOGGER.warning("学习回执恢复检查失败", exc_info=True)
 
     async def _maintenance_loop(self) -> None:
         """持续接管重验孤儿，并每小时清理一次到期回收站记录。"""
@@ -2120,6 +2181,10 @@ class SemanticWorkspaceManager:
             if retryable:
                 raise _DeliveryRetryPending(message) from exc
             raise ValueError(message) from exc
+        try:
+            await self._record_delivery_learning(user_id, task_id, revision, command.run_id, delivery.delivery_id)
+        except (sqlite3.OperationalError, OSError) as exc:
+            raise _DeliveryRetryPending("交付已保留，学习入队暂时失败，等待恢复") from exc
         store.update_semantic_workspace_task(
             user_id,
             task_id,
@@ -2151,6 +2216,60 @@ class SemanticWorkspaceManager:
         )
         self._delivery_retry_attempts.pop(task_id, None)
         self._delivery_retry_after.pop(task_id, None)
+
+    async def _queue_delivery_learning(self, user_id, task_id, revision, run_id):
+        # 完成状态之前持久入队；中断时现有交付恢复可重放，不丢学习意图。
+        from src.memory.learning_receipts import LearningReceipts, LESSON_USE_KINDS
+        from src.memory import templates
+        for kind in ("template_use", "template_new", *LESSON_USE_KINDS):
+            await execution_to_thread(
+                LearningReceipts(settings.webui_db_path, templates.TEMPLATES_DIR).enqueue,
+                owner_id=user_id, task_id=task_id, revision=revision,
+                run_id=run_id, kind=kind,
+            )
+
+    async def _record_delivery_learning(self, user_id, task_id, revision, run_id, delivery_id, *, include_new=False):
+        await self._queue_delivery_learning(user_id, task_id, revision, run_id)
+        # 学习是正式交付后的附加效果，失败不能把已交付任务倒退为失败。
+        try:
+            from src.memory.workspace_learning import record_verified_template_use
+            learning_state = await execution_to_thread(
+                record_verified_template_use, settings.webui_db_path,
+                owner_id=user_id, task_id=task_id, revision=revision,
+                run_id=run_id, delivery_id=delivery_id,
+            )
+            if learning_state in {"applied", "conflict", "source_changed"}:
+                get_store().append_semantic_workspace_event(
+                    user_id, task_id, stage="learn", event_type="learning_feedback",
+                    summary="方法使用记录已保存" if learning_state == "applied" else "方法原件已变化，本次未覆盖回写",
+                    details={"learning_state": learning_state},
+                )
+        except Exception:
+            _LOGGER.warning("正式交付后的方法统计回写失败，结果仍保留", exc_info=True)
+        try:
+            from src.memory.workspace_learning import record_verified_lesson_uses
+            await execution_to_thread(record_verified_lesson_uses, settings.webui_db_path,
+                owner_id=user_id, task_id=task_id, revision=revision,
+                run_id=run_id, delivery_id=delivery_id)
+        except Exception:
+            _LOGGER.warning("正式交付后的教训有效性回写失败，保留原回执待恢复", exc_info=True)
+        # 模型学习由完成后的持久队列处理，不阻塞正式结果或占用任务工作器。
+        if not include_new:
+            return
+        try:
+            from src.memory.workspace_learning import distill_verified_template
+            state = await distill_verified_template(settings.webui_db_path, owner_id=user_id,
+                task_id=task_id, revision=revision, run_id=run_id, delivery_id=delivery_id)
+            if state in {"applied", "binding_unavailable", "invalid_suggestion", "conflict"}:
+                get_store().append_semantic_workspace_event(user_id, task_id, stage="learn",
+                    event_type="learning_feedback", summary=("已保存本人方法草稿，后续同类任务可试用"
+                        if state == "applied" else "本次未保存新方法草稿，正式结果不受影响"),
+                    details={"learning_state": state, "revision": revision, "run_id": run_id})
+        except Exception:
+            _LOGGER.warning("方法草稿生成失败或结果未知，不自动重发，正式结果仍保留", exc_info=True)
+            get_store().append_semantic_workspace_event(user_id, task_id, stage="learn",
+                event_type="learning_feedback", summary="方法学习未完成，未自动重发；正式结果不受影响",
+                details={"learning_state": "generation_unknown", "revision": revision, "run_id": run_id})
 
     @staticmethod
     def _delivery_error_is_retryable(exc: Exception) -> bool:
@@ -2215,6 +2334,9 @@ class SemanticWorkspaceManager:
         self._active[task_id] = job
         try:
             await job
+            # 子任务会处理取消并正常返回；服务停机的工作器取消仍须继续向外传播。
+            if asyncio.current_task().cancelling():
+                raise asyncio.CancelledError
         finally:
             self._active.pop(task_id, None)
             if task_id in self._deferred_requeue:
@@ -2326,6 +2448,8 @@ class SemanticWorkspaceManager:
                 self._require_workspace_execution(user_id, task_id)
                 await self._run_task_authorized(user_id, task_id)
                 self._require_workspace_execution(user_id, task_id)
+                from src.notifications import auto_workspace
+                await auto_workspace(get_store(), user_id, task_id)
                 final = get_store().get_semantic_workspace_task(user_id, task_id)
                 if final and final["status"] in _TERMINAL_STATUSES | {"needs_input"}:
                     get_store().set_account_execution_state(authorization, "workspace", task_id, "idle")
@@ -2959,6 +3083,16 @@ class SemanticWorkspaceManager:
                 session_file=result.session_file,
             )
             clarification = result.clarification or {}
+            if clarification.get("draft_review_id"):
+                self._set_needs_input(user_id, task_id, {
+                    "kind": "plan", "purpose": "control", "continuation": "unavailable",
+                    "question_id": "draft-review:" + clarification["draft_review_id"],
+                    "draft_review_id": clarification["draft_review_id"],
+                    "draft_review_run_id": result.run_id,
+                    "prompt": "初稿已生成，请查看后决定是否接受或继续核对",
+                    "reason": "已暂停后续核对，等待你的决定", "options": [], "allow_free_text": False,
+                }, expected_revision=revision)
+                return
             self._set_needs_input(
                 user_id,
                 task_id,
@@ -2991,6 +3125,7 @@ class SemanticWorkspaceManager:
             session_file=result.session_file,
         )
         verification = result.verification
+        from src.memory.workspace_learning import business_failure_checks
         saved_runtime = repository.update(
             user_id,
             task_id,
@@ -3053,7 +3188,49 @@ class SemanticWorkspaceManager:
             )
             return
 
+        # 先持久学习意图，再保存终态；后台仍等待确切版本进入 candidate_ready。
+        store.append_semantic_workspace_event(
+            user_id,
+            task_id,
+            stage="verify",
+            event_type="candidate_verification_failed",
+            summary=(
+                candidate_coverage.conclusion.reason
+                if candidate_coverage is not None
+                and candidate_coverage.conclusion is not None
+                else verification.summary
+                if verification is not None
+                else "候选没有独立验证结论"
+            ),
+            details={
+                "revision": revision,
+                "run_id": result.run_id,
+                "failure_learning_requested": bool(business_failure_checks(verification)),
+                "candidate_count": len(result.candidates),
+                "verification_status": (
+                    verification.status.value
+                    if verification
+                    else "inconclusive"
+                ),
+                "next_actions": ["查看失败原因", "创建新版本修改目标", "停止"],
+                "formal_delivery": False,
+                "candidate_kind": (
+                    "partial_candidate"
+                    if candidate_coverage is not None
+                    and candidate_coverage.is_partial
+                    else "candidate"
+                ),
+            },
+        )
         # 未通过独立验证的 Candidate 仅供诊断，不进入 Publisher。
+        # 修订先落终态；若随后中断，任务仍非终态，可由现有维护接管。
+        store.update_semantic_workspace_revision(
+            user_id,
+            task_id,
+            revision,
+            status="candidate_ready",
+            summary="智能体候选未通过独立验证",
+        )
         store.update_semantic_workspace_task(
             user_id,
             task_id,
@@ -3070,43 +3247,6 @@ class SemanticWorkspaceManager:
             failure=None,
             question=None,
             cancel_requested=False,
-        )
-        store.update_semantic_workspace_revision(
-            user_id,
-            task_id,
-            revision,
-            status="candidate_ready",
-            summary="智能体候选未通过独立验证",
-        )
-        store.append_semantic_workspace_event(
-            user_id,
-            task_id,
-            stage="verify",
-            event_type="candidate_verification_failed",
-            summary=(
-                candidate_coverage.conclusion.reason
-                if candidate_coverage is not None
-                and candidate_coverage.conclusion is not None
-                else verification.summary
-                if verification is not None
-                else "候选没有独立验证结论"
-            ),
-            details={
-                "candidate_count": len(result.candidates),
-                "verification_status": (
-                    verification.status.value
-                    if verification
-                    else "inconclusive"
-                ),
-                "next_actions": ["查看失败原因", "创建新版本修改目标", "停止"],
-                "formal_delivery": False,
-                "candidate_kind": (
-                    "partial_candidate"
-                    if candidate_coverage is not None
-                    and candidate_coverage.is_partial
-                    else "candidate"
-                ),
-            },
         )
 
     async def _compile(

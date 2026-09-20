@@ -567,8 +567,8 @@ class Settings(BaseSettings):
     mysql_password: str = Field(default="", description="MySQL 密码（放 .env）")
     mysql_database: str = Field(default="mangrove", description="MySQL 数据库名")
 
-    # 历史连接配置保留，不迁移凭据；外部只读门不允许开启邮件投递。
-    smtp_enabled: bool = Field(default=True, description="历史邮件开关，仅保留配置，不授权发送")
+    # 配置启用不等于发送授权；每次外发必须来自用户明确指令。
+    smtp_enabled: bool = Field(default=True, description="启用已授权的邮件通知")
     smtp_host: str = Field(default="", description="SMTP 服务器地址，如 smtp.qq.com / smtp.gmail.com")
     smtp_port: int = Field(default=465, description="SMTP 端口：SSL 用 465，STARTTLS 用 587")
     smtp_user: str = Field(default="", description="SMTP 登录账号（通常即发件邮箱）")
@@ -576,9 +576,10 @@ class Settings(BaseSettings):
     smtp_from: str = Field(default="", description="发件人地址，留空则用 smtp_user")
     smtp_use_ssl: bool = Field(default=True, description="True 用 SSL(465)；False 用 STARTTLS(587)")
 
-    # 历史 Webhook 不清除；配置值不能越过外部只读投递门。
-    slack_enabled: bool = Field(default=True, description="历史 Slack 开关，仅保留配置，不授权投递")
+    slack_enabled: bool = Field(default=True, description="启用已授权的 Slack 通知")
     slack_webhook_url: str = Field(default="", description="Slack Incoming Webhook URL（放 .env）；空则不用")
+    slack_bot_token: str = Field(default="", description="Slack Bot Token，用于正文及文件发送")
+    slack_channel_id: str = Field(default="", description="Slack 目标频道 ID")
 
     # Agent 配置
     agent_max_iterations: int = Field(default=50, description="Agent 最大迭代次数")

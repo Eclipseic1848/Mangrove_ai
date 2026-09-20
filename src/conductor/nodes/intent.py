@@ -30,7 +30,7 @@ async def intent_node(state: ConductorState) -> Dict[str, Any]:
     history = state.get("messages", [])
     user_input = state.get("user_input", "")
 
-    system = INTENT_SYSTEM + preferences_context() + personal_context()
+    system = INTENT_SYSTEM + preferences_context(user_input) + personal_context(user_input)
     llm_messages: list = [{"role": "system", "content": system}]
     llm_messages.extend(history)
     if not history and user_input:

@@ -51,6 +51,42 @@ def login(client, username="synthetic-owner", password=PASSWORD):
     return response
 
 
+@pytest.mark.parametrize("access_state", ["missing", "expired"])
+def test_refresh_audit_identifies_verified_owner_without_valid_access(sessions, access_state):
+    from src.api.operations_middleware import OperationsMiddleware
+    from src.api.routes import operations
+    from tests.test_operations_api import period
+
+    device, store, owner = sessions
+    client = device()
+    client.app.include_router(operations.router)
+    client.app.add_middleware(OperationsMiddleware, store_provider=lambda: store)
+    store.create_user("synthetic-auditor", auth.hash_password(PASSWORD), role="super_admin", pending=False)
+    login(client)
+    if access_state == "expired":
+        claims = jwt.decode(client.cookies[auth.ACCESS_COOKIE], settings.jwt_secret, algorithms=["HS256"])
+        claims.update(iat=time.time() - 3600, exp=time.time() - 1800)
+        client.cookies.set(auth.ACCESS_COOKIE, jwt.encode(claims, settings.jwt_secret, algorithm="HS256"), domain="testserver.local", path="/api")
+    else:
+        client.cookies.delete(auth.ACCESS_COOKIE)
+    assert client.post("/api/auth/refresh").status_code == 200
+    auditor = device()
+    login(auditor, "synthetic-auditor")
+    response = auditor.post("/api/operations/events/query", json=period(kind="action", module="登录"))
+    assert response.status_code == 200
+    rows = response.json()["items"]
+    assert len(rows) == 1
+    assert rows[0]["actor_id"] == owner["user_id"]
+    assert rows[0]["actor_name"] == "synthetic-owner"
+    assert rows[0]["action"] == "登录状态续期"
+    assert rows[0]["result"] == "success"
+    # 未验证的请求不能仅凭客户端声明被归到某个账号。
+    stranger = device()
+    assert stranger.post("/api/auth/refresh", headers={"X-Mangrove-Owner": owner["user_id"]}).status_code == 401
+    rows = auditor.post("/api/operations/events/query", json=period(kind="action", module="登录", result="failure")).json()["items"]
+    assert len(rows) == 1 and rows[0]["actor_id"] is None
+
+
 def test_login_issues_only_host_only_http_only_cookies(sessions):
     device, _, owner = sessions
     client = device()

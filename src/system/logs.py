@@ -17,6 +17,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from src.timezone import now as beijing_now
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -69,7 +70,7 @@ def get_task_log_paths(logs_base: Optional[Path] = None) -> Tuple[Path, Path, st
     """
     base = logs_base or Path("logs")
     base.mkdir(parents=True, exist_ok=True)
-    now = datetime.now()
+    now = beijing_now()
     log_dir_name = now.strftime(LOG_TIMESTAMP_FORMAT)  # 2026-03-06_090332
     log_file_suffix = now.strftime("%Y%m%d_%H%M%S")    # 20260306_090332
     task_log_dir = base / log_dir_name

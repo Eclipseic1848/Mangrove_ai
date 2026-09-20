@@ -26,15 +26,19 @@
     "objects": {
       "index:idx_runs_task": "6d7421c5b093d5849032fc9c581e94642ee1d02b93df008fe8bf6d601c242382"
     },
-    "revision": "scheduler_0001",
+    "revision": "scheduler_0004",
     "tables": {
       "alembic_version": "691ed6fce5f31a9b013517c6b69e28441a10825af909745693a8fa7b7a627981",
-      "scheduled_task_runs": "2d8621465dd8a93f54949dee0b9631b67ab051dfbd69bc0ea28f638e8eab6816",
-      "scheduled_tasks": "760ebbec5f4cb5b561494b473bb8548dc3a85a1da9073390f569cadd1ccaa309"
+      "scheduled_task_runs": "783f875fa24e30da1259de3b91a3896e8b1f1aff1a58f1de136bbc2c2536ba56",
+      "scheduled_tasks": "db2f62c2561de1990ffe73d30447a246af4796848a3392e30bd822a4d7cfc8eb"
     }
   },
   "webui": {
     "objects": {
+      "index:idx_operations_actor": "fd9b4271bc6003650e06037c8f503c5fa7912db9e770f1ffc2200ff7de601e45",
+      "index:idx_operations_time": "8598d7de3076d9aa9c4d0444ad942b736e3f9d2e8143000e5586728180444b0d",
+      "trigger:operations_events_no_update": "bfbebb2350a2db23302d0514837403653874312ff694a5d5e736378b4e4dc4d9",
+      "trigger:operations_outcomes_no_update": "05fde1b8b2247031a81187cbe399c40aab069d8be9f3926cfc6e0f3da365a868",
       "index:idx_account_execution_generation": "291c6dd16df8fd96ade9088b8f956f413d5f8cb5606cf7d137d41e9138eb6489",
       "index:idx_agentic_runtime_events_owner": "60f8328f7121f3bf3a55a277c764648de7ea38608b24fe5ade40fb4cff6589ad",
       "index:idx_automation_procedure_digest": "2503206ed1086302f65255c7e1de9db79ce85881bc655b882f9270288ff9af0d",
@@ -138,8 +142,13 @@
       "trigger:web_task_contracts_no_delete": "8c3a98e6e3b53476208c4a42667fd84cbdf2ec99c216408a0086e245e1f6de9c",
       "trigger:web_task_contracts_no_update": "f70469242d490e4d28c884d7d2669bf72b3d3cd123ebefce630f33aab25274c0"
     },
-    "revision": "webui_0019",
+    "revision": "webui_0022",
     "tables": {
+      "operations_events": "a32722fac7cb31a0bed0a5866271ca47fd6b82e84e1d66b46cbff8103faf65c8",
+      "operations_outcomes": "6abd1649ee44a7f6c314fe940e9c6bf6e50714741d17f3413046613878b3d36b",
+      "operations_policy": "4b9399f882a7285b23c837805d1abb52dc2cffddc3497d7376e28b78e7c91aa3",
+      "operations_presence": "95c47ea7a9d769d97bebbbdbb6d2f59ac8191e55512f44ea435cc088850e430b",
+      "operations_views": "4fddf147c638f21ededf6a04a6c361aef79331ea2a44d6395a330c58dc1fb48f",
       "account_execution_bindings": "792d18e3f5416745c405e022cc798847f4a44d9c1123e58e3900e724c60e0cfd",
       "account_execution_holds": "985dd26ff02bf54e43557d05f72b11d5c97c3f3f18294bb3451afd2748e64db3",
       "agentic_runtime_coverage": "74c52319a68a7d681d3b2bbdebd68ff5a9114dba18fcb4b77c4f53d771d45ad8",
@@ -182,12 +191,13 @@
       "document_task_unit_members": "5147dc077d32f94485a4c20f420fb80f5294d9395ebbb5e1f626efa7fc6465fb",
       "document_task_units": "82115a9d279af5e96b0324f367cfd7958587bb9b3690337b332fb8e485f15cb2",
       "document_workspaces": "02321cb11d81b161937545f5cf91210fd5656fc8a38860ffb52897ca9751399f",
-      "feedback_content_access": "c14b96f83e0fa50bc8dad0c41414b7a6f4e805895e275840194c0e65bb104b48",
+      "feedback_content_access": "08afbaf1cd94f2bcaa46b4c553f7dd1eb95d47cbc7bada15dc24db97fcf0bc9a",
       "formal_delivery_outputs": "86505abf115e1ec4ba9b046f7807ccff4371578388e9d85e1011fb87c9e7b274",
       "formal_delivery_runs": "e91e3618714d310458546e0fa96e209aa2f3e9ce52f95af42e90c8889a0ec2be",
       "library_dedup_scan_log": "d004647cda25673763a69aebf608d9267ccd0747c624596ef704a3f0249d34c2",
+      "library_learning_receipts": "e0a85455f68015384850a91ebae954208ae63600e24a54c9647696538c2af728",
       "memory_hit_log": "3a4e9263e671ba159899e90d7c451441a460952043eca3e0b880688796958c14",
-      "message_feedback": "ece364bef21848f4e48d87a64de1b9597ede2f4cf21392b2092aa435ab4b93fb",
+      "message_feedback": "80f00ddd8e79e3290cebf5912fc0084cf9bed5ffbcd20eea264d94db5f5c0e70",
       "messages": "c4e45f34ae2c9d15adffc3a46f2ead0c913a520948256d5d392da7bf80fd27e0",
       "model_connection_grants": "b84c2e6dc78f8a5e5f240e97ec047bf7d0cf402c621a614094ec317c13d4c577",
       "model_connection_imports": "b2f0a7fd10d93ff586aae885a63ff61a957fd936e7c1fdaaf9263f31fb70b798",

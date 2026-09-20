@@ -20,6 +20,7 @@ import contextvars
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+from src.timezone import now as beijing_now
 from typing import Any, Dict, List, Optional, Union
 
 import httpx
@@ -167,7 +168,7 @@ def _inject_system_context(messages: List[MessageLike]) -> List[MessageLike]:
 
     合并进已有 system（而非新增一条），避免部分本地 chat_template 只认单条 system。
     """
-    prefix = _SYS_CONTEXT_TMPL.format(today=datetime.now().strftime("%Y年%m月%d日"))
+    prefix = _SYS_CONTEXT_TMPL.format(today=beijing_now().strftime("%Y年%m月%d日"))
     msgs = list(messages)
     for i, m in enumerate(msgs):
         if isinstance(m, dict) and (m.get("role") or "").lower() == "system":

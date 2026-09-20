@@ -63,7 +63,7 @@
 - TaskRevision、来源快照、连接版本、外发确认、能力 digest 和 Owner 隔离必须冻结且失败关闭。
 - Mangrove 自有 Schema 只允许经 `src/database_migrations` 显式迁移；Repository 和 startup
   只验证版本并失败关闭。LangGraph checkpoint 与用户连接器数据库不属于该迁移体系。
-- `runtime_config` 的 25 个 `secret=True` 键只保存 Owner/配置键绑定的 SecretRef，原值由共享
+- `runtime_config` 的 26 个 `secret=True` 键只保存 Owner/配置键绑定的 SecretRef，原值由共享
   Vault 密文边界持有；生产原库迁移、旧备份处置和 Secret/Key 轮换仍是独立人工门。
 - 依赖职责分为 runtime、collectors、dev、evaluation、gpu；生产镜像只安装 runtime 与
   collectors。GPU overlay 当前为空，不得无证据加入 CUDA/Triton。

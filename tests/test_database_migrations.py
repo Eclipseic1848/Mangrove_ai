@@ -80,6 +80,11 @@ result.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _remove_platform_session_schema(connection: sqlite3.Connection) -> None:
+    # 合成历史空库时同时移除后来引入的运营结构，不放宽迁移的重复建表保护。
+    for table in ("operations_outcomes", "operations_events", "operations_presence", "operations_views"):
+        assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+        connection.execute(f"DROP TABLE {table}")
+    connection.execute("DROP TABLE operations_policy")
     # 从当前空库构造历史未盖戳库，移除历史尚不存在的会话和执行授权结构。
     for table in ("feedback_content_access", "account_execution_holds", "account_execution_bindings", "platform_spent_refresh", "platform_login_sessions", "platform_rate_events", "platform_rate_blocks", "platform_security_audit"):
         assert connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
@@ -138,10 +143,10 @@ def test_inspect_uninitialized_database_is_read_only(tmp_path: Path) -> None:
 
     assert status.state == "uninitialized"
     assert status.current_revision is None
-    assert status.target_revision == "webui_0019"
+    assert status.target_revision == "webui_0021"
     assert status.pending_revisions == (
         "webui_0001", "webui_0002", "webui_0003", "webui_0004", "webui_0005",
-        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019",
+        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020", "webui_0021",
     )
     assert not database.exists()
     with pytest.raises(
@@ -184,7 +189,7 @@ def test_plan_lists_full_ordered_revision_chain_without_writing(
     assert result == 0
     assert plan.pending_revisions == (
         "webui_0001", "webui_0002", "webui_0003", "webui_0004", "webui_0005",
-        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019",
+        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020", "webui_0021",
     )
     assert [item.revision for item in plan.revisions] == [
         "webui_0001",
@@ -193,13 +198,13 @@ def test_plan_lists_full_ordered_revision_chain_without_writing(
         "webui_0004",
         "webui_0005",
         "webui_0006",
-        "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019",
+        "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020", "webui_0021",
     ]
     assert all(len(item.content_sha256) == 64 for item in plan.revisions)
     assert all(item.requires_copy_validation for item in plan.revisions)
     assert payload["pending_revisions"] == [
         "webui_0001", "webui_0002", "webui_0003", "webui_0004", "webui_0005",
-        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019",
+        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020", "webui_0021",
     ]
     assert payload["revisions"][0]["revision"] == "webui_0001"
     assert str(tmp_path) not in json.dumps(payload)
@@ -237,7 +242,7 @@ def test_inspect_current_database_is_read_only(tmp_path: Path) -> None:
     status = inspect_database(DatabaseTarget(profile="webui", path=database))
 
     assert status.state == "current"
-    assert status.current_revision == "webui_0019"
+    assert status.current_revision == "webui_0021"
     assert status.pending_revisions == ()
     status.require_current()
     assert database.read_bytes() == before
@@ -255,10 +260,10 @@ def test_apply_empty_database_creates_backup_and_current_revision(
     )
 
     assert receipt.source_revision is None
-    assert receipt.target_revision == "webui_0019"
+    assert receipt.target_revision == "webui_0021"
     assert receipt.applied_revisions == (
         "webui_0001", "webui_0002", "webui_0003", "webui_0004", "webui_0005",
-        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019",
+        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020", "webui_0021",
     )
     assert receipt.backup_path == backup.resolve()
     assert receipt.backup_sha256 == hashlib.sha256(backup.read_bytes()).hexdigest()
@@ -802,7 +807,7 @@ def test_apply_known_webui_accepts_authorized_vnext_default_rollout(
 
     assert receipt.applied_revisions == (
         "webui_0001", "webui_0002", "webui_0003", "webui_0004", "webui_0005",
-        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019",
+        "webui_0006", "webui_0007", "webui_0008", "webui_0009", "webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020", "webui_0021",
     )
     with sqlite3.connect(database) as connection:
         state = connection.execute(
@@ -903,7 +908,7 @@ def test_inspect_current_revision_fails_closed_on_schema_drift(
     status = inspect_database(DatabaseTarget(profile="webui", path=database))
 
     assert status.state == "drift"
-    assert status.current_revision == "webui_0019"
+    assert status.current_revision == "webui_0021"
     assert status.gaps == ("column:memory_hit_log.hit",)
     with pytest.raises(SchemaNotCurrentError, match="Schema"):
         status.require_current()

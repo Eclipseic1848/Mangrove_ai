@@ -165,7 +165,7 @@ test("平台配置跳转唯一模型管理入口，旧模型编辑不再展示",
     return route.fulfill({ status: 404, json: {} });
   });
   await page.goto("/settings?section=platform");
-  const inventory = page.getByRole("region", { name: "平台模型管理", exact: true });
+  const inventory = page.getByRole("main");
   await expect(page.getByText("个人秘密模型", { exact: true })).toHaveCount(0);
   await expect(inventory.getByRole("link", { name: "管理平台模型" })).toHaveAttribute("href", "/settings?section=models&scope=platform");
   await page.screenshot({ path: testInfo.outputPath("platform-models-desktop.png"), fullPage: true });
@@ -215,10 +215,11 @@ for (const role of ["user", "admin", "super_admin"]) test(`工具验证仅保留
   expect(governanceReads).toBe(0);
   await page.goto("/settings?section=governance");
   if (role === "user") {
-    await expect(page.getByRole("heading", { name: "能力治理状态", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "扩展工具管理", exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "扩展工具管理", exact: true })).toHaveCount(0);
     expect(governanceReads).toBe(0);
   } else {
-    await expect(page.getByRole("heading", { name: "能力治理状态", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "扩展工具管理", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "发起验证", exact: true })).toBeVisible();
   }
 });

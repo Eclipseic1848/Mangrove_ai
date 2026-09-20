@@ -113,6 +113,11 @@ external/chrome-devtools-howso/
 
 # 第三方品牌 Logo 图片（抖音/淘宝/京东/B站等）再分发有商标风险，不进入公开仓库。
 logos/
+# 概览可选本机品牌资源沿用不公开第三方商标图片的边界；缺图时使用通用图标。
+frontend/public/overview-brands/*.png
+# 本机设计审计结果和独立演示原型不属于产品发布源码。
+premium-audit.json
+frontend/prototypes/
 
 # 商务条款摘录（Phase 4B 文档解析演示样本）属业务内容，仅保留本机。
 docs/plans/phase4b-batch0-results/document-workflow/商务条款摘录.*

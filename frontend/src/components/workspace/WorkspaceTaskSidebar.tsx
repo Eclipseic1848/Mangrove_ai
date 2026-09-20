@@ -10,6 +10,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { beijingTime } from "@/lib/beijingTime";
 import type {
   WorkspaceStorage,
   WorkspaceTask,
@@ -68,6 +69,7 @@ export const workspaceStatusLabel = (status: WorkspaceTaskStatus) =>
   STATUS[status].label;
 
 function relativeTime(value: string) {
+  if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(value)) return beijingTime(value);
   const diff = Date.now() - new Date(value).getTime();
   const minutes = Math.max(0, Math.round(diff / 60_000));
   if (minutes < 1) return "刚刚";

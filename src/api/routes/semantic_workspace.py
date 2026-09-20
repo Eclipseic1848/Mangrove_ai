@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from src.api.auth import get_execution_user
+from src.api.workspace_feedback import WorkspaceFeedbackIn, read_feedback, write_feedback
 from src.account_execution import ExecutionDenied
 
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from src.timezone import now as beijing_now
 import hashlib
 import json
 from pathlib import Path
@@ -864,6 +866,8 @@ def preview_task_context(
             output_formats=payload.output_formats,
             selection=payload.selection,
         )
+    except (OSError, UnicodeError) as exc:
+        raise HTTPException(status_code=503, detail="记忆暂时无法读取，请稍后重试") from exc
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ValueError as exc:
@@ -1775,6 +1779,19 @@ def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgres
         }
         for event in task["harness_events"]
     )
+    # 保留原始两阶段记录；同版本同执行的结束事件替代未知占位，避免重复计量。
+    completed_learning = {
+        (details.get("revision"), details.get("run_id"), details["learning_call_id"])
+        for event in raw_events
+        if isinstance(details := event.get("details"), dict)
+        and isinstance(details.get("learning_call_id"), str)
+        and details.get("learning_usage_state") == "finished"
+    }
+    raw_events = [event for event in raw_events if not (
+        isinstance(details := event.get("details"), dict)
+        and details.get("learning_usage_state") == "started"
+        and (details.get("revision"), details.get("run_id"), details.get("learning_call_id")) in completed_learning
+    )]
     for index, event in enumerate(raw_events, start=1):
         details = event.get("details") or {}
         outer_event_type = str(event.get("event_type") or event.get("type") or "progress")
@@ -1850,7 +1867,7 @@ def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgres
                 cache_tokens=(trace_details.get("cache_tokens") if isinstance(trace_details.get("cache_tokens"), int) and not isinstance(trace_details.get("cache_tokens"), bool) and trace_details.get("cache_tokens") >= 0 else None),
                 total_tokens=(trace_details.get("total_tokens") if isinstance(trace_details.get("total_tokens"), int) and not isinstance(trace_details.get("total_tokens"), bool) and trace_details.get("total_tokens") >= 0 else None),
                 audience=audience,
-                created_at=event.get("created_at") or datetime.now().astimezone(),
+                created_at=event.get("created_at") or beijing_now(),
             )
         )
     return tuple(projected)
@@ -2032,14 +2049,35 @@ def _task_detail(
     )
     task["progress"] = progress_view.model_dump(mode="json")
     runtime_run_id = task["agentic_runtime"].get("run_id")
+    usage_revision = int(selected_revision["revision"])
+    usage_runtime = task["agentic_runtime"]
+    usage_events = progress_view.events
+    usage_status = task["status"]
+    acceptance = (source_contract or {}).get("owner_acceptance")
+    if not runtime_run_id and acceptance:
+        source_revision = acceptance.get("source_revision")
+        # 接受初稿只发布新版本；用量仍归原执行，不伪造新 Run，也不借用其他版本。
+        if isinstance(source_revision, int) and source_revision > 0 and usage_revision == source_revision + 1:
+            source = store.get_semantic_workspace_revision(user_id, task_id, source_revision)
+            if source:
+                usage_runtime = _public_runtime(user_id, task_id, source_revision, inspect_offer=False)
+                runtime_run_id = usage_runtime.get("run_id")
+                usage_revision = source_revision
+                usage_status = source["status"]
+                usage_events = ProgressProjection().project(_structured_progress_events({
+                    "task_id": task_id, "viewing_revision": source_revision, "run_id": runtime_run_id,
+                    "agentic_runtime": usage_runtime,
+                    "events": store.list_semantic_workspace_events(user_id, task_id, revision=source_revision),
+                    "harness_events": store.list_semantic_harness_events(user_id, source["run_id"]) if source.get("run_id") else [],
+                }), audience=audience, task_status=usage_status).events
     task["work_session"] = (
         WorkTraceProjection().project(
             task_id=task_id,
-            revision=int(selected_revision["revision"]),
+            revision=usage_revision,
             run_id=str(runtime_run_id),
-            status=task["status"],
-            events=progress_view.events,
-            provider_usage=task["agentic_runtime"].get("provider_usage", []),
+            status=usage_status,
+            events=usage_events,
+            provider_usage=usage_runtime.get("provider_usage", []),
         ).model_dump(mode="json")
         if runtime_run_id
         else None
@@ -2161,6 +2199,14 @@ async def draft_chat(payload: DraftChatIn, request: Request, user=Depends(get_ex
         history = [{"role": m["role"], "content": m["content"]} for m in store.list_messages(payload.conv_id)]
         if len(json.dumps(history, ensure_ascii=False)) > 120000:
             raise HTTPException(422, "当前会话过长，请新建任务并引用需要的报告；不会静默截断历史")
+    from src.memory.loader import conversation_memory_context, load_preferences
+    try:
+        memory_context = conversation_memory_context(
+            [item['text'] for item in store.memory_list(user['user_id']) if item['purpose'] == 'general'],
+            load_preferences(strict=True), '\n'.join([item['content'] for item in history[-4:] if item['role'] == 'user'] + [payload.text]),
+        )
+    except (OSError, UnicodeError):
+        raise HTTPException(503, "记忆暂时无法读取，请稍后重试") from None
     binding = None
     if payload.model_connection_id:
         if not payload.external_api_confirmed:
@@ -2187,6 +2233,7 @@ async def draft_chat(payload: DraftChatIn, request: Request, user=Depends(get_ex
     context = SteeringRequest(
         owner_id=user["user_id"], task_id=draft_id, revision=1, run_id=draft_id,
         text=payload.text, current_status="preparing_no_sources",
+        memory_context=memory_context,
         current_goal=json.dumps(history, ensure_ascii=False),
         status_summary="仅讨论需求，尚未创建或执行任务，没有读取任何资料。",
         provider="external" if binding else "local", model=payload.model,
@@ -2202,7 +2249,9 @@ async def draft_chat(payload: DraftChatIn, request: Request, user=Depends(get_ex
     if conversation_key:
         _RUNNING[conversation_key] = asyncio.current_task()
     try:
-        rewriter = build_context_rewriter(
+        from src.memory.conversation import memory_command
+        command = memory_command(payload.text, store, _runtime_repository(), before_call=lambda: execution_checkpoint(required=True))
+        rewriter = command or build_context_rewriter(
             context, before_call=lambda: execution_checkpoint(required=True),
             system_prompt=(Path(__file__).parents[2] / "conversation_steering/prompts/prepare-v1.md").read_text(encoding="utf-8"),
         )
@@ -2231,10 +2280,15 @@ async def draft_chat(payload: DraftChatIn, request: Request, user=Depends(get_ex
         if not payload.conv_id:
             for message in history:
                 store.add_message(conv_id, message["role"], message["content"])
+        from src.notifications import pending_user_text
+        pending_requirement = pending_user_text(store.list_messages(conv_id), payload.text)
         store.add_message(conv_id, "user", payload.text)
-        token_usage = dict(usage) if usage["calls"] else None
+        token_usage = dict(usage) if usage["calls"] or command else None
+        if command and not usage['calls']:
+            token_usage['no_model_call'] = True
         message_id = store.add_message(conv_id, "assistant", result.direct_answer, meta={
-            "kind": "chat",
+            "kind": "clarification" if getattr(result, "open_questions", ()) else "chat",
+            "notification_user_text": pending_requirement if getattr(result, "open_questions", ()) else None,
             "token_usage": token_usage, "model_id": payload.model,
             "model_connection_id": payload.model_connection_id,
             "model": payload.model,
@@ -2266,6 +2320,7 @@ async def create_task(
         alias="Idempotency-Key",
     ),
     user=Depends(get_execution_user),
+    request: Request = None,
 ):
     claim_started = False
 
@@ -2274,7 +2329,10 @@ async def create_task(
         claim_started = True
 
     try:
-        return await _create_task(payload, idempotency_key, user, mark_claim_started=mark_claim_started)
+        result = await _create_task(payload, idempotency_key, user, mark_claim_started=mark_claim_started)
+        from src.operations import bind_object
+        bind_object(request, "任务", result.get("task_id"))
+        return result
     except HTTPException as exc:
         # 只提供首次认领前的确定拒绝事实，已有claim冲突或未知不能解锁新请求。
         if (not claim_started and exc.status_code in {404, 409, 422}
@@ -2582,6 +2640,8 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
                 output_formats=payload.output_formats,
                 selection=payload.context_selection,
             )
+        except (OSError, UnicodeError) as exc:
+            raise HTTPException(status_code=503, detail="记忆暂时无法读取，请稍后重试") from exc
         except KeyError as exc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -2628,6 +2688,18 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
                 + "请按文字要求输出，或修改当前要求。"
             ),
         )
+    if payload.runtime_version is RuntimeVersion.PI:
+        from src.task_context import workspace_method_type
+        method_type = workspace_method_type(has_web=bool(source_snapshots), file_suffixes=input_suffixes)
+        try:
+            # 在认领幂等键之前读取，规范不可用不能留下无法重试的创建占位。
+            context_preview = _task_context_service().automatic_preview(
+                owner_id=user_id, purpose=payload.context_purpose,
+                objective_text=payload.objective_text, matching_text=user_objective,
+                output_formats=payload.output_formats, data_type=method_type, confirmed_preview=context_preview,
+            )
+        except (OSError, UnicodeError) as exc:
+            raise HTTPException(status_code=503, detail="记忆暂时无法读取，请稍后重试") from exc
     repository = _runtime_repository()
     claimed_key = None
     if idempotency_key is not None:
@@ -2807,12 +2879,13 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
             if context_base_hook is not None:
                 context_base_hook(connection)
             _task_context_service().freeze(connection, owner_id=user_id, task_id=task_id, revision=1,
-                                           preview=context_preview, expected_preview_sha256=payload.context_preview_sha256 or "", require_current=True)
+                                           preview=context_preview, expected_preview_sha256=context_preview.preview_sha256, require_current=True)
         transaction_hook = bind_confirmed_context
     frozen_source_contract = _source_contract(
         _freeze_goal_contract(payload, objective=user_objective, source_snapshot={"allowed_scope": {"groups": [item["allowed_scope"] for item in source_snapshots]}}) if source_snapshots else None,
         source_snapshots,
     )
+    frozen_source_contract['notification_user_text'] = user_objective
     first_line = payload.objective_text.splitlines()[0].strip()
     title = first_line[:40] + ("…" if len(first_line) > 40 else "")
     store = get_store()
@@ -2854,19 +2927,22 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
-    except Exception:
+    except Exception as exc:
         if claimed_key:
             repository.release_idempotency(
                 user_id,
                 claimed_key,
                 task_id=task_id,
             )
+        if isinstance(exc, (OSError, UnicodeError)):
+            raise HTTPException(status_code=503, detail="任务资料暂时无法读取或保存，请稍后重试") from exc
         raise
     store.append_semantic_workspace_event(
         user_id,
         task_id,
         stage="queued",
         event_type="task_created",
+        details={"local_learning_version": 1} if payload.runtime_version is RuntimeVersion.PI and not payload.model_connection_id and payload.provider.lower() == "local" else None,
         summary=(
             f"任务已创建，共 {len(payload.upload_ids)} 个文件"
             if payload.upload_ids
@@ -2930,6 +3006,22 @@ def list_tasks(
             runtime["status"].value if runtime else None
         )
     return tasks
+
+
+@router.get("/tasks/{task_id}/feedback")
+def get_workspace_feedback(task_id: str, revision: int = Query(ge=1), result_id: str = Query(default="delivery", min_length=1, max_length=160), user=Depends(get_current_user)):
+    try:
+        return read_feedback(get_store(), user["user_id"], task_id, revision, result_id)
+    except LookupError:
+        raise HTTPException(404, "反馈对象不可用") from None
+
+
+@router.post("/tasks/{task_id}/feedback")
+def set_workspace_feedback(task_id: str, body: WorkspaceFeedbackIn, user=Depends(get_current_user)):
+    try:
+        return write_feedback(get_store(), user["user_id"], task_id, body)
+    except LookupError:
+        raise HTTPException(404, "反馈对象不可用") from None
 
 
 @router.get("/tasks/{task_id}")
@@ -3132,6 +3224,12 @@ async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context
             if any(item is None for item in relevant_turns):
                 raise HTTPException(409, "原业务回合数据不完整")
     findings = _workspace_source_findings(user_id, task)
+    from src.memory.loader import conversation_memory_context
+    frozen_memory = TaskContextRepository(settings.webui_db_path).get_frozen(user_id, task_id, int(task['active_revision']))
+    # 历史追问只参考该版本已冻结的偏好，不把后来新增的记忆写入旧任务。
+    memory_context = conversation_memory_context(
+        [item.summary for item in frozen_memory.memories], frozen_memory.global_preferences, '',
+    ) if frozen_memory else ''
     request = SteeringRequest(
         owner_id=user_id,
         task_id=task_id,
@@ -3139,6 +3237,7 @@ async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context
         run_id=runtime.get("run_id") or task.get("run_id"),
         text=payload.text,
         idempotency_key=idempotency_key,
+        memory_context=memory_context,
         current_status=task["status"],
         status_summary=task.get("summary") or "",
         current_goal=task.get("objective_text") or "",
@@ -3159,9 +3258,15 @@ async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context
         ),
     )
     try:
+        from src.memory.conversation import memory_command
+        command = memory_command(payload.text, get_store(), _runtime_repository(), before_call=verify_current)
+        rewriter = command or (build_context_rewriter(request, before_call=verify_current) if selection or answer_context else build_context_rewriter(request))
+        if task['status'] == 'completed' and command is None:
+            from src.notifications import ResultNotificationRewriter
+            rewriter = ResultNotificationRewriter(get_store(), rewriter)
         service = ConversationSteering(
             _steering_repository(),
-            build_context_rewriter(request, before_call=verify_current) if selection or answer_context else build_context_rewriter(request),
+            rewriter,
             before_result_call=claim_answer if answer_context or selection else None,
         )
         result = await service.handle_turn(request)
@@ -3490,6 +3595,8 @@ async def _apply_confirmed_steering_revision(
             objective_text=objective,
             output_formats=formats,
             change_summary=delta.normalized_text,
+            source_contract={**(get_store().get_source_contract(user_id, task_id, decision.base_revision) or {}),
+                             'notification_user_text': '\n'.join(item.text for item in original_turns)},
             expected_revision=decision.base_revision + 1,
             expected_cancel_generation=generation,
             transaction_hook=transaction_hook,
@@ -3777,6 +3884,7 @@ async def decide_steering_revision(
                 title=f"{task['title']}（独立任务）",
                 objective_text=new_objective,
                 upload_ids=task["upload_ids"],
+                source_contract={'notification_user_text': '\n'.join(item.text for item in original_turns)},
                 output_formats=formats,
                 provider=task["provider"],
                 model=task["model"],
@@ -4051,6 +4159,8 @@ async def publish_candidate_verification(
         ) from exc
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    from src.notifications import auto_workspace
+    await auto_workspace(get_store(), user["user_id"], task_id)
     return delivery.model_dump(mode="json", exclude={"user_id"})
 
 
@@ -4453,7 +4563,7 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
             output_formats=formats,
             change_summary=payload.instruction,
             source_refs=effective_source_refs,
-            source_contract=frozen_source_contract,
+            source_contract={**(frozen_source_contract or {}), 'notification_user_text': payload.instruction},
             table_output_contracts=(
                 [
                     item.model_dump(mode="json")
@@ -5023,6 +5133,9 @@ def get_task_draft(task_id: str, revision: int | None = Query(default=None, ge=1
         "draft_id": draft["draft_id"], "revision": revision, "status": "unverified",
         "created_at": created_at,
         "acceptance_pending": bool(accepted and task["status"] != "completed"),
+        "review_waiting": bool(task["status"] == "needs_input" and task["active_revision"] == revision
+                               and (task.get("question") or {}).get("draft_review_id") == draft["draft_id"]
+                               and not (task.get("question") or {}).get("draft_review_approved")),
         "files": [{"filename": item["filename"], "format": item["format"], "size_bytes": item["size_bytes"],
                    "preview": previews.get(item["filename"]),
                    "preview_table": tables.get(item["filename"]),
@@ -5064,15 +5177,72 @@ class AcceptDraftIn(BaseModel):
     accept_unverified: Literal[True]
 
 
+class SendResultIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1)
+    channel: Literal["email", "slack"]
+    recipients: list[str] = Field(default_factory=list, max_length=20)
+    include_body: bool = True
+    include_attachments: bool = True
+    output_ids: list[str] | None = Field(default=None, max_length=20)
+
+
+@router.post("/tasks/{task_id}/notify")
+async def send_task_result(task_id: str, payload: SendResultIn, user=Depends(get_execution_user)):
+    from src.notifications import Intent, send_workspace
+    _task_or_404(user["user_id"], task_id)
+    intent = Intent(channel=payload.channel, recipients=payload.recipients,
+                    body=payload.include_body, attachments=payload.include_attachments)
+    try:
+        return await send_workspace(get_store(), user["user_id"], task_id, payload.expected_revision, intent, payload.output_ids)
+    except (ValueError, PermissionError, FileNotFoundError):
+        raise HTTPException(409, "无法发送：请核对任务版本、接收人及正式文件权限") from None
+
+
+class ContinueDraftReviewIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1)
+    draft_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@router.post("/tasks/{task_id}/draft/verify")
+async def continue_draft_review(task_id: str, payload: ContinueDraftReviewIn, user=Depends(get_execution_user)):
+    from filelock import Timeout
+    from src.api.execution import execution_lock
+    owner = user["user_id"]
+    _task_or_404(owner, task_id)
+    store = get_store()
+    try:
+        with execution_lock(store, owner, "workspace", task_id):
+            root, draft = _frozen_draft(owner, task_id, payload.expected_revision, payload.draft_id)
+            runtime = _runtime_repository().get(owner, task_id, payload.expected_revision)
+            session = runtime.get("session_file") if runtime else None
+            # 缺少检查点时不偷偷重新执行；用户仍可接受初稿或明确创建新版本。
+            if not session or not (root / session).is_file() or (root / "session").resolve() not in (root / session).resolve().parents or (root / session).suffix.lower() != ".jsonl":
+                raise ValueError("原执行会话不可恢复；可接受初稿，或修改要求后创建新版本")
+            enqueue = store.approve_workspace_draft_review(owner, task_id, payload.expected_revision,
+                                                          draft["draft_id"], runtime["run_id"])
+    except Timeout as exc:
+        raise HTTPException(status_code=409, detail="任务仍在结束当前执行，请稍后检查状态") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if enqueue:
+        get_semantic_workspace_manager().enqueue(owner, task_id)
+    return {"status": "accepted", "revision": payload.expected_revision}
+
+
 @router.post("/tasks/{task_id}/draft/accept")
 async def accept_task_draft(task_id: str, payload: AcceptDraftIn, user=Depends(get_execution_user)):
     from src.api.workspace_draft_acceptance import DraftAcceptanceConflict, accept_draft
 
     _task_or_404(user["user_id"], task_id)
     try:
-        return await accept_draft(store=get_store(), manager=get_semantic_workspace_manager(),
+        result = await accept_draft(store=get_store(), manager=get_semantic_workspace_manager(),
                                   output_root=Path(settings.semantic_execution_root), owner_id=user["user_id"],
                                   task_id=task_id, source_revision=payload.expected_revision, draft_id=payload.draft_id)
+        from src.notifications import auto_workspace
+        await auto_workspace(get_store(), user["user_id"], task_id)
+        return result
     except DraftAcceptanceConflict as exc:
         raise HTTPException(409, str(exc)) from exc
     except (ValueError, OSError, RuntimeError, ExecutionLockTimeout) as exc:
@@ -6375,5 +6545,5 @@ def storage_usage(user=Depends(get_current_user)):
         "delivery_bytes": output_bytes,
         "total_bytes": upload_bytes + output_bytes,
         "retention": "用户删除前永久保留；回收站保留 30 天",
-        "calculated_at": datetime.now().isoformat(timespec="seconds"),
+        "calculated_at": beijing_now().isoformat(timespec="seconds"),
     }

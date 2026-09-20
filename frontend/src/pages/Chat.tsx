@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { PageGuide } from "@/components/onboarding/PageGuide";
 import {
   Plus, Send, Square, PanelRightOpen, PanelRightClose, Download, Database, FileText,
   CalendarClock, Trash2, Pencil, AlertTriangle, Award, Sparkles, MessageSquare,
@@ -306,11 +307,12 @@ export function Chat() {
         },
         onError: (e) => {
           if (!isCurrent()) return;
-          toast.error(e.message);
+          if (e.code === "stream_interrupted") toast.info(e.message);
+          else toast.error(e.message);
           const viewKey = ++messageKey.current;
           setMessages((m) => [
             ...m,
-            { viewKey, role: "assistant", content: `❌ ${e.message}`, kind: "error", createdAt: new Date().toISOString() },
+            { viewKey, role: "assistant", content: e.code === "stream_interrupted" ? e.message : `❌ ${e.message}`, kind: e.code === "stream_interrupted" ? "notice" : "error", createdAt: new Date().toISOString() },
           ]);
         },
         onDone: () => {
@@ -478,6 +480,7 @@ export function Chat() {
       {/* 对话区 */}
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex items-center justify-between gap-3 border-b border-border px-5 py-3">
+          <PageGuide page="chat" />
           <select
             value={sel}
             onChange={(e) => setSel(e.target.value)}

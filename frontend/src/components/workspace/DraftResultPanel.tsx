@@ -1,3 +1,4 @@
+import { beijingTime } from "@/lib/beijingTime";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -6,7 +7,7 @@ import { api, downloadFile } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 
 export type Draft = {
-  draft_id: string; revision: number; acceptance_pending?: boolean; created_at?: string | null;
+  draft_id: string; revision: number; acceptance_pending?: boolean; review_waiting?: boolean; created_at?: string | null;
   files: Array<{ filename: string; download_url: string; preview?: string | null; preview_table?: string[][] | null;
     preview_truncated?: boolean | null; preview_scope?: string | null; page_preview_url?: string | null }>;
 };
@@ -20,6 +21,7 @@ export function DraftResultPanel({ taskId, revision, ownerId, status, active, on
 }) {
   const queryClient = useQueryClient();
   const [busy, setBusy] = useState(false);
+  const [reviewing, setReviewing] = useState(false);
   const [error, setError] = useState("");
   const [needsRecheck, setNeedsRecheck] = useState(false);
   const [confirming, setConfirming] = useState(false);
@@ -27,6 +29,7 @@ export function DraftResultPanel({ taskId, revision, ownerId, status, active, on
   const [readingDraft, setReadingDraft] = useState<Draft | null>(null);
   const mounted = useRef(false);
   const accepting = useRef(false);
+  const reviewPending = useRef(false);
   const acceptOrigin = useRef<HTMLElement | null>(null);
   useEffect(() => {
     mounted.current = true;
@@ -38,10 +41,12 @@ export function DraftResultPanel({ taskId, revision, ownerId, status, active, on
     refetchInterval: ["queued", "running", "cancelling"].includes(status) ? 2000 : false,
     retry: false,
   });
+  useEffect(() => { void queryClient.invalidateQueries({ queryKey: ["workspace-draft", ownerId, taskId, revision] }); }, [status, ownerId, taskId, revision, queryClient]);
   // 确认期间冻结用户看到的那份初稿，轮询的新稿不能替换待接受身份。
   const draft = confirmDraft ?? readingDraft ?? query.data?.draft;
   useEffect(() => { if (!readingDraft && query.data?.draft) setReadingDraft(query.data.draft); }, [query.data?.draft, readingDraft]);
   const newerDraft = query.data?.draft && query.data.draft.draft_id !== draft?.draft_id ? query.data.draft : null;
+  const reviewWaiting = active && status === "needs_input" && query.data?.draft?.review_waiting && query.data.draft.draft_id === draft?.draft_id;
   useEffect(() => { if (draft) onPreview(draft); }, [draft, onPreview]);
   if (!draft) return query.isError ? <section className="mx-auto max-w-4xl p-6 text-sm"><p role="alert">初稿读取失败，任务记录仍保留。</p><Button variant="outline" className="mt-2" disabled={query.isFetching} onClick={() => void query.refetch()}>重新读取初稿</Button></section> : null;
 
@@ -59,7 +64,7 @@ export function DraftResultPanel({ taskId, revision, ownerId, status, active, on
   }
 
   async function accept() {
-    if (!draft || accepting.current) return;
+    if (!draft || accepting.current || reviewPending.current) return;
     accepting.current = true;
     setBusy(true);
     // 请求发出后回到可阅读的页面；关闭确认框不等于取消发布。
@@ -89,15 +94,42 @@ export function DraftResultPanel({ taskId, revision, ownerId, status, active, on
       if (mounted.current) { setBusy(false); setConfirming(false); setConfirmDraft(null); }
     }
   }
+  async function continueReview() {
+    if (!draft || !reviewWaiting || reviewPending.current || accepting.current || needsRecheck) return;
+    reviewPending.current = true;
+    setReviewing(true); setError("");
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 30_000);
+    try {
+      await api.post(`/api/semantic-workspace/tasks/${taskId}/draft/verify`, {
+        expected_revision: draft.revision, draft_id: draft.draft_id,
+      }, {}, controller.signal);
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-task", taskId] }),
+        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-tasks"] }),
+        query.refetch(),
+      ]);
+    } catch (cause) {
+      if (mounted.current) {
+        setNeedsRecheck(true);
+        setError(controller.signal.aborted ? "核对请求的结果尚未确认，请先检查处理状态；不会自动重发。" : cause instanceof Error ? cause.message : "核对请求未确认，请先检查处理状态。");
+      }
+    } finally {
+      window.clearTimeout(timeout);
+      reviewPending.current = false;
+      if (mounted.current) setReviewing(false);
+    }
+  }
   const updateNotice = newerDraft && <p role="status" className="mt-2 text-sm">有新版初稿，当前阅读内容保持不变。<button type="button" disabled={busy || confirming} className="ml-2 rounded text-primary underline focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { setReadingDraft(newerDraft); onPreview(newerDraft, true); }}>查看新版初稿</button></p>;
   const canAccept = active && !["cancelling", "completed", "pausing", "paused"].includes(status);
   const openConfirmation = (origin: HTMLElement) => {
-    if (!canAccept || needsRecheck || query.isError || accepting.current) return;
+    if (!canAccept || needsRecheck || query.isError || accepting.current || reviewPending.current) return;
     acceptOrigin.current = origin;
     setConfirmDraft(draft); setConfirming(true);
   };
   const feedback = <>
     {updateNotice}
+    {reviewing && <p role="status" className="mt-2 text-sm">正在恢复核对，初稿仍可查看。</p>}
     {busy && <p role="status" className="mt-2 text-sm">{status === "cancelling" ? "正在等待验证停止。" : draft.acceptance_pending ? "正在保存正式结果。" : "已请求停止验证并保存正式结果。"}你可以继续查看内容，完成后自动更新。</p>}
     {error && <p role="alert" className="mt-2 text-sm text-destructive">{error}</p>}
     {query.isError && <p role="alert" className="mt-2 text-sm text-destructive">更新初稿失败，当前显示的是上次读取内容。</p>}
@@ -107,31 +139,33 @@ export function DraftResultPanel({ taskId, revision, ownerId, status, active, on
     <section aria-label="初稿结果" className="mx-auto max-w-4xl border-b px-6 py-5">
       <h2 className="font-semibold">初稿已生成 · 尚未完成验证</h2>
       {!actionsTarget && feedback}
-      <p className="mt-2 text-sm text-muted-foreground">可以先查看和下载。{["queued", "running"].includes(status)
+      <p className="mt-2 text-sm text-muted-foreground">可以先查看和下载。{reviewWaiting ? "已暂停后续核对，等待你的决定；" : ["queued", "running"].includes(status)
         ? "不操作将继续自动验证；" : draft.acceptance_pending ? "发布尚未完成，可继续发布已接受的初稿；" : "当前验证已停止；"}初稿不代表准确性已获确认。</p>
       <button type="button" className="my-3 mr-3 rounded-md border px-3 py-2 text-sm hover:bg-muted" onClick={() => onPreview(draft, true)}>查看初稿 · {draft.files.length} 个文件</button>
       {(canAccept || busy) && <AlertDialog.Root open={confirming} onOpenChange={value => {
         if (!busy) { setConfirmDraft(value ? draft : null); setConfirming(value); }
       }}>
-        <button type="button" disabled={busy || needsRecheck || query.isError} onClick={event => openConfirmation(event.currentTarget)} className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-ring">
-          {busy ? "正在停止验证并发布…" : draft.acceptance_pending ? "继续发布已接受的初稿" : "接受初稿并结束验证"}
+        <button type="button" disabled={busy || reviewing || needsRecheck || query.isError} onClick={event => openConfirmation(event.currentTarget)} className="rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground disabled:opacity-50 focus-visible:ring-2 focus-visible:ring-ring">
+          {busy ? "正在停止验证并发布…" : draft.acceptance_pending ? "继续发布已接受的初稿" : reviewWaiting ? "接受初稿" : "接受初稿并结束验证"}
         </button>
         <AlertDialog.Portal><AlertDialog.Overlay className="fixed inset-0 z-50 bg-black/40" />
           <AlertDialog.Content onCloseAutoFocus={event => { event.preventDefault(); if (acceptOrigin.current?.isConnected) acceptOrigin.current.focus(); }} className="fixed left-1/2 top-1/2 z-50 max-h-[85dvh] w-[min(90vw,28rem)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto rounded-xl border bg-background p-6 shadow-xl">
             <AlertDialog.Title className="font-semibold">将这份初稿转为正式结果？</AlertDialog.Title>
             <AlertDialog.Description className="my-4 text-sm text-muted-foreground">后续验证将停止，并创建新版本保存你看到的这份初稿。结果标记为“用户接受”，不表示系统验证通过；未完成检查和原任务记录继续保留。</AlertDialog.Description>
             <p className="text-sm text-muted-foreground">任务版本 V{draft.revision} · 初稿 {draft.draft_id.slice(0, 8)} · {draft.files.length} 个文件</p>
-            {draft.created_at && <p className="mt-2 text-sm text-muted-foreground">生成于 {new Date(draft.created_at).toLocaleString("zh-CN")}</p>}
+            {draft.created_at && <p className="mt-2 text-sm text-muted-foreground">生成于 {beijingTime(draft.created_at)}</p>}
             <ul className="my-3 max-h-32 overflow-y-auto text-sm">{draft.files.map(file => <li key={file.filename} className="break-words">{file.filename}</li>)}</ul>
             <div className="flex flex-wrap justify-end gap-3"><AlertDialog.Cancel asChild><Button variant="outline">返回查看</Button></AlertDialog.Cancel>
               <button type="button" disabled={busy} onClick={() => void accept()} className="rounded-md bg-primary px-3 py-2 text-primary-foreground disabled:opacity-50">{busy ? "正在处理…" : "确认接受并发布"}</button></div>
             {error && <p role="alert" className="mt-3 text-sm text-destructive">{error}</p>}
           </AlertDialog.Content></AlertDialog.Portal>
       </AlertDialog.Root>}
+      {reviewWaiting && <Button variant="outline" className="ml-3" disabled={busy || reviewing || confirming || needsRecheck || query.isError} onClick={() => void continueReview()}>继续核对</Button>}
       {actionsTarget && createPortal(<div className="space-y-2">
         {feedback}
         <div className="flex flex-wrap gap-2">
-          {(canAccept || busy) && <Button disabled={busy || needsRecheck || query.isError} onClick={event => openConfirmation(event.currentTarget)}>采用这版初稿</Button>}
+          {(canAccept || busy) && <Button disabled={busy || reviewing || needsRecheck || query.isError} onClick={event => openConfirmation(event.currentTarget)}>采用这版初稿</Button>}
+          {reviewWaiting && <Button variant="outline" disabled={busy || reviewing || confirming || needsRecheck || query.isError} onClick={() => void continueReview()}>继续核对</Button>}
           {onModify && <Button variant="outline" onClick={onModify}>提出修改</Button>}
         </div>
       </div>, actionsTarget)}
@@ -184,7 +218,7 @@ export function DraftPreview({ draft, onClose, actionsRef, expanded, onToggleExp
         <div className="flex flex-wrap gap-2">{onToggleExpand && <Button variant="outline" size="sm" aria-expanded={expanded} onClick={onToggleExpand}>{expanded ? "恢复分栏" : "展开预览"}</Button>}
         <Button variant="outline" size="sm" onClick={onClose}>关闭初稿预览</Button></div></div>
       <p className="text-sm text-muted-foreground">尚未完成验证 · V{draft.revision} · 初稿 {draft.draft_id.slice(0, 8)}</p>
-      {draft.created_at && <p className="text-xs text-muted-foreground">生成于 {new Date(draft.created_at).toLocaleString("zh-CN")}</p>}
+      {draft.created_at && <p className="text-xs text-muted-foreground">生成于 {beijingTime(draft.created_at)}</p>}
       <select aria-label="初稿文件" value={file.filename} onChange={event => { onViewStateChange({ ...viewState, filename: event.target.value }); setError(""); }} className="w-full min-w-0 rounded-md border bg-background p-2 text-sm focus-visible:ring-2 focus-visible:ring-ring">
         {draft.files.map(item => <option key={item.filename}>{item.filename}</option>)}
       </select>

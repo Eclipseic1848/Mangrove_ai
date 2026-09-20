@@ -1,437 +1,216 @@
-import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import {
-  Boxes, CalendarClock, Library, MessagesSquare, Cpu, Mail, Slack, Sparkles, Save, ArrowRight, CircleDot, Search,
-  Shield, Globe, ChevronRight, Brain,
-} from "lucide-react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { PageGuide } from "@/components/onboarding/PageGuide";
+import { beijingTime } from "@/lib/beijingTime";
+import { Link, useSearchParams } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { SiOpenai } from "@icons-pack/react-simple-icons";
+import { Activity, ArrowRight, BookOpen, CalendarClock, CheckCircle2, CircleDot, Cpu, Globe, Mail, Plus, RefreshCw, Search, Server, Slack, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Pagination } from "@/components/ui/pagination";
 import { api } from "@/lib/api";
 import { useAuth, isAdminish } from "@/lib/auth";
 import { cn } from "@/lib/utils";
+import { taskModelChoices, type TaskModelConnection } from "@/lib/taskModelChoices";
+import { describeTrigger, type ScheduledTask } from "@/lib/scheduleSummary";
 
-interface Overview {
-  collectors: { name: string; tier: number; available: boolean }[];
-  providers: { available: string[]; catalog: Record<string, string[]> };
-  scheduler: { enabled: boolean; active_count: number };
-  templates: { total: number; active: number; draft: number; retired: number };
-  conversations: number;
-  connectors: { email: boolean; slack: boolean; embedding: boolean; checkpoint: boolean };
-  connectors_enabled: { email: boolean; slack: boolean; embedding: boolean; checkpoint: boolean };
-  search_health?: {
-    backends: string[];
-    backends_detail?: { name: string; label: string; available: boolean; type: string }[];
-    has_html_fallback: boolean; status: "good" | "degraded";
-  };
-  collector_metrics?: Record<string, { calls: number; success_rate: number; avg_ms: number }>;
-  cookie_status?: Record<string, boolean>;
-  extraction_chain?: { name: string; label: string; available: boolean }[];
-  network?: { rate_limiting: string; ua_rotation: boolean; smart_routing: boolean; retry: string };
-  anti_scrape?: { camoufox: boolean; shortcut_domains: number };
-  memory_hit_stats?: {
-    hit_type: string;
-    count: number; // 总召回尝试次数（含未命中，E3 起语义变更，不等于命中数）
-    hit_count: number; // 真正命中次数（E3 新增）
-    semantic_count: number; // degrade_path=semantic 的尝试次数（含语义召回后被筛空的未命中）
-    keyword_count: number; // degrade_path=keyword 的尝试次数
-    avg_threshold: number; // 仅命中记录的平均置信度
-  }[];
+type Filter = "all" | "active" | "attention" | "completed";
+type ActivitySummary = {
+  stats: Record<Exclude<Filter, "all">, number>; total: number; updated_at: string;
+  items: { id: string; kind: "task" | "conversation"; title: string; status: string; updated_at: string }[];
+};
+type ServiceSummary = {
+  cookies: { platform: string; status: string; checked_at: string | null }[];
+  services: { key: string; label: string; configured: boolean; enabled: boolean }[];
+  scheduler_enabled: boolean;
+};
+type Connection = TaskModelConnection & { has_key?: boolean };
+type Preset = { preset_id: string; display_name: string };
+const PROVIDERS: Record<string, { label: string; file?: string }> = {
+  deepseek: { label: "DeepSeek", file: "deepseek.png" }, qwen: { label: "通义千问", file: "qwen.png" },
+  openai: { label: "OpenAI" }, anthropic: { label: "Claude", file: "claude-color.png" },
+  gemini: { label: "Gemini", file: "gemini-color.png" }, kimi: { label: "Kimi", file: "kimi-color.png" },
+  zhipu: { label: "智谱", file: "zhipu-color.png" }, xai: { label: "Grok", file: "grok.png" },
+};
+const PLATFORMS: Record<string, string> = { xiaohongshu: "小红书", weibo: "微博", douyin: "抖音", bilibili: "B站", zhihu: "知乎", kuaishou: "快手", tieba: "贴吧", jd: "京东", taobao: "淘宝", pdd: "拼多多" };
+// 品牌图片是可选本机资源，公开构建缺少图片时保留通用图标与服务名称。
+const BRAND_FILES = new Set(Object.keys(import.meta.glob("/public/overview-brands/*.png")).map(path => path.split("/").pop()));
+const STATUS: Record<string, string> = { running: "执行中", queued: "排队中", pausing: "正在暂停", paused: "已暂停", needs_input: "需要确认", candidate_ready: "待验证", cancelling: "正在停止", cancelled: "已停止", failed: "失败", completed: "已完成" };
+const FILTERS: Record<Filter, string> = { all: "全部任务", active: "进行中", attention: "待处理", completed: "近7天完成" };
+const PAGE_SIZES = [10, 20, 50, 100];
+const LINK = "inline-flex min-h-9 items-center gap-1 rounded text-sm text-primary hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
+const PANEL = "min-w-0 rounded-xl border border-border bg-card";
+
+function readOverview(path: string, signal: AbortSignal) {
+  return api.get(path, { signal: AbortSignal.any([signal, AbortSignal.timeout(15000)]) });
 }
 
-const COOKIE_CN: Record<string, string> = {
-  xiaohongshu: "小红书", weibo: "微博", douyin: "抖音", bilibili: "B站", zhihu: "知乎",
-  kuaishou: "快手", tieba: "贴吧", jd: "京东", taobao: "淘宝", pdd: "拼多多",
-};
-
-const COLLECTOR_CN: Record<string, string> = {
-  mediacrawler: "社媒采集", rsshub: "RSSHub轻量", youtube: "视频采集", ecommerce: "电商评论", rss: "RSS订阅", v2ex: "社区论坛", article: "文章提取", site_crawler: "整站爬取", firecrawl: "全网发现",
-  search: "站定向检索", crawl4ai: "通用引擎", scrapling: "反爬自愈",
-  simple_http: "轻量抓取", browser: "浏览器兜底",
-};
-
-/** 拆分"名称（细节）"格式的标签为主/次两段；无括号则细节为空。 */
-function splitLabel(label: string): [string, string | null] {
-  const m = label.match(/^(.+?)[（(](.+)[）)]\s*$/);
-  return m ? [m[1].trim(), m[2].trim()] : [label, null];
+function dateLabel(value?: string | null) {
+  if (!value) return "尚无记录";
+  return beijingTime(value);
 }
 
-/** 状态胶囊：名称用正常字号深色，细节（括号内容）降一级为更小更淡的辅助文字，避免同级字号堆在一起造成视觉疲劳。 */
-function StatusChip({ label, available }: { label: string; available: boolean }) {
-  const [primary, secondary] = splitLabel(label);
-  return (
-    <div className="flex items-center gap-1.5 text-sm">
-      <CircleDot className={cn("h-3 w-3 shrink-0", available ? "text-emerald-500" : "text-muted-foreground/40")} />
-      <span className={cn(!available && "text-muted-foreground")}>{primary}</span>
-      {secondary && <span className="text-xs text-muted-foreground/70">{secondary}</span>}
-    </div>
-  );
+function LoadState({ loading, error, stale, retry, label }: { loading: boolean; error: boolean; stale: boolean; retry: () => void; label: string }) {
+  if (error) return <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg bg-amber-50 p-3 text-sm text-amber-900 dark:bg-amber-950/40 dark:text-amber-200">{label}加载失败{stale ? "，以下为上次数据" : "，状态未知"}<Button variant="outline" size="sm" onClick={retry}>重试</Button></div>;
+  if (loading) return <p role="status" className="py-4 text-sm text-muted-foreground">正在加载{label}…</p>;
+  return null;
 }
 
-/** 模型供应商展示：各家官方 logo；本地模型为纯色标，深色模式下反色，其余保留原色不处理。 */
-const PROVIDER_META: Record<string, { label: string; logo?: string; imgClass?: string; initial?: string; badgeClass?: string }> = {
-  deepseek: { label: "DeepSeek", logo: "/logos/deepseek.png" },
-  qwen: { label: "通义千问", logo: "/logos/qwen.png" },
-  local: { label: "本地模型", logo: "/howso-logo-mark.png", imgClass: "dark:brightness-0 dark:invert" },
-};
-
-/** 平台登录态展示：官方 logo，未接入登录态时降为灰阶+半透明，与状态点呼应。 */
-const COOKIE_LOGO: Record<string, string> = {
-  xiaohongshu: "/logos/xiaohongshu.png", weibo: "/logos/weibo.png", douyin: "/logos/douyin.png",
-  bilibili: "/logos/bilibili.png", zhihu: "/logos/zhihu.png", kuaishou: "/logos/kuaishou.png",
-  tieba: "/logos/tieba.png", jd: "/logos/jd.png", taobao: "/logos/taobao.png", pdd: "/logos/pdd.png",
-};
+function ServiceCard({ title, icon, subtitle, footer, children }: { title: string; icon: ReactNode; subtitle: ReactNode; footer: ReactNode; children: ReactNode }) {
+  return <section aria-label={title} className={cn(PANEL, "flex flex-col p-5")}>
+    <h3 className="flex items-center gap-2 text-base font-semibold">{icon}{title}</h3>
+    <div className="mb-4 mt-2 min-h-10 text-xs leading-5 text-muted-foreground" data-service-subtitle>{subtitle}</div>
+    <div className="min-h-[208px] flex-1" data-service-body>{children}</div>
+    <div className="mt-4 flex min-h-11 items-center justify-between gap-2 border-t border-border pt-2 text-xs text-muted-foreground" data-service-footer>{footer}</div>
+  </section>;
+}
 
 export function Dashboard() {
-  const [data, setData] = useState<Overview | null>(null);
-  const navigate = useNavigate();
   const { user } = useAuth();
-  const isAdmin = isAdminish(user?.role);
-
+  const manager = isAdminish(user?.role);
+  const [params, setParams] = useSearchParams();
+  const rawFilter = params.get("filter") || "all";
+  const filter: Filter = Object.prototype.hasOwnProperty.call(FILTERS, rawFilter) ? rawFilter as Filter : "all";
+  const schedulesView = params.get("view") === "schedules";
+  const rawPage = Number(params.get("page") || 1);
+  const page = Number.isSafeInteger(rawPage) && rawPage > 0 && rawPage < 1000000 ? rawPage : 1;
+  const rawSize = Number(params.get("page_size"));
+  const pageSize = PAGE_SIZES.includes(rawSize) ? rawSize : 10;
+  const listRef = useRef<HTMLElement>(null);
+  const [expandedProviders, setExpandedProviders] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const owner = [user?.user_id, user?.role];
+  const activity = useQuery<ActivitySummary>({ queryKey: ["overview-activity", ...owner, filter, page, pageSize], queryFn: ({ signal }) => readOverview(`/api/overview/activity?filter=${filter}&offset=${(page - 1) * pageSize}&limit=${pageSize}`, signal),
+    // 仅保留同账号、同筛选的总数，避免翻页等待时显示“2 / 1 页”或混入其他范围数据。
+    placeholderData: (previous, query) => query?.queryKey[1] === user?.user_id && query?.queryKey[2] === user?.role && query?.queryKey[3] === filter && previous ? { ...previous, items: [] } : undefined,
+    networkMode: "always", retry: false, refetchInterval: 30000 });
+  const services = useQuery<ServiceSummary>({ queryKey: ["overview-services", ...owner], queryFn: ({ signal }) => readOverview("/api/overview/services", signal), networkMode: "always", retry: false });
+  const models = useQuery<{ connections: Connection[]; presets: Preset[] }>({ queryKey: ["overview-models", ...owner], queryFn: async ({ signal }) => {
+    const [connections, presets] = await Promise.all([readOverview("/api/model-connections", signal), readOverview("/api/model-connections/presets", signal)]);
+    return { connections: connections.items, presets: presets.items };
+  }, networkMode: "always", retry: false });
+  const schedules = useQuery<Omit<ScheduledTask, "user_input">[]>({ queryKey: ["overview-schedules", ...owner], queryFn: ({ signal }) => readOverview("/api/overview/schedules", signal), networkMode: "always", retry: false, refetchInterval: 30000 });
+  useEffect(() => { const previous = document.title; document.title = "概览 · Mangrove"; return () => { document.title = previous; }; }, []);
+  function selectView(view: "tasks" | "schedules", nextFilter: Filter = "all", nextPage = 1, focus = false) {
+    const next = new URLSearchParams(params);
+    next.set("view", view); next.set("filter", nextFilter); next.set("page", String(nextPage)); setParams(next);
+    if (focus) requestAnimationFrame(() => { listRef.current?.scrollIntoView({ block: "start" }); listRef.current?.focus({ preventScroll: true }); });
+  }
+  async function refresh() {
+    setRefreshing(true);
+    try { await Promise.all([activity.refetch(), services.refetch(), models.refetch(), schedules.refetch()]); }
+    finally { setRefreshing(false); }
+  }
+  const connections = models.data?.connections ?? [];
+  const choices = taskModelChoices([], connections, false, undefined, undefined, true);
+  const localModels = new Set(choices.filter(choice => choice.group === "本地模型").map(choice => choice.model.toLowerCase()));
+  const cloud = connections.filter(connection => !["local", "managed_private"].includes(connection.locality || "") && !(connection.models?.length && connection.models.every(model => model.current_catalog === false)));
+  const providerList = (models.data?.presets ?? []).map(preset => {
+    const matches = cloud.filter(connection => connection.preset_id === preset.preset_id);
+    const configured = matches.some(connection => connection.has_key === true || (connection.has_key === undefined && connection.status === "verified"));
+    const scope = [matches.some(connection => connection.owner_scope === "platform_shared") && "平台提供", matches.some(connection => connection.owner_scope === "user_personal") && "我的连接"].filter(Boolean).join("、");
+    return { ...preset, ...PROVIDERS[preset.preset_id], configured, scope };
+  }).sort((a, b) => Number(b.configured) - Number(a.configured));
+  const custom = cloud.filter(connection => !models.data?.presets.some(preset => preset.preset_id === connection.preset_id));
+  const plans = schedules.data ?? [];
+  const activePlans = plans.filter(plan => plan.status === "active");
+  const pausedPlans = plans.filter(plan => plan.status === "paused");
+  const nextPlan = activePlans.filter(plan => plan.next_run_at).sort((a, b) => new Date(a.next_run_at!).getTime() - new Date(b.next_run_at!).getTime())[0];
+  const total = schedulesView ? plans.length : activity.data?.total ?? 0;
   useEffect(() => {
-    api.get("/api/overview").then(setData).catch(() => {});
-  }, []);
-
-  // to=跳转路由；anchor=页内锚点（采集器无独立页，滚动到下方"采集引擎"区块）
+    const ready = schedulesView ? schedules.isSuccess : activity.isSuccess && !activity.isPlaceholderData;
+    const lastPage = Math.max(1, Math.ceil(total / pageSize));
+    if (ready && page > lastPage) setParams(previous => { const next = new URLSearchParams(previous); next.set("page", String(lastPage)); return next; }, { replace: true });
+  }, [schedulesView, schedules.isSuccess, activity.isSuccess, activity.isPlaceholderData, total, page, pageSize, setParams]);
   const stats = [
-    { label: "我的会话", value: data?.conversations ?? "—", icon: MessagesSquare, to: "/data-prep" },
-    { label: "进行中定时任务", value: data?.scheduler.active_count ?? "—", icon: CalendarClock, to: "/tasks" },
-    { label: "可用采集器", value: data ? data.collectors.filter((c) => c.available).length : "—", icon: Boxes, anchor: "collectors-section" },
-    { label: "分析模板", value: data?.templates.total ?? "—", icon: Library, to: "/templates" },
-  ] as { label: string; value: any; icon: any; to?: string; anchor?: string }[];
-
-  const onStatClick = (s: { to?: string; anchor?: string }) => {
-    if (s.to) navigate(s.to);
-    else if (s.anchor) document.getElementById(s.anchor)?.scrollIntoView({ behavior: "smooth" });
-  };
-
-  // configured：是否已填凭证；enabled：管理员开关是否打开。两者都满足才算"真的在生效"，
-  // 否则"已配置但被停用"会被误显示成"已启用"（这正是本卡片标签文案本身承诺的含义）。
-  const connectors = [
-    { key: "email", label: "邮件", icon: Mail, configured: data?.connectors.email, enabled: data?.connectors_enabled.email },
-    { key: "slack", label: "Slack", icon: Slack, configured: data?.connectors.slack, enabled: data?.connectors_enabled.slack },
-    { key: "embedding", label: "语义召回", icon: Sparkles, configured: data?.connectors.embedding, enabled: data?.connectors_enabled.embedding },
-    { key: "checkpoint", label: "断点续跑", icon: Save, configured: data?.connectors.checkpoint, enabled: data?.connectors_enabled.checkpoint },
+    { key: "active" as const, icon: Activity, label: "进行中", hint: "当前执行或排队的任务" },
+    { key: "attention" as const, icon: TriangleAlert, label: "待处理", hint: "需要确认、暂停或执行失败" },
+    { key: "completed" as const, icon: CheckCircle2, label: "近7天完成", hint: "按完成时间统计，仅我的任务" },
   ];
-
-  return (
-    <>
-      <header className="flex items-center justify-between gap-6 border-b border-border px-7 py-4">
-        <div>
-          <h1 className="text-lg font-semibold tracking-tight">概览</h1>
-          <p className="text-sm text-muted-foreground">智能体能力与运行状态一览</p>
+  return <>
+    <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-border px-7 py-4">
+      <div><h1 className="text-lg font-semibold tracking-tight">概览</h1><p className="text-sm text-muted-foreground">任务进展与平台状态，一目了然</p></div>
+      <div className="flex flex-wrap items-center gap-2"><PageGuide page="dashboard" /><Button variant="outline" aria-label="刷新概览" disabled={refreshing} onClick={refresh}><RefreshCw className={cn(refreshing && "animate-spin motion-reduce:animate-none")} />{refreshing ? "刷新中" : "刷新"}</Button><Link className={cn(LINK, "bg-primary px-3 py-2 text-primary-foreground hover:no-underline")} to="/data-prep"><Plus className="h-4 w-4" />新建任务</Link></div>
+    </header>
+    <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+      <div className="mx-auto max-w-[1600px] space-y-6">
+        <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+          {stats.map(stat => <button key={stat.key} className={cn(PANEL, "p-4 text-left transition-colors hover:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:p-5")} onClick={() => selectView("tasks", stat.key, 1, true)}>
+            <span className="flex items-center justify-between text-sm text-muted-foreground">{stat.label}<stat.icon className="h-4 w-4 text-primary" /></span>
+            <span className="my-2 block text-3xl font-semibold tabular-nums">{activity.data?.stats[stat.key] ?? "—"}</span><span className="block text-xs text-muted-foreground">{activity.isError ? "统计更新失败" : stat.hint}</span>
+          </button>)}
+          <button className={cn(PANEL, "p-4 text-left transition-colors hover:border-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring sm:p-5")} onClick={() => selectView("schedules", "all", 1, true)}>
+            <span className="flex items-center justify-between text-sm text-muted-foreground">自动化任务<CalendarClock className="h-4 w-4 text-primary" /></span>
+            <span className="my-2 block text-3xl font-semibold tabular-nums">{schedules.data ? activePlans.length : "—"}<span className="ml-2 text-xs font-normal text-muted-foreground">已启用</span></span>
+            <span className="block text-xs text-muted-foreground">{schedules.isError ? "计划更新失败" : schedules.data ? `已启用 ${activePlans.length} · 已暂停 ${pausedPlans.length}` : "正在读取计划…"}</span>
+          </button>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <Button onClick={() => navigate("/data-prep")} className="gap-1.5">
-            创建数据任务 <ArrowRight className="h-4 w-4" />
-          </Button>
-        </div>
-      </header>
-
-      <div className="flex-1 space-y-6 overflow-y-auto px-7 py-6">
-        {/* 统计卡 */}
-        <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-          {stats.map((s) => (
-            <Card
-              key={s.label}
-              className="animate-fade-in cursor-pointer transition-colors hover:border-primary/50 hover:bg-primary/[0.03]"
-              role="button"
-              tabIndex={0}
-              onClick={() => onStatClick(s)}
-              onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && onStatClick(s)}
-            >
-              <CardContent className="flex items-center gap-4 p-5">
-                <div className="flex h-11 w-11 items-center justify-center rounded-lg bg-primary/12 text-primary">
-                  <s.icon className="h-5 w-5" />
-                </div>
-                <div>
-                  <div className="text-2xl font-semibold tabular-nums">{s.value}</div>
-                  <div className="text-xs text-muted-foreground">{s.label}</div>
-                </div>
-              </CardContent>
-            </Card>
-          ))}
-        </div>
-
-        {/* 采集引擎（全宽） */}
-        <Card id="collectors-section">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Boxes className="h-4 w-4 text-primary" /> 采集引擎（分层路由 · {(data?.collectors ?? []).length}个引擎 · tier 升序优先）
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-6">
-            {(data?.collectors ?? []).map((c) => (
-              <div
-                key={c.name}
-                className="flex items-center justify-between rounded-md border border-border/60 px-3 py-2"
-              >
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-medium">{COLLECTOR_CN[c.name] || c.name}</div>
-                  <div className="truncate text-[11px] text-muted-foreground">{c.name} · t{c.tier}</div>
-                </div>
-                <CircleDot
-                  className={cn("h-3.5 w-3.5 shrink-0", c.available ? "text-emerald-500" : "text-muted-foreground/40")}
-                />
-              </div>
-            ))}
-            {/* 采集器指标（有调用数据时展示） */}
-            {data?.collector_metrics && Object.keys(data.collector_metrics).length > 0 && (
-              <div className="col-span-full mt-2 border-t border-border/40 pt-2">
-                <div className="text-[11px] text-muted-foreground mb-1">运行指标（当前进程累计）</div>
-                <div className="grid grid-cols-3 sm:grid-cols-5 gap-1">
-                  {Object.entries(data.collector_metrics).map(([name, m]) => (
-                    <div key={name} className="flex items-center justify-between text-[11px] px-1">
-                      <span className="text-muted-foreground truncate">{COLLECTOR_CN[name] || name}</span>
-                      <span className={cn("tabular-nums", m.success_rate >= 0.5 ? "text-emerald-500" : "text-amber-500")}>
-                        {Math.round(m.success_rate * 100)}% · {Math.round(m.avg_ms)}ms
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* 搜索后端 + 正文提取链 · 反爬加固 + 网络层：合并为等高两列，横向排布压缩高度 */}
-        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          {/* 搜索后端 + 正文提取链 */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Search className="h-4 w-4 text-primary" /> 搜索后端 · 正文提取
-                {data?.search_health && (
-                  <Badge variant={data.search_health.status === "good" ? "success" : "warning"}>
-                    {data.search_health.status === "good" ? "健康" : "降级"}
-                  </Badge>
-                )}
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div>
-                <div className="text-xs text-muted-foreground mb-1.5">搜索后端（{(data?.search_health?.backends_detail ?? []).length}个）</div>
-                <div className="flex flex-wrap gap-x-5 gap-y-2">
-                  {(data?.search_health?.backends_detail ?? []).length > 0 ? (
-                    data!.search_health!.backends_detail!.map((b) => (
-                      <StatusChip key={b.name} label={b.label} available={b.available} />
-                    ))
-                  ) : (
-                    (data?.search_health?.backends ?? []).map((b: string) => (
-                      <StatusChip
-                        key={b}
-                        available
-                        label={b === "anysearch" ? "AnySearch" : b === "searxng" ? "SearXNG" : b === "tavily" ? "Tavily" : b === "ddg" ? "DuckDuckGo" : b}
-                      />
-                    ))
-                  )}
-                </div>
-              </div>
-              <div className="border-t border-border/40 pt-3">
-                <div className="text-xs text-muted-foreground mb-1.5">正文提取链（3级级联，命中即停）</div>
-                <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
-                  {(data?.extraction_chain ?? [
-                    { name: "trafilatura", label: "Trafilatura", available: false },
-                    { name: "readability", label: "readability-lxml", available: false },
-                    { name: "html_to_text", label: "html_to_text", available: true },
-                  ]).map((ex, i) => (
-                    <span key={ex.name} className="flex items-center gap-2">
-                      {i > 0 && <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/40" />}
-                      <StatusChip label={ex.label} available={ex.available} />
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* 反爬加固 + 网络层 */}
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Shield className="h-4 w-4 text-primary" /> 反爬加固 · 网络层
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div>
-                <div className="text-xs text-muted-foreground mb-1.5">反爬加固</div>
-                <div className="flex flex-wrap gap-x-5 gap-y-2">
-                  <StatusChip label="Camoufox 隐身" available={!!data?.anti_scrape?.camoufox} />
-                  <StatusChip label={`短路（${data?.anti_scrape?.shortcut_domains ?? 10}域名）`} available />
-                  <StatusChip label="UA 轮换" available={!!data?.network?.ua_rotation} />
-                </div>
-              </div>
-              <div className="border-t border-border/40 pt-3">
-                <div className="text-xs text-muted-foreground mb-1.5">网络层</div>
-                <div className="flex flex-wrap gap-x-5 gap-y-2">
-                  <StatusChip label={`限速（${data?.network?.rate_limiting ?? "1s~3s"}）`} available />
-                  <StatusChip label={`退避重试（${data?.network?.retry ?? "≤2次"}）`} available />
-                  <StatusChip label="智能分流" available={!!data?.network?.smart_routing} />
-                </div>
-                <div className="text-xs text-muted-foreground pt-2">
-                  国内直连 · 境外走代理 · LAN 绕过系统代理
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* 模型 + 连接器 + 登录态 */}
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Cpu className="h-4 w-4 text-primary" /> 模型供应商
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="flex flex-wrap gap-2">
-              {(data?.providers.available ?? []).length ? (
-                data!.providers.available.map((p) => {
-                  const meta = PROVIDER_META[p];
-                  return (
-                    <span key={p} className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/30 px-2.5 py-1 text-xs font-medium">
-                      {meta?.logo ? (
-                        <img src={meta.logo} alt={meta.label} className={cn("h-4 w-4 shrink-0 rounded object-contain", meta.imgClass)} />
-                      ) : meta?.initial ? (
-                        <span className={cn("flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold", meta.badgeClass)}>
-                          {meta.initial}
-                        </span>
-                      ) : null}
-                      {meta?.label ?? p}
-                    </span>
-                  );
-                })
-              ) : (
-                <span className="text-sm text-muted-foreground">仅本地模型可用</span>
-              )}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Globe className="h-4 w-4 text-primary" /> 平台登录态
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="grid grid-cols-3 gap-1.5">
-              {(data?.cookie_status && Object.entries(data.cookie_status).length > 0
-                ? Object.entries(data.cookie_status).map(([k, v]) => (
-                    <div key={k} className="flex items-center gap-1.5 text-sm">
-                      <CircleDot className={cn("h-3 w-3 shrink-0", v ? "text-emerald-500" : "text-muted-foreground/40")} />
-                      {COOKIE_LOGO[k] && (
-                        <img
-                          src={COOKIE_LOGO[k]}
-                          alt=""
-                          className={cn("h-4 w-4 shrink-0 rounded object-contain", !v && "opacity-40 grayscale")}
-                        />
-                      )}
-                      <span className={cn(v ? "text-foreground" : "text-muted-foreground")}>{COOKIE_CN[k] || k}</span>
-                    </div>
-                  ))
-                : <span className="text-sm text-muted-foreground">加载中…</span>)}
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">连接器 / 增强</CardTitle>
-            </CardHeader>
-            <CardContent className="grid grid-cols-2 gap-2">
-              {connectors.map((c) => {
-                const variant = c.enabled ? "success" : c.configured ? "warning" : "outline";
-                const text = c.enabled ? "已启用" : c.configured ? "已停用" : "未配";
-                return (
-                  <div key={c.key} className="flex items-center gap-2 rounded-md border border-border/60 px-2.5 py-2">
-                    <c.icon className="h-4 w-4 text-muted-foreground" />
-                    <span className="flex-1 text-sm">{c.label}</span>
-                    <Badge variant={variant}>{text}</Badge>
-                  </div>
-                );
-              })}
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* 记忆系统命中统计（方案 D 评估闭环） */}
-        {isAdmin && <MemoryHitCard stats={data?.memory_hit_stats ?? []} />}
-      </div>
-    </>
-  );
-}
-
-/** 记忆系统命中统计卡片：展示教训/模板命中次数、语义召回率、降级率，量化记忆有没有在起作用。 */
-function MemoryHitCard({ stats }: { stats: NonNullable<Overview["memory_hit_stats"]> }) {
-  const lesson = stats.find((s) => s.hit_type === "lesson");
-  const total = lesson?.count ?? 0; // 总召回尝试次数（命中+未命中）
-  const hitCount = lesson?.hit_count ?? 0;
-  const semantic = lesson?.semantic_count ?? 0;
-  const keyword = lesson?.keyword_count ?? 0;
-  const avgThreshold = lesson?.avg_threshold ?? 0;
-  const hitRate = total > 0 ? Math.round((hitCount / total) * 100) : 0;
-  const semanticRate = total > 0 ? Math.round((semantic / total) * 100) : 0;
-  const keywordRate = total > 0 ? Math.round((keyword / total) * 100) : 0;
-
-  const health = (() => {
-    if (total === 0) return { label: "暂无记录", variant: "outline" as const };
-    if (hitRate >= 50) return { label: "良好", variant: "success" as const };
-    if (hitRate >= 20) return { label: "一般", variant: "warning" as const };
-    return { label: "建议检查召回配置", variant: "danger" as const };
-  })();
-
-  return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="flex items-center gap-2 text-base">
-          <Brain className="h-4 w-4 text-primary" /> 记忆系统 · 命中统计
-        </CardTitle>
-      </CardHeader>
-      <CardContent>
-        {total === 0 ? (
-          <p className="text-sm text-muted-foreground">
-            暂无记录。教训库在任务被判定采集失败时自动沉淀，累计 2 次失败且至少 1 次帮到后续任务后转正开始注入。
-          </p>
-        ) : (
-          <div className="space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-4 text-sm">
-                <span>
-                  尝试 <span className="font-semibold text-foreground">{total}</span> 次，命中{" "}
-                  <span className="font-semibold text-foreground">{hitCount}</span> 次
-                </span>
-                <span className="text-muted-foreground">命中平均置信度 {avgThreshold.toFixed(2)}</span>
-              </div>
-              <Badge variant={health.variant}>{health.label}</Badge>
-            </div>
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">命中率</span>
-                <span className="text-foreground">{hitCount} / {total} ({hitRate}%)</span>
-              </div>
-              <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                <div className="h-full rounded-full bg-emerald-500" style={{ width: `${hitRate}%` }} />
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">语义召回路径</span>
-                <span className="text-foreground">{semantic} 次 ({semanticRate}%)</span>
-              </div>
-              <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                <div className="h-full rounded-full bg-sky-500" style={{ width: `${semanticRate}%` }} />
-              </div>
-            </div>
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-muted-foreground">关键词兜底路径</span>
-                <span className="text-foreground">{keyword} 次 ({keywordRate}%)</span>
-              </div>
-              <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                <div className="h-full rounded-full bg-amber-500" style={{ width: `${keywordRate}%` }} />
-              </div>
-            </div>
+        <section aria-labelledby="platform-services-title">
+          <div className="mb-3 flex items-center justify-between"><h2 id="platform-services-title" className="font-semibold">平台服务</h2>{manager && <Link className={LINK} to="/settings?section=diagnostics">运行与诊断<ArrowRight className="h-3 w-3" /></Link>}</div>
+          <div className="grid gap-4 min-[1280px]:grid-cols-3">
+            <ServiceCard title="模型与连接" icon={<Cpu className="h-5 w-5 text-primary" />} subtitle={models.data ? <>本地模型 · {localModels.size} 个已配置<br />云端供应商 · {providerList.filter(p => p.configured).length} 个已配置</> : "当前账号获准使用的模型"} footer={<><span>彩色已配 · 灰色未配</span><Link className={LINK} to="/settings?section=models">管理连接<ArrowRight className="h-3 w-3" /></Link></>}>
+              <LoadState label="模型列表" loading={models.isPending} error={models.isError} stale={!!models.data} retry={() => void models.refetch()} />
+              {models.data && <div className="grid auto-rows-[52px] grid-cols-2 gap-x-2">
+                {(expandedProviders ? providerList : providerList.slice(0, 8)).map(provider => <div key={provider.preset_id} data-provider={provider.preset_id} title={`${provider.label || provider.display_name}：${provider.configured ? `已配置（${provider.scope}）；连接健康请查看验证记录` : "未配置 API Key"}`} className="my-1 flex min-w-0 items-center gap-2 rounded-lg border border-border bg-muted/20 px-2">
+                  <span className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted/60", provider.preset_id === "kimi" && "bg-slate-900")}>
+                    {provider.file && BRAND_FILES.has(provider.file) ? <img src={`/overview-brands/${provider.file}`} alt="" className={cn("h-5 w-5 object-contain", provider.preset_id === "xai" && "dark:invert", !provider.configured && "grayscale opacity-45")} /> : provider.preset_id === "openai" ? <SiOpenai aria-hidden className={cn("h-5 w-5", !provider.configured && "text-muted-foreground")} /> : <Cpu className="h-5 w-5 text-muted-foreground" />}
+                  </span><span className="min-w-0"><span className={cn("block truncate text-sm", !provider.configured && "text-muted-foreground")}>{provider.label || provider.display_name}</span><span className="block truncate text-[11px] text-muted-foreground">{provider.configured ? provider.scope : "未配置"}</span></span>
+                </div>)}
+              </div>}
+              {(providerList.length > 8 || custom.length > 0) && <Button variant="link" size="sm" aria-expanded={expandedProviders} onClick={() => setExpandedProviders(value => !value)}>{expandedProviders ? "收起" : "更多连接"}</Button>}
+              {expandedProviders && custom.map(connection => <p className="mt-2 text-sm" key={connection.connection_id}>{connection.display_name} · {connection.owner_scope === "platform_shared" ? "平台提供" : "我的连接"}</p>)}
+            </ServiceCard>
+            <ServiceCard title="平台登录态" icon={<Globe className="h-5 w-5 text-primary" />} subtitle={<>共享账号的最近检查结果<br />不代表当前实时在线</>} footer={<><span>有效 · 失效 · 未检查</span>{manager ? <Link className={LINK} to="/settings?section=platform&service=cookies">管理账号<ArrowRight className="h-3 w-3" /></Link> : <Link className={LINK} to="/settings?section=credentials">我的采集账号<ArrowRight className="h-3 w-3" /></Link>}</>}>
+              <LoadState label="服务状态" loading={services.isPending} error={services.isError} stale={!!services.data} retry={() => void services.refetch()} />
+              {services.data && <div className="grid auto-rows-[52px] grid-cols-3 gap-x-2">{services.data.cookies.map(cookie => {
+                const label = cookie.status === "valid" ? "有效" : cookie.status === "invalid" ? "失效" : "未检查";
+                return <div key={cookie.platform} tabIndex={0} aria-label={`${PLATFORMS[cookie.platform] || cookie.platform}：${label}，${dateLabel(cookie.checked_at)}`} title={`上次检查：${label} · ${dateLabel(cookie.checked_at)}`} className="flex min-w-0 items-center gap-1.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+                  <CircleDot aria-hidden className={cn("h-3 w-3 shrink-0", cookie.status === "valid" ? "text-emerald-600 dark:text-emerald-400" : cookie.status === "invalid" ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground")} />
+                  {BRAND_FILES.has(`${cookie.platform}.png`) ? <img src={`/overview-brands/${cookie.platform}.png`} alt="" className={cn("h-5 w-5 shrink-0 rounded object-contain", cookie.status !== "valid" && "grayscale opacity-50")} /> : <Globe aria-hidden className="h-5 w-5 shrink-0 text-muted-foreground" />}<span className="min-w-0"><span className="block truncate text-sm">{PLATFORMS[cookie.platform] || cookie.platform}</span><span className="block text-[11px] text-muted-foreground">{label}</span></span>
+                </div>;
+              })}</div>}
+            </ServiceCard>
+            <ServiceCard title="服务与增强" icon={<Server className="h-5 w-5 text-primary" />} subtitle={<>展示平台配置状态<br />连接是否可用需单独检查</>} footer={<><span>配置不等于检查通过</span>{manager ? <Link className={LINK} to="/settings?section=platform">管理服务<ArrowRight className="h-3 w-3" /></Link> : <span>由管理员维护</span>}</>}>
+              <LoadState label="服务状态" loading={services.isPending} error={services.isError} stale={!!services.data} retry={() => void services.refetch()} />
+              {services.data && <div className="grid auto-rows-[52px]">{services.data.services.map(service => {
+                const Icon = ({ search: Search, email: Mail, slack: Slack, embedding: BookOpen } as Record<string, typeof Search>)[service.key] || Server;
+                return <div key={service.key} className="flex min-w-0 items-center justify-between gap-2 border-b border-border/50 last:border-0"><span className="flex items-center gap-2 text-sm"><Icon className="h-4 w-4 text-primary" />{service.label}</span><span className="text-xs text-muted-foreground">{!service.enabled ? "已停用" : service.configured ? "已配置 · 未检查" : "未配置"}</span></div>;
+              })}</div>}
+            </ServiceCard>
           </div>
-        )}
-      </CardContent>
-    </Card>
-  );
+        </section>
+        <section ref={listRef} tabIndex={-1} aria-label="任务与定时计划" className={cn(PANEL, "scroll-mt-4 focus:outline-none")}>
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3 sm:px-5">
+            <div className="flex gap-1" role="group" aria-label="列表类型"><Button variant={!schedulesView ? "secondary" : "ghost"} aria-pressed={!schedulesView} onClick={() => selectView("tasks")}>最近任务</Button><Button variant={schedulesView ? "secondary" : "ghost"} aria-pressed={schedulesView} onClick={() => selectView("schedules")}>定时计划</Button></div>
+            <Link className={LINK} to={schedulesView ? "/tasks" : "/data-prep"}>{schedulesView ? "管理全部计划" : "进入任务工作台"}<ArrowRight className="h-4 w-4" /></Link>
+          </div>
+          <div className="p-4 sm:px-5">
+            {schedulesView ? <>
+              <p className="mb-3 text-sm text-muted-foreground">{services.isError ? "调度服务状态未知" : services.data?.scheduler_enabled === false ? "平台调度已停用，计划不会自动执行" : services.isPending ? "正在读取调度状态…" : nextPlan ? `最近计划执行：${dateLabel(nextPlan.next_run_at)}` : "暂无待执行计划"}<span className="ml-2 text-xs">时间按本机时区显示</span></p>
+              <LoadState label="定时计划" loading={schedules.isPending} error={schedules.isError} stale={!!schedules.data} retry={() => void schedules.refetch()} />
+              {schedules.data && plans.slice((page - 1) * pageSize, page * pageSize).map(plan => <div className="grid gap-2 border-b border-border py-3 last:border-0 sm:grid-cols-[minmax(0,1fr)_160px_180px]" key={plan.task_id}>
+                <div className="min-w-0"><Link className={cn(LINK, "max-w-full font-medium")} to={`/tasks?task=${encodeURIComponent(plan.task_id)}`}><span className="truncate">{plan.name || "未命名计划"}</span></Link><p className="text-xs text-muted-foreground">{describeTrigger(plan)}</p></div>
+                <div className="text-sm"><span>{plan.status === "paused" ? "已暂停" : "已启用"}</span><p className="mt-1 text-xs text-muted-foreground">上次：{!plan.last_run_at ? "尚未执行" : plan.last_success === 1 ? "成功" : plan.last_success === 0 ? "失败" : "结果未知"}</p></div>
+                <div className="text-xs text-muted-foreground">下次执行<p className="mt-1 text-sm text-foreground">{plan.status === "paused" ? "已暂停" : services.data?.scheduler_enabled === false ? "调度已停用" : dateLabel(plan.next_run_at)}</p></div>
+              </div>)}
+              {schedules.isSuccess && !plans.length && <p className="py-8 text-center text-sm text-muted-foreground">还没有定时计划。前往自动化任务添加。</p>}
+            </> : <>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2"><label className="flex items-center gap-2 text-sm">任务状态<select className="h-9 rounded-md border border-border bg-background px-2" value={filter} onChange={event => selectView("tasks", event.target.value as Filter)}>{Object.entries(FILTERS).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><span className="text-xs text-muted-foreground">仅我的任务 · 更新于 {dateLabel(activity.data?.updated_at)}</span></div>
+              <LoadState label="任务列表" loading={activity.isPending || activity.isPlaceholderData} error={activity.isError} stale={!!activity.data} retry={() => void activity.refetch()} />
+              {activity.data?.items.map(task => <div className="grid items-center gap-1 border-b border-border py-3 last:border-0 sm:grid-cols-[minmax(0,1fr)_100px_130px] sm:gap-4" key={`${task.kind}:${task.id}`}>
+                <Link className={cn(LINK, "min-w-0 font-medium")} to={`/data-prep?${task.kind === "task" ? "task" : "conversation"}=${encodeURIComponent(task.id)}`}><span className="truncate">{task.title || "未命名任务"}</span><ArrowRight className="h-3 w-3 shrink-0" /></Link>
+                <span className={cn("text-sm", task.status === "completed" ? "text-teal-700 dark:text-teal-300" : ["failed", "needs_input", "candidate_ready"].includes(task.status) ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground")}>{STATUS[task.status] || "状态未知"}</span><time className="text-xs text-muted-foreground" dateTime={task.updated_at}>{dateLabel(task.updated_at)}</time>
+              </div>)}
+              {activity.isSuccess && !activity.isPlaceholderData && !activity.data.items.length && <p className="py-8 text-center text-sm text-muted-foreground">{filter === "all" ? "还没有任务，从右上角新建任务开始。" : "此分类暂无任务。"}</p>}
+            </>}
+            {(schedulesView ? schedules.data : activity.data) && <nav aria-label="概览列表分页" className="mt-3 border-t border-border">
+              <Pagination page={page} totalPages={Math.max(1, Math.ceil(total / pageSize))} total={total}
+                pageSize={pageSize} pageSizeOptions={PAGE_SIZES} disabled={schedulesView ? schedules.isFetching : activity.isFetching}
+                onChange={value => selectView(schedulesView ? "schedules" : "tasks", filter, value)}
+                onPageSizeChange={value => { const next = new URLSearchParams(params); next.set("page_size", String(value)); next.set("page", "1"); setParams(next); }} />
+            </nav>}
+          </div>
+        </section>
+      </div>
+    </div>
+  </>;
 }

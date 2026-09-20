@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { PageGuide } from "@/components/onboarding/PageGuide";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   Boxes, Cpu, Sparkles, Save, Moon, Sun, CircleDot, RefreshCw,
   Play, Loader2, CheckCircle2, XCircle, ShieldAlert, Unlock, UserRound,
@@ -46,8 +47,8 @@ const SETTINGS_SECTIONS: Array<{
   { key: "personal", label: "我的设置", description: "外观与个人任务默认项", icon: UserRound },
   { key: "models", label: "模型与连接", description: "个人 Key 与可用共享连接", icon: Cpu },
   { key: "credentials", label: "采集账号", description: "只作用于自己的平台登录凭证", icon: KeyRound },
-  { key: "platform", label: "平台配置", description: "全局运行配置与旧流程兼容", icon: SlidersHorizontal, managerOnly: true },
-  { key: "governance", label: "能力治理", description: "能力版本的三轴治理状态", icon: ShieldCheck, managerOnly: true },
+  { key: "platform", label: "平台配置", description: "共享服务、采集与通知", icon: SlidersHorizontal, managerOnly: true },
+  { key: "governance", label: "扩展工具管理", description: "查看工具状态、验证与开放范围", icon: ShieldCheck, managerOnly: true },
   { key: "diagnostics", label: "运行与诊断", description: "连接器、路由和采集引擎状态", icon: Activity, managerOnly: true },
 ];
 
@@ -125,37 +126,6 @@ function DomainHealthPanel() {
   );
 }
 
-/**
- * 极简开关：只在这一处用，不引入新的 UI 依赖。非管理员点了也会因后端 403 无效，直接禁用更直白。
- * 上一版关闭态用 bg-muted 配 bg-background 的圆点，两者在浅色主题下亮度都接近 95%，
- * 轨道和圆点几乎融成一片、看不出是开关——这版改成轨道加边框 + 圆点用纯白/纯色，拉开对比度。
- */
-function Toggle({ checked, disabled, title, onChange }: {
-  checked: boolean; disabled?: boolean; title?: string; onChange: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      disabled={disabled}
-      title={title}
-      onClick={onChange}
-      className={cn(
-        "inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors",
-        checked ? "border-primary bg-primary" : "border-border bg-muted-foreground/25",
-        disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer",
-      )}
-    >
-      <span
-        className={cn(
-          "h-4 w-4 rounded-full bg-white shadow-sm ring-1 ring-black/5 transition-transform",
-          checked ? "translate-x-4" : "translate-x-0.5",
-        )}
-      />
-    </button>
-  );
-}
 
 export function Settings() {
   return <SettingsContent />;
@@ -241,10 +211,13 @@ function SettingsContent() {
     ? requestedSection!
     : "personal";
   const currentSection = SETTINGS_SECTIONS.find((item) => item.key === section)!;
+  const navigation = useRef<HTMLElement>(null);
+  useEffect(() => {
+    navigation.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [section]);
   const [ov, setOv] = useState<Overview | null>(null);
   const [testing, setTesting] = useState<string | null>(null); // 正在自检的 target
   const [results, setResults] = useState<Record<string, CheckResult>>({});
-  const [togglingKey, setTogglingKey] = useState<string | null>(null); // 正在切换开关的 connector.key
 
   const selectSection = (next: SettingsSection) => {
     const params = new URLSearchParams(searchParams);
@@ -256,20 +229,6 @@ function SettingsContent() {
     api.get("/api/overview").then(setOv).catch(() => {});
   };
   useEffect(load, []);
-
-  /** 切换"是否启用该服务"（不影响已保存的凭证）。仅管理员/超管可调用，其余角色 Toggle 已禁用。 */
-  const toggleConnector = async (registryKey: string, connectorKey: string, next: boolean) => {
-    setTogglingKey(connectorKey);
-    try {
-      await api.put(`/api/config/${registryKey}`, { value: next ? "True" : "False" });
-      toast.success(next ? "已启用" : "已停用");
-      load();
-    } catch (e: any) {
-      toast.error(e.message || "切换失败");
-    } finally {
-      setTogglingKey(null);
-    }
-  };
 
   const runTest = async (target: string) => {
     setTesting(target);
@@ -287,18 +246,17 @@ function SettingsContent() {
   };
 
   // target 为 null 表示不可主动自检，仅展示配置状态
-  // enabledKey：对应配置中心的开关字段（管理员可用它临时启停服务，不影响已保存的凭证）
   const connectors: {
     key: string; label: string; icon: typeof Sparkles; on?: boolean; hint: string;
-    target: string | null; enabledKey: string;
+    target: string | null;
   }[] = [
-    { key: "embedding", label: "语义召回 (embedding)", icon: Sparkles, on: ov?.connectors.embedding, hint: "请求一次 embedding 端点", target: "embedding", enabledKey: "embedding_enabled" },
-    { key: "checkpoint", label: "断点续跑 (checkpoint)", icon: Save, on: ov?.connectors.checkpoint, hint: "本地存储，检查存储目录可写", target: "checkpoint", enabledKey: "checkpoint_enabled" },
+    { key: "embedding", label: "知识检索（语义召回）", icon: Sparkles, on: ov?.connectors.embedding, hint: "请求一次 embedding 端点", target: "embedding" },
+    { key: "checkpoint", label: "断点续跑 (checkpoint)", icon: Save, on: ov?.connectors.checkpoint, hint: "本地存储，检查存储目录可写", target: "checkpoint" },
   ];
 
   return (
     <>
-      <header className="flex items-center justify-between border-b border-border px-7 py-4">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-7 py-4">
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-lg font-semibold tracking-tight">设置</h1>
@@ -311,16 +269,20 @@ function SettingsContent() {
           </div>
           <p className="text-sm text-muted-foreground">{currentSection.description}</p>
         </div>
-        {section === "diagnostics" ? (
-          <Button variant="outline" size="sm" onClick={load} className="gap-1.5">
-            <RefreshCw className="h-4 w-4" /> 刷新
-          </Button>
-        ) : null}
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <PageGuide page={`settings.${section}`} />
+          {section === "diagnostics" ? (
+            <Button variant="outline" size="sm" onClick={load} className="gap-1.5">
+              <RefreshCw className="h-4 w-4" /> 刷新
+            </Button>
+          ) : null}
+        </div>
       </header>
 
       <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-7 sm:py-6">
         <div className="mx-auto max-w-6xl">
           <nav
+            ref={navigation}
             aria-label="设置分区"
             className="mb-6 flex gap-2 overflow-x-auto pb-2"
           >
@@ -345,7 +307,7 @@ function SettingsContent() {
             ))}
           </nav>
 
-          <div className="space-y-5">
+          <div data-guide="settings-content" className="space-y-5">
             {section === "personal" && (
               <>
                 <TaskModelSettings key={user?.user_id} />
@@ -382,7 +344,7 @@ function SettingsContent() {
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base">平台连接器 / 增强</CardTitle>
-                    <p className="text-xs text-muted-foreground">邮件和 Slack 外发已关闭；历史配置仅在平台配置中只读保留。</p>
+                    <p className="text-xs text-muted-foreground">邮件和 Slack 在“平台配置 → 通知”维护，仅按用户明确要求发送。</p>
                   </CardHeader>
                   <CardContent className="space-y-2">
                     {connectors.map((c) => {
@@ -399,12 +361,8 @@ function SettingsContent() {
                             <div className="truncate text-sm">{c.label}</div>
                             <div className="truncate text-[11px] text-muted-foreground">{c.hint}</div>
                           </div>
-                          <Toggle
-                            checked={enabled}
-                            disabled={togglingKey === c.key || !ov}
-                            title={enabled ? "点击停用" : "点击启用"}
-                            onChange={() => toggleConnector(c.enabledKey, c.key, !enabled)}
-                          />
+                          <span className="text-sm">{enabled ? "已启用" : "已停用"}</span>
+                          <Link className="inline-flex h-8 items-center rounded-md border px-3 text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" to={`/settings?section=platform${c.key === "embedding" ? "&service=semantic" : ""}`}>前往平台配置</Link>
                           <Badge variant={c.on ? "success" : "outline"}>{c.on ? "已配置" : "未配"}</Badge>
                           {c.target && (
                             <Button

@@ -1,16 +1,111 @@
 """概览仪表盘路由：聚合采集器/模型/调度器/模板/会话等状态供首页展示。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from datetime import datetime, timedelta
+from typing import Literal
+
+from fastapi import APIRouter, Depends, Query
 
 from src.config.settings import settings
 from src.llm import available_providers, list_models
 from src.memory import load_templates
+from src.timezone import now as beijing_now, timestamp, BEIJING
 
 from ..auth import get_current_user, get_store
 from ..services import get_schedule_store
 
 router = APIRouter(prefix="/api/overview", tags=["overview"])
+
+
+def _timestamp(value: str) -> str:
+    return timestamp(value)
+
+
+@router.get("/activity")
+def activity(
+    user=Depends(get_current_user),
+    filter: Literal["all", "active", "attention", "completed"] = "all",
+    offset: int = Query(0, ge=0),
+    limit: int = Query(6, ge=1, le=100),
+):
+    store = get_store()
+    now = beijing_now()
+    # 所有角色均只聚合当前 Owner，不将管理员权限当作业务内容读取权限。
+    items = [
+        {"id": row["task_id"], "kind": "task", "title": row["title"],
+         "status": row["status"], "updated_at": _timestamp(row["updated_at"]),
+         "completed_at": _timestamp(row["completed_at"]) if row.get("completed_at") else None}
+        for row in store.list_workspace_activity(user["user_id"])
+    ] + [
+        {"id": row["conv_id"], "kind": "conversation", "title": row["title"],
+         "status": row["status"], "updated_at": _timestamp(row["updated_at"]),
+         "completed_at": _timestamp(row["completed_at"]) if row.get("completed_at") else None}
+        for row in store.list_chat_history(user["user_id"], include_activity_time=True)
+    ]
+    groups = {
+        "active": {"queued", "running", "cancelling", "pausing"},
+        "attention": {"needs_input", "candidate_ready", "paused", "failed"},
+        "completed": {"completed"},
+    }
+    def matches(row, group):
+        if group == "all":
+            return True
+        if row["status"] not in groups[group]:
+            return False
+        # 完成时间取终态事件/末条回复，不把重命名时间冒充完成时间。
+        completed = datetime.fromisoformat(row['completed_at']) if row['completed_at'] else None
+        # 历史无时区数据保留展示，但不能冒充精确的近七天统计。
+        return group != "completed" or bool(completed and completed.tzinfo and now - timedelta(days=7) <= completed <= now)
+
+    stats = {key: sum(matches(row, key) for row in items) for key in groups}
+    selected = [row for row in items if matches(row, filter)]
+    selected.sort(key=lambda row: (row["updated_at"], row["kind"], row["id"]), reverse=True)
+    return {"stats": stats, "items": selected[offset:offset + limit], "total": len(selected),
+            "updated_at": beijing_now().isoformat()}
+
+
+@router.get("/services")
+def service_summary(user=Depends(get_current_user)):
+    """首页只读配置和已有检查证据；不加载采集器，也不触发外部探测。"""
+    health = get_store().cookie_health_all()
+    provider = (settings.search_provider or "auto").lower()
+    # 与搜索采集器的纯配置选择一致：其余模式保留无需 Key 的 DDG。
+    search_configured = bool(settings.tavily_api_key) if provider == "tavily" else bool(settings.searxng_base_url) if provider == "searxng" else True
+    platforms = {
+        "xiaohongshu": "mc_cookie_xhs", "weibo": "mc_cookie_wb", "douyin": "mc_cookie_dy",
+        "bilibili": "mc_cookie_bili", "zhihu": "mc_cookie_zhihu", "kuaishou": "mc_cookie_ks",
+        "tieba": "mc_cookie_tieba", "jd": "jd_cookie", "taobao": "tb_cookie", "pdd": "pdd_cookie",
+    }
+    return {
+        "cookies": [{"platform": platform, "status": health.get(key, {}).get("status", "unknown"),
+                     "checked_at": _timestamp(health[key]["checked_at"]) if key in health else None}
+                    for platform, key in platforms.items()],
+        "services": [
+            {"key": "search", "label": "搜索采集", "configured": search_configured, "enabled": True},
+            {"key": "email", "label": "邮件", "configured": bool(settings.smtp_host and settings.smtp_user and settings.smtp_password), "enabled": bool(settings.smtp_enabled)},
+            {"key": "slack", "label": "Slack", "configured": bool(settings.slack_webhook_url or (settings.slack_bot_token and settings.slack_channel_id)), "enabled": bool(settings.slack_enabled)},
+            {"key": "embedding", "label": "知识检索", "configured": bool(settings.embedding_base_url or settings.qwen_api_key), "enabled": bool(settings.embedding_enabled)},
+        ],
+        "scheduler_enabled": bool(settings.scheduler_enabled),
+        "updated_at": beijing_now().isoformat(),
+    }
+
+
+@router.get("/schedules")
+def schedule_summary(user=Depends(get_current_user)):
+    fields = ("task_id", "name", "status", "trigger_type", "cron_expr", "interval_seconds", "run_count", "last_success", "time_zone")
+    result = []
+    for plan in get_schedule_store().list_active(owner_user_id=user["user_id"]):
+        item = {key: plan.get(key) for key in fields}
+        item["name"] = plan.get("name") or "未命名计划"
+        for key in ("run_at", "next_run_at", "last_run_at"):
+            item[key] = _timestamp(plan[key]) if plan.get(key) else None
+            if item[key] and key != 'last_run_at' and plan.get('time_zone') == 'Asia/Shanghai':
+                parsed = datetime.fromisoformat(item[key])
+                if parsed.tzinfo is None:
+                    item[key] = parsed.replace(tzinfo=BEIJING).isoformat()
+        result.append(item)
+    return result
 
 
 @router.get("")

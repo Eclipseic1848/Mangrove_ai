@@ -11,6 +11,7 @@ import { Memory } from "@/pages/Memory";
 import { Settings } from "@/pages/Settings";
 import { Admin } from "@/pages/Admin";
 import { Feedback } from "@/pages/Feedback";
+import { Operations } from "@/pages/Operations";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();
@@ -52,6 +53,7 @@ export default function App() {
         <Route path="/settings" element={<Settings />} />
         <Route path="/admin" element={<AdminOnly><Admin /></AdminOnly>} />
         <Route path="/feedback" element={<AdminOnly><Feedback /></AdminOnly>} />
+        <Route path="/operations" element={<Operations />} />
       </Route>
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

@@ -159,6 +159,7 @@ export interface WorkSessionView {
 }
 
 export interface SteeringResult {
+  created_at?: string;
   clarification?: WorkspaceQuestion | null;
   result_context?: PublicResultContext | null;
   result_id: string;

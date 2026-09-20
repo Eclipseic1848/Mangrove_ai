@@ -114,6 +114,8 @@ class ManualTaskIn(BaseModel):
     prompt: str  # 交给 Conductor 的 user_input
     provider: Optional[str] = None
     model: Optional[str] = None
+    model_connection_id: Optional[str] = None
+    external_api_confirmed: bool = False
     trigger: TriggerIn
     start_date: Optional[str] = None  # 生效区间起（ISO 日期），留空始终生效
     end_date: Optional[str] = None    # 生效区间止（ISO 日期）
@@ -121,6 +123,8 @@ class ManualTaskIn(BaseModel):
 
 
 class TaskPatchIn(BaseModel):
+    model_connection_id: Optional[str] = None
+    external_api_confirmed: bool = False
     status: Optional[str] = None  # "active" | "paused"：仅传它表示纯粹的暂停/恢复
     name: Optional[str] = None
     prompt: Optional[str] = None

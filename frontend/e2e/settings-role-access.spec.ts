@@ -86,10 +86,10 @@ test("旧对话入口隐藏，概览统一进入工作台，旧地址保留", as
   await expect(page.getByRole("link", { name: "旧版对话", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "发起采集对话" })).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("mangrove-hidden-chat.png") });
-  await page.getByRole("button", { name: /我的会话/ }).click();
+  await page.getByRole("link", { name: "进入任务工作台" }).click();
   await expect(page).toHaveURL(/\/data-prep$/);
   await page.goto("/");
-  await page.getByRole("button", { name: "创建数据任务" }).click();
+  await page.getByRole("link", { name: "新建任务", exact: true }).click();
   await expect(page).toHaveURL(/\/data-prep$/);
   await page.route("**/api/conversations", route => route.fulfill({ json: [] }));
   await page.goto("/chat");
@@ -541,7 +541,7 @@ test("普通用户只看到个人范围并可配置自己的 Provider 连接", a
   await expect(page.getByRole("button", { name: "采集账号" })).toBeVisible();
   await expect(page.getByRole("button", { name: "平台配置" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "运行与诊断" })).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "能力治理" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "扩展工具管理" })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "我的能力验证" })).toHaveCount(0);
 
   await page.getByRole("button", { name: "模型与连接" }).click();
@@ -649,23 +649,26 @@ test("管理员从能力卡片创建验证并渐进查看步骤缺口", async ({
 
   await page.goto("/settings?section=governance");
 
-  await expect(page.getByRole("button", { name: "能力治理" })).toHaveAttribute(
+  await expect(page.getByRole("button", { name: "扩展工具管理" })).toHaveAttribute(
     "aria-current",
     "page",
   );
-  await expect(page.getByRole("heading", { name: "能力治理状态" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "扩展工具管理" })).toBeVisible();
   await expect(page.getByText("gray-python-table")).toBeVisible();
   const grayCard = page.locator("article").filter({ hasText: "gray-python-table" }).first();
+  await grayCard.locator("summary").filter({ hasText: "技术详情与安全检查" }).click();
   await expect(grayCard).toContainText("平台");
   await expect(grayCard).toContainText("已验证");
   await expect(grayCard).toContainText("正常");
-  await expect(page.getByText("可运行")).toHaveCount(2);
+  await expect(grayCard.getByText("验证：已验证 · 生命周期：正常 · 运行资格：可运行")).toBeVisible();
   await expect(page.getByText("兼容读取").first()).toBeVisible();
   await expect(grayCard).toContainText("供应链证据");
-  await expect(grayCard).toContainText("存在硬门");
+  await expect(grayCard).toContainText("检查未通过");
   await expect(grayCard).toContainText("阻断原因：存在 Critical 或可修复 High 安全误配置、Trivy 漏洞库已过期");
   await expect(grayCard).toContainText("DB 更新 2026-08-07 00:00 UTC");
-  await expect(page.getByText("sha256:bbbbbbbbbbbb…bbbbbbbbbbbb").first()).toBeVisible();
+  const retiredCard = page.locator("article").filter({ hasText: "everything-mcp" }).first();
+  await retiredCard.locator("summary").filter({ hasText: "技术详情与安全检查" }).click();
+  await expect(retiredCard.locator("code")).toHaveText(`sha256:${"b".repeat(64)}`);
   await grayCard.getByRole("button", { name: "发起验证" }).click();
   await expect(page.getByRole("dialog", { name: "发起能力验证" })).toBeVisible();
   await expect(page.getByLabel("真实任务证据")).toContainText("季度表格汇总 · V2");
@@ -773,7 +776,7 @@ test("草稿能力卡片展示脱敏缺口并提示自动晋级", async ({ page 
 
   const card = page.locator("article").filter({ hasText: "pending-draft" });
   await expect(card).toContainText("草稿");
-  await expect(card).toContainText("距已验证还缺");
+  await expect(card).toContainText("验证待办");
   await expect(card).toContainText("尚无全部通过的验证运行");
   await expect(card).toContainText("尚未形成供应链扫描证据");
 });
@@ -1354,7 +1357,7 @@ test("管理员审核视图分组渐进披露并完成一次审计查看", async
 
   // 分组与计数：状态不只依赖颜色，用文本标题表达。
   await expect(page.getByRole("heading", { name: "待验证（1）" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "已晋级（1）" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "已验证（1）" })).toBeVisible();
 
   // 1366 宽度下无横向滚动。
   const scrolls = await page.evaluate(() => ({
@@ -1492,9 +1495,10 @@ test("管理员提交平台候选并发布到管理员灰度", async ({ page }) 
   await expect(submit).toBeEnabled();
   await submit.click();
 
-  // 候选分组出现，展示平台 digest 与原因。
+  // 候选分组出现，技术身份和原因在详情中保留。
   await expect(page.getByRole("heading", { name: "平台候选（1）" })).toBeVisible();
-  const candidateCard = page.locator("article").filter({ hasText: "平台 digest" }).first();
+  const candidateCard = page.locator("article").filter({ hasText: "待发布 · 发布后仅管理员试用" }).first();
+  await candidateCard.locator("summary").filter({ hasText: "发布详情" }).click();
   await expect(candidateCard).toContainText("verified-personal-tool");
   await expect(candidateCard).toContainText("平台候选：个人验证已完成并通过审核");
   await candidateCard.getByRole("button", { name: "发布" }).click();
@@ -1513,7 +1517,7 @@ test("管理员提交平台候选并发布到管理员灰度", async ({ page }) 
 
 
 for (const role of ["admin", "super_admin"] as const) {
-  test(`外部只读边界：${role} 历史通知无编辑验证入口，搜索与内部增强保留`, async ({ page }) => {
+  test(`通知授权边界：${role} 可维护邮件和 Slack，搜索与内部增强保留`, async ({ page }) => {
     await mockSettings(page, role);
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -1524,7 +1528,7 @@ for (const role of ["admin", "super_admin"] as const) {
     page.on("request", (request) => {
       if (request.method() !== "GET") writes.push(request.url());
     });
-    await page.route("**/api/config?*", (route) => route.fulfill({ json: { groups: [
+    await page.route(/\/api\/config(?:\?.*)?$/, (route) => route.fulfill({ json: { groups: [
       ...["email", "slack"].map((key) => ({ key, label: `历史 ${key}`, items: [{
         key: key === "email" ? "smtp_enabled" : "slack_webhook_url",
         label: `历史 ${key} 值`, value: "已保留", source: "override", secret: true,
@@ -1536,23 +1540,23 @@ for (const role of ["admin", "super_admin"] as const) {
     await expect(page).toHaveTitle(/Mangrove/);
     await expect(page.getByRole("main")).not.toBeEmpty();
     await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+    await page.getByRole("button", { name: "通知", exact: true }).click();
     for (const key of ["email", "slack"]) {
-      const group = page.getByRole("button", { name: `历史 ${key}`, exact: false }).locator("..");
-      await group.getByRole("button").click();
-      await expect(group).toContainText("外部只读边界");
-      await expect(group).toContainText("已保留");
-      await expect(group.getByRole("button", { name: /修改|重置|验证|启用|发送/ })).toHaveCount(0);
+      const group = page.getByRole("region", { name: `历史 ${key}`, exact: true });
+      await group.getByRole("button", { name: `配置 历史 ${key}`, exact: true }).click();
+      await expect(page.getByRole("dialog").getByRole("button", { name: "保存配置" })).toBeVisible();
+      await page.getByRole("dialog").getByRole("button", { name: "取消", exact: true }).click();
     }
     await page.screenshot({ path: `../.artifacts/issue-126/ui-${role}.png`, fullPage: true });
-    await page.getByRole("button", { name: "搜索与采集服务", exact: false }).click();
-    await expect(page.getByRole("button", { name: "修改", exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "验证", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "搜索采集", exact: true }).click();
+    await expect(page.getByRole("button", { name: "配置 Tavily", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "检查 Tavily", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "使用指南", exact: true }).click();
     await expect(page.getByRole("dialog")).not.toContainText("随时可以重新开启");
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "运行与诊断" }).click();
-    await expect(page.getByText("邮件和 Slack 外发已关闭", { exact: false })).toBeVisible();
-    await expect(page.getByText("语义召回 (embedding)", { exact: true })).toBeVisible();
+    await expect(page.getByText("仅按用户明确要求发送", { exact: false })).toBeVisible();
+    await expect(page.getByText("知识检索（语义召回）", { exact: true })).toBeVisible();
     await expect(page.getByText("断点续跑 (checkpoint)", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "测试", exact: true })).toHaveCount(2);
     expect(writes).toEqual([]);

@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime
+from src.timezone import now as beijing_now
 from pathlib import Path
 
 from src.database_migrations import DatabaseTarget, inspect_database
@@ -19,7 +20,7 @@ from .catalog import PRESETS_BY_ID
 
 
 def _now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    return beijing_now().isoformat(timespec="seconds")
 
 
 def _public_row(
@@ -48,6 +49,13 @@ def _public_row(
         )}
     superseded = bool(conn.execute("SELECT 1 FROM model_configuration_versions WHERE previous_id=?", (row["connection_id"],)).fetchone())
     edited = bool(conn.execute("SELECT 1 FROM model_configuration_versions WHERE connection_id=?", (row["connection_id"],)).fetchone())
+    # 用户确认此历史导入型号不存在；仅退出当前目录，保留冻结记录及后来独立配置的同名模型。
+    incorrect_import = (
+        row["owner_scope"] == "platform_shared"
+        and row["locality"] in {"local", "managed_private"}
+        and row["preset_version"] == "legacy_imported"
+        and not edited
+    )
     public_models = [
         {
             "model_id": item["model_id"],
@@ -61,7 +69,8 @@ def _public_row(
             "error_code": item["error_code"],
             "usage_status": item["usage_status"],
             # 旧模型保持可追溯和历史装载；新任务列表只采用当前预设型号，不改写验证状态。
-            "current_catalog": (edited or preset is None or item["model_id"] in preset.models) and item["model_id"] not in newer_platform_models and not superseded,
+            "current_catalog": (edited or preset is None or item["model_id"] in preset.models) and item["model_id"] not in newer_platform_models and not superseded
+                and not (incorrect_import and item["model_id"].strip().lower() == "qwen3.8-27b-fp8"),
         }
         for item in models
     ]
@@ -76,6 +85,7 @@ def _public_row(
         "locality": row["locality"],
         "status": row["status"],
         "key_hint": row["key_hint"],
+        "has_key": bool(conn.execute("SELECT secret_id FROM model_connections WHERE connection_id=?", (row["connection_id"],)).fetchone()[0]),
         "verified_at": row["verified_at"],
         "default_model": default_model,
         "available_model_count": sum(

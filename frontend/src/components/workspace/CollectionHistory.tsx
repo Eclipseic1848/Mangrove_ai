@@ -27,7 +27,7 @@ export function CollectionHistory({ convId, composerProps }: { convId: string; c
   const controller = useRef<AbortController | null>(null);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [previewId, setPreviewId] = useState<string | null>(null);
-  const inputArea = useRef<HTMLDivElement | null>(null);
+  const messagesArea = useRef<HTMLDivElement | null>(null);
   useEffect(() => () => controller.current?.abort(), []);
   const state = useQuery({
     queryKey: ["collection-history-detail", user?.user_id, convId],
@@ -39,7 +39,10 @@ export function CollectionHistory({ convId, composerProps }: { convId: string; c
     refetchInterval: query => query.state.data?.running ? 2000 : false,
   });
   const lastMessage = state.data?.messages[state.data.messages.length - 1];
-  useEffect(() => { inputArea.current?.scrollIntoView({ block: "end" }); }, [lastMessage?.id]);
+  useEffect(() => {
+    const area = messagesArea.current;
+    if (area) area.scrollTop = area.scrollHeight;
+  }, [lastMessage?.id]);
   const send = async (next: WebIntakeDraft, confirmed: boolean) => {
     const model = next.connectionId ? next.connectionModel : next.localModel;
     if (!model || controller.current) return;
@@ -69,9 +72,11 @@ export function CollectionHistory({ convId, composerProps }: { convId: string; c
   if (state.isError) return <div role="alert" className="p-6">{state.error.message}<button type="button" className="ml-3 rounded border px-3 py-2" onClick={() => void state.refetch()}>重新读取</button></div>;
   const data = state.data;
   const previousModel = [...data.messages].reverse().find(message => message.meta?.model_id)?.meta;
-  return <div className="flex h-full min-w-0">
-    <div className="min-w-0 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
-    <div className="mx-auto flex min-h-full max-w-3xl flex-col gap-6">
+  return <div className="flex h-full min-h-0 min-w-0">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
+    {/* 正文与输入区各占布局空间，正文不能滚到输入框背后。 */}
+    <div ref={messagesArea} className="min-h-24 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
+    <div className="mx-auto flex max-w-3xl flex-col gap-6">
       <p className="text-xs text-muted-foreground">历史任务 · 已保存到当前账号</p>
       {data.messages.map(message => <article key={message.id} aria-label={message.role === "user" ? "我的消息" : "智能体回复"} className={message.role === "user" ? "ml-8 rounded-2xl bg-muted p-4 text-sm" : "space-y-3 text-sm"}>
         <Markdown safeResources>{message.content}</Markdown>
@@ -96,7 +101,10 @@ export function CollectionHistory({ convId, composerProps }: { convId: string; c
       </>}
       {!data.running && !sending && data.messages[data.messages.length - 1]?.role === "user" && <p role="alert" className="text-sm text-amber-700">本次执行没有完整结果，请检查服务状态；不会自动重新采集。</p>}
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-      <div ref={inputArea} className="sticky bottom-0 mt-auto bg-background pb-2 pt-4">
+    </div>
+    </div>
+      <div className="shrink-0 px-4 pb-3 pt-3 sm:px-8">
+      <div className="mx-auto max-w-3xl">
         <p className="mb-2 text-xs text-muted-foreground">继续这个会话：可以追问已有结果，也可以提出新的任务。</p>
         <WorkspaceSourceComposer {...composerProps} ownerId={user?.user_id ?? "current"} draftScope={`conversation_${convId}`}
           unified draft={draft} onDraftChange={setDraft} onChat={send} sourceBusy={Boolean(sending)} submitBlocked={data.running || Boolean(sending)}

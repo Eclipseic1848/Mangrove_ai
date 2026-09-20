@@ -76,6 +76,65 @@ def migrated_webui_database(path):
     return database
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recover_existing", [False, True, "settled"])
+async def test_draft_freeze_pauses_before_any_verification(tmp_path, monkeypatch, recover_existing):
+    root = tmp_path / "run"
+    for directory in ("output", "sessions", "trace", "work"):
+        (root / directory).mkdir(parents=True)
+    (root / "sessions" / "run.jsonl").write_text('{}\n', encoding="utf-8")
+    source = tmp_path / "source.csv"
+    source.write_text("name,value\nsynthetic,1\n", encoding="utf-8")
+    request = PiRuntimeRequest(user_id="user-a", task_id="t", revision=1,
+        objective_text="整理合成来源", requested_output_formats=("json",),
+        sources=(SourceInput(upload_id="source", original_name="source.csv", host_path=source,
+                             sha256=hashlib.sha256(source.read_bytes()).hexdigest()),),
+        model="test", base_url="http://127.0.0.1:1/v1", api_key="test")
+    from src.api import auth
+    from src.api.store import WebUIStore
+    database = migrated_webui_database(tmp_path / "runtime.db")
+    monkeypatch.setattr(auth, "_store", WebUIStore(str(database)))
+    runtime = PiRuntime(execution_root=tmp_path,
+        state_store=AgenticRuntimeRepository(database),
+        draft_review_required=lambda _: True)
+    calls = []
+    async def rpc(_request, **kwargs):
+        calls.append("rpc")
+        (root / "output" / "draft.json").write_text('{}', encoding="utf-8")
+        await kwargs["capture_draft"]()
+        assert events == []
+        (root / "output" / "draft.json").write_text('{"value":1}', encoding="utf-8")
+        if recover_existing == "settled":
+            await kwargs["settled_check"]()
+            pytest.fail("模型结束也必须先等用户决定，不能进入独立核对")
+        (root / "work" / "draft-ready").write_text("ready", encoding="utf-8")
+        await kwargs["capture_draft"]()
+        pytest.fail("初稿之后不应继续执行或验证")
+    monkeypatch.setattr(runtime, "_run_rpc", rpc)
+    if recover_existing is True:
+        (root / "output" / "draft.json").write_text('{"value":1}', encoding="utf-8")
+        (root / "work" / "draft-ready").write_text("ready", encoding="utf-8")
+    events = []
+    async def emit(event):
+        events.append(event)
+    result = await runtime._execute_run(request=request, run_id="r", root=root,
+        output_dir=root / "output", session_dir=root / "sessions", trace_dir=root / "trace",
+        container_name="synthetic", command=(), on_event=emit)
+    assert result.status == RuntimeStatus.NEEDS_INPUT
+    assert Path(result.session_file) == Path("sessions/run.jsonl")
+    assert result.clarification["draft_review_id"]
+    assert result.verification is None
+    assert any((root / "drafts").glob("*/_draft"))
+    assert [item.event_type for item in events] == ["draft.ready"]
+    assert calls == ([] if recover_existing is True else ["rpc"])
+    if recover_existing == "settled":
+        calls.clear()
+        replay = await runtime._execute_run(request=request, run_id="r", root=root,
+            output_dir=root / "output", session_dir=root / "sessions", trace_dir=root / "trace",
+            container_name="synthetic", command=(), on_event=emit)
+        assert replay.status == RuntimeStatus.NEEDS_INPUT and calls == []
+
+
 @pytest.fixture(autouse=True)
 def _execution_authorization():
     with execution_context(ExecutionAuthorization("user-a", 0)):
@@ -1002,9 +1061,11 @@ async def test_pi_cancel_after_restart_revokes_persisted_revision_grants(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("review_waiting", [False, True])
 async def test_pi_resume_without_session_revokes_old_grant_before_restart(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    review_waiting: bool,
 ) -> None:
     broker = ConnectionBroker(
         repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
@@ -1081,6 +1142,12 @@ async def test_pi_resume_without_session_revokes_old_grant_before_restart(
     for name in ("input", "work", "output", "session", "config", "trace"):
         (root / name).mkdir(parents=True, exist_ok=True)
     (root / "input" / "source.txt").write_bytes(source.read_bytes())
+    if review_waiting:
+        from src.agentic_runtime.draft_snapshot import freeze_draft
+        (root / "output" / "result.txt").write_text("合成初稿", encoding="utf-8")
+        freeze_draft(root, owner_id=request.user_id, task_id=request.task_id, revision=1,
+                     run_id="pi_run_missing_session", formats=("txt",))
+        runtime._draft_review_required = lambda _: False
 
     async def image_ready() -> None:
         return None
@@ -1097,7 +1164,7 @@ async def test_pi_resume_without_session_revokes_old_grant_before_restart(
     async def record_event(event: object) -> None:
         events.append(event)
 
-    result = await runtime.resume(
+    resume = runtime.resume(
         request,
         checkpoint=PiRuntimeCheckpoint(
             run_id="pi_run_missing_session",
@@ -1106,8 +1173,13 @@ async def test_pi_resume_without_session_revokes_old_grant_before_restart(
         on_event=record_event,
     )
 
-    assert result is restarted
-    assert getattr(events[0], "event_type") == "runtime.replay_required"
+    if review_waiting:
+        with pytest.raises(PiRuntimeError, match="会话已丢失"):
+            await resume
+        assert events == []
+    else:
+        assert await resume is restarted
+        assert getattr(events[0], "event_type") == "runtime.replay_required"
     with pytest.raises(GrantError, match="已撤销"):
         await broker.relay(
             grant_token=stale.token,
@@ -2473,9 +2545,23 @@ def test_pi_runtime_installs_official_extension_based_context_gate(
     assert "不要尝试联网安装" in system_prompt
     assert "inspect_source" in system_prompt
     assert "freeze_coverage" in system_prompt
+    assert "省略 authorized_scope.unit_ids" in system_prompt
+    assert "用户明确限定的页面仍须严格保留" in system_prompt
     assert "read_evidence" in system_prompt
     assert "propose_completion" in system_prompt
     assert "mangrove-ocr.jsonl" not in system_prompt
+
+
+def test_document_scope_denial_is_not_reported_as_parser_failure() -> None:
+    for tool in ('discover_content', 'read_evidence'):
+        event = PiRuntime._translate_event({
+            'type': 'tool_execution_end', 'toolName': tool, 'isError': True,
+            'result': {'content': [{'type': 'text', 'text': 'HTTP 403: 内容单元超出冻结的获准范围'}]},
+        })
+        assert event.event_type == 'tool.failed'
+        assert event.details['error_code'] == 'DOCUMENT_SCOPE_DENIED'
+        assert '范围不足' in event.summary
+        assert '解析' not in event.summary
 
 
 def test_pi_runtime_writes_frozen_table_output_contract_to_goal(

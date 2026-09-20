@@ -13,6 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import yaml
+import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -21,6 +22,18 @@ from src.config.settings import settings
 from src.conductor.task_spec import DataType, TaskSpec
 import src.memory.templates as tpl
 import src.memory.embeddings as emb
+
+
+@pytest.fixture(autouse=True)
+def isolate_learning_services(monkeypatch):
+    """scripts 不继承 tests/conftest，默认禁用外部召回；专项测试自行注入替身。"""
+    monkeypatch.setattr(settings, "embedding_enabled", False)
+    monkeypatch.setattr(settings, "rerank_base_url", "")
+
+    async def no_live_model(*args, **kwargs):
+        raise AssertionError("学习回归禁止调用真实模型，请注入模拟响应")
+
+    monkeypatch.setattr(tpl, "achat", no_live_model)
 
 
 def _setup_tmp():

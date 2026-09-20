@@ -95,6 +95,29 @@ def test_old_catalog_models_remain_frozen_but_are_not_new_task_choices(tmp_path)
     assert broker.freeze_connection("user-a", saved["connection_id"]).model == "deepseek-v4-flash"
 
 
+@pytest.mark.parametrize("role", ["user", "admin", "super_admin"])
+def test_incorrect_imported_local_model_is_not_current_but_history_remains(tmp_path, role):
+    repository = ModelConnectionRepository(str(migrated_webui_database(tmp_path / "local-catalog.db")))
+    broker = ConnectionBroker(repository=repository, vault=FernetCredentialVault.generate())
+    saved = []
+    for model in ("Qwen3.8-27B-FP8", "Qwen3.8-27B", "Qwen3.6-35B-A3B", "Qwen3.5-35B-A3B", "Qwen3-30B-A3B"):
+        saved.append(repository.create_managed(created_by="admin-a", display_name=model,
+            base_url="http://local.example/v1", model=model, api_format="openai_chat_completions",
+            locality="managed_private", ciphertext=None, key_hint="", verified_at="2026-09-01T00:00:00",
+            preset_version="legacy_imported"))
+    _, client = _client(user_id="admin-a" if role != "user" else "user-a", role=role, broker=broker)
+    items = client.get("/api/model-connections").json()["items"]
+    current = {model["model_id"] for item in items for model in item["models"] if model["current_catalog"]}
+    assert current == {"Qwen3.8-27B", "Qwen3.6-35B-A3B", "Qwen3.5-35B-A3B", "Qwen3-30B-A3B"}
+    assert broker.freeze_connection("user-a", saved[0]["connection_id"]).model == "Qwen3.8-27B-FP8"
+    # 只退役错误的历史导入条目，不禁止未来独立配置同名真实模型。
+    added = repository.create_managed(created_by="admin-a", display_name="独立模型",
+        base_url="http://another.example/v1", model="Qwen3.8-27B-FP8", api_format="openai_chat_completions",
+        locality="managed_private", ciphertext=None, key_hint="", verified_at="2026-09-01T00:00:00")
+    items = client.get("/api/model-connections").json()["items"]
+    assert next(item for item in items if item["connection_id"] == added["connection_id"])["models"][0]["current_catalog"] is True
+
+
 def test_local_default_preference_requires_admin_and_current_configuration(tmp_path):
     broker = ConnectionBroker(
         repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),

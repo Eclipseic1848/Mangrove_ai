@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..auth import get_store, hash_password, registration_allowed, require_admin, role_level
@@ -63,7 +63,7 @@ def create_user(body: AdminUserCreateIn, admin=Depends(require_admin)):
 
 
 @router.patch("/users/{user_id}")
-def update_user(user_id: str, body: AdminUserUpdateIn, admin=Depends(require_admin)):
+def update_user(user_id: str, body: AdminUserUpdateIn, admin=Depends(require_admin), request: Request = None):
     store = get_store()
     target = store.get_user(user_id)
     if not target:
@@ -84,6 +84,16 @@ def update_user(user_id: str, body: AdminUserUpdateIn, admin=Depends(require_adm
         pending=body.pending, password_hash=pwd_hash, display_name=display_name,
         actor_user_id=admin["user_id"],
     )
+    if request is not None:
+        # 只记录角色与开关差异；个人资料和密码仅保留修改事实。
+        request.state.operations_changes = [
+            {"field": label, "before": target.get(key), "after": getattr(body, key)}
+            for key, label in (("role", "角色"), ("disabled", "禁用"), ("pending", "待审批"))
+            if getattr(body, key) is not None and target.get(key) != getattr(body, key)
+        ]
+        for key, label in (("password", "密码"), ("display_name", "昵称")):
+            if getattr(body, key) is not None:
+                request.state.operations_changes.append({"field": label, "before": "不记录", "after": "已修改"})
     return {"ok": True, "user": store.admin_user(user_id)}
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from src.timezone import now as beijing_now
 import hashlib
 import ipaddress
 import json
@@ -295,7 +296,7 @@ class ConnectionBroker:
                     "model_id": model_id,
                     "status": state,
                     "enabled": state == "available",
-                    "verified_at": datetime.now().isoformat(timespec="seconds"),
+                    "verified_at": beijing_now().isoformat(timespec="seconds"),
                     "error_code": error,
                     "usage_status": "reported" if usage else "unknown",
                     "native_usage_json": json.dumps(usage, separators=(",", ":")),
@@ -780,7 +781,7 @@ class ConnectionBroker:
             api_key=api_key,
             model=model,
         )
-        verified_at = datetime.now().isoformat(timespec="seconds")
+        verified_at = beijing_now().isoformat(timespec="seconds")
         return self._repository.upsert_personal(
             owner_user_id=owner_user_id,
             preset_id=preset.preset_id,
@@ -842,7 +843,7 @@ class ConnectionBroker:
                 model_results,
             )
         self._append_pending_models(preset, model_results)
-        verified_at = datetime.now().isoformat(timespec="seconds")
+        verified_at = beijing_now().isoformat(timespec="seconds")
         return self._repository.create_personal(
             owner_user_id=owner_user_id,
             preset_id=preset.preset_id,
@@ -883,7 +884,7 @@ class ConnectionBroker:
         for item in preset.model_catalog:
             if selected is not None and item.model_id not in selected:
                 continue
-            verified_at = datetime.now().isoformat(timespec="seconds")
+            verified_at = beijing_now().isoformat(timespec="seconds")
             try:
                 usage = await self._verify_preset_model(
                     preset=preset,
@@ -1049,7 +1050,7 @@ class ConnectionBroker:
                     status = "available"
                 except ProviderVerificationError as exc:
                     usage, status = {}, exc.code
-                results.append({"model_id": model_id, "display_name": model_id, "catalog_role": "custom", "catalog_version": current["preset_version"] or "custom", "status": status, "enabled": status == "available", "verified_at": datetime.now().isoformat(timespec="seconds"), "error_code": None if status == "available" else status, "usage_status": "reported" if usage else "unknown", "native_usage_json": json.dumps(usage)})
+                results.append({"model_id": model_id, "display_name": model_id, "catalog_role": "custom", "catalog_version": current["preset_version"] or "custom", "status": status, "enabled": status == "available", "verified_at": beijing_now().isoformat(timespec="seconds"), "error_code": None if status == "available" else status, "usage_status": "reported" if usage else "unknown", "native_usage_json": json.dumps(usage)})
                 if status == "result_unknown":
                     break
             state = "verified" if all(item["status"] == "available" for item in results) else "failed"
@@ -1158,7 +1159,7 @@ class ConnectionBroker:
                 "catalog_version": "custom-v1",
                 "status": status,
                 "enabled": status == "available",
-                "verified_at": datetime.now().isoformat(timespec="seconds"),
+                "verified_at": beijing_now().isoformat(timespec="seconds"),
                 "error_code": error_code,
                 "usage_status": "reported" if usage else "unknown",
                 "native_usage_json": json.dumps(usage, separators=(",", ":")),
@@ -1169,7 +1170,7 @@ class ConnectionBroker:
         ]
         if selected_model not in available:
             raise ConnectionValidationError("所选模型验证失败，连接未发布", results)
-        verified_at = datetime.now().isoformat(timespec="seconds")
+        verified_at = beijing_now().isoformat(timespec="seconds")
         return self._repository.create_managed(
             created_by=actor_user_id,
             display_name=name,
@@ -1361,7 +1362,7 @@ class ConnectionBroker:
             )
 
         self._append_pending_models(preset, results)
-        verified_at = datetime.now().isoformat(timespec="seconds")
+        verified_at = beijing_now().isoformat(timespec="seconds")
         return self._repository.create_managed(
             created_by=actor_user_id,
             display_name=name,

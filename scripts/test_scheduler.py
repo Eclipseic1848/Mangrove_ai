@@ -461,7 +461,7 @@ def test_run_task_now_concurrent_guard():
                          trigger_type="cron", cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime(2026, 7, 20, 8, 0))
         svc = SchedulerService(store=store, poll_interval=1.0, runner=lambda *a, **k: None)
-        svc._running_ids.add(tid)  # 模拟 tick() 正在执行该任务
+        svc._running_ids[tid] = 1  # 模拟 tick() 正在执行该任务
         assert asyncio.run(svc.run_task_now(tid)) == "running"
         assert store.get(tid)["run_count"] == 0, "应跳过，不重复执行"
 

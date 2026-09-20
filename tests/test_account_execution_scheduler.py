@@ -17,6 +17,7 @@ def fixture(tmp_path, monkeypatch):
     owner = web.create_user("schedule-fixture", "synthetic-unused")["user_id"]
     monkeypatch.setattr("src.api.auth.get_store", lambda: web)
     store = ScheduleStore(str(migrated_profile_database(tmp_path / "scheduler.db", profile="scheduler")))
+    monkeypatch.setattr('src.api.services._service', SchedulerService(store))
     auth = web.capture_account_execution(owner)
     return web, store, owner, auth
 
@@ -58,7 +59,10 @@ async def test_late_runner_result_after_hold_is_discarded(fixture):
     web.update_user(owner, disabled=True)
     release.set()
     await work
-    assert store.list_runs(task_id) == []
+    run = store.list_runs(task_id)[0]
+    assert run['state'] == 'cancelled'
+    assert run['summary'] == '执行授权已失效，结果未保存'
+    assert not run['report_path'] and not run['json_path']
     assert store.get(task_id)["last_result"] in (None, "")
     assert web.account_execution_binding(owner, "schedule", task_id)["state"] == "paused"
 
@@ -206,7 +210,7 @@ async def test_reconcile_waits_for_actual_return_before_completion(fixture):
     release.set()
     await work
     assert await service.reconcile_account_execution(owner, auth.generation + 1) is True
-    assert store.list_runs(task_id) == []
+    assert store.list_runs(task_id)[0]['state'] == 'cancelled'
 
 
 def test_first_schedule_requires_frozen_owner_and_never_backfills(fixture):
@@ -236,7 +240,8 @@ async def test_denied_safety_boundary_does_not_starve_other_owner(fixture):
 
     await SchedulerService(store, runner=runner).tick(datetime(2026, 9, 6, 1))
     assert len(store.list_runs(other_id)) == 1
-    assert store.list_runs(task_id) == []
+    assert store.list_runs(task_id)[0]['state'] == 'unknown'
+    assert not store.list_runs(task_id)[0]['report_path']
     assert web.account_execution_binding(owner, "schedule", task_id)["state"] == "cleanup_failed"
 
 

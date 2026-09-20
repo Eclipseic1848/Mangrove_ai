@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from src.operations import bind_object
 
 from src.conductor.db_writer import write_items
 from src.config.settings import settings
@@ -25,7 +26,8 @@ def _run_action(action, *args, **kwargs):
 
 
 @router.post("/db")
-async def confirm_db(body: ConfirmIn, user=Depends(get_execution_user)):
+async def confirm_db(body: ConfirmIn, user=Depends(get_execution_user), request: Request = None):
+    bind_object(request, "任务", body.task_id)
     if (settings.db_backend or "sqlite").lower() == "mysql":
         _reject_external_delivery(user)
     with pending_store.claim_action(user["user_id"], body.task_id, "db") as pend:
@@ -41,12 +43,14 @@ async def confirm_db(body: ConfirmIn, user=Depends(get_execution_user)):
 
 
 @router.post("/email")
-async def confirm_email(body: ConfirmIn, user=Depends(get_execution_user)):
+async def confirm_email(body: ConfirmIn, user=Depends(get_execution_user), request: Request = None):
+    bind_object(request, "任务", body.task_id)
     _reject_external_delivery(user)
 
 
 @router.post("/slack")
-async def confirm_slack(body: ConfirmIn, user=Depends(get_execution_user)):
+async def confirm_slack(body: ConfirmIn, user=Depends(get_execution_user), request: Request = None):
+    bind_object(request, "任务", body.task_id)
     _reject_external_delivery(user)
 
 
@@ -62,7 +66,8 @@ def _reject_external_delivery(user):
 
 
 @router.post("/template")
-async def confirm_template(body: ConfirmIn, user=Depends(get_execution_user)):
+async def confirm_template(body: ConfirmIn, user=Depends(get_execution_user), request: Request = None):
+    bind_object(request, "任务", body.task_id)
     with pending_store.claim_action(user["user_id"], body.task_id, "template") as pend, ExitStack() as contexts:
         if not pend or not pend.get("analysis"):
             raise HTTPException(status_code=404, detail="没有可沉淀的模板或已处理")

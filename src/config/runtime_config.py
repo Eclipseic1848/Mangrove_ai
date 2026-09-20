@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Any, Dict, List, Optional
 
 from src.config.settings import settings
@@ -102,7 +103,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     "pdd_cookie": {"label": "拼多多 Cookie", "group": "cookies", "secret": True, "user": True},
     # 邮件
     "smtp_enabled": {
-        "label": "历史邮件开关（不开放发送）", "group": "email", "secret": False, "user": False,
+        "label": "启用邮件通知", "group": "email", "secret": False, "user": False,
         "type": "select", "choices": ["True", "False"],
     },
     "smtp_host": {"label": "SMTP 服务器", "group": "email", "secret": False, "user": False},
@@ -117,10 +118,12 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     # Slack
     "slack_enabled": {
-        "label": "历史 Slack 开关（不开放投递）", "group": "slack", "secret": False, "user": False,
+        "label": "启用 Slack 通知", "group": "slack", "secret": False, "user": False,
         "type": "select", "choices": ["True", "False"],
     },
     "slack_webhook_url": {"label": "Slack Webhook URL", "group": "slack", "secret": True, "user": False},
+    "slack_bot_token": {"label": "Bot Token（发送文件必填）", "group": "slack", "secret": True, "user": False},
+    "slack_channel_id": {"label": "目标频道 ID", "group": "slack", "secret": False, "user": False},
     # 语义召回
     "embedding_enabled": {
         "label": "启用语义召回", "group": "semantic", "secret": False, "user": False,
@@ -203,6 +206,7 @@ USER_KEYS = {k for k, m in REGISTRY.items() if m["user"]}  # 普通用户可按�
 
 # .env/默认值基线（首次 apply 前采集；重置回落到这里）
 _BASELINE: Dict[str, Any] = {}
+_CONFIG_LOCK = threading.RLock()
 
 
 def _snapshot_baseline() -> None:
@@ -222,10 +226,27 @@ def cast_value(key: str, raw: str) -> Any:
             return False
         raise ValueError(f"{key} 须为 true/false")
     if isinstance(base, int) and not isinstance(base, bool):
-        return int(raw)
+        value = int(raw)
+        minimum, maximum = NUMERIC_LIMITS.get(key, (None, None))
+        if minimum is not None and value < minimum or maximum is not None and value > maximum:
+            raise ValueError(f"{REGISTRY[key]['label']} 超出允许范围")
+        return value
     if isinstance(base, float):
         return float(raw)
+    choices = REGISTRY.get(key, {}).get("choices")
+    if choices and raw not in choices:
+        raise ValueError(f"{REGISTRY[key]['label']} 请从可用选项中选择")
     return raw
+
+
+NUMERIC_LIMITS = {
+    "mysql_port": (1, 65535), "smtp_port": (1, 65535),
+    "cookie_health_scan_interval_hours": (1, None),
+    "library_dedup_scan_interval_hours": (1, None),
+    "library_stale_draft_days": (0, None),
+    "library_dedup_scan_max_merges_per_run": (1, None),
+    "data_prep_raw_retention_days": (1, None),
+}
 
 
 def _after_set(key: str) -> None:
@@ -261,24 +282,48 @@ def apply_global_overrides(store) -> int:
 
 def set_global(store, key: str, raw: str, updated_by: str = "") -> None:
     """管理员设置全局覆盖：校验→落库→热生效。"""
-    _snapshot_baseline()
-    if key not in REGISTRY:
-        raise KeyError(f"不支持配置该项: {key}")
-    value = cast_value(key, raw)  # 先校验类型，坏值不落库
-    store.config_set("global", key, raw, updated_by)
-    setattr(settings, key, value)
-    _after_set(key)
+    # 写入与运行态更新共用锁，避免并发保存导致数据库和当前进程取值相反。
+    with _CONFIG_LOCK:
+        _snapshot_baseline()
+        if key not in REGISTRY:
+            raise KeyError(f"不支持配置该项: {key}")
+        value = cast_value(key, raw)  # 先校验类型，坏值不落库
+        store.config_set("global", key, raw, updated_by)
+        setattr(settings, key, value)
+        _after_set(key)
+
+
+def set_global_many(store, values: Dict[str, str], updated_by: str = "") -> None:
+    """只提交已编辑字段；未提交的密钥保留原值。"""
+    # 写入与运行态更新共用锁，避免并发保存导致数据库和当前进程取值相反。
+    with _CONFIG_LOCK:
+        _snapshot_baseline()
+        if not values or len(values) > len(REGISTRY):
+            raise ValueError("请选择需要保存的配置")
+        parsed = {}
+        for key, raw in values.items():
+            if key not in REGISTRY:
+                raise KeyError("不支持配置该项")
+            if not raw.strip():
+                raise ValueError(f"{REGISTRY[key]['label']} 不能为空；恢复默认请使用恢复操作")
+            parsed[key] = cast_value(key, raw)
+        store.config_set_many("global", values, updated_by)
+        for key, value in parsed.items():
+            setattr(settings, key, value)
+            _after_set(key)
 
 
 def reset_global(store, key: str) -> None:
     """删除全局覆盖，恢复 .env/默认基线。"""
-    _snapshot_baseline()
-    if key not in REGISTRY:
-        raise KeyError(f"不支持配置该项: {key}")
-    store.config_delete("global", key)
-    if key in _BASELINE:
-        setattr(settings, key, _BASELINE[key])
-    _after_set(key)
+    # 写入与运行态更新共用锁，避免并发保存导致数据库和当前进程取值相反。
+    with _CONFIG_LOCK:
+        _snapshot_baseline()
+        if key not in REGISTRY:
+            raise KeyError(f"不支持配置该项: {key}")
+        store.config_delete("global", key)
+        if key in _BASELINE:
+            setattr(settings, key, _BASELINE[key])
+        _after_set(key)
 
 
 def mask_value(key: str, raw: Optional[str]) -> str:
@@ -333,7 +378,10 @@ def describe(store) -> List[Dict[str, Any]]:
                 "user_editable": meta["user"],
                 "source": "override" if overridden else "env",
                 "value": mask_value(key, "" if cur is None else str(cur)),
+                "default_value": mask_value(key, "" if _BASELINE.get(key) is None else str(_BASELINE[key])),
             }
+            if key in NUMERIC_LIMITS:
+                entry.update(type="number", minimum=NUMERIC_LIMITS[key][0], maximum=NUMERIC_LIMITS[key][1])
             # 下拉选择型配置：透传 type/choices/choicesFrom 给前端渲染下拉
             if meta.get("type") == "select":
                 entry["type"] = "select"

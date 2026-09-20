@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import json
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -11,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from src.scheduler import Schedule, TASK_TEMPLATES, compute_next_run, parse_schedule
+from src.operations import bind_object
 
 from ..auth import get_current_user, get_execution_user
 from src.account_execution import ExecutionDenied
@@ -36,6 +38,16 @@ def _trigger_to_schedule_str(trigger: TriggerIn) -> str:
 def list_templates(user=Depends(get_current_user)) -> List[Dict[str, Any]]:
     """自动化任务模板（场景化预设），供任务中心「添加自动化」时快速预填。"""
     return TASK_TEMPLATES
+
+
+@router.get('/scheduler/status')
+def scheduler_status(user=Depends(get_current_user)):
+    from src.config.settings import settings
+    service = get_scheduler_service()
+    return {'enabled': settings.scheduler_enabled,
+            'running': service.polling,
+            'last_poll_at': service.last_poll_at, 'poll_interval_seconds': service.poll_interval,
+            'time_zone': 'Asia/Shanghai'}
 
 
 @router.get("/runs/recent")
@@ -65,6 +77,12 @@ def recent_runs(
             "task_name": r.get("task_name") or (r.get("task_user_input") or "")[:30],
             "run_at": r["run_at"],
             "success": bool(r["success"]),
+            "state": ('unknown' if r.get('state') == 'running' and not get_scheduler_service().is_running(r['task_id'], r['run_id'])
+                      else r.get('state') or ('succeeded' if r['success'] else 'failed')),
+            "started_at": r.get('started_at'), "ended_at": r.get('ended_at'),
+            "provider": r.get('provider'), "model": r.get('model'),
+            "notification": json.loads(r['notification_json']) if r.get('notification_json') else None,
+            "usage": json.loads(r['usage_json']) if r.get('usage_json') else None,
             "summary": (r["summary"] or "")[:200],
             "has_report": bool(r["report_path"]),
             "has_json": bool(r["json_path"]),
@@ -76,11 +94,14 @@ def recent_runs(
 
 @router.get("")
 def list_tasks(user=Depends(get_current_user)) -> List[Dict[str, Any]]:
-    return get_schedule_store().list_active(owner_user_id=user["user_id"])
+    store = get_schedule_store()
+    service = get_scheduler_service()
+    return [{**task, **store.execution_status(task, running=service.is_running(task['task_id']))}
+            for task in store.list_active(owner_user_id=user["user_id"])]
 
 
 @router.post("", openapi_extra={"x-mangrove-task-control": True})
-def create_task(body: ScheduleIn, user=Depends(get_execution_user)):
+def create_task(body: ScheduleIn, user=Depends(get_execution_user), request: Request = None):
     with pending_store.claim_action(user["user_id"], body.task_id, "schedule") as pend:
         if not pend:
             raise HTTPException(status_code=404, detail="没有待创建的定时任务或已处理")
@@ -97,17 +118,22 @@ def create_task(body: ScheduleIn, user=Depends(get_execution_user)):
                 owner_user_id=user["user_id"],
                 name=(pend.get("intent") or user_input)[:30] or None,
                 source="auto",
+                interval_seconds=sched.interval_seconds,
+                model_connection_id=pend.get("model_connection_id"),
+                model_connection_version=pend.get("model_connection_version"),
             )
         except (HTTPException, ExecutionDenied):
             raise
         except Exception as e:  # noqa: BLE001
             raise HTTPException(status_code=500, detail=f"创建定时任务失败：{e}")
+        bind_object(request, "计划", sched_id)
         return {"ok": True, "task_id": sched_id, "next_run_at": next_run.isoformat(timespec="minutes")}
 
 
 @router.post("/manual", openapi_extra={"x-mangrove-task-control": True})
-def create_manual_task(body: ManualTaskIn, user=Depends(get_execution_user)):
+def create_manual_task(body: ManualTaskIn, user=Depends(get_execution_user), request: Request = None):
     """手动创建自动化任务（含从模板创建：template_id 非空则 source 记 template）。"""
+    model_binding = _selected_model(body, user)
     try:
         sched = parse_schedule(_trigger_to_schedule_str(body.trigger))
     except ValueError as e:
@@ -116,14 +142,40 @@ def create_manual_task(body: ManualTaskIn, user=Depends(get_execution_user)):
     if next_run is None:
         raise HTTPException(status_code=422, detail="该计划的执行时间已过或无后续，未创建")
     sched_id = get_schedule_store().add(
-        user_input=body.prompt, provider=body.provider, model=body.model,
+        user_input=body.prompt, **model_binding,
         trigger_type=sched.trigger_type, cron_expr=sched.cron_expr, run_at=sched.run_at,
         next_run_at=next_run, owner_user_id=user["user_id"],
         name=body.name, source="template" if body.template_id else "manual",
         interval_seconds=sched.interval_seconds,
         start_date=body.start_date, end_date=body.end_date,
     )
+    bind_object(request, "计划", sched_id)
     return {"ok": True, "task_id": sched_id, "next_run_at": next_run.isoformat(timespec="minutes")}
+
+
+def _selected_model(body: ManualTaskIn, user: dict) -> dict:
+    from ..auth import is_admin_role
+    from src.model_connections import get_default_broker
+    if not body.model or not body.model_connection_id:
+        raise HTTPException(status_code=422, detail="请选择执行模型，不能隐式使用平台默认模型")
+    if body.model_connection_id == '__local__':
+        from src.llm.provider import list_models
+        if not is_admin_role(user.get('role')) or body.model not in list_models().get('local', []):
+            raise HTTPException(status_code=422, detail="本地模型不可用或无权使用")
+        return {'provider': 'local', 'model': body.model}
+    broker = get_default_broker()
+    connection = next((item for item in broker.list_connections(user['user_id'])
+                       if item['connection_id'] == body.model_connection_id), None)
+    if not connection or connection['status'] != 'verified' or not any(
+        item['model_id'] == body.model and item.get('enabled') and item.get('status') == 'available'
+        and item.get('current_catalog') is not False for item in connection.get('models', [])
+    ):
+        raise HTTPException(status_code=422, detail="所选模型不可用，请刷新模型列表")
+    if connection.get('locality') not in ('managed_private', 'local') and not body.external_api_confirmed:
+        raise HTTPException(status_code=422, detail="请确认允许该计划使用所选云端模型处理任务资料")
+    binding = broker.freeze_connection(user['user_id'], body.model_connection_id)
+    return {'provider': connection.get('preset_id') or 'openai', 'model': body.model,
+            'model_connection_id': binding.connection_id, 'model_connection_version': binding.connection_version}
 
 
 async def _mark_schedule_resume(request: Request):
@@ -144,6 +196,8 @@ def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_execution_use
         if body.status == "paused":
             store.set_status(sched_id, "paused")
             return {"ok": True}
+        if task.get('time_zone') != 'Asia/Shanghai':
+            raise HTTPException(status_code=409, detail="历史时区未记录，请核对北京时间后重新创建计划")
         # 恢复：原定时刻可能已过去，需重算 next_run_at
         cur_sched = Schedule(
             trigger_type=task["trigger_type"], cron_expr=task.get("cron_expr"),
@@ -158,11 +212,20 @@ def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_execution_use
         store.set_status(sched_id, "active", next_run_at=next_run)
         return {"ok": True}
 
+    if task.get('time_zone') != 'Asia/Shanghai':
+        raise HTTPException(status_code=409, detail="历史时区未记录，原计划保持不变；请按北京时间重新创建")
     # 整体编辑：未传的字段沿用旧值
     name = body.name if body.name is not None else task.get("name")
     user_input = body.prompt if body.prompt is not None else task["user_input"]
     provider = body.provider if body.provider is not None else task.get("provider")
     model = body.model if body.model is not None else task.get("model")
+    model_binding = _selected_model(body, user) if body.model_connection_id else None
+    if model_binding:
+        if get_scheduler_service().is_running(sched_id):
+            raise HTTPException(status_code=409, detail="任务执行中，请完成后再更换模型")
+        provider, model = model_binding['provider'], model_binding['model']
+    elif provider != task.get('provider') or model != task.get('model'):
+        raise HTTPException(status_code=422, detail="更换模型时必须明确选择可用模型连接")
     start_date = body.start_date if body.start_date is not None else task.get("start_date")
     end_date = body.end_date if body.end_date is not None else task.get("end_date")
 
@@ -187,6 +250,7 @@ def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_execution_use
         trigger_type=sched.trigger_type, cron_expr=sched.cron_expr,
         interval_seconds=sched.interval_seconds, run_at=sched.run_at,
         next_run_at=next_run, start_date=start_date, end_date=end_date,
+        model_binding=model_binding,
     )
     return {"ok": True, "next_run_at": next_run.isoformat(timespec="minutes")}
 
@@ -195,12 +259,12 @@ def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_execution_use
 async def run_task_now_endpoint(sched_id: str, user=Depends(get_execution_user)):
     """立即执行一次，不影响原定 next_run_at/status。"""
     _owned_task(sched_id, user)
-    outcome = await get_scheduler_service().run_task_now(sched_id)
+    outcome = await get_scheduler_service().run_task_now(sched_id, background=True)
     if outcome == "not_found":
         raise HTTPException(status_code=404, detail="任务不存在")
     if outcome == "running":
         raise HTTPException(status_code=409, detail="任务正在执行中，请稍候")
-    return {"ok": True, "started": True}
+    return {"ok": True, "started": True, **outcome}
 
 
 @router.get("/{sched_id}/report")

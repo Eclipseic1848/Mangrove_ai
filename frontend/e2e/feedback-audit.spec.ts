@@ -13,7 +13,114 @@ async function setup(page: Page, handler: (route: Route) => Promise<void>, ident
   });
   await page.goto("/feedback");
 }
-const open = async (page: Page, index = 0) => page.getByRole("button", { name: "审计查看业务内容", exact: true }).nth(index).click();
+const open = async (page: Page, index = 0) => page.getByRole("button", { name: "查看反馈详情", exact: true }).nth(index).click();
+
+for (const width of [1440, 390]) test(`原任务真实内容与完整文件入口 ${width}`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 900 });
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await setup(page, async route => {
+    if (route.request().url().endsWith('/task-context')) {
+      const body = route.request().postDataJSON();
+      if (body.action === 'message') return route.fulfill({ json: { text: '用户要求：按部门核对每笔订单，不是状态摘要。', total: 25, offset: 0 } });
+      if (body.action === 'preview') return route.fulfill({ json: { kind: 'text', text: '实际结果：财务部 订单001 金额100', total: 22, offset: 0 } });
+      if (body.action === 'download') return route.fulfill({ contentType: 'application/octet-stream', body: '完整结果' });
+      return route.fulfill({ json: { revision: 2, total: 1, messages: [{ id: 'objective', role: 'user', created_at: '2026-09-20T00:00:00Z', evaluated: false }], files: [{ id: 'output:1', kind: 'output', name: '完整结果.json' }] } });
+    }
+    if (route.request().method() === 'POST') return route.fulfill({ json: result() });
+    return route.fulfill({ json: { items: [item()], total: 1 } });
+  });
+  await open(page);
+  await page.getByLabel('查看原因').fill('核对原始需求和实际结果');
+  await page.getByRole('button', { name: '提交审计并查看' }).click();
+  await page.getByRole('button', { name: '查看原任务', exact: true }).click();
+  await page.getByRole('button', { name: '查看内容', exact: true }).click();
+  await expect(page.getByText('用户要求：按部门核对每笔订单，不是状态摘要。', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '预览', exact: true }).click();
+  await expect(page.getByText('实际结果：财务部 订单001 金额100', { exact: true })).toBeVisible();
+  const download = page.waitForEvent('download');
+  await page.getByRole('button', { name: '下载完整原件', exact: true }).click();
+  expect((await download).suggestedFilename()).toBe('完整结果.json');
+  await page.screenshot({ path: testInfo.outputPath('actual-task.png'), fullPage: true });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(errors).toEqual([]);
+  await page.getByRole('button', { name: '收起原任务' }).click();
+  await expect(page.getByText('实际结果：财务部 订单001 金额100', { exact: true })).toHaveCount(0);
+});
+
+test('原任务收起后晚到正文不能恢复或覆盖重新打开的内容', async ({ page }) => {
+  let held: Route | undefined;
+  await setup(page, async route => {
+    if (route.request().url().endsWith('/task-context')) {
+      if (route.request().postDataJSON().action === 'message') { held = route; return; }
+      return route.fulfill({ json: { total: 1, messages: [{ id: 'q', role: 'user', created_at: '2026-09-20T00:00:00Z' }], files: [] } });
+    }
+    if (route.request().method() === 'POST') return route.fulfill({ json: result() });
+    return route.fulfill({ json: { items: [item()], total: 1 } });
+  });
+  await open(page);
+  await page.getByLabel('查看原因').fill('核对原始需求和实际结果');
+  await page.getByRole('button', { name: '提交审计并查看' }).click();
+  await page.getByRole('button', { name: '查看原任务', exact: true }).click();
+  await page.getByRole('button', { name: '查看内容', exact: true }).click();
+  await expect.poll(() => !!held).toBe(true);
+  await page.getByRole('button', { name: '收起原任务' }).click();
+  await page.getByRole('button', { name: '查看原任务', exact: true }).click();
+  await held!.fulfill({ json: { text: '晚到的私人正文', total: 8, offset: 0 } });
+  await expect(page.getByRole('button', { name: '查看内容', exact: true })).toBeEnabled();
+  await expect(page.getByText('晚到的私人正文')).toHaveCount(0);
+});
+
+test('点踩率按平台任务口径，用户名查询与北京时间显示一致', async ({ page }) => {
+  const queries: string[] = [];
+  await setup(page, route => { queries.push(route.request().url()); return route.fulfill({ json: { items: [{ ...item(), created_at: '2026-09-18T17:00:00Z' }], total: 1 } }); });
+  await page.route('**/api/feedback/overview', route => route.fulfill({ json: { total_tasks: 10, total_up: 1, total_down: 3, total_pending: 4, down_rate: .3, reason_counts: {}, daily: [] } }));
+  await page.getByRole('button', { name: '刷新', exact: true }).click();
+  await expect(page.getByText('30.0%', { exact: true })).toBeVisible();
+  await expect(page.getByText('2026/09/19 01:00:00', { exact: true })).toBeVisible();
+  await page.getByLabel('用户名、昵称或用户ID').fill('owner');
+  await expect.poll(() => new URL(queries.at(-1)!).searchParams.get('q')).toBe('owner');
+});
+
+test('删除末页会回退并区分加载失败与空数据', async ({ page }) => {
+  let total = 11;
+  let failed = false;
+  await setup(page, async route => {
+    if (route.request().method() === 'DELETE') { total--; return route.fulfill({ json: { ok: true } }); }
+    if (failed) return route.fulfill({ status: 503, json: { detail: '暂不可用' } });
+    const offset = Number(new URL(route.request().url()).searchParams.get('offset'));
+    return route.fulfill({ json: { total, items: Array.from({ length: Math.max(0, Math.min(10, total - offset)) }, (_, i) => item(offset + i + 1)) } });
+  });
+  await page.getByRole('button', { name: '2', exact: true }).click();
+  await expect(page.getByTitle('删除', { exact: true })).toHaveCount(1);
+  await page.getByTitle('删除', { exact: true }).click();
+  await page.getByRole('alertdialog').getByRole('button', { name: '删除', exact: true }).click();
+  await expect(page.getByText('@owner-1（owner-1）', { exact: true })).toBeVisible();
+  failed = true;
+  await page.getByRole('button', { name: '刷新', exact: true }).click();
+  await expect(page.getByRole('alert')).toContainText('反馈加载失败');
+  await expect(page.getByText('暂无反馈数据。', { exact: true })).toHaveCount(0);
+});
+
+for (const rating of ['up', 'down']) test(`反馈详情展示原始任务与评价 ${rating}`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: rating === 'up' ? 1440 : 390, height: 900 });
+  await setup(page, async route => {
+    if (route.request().method() === 'POST') return route.fulfill({ json: { ...result(), context: { task_id: 'task', revision: 2, result_id: 'delivery' }, content: { ...result().content, original_task: '请整理订单并标出重复项', task_title: '订单整理', result_preview: '订单001：金额100，重复项2条', comment: rating === 'up' ? null : '重复项没有标出' } } });
+    return route.fulfill({ json: { items: [{ ...item(), rating }], total: 1 } });
+  });
+  await page.getByRole('button', { name: '查看反馈详情', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText(rating === 'up' ? '点赞' : '点踩');
+  await expect(page.getByText('请整理订单并标出重复项')).toHaveCount(0);
+  await page.getByLabel('查看原因').fill('分析反馈并改善回答质量');
+  await page.getByRole('button', { name: '提交审计并查看' }).click();
+  await expect(page.getByText('请整理订单并标出重复项', { exact: true })).toBeVisible();
+  await expect(page.getByText('订单整理', { exact: true })).toBeVisible();
+  await expect(page.getByText(rating === 'up' ? '用户未填写补充说明' : '重复项没有标出', { exact: true })).toBeVisible();
+  await expect(page.getByText('正文回答-1', { exact: true })).toBeVisible();
+  await expect(page.getByText('订单001：金额100，重复项2条', { exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath('feedback-detail.png'), fullPage: true });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
 
 test("元数据列表原因先行，单次审计成功后才显示正文与事件号，关闭清理", async ({ page }) => {
   let request: Route | undefined;
@@ -32,6 +139,7 @@ test("元数据列表原因先行，单次审计成功后才显示正文与事�
   expect(request!.request().postDataJSON()).toMatchObject({ reason: "核对反馈处理情况", idempotency_key: expect.any(String) });
   await request!.fulfill({ json: result() });
   await expect(page.getByText("正文问题-1", { exact: true })).toBeVisible();
+  await page.getByText('访问记录与任务编号', { exact: true }).click();
   await expect(page.getByText(/审计事件：event-1/)).toBeVisible();
   await page.keyboard.press("Escape");
   await open(page);
@@ -107,30 +215,28 @@ test("关闭在途A再打开B，A迟到不覆盖B正文或原因", async ({ page
   await expect(page.getByText("正文问题-2", { exact: true })).toBeVisible();
   await first!.fulfill({ json: result() });
   await expect(page.getByText("正文问题-1")).toHaveCount(0);
+  await page.getByText('访问记录与任务编号', { exact: true }).click();
   await expect(page.getByText(/审计事件：event-2/)).toBeVisible();
 });
 
-test("只改状态保留旧备注，编辑与显式清除备注先经单条审计", async ({ page }) => {
+test("列表不提供快捷处理，编辑与显式清除备注先经单条审计", async ({ page }) => {
   const patches: unknown[] = [];
   await setup(page, async (route) => {
     if (route.request().method() === "PATCH") { patches.push(route.request().postDataJSON()); return route.fulfill({ json: { ok: true } }); }
     if (route.request().method() === "POST") return route.fulfill({ json: result() });
     return route.fulfill({ json: { items: [item()], total: 1 } });
   });
-  await page.getByTitle("标记已处理", { exact: true }).click();
-  await expect.poll(() => patches.length).toBe(1);
-  await page.getByTitle("标记忽略", { exact: true }).click();
-  await expect.poll(() => patches.length).toBe(2);
-  expect(patches).toEqual([{ status: "resolved" }, { status: "ignored" }]);
-  await open(page);
+  await expect(page.getByTitle("标记已处理", { exact: true })).toHaveCount(0);
+  await page.getByRole('button', { name: '查看反馈详情', exact: true }).click();
+  expect(patches).toEqual([]);
   await expect(page.getByLabel(/处理备注/)).toHaveCount(0);
   await page.getByLabel("查看原因").fill("核对并清除处理备注");
   await page.getByRole("button", { name: "提交审计并查看" }).click();
   await expect(page.getByLabel(/处理备注/)).toHaveValue("旧处理备注");
   await page.getByLabel(/处理备注/).fill("");
   await page.getByRole("button", { name: "保存备注" }).click();
-  await expect.poll(() => patches.length).toBe(3);
-  expect(patches[2]).toEqual({ admin_note: null });
+  await expect.poll(() => patches.length).toBe(1);
+  expect(patches[0]).toEqual({ admin_note: null });
 });
 
 test("CSV沿用当前筛选，实际下载只包含元数据", async ({ page }) => {
@@ -145,7 +251,7 @@ test("CSV沿用当前筛选，实际下载只包含元数据", async ({ page }) 
   await page.getByRole("combobox").nth(0).selectOption("pending");
   await page.getByRole("combobox").nth(1).selectOption("down");
   await page.getByRole("combobox").nth(2).selectOption("其他");
-  await page.getByPlaceholder("用户名").fill("owner-1");
+  await page.getByLabel("用户名、昵称或用户ID").fill("owner-1");
   const download = page.waitForEvent("download");
   await page.getByRole("button", { name: "导出元数据 CSV" }).click();
   const file = await download;
@@ -153,7 +259,7 @@ test("CSV沿用当前筛选，实际下载只包含元数据", async ({ page }) 
   const chunks: Buffer[] = [];
   for await (const chunk of stream!) chunks.push(chunk);
   expect(Buffer.concat(chunks).toString("utf8")).toBe("id,rating,status\n1,down,pending\n");
-  expect(Object.fromEntries(new URL(exported).searchParams)).toEqual({ status: "pending", rating: "down", reason: "其他", user_id: "owner-1" });
+  expect(Object.fromEntries(new URL(exported).searchParams)).toEqual({ status: "pending", rating: "down", reason: "其他", q: "owner-1" });
 });
 
 test("旧筛选迟到不覆盖新列表，刷新重新加载明细", async ({ page }) => {
@@ -204,7 +310,7 @@ for (const change of [{ user_id: "admin-b", role: "admin" }, { user_id: "admin-a
     if (change.role !== "user") {
       await open(page);
       await expect(page.getByLabel("查看原因")).toHaveValue("");
-    } else await expect(page.getByRole("button", { name: "审计查看业务内容" })).toHaveCount(0);
+    } else await expect(page.getByRole("button", { name: "查看反馈详情" })).toHaveCount(0);
   });
 }
 
@@ -212,7 +318,7 @@ test("普通用户无反馈管理正文入口", async ({ page }) => {
   let reads = 0;
   await setup(page, async (route) => { reads++; return route.fulfill({ status: 403, json: {} }); }, { ...actor, role: "user" });
   await expect(page).not.toHaveURL(/\/feedback$/);
-  await expect(page.getByRole("button", { name: "审计查看业务内容" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "查看反馈详情" })).toHaveCount(0);
   expect(reads).toBe(0);
 });
 
@@ -240,7 +346,7 @@ test("超级管理员同样先审计，截断备注只读且正文不写持久�
   expect(storage).not.toContain("核对截断");
   await page.getByRole("button", { name: "关闭", exact: true }).focus();
   await page.keyboard.press("Tab");
-  await expect(page.getByLabel(/处理备注/)).toBeFocused();
+  await expect(page.getByText('访问记录与任务编号', { exact: true })).toBeFocused();
   await page.keyboard.press("Escape");
-  await expect(page.getByRole("button", { name: "审计查看业务内容", exact: true })).toBeFocused();
+  await expect(page.getByRole("button", { name: "查看反馈详情", exact: true })).toBeFocused();
 });

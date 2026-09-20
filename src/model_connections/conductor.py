@@ -12,7 +12,7 @@ from src.model_connections.text_protocol import structured_request, response_tex
 
 
 @contextmanager
-def conductor_connection(*, owner_id, connection_id, connection_version, model, task_id, run_id):
+def conductor_connection(*, owner_id, connection_id, connection_version, model, task_id, run_id, revision=1):
     broker = get_default_broker()
     failure = []
 
@@ -23,7 +23,7 @@ def conductor_connection(*, owner_id, connection_id, connection_version, model, 
         try:
             grant = broker.issue_grant(
                 owner_user_id=owner_id, connection_id=connection_id, connection_version=connection_version,
-                model_id=model, task_id=task_id, revision=1, run_id=run_id,
+                model_id=model, task_id=task_id, revision=revision, run_id=run_id,
                 purpose="agent_inference", ttl_seconds=300,
             )
             system = "\n".join(str(message["content"]) for message in messages if message["role"] == "system")

@@ -20,6 +20,7 @@ import json
 import logging
 import threading
 from datetime import datetime
+from src.timezone import now as beijing_now
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -70,7 +71,7 @@ def _load_templates_from_disk() -> List[Dict]:
         if parsed is None:
             continue  # 无 frontmatter（如 README.md）跳过
         meta, body = parsed
-        if not body or not valid_entry({**meta, "body": body}):
+        if not isinstance(meta, dict) or not body or not valid_entry({**meta, "body": body}):
             continue
         kws = meta.get("keywords") or []
         if isinstance(kws, str):
@@ -109,10 +110,23 @@ def _candidates(spec: TaskSpec, *, owner_id: str | None = None) -> List[Dict]:
 
 def _match_keyword(spec: TaskSpec, *, owner_id: str | None = None) -> Optional[Dict]:
     """关键词匹配：至少一个关键词出现在 intent/keywords，取命中数最多者；都不命中返回 None。"""
-    haystack = ((spec.intent or "") + " " + " ".join(spec.keywords or [])).lower()
+    return match_template_keywords(
+        (spec.intent or "") + " " + " ".join(spec.keywords or []),
+        spec.data_type.value, owner_id=owner_id, include_untyped=True,
+    )
+
+
+def match_template_keywords(intent: str, data_type: str, *, owner_id: str | None = None,
+                            include_untyped: bool = False) -> Optional[Dict]:
+    """本地匹配共享给工作台；未授权额外网络调用时不请求 embedding 服务。"""
+    haystack = intent.lower()
     best: Optional[Dict] = None
     best_score = 0
-    for t in _candidates(spec, owner_id=owner_id):
+    for t in load_templates(owner_id=owner_id):
+        if t.get("status") == "retired" or not (
+            t["data_type"] == data_type or (include_untyped and not t["data_type"])
+        ):
+            continue
         score = sum(1 for k in t["keywords"] if k.lower() in haystack)
         if score > best_score:
             best, best_score = t, score
@@ -543,7 +557,7 @@ async def save_template(title: str, data_type: str, keywords: List[str], body: s
             "status": "draft",
             "uses": 0,
             "quality_avg": 0,
-            "created_at": datetime.now().isoformat(),
+            "created_at": beijing_now().isoformat(),
         }
         front = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).strip()
         execution_checkpoint()

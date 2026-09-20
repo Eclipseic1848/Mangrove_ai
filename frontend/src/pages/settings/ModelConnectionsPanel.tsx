@@ -995,7 +995,7 @@ export function ModelConnectionsPanel({ isManager, initialScope = "platform" }: 
   );
 
   return (
-    <div className="space-y-5">
+    <div data-guide-loading={loading ? "true" : undefined} className="space-y-5">
       <Joyride
         run={tourRun}
         continuous

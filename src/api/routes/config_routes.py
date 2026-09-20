@@ -12,11 +12,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 from src.config import runtime_config as rc
@@ -32,6 +33,10 @@ logger = logging.getLogger(__name__)
 
 class ConfigValueIn(BaseModel):
     value: str
+
+
+class ConfigBatchIn(BaseModel):
+    values: dict[str, str]
 
 
 class VerifyIn(BaseModel):
@@ -66,15 +71,46 @@ def list_models(user=Depends(get_current_user)):
 
 
 # ---------- 管理员：全局配置 ----------
+@contextmanager
+def _audit_config_changes(request, keys):
+    # 与既有运行态写锁共用边界，避免并发保存导致前后值错配。
+    with rc._CONFIG_LOCK:
+        before = {}
+        for key in keys:
+            meta = rc.REGISTRY.get(key)
+            if not meta:
+                continue
+            value = None if meta["secret"] else getattr(settings, key, None)
+            before[key] = value if isinstance(value, (bool, int, float)) else None
+        yield
+        if request is not None:
+            request.state.operations_changes = [
+                {"field": rc.REGISTRY[key]["label"], "before": value if value is not None else "不记录",
+                 "after": getattr(settings, key) if value is not None else "已修改"}
+                for key, value in before.items()
+            ]
+
+
 @router.get("")
 def list_config(admin=Depends(require_admin)):
     return {"groups": rc.describe(get_store())}
 
 
-@router.put("/{key}")
-def set_config(key: str, body: ConfigValueIn, admin=Depends(require_admin)):
+@router.put("/batch")
+def set_config_batch(body: ConfigBatchIn, admin=Depends(require_admin), request: Request = None):
     try:
-        rc.set_global(get_store(), key, body.value, updated_by=admin["user_id"])
+        with _audit_config_changes(request, body.values):
+            rc.set_global_many(get_store(), body.values, updated_by=admin["user_id"])
+    except (KeyError, ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True}
+
+
+@router.put("/{key}")
+def set_config(key: str, body: ConfigValueIn, admin=Depends(require_admin), request: Request = None):
+    try:
+        with _audit_config_changes(request, [key]):
+            rc.set_global(get_store(), key, body.value, updated_by=admin["user_id"])
     except KeyError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except (ValueError, TypeError) as e:
@@ -83,9 +119,10 @@ def set_config(key: str, body: ConfigValueIn, admin=Depends(require_admin)):
 
 
 @router.delete("/{key}")
-def reset_config(key: str, admin=Depends(require_admin)):
+def reset_config(key: str, admin=Depends(require_admin), request: Request = None):
     try:
-        rc.reset_global(get_store(), key)
+        with _audit_config_changes(request, [key]):
+            rc.reset_global(get_store(), key)
     except KeyError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"ok": True, "key": key, "source": "env"}
@@ -352,8 +389,9 @@ async def _verify_target(target: str) -> str:
         await asyncio.to_thread(verify_connection)
         return "SMTP 连接并登录成功（未发送邮件）"
     if target == "slack":
-        from src.external_readonly import reject_external_write
-        reject_external_write()
+        from src.conductor.slack_sender import verify_connection
+        await verify_connection()
+        return "Slack 身份验证成功（未发送消息；未验证频道与文件权限）"
     if target == "semantic":
         from src.memory.embeddings import embed_texts_with_model, is_rerank_configured, rerank_scores
         got = await asyncio.to_thread(embed_texts_with_model, ["连通验证"])
@@ -362,7 +400,9 @@ async def _verify_target(target: str) -> str:
         msg = f"embedding 可用（{got[0]}）"
         if is_rerank_configured():
             scores = await asyncio.to_thread(rerank_scores, "连通验证", ["连通验证"])
-            msg += "；rerank 可用" if scores else "；rerank 不可用"
+            if not scores:
+                raise RuntimeError("embedding 可用；已配置的 rerank 不可用，组合检查未通过")
+            msg += "；rerank 可用"
         return msg
     if target == "mysql":
         import pymysql

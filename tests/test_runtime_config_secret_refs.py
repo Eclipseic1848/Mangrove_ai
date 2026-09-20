@@ -65,7 +65,8 @@ def _upgrade(database: Path, revision: str) -> None:
 def test_webui_0004_freezes_secret_keys_and_does_not_import_runtime_helpers() -> None:
     revision_source = Path(webui_0004.__file__).read_text(encoding="utf-8")
 
-    assert webui_0004._RUNTIME_CONFIG_SECRET_KEYS == RUNTIME_CONFIG_SECRET_KEYS
+    # 旧迁移冻结原有键；新增 Token 从首次保存起就使用 SecretRef，无明文历史迁移。
+    assert RUNTIME_CONFIG_SECRET_KEYS - webui_0004._RUNTIME_CONFIG_SECRET_KEYS == {"slack_bot_token"}
     assert "src.config.secret_refs" not in revision_source
 
 
@@ -369,7 +370,7 @@ def test_webui_0004_migrates_legacy_plaintext_and_backup_has_no_plaintext(
     backup = tmp_path / "webui-after-secretref.db"
     shutil.copy2(database, backup)
     # 先冻结 webui_0004 专属备份，再升到当前头供 Repository 失败关闭门使用。
-    _upgrade(database, "webui_0018")
+    _upgrade(database, "webui_0019")
 
     store = WebUIStore(str(database))
     assert store.config_all("global")["smtp_password"] == "legacy-smtp-secret-4400"
@@ -392,7 +393,7 @@ def test_webui_0004_migrates_legacy_plaintext_and_backup_has_no_plaintext(
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("webui_0018",)
+        ).fetchone() == ("webui_0019",)
         values = {
             row[0]
             for row in connection.execute(

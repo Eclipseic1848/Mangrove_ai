@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 import threading
 import time
 import uuid
@@ -20,6 +21,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from src.database_migrations import DatabaseTarget, inspect_database
 from src import account_execution as execution
+from src.timezone import now as beijing_now, wall_time
 
 
 def _iso(dt: Optional[datetime]) -> Optional[str]:
@@ -54,7 +56,7 @@ class ScheduleStore:
             conn.close()
 
     @contextmanager
-    def _execution_write(self, task_id: str, *, resume: bool = False):
+    def _execution_write(self, task_id: str, *, resume: bool = False, idle_only: bool = False):
         from src.api.auth import get_store
 
         auth = execution.current_authorization()
@@ -62,6 +64,8 @@ class ScheduleStore:
         # 锁序固定为 WebUI → scheduler；读取旧绑定，不从当前账号补领授权。
         with web.account_execution_transaction(auth) as web_conn:
             binding = execution._binding(web_conn, auth.owner_user_id, "schedule", task_id)
+            if idle_only and binding and binding['state'] != 'idle':
+                raise execution.ExecutionDenied('执行尚未结束，暂不能编辑计划')
             if resume and binding and binding["state"] == "paused":
                 execution.resume_execution(web_conn, auth, "schedule", task_id,
                                            expected_generation=binding["generation"], now=time.time())
@@ -78,6 +82,8 @@ class ScheduleStore:
         from src.api.auth import get_store
 
         web = get_store()
+        if expected_task.get('time_zone') != 'Asia/Shanghai':
+            raise execution.ExecutionDenied('历史时区未记录，请核对北京时间后重新创建计划')
         if manual:
             # 手动操作只能使用请求冻结的授权，不能借用后来恢复的账号代数。
             auth = execution.current_authorization()
@@ -147,12 +153,14 @@ class ScheduleStore:
         interval_seconds: Optional[int] = None,
         start_date: Optional[str] = None,
         end_date: Optional[str] = None,
+        model_connection_id: Optional[str] = None,
+        model_connection_version: Optional[str] = None,
     ) -> str:
         """新增一条定时任务，返回 task_id。owner_user_id 用于 Web UI 多用户归属。
 
         source：auto（对话语义识别自动创建）| manual（手动创建）| template（模板创建）。
         """
-        task_id = f"sch_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
+        task_id = f"sch_{beijing_now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:6]}"
         from src.api.auth import get_store
 
         auth = execution.current_authorization()
@@ -166,12 +174,14 @@ class ScheduleStore:
                     """INSERT INTO scheduled_tasks
                        (task_id, user_input, owner_user_id, provider, model, trigger_type, run_at,
                         cron_expr, next_run_at, status, run_count, created_at,
-                        name, source, interval_seconds, start_date, end_date)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?)""",
+                        name, source, interval_seconds, start_date, end_date,
+                        model_connection_id, model_connection_version, time_zone)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, ?, ?, 'Asia/Shanghai')""",
                     (
                         task_id, user_input, owner_user_id, provider, model, trigger_type,
-                        _iso(run_at), cron_expr, _iso(next_run_at), _iso(datetime.now()),
+                        _iso(run_at), cron_expr, _iso(next_run_at), _iso(beijing_now()),
                         name, source, interval_seconds, start_date, end_date,
+                        model_connection_id, model_connection_version,
                     ),
                 )
         return task_id
@@ -206,7 +216,7 @@ class ScheduleStore:
         """返回 next_run_at <= now 且仍 active 的任务（到点待执行）。"""
         from src.api.auth import get_store
 
-        now = now or datetime.now()
+        now = wall_time(now)
         # 先固定 WebUI 绑定快照，再读调度行；等待其它任务期间不得重领新代授权。
         with get_store()._conn() as web_conn:
             web_conn.execute("BEGIN")
@@ -216,7 +226,7 @@ class ScheduleStore:
             with self._conn() as conn:
                 rows = conn.execute(
                     """SELECT * FROM scheduled_tasks
-                       WHERE status='active' AND next_run_at IS NOT NULL AND next_run_at <= ?
+                       WHERE status='active' AND time_zone='Asia/Shanghai' AND next_run_at IS NOT NULL AND next_run_at <= ?
                        ORDER BY next_run_at""",
                     (_iso(now),),
                 ).fetchall()
@@ -244,7 +254,7 @@ class ScheduleStore:
                        status=CASE WHEN status='active' THEN ? ELSE status END
                    WHERE task_id=?""",
                 (
-                    _iso(datetime.now()), 1 if success else 0, result, error,
+                    _iso(beijing_now()), 1 if success else 0, result, error,
                     _iso(next_run_at), new_status, task_id,
                 ),
             )
@@ -259,7 +269,7 @@ class ScheduleStore:
                    SET last_run_at=?, last_success=?, last_result=?, last_error=?,
                        run_count=run_count+1
                    WHERE task_id=?""",
-                (_iso(datetime.now()), 1 if success else 0, result, error, task_id),
+                (_iso(beijing_now()), 1 if success else 0, result, error, task_id),
             )
 
     def add_run(
@@ -277,8 +287,52 @@ class ScheduleStore:
                 """INSERT INTO scheduled_task_runs
                    (task_id, run_at, success, summary, report_path, json_path)
                    VALUES (?, ?, ?, ?, ?, ?)""",
-                (task_id, _iso(datetime.now()), 1 if success else 0, summary, report_path, json_path),
+                (task_id, _iso(beijing_now()), 1 if success else 0, summary, report_path, json_path),
             )
+
+    def begin_run(self, task: dict) -> int:
+        with self._execution_write(task['task_id']) as conn:
+            return conn.execute('''INSERT INTO scheduled_task_runs
+                (task_id,run_at,success,summary,report_path,json_path,state,started_at,provider,model,model_connection_id,model_connection_version)
+                VALUES (?,?,0,'执行中','','','running',?,?,?,?,?)''',
+                (task['task_id'], _iso(beijing_now()), _iso(beijing_now()), task.get('provider'), task.get('model'), task.get('model_connection_id'), task.get('model_connection_version'))).lastrowid
+
+    def finish_run(self, task_id: str, run_id: int, *, success: bool, summary: str, outputs: dict | None = None, notification: dict | None = None, usage: dict | None = None, state: str | None = None):
+        outputs = outputs or {}
+        with self._execution_write(task_id) as conn:
+            conn.execute('''UPDATE scheduled_task_runs SET state=?,ended_at=?,success=?,summary=?,report_path=?,json_path=?,notification_json=?,usage_json=?
+                WHERE task_id=? AND run_id=? AND state='running' ''',
+                (state or ('succeeded' if success else 'failed'), _iso(beijing_now()), int(success), summary, str(outputs.get('report_md') or ''), str(outputs.get('json') or ''), json.dumps(notification, ensure_ascii=False) if notification else None, json.dumps(usage) if usage else None, task_id, run_id))
+
+    def close_stopped_run(self, task_id: str, run_id: int, owner: str, *, returned: bool) -> None:
+        # 撤权后只允许封闭已开始的运行元数据；不写入迟到正文，也不恢复计划或授权。
+        with self._lock, self._conn() as conn:
+            conn.execute("""UPDATE scheduled_task_runs SET state=?, ended_at=?, summary=?
+                WHERE task_id=? AND run_id=? AND state='running'
+                AND EXISTS (SELECT 1 FROM scheduled_tasks WHERE task_id=? AND owner_user_id=?)""",
+                ('cancelled' if returned else 'unknown', _iso(beijing_now()),
+                 '执行授权已失效，结果未保存' if returned else '执行授权已失效，停止状态待确认',
+                 task_id, run_id, task_id, owner))
+
+    def execution_status(self, task: dict, *, running: bool = False) -> dict:
+        from src.api.auth import get_store
+        binding = get_store().account_execution_binding(task['owner_user_id'], 'schedule', task['task_id'])
+        reason = ''
+        # 停止未确认优先于历史时区，不能通过复制新计划绕开禁止重试。
+        unsafe = bool(binding and binding['state'] in ('active', 'cleanup_failed'))
+        if unsafe:
+            if binding['state'] == 'active' and running:
+                return {'execution_state': 'running', 'blocked_reason': '', 'can_recreate': False}
+            reason = '停止状态待确认，请联系管理员核查；不会自动重试'
+        elif task.get('time_zone') != 'Asia/Shanghai':
+            reason = '历史时区未记录，请核对模型及北京时间后重新创建；不会自动补跑'
+        elif not binding:
+            reason = '缺少执行授权，请重新创建计划'
+        elif binding['state'] == 'paused' and task['status'] == 'active':
+            reason = '执行授权已暂停，请明确恢复计划'
+        return {'execution_state': 'blocked' if reason else 'paused' if task['status'] == 'paused' else 'idle',
+                'blocked_reason': reason,
+                'can_recreate': not unsafe and (task.get('time_zone') != 'Asia/Shanghai' or not binding)}
 
     def list_runs(self, task_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         """某任务的执行历史，新→旧。"""
@@ -331,6 +385,7 @@ class ScheduleStore:
         next_run_at: Optional[datetime],
         start_date: Optional[str],
         end_date: Optional[str],
+        model_binding: Optional[dict] = None,
     ) -> bool:
         """整体替换任务的可编辑字段（触发方式/文案/生效区间）+ 重算后的 next_run_at。
 
@@ -339,7 +394,7 @@ class ScheduleStore:
         """
         if self.get(task_id) is None:
             return False
-        with self._execution_write(task_id) as conn:
+        with self._execution_write(task_id, idle_only=True) as conn:
             cur = conn.execute(
                 """UPDATE scheduled_tasks
                    SET name=?, user_input=?, provider=?, model=?, trigger_type=?, cron_expr=?,
@@ -351,6 +406,9 @@ class ScheduleStore:
                     task_id,
                 ),
             )
+            if model_binding is not None:
+                conn.execute('UPDATE scheduled_tasks SET model_connection_id=?,model_connection_version=? WHERE task_id=?',
+                             (model_binding.get('model_connection_id'), model_binding.get('model_connection_version'), task_id))
             return cur.rowcount > 0
 
     @staticmethod
@@ -367,6 +425,7 @@ class ScheduleStore:
             params.append(task_id)
         if success is not None:
             clauses.append("r.success=?")
+            clauses.append("(r.state IS NULL OR r.state IN ('succeeded','failed'))")
             params.append(1 if success else 0)
         if q:
             clauses.append("r.summary LIKE ?")

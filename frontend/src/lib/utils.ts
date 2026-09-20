@@ -1,5 +1,6 @@
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
+import { beijingTime } from "./beijingTime";
 
 /** 合并 className（条件类 + tailwind 去冲突）。 */
 export function cn(...inputs: ClassValue[]) {
@@ -8,6 +9,7 @@ export function cn(...inputs: ClassValue[]) {
 
 /** 把 ISO 时间戳格式化成"3分钟前/2小时前/5天前"这类相对时间，用于 Cookie 健康状态等展示。 */
 export function formatRelativeTime(iso: string): string {
+  if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(iso)) return beijingTime(iso);
   const then = new Date(iso).getTime();
   if (Number.isNaN(then)) return iso;
   const diffMs = Date.now() - then;

@@ -15,6 +15,7 @@ import logging
 import time
 import uuid
 from datetime import datetime
+from src.timezone import now as beijing_now
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from langgraph.graph import END, START, StateGraph
@@ -244,7 +245,7 @@ def _build_init(
 ) -> ConductorState:
     # task_id 传入则复用（断点续跑同一任务）；否则新建并加 6 位随机后缀，
     # 同一秒并发的多个任务不会共用 downloads/<task_id>/ 目录（并行不踩踏）。
-    tid = task_id or (datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6])
+    tid = task_id or (beijing_now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6])
     return {
         "user_input": user_input,
         "messages": messages or [{"role": "user", "content": user_input}],
