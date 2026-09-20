@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from src.agentic_runtime.document_retrieval import DocumentRetrievalError
 
 from src.agentic_runtime.document_tools import (
     DocumentToolBroker,
@@ -98,6 +100,16 @@ async def relay_document_tool(
             payload=await _payload(request),
             claims=claims,
         )
+    except DocumentRetrievalError as exc:
+        # 原始异常可能包含宿主路径，只写服务日志，不传给模型或用户。
+        logging.getLogger(__name__).exception("文档工具读取失败：%s", operation)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "DOCUMENT_RETRIEVAL_FAILED",
+                "message": "文档读取失败；请勿通过长时间等待反复重试，应检查来源或解析服务。",
+            },
+        ) from exc
     except (DocumentToolError, ValueError) as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

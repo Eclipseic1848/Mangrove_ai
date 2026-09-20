@@ -144,7 +144,8 @@ class LibraryDedupScanner:
         """模板库停滞草稿清理：返回 (deleted, details)。"""
         from src.memory import templates as tpl
 
-        now = datetime.now()
+        from src.timezone import now as beijing_now
+        now = beijing_now()
         deleted = 0
         details: list = []
         for entry in tpl._patrol_entries():
@@ -154,6 +155,8 @@ class LibraryDedupScanner:
                 created = datetime.fromisoformat(entry["created_at"])
             except ValueError:
                 continue
+            if created.tzinfo is None:
+                continue  # 历史时区未知，不猜测过期时间并自动删除。
             stale_days = (now - created).days
             if stale_days > settings.library_stale_draft_days:
                 if tpl.delete_template(entry["slug"], owner_id=entry["owner_id"],
@@ -172,7 +175,8 @@ class LibraryDedupScanner:
         """教训库停滞草稿清理：返回 (deleted, details)。"""
         from src.memory import lessons as lsn
 
-        now = datetime.now()
+        from src.timezone import now as beijing_now
+        now = beijing_now()
         deleted = 0
         details: list = []
         for entry in lsn._patrol_entries():
@@ -182,6 +186,8 @@ class LibraryDedupScanner:
                 created = datetime.fromisoformat(entry["created_at"])
             except ValueError:
                 continue
+            if created.tzinfo is None:
+                continue  # 历史时区未知，不猜测过期时间并自动删除。
             stale_days = (now - created).days
             if stale_days > settings.library_stale_draft_days:
                 if lsn.delete_lesson(entry["slug"], owner_id=entry["owner_id"],

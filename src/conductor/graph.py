@@ -15,6 +15,7 @@ import logging
 import time
 import uuid
 from datetime import datetime
+from src.timezone import now as beijing_now
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from langgraph.graph import END, START, StateGraph
@@ -33,6 +34,7 @@ from .nodes import (
     video_enrich_node,
 )
 from .node_views import build_node_view
+from .progress import LABELS, emit_progress, completed_summary
 from .state import ConductorState
 from .targets import is_direct_video_manifest
 
@@ -130,8 +132,12 @@ def _traced(name: str, fn: Callable[[ConductorState], Awaitable[Dict[str, Any]]]
         from src.api.execution import execution_checkpoint
         execution_checkpoint()
         t0 = time.perf_counter()
+        emit_progress(name, "started", f"正在{LABELS.get(name, '处理任务')}…")
         result = await fn(state) or {}
+        from src.llm.provider import verify_bound_model
+        verify_bound_model()
         execution_checkpoint()
+        emit_progress(name, "failed" if result.get("error") else "waiting" if result.get("needs_clarification") else "completed", completed_summary(name, result))
         ms = round((time.perf_counter() - t0) * 1000)
         entry = {"node": name, "ms": ms, "summary": _node_summary(name, result, state)}
         return {**result, "trace": [entry]}
@@ -239,7 +245,7 @@ def _build_init(
 ) -> ConductorState:
     # task_id 传入则复用（断点续跑同一任务）；否则新建并加 6 位随机后缀，
     # 同一秒并发的多个任务不会共用 downloads/<task_id>/ 目录（并行不踩踏）。
-    tid = task_id or (datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6])
+    tid = task_id or (beijing_now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6])
     return {
         "user_input": user_input,
         "messages": messages or [{"role": "user", "content": user_input}],
@@ -312,11 +318,13 @@ async def astream_conductor(
     if _settings.checkpoint_enabled:
         graph = await _get_checkpoint_graph()
         config = {"configurable": {"thread_id": init["task_id"]}}
-        stream = graph.astream(init, config=config, stream_mode=["updates", "values"])
+        stream = graph.astream(init, config=config, stream_mode=["updates", "values", "custom"])
     else:
-        stream = get_graph().astream(init, stream_mode=["updates", "values"])
+        stream = get_graph().astream(init, stream_mode=["updates", "values", "custom"])
     final_state: Dict[str, Any] = {}
     async for mode, chunk in stream:
+        if mode == "custom" and isinstance(chunk, dict):
+            yield ("progress", chunk)
         if mode == "values":
             final_state = chunk if isinstance(chunk, dict) else final_state
         elif mode == "updates" and isinstance(chunk, dict):

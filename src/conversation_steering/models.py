@@ -222,6 +222,7 @@ class SteeringRequest(BaseModel):
     status_summary: str = ""
     current_goal: str = ""
     selection_reason: str = ""
+    memory_context: str = Field(default="", max_length=6500)
     event_summaries: tuple[str, ...] = ()
     source_findings: tuple[dict[str, Any], ...] = Field(default=(), max_length=20)
     relevant_turns: tuple[RawUserTurn, ...] = Field(default=(), max_length=16)
@@ -294,6 +295,7 @@ class ContextCompileRequest(BaseModel):
     run_summary: str = ""
     procedure_summaries: tuple[str, ...] = ()
     task_template_summaries: tuple[ReferencedContextSummary, ...] = ()
+    lesson_summaries: tuple[ReferencedContextSummary, ...] = ()
     owner_memory_summaries: tuple[ReferencedContextSummary, ...] = ()
     relevant_turns: tuple[RawUserTurn, ...] = ()
     evidence_snippets: tuple[str, ...] = ()

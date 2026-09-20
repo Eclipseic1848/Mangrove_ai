@@ -1,3 +1,5 @@
+import { beijingTime } from "@/lib/beijingTime";
+import { PageGuide } from "@/components/onboarding/PageGuide";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
@@ -7,18 +9,13 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Group, Panel, Separator } from "react-resizable-panels";
 import {
   ArrowLeft,
-  Copy,
+  ArrowUp,
   FileSearch,
-  HelpCircle,
   LayoutTemplate,
   Loader2,
-  Pencil,
+  PanelLeftClose,
+  PanelLeftOpen,
   RotateCcw,
-  Search,
-  Share2,
-  Sparkles,
-  ThumbsDown,
-  ThumbsUp,
   Trash2,
   X,
 } from "lucide-react";
@@ -27,6 +24,8 @@ import { api, ApiError } from "@/lib/api";
 import { isAdminish, useAuth } from "@/lib/auth";
 import { ModelConnectionsPanel } from "@/pages/settings/ModelConnectionsPanel";
 import { type WebIntakeDraft } from "@/components/workspace/TaskComposer";
+import { ResultNotification } from "@/components/workspace/ResultNotification";
+import { MessageFooter, MessageTimestamp } from "@/components/workspace/MessageFooter";
 import { WorkspaceSourceComposer, type SourceTaskPayload } from "@/components/workspace/WorkspaceSourceComposer";
 import {
   CandidatePreview,
@@ -37,10 +36,11 @@ import {
 import { SourcePreviewPanel, initialSourceView, type SourceViewState } from "@/components/workspace/SourcePreviewPanel";
 import { TaskDeletionDialog } from "@/components/workspace/TaskDeletionDialog";
 import { TaskTimeline } from "@/components/workspace/TaskTimeline";
-import { WorkspaceLifecycleActions, type FeedbackRequest } from "@/components/workspace/WorkspaceLifecycleActions";
+import { DraftResultPanel, DraftPreview, initialDraftView, type Draft, type DraftViewState } from "@/components/workspace/DraftResultPanel";
 import { Markdown } from "@/components/Markdown";
 import { WorkspaceTaskSidebar } from "@/components/workspace/WorkspaceTaskSidebar";
-import { detachStoredSourceAcquisition, settleDetachedSourceAcquisitions } from "@/components/workspace/WebSourceIntake";
+import { WorkspaceExamples } from "@/components/workspace/WorkspaceExamples";
+import { CollectionHistory } from "@/components/workspace/CollectionHistory";
 import {
   answerWorkspaceTask,
   cancelWorkspaceTask,
@@ -50,9 +50,9 @@ import {
   WorkspaceTaskError,
   decideCandidateGap,
   decideWorkspaceRevision,
-  getWorkspaceGuidance,
   getWorkspaceStorage,
   getWorkspaceTask,
+  workspaceResultText,
   listGrayCapabilities,
   listWorkspaceTasks,
   recycleWorkspaceTask,
@@ -60,7 +60,6 @@ import {
   publishCandidateVerification,
   refreshWorkspaceSource,
   restoreWorkspaceTask,
-  regenerateWorkspaceTurn,
   resumeAccountWorkspaceTask,
   sendWorkspaceTurn,
   streamWorkspaceTask,
@@ -74,7 +73,6 @@ import type {
 import type {
   WorkspaceEvent,
   WorkspaceMessage,
-  WorkspaceGuidance,
   SteeringResult,
   WorkspaceTask,
   WorkspaceQuestion,
@@ -108,105 +106,11 @@ type ModelConnection = {
 };
 type ModelConnectionsResponse = { items: ModelConnection[] };
 
-let runtimeSourceScope: string | null = null;
-function sourceScope() {
-  if (runtimeSourceScope) return runtimeSourceScope;
-  try {
-    const saved = sessionStorage.getItem("mangrove_web_source_scope");
-    const navigation = performance.getEntriesByType("navigation")[0] as PerformanceNavigationTiming | undefined;
-    runtimeSourceScope = navigation?.type === "reload" && saved ? saved : nanoid();
-    sessionStorage.setItem("mangrove_web_source_scope", runtimeSourceScope);
-  } catch { runtimeSourceScope = nanoid(); }
-  return runtimeSourceScope;
-}
-
-function renewSourceScope() {
-  runtimeSourceScope = nanoid();
-  try { sessionStorage.setItem("mangrove_web_source_scope", runtimeSourceScope); } catch { /* 当前页面仍持有会话身份。 */ }
-  return runtimeSourceScope;
-}
-
 function AnswerReferences({ context, onViewSource }: { context: PublicResultContext | null; onViewSource: (ref: Record<string, unknown>, revision: number) => void }) {
   if (!context) return <p className="text-xs text-muted-foreground">未附结构化引用</p>;
   return <div className="space-y-2 border-l-2 border-primary/40 pl-3 text-xs" aria-label="本次追问引用的结果和来源">
     <p>本次追问引用的结果/来源：{context.label} · V{context.revision}</p>
-    {context.source_refs.length ? <div className="flex flex-wrap gap-2">{context.source_refs.map((ref, index) => <button type="button" key={index} className="rounded-lg border px-3 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onViewSource({ ...ref }, context.revision)}>来源 {index + 1}{ref.page ? ` · 第${ref.page}页` : ref.row_number ? ` · 第${ref.row_number}行` : ""}{ref.read_at ? ` · ${new Date(ref.read_at).toLocaleString()}` : ""}</button>)}</div> : <p className="text-muted-foreground">该结果未附原始来源。</p>}
-  </div>;
-}
-
-function copyAnswer(text: string) {
-  if (navigator.clipboard && window.isSecureContext) {
-    navigator.clipboard.writeText(text).then(() => toast.success("已复制回答")).catch(() => copyAnswerFallback(text));
-    return;
-  }
-  copyAnswerFallback(text);
-}
-
-function copyAnswerFallback(text: string) {
-  const input = document.createElement("textarea");
-  input.value = text;
-  input.style.position = "fixed";
-  input.style.opacity = "0";
-  document.body.appendChild(input);
-  input.select();
-  try {
-    if (!document.execCommand("copy")) throw new Error("copy failed");
-    toast.success("已复制回答");
-  } catch {
-    toast.error("复制失败，请手动选择正文");
-  } finally {
-    document.body.removeChild(input);
-  }
-}
-
-function ConversationActions({ content, canFeedback, canRegenerate, regenerating, requiresExternalConfirmation, onFeedback, onRegenerate }: {
-  content: string;
-  canFeedback: boolean;
-  canRegenerate: boolean;
-  regenerating: boolean;
-  requiresExternalConfirmation: boolean;
-  onFeedback: (rating: "up" | "down") => void;
-  onRegenerate: (externalApiConfirmed: boolean) => Promise<void>;
-}) {
-  const shareAnswer = async () => {
-    if (typeof navigator.share !== "function") {
-      toast.error("当前浏览器不支持系统分享，请复制后自行发送");
-      return;
-    }
-    try {
-      await navigator.share({ title: "Mangrove 回答", text: content });
-    } catch (error) {
-      if (!(error instanceof DOMException && error.name === "AbortError")) toast.error("系统分享失败，请复制后自行发送");
-    }
-  };
-  return <div className="mt-2 flex flex-wrap gap-1 text-xs text-muted-foreground" role="group" aria-label="回答操作">
-    <button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => copyAnswer(content)}><Copy className="h-3.5 w-3.5" />复制</button>
-    {canFeedback && <>
-      <button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onFeedback("up")}><ThumbsUp className="h-3.5 w-3.5" />有帮助</button>
-      <button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onFeedback("down")}><ThumbsDown className="h-3.5 w-3.5" />需要改进</button>
-    </>}
-    <AlertDialog.Root>
-      <AlertDialog.Trigger asChild><button type="button" className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"><Share2 className="h-3.5 w-3.5" />分享</button></AlertDialog.Trigger>
-      <AlertDialog.Portal>
-        <AlertDialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
-        <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(90vw,440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl">
-          <AlertDialog.Title className="font-semibold">分享这条回答？</AlertDialog.Title>
-          <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">只把当前回答正文交给系统分享面板；不会创建公开链接，也不会额外附带原始资料、下载凭据或任务访问权限。</AlertDialog.Description>
-          <div className="mt-5 flex justify-end gap-2"><AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm hover:bg-muted">取消</AlertDialog.Cancel><AlertDialog.Action className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground" onClick={() => void shareAnswer()}>打开系统分享</AlertDialog.Action></div>
-        </AlertDialog.Content>
-      </AlertDialog.Portal>
-    </AlertDialog.Root>
-    <AlertDialog.Root>
-      <AlertDialog.Trigger asChild><button type="button" disabled={!canRegenerate || regenerating} title={canRegenerate ? undefined : "请先回到最新版本"} className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"><RotateCcw className="h-3.5 w-3.5" />{regenerating ? "重新生成中" : "重新生成"}</button></AlertDialog.Trigger>
-      <AlertDialog.Portal>
-        <AlertDialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
-        <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(90vw,440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl">
-          <AlertDialog.Title className="font-semibold">重新生成这条回答？</AlertDialog.Title>
-          <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">系统会按原始用户消息和当前任务版本再次请求本任务模型。{requiresExternalConfirmation ? "这会再次向已选外部模型发送本任务必要数据，并可能产生费用。" : "原回答会保留。"}</AlertDialog.Description>
-          <div className="mt-5 flex justify-end gap-2"><AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm hover:bg-muted">取消</AlertDialog.Cancel><AlertDialog.Action className="rounded-lg bg-primary px-3 py-2 text-sm font-medium text-primary-foreground" onClick={() => void onRegenerate(requiresExternalConfirmation)}>确认重新生成</AlertDialog.Action></div>
-        </AlertDialog.Content>
-      </AlertDialog.Portal>
-    </AlertDialog.Root>
+    {context.source_refs.length ? <div className="flex flex-wrap gap-2">{context.source_refs.map((ref, index) => <button type="button" key={index} className="rounded-lg border px-3 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => onViewSource({ ...ref }, context.revision)}>来源 {index + 1}{ref.page ? ` · 第${ref.page}页` : ref.row_number ? ` · 第${ref.row_number}行` : ""}{ref.read_at ? ` · ${beijingTime(ref.read_at)}` : ""}</button>)}</div> : <p className="text-muted-foreground">该结果未附原始来源。</p>}
   </div>;
 }
 
@@ -232,7 +136,7 @@ function FollowupComposer({
   resultContext,
   onClearResultContext,
   onBusyChange,
-  draftRequest,
+  onCancelTarget,
 }: {
   task: WorkspaceTask;
   scopeIdentity: string;
@@ -243,7 +147,7 @@ function FollowupComposer({
   resultContext: (ResultSelection & { label: string }) | null;
   onClearResultContext: () => void;
   onBusyChange: (busy: boolean) => void;
-  draftRequest: { key: string; text: string } | null;
+  onCancelTarget: (target: HTMLDivElement | null) => void;
   onDecision: (
     proposalId: string,
     mode: "cancel_now" | "after_safe_point" | "new_task",
@@ -287,18 +191,6 @@ function FollowupComposer({
     setText("");
     setConfirmedProposal(null);
   }, [task.task_id]);
-  useEffect(() => {
-    if (!draftRequest) return;
-    if (text.trim()) {
-      toast.info("输入框已有未发送内容；请先发送或清空，再编辑历史消息");
-      requestAnimationFrame(() => inputRef.current?.focus());
-      return;
-    }
-    setAnswerMode(null);
-    setText(draftRequest.text);
-    onClearResultContext();
-    requestAnimationFrame(() => inputRef.current?.focus());
-  }, [draftRequest]);
   useEffect(() => { latestIdentity.current = currentIdentity; return () => { latestIdentity.current = null; }; }, []);
   useLayoutEffect(() => {
     // 新轮次可继续编辑；旧请求不能清理新一轮的忙碌状态。
@@ -462,17 +354,20 @@ function FollowupComposer({
         placeholder={isAnswer ? "补充这项问题需要的信息；不会替代外发或修改确认" : "可询问进度和原因，也可提出修改；系统会先说明是否影响当前任务"}
         className="w-full min-h-16 max-h-40 [field-sizing:content] resize-none overflow-y-auto bg-transparent px-1 text-sm leading-6 outline-none placeholder:text-muted-foreground/70"
       />
-      <div className="mt-2 flex items-center gap-3 border-t pt-2">
+      <div className="mt-2 flex items-center gap-3 border-t pt-2 [&:has([data-stop-slot]:not([hidden])_button)>.send-action]:hidden">
         <span className="text-[11px] text-muted-foreground">
           Enter 发送 · Shift + Enter 换行
         </span>
+        <div data-stop-slot ref={onCancelTarget} hidden={Boolean(text.trim()) || isAnswer} className="ml-auto" />
         <button
           type="button"
           disabled={busy || (isAnswer ? !answerText.trim() || !answerTargetCurrent || !questionAvailable || feedback?.unknown : !text.trim() || contextExpired)}
           onClick={() => void submit()}
-          className="ml-auto rounded-lg bg-primary px-3 py-2 text-xs font-medium text-primary-foreground disabled:opacity-45"
+          aria-label={busy ? "正在理解" : isAnswer ? "提交回答" : "发送"}
+          title={busy ? "正在理解" : isAnswer ? "提交回答" : "发送"}
+          className="send-action ml-auto inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-45"
         >
-          {busy ? "正在理解" : isAnswer ? "提交回答" : "发送"}
+          {busy ? <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin motion-reduce:animate-none" /> : <ArrowUp aria-hidden="true" className="h-5 w-5" />}
         </button>
       </div>
       {pendingResults.map(result => (
@@ -530,105 +425,6 @@ function FollowupComposer({
   );
 }
 
-function GuidanceDialog({
-  guidance,
-  open,
-  onOpenChange,
-  onUseExample,
-}: {
-  guidance?: WorkspaceGuidance;
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  onUseExample: (example: WorkspaceGuidance["examples"][number]) => void;
-}) {
-  const [query, setQuery] = useState("");
-  const examples = (guidance?.examples || []).filter((example) =>
-    `${example.title} ${example.description} ${example.category}`
-      .toLowerCase()
-      .includes(query.toLowerCase()),
-  );
-  return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45 backdrop-blur-[2px]" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 flex h-[min(82vh,760px)] w-[min(92vw,920px)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-2xl border bg-background shadow-2xl">
-          <div className="flex items-start justify-between border-b p-5">
-            <div>
-              <Dialog.Title className="font-semibold">
-                使用帮助与场景示例
-              </Dialog.Title>
-              <Dialog.Description className="mt-1 text-sm text-muted-foreground">
-                当前示例全部使用已经交付的表格和文档能力。
-              </Dialog.Description>
-            </div>
-            <Dialog.Close className="rounded-lg p-2 text-muted-foreground hover:bg-muted">
-              <X className="h-4 w-4" />
-            </Dialog.Close>
-          </div>
-          <div className="grid min-h-0 flex-1 overflow-y-auto md:grid-cols-[260px_1fr]">
-            <aside className="border-r bg-muted/20 p-5">
-              <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                三步开始
-              </h3>
-              <div className="mt-4 space-y-4">
-                {guidance?.onboarding.map((item, index) => (
-                  <div key={item.title} className="flex gap-3">
-                    <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-primary/10 text-xs font-semibold text-primary">
-                      {index + 1}
-                    </div>
-                    <div>
-                      <p className="text-sm font-medium">{item.title}</p>
-                      <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                        {item.description}
-                      </p>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </aside>
-            <div className="min-h-0 overflow-y-auto p-5">
-              <div className="relative mb-4">
-                <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <input
-                  value={query}
-                  onChange={(event) => setQuery(event.target.value)}
-                  placeholder="搜索示例"
-                  className="h-10 w-full rounded-xl border bg-background pl-9 pr-3 text-sm outline-none focus:border-primary"
-                />
-              </div>
-              <div className="grid gap-3 md:grid-cols-2">
-                {examples.map((example) => (
-                  <button
-                    key={example.id}
-                    type="button"
-                    onClick={() => {
-                      onUseExample(example);
-                      onOpenChange(false);
-                    }}
-                    className="rounded-xl border p-4 text-left transition-colors hover:border-primary/35 hover:bg-primary/[0.03]"
-                  >
-                    <span className="text-[10px] font-medium uppercase tracking-wide text-primary">
-                      {example.category}
-                    </span>
-                    <h3 className="mt-1 text-sm font-semibold">
-                      {example.title}
-                    </h3>
-                    <p className="mt-2 text-xs leading-5 text-muted-foreground">
-                      {example.description}
-                    </p>
-                    <p className="mt-3 text-[11px] text-muted-foreground">
-                      需要：{example.required_inputs}
-                    </p>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
-  );
-}
 
 export function SemanticWorkspacePage() {
   const queryClient = useQueryClient();
@@ -657,6 +453,8 @@ export function SemanticWorkspacePage() {
   const [accountResumeError, setAccountResumeError] = useState<{ key: string; message: string; unknown: boolean } | null>(null);
   const [accountResumeConfirmed, setAccountResumeConfirmed] = useState<string | null>(null);
   const { user } = useAuth();
+  const [composerEpoch, setComposerEpoch] = useState(0);
+  const composerEpochRef = useRef(0);
   const accountResumeOwner = useRef(user?.user_id);
   accountResumeOwner.current = user?.user_id;
   const [searchParams, setSearchParams] = useSearchParams();
@@ -664,10 +462,12 @@ export function SemanticWorkspacePage() {
   selectionParams.current = searchParams;
   // 选择保留在站内地址，重新登录后仍读取同一任务与修订；正文仍经 Owner 鉴权获取。
   const selectedTaskId = searchParams.get("task") || null;
+  const selectedConversationId = searchParams.get("conversation") || null;
   const revision = Number(searchParams.get("revision"));
   const selectedRevision = Number.isSafeInteger(revision) && revision > 0 ? revision : null;
   const setSelectedTaskId = (taskId: string | null) => {
     const next = new URLSearchParams(selectionParams.current);
+    next.delete("conversation");
     if (taskId) next.set("task", taskId);
     else next.delete("task");
     next.delete("revision");
@@ -693,6 +493,7 @@ export function SemanticWorkspacePage() {
     try { stored = JSON.parse(localStorage.getItem(storageKey) || "null"); } catch { return; }
     if (!stored?.payload || !stored.idempotency_key) return;
     let current = true;
+    const epoch = composerEpochRef.current;
     const draftKey = `mangrove_workspace_draft_${user.user_id}_new`;
     const savedDraft = localStorage.getItem(draftKey), savedFiles = localStorage.getItem(`${draftKey}_files`);
     createAttemptRef.current = { fingerprint: stored.fingerprint, key: stored.idempotency_key };
@@ -704,7 +505,7 @@ export function SemanticWorkspacePage() {
       localStorage.removeItem(storageKey);
       if (localStorage.getItem(draftKey) === savedDraft && localStorage.getItem(`${draftKey}_files`) === savedFiles) { localStorage.removeItem(draftKey); localStorage.removeItem(`${draftKey}_files`); }
       createAttemptRef.current = null;
-      setSelectedTaskId(created.task_id);
+      if (epoch === composerEpochRef.current) setSelectedTaskId(created.task_id);
       void queryClient.invalidateQueries({ queryKey: ["semantic-workspace-tasks"] });
       toast.success("已恢复上次任务");
     }).catch(error => {
@@ -724,10 +525,6 @@ export function SemanticWorkspacePage() {
     return () => media.removeEventListener("change", update);
   }, []);
   const [composerDraft, setComposerDraft] = useState<WebIntakeDraft | null>(null);
-  const newTaskSourceRecovery = useRef<string | null>(null);
-  const [newTaskSourceScope, setNewTaskSourceScope] = useState(sourceScope);
-  const [newTaskSession, setNewTaskSession] = useState(0);
-  const [detachedSourceCleanup, setDetachedSourceCleanup] = useState(0);
   const [sourceEditorIdentity, setSourceEditorIdentity] = useState<string | null>(null);
   const sourceEditAttempt = useRef<{ fingerprint: string; key: string } | null>(null);
   const [sourceEditUnknown, setSourceEditUnknown] = useState(false);
@@ -737,12 +534,16 @@ export function SemanticWorkspacePage() {
   >("all");
   const [recycleBin, setRecycleBin] = useState(false);
   const [deletionTarget, setDeletionTarget] = useState<{ task_id: string; title: string } | null>(null);
-  const newTask = !selectedTaskId && !recycleBin;
+  const newTask = !selectedTaskId && !selectedConversationId && !recycleBin;
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorExpanded, setInspectorExpanded] = useState(false);
   const fullInspector = narrow || inspectorExpanded;
-  const [inspectorKind, setInspectorKind] = useState<"source" | "result">("source");
-  const previewedDraft = useRef(false);
+  const [inspectorKind, setInspectorKind] = useState<"source" | "result" | "draft">("source");
+  const [previewDraft, setPreviewDraft] = useState<{ identity: string; draft: Draft } | null>(null);
+  const openedDraft = useRef("");
+  const [draftActionsTarget, setDraftActionsTarget] = useState<HTMLDivElement | null>(null);
+  const [cancelTarget, setCancelTarget] = useState<HTMLDivElement | null>(null);
+  const previewedDraft = useRef<string[]>([]);
   const previewedResults = useRef(new Set<string>());
   const [selectedUploadId, setSelectedUploadId] = useState<string | null>(null);
   const [taskSourceSelection, setTaskSourceSelection] = useState<{
@@ -752,17 +553,12 @@ export function SemanticWorkspacePage() {
   } | null>(null);
   const [draftUploads, setDraftUploads] = useState<UploadItem[]>([]);
   const [canvasView, setCanvasView] = useState<{
-    identity: string; outputId: string | null; results: Record<string, ResultViewState>; sources: Record<string, SourceViewState>;
+    identity: string; outputId: string | null; results: Record<string, ResultViewState>; sources: Record<string, SourceViewState>; draft?: DraftViewState;
   }>({ identity: "", outputId: null, results: {}, sources: {} });
   const canvasIdentityRef = useRef("");
   const pendingSource = useRef<{ taskId: string; revision: number; evidence: Record<string, unknown> } | null>(null);
   const [resultDraft, setResultDraft] = useState<{ identity: string; context: ResultSelection & { label: string } } | null>(null);
   const [followupBusy, setFollowupBusy] = useState(false);
-  const [resendDraft, setResendDraft] = useState<{ scope: string; key: string; text: string } | null>(null);
-  const [regeneratingMessageId, setRegeneratingMessageId] = useState<string | null>(null);
-  const feedbackRequestId = useRef(0);
-  const [feedbackRequest, setFeedbackRequest] = useState<FeedbackRequest | null>(null);
-  const rerunFlight = useRef(false);
 
   const [liveFeed, setLiveFeed] = useState<{ identity: string; events: WorkspaceEvent[] }>({ identity: "", events: [] });
   const setLiveEvents = (events: WorkspaceEvent[]) => setLiveFeed({ identity: "", events });
@@ -773,23 +569,6 @@ export function SemanticWorkspacePage() {
   const followLatest = useRef(true);
   const [awayFromLatest, setAwayFromLatest] = useState(false);
   const scrollPositions = useRef(new Map<string, { top: number; follow: boolean }>());
-  const [helpOpen, setHelpOpen] = useState(false);
-  const [exampleSeed, setExampleSeed] = useState<{
-    key: string;
-    prompt: string;
-    formats: string[];
-  } | null>(null);
-
-  useEffect(() => {
-    if (!user?.user_id) return;
-    let active = true;
-    let timer: number | undefined;
-    const settle = () => void settleDetachedSourceAcquisitions(user.user_id).then(retry => {
-      if (active && retry) timer = window.setTimeout(settle, 1_000);
-    });
-    settle();
-    return () => { active = false; if (timer) window.clearTimeout(timer); };
-  }, [detachedSourceCleanup, user?.user_id]);
 
 
   const tasks = useQuery({
@@ -797,9 +576,11 @@ export function SemanticWorkspacePage() {
     queryFn: () => listWorkspaceTasks(recycleBin),
     refetchInterval: 3_000,
   });
-  const guidance = useQuery({
-    queryKey: ["semantic-workspace-guidance"],
-    queryFn: getWorkspaceGuidance,
+  const collectionHistory = useQuery<Array<{ conv_id: string; title: string; status: import("@/types/semanticWorkspace").WorkspaceTaskStatus; updated_at: string }>>({
+    queryKey: ["collection-history", user?.user_id],
+    queryFn: () => api.get("/api/chat/history"),
+    refetchInterval: 3000,
+    enabled: Boolean(user?.user_id) && !recycleBin,
   });
   const models = useQuery<ModelsResponse>({
     queryKey: ["models"],
@@ -844,15 +625,17 @@ export function SemanticWorkspacePage() {
       const status = query.state.data?.status;
       const verificationStatus = query.state.data?.agentic_runtime
         ?.latest_verification_attempt?.status;
+      const notificationPending = status === "completed" && /@|邮件|邮箱|slack|email/i.test(query.state.data?.objective_text ?? "")
+        && Date.now() - Date.parse(query.state.data?.updated_at ?? "") < 120_000;
       return (
         status && ["queued", "running", "cancelling", "pausing"].includes(status)
-      ) || ["requested", "running"].includes(verificationStatus ?? "")
+      ) || notificationPending || ["requested", "running"].includes(verificationStatus ?? "")
         ? 2_000
         : false;
     },
   });
   const conversation = useQuery<{
-    turns: Array<{ turn_id: string; text: string; revision: number }>;
+    turns: Array<{ turn_id: string; text: string; revision: number; created_at?: string }>;
     results: SteeringResult[];
     proposals: Array<{ proposal_id: string; base_revision: number; status: string }>;
   }>({
@@ -862,7 +645,7 @@ export function SemanticWorkspacePage() {
   });
   const task = detail.data;
   const viewingRevision = task?.viewing_revision ?? task?.current_revision ?? task?.active_revision;
-  const runId = task?.agentic_runtime?.run_id ?? task?.work_session?.run_id ?? task?.run_id ?? (typeof task?.run?.run_id === "string" ? task.run.run_id : null);
+  const runId = task?.agentic_runtime?.run_id ?? (task?.work_session && task.work_session.revision === viewingRevision ? task.work_session.run_id : null) ?? task?.run_id ?? (typeof task?.run?.run_id === "string" ? task.run.run_id : null);
   const subscriptionIdentity = JSON.stringify([user?.user_id, selectedTaskId, selectedRevision, viewingRevision, runId]);
   const selectedSubscription = useRef(subscriptionIdentity);
   // 同步阻断上一身份的迟到回调和首帧缓存，不能等 effect 清理。
@@ -896,77 +679,6 @@ export function SemanticWorkspacePage() {
     } catch (error) {
       if (answerScope.current === capturedScope && answerRound.current === question.round_id) toast.error(error instanceof Error ? error.message : "提交回答失败");
       throw error;
-    }
-  };
-  const regenerateMessage = async (resultId: string, revision: number, externalApiConfirmed: boolean) => {
-    if (!task || revision !== (task.current_revision ?? task.active_revision) || revision !== viewingRevision) {
-      toast.error("只有当前版本的回答可以重新生成，请先回到最新版本。");
-      return;
-    }
-    const storageKey = `mangrove_regenerate_${user?.user_id}_${task.task_id}_${resultId}`;
-    let idempotencyKey: string;
-    try {
-      const stored = localStorage.getItem(storageKey);
-      idempotencyKey = stored && /^[A-Za-z0-9_-]{1,128}$/.test(stored) ? stored : nanoid();
-      localStorage.setItem(storageKey, idempotencyKey);
-    } catch {
-      toast.error("浏览器无法安全保存重新生成标识，本次未发送。");
-      return;
-    }
-    setRegeneratingMessageId(resultId);
-    try {
-      await regenerateWorkspaceTurn(task.task_id, resultId, revision, externalApiConfirmed, idempotencyKey);
-      try { localStorage.removeItem(storageKey); } catch { /* 残留键只会重放已完成的同一请求。 */ }
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-task", task.task_id] }),
-        queryClient.invalidateQueries({ queryKey: ["workspace-turns", user?.user_id, task.task_id] }),
-      ]);
-      toast.success("已重新生成回答");
-    } catch (error) {
-      if (error instanceof ApiError && error.status < 500 && !error.message.includes("结果未知")) {
-        try { localStorage.removeItem(storageKey); } catch { /* 服务端已明确拒绝，残留键不会造成重复调用。 */ }
-      }
-      toast.error(error instanceof Error ? error.message : "重新生成结果未知，原请求已保留");
-    } finally {
-      setRegeneratingMessageId(current => current === resultId ? null : current);
-    }
-  };
-  const retryCurrentTask = async (externalApiConfirmed: boolean) => {
-    if (!task || rerunFlight.current) return;
-    if (task.source_integrity?.can_rerun === false) {
-      toast.error("来源已删除，不能按原来源重跑；请先核对本次资料。");
-      return;
-    }
-    const externalConnection = Boolean(task.agentic_runtime?.model_connection_id ?? task.model_connection_id);
-    if (externalConnection && !externalApiConfirmed) return;
-    const storageKey = `mangrove_task_retry_${user?.user_id ?? "unknown"}_${task.task_id}_${task.active_revision}`;
-    let idempotencyKey: string;
-    try {
-      const stored = localStorage.getItem(storageKey);
-      idempotencyKey = stored && /^[A-Za-z0-9_-]{1,128}$/.test(stored) ? stored : nanoid();
-      localStorage.setItem(storageKey, idempotencyKey);
-    } catch {
-      toast.error("浏览器无法安全保存重试标识，本次未重新执行。");
-      return;
-    }
-    const capturedScope = readingIdentity;
-    rerunFlight.current = true;
-    try {
-      await createWorkspaceRevision(task.task_id, "保持原要求，重新执行", task.active_revision, undefined, externalApiConfirmed, undefined, idempotencyKey);
-      try { localStorage.removeItem(storageKey); } catch { /* 同一幂等键残留只会重放已完成请求。 */ }
-      if (answerScope.current === capturedScope) setSelectedRevision(null);
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-task", task.task_id] }),
-        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-tasks"] }),
-      ]);
-      if (answerScope.current === capturedScope) toast.success("已创建新版本，正在重新执行");
-    } catch (error) {
-      if (error instanceof WorkspaceRevisionError && error.rejected) {
-        try { localStorage.removeItem(storageKey); } catch { /* 服务端已明确拒绝，残留键不会造成重复执行。 */ }
-      }
-      if (answerScope.current === capturedScope) toast.error(error instanceof WorkspaceRevisionError && error.rejected ? error.message : "重新执行结果未知，请刷新任务核对；不会自动重发。");
-    } finally {
-      rerunFlight.current = false;
     }
   };
   useLayoutEffect(() => {
@@ -1022,6 +734,17 @@ export function SemanticWorkspacePage() {
     task?.delivery?.delivery_id,
   ]);
   canvasIdentityRef.current = resultIdentity;
+  const showDraft = useCallback((draft: Draft, open = false) => {
+    setPreviewDraft({ identity: resultIdentity, draft });
+    const firstDraft = openedDraft.current !== resultIdentity;
+    openedDraft.current = resultIdentity;
+    const typing = ["TEXTAREA", "INPUT"].includes(document.activeElement?.tagName ?? "");
+    if (open || (firstDraft && !narrow && !typing)) {
+      setInspectorKind("draft");
+      setInspectorOpen(true);
+      if (open) requestAnimationFrame(() => document.querySelector<HTMLSelectElement>('select[aria-label="初稿文件"]')?.focus());
+    }
+  }, [resultIdentity, narrow]);
   // 在渲染阶段切换身份，缓存命中与旧组件卸载也不能写回前一修订的阅读状态。
   if (canvasView.identity !== resultIdentity) {
     setCanvasView({ identity: resultIdentity, outputId: null, results: {}, sources: {} });
@@ -1054,10 +777,10 @@ export function SemanticWorkspacePage() {
   useEffect(() => {
     if (!task?.delivery || task.status !== "completed" || previewedResults.current.has(resultIdentity)) return;
     previewedResults.current.add(resultIdentity);
-    if (inspectorOpen || document.activeElement?.tagName === "TEXTAREA") return;
+    if (inspectorKind !== "draft" && (inspectorOpen || document.activeElement?.tagName === "TEXTAREA")) return;
     setInspectorKind("result");
     setInspectorOpen(true);
-  }, [resultIdentity, task?.status, task?.delivery, inspectorOpen]);
+  }, [resultIdentity, task?.status, task?.delivery, inspectorOpen, inspectorKind]);
 
   useEffect(() => {
     if (!selectedTaskId || !task) return;
@@ -1109,66 +832,36 @@ export function SemanticWorkspacePage() {
 
 
 
-  const resetNewTaskDraft = () => {
-    const owner = user?.user_id ?? "current";
-    if (!detachStoredSourceAcquisition(owner, newTaskSourceScope, newTaskSourceRecovery.current)) {
-      toast.error("无法安全保存上一份网页读取状态，请稍后重试新建任务");
-      return false;
-    }
-    try {
-      // 用户明确新建任务后不再恢复上一份草稿；来源请求另行保留身份并安全停止。
-      localStorage.removeItem(`mangrove_workspace_draft_${owner}_new`);
-      localStorage.removeItem(`mangrove_workspace_draft_${owner}_new_files`);
-    } catch {
-      // 存储不可用时仍重置当前页面状态。
-    }
-    setComposerDraft(null);
-    setDraftUploads([]);
-    setSelectedUploadId(null);
-    setInspectorOpen(false);
-    setNewTaskSession(value => value + 1);
-    setNewTaskSourceScope(renewSourceScope());
-    setDetachedSourceCleanup(value => value + 1);
-    newTaskSourceRecovery.current = null;
-    return true;
-  };
-
-  const useExample = (example: WorkspaceGuidance["examples"][number]) => {
-
-    if (!resetNewTaskDraft()) return;
-    setSelectedTaskId(null);
-    setExampleSeed({
-      key: `${example.id}:${Date.now()}`,
-      prompt: example.prompt,
-      formats: example.output_formats,
-    });
-  };
 
   const handleDraftUploadsChange = useCallback((uploads: UploadItem[]) => {
     setDraftUploads(uploads);
     if (!uploads.length) {
-      previewedDraft.current = false;
+      previewedDraft.current = [];
       setSelectedUploadId(null);
       setInspectorOpen(false);
       return;
     }
-    if (!previewedDraft.current) {
-      previewedDraft.current = true;
-      // 上传返回不能切走用户正在输入的内容；预览入口仍常驻。
-      if (document.activeElement?.tagName !== "TEXTAREA") setInspectorOpen(true);
+    const added = uploads.find(upload => !previewedDraft.current.includes(upload.upload_id));
+    previewedDraft.current = uploads.map(upload => upload.upload_id);
+    if (added) {
+      // 桌面并排打开预览但不抢焦点；手机全屏预览不能遮住正在输入的内容。
+      if (!narrow) setInspectorExpanded(false);
+      if (!narrow || document.activeElement?.tagName !== "TEXTAREA") setInspectorOpen(true);
       setInspectorKind("source");
     }
     setSelectedUploadId((current) =>
-      current && uploads.some((upload) => upload.upload_id === current)
+      added ? added.upload_id : current && uploads.some((upload) => upload.upload_id === current)
         ? current
         : uploads[0].upload_id,
     );
-  }, []);
+  }, [narrow]);
 
-  const submitNew = async (payload: SourceTaskPayload) => {
+  const submitNew = async (payload: SourceTaskPayload, draftScope = "new") => {
+    const epoch = composerEpochRef.current;
+    const navigation = selectionParams.current.toString();
     const storageKey = `mangrove_web_task_attempt_${user?.user_id}`;
     const owner = user?.user_id;
-    const draftKey = `mangrove_workspace_draft_${owner}_new`;
+    const draftKey = `mangrove_workspace_draft_${owner}_${draftScope}`;
     const savedDraft = localStorage.getItem(draftKey), savedFiles = localStorage.getItem(`${draftKey}_files`);
     try {
       const requestPayload = {
@@ -1208,10 +901,12 @@ export function SemanticWorkspacePage() {
       if (localStorage.getItem(draftKey) === savedDraft && localStorage.getItem(`${draftKey}_files`) === savedFiles) { localStorage.removeItem(draftKey); localStorage.removeItem(`${draftKey}_files`); }
       localStorage.removeItem(storageKey);
       createAttemptRef.current = null;
-      setSelectedTaskId(created.task_id);
-
-      setRecycleBin(false);
-      setLiveEvents([]);
+      // 旧创建请求仍保存结果，但不能把用户从新草稿切回旧任务。
+      if (epoch === composerEpochRef.current && navigation === selectionParams.current.toString()) {
+        setSelectedTaskId(created.task_id);
+        setRecycleBin(false);
+        setLiveEvents([]);
+      }
       await queryClient.invalidateQueries({
         queryKey: ["semantic-workspace-tasks"],
       });
@@ -1224,13 +919,21 @@ export function SemanticWorkspacePage() {
 
   const taskNavigation = (
           <WorkspaceTaskSidebar
-          tasks={tasks.data || []}
-          activeTaskId={selectedTaskId}
+          tasks={[...(tasks.data || []), ...(recycleBin ? [] : collectionHistory.data || []).map(item => ({ ...item, task_id: `conversation:${item.conv_id}` }))].sort((a, b) => b.updated_at.localeCompare(a.updated_at))}
+          activeTaskId={selectedConversationId ? `conversation:${selectedConversationId}` : selectedTaskId}
           filter={filter}
           recycleBin={recycleBin}
           storage={storage.data}
           onSelect={(taskId) => {
             if (narrow) setNavigationOpen(false);
+            if (taskId.startsWith("conversation:")) {
+              const next = new URLSearchParams();
+              next.set("conversation", taskId.slice("conversation:".length));
+              selectionParams.current = next;
+              setSearchParams(next);
+              setInspectorOpen(false);
+              return;
+            }
             setSelectedTaskId(taskId);
 
             setLiveEvents([]);
@@ -1240,11 +943,28 @@ export function SemanticWorkspacePage() {
             setFilter(nextFilter);
           }}
           onNew={() => {
-            if (!resetNewTaskDraft()) return;
-            setExampleSeed(null);
+            try {
+              // 只清理新任务输入缓存，不删除服务端任务、文件或未知创建请求。
+              const draftKey = `mangrove_workspace_draft_${user?.user_id ?? "current"}_new`;
+              localStorage.removeItem(draftKey);
+              localStorage.removeItem(`${draftKey}_files`);
+              localStorage.removeItem(`mangrove_web_source_attempt_${user?.user_id ?? "current"}`);
+            } catch {
+              toast.error("无法重置浏览器草稿，请检查浏览器存储权限后重试");
+              return;
+            }
+            setComposerDraft(current => current ? {
+              prompt: "", formats: [], connectionId: current.connectionId,
+              connectionModel: current.connectionModel, localModel: current.localModel,
+            } : null);
+            // 新身份触发卸载，中止旧等待并使迟到回调失效。
+            setComposerEpoch(++composerEpochRef.current);
             if (narrow) setNavigationOpen(false);
             setRecycleBin(false);
             setSelectedTaskId(null);
+            setDraftUploads([]);
+            setSelectedUploadId(null);
+            setInspectorOpen(false);
 
           }}
           onToggleRecycleBin={() => {
@@ -1280,19 +1000,23 @@ export function SemanticWorkspacePage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      {user && <TaskDeletionDialog key={user.user_id} ownerId={user.user_id} target={deletionTarget} currentTaskId={selectedTaskId} onClose={() => setDeletionTarget(null)} onCompleted={operation => {
-        if (selectedTaskId === operation.task_id) setSelectedTaskId(null);
-        void Promise.all(["semantic-workspace-task", "semantic-workspace-tasks", "semantic-workspace-storage", "workspace-task-source", "workspace-task-derived-source", "workspace-source-file"].map(key => queryClient.invalidateQueries({ queryKey: [key] })));
-      }} />}
-      <header className="flex min-h-14 shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-background px-3 py-2">
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-background px-7 py-4">
         <div>
-          <h1 className="text-sm font-semibold">任务工作台</h1>
-          <p className="text-[11px] text-muted-foreground">
+          <h1 className="text-lg font-semibold tracking-tight">任务工作台</h1>
+          <p className="text-sm text-muted-foreground">
             表格与文档的理解、执行、验证和正式交付
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <button type="button" aria-label="任务列表开关" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(value => !value)} className="rounded-lg border px-3 py-2 text-xs hover:bg-muted">任务列表</button>
+        <div className="flex flex-wrap items-center gap-2">
+          <PageGuide page={newTask ? "workspace.new" : "workspace.task"} ready={newTask || Boolean(task)} />
+          {user && <TaskDeletionDialog key={user.user_id} ownerId={user.user_id} target={deletionTarget} currentTaskId={selectedTaskId} onClose={() => setDeletionTarget(null)} onCompleted={operation => {
+            if (selectedTaskId === operation.task_id) setSelectedTaskId(null);
+            void Promise.all(["semantic-workspace-task", "semantic-workspace-tasks", "semantic-workspace-storage", "workspace-task-source", "workspace-task-derived-source", "workspace-source-file"].map(key => queryClient.invalidateQueries({ queryKey: [key] })));
+          }} />}
+          <button id="task-list-toggle" type="button" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(value => !value)} className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+            {navigationOpen ? <PanelLeftClose aria-hidden="true" className="h-3.5 w-3.5" /> : <PanelLeftOpen aria-hidden="true" className="h-3.5 w-3.5" />}
+            {navigationOpen ? "收起任务列表" : "展开任务列表"}
+          </button>
           {(newTask ? draftUploads.length > 0 : Boolean(task?.uploads?.length || taskWebSources.some(source => source.snapshot?.artifacts.length) || task?.delivery_output_ids?.length)) ? (
             <button
               type="button"
@@ -1304,23 +1028,9 @@ export function SemanticWorkspacePage() {
             </button>
           ) : null}
           {task?.delivery && !newTask && <button type="button" className="rounded-lg border px-3 py-2 text-xs hover:bg-muted" onClick={() => { setInspectorKind("result"); setInspectorOpen(true); }}>查看结果</button>}
-          <button
-            type="button"
-            onClick={() => setHelpOpen(true)}
-            className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted"
-          >
-            <HelpCircle className="h-3.5 w-3.5" />
-            帮助
-          </button>
         </div>
       </header>
 
-      <GuidanceDialog
-        guidance={guidance.data}
-        open={helpOpen}
-        onOpenChange={setHelpOpen}
-        onUseExample={useExample}
-      />
 
       {settingsOpen && (
         <section className="min-h-0 flex-1 overflow-y-auto p-4" aria-label="模型设置">
@@ -1344,7 +1054,7 @@ export function SemanticWorkspacePage() {
               <Dialog.Overlay className="fixed inset-0 z-40 bg-foreground/20" />
               <Dialog.Content aria-describedby={undefined} className="fixed inset-y-0 left-0 z-50 max-w-[90vw] bg-background" onCloseAutoFocus={event => {
                 event.preventDefault();
-                document.querySelector<HTMLButtonElement>('[aria-label="任务列表开关"]')?.focus();
+                document.getElementById("task-list-toggle")?.focus();
               }}>
                 <Dialog.Title className="sr-only">任务列表</Dialog.Title>
                 {taskNavigation}
@@ -1354,78 +1064,69 @@ export function SemanticWorkspacePage() {
         ) : navigationOpen && taskNavigation}
 
         <div className="min-w-0 flex-1">
-          {newTask ? (
+          {selectedConversationId ? <CollectionHistory key={`${user?.user_id}:${selectedConversationId}`} convId={selectedConversationId}
+            composerProps={{ modelOptions: models.data?.options, defaultModel: models.data?.default,
+              allowPiRuntime: Boolean(models.data?.pi_runtime_enabled), allowLocalPiRuntime: canUseLocalPiRuntime,
+              modelConnections: verifiedModelConnections,
+              defaultConnectionId: modelPreference.data?.preference?.connection_id ?? null,
+              defaultConnectionModel: modelPreference.data?.preference?.model_id ?? null,
+              grayCapabilities: grayCapabilities.data?.items ?? [], onSubmit: payload => submitNew(payload, `conversation_${selectedConversationId}`) }} /> : newTask ? (
             <Group orientation="horizontal" className="h-full min-h-0" defaultLayout={{ draft: 58, preview: 42 }}>
               <Panel id="draft" minSize="0px" className={cn("min-w-0", fullInspector && inspectorOpen && draftUploads.length > 0 && "hidden")}>
               <div className="h-full overflow-y-auto">
                 <div
                   className={cn(
-                    "mx-auto max-w-5xl",
+                    "mx-auto flex min-h-full max-w-5xl flex-col",
                     draftUploads.length
                       ? "px-3 pb-4 pt-2"
-                      : "px-4 pb-12 pt-8 sm:px-8 sm:pt-14",
+                      : "px-4 pb-3 pt-6 sm:px-8",
                   )}
                 >
-                {draftUploads.length === 0 ? (
-                  <>
-                    <div className="mx-auto max-w-3xl text-center">
-                      <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-                        <Sparkles className="h-5 w-5" />
-                      </div>
-                      <h2 className="mt-5 text-2xl font-semibold tracking-tight">
-                        想处理什么资料？
-                      </h2>
-                      <p className="mt-2 text-sm text-muted-foreground">
-                        描述想得到的结果，添加文件或提供具体公开网址。
-                      </p>
-                    </div>
-
-                  </>
-                ) : (
+                {draftUploads.length === 0 && !composerDraft?.conversation?.length && !composerDraft?.chatAttempt ? (
+                  <div className="flex flex-1 flex-col justify-center">
+                  <WorkspaceExamples hasPrompt={Boolean(composerDraft?.prompt.trim())} onFill={prompt => {
+                    setComposerDraft(current => ({ ...current, prompt: current?.prompt.trim() ? `${current.prompt}\n\n${prompt}` : prompt,
+                      connectionId: current?.connectionId ?? null, connectionModel: current?.connectionModel ?? null, localModel: current?.localModel ?? null }));
+                    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务要求"]')?.focus());
+                  }} />
+                  </div>
+                ) : draftUploads.length > 0 ? (
                   <div className="mx-auto mb-2 hidden max-w-3xl md:block">
                     <h2 className="text-lg font-semibold">核对文件并说明目标</h2>
                     <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                      文件已添加，可打开预览核对内容，再说明要筛选、汇总或提取什么。
+                      右侧查看文件，在下方直接告诉我你的要求。
                     </p>
                   </div>
-                )}
+                ) : null}
 
                 <div
                   className={cn(
-                    "mx-auto max-w-3xl",
-                    draftUploads.length === 0 && "mt-6",
+                    "mx-auto w-full max-w-3xl",
+                    composerDraft?.conversation?.length || composerDraft?.chatAttempt ? "flex flex-1 flex-col pt-6" : "mt-auto pt-6",
                   )}
+                  data-task-composer
                 >
-                    <div>
+                    <div className="flex flex-1 flex-col">
                     <WorkspaceSourceComposer
                     ownerId={user?.user_id ?? "current"}
-                    sourceStorageScope={newTaskSourceScope}
                     unified
-                    onConfigureModels={() => setSettingsOpen(true)}
                     draft={composerDraft}
                     onDraftChange={setComposerDraft}
                     active={!settingsOpen && !recoveringCreate}
-                    key={`${user?.user_id}:${exampleSeed?.key || `new-task:${newTaskSession}`}`}
-                    initialPrompt={exampleSeed?.prompt}
-                    initialFormats={exampleSeed?.formats}
+                    key={`${user?.user_id}:new-task:${composerEpoch}`}
                     modelOptions={models.data?.options}
                     defaultModel={models.data?.default}
                     allowPiRuntime={Boolean(models.data?.pi_runtime_enabled)}
                     allowLocalPiRuntime={canUseLocalPiRuntime}
                     modelConnections={verifiedModelConnections}
                     defaultConnectionId={
-                      modelPreference.data?.preference?.available
-                        ? modelPreference.data.preference.connection_id
-                        : null
+                      modelPreference.data?.preference?.connection_id ?? null
                     }
                     defaultConnectionModel={
-                      modelPreference.data?.preference?.available
-                        ? modelPreference.data.preference.model_id
-                        : null
+                      modelPreference.data?.preference?.model_id ?? null
                     }
                     grayCapabilities={grayCapabilities.data?.items ?? []}
                     onUploadsChange={handleDraftUploadsChange}
-                    onSourceAcquisitionRecoveryChange={raw => { newTaskSourceRecovery.current = raw; }}
                     onSubmit={submitNew}
                     />
                     </div>
@@ -1502,8 +1203,8 @@ export function SemanticWorkspacePage() {
               orientation="horizontal"
               className="h-full min-h-0"
               defaultLayout={{
-                content: inspectorOpen ? 68 : 100,
-                source: inspectorOpen ? 32 : 0,
+                content: inspectorOpen ? 55 : 100,
+                source: inspectorOpen ? 45 : 0,
               }}
             >
               <Panel id="content" minSize="0px" className={cn("min-w-0", fullInspector && inspectorOpen && "hidden")}>
@@ -1584,11 +1285,21 @@ export function SemanticWorkspacePage() {
                             {accountResumeFeedback && <button type="button" className="ml-3 mt-3 underline" onClick={() => void detail.refetch()}>刷新任务状态</button>}
                           </section>
                         )}
-                        {user && <WorkspaceLifecycleActions feedbackRequest={feedbackRequest} key={`lifecycle:${user.user_id}:${task.task_id}:${task.viewing_revision ?? task.active_revision}`} ownerId={user.user_id} task={task} />}
+                        {task.source_contract?.owner_acceptance && task.status === "completed" && (
+                          <p className="mx-auto max-w-4xl border-b px-6 py-4 text-sm" role="status">正式结果 · 用户接受初稿；未完成的系统检查仍为未验证。</p>
+                        )}
+                        {viewingRevision && task.status !== "completed" && <DraftResultPanel
+                          key={`${user?.user_id}:${task.task_id}:${viewingRevision}`}
+                          taskId={task.task_id} revision={viewingRevision} ownerId={user?.user_id}
+                          status={task.status} active={viewingRevision === task.active_revision}
+                          onAccepted={revision => setSelectedRevision(revision)}
+                          onPreview={showDraft}
+                          actionsTarget={draftActionsTarget}
+                          onModify={closeInspector}
+                        />}
                         <TaskTimeline
-                          key={`${user?.user_id}:${task.task_id}:${task.active_revision}`}
+                          cancelTarget={cancelTarget}
                           task={task}
-                          externalConnection={Boolean(task.agentic_runtime?.model_connection_id ?? task.model_connection_id)}
                           connectionLabel={modelConnections.data?.items.find(connection => connection.connection_id === (task.agentic_runtime?.model_connection_id ?? task.model_connection_id))?.display_name}
                           clarificationTurnIds={conversation.data?.turns.map(turn => turn.turn_id)}
                           liveEvents={liveEvents}
@@ -1637,7 +1348,7 @@ export function SemanticWorkspacePage() {
                               );
                             }
                           }}
-                          onRetry={async (unchanged = false, externalApiConfirmed = false) => {
+                          onRetry={async (unchanged = false) => {
                             if (task.source_integrity?.can_rerun === false) { toast.error("来源已删除，不能按原来源重跑；请先核对本次资料。"); return; }
                             if (!unchanged) {
                               document
@@ -1645,7 +1356,33 @@ export function SemanticWorkspacePage() {
                                 ?.scrollIntoView({ behavior: "smooth" });
                               return;
                             }
-                            await retryCurrentTask(externalApiConfirmed);
+                            try {
+                              await createWorkspaceRevision(
+                                task.task_id,
+                                "保持原要求，重新执行",
+                                task.active_revision,
+                                undefined,
+                                true,
+                              );
+                              await Promise.all([
+                                queryClient.invalidateQueries({
+                                  queryKey: [
+                                    "semantic-workspace-task",
+                                    task.task_id,
+                                  ],
+                                }),
+                                queryClient.invalidateQueries({
+                                  queryKey: ["semantic-workspace-tasks"],
+                                }),
+                              ]);
+                              toast.success("已创建新版本并重新执行");
+                            } catch (error) {
+                              toast.error(
+                                error instanceof Error
+                                  ? error.message
+                                  : "重新执行失败",
+                              );
+                            }
                           }}
                           onRefreshSource={async (externalApiConfirmed, targetSourceSnapshotId) => {
                             const expectedRevision = task.current_revision
@@ -1808,36 +1545,19 @@ export function SemanticWorkspacePage() {
                             const clarification = task.clarification_history?.find(entry => entry.turn_id === turn.turn_id);
                             return <article key={turn.turn_id} className="space-y-2 border-b pb-4 text-sm leading-7">
                               {clarification && <p className="text-muted-foreground">{clarification.question.prompt}</p>}
-                              <div className="flex items-start gap-2"><p className="min-w-0 flex-1 whitespace-pre-wrap font-medium">{turn.text}</p><button type="button" disabled={followupBusy} className="inline-flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs text-muted-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50" onClick={() => setResendDraft({ scope: readingIdentity, key: nanoid(), text: turn.text })}><Pencil className="h-3.5 w-3.5" />编辑为新消息</button></div>
+                              <p className="whitespace-pre-wrap font-medium">{turn.text}</p>
+                              <MessageTimestamp value={turn.created_at} />
                               {response && <p className="text-muted-foreground">{response.acknowledgement}</p>}
                               {answer && <div aria-label="Mangrove 回答"><Markdown safeResources>{answer}</Markdown></div>}
                               {answer && <AnswerReferences context={context && context.revision === (message?.revision ?? response?.revision) ? context : null} onViewSource={viewSource} />}
-                              {answer && response && <ConversationActions
-                                content={answer}
-                                canFeedback={viewingRevision === response.revision}
-                                canRegenerate={response.revision === (task.current_revision ?? task.active_revision) && viewingRevision === response.revision}
-                                regenerating={regeneratingMessageId === response.result_id}
-                                requiresExternalConfirmation={Boolean(task.model_connection_id || task.agentic_runtime?.model_connection_id || task.provider !== "local")}
-                                onFeedback={rating => setFeedbackRequest({id:++feedbackRequestId.current,taskId:task.task_id,revision:response.revision,resultId:response.result_id,rating})}
-                                onRegenerate={confirmed => regenerateMessage(response.result_id, response.revision, confirmed)}
-                              />}
+                              {answer && (message || response) && <MessageFooter content={answer} createdAt={message?.created_at ?? response?.created_at}
+                                workspace={{ taskId: task.task_id, revision: message?.revision ?? response!.revision, resultId: message?.message_id ?? response!.result_id }} />}
                             </article>;
                           })}
                           {messages.filter(message => !conversation.data?.turns?.some(turn => turn.turn_id === message.turn_id)).map(message => (
-                            <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown><AnswerReferences context={message.result_context?.revision === message.revision ? readPublicResultContext(message.result_context) : null} onViewSource={viewSource} /><ConversationActions
-                              content={message.content}
-                              canFeedback={viewingRevision === message.revision}
-                              canRegenerate={message.revision === (task.current_revision ?? task.active_revision) && viewingRevision === message.revision}
-                              regenerating={regeneratingMessageId === message.message_id}
-                              requiresExternalConfirmation={Boolean(task.model_connection_id || task.agentic_runtime?.model_connection_id || task.provider !== "local")}
-                              onFeedback={rating => setFeedbackRequest({id:++feedbackRequestId.current,taskId:task.task_id,revision:message.revision,resultId:message.message_id,rating})}
-                              onRegenerate={confirmed => regenerateMessage(message.message_id, message.revision, confirmed)}
-                            /></article>
+                            <article key={message.message_id} aria-label="Mangrove 回答" className="text-sm leading-7"><Markdown safeResources>{message.content}</Markdown><AnswerReferences context={message.result_context?.revision === message.revision ? readPublicResultContext(message.result_context) : null} onViewSource={viewSource} /><MessageFooter content={message.content} createdAt={message.created_at} workspace={{ taskId: task.task_id, revision: message.revision, resultId: message.message_id }} /></article>
                           ))}
                         </section>
-                        {task.status === "completed" && (
-                          <p className="text-sm text-muted-foreground">正式结果已生成，可在文件侧栏核对并下载。</p>
-                        )}
                         {task.status === "candidate_ready" && (
                           <CandidatePreview
                             task={task}
@@ -1923,6 +1643,22 @@ export function SemanticWorkspacePage() {
                           />
                         )}
                         <div id="workspace-revision-composer" className="mx-auto mb-6 max-w-4xl px-6">
+                          {task.status === "completed" && task.delivery && viewingRevision === (task.current_revision ?? task.active_revision) && <div className="mb-3">
+                            <ResultNotification key={`${task.task_id}:${viewingRevision}`} taskId={task.task_id} revision={viewingRevision} outputs={task.delivery.outputs}
+                              onSent={() => { void queryClient.invalidateQueries({ queryKey: ["semantic-workspace-task"] }); }} />
+                            {(task.events ?? []).filter(event => event.event_type.startsWith("notification.") && event.event_type !== "notification.intent").slice(-1).map(event => <p key={event.event_id} role="status" className="mt-2 text-sm">{event.summary}</p>)}
+                          </div>}
+                          {task.status === "completed" && (
+                            <div className="mb-3 text-sm text-muted-foreground"><p>
+                              正式结果已生成。
+                              <button type="button" className="ml-2 rounded text-primary underline underline-offset-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { setInspectorKind("result"); setInspectorOpen(true); }}>查看正式结果</button>
+                            </p><MessageFooter content={task.summary || "正式结果已生成。"} copyLabel="复制结果" createdAt={task.delivery?.created_at ?? (task.work_session?.revision === viewingRevision ? task.work_session?.ended_at ?? undefined : undefined)}
+                              copyContent={() => workspaceResultText(task.task_id, viewingRevision!, selectedOutputId ?? undefined)}
+                              workspace={{ taskId: task.task_id, revision: viewingRevision! }} usageLabel={task.work_session && task.work_session.revision !== viewingRevision ? `来源执行 V${task.work_session.revision}` : "本次任务版本"}
+                              usage={task.work_session?.usage.call_count ? { calls: task.work_session.usage.call_count, prompt_tokens: task.work_session.usage.input_tokens ?? 0, completion_tokens: task.work_session.usage.output_tokens ?? 0, total_tokens: task.work_session.usage.total_tokens,
+                                incomplete: task.work_session.usage.unknown_call_count > 0,
+                                missing_fields: [...(task.work_session.usage.input_tokens === null ? ["prompt_tokens"] : []), ...(task.work_session.usage.output_tokens === null ? ["completion_tokens"] : []), ...(task.work_session.usage.unknown_call_count === task.work_session.usage.call_count ? ["total_tokens"] : [])] } : null} /></div>
+                          )}
                           {viewingRevision === (task.current_revision ?? task.active_revision) && ["completed", "failed", "cancelled", "candidate_ready"].includes(task.status) && <>
                             <button type="button" aria-expanded={sourceEditorIdentity === resultIdentity} onClick={() => setSourceEditorIdentity(current => current === resultIdentity ? null : resultIdentity)} className="rounded-lg border px-3 py-2 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">编辑本次资料</button>
                             {(() => {
@@ -2012,10 +1748,10 @@ export function SemanticWorkspacePage() {
                             <span>设置用于新任务，当前版本保持原模型。</span>
                           </div>
                           <FollowupComposer
+                            onCancelTarget={setCancelTarget}
                             key={`${user?.user_id}:${task.task_id}`}
                             task={task}
                             scopeIdentity={readingIdentity}
-                            draftRequest={resendDraft?.scope === readingIdentity ? resendDraft : null}
                             onAnswer={answerQuestion}
                             onRefreshQuestion={() => { void detail.refetch(); }}
                             resultContext={resultDraft?.identity === resultIdentity ? resultDraft.context : null}
@@ -2106,11 +1842,16 @@ export function SemanticWorkspacePage() {
                   {!fullInspector && <Separator className="w-1 border-x bg-border/50 transition-colors hover:bg-primary/30" />}
                   <Panel
                     id="source"
-                    minSize={fullInspector ? "100%" : "280px"}
+                    minSize={fullInspector ? "100%" : "360px"}
                     maxSize={fullInspector ? "100%" : "65%"}
                     className="bg-background"
                   >
-                    {inspectorKind === "result" ? (
+                    {inspectorKind === "draft" && previewDraft?.identity === resultIdentity && task.status !== "completed" ? (
+                      <DraftPreview key={resultIdentity} draft={previewDraft.draft} onClose={closeInspector} actionsRef={setDraftActionsTarget}
+                        expanded={inspectorExpanded} onToggleExpand={narrow ? undefined : () => setInspectorExpanded(value => !value)}
+                        viewState={canvasView.draft ?? initialDraftView}
+                        onViewStateChange={draft => setCanvasView(current => current.identity === resultIdentity ? { ...current, draft } : current)} />
+                    ) : inspectorKind === "result" ? (
                       <div className="h-full overflow-auto p-3" ref={element => { if (element) element.scrollTop = resultView.bodyTop ?? 0; }}
                         onScroll={event => updateCanvasResult({ bodyTop: event.currentTarget.scrollTop })}>
                         <button type="button" className="mb-3 rounded-lg border px-3 py-2 text-xs hover:bg-muted" onClick={closeInspector}>关闭结果预览</button>

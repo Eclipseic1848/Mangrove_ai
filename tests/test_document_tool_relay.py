@@ -92,6 +92,32 @@ class InspectAdapter:
 
 
 @pytest.mark.asyncio
+async def test_uncertain_page_scope_can_replan_before_freeze(tmp_path: Path) -> None:
+    source = tmp_path / 'source.pdf'
+    source.write_bytes(b'fixture')
+    broker = DocumentToolBroker(retriever=InspectAdapter())
+    grant = broker.issue_grant(owner_user_id='user-a', task_id='scope-replan', revision=1,
+        run_id='run-a', sources=(SourceInput(upload_id='upload-a', original_name='source.pdf',
+            host_path=source, sha256='a' * 64, media_type='application/pdf'),))
+    await broker.call(grant_token=grant.token, operation='inspect_source', payload={'source_id': 'upload-a'})
+    payload = {
+        'authorized_scope': {'source_ids': ['upload-a'], 'unit_ids': ['upload-a:page:1']},
+        'result_cardinality': 'ordinal', 'result_ordinal': 5, 'completeness': 'strict',
+        'ordering': '文档顺序', 'object_boundary': '完整审批单',
+        'stop_semantics': '定位第5张完整审批单', 'interpretation': '提取第5张审批单', 'confidence': 'low',
+    }
+    with pytest.raises(DocumentToolError, match='本次未冻结'):
+        await broker.call(grant_token=grant.token, operation='freeze_coverage', payload=payload)
+    payload['authorized_scope'] = {'source_ids': ['upload-a']}
+    await broker.call(grant_token=grant.token, operation='freeze_coverage', payload=payload)
+    read = await broker.call(grant_token=grant.token, operation='read_evidence',
+        payload={'source_id': 'upload-a', 'unit_ids': ['upload-a:page:2']})
+    assert read['coverage']['authoritatively_read'] == 1
+    with pytest.raises(DocumentToolError, match='已经冻结'):
+        await broker.call(grant_token=grant.token, operation='freeze_coverage', payload=payload)
+
+
+@pytest.mark.asyncio
 async def test_ordinal_result_does_not_require_units_after_target(
     tmp_path: Path,
 ) -> None:
@@ -475,6 +501,29 @@ def _relay_headers(grant: DocumentToolGrant) -> dict[str, str]:
         "X-Mangrove-Run-ID": grant.run_id,
         "X-Mangrove-Purpose": grant.purpose,
     }
+
+
+def test_document_retrieval_failure_is_typed_and_does_not_leak_path(tmp_path):
+    import hashlib
+    from src.agentic_runtime.document_retrieval import DocumentRetrievalModule
+
+    source = tmp_path / "private-source.pdf"
+    source.write_bytes(b"invalid synthetic PDF")
+    broker = DocumentToolBroker(retriever=DocumentRetrievalModule(execution_root=tmp_path))
+    grant = broker.issue_grant(
+        owner_user_id="user-a", task_id="task-a", revision=1, run_id="run-a",
+        sources=(SourceInput(upload_id="upload-a", original_name=source.name,
+                             host_path=source, sha256=hashlib.sha256(source.read_bytes()).hexdigest()),),
+    )
+    app = FastAPI()
+    app.include_router(document_tool_routes.router)
+    app.dependency_overrides[document_tool_routes.get_document_tool_broker] = lambda: broker
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.post("/internal/document-tools/inspect_source",
+                               headers=_relay_headers(grant), json={"source_id": "upload-a"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "DOCUMENT_RETRIEVAL_FAILED"
+    assert str(tmp_path) not in response.text
 
 
 def _claims(grant: DocumentToolGrant, **changes: object) -> DocumentToolClaims:

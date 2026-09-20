@@ -31,7 +31,42 @@ def create_conversation(user=Depends(get_current_user)):
 @router.get("/{conv_id}/messages", response_model=List[MessageOut])
 def get_messages(conv_id: str, user=Depends(get_current_user)):
     _own_conv_or_404(conv_id, user)
-    return get_store().list_messages(conv_id)
+    messages = get_store().list_messages(conv_id)
+    assistants = [message for message in messages if message["role"] == "assistant"]
+    from src.api.session_store import pending_store
+    for message in assistants:
+        # 消息身份只用于定位；能否操作每次按当前 Owner 的服务端暂存核对。
+        message["meta"] = {**(message.get("meta") or {}), "template_available": bool(
+            message.get("task_id") and pending_store.has_action(user["user_id"], message["task_id"], "template")
+        )}
+    missing = [message for message in assistants if not (message.get("meta") or {}).get("token_usage")]
+    if missing:
+        from src.model_connections.storage import ModelConnectionRepository
+        usage = ModelConnectionRepository(get_store().db_path).list_usage(user["user_id"], task_id=conv_id, revision=1, include_identity=True)
+        run_ids = {item["run_id"] for item in usage}
+        linked_runs = {(message.get("meta") or {}).get("chat_run_id") for message in assistants}
+        legacy = [message for message in missing if not (message.get("meta") or {}).get("chat_run_id") and (message.get("meta") or {}).get("kind") != "chat"]
+        unlinked_runs = run_ids - linked_runs
+        for message in missing:
+            meta = message.get("meta") or {}
+            # 新记录按运行身份对账；排除已绑定的新回复后，旧数据只允许单回复、单运行关联。
+            run_id = meta.get("chat_run_id")
+            if not run_id and message in legacy and len(legacy) == 1 and len(unlinked_runs) == 1:
+                run_id = next(iter(unlinked_runs))
+            rows = [item for item in usage if run_id and item["run_id"] == run_id]
+            if not rows:
+                continue
+            totals = {"calls": sum(item["request_count"] for item in rows), "scope": "execution_only"}
+            missing_fields = []
+            for source, target in (("input_tokens", "prompt_tokens"), ("output_tokens", "completion_tokens"), ("total_tokens", "total_tokens")):
+                totals[target] = sum(item[source] for item in rows if item[source] is not None)
+                if any(item[source] is None for item in rows):
+                    missing_fields.append(target)
+            if missing_fields:
+                totals.update(incomplete=True, missing_fields=missing_fields)
+            # 只投影已有账本，不改历史正文或原始计费记录；不含旧版会话外的需求识别调用。
+            message["meta"] = {**meta, "token_usage": totals}
+    return messages
 
 
 @router.patch("/{conv_id}")

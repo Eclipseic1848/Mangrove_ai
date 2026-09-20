@@ -15,8 +15,13 @@ async function setup(page: Page, routeUser: (route: Route) => Promise<void>, rol
   });
   await page.goto("/admin");
   await expect(page.getByText("@owner-a", { exact: true })).toBeVisible();
+  await row(page).getByRole("button", { name: "更多操作" }).click();
 }
 const row = (page: Page, name = "owner-a") => page.getByRole("group", { name: `账号 ${name}`, exact: true });
+async function confirmAccount(page: Page, title = "禁用账号") {
+  await row(page).getByTitle(title, { exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "确认", exact: true }).click();
+}
 
 test("停用接受与后台完成分开，刷新恢复且不凭零计数完成", async ({ page }) => {
   const user = account();
@@ -26,7 +31,8 @@ test("停用接受与后台完成分开，刷新恢复且不凭零计数完成",
     if (route.request().method() === "PATCH") { patches += 1; patch = route; return; }
     return route.fulfill({ json: list([user, account("owner-b")]) });
   });
-  await page.getByTitle("禁用账号", { exact: true }).first().evaluate((button: HTMLButtonElement) => { button.click(); button.click(); });
+  await row(page).getByTitle("禁用账号", { exact: true }).click();
+  await page.getByRole("dialog").getByRole("button", { name: "确认", exact: true }).evaluate((button: HTMLButtonElement) => { button.click(); button.click(); });
   await expect.poll(() => !!patch).toBe(true);
   await expect(row(page).getByTitle("禁用账号", { exact: true })).toBeDisabled();
   user.disabled = 1;
@@ -59,7 +65,7 @@ test("持久失败可重试同操作，重新启用不会恢复后台任务", as
   await expect(row(page)).toContainText("后台处理未完成");
   await row(page).getByRole("button", { name: "重试处理", exact: true }).press("Enter");
   await expect(row(page)).toContainText("后台处理进行中");
-  await row(page).getByTitle("启用账号", { exact: true }).click();
+  await confirmAccount(page, "启用账号");
   await expect(row(page)).toContainText("历史任务不会自动继续");
   await expect(row(page)).toContainText("后台处理进行中");
   await page.reload();
@@ -106,8 +112,9 @@ test("未知停用提交不自动重发，只通过刷新核对", async ({ page 
     }
     return route.fulfill({ json: list([user]) });
   });
-  await page.getByTitle("禁用账号", { exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("提交结果尚未确认");
+  await confirmAccount(page);
+  await expect(row(page).getByRole("alert")).toContainText("提交结果尚未确认");
+  await page.getByRole("dialog").getByRole("button", { name: "取消", exact: true }).click();
   await page.clock.fastForward(15000);
   expect(patches).toBe(1);
   await page.getByRole("button", { name: "刷新", exact: true }).click();
@@ -124,7 +131,7 @@ test("迟到停用结果只刷新当前筛选，不把旧Owner插回列表", asy
     filters.push(filter);
     return route.fulfill({ json: list([account(filter ? "owner-b" : "owner-a")]) });
   });
-  await page.getByTitle("禁用账号", { exact: true }).click();
+  await confirmAccount(page);
   await expect.poll(() => !!patch).toBe(true);
   await page.getByRole("combobox").nth(1).selectOption("disabled");
   await expect(page.getByText("@owner-b", { exact: true })).toBeVisible();
@@ -166,8 +173,8 @@ test("权限拒绝不报告停用成功，同级账号不提供治理按钮", as
     return route.fulfill({ json: list([account(), { ...account("peer-admin"), role: "admin" }]) });
   }, "admin");
   await expect(row(page, "peer-admin").getByTitle("禁用账号", { exact: true })).toHaveCount(0);
-  await row(page).getByTitle("禁用账号", { exact: true }).click();
-  await expect(page.getByRole("alert")).toContainText("无权管理该账号");
+  await confirmAccount(page);
+  await expect(row(page).getByRole("alert")).toContainText("无权管理该账号");
   await expect(row(page)).not.toContainText("新操作已拒绝");
 });
 
@@ -189,10 +196,11 @@ test(`旧停用回执不能覆盖第${generation}代更新后的处理状态`, a
     if (block) return;
     return route.fulfill({ json: list([user]) });
   });
-  await page.getByTitle("禁用账号", { exact: true }).click();
+  await confirmAccount(page);
   await expect.poll(() => !!patch).toBe(true);
   user = { ...user, disabled: 1, execution_hold: { ...hold(), operation_id: generation === 2 ? "hold-new" : "hold-a", generation, updated_at: "2026-09-06T00:00:01Z" } };
-  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  // 筛选触发较新读取，仍验证迟到回执不能覆盖较新状态。
+  await page.getByRole("combobox", { name: "状态筛选" }).selectOption("disabled");
   await expect(row(page)).toContainText("后台处理进行中");
   block = true;
   await patch!.fulfill({ json: { ok: true, user: { ...user, execution_hold: hold("completed") } } });

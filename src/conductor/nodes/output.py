@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
+from src.timezone import now as beijing_now
 from pathlib import Path
 from typing import Any, Dict
 
@@ -21,7 +22,7 @@ def _assemble_report(spec: TaskSpec, state: ConductorState) -> str:
     """拼装最终 Markdown 报告：元信息 + 分析正文 + 数据附录。"""
     data = state.get("cleaned_dataset", [])
     analysis = state.get("analysis")
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = beijing_now().strftime("%Y-%m-%d %H:%M:%S")
 
     lines = [
         f"# 数据采集分析报告：{spec.intent}",
@@ -34,6 +35,9 @@ def _assemble_report(spec: TaskSpec, state: ConductorState) -> str:
         f"- 采集条数：{len(data)}",
         "",
     ]
+    quality = state.get("quality") or {}
+    if quality.get("passed") is False:
+        lines += ["- 核验结果：未通过，本报告不代表任务已完成。", ""]
     coverage = state.get("target_coverage") or {}
     if coverage:
         lines += [
@@ -72,7 +76,9 @@ def _assemble_grade(state: ConductorState) -> Dict[str, Any]:
     q = state.get("quality") or {}
     score = q.get("score")
     n = len(state.get("cleaned_dataset") or [])
-    if score is None:
+    if q.get("passed") is False:
+        level = "未通过"
+    elif score is None:
         level = "未评估"
     elif score >= 85:
         level = "A 优秀"
@@ -87,7 +93,7 @@ def _assemble_grade(state: ConductorState) -> Dict[str, Any]:
 
 async def output_node(state: ConductorState) -> Dict[str, Any]:
     spec = state["task_spec"]
-    task_id = state.get("task_id") or datetime.now().strftime("%Y%m%d_%H%M%S")
+    task_id = state.get("task_id") or beijing_now().strftime("%Y%m%d_%H%M%S")
     out_dir: Path = PROJECT_ROOT / "downloads" / task_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -134,13 +140,19 @@ async def output_node(state: ConductorState) -> Dict[str, Any]:
         else:
             outputs["db_pending"] = True
 
-    # 旧批准标记与恢复的 pending 都不能重新开放外部结果投递。
+    # 发送交由宿主通知服务核对用户原文；旧批准标记不能直接触发网络动作。
     prior_outputs = state.get("outputs") or {}
     if spec.needs_email() or spec.needs_slack() or prior_outputs.get("email_pending") or prior_outputs.get("slack_pending"):
-        outputs["external_delivery"] = "平台遵守外部只读边界，不支持邮件或 Slack 投递；本机报告已保留。"
+        outputs["external_delivery"] = "报告已生成；宿主将核对本次用户发送指令，明确授权后发送。"
 
     # 4) 用户回复
-    reply_lines = (["未生成视频内容结论：未取得足够的可验证证据。"] if state.get("analysis_source") == "video_evidence_blocked" else [f"已完成采集与分析，共 {len(data)} 条数据（采集引擎：{state.get('collector_used') or '—'}）。"])
+    quality = state.get("quality") or {}
+    if state.get("analysis_source") == "video_evidence_blocked":
+        reply_lines = ["未生成视频内容结论：未取得足够的可验证证据。"]
+    elif quality.get("passed") is False:
+        reply_lines = [f"本次结果未通过核验，不能视为任务完成；取得 {len(data)} 条数据。"]
+    else:
+        reply_lines = [f"已取得 {len(data)} 条数据并生成分析（采集引擎：{state.get('collector_used') or '—'}）。"]
     # 采集过程说明（如小红书登录过期、已改用全网兜底等），置顶告知用户
     for note in state.get("collector_notes") or []:
         reply_lines.append(note)
@@ -154,7 +166,6 @@ async def output_node(state: ConductorState) -> Dict[str, Any]:
         reply_lines.append(outputs["external_delivery"])
 
     # 质量评估（Checker）：通过给分，未通过附问题清单（仅提示，不重跑）
-    quality = state.get("quality")
     if quality:
         if quality.get("passed"):
             reply_lines.append(f"✅ 质量自评：{quality.get('score')} 分。{quality.get('summary') or ''}".rstrip())
@@ -195,6 +206,7 @@ async def output_node(state: ConductorState) -> Dict[str, Any]:
     # 阶段1 兜底：走了通用兜底但未自动沉淀（Checker 关闭/未通过）时，提议手动沉淀
     elif (
         settings.template_learning_enabled
+        and quality.get("passed") is True
         and state.get("analysis_source") == "fallback"
         and state.get("analysis")
     ):

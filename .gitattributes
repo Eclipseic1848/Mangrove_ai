@@ -9,11 +9,6 @@ evals/generalization-g1-independent-v2/sources/*.xlsx binary
 evals/generalization-g1-independent-v3/sources/*.pdf binary
 evals/generalization-g1-independent-v3/sources/*.docx binary
 evals/generalization-g1-independent-v3/sources/*.xlsx binary
-src/database_migrations/alembic/versions/webui_0013_feedback_content_access.py text eol=lf
-src/database_migrations/alembic/versions/webui_0015_public_search.py text eol=lf
-src/database_migrations/alembic/versions/webui_0016_mixed_source_contract.py text eol=lf
-
-src/database_migrations/alembic/versions/webui_0017_source_read_uses.py text eol=lf
-src/database_migrations/alembic/versions/webui_0018_source_deletion.py text eol=lf
-src/database_migrations/alembic/versions/scheduler_0002_workspace_lifecycle.py text eol=lf
-src/database_migrations/alembic/versions/webui_0019_workspace_lifecycle.py text eol=lf
+# 冻结迁移摘要按 LF 字节生成；所有平台的检出和归档必须保留同一字节格式。
+src/database_migrations/alembic/versions/*.py text eol=lf
+src/database_migrations/alembic/versions/*.sql text eol=lf

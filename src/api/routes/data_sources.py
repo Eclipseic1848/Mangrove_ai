@@ -17,8 +17,8 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse, Response
 
 from src.config.settings import settings
 from src.data_prep.document_models import DocumentElement
@@ -91,6 +91,29 @@ def get_upload_content(
     )
 
 
+@router.get("/uploads/{upload_id}/workbook-preview")
+@guarded_response("preview", lambda values: [{"upload_id": values["upload_id"]}], joined_reader=True)
+async def get_workbook_preview(
+    upload_id: str, sheet: int = Query(0, ge=0), row: int = Query(0, ge=0, le=1048575),
+    column: int = Query(0, ge=0, le=16383), user=Depends(get_current_user),
+):
+    from src.services.workbook_preview import WorkbookPreviewError, workbook_preview
+    try:
+        item = get_upload_store().resolve(user["user_id"], upload_id)
+    except PermissionError:
+        raise HTTPException(404, "上传不存在")
+    ext = Path(item.original_name).suffix.lower()
+    if ext not in {".xlsx", ".xls"}:
+        raise HTTPException(415, "此接口仅支持 Excel 工作簿")
+    try:
+        return await execution_to_thread(workbook_preview, Path(item.storage_path), ext, sheet, row, column)
+    except WorkbookPreviewError as error:
+        raise HTTPException(422, str(error))
+    except Exception:
+        # 解析异常可能包含宿主路径；仅返回可操作的安全提示。
+        raise HTTPException(422, "工作簿无法预览：文件可能损坏、加密或超过安全限制（原件 20 MB / 解压 32 MB）；可下载原件查看")
+
+
 @router.get("/uploads/{upload_id}/document-preview")
 @guarded_response("preview", lambda values: [{"upload_id":values["upload_id"]}], joined_reader=True)
 async def get_document_preview(
@@ -150,6 +173,26 @@ async def get_document_preview(
         "elements": [element.model_dump(mode="json") for element in elements],
         "rejects": rejects,
     }
+
+
+@router.get("/uploads/{upload_id}/office-preview")
+@guarded_response("preview", lambda values: [{"upload_id": values["upload_id"]}], joined_reader=True)
+async def get_office_preview(upload_id: str, user=Depends(get_current_user)):
+    from src.services.office_preview import office_preview
+    try:
+        item = get_upload_store().resolve(user["user_id"], upload_id)
+    except PermissionError:
+        raise HTTPException(404, "上传不存在")
+    ext = Path(item.original_name).suffix.lower()
+    if ext not in {".doc", ".docx", ".ppt", ".pptx"}:
+        raise HTTPException(415, "此接口仅支持 Word 和 PPT 原件")
+    try:
+        result = await execution_to_thread(office_preview, Path(item.storage_path), ext)
+    except (RuntimeError, ValueError) as error:
+        raise HTTPException(422, str(error))
+    except Exception:
+        raise HTTPException(503, "Office 隔离预览服务暂不可用，请重试或下载原件")
+    return Response(result, media_type="application/pdf", headers={"Content-Disposition": "inline", "Cache-Control": "no-store"})
 
 
 @router.delete("/uploads/{upload_id}")

@@ -40,7 +40,7 @@ test("搜索迟到成功不能覆盖新列表与统计", async ({ page }) => {
   await expect(page.getByText("@new-result", { exact: true })).toBeVisible();
   await deliver(page, old!, result("old-result", 999, 99));
   await expect(page.getByText("@new-result", { exact: true })).toBeVisible();
-  await expect(page.getByText("用户（共 61）", { exact: false })).toBeVisible();
+  await expect(page.getByText("筛选结果（共 61）", { exact: false })).toBeVisible();
   await expect(page.getByText("99 待审批", { exact: false })).toHaveCount(0);
 });
 
@@ -78,7 +78,7 @@ test("翻页请求迟到不能覆盖筛选回到第一页", async ({ page }) => 
   expect(queries.filter((q) => q.includes("role=user")).every((q) => new URLSearchParams(q).get("page") === "1")).toBeTruthy();
   await deliver(page, second!, result("obsolete-page"));
   await expect(page.getByText("@filtered", { exact: true })).toBeVisible();
-  await expect(page.getByText("第 1 / 4 页", { exact: true })).toBeVisible();
+  await expect(page.getByText("1 / 7 页", { exact: true })).toBeVisible();
 });
 
 test("最新筛选失败清除旧资料且刷新可恢复", async ({ page }) => {
@@ -104,17 +104,20 @@ for (const action of ["patch", "delete", "create"] as const) {
       queries.push(query.get("status") || "");
       await route.fulfill({ json: result(query.get("status") ? "current-filter" : "initial") });
     }, async (route) => { operation = route; });
-    if (action === "patch") await page.getByTitle("禁用账号", { exact: true }).click();
+    if (action !== "create") await page.getByRole("button", { name: "更多操作" }).click();
+    if (action === "patch") {
+      await page.getByTitle("禁用账号", { exact: true }).click();
+      await page.getByRole("dialog").getByRole("button", { name: "确认", exact: true }).click();
+    }
     if (action === "delete") {
       await page.getByTitle("删除用户", { exact: true }).click();
-      await page.getByRole("button", { name: "删除", exact: true }).click();
+      await page.getByRole("button", { name: "确认删除", exact: true }).click();
     }
     if (action === "create") {
       await page.getByRole("button", { name: "新建用户", exact: true }).click();
       await page.getByPlaceholder("用户名（≥2位）").fill("fixture-new");
       await page.getByPlaceholder("密码（≥6位）").fill("synthetic-password");
       await page.getByRole("button", { name: "创建", exact: true }).click();
-      await page.getByRole("button", { name: "取消", exact: true }).click();
     }
     await expect.poll(() => !!operation).toBeTruthy();
     await page.getByRole("combobox").nth(1).selectOption("disabled");
@@ -129,12 +132,15 @@ for (const action of ["patch", "delete", "create"] as const) {
 
 for (const editor of ["name", "password", "create"] as const) {
   for (const reopen of [false, true]) {
-    test(`${editor} 旧提交不丢失${reopen ? "关闭重开的同对象" : "等待中新改"}草稿`, async ({ page }) => {
+    test(`${editor} 提交期间${reopen ? "关闭受保护" : "草稿锁定"}且成功后关闭`, async ({ page }) => {
       let operation: Route | undefined;
       await mockAdmin(page, async (route) => { await route.fulfill({ json: result("initial") }); }, async (route) => { operation = route; });
       const open = async () => {
         if (editor === "create") await page.getByRole("button", { name: "新建用户", exact: true }).click();
-        else await page.getByTitle(editor === "name" ? "修改昵称" : "重置密码", { exact: true }).click();
+        else {
+          if (editor === "password") await page.getByRole("button", { name: "更多操作" }).click();
+          await page.getByTitle(editor === "name" ? "修改昵称" : "重置密码", { exact: true }).click();
+        }
       };
       const field = page.getByPlaceholder(editor === "name" ? "新昵称（1~32 字符）" : editor === "password" ? "新密码（≥6位）" : "用户名（≥2位）");
       await open();
@@ -143,14 +149,14 @@ for (const editor of ["name", "password", "create"] as const) {
       await page.getByRole("button", { name: editor === "create" ? "创建" : "确定", exact: true }).click();
       await expect.poll(() => !!operation).toBeTruthy();
       if (reopen) {
-        await page.getByRole("button", { name: "取消", exact: true }).click();
-        await open();
+        await expect(page.getByRole("button", { name: "取消", exact: true })).toBeDisabled();
+        await page.keyboard.press("Escape");
+        await expect(page.getByRole("dialog")).toBeVisible();
       }
-      if (!reopen) await field.fill("later-draft");
-      const draft = await field.inputValue();
+      await expect(field).toBeDisabled();
+      await expect(field).toHaveValue("first-draft");
       await deliver(page, operation!, { ok: true });
-      await expect(field).toBeVisible();
-      await expect(field).toHaveValue(draft);
+      await expect(page.getByRole("dialog")).toHaveCount(0);
     });
   }
 }

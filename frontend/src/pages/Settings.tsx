@@ -1,9 +1,10 @@
-import { useEffect, useId, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { PageGuide } from "@/components/onboarding/PageGuide";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   Boxes, Cpu, Sparkles, Save, Moon, Sun, CircleDot, RefreshCw,
   Play, Loader2, CheckCircle2, XCircle, ShieldAlert, Unlock, UserRound,
-  KeyRound, SlidersHorizontal, Activity, ShieldCheck,
+  KeyRound, SlidersHorizontal, Activity, ShieldCheck, LogOut,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,24 +18,13 @@ import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { ModelConnectionsPanel } from "@/pages/settings/ModelConnectionsPanel";
 import { CapabilityGovernancePanel } from "@/pages/settings/CapabilityGovernancePanel";
+import { TaskModelSettings } from "@/pages/settings/TaskModelSettings";
 
 interface Overview {
   collectors: { name: string; tier: number; available: boolean }[];
   scheduler: { enabled: boolean; active_count: number };
   connectors: { email: boolean; slack: boolean; embedding: boolean; checkpoint: boolean };
   connectors_enabled: { email: boolean; slack: boolean; embedding: boolean; checkpoint: boolean };
-}
-interface ModelOption {
-  provider: string;
-  model: string;
-  label: string;
-}
-interface Models {
-  options: ModelOption[];
-  available: string[];
-  default: ModelOption | null;
-  document_default: ModelOption | null;
-  document_default_source: "user" | "global";
 }
 
 const COLLECTOR_CN: Record<string, string> = {
@@ -57,8 +47,8 @@ const SETTINGS_SECTIONS: Array<{
   { key: "personal", label: "我的设置", description: "外观与个人任务默认项", icon: UserRound },
   { key: "models", label: "模型与连接", description: "个人 Key 与可用共享连接", icon: Cpu },
   { key: "credentials", label: "采集账号", description: "只作用于自己的平台登录凭证", icon: KeyRound },
-  { key: "platform", label: "平台配置", description: "全局运行配置与旧流程兼容", icon: SlidersHorizontal, managerOnly: true },
-  { key: "governance", label: "能力治理", description: "能力版本的三轴治理状态", icon: ShieldCheck, managerOnly: true },
+  { key: "platform", label: "平台配置", description: "共享服务、采集与通知", icon: SlidersHorizontal, managerOnly: true },
+  { key: "governance", label: "扩展工具管理", description: "查看工具状态、验证与开放范围", icon: ShieldCheck, managerOnly: true },
   { key: "diagnostics", label: "运行与诊断", description: "连接器、路由和采集引擎状态", icon: Activity, managerOnly: true },
 ];
 
@@ -68,19 +58,15 @@ function DomainHealthPanel() {
   const [flagged, setFlagged] = useState<Record<string, DomainStat>>({});
   const [loading, setLoading] = useState(true);
   const [releasing, setReleasing] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState(false);
-  const loadVersion = useRef(0);
 
   const load = () => {
-    const version = ++loadVersion.current;
     setLoading(true);
-    setLoadError(false);
     api.get("/api/config/domain-health")
-      .then((d) => { if (version === loadVersion.current) setFlagged(d.flagged || {}); })
-      .catch(() => { if (version === loadVersion.current) setLoadError(true); })
-      .finally(() => { if (version === loadVersion.current) setLoading(false); });
+      .then((d) => setFlagged(d.flagged || {}))
+      .catch(() => {})
+      .finally(() => setLoading(false));
   };
-  useEffect(() => { load(); return () => { loadVersion.current++; }; }, []);
+  useEffect(load, []);
 
   const release = async (domain: string) => {
     setReleasing(domain);
@@ -111,8 +97,6 @@ function DomainHealthPanel() {
       <CardContent className="space-y-2">
         {loading ? (
           <p className="py-3 text-center text-sm text-muted-foreground">加载中…</p>
-        ) : loadError ? (
-          <div className="space-y-2"><p role="alert" className="text-sm text-destructive">无法读取域名状态，不能确认是否存在被短路的域名。</p><Button variant="outline" size="sm" onClick={load}>重新读取域名状态</Button></div>
         ) : domains.length === 0 ? (
           <p className="py-3 text-center text-sm text-muted-foreground">当前没有被短路的域名</p>
         ) : (
@@ -142,37 +126,6 @@ function DomainHealthPanel() {
   );
 }
 
-/**
- * 极简开关：只在这一处用，不引入新的 UI 依赖。非管理员点了也会因后端 403 无效，直接禁用更直白。
- * 上一版关闭态用 bg-muted 配 bg-background 的圆点，两者在浅色主题下亮度都接近 95%，
- * 轨道和圆点几乎融成一片、看不出是开关——这版改成轨道加边框 + 圆点用纯白/纯色，拉开对比度。
- */
-function Toggle({ checked, disabled, title, onChange }: {
-  checked: boolean; disabled?: boolean; title?: string; onChange: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      disabled={disabled}
-      title={title}
-      onClick={onChange}
-      className={cn(
-        "inline-flex h-5 w-9 shrink-0 items-center rounded-full border transition-colors",
-        checked ? "border-primary bg-primary" : "border-border bg-muted-foreground/25",
-        disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer",
-      )}
-    >
-      <span
-        className={cn(
-          "h-4 w-4 rounded-full bg-white shadow-sm ring-1 ring-black/5 transition-transform",
-          checked ? "translate-x-4" : "translate-x-0.5",
-        )}
-      />
-    </button>
-  );
-}
 
 export function Settings() {
   return <SettingsContent />;
@@ -184,15 +137,23 @@ function AccountSecurity() {
   const [newPassword, setNewPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [showPasswords, setShowPasswords] = useState(false);
+  const [editingPassword, setEditingPassword] = useState(false);
   return (
     <Card>
-      <CardHeader>
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-3 space-y-0 p-4">
+        <div className="space-y-1">
         <CardTitle className="text-base">登录与密码</CardTitle>
-        <p className="text-xs text-muted-foreground">修改密码会退出所有设备。后台任务继续运行，重新登录后可继续查看。</p>
+        <p className="text-xs text-muted-foreground">管理登录安全；退出登录不会停止后台任务。</p>
+        </div>
+        <Button variant="outline" size="sm" disabled={busy} aria-expanded={editingPassword} aria-controls="password-editor" onClick={() => {
+          setEditingPassword(!editingPassword); setCurrentPassword(""); setNewPassword(""); setShowPasswords(false); setError("");
+        }}>{editingPassword ? "取消修改" : "修改密码"}</Button>
       </CardHeader>
-      <CardContent className="space-y-4">
-        <form className="max-w-md space-y-3" onSubmit={async (event) => {
+      <CardContent className="space-y-3 px-4 pb-4 pt-0">
+        {editingPassword && <form id="password-editor" className="max-w-2xl space-y-3 rounded-lg border bg-muted/20 p-3" onSubmit={async (event) => {
           event.preventDefault();
+          if (busy) return;
           setBusy(true);
           setError("");
           try {
@@ -204,20 +165,26 @@ function AccountSecurity() {
           }
         }}>
           <input type="hidden" name="username" autoComplete="username" value={user?.username || ""} />
+          <div className="grid gap-3 sm:grid-cols-2">
           <div className="space-y-1.5">
             <label htmlFor="current-password" className="text-sm">当前密码</label>
-            <Input id="current-password" name="current_password" type="password" autoComplete="current-password"
+            <Input id="current-password" name="current_password" type={showPasswords ? "text" : "password"} autoComplete="current-password"
               value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} required disabled={busy} />
           </div>
           <div className="space-y-1.5">
             <label htmlFor="new-password" className="text-sm">新密码</label>
-            <Input id="new-password" name="new_password" type="password" autoComplete="new-password" minLength={6}
+            <Input id="new-password" name="new_password" type={showPasswords ? "text" : "password"} autoComplete="new-password" minLength={6} aria-describedby="password-help"
               value={newPassword} onChange={(event) => setNewPassword(event.target.value)} required disabled={busy} />
           </div>
+          </div>
+          <p id="password-help" className="text-xs text-muted-foreground">新密码至少 6 个字符。</p>
+          <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={showPasswords} disabled={busy} onChange={event => setShowPasswords(event.target.checked)} />显示密码</label>
           {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
           <Button type="submit" disabled={busy || !currentPassword || newPassword.length < 6}>修改密码并退出所有设备</Button>
-        </form>
-        <Button variant="outline" disabled={busy} onClick={async () => {
+        </form>}
+        {!editingPassword && error && <p role="alert" className="text-sm text-destructive">{error}</p>}
+        <Button variant="outline" className="min-h-11 border-red-300 bg-red-50 text-red-700 hover:border-red-400 hover:bg-red-100 hover:text-red-800 focus-visible:ring-red-500 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300 dark:hover:bg-red-950/60 dark:hover:text-red-200" disabled={busy} onClick={async () => {
+          if (busy || !window.confirm("退出所有设备（包括当前设备）？后台任务会继续运行，你需要重新登录。")) return;
           setBusy(true);
           setError("");
           try {
@@ -227,7 +194,7 @@ function AccountSecurity() {
           } finally {
             setBusy(false);
           }
-        }}>退出所有设备</Button>
+        }}><LogOut aria-hidden="true" />退出所有设备</Button>
       </CardContent>
     </Card>
   );
@@ -237,7 +204,6 @@ function SettingsContent() {
   const { theme, toggle } = useTheme();
   const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
-  const sectionId = useId();
   const manager = isAdminish(user?.role);
   const requestedSection = searchParams.get("section") as SettingsSection | null;
   const allowedSections = SETTINGS_SECTIONS.filter((item) => !item.managerOnly || manager);
@@ -245,16 +211,13 @@ function SettingsContent() {
     ? requestedSection!
     : "personal";
   const currentSection = SETTINGS_SECTIONS.find((item) => item.key === section)!;
+  const navigation = useRef<HTMLElement>(null);
+  useEffect(() => {
+    navigation.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [section]);
   const [ov, setOv] = useState<Overview | null>(null);
-  const [models, setModels] = useState<Models | null>(null);
-  const [documentModelRef, setDocumentModelRef] = useState("");
-  const [savingDocumentModel, setSavingDocumentModel] = useState(false);
   const [testing, setTesting] = useState<string | null>(null); // 正在自检的 target
   const [results, setResults] = useState<Record<string, CheckResult>>({});
-  const [togglingKey, setTogglingKey] = useState<string | null>(null); // 正在切换开关的 connector.key
-  const [loadErrors, setLoadErrors] = useState<string[]>([]);
-  const [loadingSettings, setLoadingSettings] = useState(false);
-  const loadVersion = useRef(0);
 
   const selectSection = (next: SettingsSection) => {
     const params = new URLSearchParams(searchParams);
@@ -263,39 +226,9 @@ function SettingsContent() {
   };
 
   const load = () => {
-    const version = ++loadVersion.current;
-    setLoadErrors([]);
-    setLoadingSettings(true);
-    void Promise.allSettled([api.get("/api/overview"), api.get("/api/models")]).then(([overview, modelResult]) => {
-      // 刷新和离开页面会使旧响应失效；单项失败不能伪装为空配置。
-      if (version !== loadVersion.current) return;
-      const errors: string[] = [];
-      if (overview.status === "fulfilled") setOv(overview.value);
-      else errors.push("运行概览读取失败");
-      if (modelResult.status === "fulfilled") {
-        const data: Models = modelResult.value;
-        setModels(data);
-        setDocumentModelRef(data.document_default ? `${data.document_default.provider}::${data.document_default.model}` : "");
-      } else errors.push("模型默认项读取失败");
-      setLoadErrors(errors);
-      setLoadingSettings(false);
-    });
+    api.get("/api/overview").then(setOv).catch(() => {});
   };
-  useEffect(() => { load(); return () => { loadVersion.current++; }; }, []);
-
-  /** 切换"是否启用该服务"（不影响已保存的凭证）。仅管理员/超管可调用，其余角色 Toggle 已禁用。 */
-  const toggleConnector = async (registryKey: string, connectorKey: string, next: boolean) => {
-    setTogglingKey(connectorKey);
-    try {
-      await api.put(`/api/config/${registryKey}`, { value: next ? "True" : "False" });
-      toast.success(next ? "已启用" : "已停用");
-      load();
-    } catch (e: any) {
-      toast.error(e.message || "切换失败");
-    } finally {
-      setTogglingKey(null);
-    }
-  };
+  useEffect(load, []);
 
   const runTest = async (target: string) => {
     setTesting(target);
@@ -312,50 +245,18 @@ function SettingsContent() {
     }
   };
 
-  const saveDocumentModel = async () => {
-    if (!documentModelRef) return;
-    setSavingDocumentModel(true);
-    try {
-      await api.put("/api/config/self/document_extraction_model", {
-        value: documentModelRef,
-      });
-      toast.success("文档抽取默认模型已保存到当前用户");
-      window.dispatchEvent(new CustomEvent("mangrove:config-changed"));
-      load();
-    } catch (e: any) {
-      toast.error(e.message || "保存失败");
-    } finally {
-      setSavingDocumentModel(false);
-    }
-  };
-
-  const resetDocumentModel = async () => {
-    setSavingDocumentModel(true);
-    try {
-      await api.del("/api/config/self/document_extraction_model");
-      toast.success("已恢复管理员或 .env 中的文档抽取默认模型");
-      window.dispatchEvent(new CustomEvent("mangrove:config-changed"));
-      load();
-    } catch (e: any) {
-      toast.error(e.message || "恢复失败");
-    } finally {
-      setSavingDocumentModel(false);
-    }
-  };
-
   // target 为 null 表示不可主动自检，仅展示配置状态
-  // enabledKey：对应配置中心的开关字段（管理员可用它临时启停服务，不影响已保存的凭证）
   const connectors: {
     key: string; label: string; icon: typeof Sparkles; on?: boolean; hint: string;
-    target: string | null; enabledKey: string;
+    target: string | null;
   }[] = [
-    { key: "embedding", label: "语义召回 (embedding)", icon: Sparkles, on: ov?.connectors.embedding, hint: "请求一次 embedding 端点", target: "embedding", enabledKey: "embedding_enabled" },
-    { key: "checkpoint", label: "断点续跑 (checkpoint)", icon: Save, on: ov?.connectors.checkpoint, hint: "本地存储，检查存储目录可写", target: "checkpoint", enabledKey: "checkpoint_enabled" },
+    { key: "embedding", label: "知识检索（语义召回）", icon: Sparkles, on: ov?.connectors.embedding, hint: "请求一次 embedding 端点", target: "embedding" },
+    { key: "checkpoint", label: "断点续跑 (checkpoint)", icon: Save, on: ov?.connectors.checkpoint, hint: "本地存储，检查存储目录可写", target: "checkpoint" },
   ];
 
   return (
     <>
-      <header className="flex items-center justify-between border-b border-border px-7 py-4">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-7 py-4">
         <div>
           <div className="flex items-center gap-2">
             <h1 className="text-lg font-semibold tracking-tight">设置</h1>
@@ -368,45 +269,31 @@ function SettingsContent() {
           </div>
           <p className="text-sm text-muted-foreground">{currentSection.description}</p>
         </div>
-        {section === "personal" || section === "diagnostics" ? (
-          <Button variant="outline" size="sm" onClick={load} className="gap-1.5">
-            <RefreshCw className="h-4 w-4" /> 刷新
-          </Button>
-        ) : null}
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <PageGuide page={`settings.${section}`} />
+          {section === "diagnostics" ? (
+            <Button variant="outline" size="sm" onClick={load} className="gap-1.5">
+              <RefreshCw className="h-4 w-4" /> 刷新
+            </Button>
+          ) : null}
+        </div>
       </header>
 
-      <div className="flex-1 overflow-y-auto px-7 py-6">
+      <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-7 sm:py-6">
         <div className="mx-auto max-w-6xl">
           <nav
-            role="tablist"
+            ref={navigation}
             aria-label="设置分区"
-            aria-orientation="horizontal"
-            className="mb-6 grid gap-2 sm:grid-cols-2 xl:grid-cols-6"
+            className="mb-6 flex gap-2 overflow-x-auto pb-2"
           >
             {allowedSections.map((item) => (
               <button
                 key={item.key}
                 type="button"
-                role="tab"
-                id={`${sectionId}-${item.key}`}
-                aria-controls={`${sectionId}-panel`}
-                aria-selected={section === item.key}
-                tabIndex={section === item.key ? 0 : -1}
+                aria-current={section === item.key ? "page" : undefined}
                 onClick={() => selectSection(item.key)}
-                onKeyDown={(event) => {
-                  if (event.nativeEvent.isComposing) return;
-                  const index = allowedSections.findIndex(candidate => candidate.key === item.key);
-                  const nextIndex = event.key === "Home" ? 0 : event.key === "End" ? allowedSections.length - 1
-                    : event.key === "ArrowRight" ? (index + 1) % allowedSections.length
-                      : event.key === "ArrowLeft" ? (index + allowedSections.length - 1) % allowedSections.length : null;
-                  if (nextIndex === null) return;
-                  event.preventDefault();
-                  const next = allowedSections[nextIndex];
-                  selectSection(next.key);
-                  document.getElementById(`${sectionId}-${next.key}`)?.focus();
-                }}
                 className={cn(
-                  "flex items-center gap-3 rounded-xl border px-3 py-3 text-left transition",
+                  "flex shrink-0 items-center gap-2 rounded-lg border px-3 py-3 text-left transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
                   section === item.key
                     ? "border-primary bg-primary/5 shadow-sm ring-2 ring-primary/10"
                     : "border-border/70 hover:bg-muted/40",
@@ -415,23 +302,15 @@ function SettingsContent() {
                 <item.icon className={cn("h-4 w-4 shrink-0", section === item.key ? "text-primary" : "text-muted-foreground")} />
                 <span className="min-w-0">
                   <span className="block text-sm font-medium">{item.label}</span>
-                  <span className={cn(
-                    "block truncate text-xs",
-                    section === item.key ? "text-foreground/75" : "text-muted-foreground",
-                  )}>
-                    {item.description}
-                  </span>
                 </span>
               </button>
             ))}
           </nav>
 
-          {loadingSettings && <p role="status" className="mb-4 text-sm text-muted-foreground">正在加载设置…</p>}
-          {loadErrors.length > 0 && <div className="mb-4 space-y-2"><p role="alert" className="text-sm text-destructive">设置加载未完成：{loadErrors.join("；")}。已显示的内容可能不是最新状态。</p><Button variant="outline" size="sm" onClick={load}>重新加载设置</Button></div>}
-          <div role="tabpanel" id={`${sectionId}-panel`} aria-labelledby={`${sectionId}-${section}`} tabIndex={0} className="space-y-5">
+          <div data-guide="settings-content" className="space-y-5">
             {section === "personal" && (
               <>
-                <AccountSecurity />
+                <TaskModelSettings key={user?.user_id} />
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base">外观</CardTitle>
@@ -450,71 +329,12 @@ function SettingsContent() {
                   </CardContent>
                 </Card>
 
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2 text-base">
-                      <Cpu className="h-4 w-4 text-primary" /> 个人任务默认项
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    <div className="flex items-center justify-between text-sm">
-                      <span className="text-muted-foreground">旧对话流程默认模型</span>
-                      <span className="font-medium">{models?.default?.label || "—"}</span>
-                    </div>
-                    <div className="space-y-2 rounded-md border border-border/60 p-3">
-                      <div>
-                        <div className="text-sm font-medium">文档抽取默认模型</div>
-                        <div className="text-xs text-muted-foreground">
-                          当前用户可覆盖平台默认；文档工作区仍可按单个任务临时切换。
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <select
-                          aria-label="文档抽取默认模型"
-                          value={documentModelRef}
-                          onChange={(event) => setDocumentModelRef(event.target.value)}
-                          className="h-9 min-w-0 flex-1 rounded-md border bg-background px-3 text-sm"
-                        >
-                          {(models?.options ?? []).map((option) => (
-                            <option
-                              key={`${option.provider}::${option.model}`}
-                              value={`${option.provider}::${option.model}`}
-                            >
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                        <Button
-                          size="sm"
-                          disabled={!documentModelRef || savingDocumentModel}
-                          onClick={saveDocumentModel}
-                          className="bg-teal-700 text-white hover:bg-teal-800"
-                        >
-                          {savingDocumentModel ? <Loader2 className="h-4 w-4 animate-spin" /> : "保存"}
-                        </Button>
-                        {models?.document_default_source === "user" && (
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            disabled={savingDocumentModel}
-                            onClick={resetDocumentModel}
-                          >
-                            恢复平台默认
-                          </Button>
-                        )}
-                      </div>
-                      <p className="text-xs text-amber-700 dark:text-amber-300">
-                        选择云模型时，解析后的文档文本会发送到对应 Provider；任务执行前仍会展示外发摘要。
-                      </p>
-                    </div>
-                  </CardContent>
-                </Card>
+                <AccountSecurity />
 
-                <CapabilityGovernancePanel ownerOnly />
               </>
             )}
 
-            {section === "models" && <ModelConnectionsPanel isManager={manager} />}
+            {section === "models" && <ModelConnectionsPanel isManager={manager} initialScope={searchParams.get("scope") === "personal" ? "personal" : "platform"} />}
             {section === "credentials" && <SelfConfigCenter />}
             {section === "platform" && manager && <AdminConfigCenter />}
             {section === "governance" && manager && <CapabilityGovernancePanel />}
@@ -524,7 +344,7 @@ function SettingsContent() {
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base">平台连接器 / 增强</CardTitle>
-                    <p className="text-xs text-muted-foreground">邮件和 Slack 外发已关闭；历史配置仅在平台配置中只读保留。</p>
+                    <p className="text-xs text-muted-foreground">邮件和 Slack 在“平台配置 → 通知”维护，仅按用户明确要求发送。</p>
                   </CardHeader>
                   <CardContent className="space-y-2">
                     {connectors.map((c) => {
@@ -541,12 +361,8 @@ function SettingsContent() {
                             <div className="truncate text-sm">{c.label}</div>
                             <div className="truncate text-[11px] text-muted-foreground">{c.hint}</div>
                           </div>
-                          <Toggle
-                            checked={enabled}
-                            disabled={togglingKey === c.key || !ov}
-                            title={enabled ? "点击停用" : "点击启用"}
-                            onChange={() => toggleConnector(c.enabledKey, c.key, !enabled)}
-                          />
+                          <span className="text-sm">{enabled ? "已启用" : "已停用"}</span>
+                          <Link className="inline-flex h-8 items-center rounded-md border px-3 text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" to={`/settings?section=platform${c.key === "embedding" ? "&service=semantic" : ""}`}>前往平台配置</Link>
                           <Badge variant={c.on ? "success" : "outline"}>{c.on ? "已配置" : "未配"}</Badge>
                           {c.target && (
                             <Button

@@ -198,6 +198,8 @@ async def analyze_node(state: ConductorState) -> Dict[str, Any]:
     # 改走下方 LLM 路径带着问题清单重写。
     if (
         not direct_video
+        # 旧 VOC 引擎另持全局模型；绑定工作台模型时沿下方同模型分析链路。
+        and state.get("provider") != "bound"
         and not feedback
         and spec.analysis_type == AnalysisType.VOC
         and spec.data_type in _VOC_DATA_TYPES

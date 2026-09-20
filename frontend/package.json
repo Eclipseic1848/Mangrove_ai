@@ -25,6 +25,7 @@
     "@types/openseadragon": "^5.0.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "dompurify": "3.4.15",
     "lucide-react": "^0.469.0",
     "nanoid": "3.3.18",
     "openseadragon": "^6.0.2",

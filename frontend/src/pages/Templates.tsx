@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { PageGuide } from "@/components/onboarding/PageGuide";
 import { TaskContextLibrary } from "@/components/workspace/TaskContextLibrary";
 import { BadgeCheck, Library, Share2, Trash2, RefreshCw, Eye, Tag, TrendingUp, Repeat } from "lucide-react";
 import { toast } from "sonner";
@@ -27,6 +28,7 @@ interface Template extends LibraryEntry {
   status: string; // active / draft / retired
   uses: number;
   quality_avg: number;
+  verified_uses?: number;
 }
 
 interface Lesson extends LibraryEntry {
@@ -67,6 +69,18 @@ type TabKey = "templates" | "lessons" | "scanLog";
 
 // 分页：每页条数（三个 Tab 统一）
 const PAGE_SIZE = 12;
+const TYPE_LABELS: Record<string, string> = {
+  workspace_document: "文档处理", workspace_table: "表格处理", workspace_web: "网页分析",
+  workspace_mixed: "混合资料", workspace_file: "文件处理", article: "文章", generic: "通用",
+};
+type LibraryFilter = { query: string; dataType: string; status: string };
+const emptyFilter: LibraryFilter = { query: "", dataType: "", status: "" };
+function matchesFilter(entry: Template | Lesson, filter: LibraryFilter) {
+  const query = filter.query.trim().toLocaleLowerCase();
+  return (!filter.dataType || entry.data_type === filter.dataType)
+    && (!filter.status || entry.status === filter.status)
+    && (!query || [entry.title, ...entry.keywords, entry.body].join("\n").toLocaleLowerCase().includes(query));
+}
 
 export function Templates() {
   const { user } = useAuth();
@@ -77,6 +91,13 @@ function TemplateLibrary({ user }: { user: User }) {
   const isAdmin = isAdminish(user?.role);
   const [contextOpen, setContextOpen] = useState(false);
   const [tab, setTab] = useState<TabKey>("templates");
+  const [filters, setFilters] = useState({ templates: emptyFilter, lessons: emptyFilter });
+  const filter = filters[tab === "lessons" ? "lessons" : "templates"];
+  const updateFilter = (next: LibraryFilter) => {
+    if (tab === "scanLog") return;
+    setFilters(previous => ({ ...previous, [tab]: next }));
+    if (tab === "templates") setTplPage(1); else setLessonPage(1);
+  };
 
   // 模板库状态
   const [items, setItems] = useState<Template[]>([]);
@@ -93,6 +114,7 @@ function TemplateLibrary({ user }: { user: User }) {
   // 巡检报告状态（只读，无 preview/delete）
   const [scanLog, setScanLog] = useState<ScanLogRow[]>([]);
   const [scanLogLoading, setScanLogLoading] = useState(true);
+  const [scanLogError, setScanLogError] = useState(false);
   const [shareTarget, setShareTarget] = useState<{ kind: "templates" | "lessons"; entry: Template | Lesson } | null>(null);
   const [shareTitle, setShareTitle] = useState("");
   const [shareKeywords, setShareKeywords] = useState("");
@@ -143,11 +165,12 @@ function TemplateLibrary({ user }: { user: User }) {
   const loadScanLog = () => {
     const epoch = ++loadEpoch.current.scan;
     setScanLogLoading(true);
+    setScanLogError(false);
     setScanPage(1);
     api
       .get("/api/library-dedup-log")
       .then((d) => { if (mounted.current && epoch === loadEpoch.current.scan) setScanLog(d.log || []); })
-      .catch(() => {})
+      .catch(() => { if (mounted.current && epoch === loadEpoch.current.scan) setScanLogError(true); })
       .finally(() => { if (mounted.current && epoch === loadEpoch.current.scan) setScanLogLoading(false); });
   };
   useEffect(() => {
@@ -218,12 +241,15 @@ function TemplateLibrary({ user }: { user: User }) {
   };
 
   // 分页切片（页码超出总页数时自动 clamp 到有效范围，删除后不会越界）
-  const tplTotalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
+  const filteredTemplates = items.filter(entry => matchesFilter(entry, filters.templates));
+  const filteredLessons = lessonItems.filter(entry => matchesFilter(entry, filters.lessons));
+  const dataTypes = [...new Set((tab === "lessons" ? lessonItems : items).map(entry => entry.data_type).filter(Boolean))].sort();
+  const tplTotalPages = Math.max(1, Math.ceil(filteredTemplates.length / PAGE_SIZE));
   const tplPageClamped = Math.min(tplPage, tplTotalPages);
-  const tplPaged = items.slice((tplPageClamped - 1) * PAGE_SIZE, tplPageClamped * PAGE_SIZE);
-  const lessonTotalPages = Math.max(1, Math.ceil(lessonItems.length / PAGE_SIZE));
+  const tplPaged = filteredTemplates.slice((tplPageClamped - 1) * PAGE_SIZE, tplPageClamped * PAGE_SIZE);
+  const lessonTotalPages = Math.max(1, Math.ceil(filteredLessons.length / PAGE_SIZE));
   const lessonPageClamped = Math.min(lessonPage, lessonTotalPages);
-  const lessonPaged = lessonItems.slice((lessonPageClamped - 1) * PAGE_SIZE, lessonPageClamped * PAGE_SIZE);
+  const lessonPaged = filteredLessons.slice((lessonPageClamped - 1) * PAGE_SIZE, lessonPageClamped * PAGE_SIZE);
   const scanTotalPages = Math.max(1, Math.ceil(scanLog.length / PAGE_SIZE));
   const scanPageClamped = Math.min(scanPage, scanTotalPages);
   const scanPaged = scanLog.slice((scanPageClamped - 1) * PAGE_SIZE, scanPageClamped * PAGE_SIZE);
@@ -231,22 +257,22 @@ function TemplateLibrary({ user }: { user: User }) {
   return (
     <>
       <TaskContextLibrary key={user.user_id} open={contextOpen} onClose={() => setContextOpen(false)} onChanged={() => undefined} />
-      <div className="border-b px-7 py-3"><Button variant="outline" onClick={() => setContextOpen(true)}>管理任务模板与个人记忆</Button></div>
-      <header className="flex items-center justify-between border-b border-border px-7 py-4">
-        <div>
+      <header className="flex flex-col gap-4 border-b border-border px-7 py-4 lg:flex-row lg:items-center lg:justify-between">
+        <div className="min-w-0">
           <h1 className="text-lg font-semibold tracking-tight">
             {tab === "templates" ? "模板库" : tab === "lessons" ? "教训库" : "巡检报告"}
           </h1>
           <p className="text-sm text-muted-foreground">
             {tab === "templates"
-              ? "默认仅本人使用；确认通用副本后共享。评分、转正与淘汰继续生效。"
+              ? "同类任务自动匹配方法建议，当前要求优先。默认仅本人使用；确认通用副本后才共享。"
               : tab === "lessons"
               ? "经验默认仅本人使用，转正后可贡献通用副本；共享副本独立累计使用效果。"
               : "定时巡检最近记录（语义去重合并 + 长期停滞草稿清理，默认关闭）"}
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <div className="flex rounded-md border border-border p-0.5">
+        <div className="flex shrink-0 flex-wrap items-center gap-2">
+          <PageGuide page={`templates.${tab}`} ready={!(tab === "templates" ? loading : tab === "lessons" ? lessonLoading : scanLogLoading)} />
+          <div data-guide="library-tabs" className="flex rounded-md border border-border p-0.5">
             <Button
               variant={tab === "templates" ? "default" : "ghost"}
               size="sm"
@@ -287,6 +313,25 @@ function TemplateLibrary({ user }: { user: User }) {
         </div>
       </header>
 
+      {tab !== "scanLog" && <section aria-label="模板库筛选与操作" className="flex flex-wrap items-end gap-3 border-b px-7 py-3">
+        <label className="min-w-0 flex-1 basis-56 text-xs text-muted-foreground">搜索标题、关键词或正文
+          <input type="search" value={filter.query} onChange={event => updateFilter({ ...filter, query: event.target.value })} className="mt-1 h-9 w-full rounded-md border bg-background px-3 text-sm text-foreground focus-visible:ring-2 focus-visible:ring-ring" />
+        </label>
+        <label className="text-xs text-muted-foreground">任务类型
+          <select aria-label="任务类型" value={filter.dataType} onChange={event => updateFilter({ ...filter, dataType: event.target.value })} className="mt-1 block h-9 max-w-48 rounded-md border bg-background px-2 text-foreground focus-visible:ring-2 focus-visible:ring-ring">
+            <option value="">全部类型</option>
+            {dataTypes.map(value => <option key={value} value={value}>{TYPE_LABELS[value] || value}</option>)}
+          </select>
+        </label>
+        <label className="text-xs text-muted-foreground">状态
+          <select aria-label="状态" value={filter.status} onChange={event => updateFilter({ ...filter, status: event.target.value })} className="mt-1 block h-9 rounded-md border bg-background px-2 text-foreground focus-visible:ring-2 focus-visible:ring-ring">
+            <option value="">全部状态</option><option value="draft">草稿</option><option value="active">已转正</option><option value="retired">已停用</option>
+          </select>
+        </label>
+        <Button variant="ghost" size="sm" onClick={() => updateFilter(emptyFilter)}>清除筛选</Button>
+        {tab === "templates" && <Button size="sm" className="h-9 shrink-0" onClick={() => setContextOpen(true)}>管理任务模板与个人记忆</Button>}
+      </section>}
+
       {tab === "templates" ? (
         <div className="flex-1 overflow-y-auto px-7 py-6">
           {loading ? (
@@ -297,7 +342,7 @@ function TemplateLibrary({ user }: { user: User }) {
               <p className="text-sm text-muted-foreground">
                 暂无已学模板。
                 <br />
-                在对话工作区跑一个未命中内置领域的任务，完成后确认「沉淀为模板」即可积累。
+                这里汇集可复用的任务处理方法。Mangrove 会自动积累，并在同类任务中参考使用，无需手动配置。
               </p>
             </div>
           ) : (
@@ -343,7 +388,9 @@ function TemplateLibrary({ user }: { user: User }) {
                             <Repeat className="h-3 w-3" /> 用 {t.uses} 次
                           </span>
                           <span className="inline-flex items-center gap-1">
-                            <TrendingUp className="h-3 w-3" /> 均分 {t.quality_avg || "—"}
+                            {t.data_type.startsWith("workspace_")
+                              ? <><BadgeCheck className="h-3 w-3" /> 已核验 {t.verified_uses ?? "—"} 次</>
+                              : <><TrendingUp className="h-3 w-3" /> 均分 {t.quality_avg || "—"}</>}
                           </span>
                         </div>
                         <div className="flex gap-1">
@@ -380,11 +427,12 @@ function TemplateLibrary({ user }: { user: User }) {
               })}
             </div>
           )}
-          {!loading && items.length > 0 && (
+          {!loading && items.length > 0 && !filteredTemplates.length && <p role="status" className="py-8 text-center text-sm text-muted-foreground">没有匹配的记录，请调整筛选条件。</p>}
+          {!loading && filteredTemplates.length > 0 && (
             <Pagination
               page={tplPageClamped}
               totalPages={tplTotalPages}
-              total={items.length}
+              total={filteredTemplates.length}
               onChange={setTplPage}
             />
           )}
@@ -399,7 +447,7 @@ function TemplateLibrary({ user }: { user: User }) {
               <p className="text-sm text-muted-foreground">
                 暂无教训记录。
                 <br />
-                当任务被判定采集失败时，Agent 会自动蒸馏教训；累计 2 次失败且该教训至少 1 次帮到后续任务再转正。无效教训（10 次失败从未帮到）自动退役。
+                新工作台任务出现明确业务失败时，可自动积累教训草稿；连接故障或核验无结论不算业务教训。实际采用、对应风险通过独立核验并正式交付后，才计为有效；历史任务不补学。
               </p>
             </div>
           ) : (
@@ -442,7 +490,7 @@ function TemplateLibrary({ user }: { user: User }) {
                       <div className="flex items-center justify-between border-t border-border/60 pt-3">
                         <div className="flex gap-4 text-xs text-muted-foreground">
                           <span className="inline-flex items-center gap-1">
-                            <Repeat className="h-3 w-3" /> 命中 {t.occurrences} 次
+                            <Repeat className="h-3 w-3" /> 发生 {t.occurrences} 次
                           </span>
                           <span className="inline-flex items-center gap-1" title="该教训帮后续任务避免同类失败的次数">
                             <BadgeCheck className="h-3 w-3" /> 有效 {t.helped_avoid ?? 0} 次
@@ -482,11 +530,12 @@ function TemplateLibrary({ user }: { user: User }) {
               })}
             </div>
           )}
-          {!lessonLoading && lessonItems.length > 0 && (
+          {!lessonLoading && lessonItems.length > 0 && !filteredLessons.length && <p role="status" className="py-8 text-center text-sm text-muted-foreground">没有匹配的记录，请调整筛选条件。</p>}
+          {!lessonLoading && filteredLessons.length > 0 && (
             <Pagination
               page={lessonPageClamped}
               totalPages={lessonTotalPages}
-              total={lessonItems.length}
+              total={filteredLessons.length}
               onChange={setLessonPage}
             />
           )}
@@ -495,6 +544,8 @@ function TemplateLibrary({ user }: { user: User }) {
         <div className="flex-1 overflow-y-auto px-7 py-6">
           {scanLogLoading ? (
             <p className="text-sm text-muted-foreground">加载中…</p>
+          ) : scanLogError ? (
+            <p role="alert" className="text-sm text-destructive">巡检报告加载失败，请刷新重试</p>
           ) : !scanLog.length ? (
             <div className="mx-auto max-w-md py-16 text-center">
               <Library className="mx-auto mb-3 h-10 w-10 text-muted-foreground/40" />
@@ -523,7 +574,7 @@ function TemplateLibrary({ user }: { user: User }) {
               })}
             </div>
           )}
-          {!scanLogLoading && scanLog.length > 0 && (
+          {!scanLogLoading && !scanLogError && scanLog.length > 0 && (
             <Pagination
               page={scanPageClamped}
               totalPages={scanTotalPages}

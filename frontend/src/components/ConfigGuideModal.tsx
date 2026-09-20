@@ -33,10 +33,10 @@ function GuideStepsList({ steps }: { steps: GuideStep[] }) {
  * 管理员配置中心传 ADMIN_GUIDE_SECTIONS 覆盖全部配置项。
  */
 export function ConfigGuideModal(
-  { open, onClose, sections = CONFIG_GUIDE_SECTIONS }: { open: boolean; onClose: () => void; sections?: GuideSection[] },
+  { open, onClose, sections = CONFIG_GUIDE_SECTIONS, title = "凭证配置指南" }: { open: boolean; onClose: () => void; sections?: GuideSection[]; title?: string },
 ) {
   return (
-    <Modal open={open} onClose={onClose} title="凭证配置指南" wide>
+    <Modal open={open} onClose={onClose} title={title} wide>
       <div className="max-h-[70vh] space-y-5 overflow-y-auto pr-1">
         {sections.map((section) => (
           <div key={section.key}>

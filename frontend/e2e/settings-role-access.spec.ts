@@ -1,6 +1,118 @@
 import { expect, test, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
+test("平台配置可编辑验证再保存，窄屏不溢出", async ({ page }, testInfo) => {
+  await mockSettings(page, "admin");
+  await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [UX_CONNECTION] } }));
+  const configuration = { display_name: "DeepSeek", base_url: "https://models.example/v1", model: "deepseek-v4-flash", models: ["deepseek-v4-flash"], api_format: "openai_chat_completions", locality: "public_external", thinking: "default", version: "synthetic-version", has_key: true, superseded: false };
+  await page.route("**/api/model-connections/ux-shared/configuration", route => route.fulfill({ json: configuration }));
+  let tested = 0, applied = 0;
+  await page.route("**/api/model-connections/ux-shared/configuration/test", route => {
+    tested++;
+    expect(route.request().postDataJSON().api_key).toBeNull();
+    return route.fulfill({ json: { state: "verified", results: [] } });
+  });
+  await page.route("**/api/model-connections/ux-shared/configuration/apply", route => { applied++; return route.fulfill({ json: { state: "applied", connection_id: "new-id" } }); });
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.goto("/settings?section=models&scope=platform");
+  await page.getByRole("button", { name: "管理 DeepSeek · 合成模型", exact: true }).click();
+  await page.getByRole("button", { name: "编辑配置", exact: true }).click();
+  const editor = page.getByRole("region", { name: "编辑模型配置" });
+  await expect(editor.getByLabel("API 地址", { exact: true })).toHaveValue(configuration.base_url);
+  await editor.getByLabel("名称", { exact: true }).fill("团队云端模型");
+  await editor.getByLabel("模型 ID（多个用逗号分隔）", { exact: true }).fill("new-model");
+  await expect(editor.getByRole("combobox", { name: /连接首选模型/ })).toHaveValue("new-model");
+  await editor.getByLabel("API 地址", { exact: true }).fill(configuration.base_url + "/");
+  await expect(editor.getByRole("button", { name: "验证配置", exact: true })).toBeEnabled();
+  await expect(editor.getByRole("button", { name: "保存配置", exact: true })).toBeDisabled();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await editor.scrollIntoViewIfNeeded();
+  await expect(editor).toBeVisible();
+  expect((await new AxeBuilder({ page }).include('[aria-label="编辑模型配置"]').analyze()).violations).toEqual([]);
+  await page.screenshot({ path: testInfo.outputPath("configuration-mobile.png"), fullPage: true });
+  await editor.getByRole("button", { name: "验证配置", exact: true }).click();
+  await expect(editor.getByText(/验证通过/)).toBeVisible();
+  await editor.getByRole("button", { name: "保存配置", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(tested).toBe(1); expect(applied).toBe(1); expect(errors).toEqual([]);
+});
+
+test("配置拒绝可修正，刷新后的验证核对不会锁死或重复调用", async ({ page }) => {
+  await mockSettings(page, "admin");
+  const configuration = { display_name: "DeepSeek", base_url: "https://models.example/v1", model: "deepseek-v4-flash", models: ["deepseek-v4-flash"], api_format: "openai_chat_completions", locality: "public_external", thinking: "default", version: "v1", has_key: true, superseded: false };
+  await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [UX_CONNECTION] } }));
+  await page.route("**/api/model-connections/ux-shared/configuration", route => route.fulfill({ json: configuration }));
+  let tests = 0;
+  await page.route("**/api/model-connections/ux-shared/configuration/test", route => { tests++; return route.fulfill({ status: 422, json: { detail: "请填写名称" } }); });
+  await page.goto("/settings?section=models&scope=platform");
+  const open = async () => { await page.getByRole("button", { name: "管理 DeepSeek · 合成模型", exact: true }).click(); await page.getByRole("button", { name: "编辑配置", exact: true }).click(); };
+  await open();
+  const editor = page.getByRole("region", { name: "编辑模型配置" });
+  await editor.getByLabel("名称", { exact: true }).fill("");
+  await editor.getByRole("button", { name: "验证配置", exact: true }).click();
+  await expect(editor.getByLabel("名称", { exact: true })).toBeEnabled();
+  await expect(editor.getByRole("button", { name: "关闭编辑" })).toBeEnabled();
+  await page.evaluate(() => sessionStorage.setItem("model-configuration-operation:admin-a:ux-shared", "pending-test"));
+  await page.route("**/api/model-connections/ux-shared/configuration/operations/pending-test", route => route.fulfill({ json: { state: "testing", configuration } }));
+  await page.reload(); await open();
+  await expect(editor.getByRole("button", { name: "核对验证结果" })).toBeEnabled();
+  await editor.getByRole("button", { name: "核对验证结果" }).click();
+  await expect(editor.getByRole("button", { name: "关闭编辑" })).toBeEnabled();
+  await editor.getByRole("button", { name: "关闭编辑" }).click();
+  expect(tests).toBe(1);
+});
+
+test("模型配置从平台模型开始，添加个人模型可达且列表失败可恢复", async ({ page }) => {
+  await mockSettings(page, "user");
+  await page.goto("/settings?section=models");
+  await expect(page.getByRole("tab", { name: "平台可用连接" })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("button", { name: "添加自己的模型", exact: true }).click();
+  await expect(page.getByLabel("模型服务商", { exact: false })).toBeVisible();
+  await page.getByRole("tab", { name: "平台可用连接" }).click();
+  await page.route("**/api/model-connections", route => route.fulfill({ status: 503, json: { detail: "合成网络故障" } }));
+  await page.reload();
+  await expect(page.getByRole("alert").filter({ hasText: "合成网络故障" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "重新加载", exact: true })).toBeVisible();
+  await expect(page.getByText("还没有平台连接", { exact: true })).toHaveCount(0);
+});
+
+test("旧对话入口隐藏，概览统一进入工作台，旧地址保留", async ({ page }, testInfo) => {
+  await mockSettings(page, "user");
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "概览", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "旧版对话", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "发起采集对话" })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("mangrove-hidden-chat.png") });
+  await page.getByRole("link", { name: "进入任务工作台" }).click();
+  await expect(page).toHaveURL(/\/data-prep$/);
+  await page.goto("/");
+  await page.getByRole("link", { name: "新建任务", exact: true }).click();
+  await expect(page).toHaveURL(/\/data-prep$/);
+  await page.route("**/api/conversations", route => route.fulfill({ json: [] }));
+  await page.goto("/chat");
+  await expect(page).toHaveURL(/\/chat$/);
+  await expect(page.locator("textarea")).toBeVisible();
+  expect(errors).toEqual([]);
+});
+
+test("退出所有设备使用警示按钮且取消不退出", async ({ page }, testInfo) => {
+  await mockSettings(page, "user");
+  await page.goto("/settings");
+  const button = page.getByRole("button", { name: "退出所有设备", exact: true });
+  await expect(button).toBeVisible();
+  await expect(button).toHaveClass(/border-red-300/);
+  await button.focus();
+  await expect(button).toBeFocused();
+  page.once("dialog", dialog => dialog.dismiss());
+  await button.press("Enter");
+  await expect(page).toHaveURL(/\/settings$/);
+  await expect(button).toBeEnabled();
+  await button.screenshot({ path: testInfo.outputPath("mangrove-logout-button.png") });
+});
+
 const PRESETS = [
   {
     preset_id: "deepseek",
@@ -39,11 +151,238 @@ const PRESETS = [
   },
 ];
 
+const UX_CONNECTION = {
+  connection_id: "ux-shared", owner_scope: "platform_shared", preset_id: "deepseek",
+  display_name: "合成共享模型", model: "deepseek-v4-flash", locality: "cloud", status: "verified", available_model_count: 1,
+  models: [{ model_id: "deepseek-v4-flash", display_name: "合成模型", status: "available", enabled: true, is_default: true }],
+};
+
+test("平台模型仅分本地与云端，三角色去重并移除过期型号和导入名称", async ({ page }, testInfo) => {
+  const localNames = ["Qwen3.8-27B", "Qwen3.6-35B-A3B", "Qwen3.5-35B-A3B", "Qwen3-30B-A3B"];
+  const makeModel = (model: string, current = true) => ({ model_id: model, display_name: model, enabled: true, status: "available", is_default: true, current_catalog: current });
+  const local = localNames.map((model, index) => ({ ...UX_CONNECTION, connection_id: `local-${index}`, preset_id: null, display_name: `导入的本地模型 · ${model}`, locality: "managed_private", model, models: [makeModel(model)] }));
+  const cloud = [
+    { ...UX_CONNECTION, connection_id: "cloud-qwen", preset_id: "qwen", display_name: "导入的平台 阿里百炼", models: [makeModel("qwen3.8-max"), makeModel("qwen3.7-max", false)] },
+    { ...UX_CONNECTION, connection_id: "cloud-deepseek", display_name: "导入的平台 DeepSeek", models: [makeModel("deepseek-flash"), makeModel("deepseek-v4-flash", false)] },
+  ];
+  for (const role of ["user", "admin", "super_admin"] as const) {
+    await page.unrouteAll({ behavior: "wait" });
+    await mockSettings(page, role);
+    await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [...local, { ...local[1], connection_id: "duplicate-local" }, ...cloud, { ...cloud[1], connection_id: "duplicate-cloud" }] } }));
+    await page.goto("/settings?section=models");
+    const catalog = page.getByRole("region", { name: "平台模型清单" });
+    await expect(catalog).toBeVisible();
+    await expect(catalog.getByRole("heading", { level: 3 })).toHaveText(["本地模型", "云端模型"]);
+    for (const model of localNames) await expect(catalog.getByText(model, { exact: true })).toHaveCount(1);
+    await expect(catalog.getByRole("heading", { level: 4 })).toHaveCount(2);
+    await expect(catalog.getByRole("heading", { name: "DeepSeek", exact: true })).toBeVisible();
+    await expect(catalog.getByRole("heading", { name: "阿里百炼", exact: true })).toBeVisible();
+    await expect(catalog.getByText(/导入|qwen3.7|deepseek-v4-flash/)).toHaveCount(0);
+    await expect(catalog.getByText("deepseek-flash", { exact: true })).toHaveCount(1);
+    expect((await new AxeBuilder({ page }).include('[aria-label="平台模型清单"]').analyze()).violations).toEqual([]);
+    await catalog.screenshot({ path: testInfo.outputPath(`${role}-catalog.png`) });
+  }
+});
+
+test("平台清单去重不丢失管理员异常型号与重复连接维护", async ({ page }) => {
+  await mockSettings(page, "admin");
+  await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [
+    { ...UX_CONNECTION, models: [...UX_CONNECTION.models, { ...UX_CONNECTION.models[0], model_id: "failed", display_name: "失败型号", status: "network_unreachable", enabled: false }, { ...UX_CONNECTION.models[0], model_id: "disabled", display_name: "停用型号", status: "disabled", enabled: false }] },
+    { ...UX_CONNECTION, connection_id: "duplicate" },
+  ] } }));
+  await page.goto("/settings?section=models");
+  await expect(page.getByRole("region", { name: "平台模型清单" }).getByText("合成模型", { exact: true })).toHaveCount(1);
+  await expect(page.getByText("连接维护（高级）", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "管理 DeepSeek · 合成模型", exact: true }).click();
+  await expect(page.getByRole("button", { name: "重试 失败型号", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "启用 停用型号", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "停用连接", exact: true })).toHaveCount(1);
+  await page.getByLabel("使用的连接记录").selectOption("duplicate");
+  await expect(page.getByRole("button", { name: "停用连接", exact: true })).toHaveCount(1);
+});
+
+test("自定义云供应商名称简化不会合并不同供应商的同名模型", async ({ page }) => {
+  await mockSettings(page, "user");
+  await page.route("**/api/model-connections", route => route.fulfill({ json: { items: ["甲供应商", "乙供应商"].map((name, index) => ({
+    ...UX_CONNECTION, connection_id: `custom-${index}`, preset_id: null, display_name: `导入的平台 ${name}`,
+  })) } }));
+  await page.goto("/settings?section=models");
+  const catalog = page.getByRole("region", { name: "平台模型清单" });
+  await expect(catalog.getByText("合成模型", { exact: true })).toHaveCount(2);
+  await expect(catalog.getByRole("heading", { name: "甲供应商", exact: true })).toBeVisible();
+  await expect(catalog.getByRole("heading", { name: "乙供应商", exact: true })).toBeVisible();
+  await expect(catalog.getByText(/导入/)).toHaveCount(0);
+});
+
+test("统一管理移除退役导入型号，保留异常自建与不同本地接入记录", async ({ page }, testInfo) => {
+  await mockSettings(page, "super_admin");
+  const local = (id: string, name: string, locality: string, role: string, status = "available") => ({ ...UX_CONNECTION,
+    connection_id: id, preset_id: null, display_name: `导入的本地模型 · ${name}`, model: name, locality,
+    models: [{ ...UX_CONNECTION.models[0], model_id: name, display_name: name, catalog_role: role, status, enabled: status === "available" }],
+  });
+  let names = ["Qwen3.6-35B-A3B"];
+  await page.route("**/api/config/models*", route => route.fulfill({ json: { models: { local: names } } }));
+  await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [
+    local("main-local", "Qwen3.6-35B-A3B", "managed_private", "legacy_imported"),
+    local("other-local", "Qwen3.6-35B-A3B", "local", "legacy_imported"),
+    local("old-local", "Qwen3.8-27B-FP8", "managed_private", "legacy_imported", "model_access_denied"),
+    local("custom-local", "自建待修复模型", "local", "custom", "network_unreachable"),
+  ] } }));
+  await page.goto("/settings?section=models");
+  const catalog = page.getByRole("region", { name: "平台模型清单" });
+  await expect(catalog.getByText("Qwen3.8-27B-FP8", { exact: true })).toHaveCount(0);
+  await expect(catalog.getByText("Qwen3.6-35B-A3B", { exact: true })).toHaveCount(1);
+  await expect(catalog.getByText("自建待修复模型", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "管理 Qwen3.6-35B-A3B", exact: true }).click();
+  await page.getByLabel("使用的连接记录").selectOption("other-local");
+  await expect(page.getByText("连接编号 other-lo", { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("dialog").screenshot({ path: testInfo.outputPath("management-mobile.png") });
+  await page.getByRole("button", { name: "完成管理", exact: true }).click();
+  names = [];
+  await page.reload();
+  await expect(catalog.getByText("Qwen3.6-35B-A3B", { exact: true })).toHaveCount(0);
+  await expect(catalog.getByText("自建待修复模型", { exact: true })).toBeVisible();
+  await page.goto("/settings?section=platform");
+  await page.getByRole("link", { name: "管理平台模型", exact: true }).click();
+  await expect(page).toHaveURL(/section=models&scope=platform/);
+});
+
+test("模型默认选择共用设置入口，窄屏添加前可见计费提示并支持键盘切换", async ({ page }) => {
+  await mockSettings(page, "user");
+  await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [UX_CONNECTION] } }));
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/settings?section=models");
+  await expect(page.getByLabel("默认任务模型", { exact: true })).toBeVisible();
+  const platformTab = page.getByRole("tab", { name: "平台可用连接" });
+  await platformTab.focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(page.getByRole("tab", { name: "我的连接" })).toBeFocused();
+  await expect(page.getByRole("tab", { name: "我的连接" })).toHaveAttribute("aria-selected", "true");
+  await page.getByRole("button", { name: "添加自己的模型", exact: true }).click();
+  await page.getByLabel("API Key", { exact: false }).fill("synthetic-key");
+  const notice = page.getByText(/仅发送简短测试，可能按服务商标准计费/);
+  const submit = page.getByRole("button", { name: "测试并保存所选模型", exact: true });
+  await expect(notice).toBeVisible();
+  expect((await notice.boundingBox())!.y).toBeLessThan((await submit.boundingBox())!.y);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(390);
+});
+
+test("平台停用需要确认，停用后不能作为默认模型，删除防止重复提交", async ({ page }) => {
+  await mockSettings(page, "admin");
+  let disabled = false;
+  let deletes = 0;
+  await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [{ ...UX_CONNECTION, status: disabled ? "disabled" : "verified" }] } }));
+  await page.route("**/api/model-connections/ux-shared", async route => {
+    if (route.request().method() === "DELETE") {
+      deletes++;
+      await new Promise(resolve => setTimeout(resolve, 400));
+    } else disabled = true;
+    await route.fulfill({ json: {} });
+  });
+  await page.goto("/settings?section=models");
+  await page.getByRole("button", { name: "管理 DeepSeek · 合成模型", exact: true }).click();
+  await page.getByRole("button", { name: "停用连接", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "停用平台连接" })).toBeVisible();
+  expect(disabled).toBe(false);
+  await page.getByRole("button", { name: "确认停用", exact: true }).click();
+  await expect(page.getByText("连接已停用", { exact: true })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "管理平台模型" }).getByRole("button", { name: /为新任务默认/ })).toHaveCount(0);
+  await expect(page.locator("#model-connection-list").getByText("可用", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "删除", exact: true }).click();
+  await page.getByRole("button", { name: "确认删除", exact: true }).dblclick();
+  await expect(page.getByRole("dialog", { name: "删除模型连接" })).toHaveCount(0);
+  expect(deletes).toBe(1);
+});
+
+test("平台保存未知可核对列表但不自动重试，更换本地地址清除旧发现结果", async ({ page }) => {
+  await mockSettings(page, "super_admin");
+  let saves = 0;
+  await page.route("**/api/model-connections/managed/presets/*", route => {
+    saves++; return route.fulfill({ status: 503, json: { detail: "结果未知" } });
+  });
+  await page.route("**/api/model-connections/managed/discover", route => route.fulfill({ json: { models: ["model-a"], detected_api_formats: [], manual_models_required: false } }));
+  await page.goto("/settings?section=models");
+  await page.getByRole("button", { name: "添加平台连接", exact: true }).click();
+  await page.getByLabel("API Key", { exact: false }).fill("synthetic-key");
+  await page.getByRole("button", { name: "测试并共享", exact: true }).click();
+  await page.getByRole("button", { name: "本地或自定义服务", exact: true }).click();
+  await page.getByLabel("模型服务地址", { exact: false }).fill("http://localhost:11434/v1");
+  await expect(page.getByRole("button", { name: "探测模型与四种协议（会产生测试用量）" })).toBeDisabled();
+  await page.getByRole("button", { name: "检查保存结果", exact: true }).click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(page.getByText(/列表已刷新，但不能据此确认服务商未计费/)).toBeVisible();
+  expect(saves).toBe(1);
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "我已核对，允许重新测试" }).click();
+  await page.getByRole("button", { name: "添加平台连接", exact: true }).click();
+  await page.getByRole("button", { name: "本地或自定义服务", exact: true }).click();
+  await page.getByLabel("模型服务类型", { exact: true }).selectOption("ollama");
+  await page.getByRole("button", { name: "读取可用模型", exact: true }).click();
+  await expect(page.getByLabel("本地模型 ID", { exact: false })).toHaveValue("model-a");
+  await page.getByLabel("模型服务地址", { exact: false }).fill("http://localhost:1234/v1");
+  await expect(page.getByLabel("本地模型 ID", { exact: false })).toHaveValue("");
+  await page.getByLabel("本地模型 ID", { exact: false }).fill("manual-model");
+  await page.getByLabel("API Key", { exact: false }).fill("synthetic-key-2");
+  await expect(page.getByLabel("本地模型 ID", { exact: false })).toHaveValue("manual-model");
+});
+
+test("三角色模型页面有真实列表且高级首选不替换任务默认", async ({ page }, testInfo) => {
+  for (const role of ["user", "admin", "super_admin"] as const) {
+    await page.unrouteAll({ behavior: "wait" });
+    await mockSettings(page, role);
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    let preferred = "deepseek-v4-flash";
+    let personalWrites = 0;
+    await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [{ ...UX_CONNECTION, model: preferred, default_model: preferred, available_model_count: 2, models: [
+      ...UX_CONNECTION.models,
+      { ...UX_CONNECTION.models[0], model_id: "deepseek-v4-pro", display_name: "合成增强模型", is_default: false },
+    ] }] } }));
+    await page.route("**/api/model-connections/ux-shared/default-model", route => {
+      preferred = route.request().postDataJSON().model;
+      return route.fulfill({ json: {} });
+    });
+    await page.route("**/api/model-connections/preferences/default", route => {
+      if (route.request().method() !== "GET") personalWrites++;
+      return route.fulfill({ json: { preference: null } });
+    });
+    const errors: string[] = [];
+    const recordError = (error: Error) => errors.push(error.message);
+    page.on("pageerror", recordError);
+    await page.goto("/settings?section=models");
+    await expect(page.getByRole("region", { name: "平台模型清单" }).getByText("合成模型", { exact: true })).toBeVisible();
+    await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+    if (role === "user") await expect(page.getByRole("button", { name: "删除", exact: true })).toHaveCount(0);
+    else {
+      await page.getByRole("button", { name: "管理 DeepSeek · 合成模型", exact: true }).click();
+      await page.getByText("连接高级设置 · DeepSeek", { exact: true }).click();
+      await expect(page.getByLabel("连接首选模型", { exact: true })).toHaveValue("deepseek-v4-flash");
+      await page.getByLabel("连接首选模型", { exact: true }).selectOption("deepseek-v4-pro");
+      await expect(page.getByLabel("连接首选模型", { exact: true })).toHaveValue("deepseek-v4-pro");
+      await expect(page.getByLabel("默认任务模型", { exact: true })).toHaveValue("");
+      expect(personalWrites).toBe(0);
+      expect((await new AxeBuilder({ page }).include('[role="dialog"]').analyze()).violations).toEqual([]);
+      await page.getByRole("button", { name: "完成管理", exact: true }).click();
+    }
+    expect((await new AxeBuilder({ page }).include("#model-scope-content").analyze()).violations).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath(`${role}-desktop.png`), fullPage: true });
+    await page.getByRole("button", { name: "添加自己的模型", exact: true }).click();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole("heading", { name: "连接一个模型服务" }).scrollIntoViewIfNeeded();
+    expect((await new AxeBuilder({ page }).include("#model-scope-content").analyze()).violations).toEqual([]);
+    await page.screenshot({ path: testInfo.outputPath(`${role}-mobile.png`), fullPage: true });
+    expect(errors).toEqual([]);
+    page.off("pageerror", recordError);
+  }
+});
+
 async function mockSettings(
   page: Page,
   role: "user" | "admin" | "super_admin",
   theme: "light" | "dark" = "light",
 ) {
+  // 未声明的请求留在隔离环境，避免旧用例落到真实后端并触发登录失效。
+  await page.route("**/api/**", route => route.fulfill({ status: 404, json: { detail: "隔离API" } }));
   await page.addInitScript(() => {
     localStorage.setItem("mangrove_token", "e2e-token");
   });
@@ -87,6 +426,9 @@ async function mockSettings(
   await page.route("**/api/overview", (route) => route.fulfill({
     json: {
       collectors: [],
+      conversations: 0,
+      templates: { total: 0 },
+      providers: { available: [] },
       scheduler: { enabled: false, active_count: 0 },
       connectors: {
         email: false,
@@ -120,6 +462,7 @@ async function mockSettings(
   await page.route("**/api/model-connections", (route) => route.fulfill({
     json: { items: [] },
   }));
+  await page.route("**/api/model-connections/preferences/default", route => route.fulfill({ json: { preference: null } }));
   await page.route("**/api/capability-governance/packs", (route) => route.fulfill({
     json: { items: [] },
   }));
@@ -193,21 +536,23 @@ test("普通用户只看到个人范围并可配置自己的 Provider 连接", a
 
   await page.goto("/settings");
 
-  await expect(page.getByRole("tab", { name: "我的设置" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "模型与连接" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "采集账号" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "平台配置" })).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: "运行与诊断" })).toHaveCount(0);
-  await expect(page.getByRole("tab", { name: "能力治理" })).toHaveCount(0);
-  await expect(page.getByRole("heading", { name: "我的能力验证" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "我的设置" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "模型与连接" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "采集账号" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "平台配置" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "运行与诊断" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "扩展工具管理" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "我的能力验证" })).toHaveCount(0);
 
-  await page.getByRole("tab", { name: "模型与连接" }).click();
+  await page.getByRole("button", { name: "模型与连接" }).click();
+  await page.getByRole("button", { name: "添加自己的模型", exact: true }).click();
   await expect(page.getByRole("heading", { name: "连接一个模型服务" })).toBeVisible();
   await expect(page.getByText("自定义兼容接口")).toHaveCount(0);
   await page.getByLabel("模型服务商").selectOption("deepseek");
   await expect(page.getByLabel("选择模型")).toHaveValue("deepseek-v4-flash");
   await expect(page.getByLabel("模型服务地址")).toHaveCount(0);
   await expect(page.getByLabel("API 格式")).toHaveCount(0);
+  await page.getByText("连接名称（已自动填写，可选修改）", { exact: true }).click();
   await page.getByLabel("连接名称").fill("我的 DeepSeek");
   await page.getByLabel("API Key").fill("sk-user-secret-1234");
   await page.getByRole("button", { name: "测试并保存所选模型" }).click();
@@ -219,89 +564,6 @@ test("普通用户只看到个人范围并可配置自己的 Provider 连接", a
     model: "deepseek-v4-flash",
   });
   await expect(page.getByText("连接已验证并保存")).toBeVisible();
-});
-
-for (const role of ["user", "admin"] as const) {
-  test(`${role} 从本人采集账号验证本人 Cookie`, async ({ page }) => {
-    await mockSettings(page, role);
-    await page.setViewportSize(role === "user" ? { width: 390, height: 844 } : { width: 1366, height: 768 });
-    let verified: Record<string, unknown> | null = null;
-    await page.route("**/api/config/self", (route) => route.fulfill({
-      json: {
-        items: [{
-          key: "mc_cookie_dy",
-          label: "抖音 Cookie",
-          secret: true,
-          group: "cookies",
-          set: true,
-          value: "····本人",
-        }],
-      },
-    }));
-    await page.route("**/api/config/verify", (route) => {
-      verified = route.request().postDataJSON();
-      return route.fulfill({ json: { ok: true, detail: "本人 Cookie 有效" } });
-    });
-
-    await page.goto("/settings");
-    await page.getByRole("tab", { name: "采集账号" }).click();
-    const row = page.locator("div").filter({ hasText: /^抖音 Cookie/ }).last();
-    await row.getByRole("button", { name: "验证", exact: true }).focus();
-    await page.keyboard.press("Enter");
-    await page.getByRole("button", { name: "开始验证", exact: true }).focus();
-    await page.keyboard.press("Enter");
-    await expect.poll(() => verified).not.toBeNull();
-    expect(verified).toEqual({ target: "mc_cookie_dy", scope: "self" });
-    if (role === "user") {
-      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
-    }
-  });
-}
-
-test("390px 下本人 Cookie 修改支持输入法与失败重试，并可清除", async ({ page }) => {
-  await mockSettings(page, "user");
-  await page.setViewportSize({ width: 390, height: 844 });
-  let configured = true;
-  let writes = 0;
-  await page.route("**/api/config/self/mc_cookie_dy", (route) => {
-    writes += 1;
-    if (route.request().method() === "PUT" && writes === 1) {
-      return route.fulfill({ status: 503, json: { detail: "配置服务暂时不可用" } });
-    }
-    configured = route.request().method() === "PUT";
-    return route.fulfill({ json: { ok: true, key: "mc_cookie_dy" } });
-  });
-  await page.route("**/api/config/self", (route) => route.fulfill({
-    json: {
-      items: [{
-        key: "mc_cookie_dy",
-        label: "抖音 Cookie",
-        secret: true,
-        group: "cookies",
-        set: configured,
-        value: configured ? "····7700" : "",
-      }],
-    },
-  }));
-
-  await page.goto("/settings");
-  await page.getByRole("tab", { name: "采集账号" }).click();
-  await page.getByRole("button", { name: "修改", exact: true }).click();
-  const input = page.getByPlaceholder("粘贴从浏览器导出的 Cookie");
-  await input.fill("synthetic-cookie-7700");
-  await input.dispatchEvent("keydown", { key: "Enter", code: "Enter", isComposing: true });
-  expect(writes).toBe(0);
-  await input.dispatchEvent("compositionend", { data: "7700" });
-  await page.keyboard.press("Enter");
-  await expect(page.getByText("配置服务暂时不可用")).toBeVisible();
-  await expect(input).toHaveValue("synthetic-cookie-7700");
-  await page.keyboard.press("Enter");
-  await expect(page.getByText("抖音 Cookie 已保存")).toBeVisible();
-  await expect(page.getByText("····7700")).toBeVisible();
-  await page.getByRole("button", { name: "清除", exact: true }).click();
-  await expect(page.getByText("（未配置，用系统默认）")).toBeVisible();
-  expect(writes).toBe(3);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
 
 test("管理员从能力卡片创建验证并渐进查看步骤缺口", async ({ page }) => {
@@ -387,23 +649,26 @@ test("管理员从能力卡片创建验证并渐进查看步骤缺口", async ({
 
   await page.goto("/settings?section=governance");
 
-  await expect(page.getByRole("tab", { name: "能力治理" })).toHaveAttribute(
-    "aria-selected",
-    "true",
+  await expect(page.getByRole("button", { name: "扩展工具管理" })).toHaveAttribute(
+    "aria-current",
+    "page",
   );
-  await expect(page.getByRole("heading", { name: "能力治理状态" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "扩展工具管理" })).toBeVisible();
   await expect(page.getByText("gray-python-table")).toBeVisible();
   const grayCard = page.locator("article").filter({ hasText: "gray-python-table" }).first();
+  await grayCard.locator("summary").filter({ hasText: "技术详情与安全检查" }).click();
   await expect(grayCard).toContainText("平台");
   await expect(grayCard).toContainText("已验证");
   await expect(grayCard).toContainText("正常");
-  await expect(page.getByText("可运行")).toHaveCount(2);
+  await expect(grayCard.getByText("验证：已验证 · 生命周期：正常 · 运行资格：可运行")).toBeVisible();
   await expect(page.getByText("兼容读取").first()).toBeVisible();
   await expect(grayCard).toContainText("供应链证据");
-  await expect(grayCard).toContainText("存在硬门");
+  await expect(grayCard).toContainText("检查未通过");
   await expect(grayCard).toContainText("阻断原因：存在 Critical 或可修复 High 安全误配置、Trivy 漏洞库已过期");
   await expect(grayCard).toContainText("DB 更新 2026-08-07 00:00 UTC");
-  await expect(page.getByText("sha256:bbbbbbbbbbbb…bbbbbbbbbbbb").first()).toBeVisible();
+  const retiredCard = page.locator("article").filter({ hasText: "everything-mcp" }).first();
+  await retiredCard.locator("summary").filter({ hasText: "技术详情与安全检查" }).click();
+  await expect(retiredCard.locator("code")).toHaveText(`sha256:${"b".repeat(64)}`);
   await grayCard.getByRole("button", { name: "发起验证" }).click();
   await expect(page.getByRole("dialog", { name: "发起能力验证" })).toBeVisible();
   await expect(page.getByLabel("真实任务证据")).toContainText("季度表格汇总 · V2");
@@ -511,12 +776,12 @@ test("草稿能力卡片展示脱敏缺口并提示自动晋级", async ({ page 
 
   const card = page.locator("article").filter({ hasText: "pending-draft" });
   await expect(card).toContainText("草稿");
-  await expect(card).toContainText("距已验证还缺");
+  await expect(card).toContainText("验证待办");
   await expect(card).toContainText("尚无全部通过的验证运行");
   await expect(card).toContainText("尚未形成供应链扫描证据");
 });
 
-test("普通用户只为自己的非脱敏能力读取供应链证据", async ({ page }) => {
+test("普通用户设置不加载低频能力验证和供应链证据", async ({ page }) => {
   await mockSettings(page, "user");
   const personalDigest = `sha256:${"a".repeat(64)}`;
   const evidenceRequests: string[] = [];
@@ -560,14 +825,10 @@ test("普通用户只为自己的非脱敏能力读取供应链证据", async ({
 
   await page.goto("/settings");
 
-  await expect(page.getByRole("heading", { name: "我的能力验证" })).toBeVisible();
-  await expect(page.getByText("owner-python-table")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "我的能力验证" })).toHaveCount(0);
+  await expect(page.getByText("owner-python-table")).toHaveCount(0);
   await expect(page.getByText("gray-python-table")).toHaveCount(0);
-  expect(evidenceRequests.length).toBeGreaterThan(0);
-  expect(evidenceRequests.every((url) => (
-    url.includes("/owner-python-table/1.0.0/")
-    && url.includes(encodeURIComponent(personalDigest))
-  ))).toBe(true);
+  expect(evidenceRequests).toEqual([]);
 });
 
 test("普通用户可创建并区分同一 Provider 的多套命名连接", async ({ page }) => {
@@ -594,12 +855,15 @@ test("普通用户可创建并区分同一 Provider 的多套命名连接", asyn
   });
 
   await page.goto("/settings?section=models");
+  await page.getByRole("button", { name: "添加自己的模型", exact: true }).click();
+  await page.getByText("连接名称（已自动填写，可选修改）", { exact: true }).click();
   await page.getByLabel("连接名称").fill("DeepSeek 日常");
   await page.getByLabel("API Key").fill("sk-personal-primary-1111");
   await page.getByRole("button", { name: "测试并保存所选模型" }).click();
   await expect(page.locator("#model-connection-list").getByText("DeepSeek 日常", { exact: true })).toBeVisible();
 
   await page.getByRole("button", { name: "添加个人连接" }).click();
+  await page.getByText("连接名称（已自动填写，可选修改）", { exact: true }).click();
   await page.getByLabel("连接名称").fill("DeepSeek 备用");
   await page.getByLabel("API Key").fill("sk-personal-backup-2222");
   await page.getByRole("button", { name: "测试并保存所选模型" }).click();
@@ -702,17 +966,19 @@ test("部分成功连接展示逐模型结果并可只重试失败模型", async
   );
 
   await page.goto("/settings?section=models");
+  await page.getByRole("button", { name: "添加自己的模型", exact: true }).click();
+  await page.getByText("连接名称（已自动填写，可选修改）", { exact: true }).click();
   await page.getByLabel("连接名称").fill("DeepSeek 主连接");
   await page.getByLabel("API Key").fill("sk-personal-multi-model-1234");
   await page.getByRole("button", { name: "测试并保存所选模型" }).click();
 
-  await expect(page.getByText(/^1 \/ 2 个模型可用 · 默认 DeepSeek V4 Flash · Key/)).toBeVisible();
-  await expect(page.getByText("DeepSeek V4 Flash", { exact: true })).toBeVisible();
+  await expect(page.getByText(/^1 \/ 2 个模型可用 · 连接首选 DeepSeek V4 Flash · Key/)).toBeVisible();
+  await expect(page.locator("#model-connection-list span").filter({ hasText: /^DeepSeek V4 Flash$/ })).toBeVisible();
   await expect(page.getByText("无模型权限")).toBeVisible();
   await page.getByRole("button", { name: "重试 DeepSeek V4 Pro" }).click();
   await expect(page.getByText("2 / 2 个模型可用")).toBeVisible();
   await expect(
-    page.getByRole("button", { name: "设 DeepSeek V4 Pro 为默认" }),
+    page.getByRole("button", { name: "设 DeepSeek 主连接 的 DeepSeek V4 Pro 为新任务默认" }),
   ).toBeVisible();
 });
 
@@ -734,19 +1000,19 @@ test("管理员同时拥有个人设置和平台治理入口", async ({ page }) 
   });
   await page.goto("/settings");
 
-  await expect(page.getByRole("tab", { name: "我的设置" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "模型与连接" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "采集账号" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "平台配置" })).toBeVisible();
-  await expect(page.getByRole("tab", { name: "运行与诊断" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "我的设置", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "模型与连接", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "采集账号", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "平台配置", exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "运行与诊断", exact: true })).toBeVisible();
 
-  await page.getByRole("tab", { name: "模型与连接" }).click();
+  await page.getByRole("button", { name: "模型与连接", exact: true }).click();
   await expect(page.getByRole("tab", { name: "个人连接" })).toBeVisible();
   await expect(page.getByRole("tab", { name: "平台连接" })).toBeVisible();
   await page.getByRole("tab", { name: "平台连接" }).click();
   await expect(page.getByRole("button", { name: "添加平台连接" })).toBeVisible();
   await page.getByRole("button", { name: "添加平台连接" }).click();
-  await expect(page.getByRole("button", { name: "Provider 预设（推荐）" }))
+  await expect(page.getByRole("button", { name: "云端服务商" }))
     .toHaveAttribute("aria-pressed", "true");
   await page.locator('[role="dialog"]').evaluate(async (dialog) => {
     await Promise.all(
@@ -762,9 +1028,9 @@ test("管理员同时拥有个人设置和平台治理入口", async ({ page }) 
   ).toEqual([]);
   await page.getByLabel("连接名称").fill("生产 DeepSeek");
   await page.getByLabel("模型服务商").selectOption("deepseek");
-  await page.getByLabel("模型版本").selectOption("deepseek-v4-pro");
+  await page.getByLabel("选择模型").selectOption("deepseek-v4-pro");
   await page.getByLabel("API Key").fill("sk-platform-secret-2468");
-  await page.getByRole("button", { name: "验证并发布" }).click();
+  await page.getByRole("button", { name: "测试并共享" }).click();
   expect(presetConnection).toEqual({
     display_name: "生产 DeepSeek",
     model: "deepseek-v4-pro",
@@ -773,7 +1039,7 @@ test("管理员同时拥有个人设置和平台治理入口", async ({ page }) 
   });
 
   await page.getByRole("button", { name: "添加平台连接" }).click();
-  await page.getByRole("button", { name: "自定义 / LAN" }).click();
+  await page.getByRole("button", { name: "本地或自定义服务" }).click();
   await expect(page.getByLabel("模型服务地址")).toBeVisible();
   await expect(page.getByLabel("API 格式")).toBeVisible();
   await expect(
@@ -781,15 +1047,13 @@ test("管理员同时拥有个人设置和平台治理入口", async ({ page }) 
   ).toBeVisible();
   await page.getByRole("button", { name: "取消" }).click();
 
-  await page.getByRole("tab", { name: "平台配置" }).click();
-  const legacy = page.locator("summary").filter({ hasText: "旧流程兼容" });
-  await expect(legacy).toBeVisible();
+  await page.getByRole("button", { name: "平台配置", exact: true }).click();
+  const legacy = page.locator("summary").filter({ hasText: "高级：旧流程模型参数" });
+  await expect(legacy).toHaveCount(0);
   await expect(page.getByText("DeepSeek API Key")).not.toBeVisible();
-  await legacy.click();
-  await page.getByRole("button", { name: "模型 · DeepSeek" }).click();
-  await expect(page.getByText("DeepSeek API Key")).toBeVisible();
+  await expect(page.getByRole("link", { name: "管理平台模型" })).toHaveAttribute("href", "/settings?section=models&scope=platform");
 
-  await page.getByRole("tab", { name: "采集账号" }).click();
+  await page.getByRole("button", { name: "采集账号", exact: true }).click();
   await expect(page.getByText("我的采集账号")).toBeVisible();
 });
 
@@ -801,7 +1065,7 @@ test("平台连接对话框支持键盘进入、Esc 关闭和焦点归还", asyn
   await trigger.focus();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("dialog")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Provider 预设（推荐）" }))
+  await expect(page.getByRole("button", { name: "云端服务商" }))
     .toBeFocused();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toHaveCount(0);
@@ -857,7 +1121,9 @@ test("导入连接网络失败后仍可再次验证且无需重填 Key", async (
   });
 
   await page.goto("/settings?section=models");
+  await page.getByText("帮助与高级操作", { exact: true }).click();
   await page.getByRole("button", { name: "导入现有配置" }).click();
+  await page.getByRole("tab", { name: "我的连接" }).click();
   await expect(page.getByText("验证并启用（Key 无需重填）")).toBeVisible();
   await page.getByRole("button", { name: "验证并启用（Key 无需重填）" }).click();
   await page.getByRole("button", { name: /导入的 DeepSeek.*新任务默认/ }).click();
@@ -865,9 +1131,7 @@ test("导入连接网络失败后仍可再次验证且无需重填 Key", async (
     connection_id: "imported-1",
     model_id: "deepseek-v4-flash",
   });
-  await expect(page.locator('[data-model-tour="default-connection"]')).toContainText(
-    "导入的 DeepSeek",
-  );
+  await expect(page.getByLabel("默认任务模型", { exact: true })).toHaveValue(JSON.stringify(["imported-1", "deepseek-v4-flash"]));
   await expect(page.locator('[data-model-tour="default-connection"]')).toContainText(
     "DeepSeek V4 Flash",
   );
@@ -900,7 +1164,7 @@ test("超级管理员可发现四协议并手工覆盖最多八个模型", async
   await page.goto("/settings?section=models");
   await page.getByRole("tab", { name: "平台连接" }).click();
   await page.getByRole("button", { name: "添加平台连接" }).click();
-  await page.getByRole("button", { name: "自定义 / LAN" }).click();
+  await page.getByRole("button", { name: "本地或自定义服务" }).click();
   await expect(page.getByLabel("API 格式").locator("option")).toHaveCount(4);
   await page.getByLabel("连接名称").fill("多协议网关");
   await page.getByLabel("模型服务地址").fill("https://gateway.example/v1");
@@ -908,8 +1172,8 @@ test("超级管理员可发现四协议并手工覆盖最多八个模型", async
   await page.getByRole("button", { name: "探测模型与四种协议（会产生测试用量）" }).click();
   await expect(page.getByText(/已检测：/)).toContainText("openai_responses");
   await expect(page.getByLabel("API 格式")).toHaveValue("openai_responses");
-  await page.getByLabel("默认模型").fill("model-b");
-  await page.getByRole("button", { name: "验证并发布" }).click();
+  await page.getByRole("dialog").getByLabel("默认模型").fill("model-b");
+  await page.getByRole("button", { name: "测试并共享" }).click();
   expect(published).toMatchObject({
     display_name: "多协议网关",
     api_format: "openai_responses",
@@ -931,6 +1195,9 @@ test("新手引导可跳过并从设置页重新播放", async ({ page }) => {
   });
 
   await page.goto("/settings?section=models");
+  await expect(page.getByText("先确认新任务默认模型")).toHaveCount(0);
+  await page.getByText("帮助与高级操作", { exact: true }).click();
+  await page.getByRole("button", { name: "播放新手引导" }).click();
   await expect(page.getByText("先确认新任务默认模型")).toBeVisible();
   await page.getByRole("button", { name: "跳过" }).click();
   await expect.poll(() => savedStates).toContain("skipped");
@@ -950,7 +1217,7 @@ test("模型连接接口误返回网页时显示可恢复错误而不是 JSON �
 
   await page.goto("/settings?section=models");
 
-  await expect(page.getByText("模型连接加载失败")).toBeVisible();
+  await expect(page.getByRole("alert").filter({ hasText: "模型连接加载失败" })).toBeVisible();
   await expect(
     page.getByRole("main").getByText(/服务返回了网页而不是 API 数据/),
   ).toBeVisible();
@@ -1090,7 +1357,7 @@ test("管理员审核视图分组渐进披露并完成一次审计查看", async
 
   // 分组与计数：状态不只依赖颜色，用文本标题表达。
   await expect(page.getByRole("heading", { name: "待验证（1）" })).toBeVisible();
-  await expect(page.getByRole("heading", { name: "已晋级（1）" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "已验证（1）" })).toBeVisible();
 
   // 1366 宽度下无横向滚动。
   const scrolls = await page.evaluate(() => ({
@@ -1228,9 +1495,10 @@ test("管理员提交平台候选并发布到管理员灰度", async ({ page }) 
   await expect(submit).toBeEnabled();
   await submit.click();
 
-  // 候选分组出现，展示平台 digest 与原因。
+  // 候选分组出现，技术身份和原因在详情中保留。
   await expect(page.getByRole("heading", { name: "平台候选（1）" })).toBeVisible();
-  const candidateCard = page.locator("article").filter({ hasText: "平台 digest" }).first();
+  const candidateCard = page.locator("article").filter({ hasText: "待发布 · 发布后仅管理员试用" }).first();
+  await candidateCard.locator("summary").filter({ hasText: "发布详情" }).click();
   await expect(candidateCard).toContainText("verified-personal-tool");
   await expect(candidateCard).toContainText("平台候选：个人验证已完成并通过审核");
   await candidateCard.getByRole("button", { name: "发布" }).click();
@@ -1249,7 +1517,7 @@ test("管理员提交平台候选并发布到管理员灰度", async ({ page }) 
 
 
 for (const role of ["admin", "super_admin"] as const) {
-  test(`外部只读边界：${role} 历史通知无编辑验证入口，搜索与内部增强保留`, async ({ page }) => {
+  test(`通知授权边界：${role} 可维护邮件和 Slack，搜索与内部增强保留`, async ({ page }) => {
     await mockSettings(page, role);
     const errors: string[] = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -1260,7 +1528,7 @@ for (const role of ["admin", "super_admin"] as const) {
     page.on("request", (request) => {
       if (request.method() !== "GET") writes.push(request.url());
     });
-    await page.route("**/api/config?*", (route) => route.fulfill({ json: { groups: [
+    await page.route(/\/api\/config(?:\?.*)?$/, (route) => route.fulfill({ json: { groups: [
       ...["email", "slack"].map((key) => ({ key, label: `历史 ${key}`, items: [{
         key: key === "email" ? "smtp_enabled" : "slack_webhook_url",
         label: `历史 ${key} 值`, value: "已保留", source: "override", secret: true,
@@ -1272,23 +1540,23 @@ for (const role of ["admin", "super_admin"] as const) {
     await expect(page).toHaveTitle(/Mangrove/);
     await expect(page.getByRole("main")).not.toBeEmpty();
     await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+    await page.getByRole("button", { name: "通知", exact: true }).click();
     for (const key of ["email", "slack"]) {
-      const group = page.getByRole("button", { name: `历史 ${key}`, exact: false }).locator("..");
-      await group.getByRole("button").click();
-      await expect(group).toContainText("外部只读边界");
-      await expect(group).toContainText("已保留");
-      await expect(group.getByRole("button", { name: /修改|重置|验证|启用|发送/ })).toHaveCount(0);
+      const group = page.getByRole("region", { name: `历史 ${key}`, exact: true });
+      await group.getByRole("button", { name: `配置 历史 ${key}`, exact: true }).click();
+      await expect(page.getByRole("dialog").getByRole("button", { name: "保存配置" })).toBeVisible();
+      await page.getByRole("dialog").getByRole("button", { name: "取消", exact: true }).click();
     }
     await page.screenshot({ path: `../.artifacts/issue-126/ui-${role}.png`, fullPage: true });
-    await page.getByRole("button", { name: "搜索与采集服务", exact: false }).click();
-    await expect(page.getByRole("button", { name: "修改", exact: true })).toBeVisible();
-    await expect(page.getByRole("button", { name: "验证", exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "搜索采集", exact: true }).click();
+    await expect(page.getByRole("button", { name: "配置 Tavily", exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "检查 Tavily", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "使用指南", exact: true }).click();
     await expect(page.getByRole("dialog")).not.toContainText("随时可以重新开启");
     await page.keyboard.press("Escape");
-    await page.getByRole("tab", { name: "运行与诊断" }).click();
-    await expect(page.getByText("邮件和 Slack 外发已关闭", { exact: false })).toBeVisible();
-    await expect(page.getByText("语义召回 (embedding)", { exact: true })).toBeVisible();
+    await page.getByRole("button", { name: "运行与诊断" }).click();
+    await expect(page.getByText("仅按用户明确要求发送", { exact: false })).toBeVisible();
+    await expect(page.getByText("知识检索（语义召回）", { exact: true })).toBeVisible();
     await expect(page.getByText("断点续跑 (checkpoint)", { exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "测试", exact: true })).toHaveCount(2);
     expect(writes).toEqual([]);

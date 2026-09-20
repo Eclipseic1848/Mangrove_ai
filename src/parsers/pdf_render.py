@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import io
 import math
+from threading import RLock
 
 from src.services.upload_store import MAX_IMAGE_PIXELS
+
+# ponytail: PDFium 跨文档也不能多线程并行；吞吐瓶颈出现时改用独立进程。
+_PDFIUM_LOCK = RLock()
 
 
 def validate_pdf_source(raw_bytes: bytes) -> int:
     """在文字提取/OCR 前检查页面资源，不分配位图或改写原件。"""
+    with _PDFIUM_LOCK:
+        return _validate_pdf_source(raw_bytes)
+
+
+def _validate_pdf_source(raw_bytes: bytes) -> int:
     import pypdfium2 as pdfium
     from src.config.settings import settings
 
@@ -40,6 +49,11 @@ def _validate_render_size(width: float, height: float, dpi: int) -> None:
 
 def render_pdf_page_png(raw_bytes: bytes, *, page_number: int, dpi: int = 200) -> bytes:
     """渲染 1-based 页码；供 PaddleOCR/Qwen 共用同一页图。"""
+    with _PDFIUM_LOCK:
+        return _render_pdf_page_png(raw_bytes, page_number=page_number, dpi=dpi)
+
+
+def _render_pdf_page_png(raw_bytes: bytes, *, page_number: int, dpi: int) -> bytes:
     if page_number < 1:
         raise ValueError("page_number 必须从 1 开始")
     if dpi < 72:

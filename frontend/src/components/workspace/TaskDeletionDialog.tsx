@@ -1,3 +1,4 @@
+import { beijingTime } from "@/lib/beijingTime";
 import { useEffect, useRef, useState } from "react";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import { nanoid } from "nanoid/non-secure";
@@ -18,7 +19,8 @@ export function TaskDeletionDialog({ ownerId, target, currentTaskId, onClose, on
     try { stored.current = localStorage.getItem(storageKey); const value = JSON.parse(stored.current || "null"); return value?.task_id && value?.key && value?.payload?.plan_token ? value : null; } catch { return null; }
   });
   const [uncertain, setUncertain] = useState(Boolean(pending));
-  const [open, setOpen] = useState(Boolean(pending));
+  // 保留未完成操作用于核对，但进入工作台不能自动弹出危险操作窗口。
+  const [open, setOpen] = useState(false);
   const [policy, setPolicy] = useState<DeletionPolicy>("keep_shared");
   const [plan, setPlan] = useState<TaskDeletionPlan | null>(null);
   const [operation, setOperation] = useState<TaskDeletionOperation | null>(null);
@@ -87,7 +89,7 @@ export function TaskDeletionDialog({ ownerId, target, currentTaskId, onClose, on
   }, []);
   const close = () => {
     active(); setBusy(false); setOpen(false); setPlan(null); onClose();
-    requestAnimationFrame(() => { if (trigger.current?.isConnected) trigger.current.focus(); else document.querySelector<HTMLButtonElement>('button[aria-label="任务列表开关"]')?.focus(); });
+    requestAnimationFrame(() => { if (trigger.current?.isConnected) trigger.current.focus(); else document.getElementById("task-list-toggle")?.focus(); });
   };
   useEffect(() => { if (target && currentTaskId !== target.task_id && operation?.state !== "completed") close(); }, [currentTaskId]);
   async function commit(resume: boolean) {
@@ -115,8 +117,11 @@ export function TaskDeletionDialog({ ownerId, target, currentTaskId, onClose, on
     } finally { if (request === generation.current) setBusy(false); }
   }
   const needsPlan = !uncertain && (!pending || operation?.state === "needs_confirmation");
+  const operationMessage = operation?.error_code === "runtime_stop_unconfirmed" || operation?.message === "runtime_stop_unconfirmed"
+    ? "尚未确认相关任务已停止，因此暂未继续清理。你可以关闭此窗口正常使用工作台，稍后查询原操作状态。"
+    : operation?.message;
   return <>
-    {!open && pending && <button type="button" className={`${button} m-2`} onClick={() => { setOpen(true); void inspect(); }}>查看未完成的资料清理</button>}
+    {!open && pending && <button type="button" title="查看未完成的资料清理，仅查询，不会自动继续清理" className="inline-flex shrink-0 items-center rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" onClick={() => { trigger.current = document.activeElement as HTMLElement; setOpen(true); void inspect(); }}>清理记录</button>}
     <AlertDialog.Root open={open} onOpenChange={value => { if (!value) close(); }}><AlertDialog.Portal>
       <AlertDialog.Overlay className="fixed inset-0 z-50 bg-black/40" />
       <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 flex max-h-[90dvh] w-[calc(100%_-_1.5rem)] max-w-2xl -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-xl border bg-background shadow-xl" onKeyDown={event => { if (event.key === "Enter" && event.nativeEvent.isComposing) event.preventDefault(); }} onOpenAutoFocus={event => { event.preventDefault(); cancelButton.current?.focus(); }} onCloseAutoFocus={event => event.preventDefault()}>
@@ -125,9 +130,9 @@ export function TaskDeletionDialog({ ownerId, target, currentTaskId, onClose, on
           {stale && <p role="alert">清理操作已在其他页面更新，请刷新查询；旧确认不能继续使用。</p>}
           {busy && <p role="status">正在核对清单或清理状态…</p>}
           {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
-          {operation && <section aria-label="清理操作状态" className="space-y-2"><p role="status" className="font-medium">{labels[operation.state]}</p><p className="text-sm">已清理 {operation.completed_source_keys.length} 份 · 保留共享 {operation.retained_source_keys.length} 份</p>{operation.message && <p className="text-sm">{operation.message}</p>}<p className="text-xs text-muted-foreground">停止依赖任务后清理；不承诺原会话原地续跑。保留任务可能无法按原来源完整重跑或复验。</p></section>}
+          {operation && <section aria-label="清理操作状态" className="space-y-2"><p role="status" className="font-medium">{labels[operation.state]}</p><p className="text-sm">已清理 {operation.completed_source_keys.length} 份 · 保留共享 {operation.retained_source_keys.length} 份</p>{operationMessage && <p className="break-words text-sm">{operationMessage}</p>}<p className="text-xs text-muted-foreground">停止依赖任务后清理；不承诺原会话原地续跑。保留任务可能无法按原来源完整重跑或复验。</p></section>}
           {needsPlan && operation?.state !== "completed" && <fieldset disabled={busy || stale} className="space-y-2"><legend className="text-sm font-medium">共享资料如何处理</legend><label className="flex items-start gap-2 text-sm"><input type="radio" name="shared-deletion-policy" checked={policy === "keep_shared"} onChange={() => void loadPlan("keep_shared")} className="mt-1" />保留其他任务使用的资料（默认）</label><label className="flex items-start gap-2 text-sm"><input type="radio" name="shared-deletion-policy" checked={policy === "delete_shared"} onChange={() => void loadPlan("delete_shared")} className="mt-1" />同时删除共享资料，先停止依赖任务</label></fieldset>}
-          {plan && <section aria-label="资料清理清单" className="space-y-3"><p className="text-sm">本次核对 {plan.objects.length} 份资料，已核对以下关联记录。</p>{plan.objects.map(item => <article key={item.source_key} className="space-y-1 rounded-lg border p-3 text-sm"><p className="break-all font-medium">{item.label}</p><p>{item.kind === "delivery_output" ? "处理结果 · 非原件" : item.kind === "web_artifact" ? "网页原文" : "原始文件"} · {item.disposition === "keep_shared" ? "保留共享资料" : "本次将清理"}</p>{item.kind === "web_artifact" && <p className="break-all text-xs text-muted-foreground">来源组：{item.snapshot_id} · 原件：{item.artifact_id}</p>}<p className="text-xs text-muted-foreground">{item.time_kind === "generated" ? "生成时间" : "取得时间"}：{item.acquired_at && item.time_kind !== "unknown" ? new Date(item.acquired_at).toLocaleString("zh-CN") : "时间未记录"}</p>{item.references.length > 0 && <details><summary className="cursor-pointer py-1">查看 {item.references.length} 条关联记录</summary><div className="space-y-2 break-words text-xs text-muted-foreground">{item.references.map((reference, index) => <p key={index}><SourceReferenceFacts item={reference} /></p>)}</div></details>}</article>)}{plan.affected_tasks.length > 0 && <div className="space-y-1 text-sm"><p>受影响任务（记录和独立结果保留）</p>{plan.affected_tasks.map((item, index) => <p key={index} className="break-all">{item.task_id}{item.revision ? ` · V${item.revision}` : ""}{!item.task_exists ? " · 原任务记录已清理" : item.in_recycle_bin ? " · 回收站中" : ""}</p>)}</div>}{plan.blockers.map((blocker, index) => <p role="alert" key={index} className="text-sm text-destructive">{blocker.message}</p>)}</section>}
+          {plan && <section aria-label="资料清理清单" className="space-y-3"><p className="text-sm">本次核对 {plan.objects.length} 份资料，已核对以下关联记录。</p>{plan.objects.map(item => <article key={item.source_key} className="space-y-1 rounded-lg border p-3 text-sm"><p className="break-all font-medium">{item.label}</p><p>{item.kind === "delivery_output" ? "处理结果 · 非原件" : item.kind === "web_artifact" ? "网页原文" : "原始文件"} · {item.disposition === "keep_shared" ? "保留共享资料" : "本次将清理"}</p>{item.kind === "web_artifact" && <p className="break-all text-xs text-muted-foreground">来源组：{item.snapshot_id} · 原件：{item.artifact_id}</p>}<p className="text-xs text-muted-foreground">{item.time_kind === "generated" ? "生成时间" : "取得时间"}：{item.acquired_at && item.time_kind !== "unknown" ? beijingTime(item.acquired_at) : "时间未记录"}</p>{item.references.length > 0 && <details><summary className="cursor-pointer py-1">查看 {item.references.length} 条关联记录</summary><div className="space-y-2 break-words text-xs text-muted-foreground">{item.references.map((reference, index) => <p key={index}><SourceReferenceFacts item={reference} /></p>)}</div></details>}</article>)}{plan.affected_tasks.length > 0 && <div className="space-y-1 text-sm"><p>受影响任务（记录和独立结果保留）</p>{plan.affected_tasks.map((item, index) => <p key={index} className="break-all">{item.task_id}{item.revision ? ` · V${item.revision}` : ""}{!item.task_exists ? " · 原任务记录已清理" : item.in_recycle_bin ? " · 回收站中" : ""}</p>)}</div>}{plan.blockers.map((blocker, index) => <p role="alert" key={index} className="text-sm text-destructive">{blocker.message}</p>)}</section>}
           {needsPlan && !plan && !busy && operation?.state !== "completed" && <button type="button" className={button} disabled={stale} onClick={() => void loadPlan()}>重新核对清单</button>}
           {pending && <button type="button" className={button} disabled={busy || stale} onClick={() => void inspect()}>查询原操作状态</button>}
         </div>

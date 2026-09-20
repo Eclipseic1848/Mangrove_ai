@@ -101,12 +101,12 @@ def test_note_omission_preserves_and_old_note_requires_real_audit(feedback):
     fb_id = store.feedback_list()['items'][0]['id']
     with store._conn() as conn:
         conn.execute('UPDATE message_feedback SET admin_note=? WHERE id=?', ('OLD_NOTE', fb_id))
-    store.update_feedback_status(fb_id, 'resolved')
+    store.update_feedback_status(fb_id, 'pending')
     assert store.feedback_list()['items'][0]['has_admin_note'] is True
     with pytest.raises(PermissionError):
-        store.update_feedback_status(fb_id, 'resolved', None, actor_id=admin['user_id'])
+        store.update_feedback_status(fb_id, admin_note=None, actor_id=admin['user_id'])
     store.audit_feedback_content(fb_id, actor_id=admin['user_id'], reason='排查反馈备注', idempotency_key='note')
-    store.update_feedback_status(fb_id, 'resolved', None, actor_id=admin['user_id'])
+    store.update_feedback_status(fb_id, admin_note=None, actor_id=admin['user_id'])
     assert store.feedback_list()['items'][0]['has_admin_note'] is False
 
 

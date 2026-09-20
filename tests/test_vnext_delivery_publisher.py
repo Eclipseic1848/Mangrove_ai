@@ -53,6 +53,31 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def test_owner_acceptance_is_not_system_verification_and_still_needs_gate(tmp_path, repository, candidate):
+    from src.delivery_publishing.models import OwnerAcceptance
+    command = _command(candidate, verification_status="inconclusive")
+    acceptance = OwnerAcceptance(actor_id="owner-a", source_revision=1, draft_id="a" * 64,
+                                 candidate_set_hash=command.candidate_set_hash,
+                                 accepted_at="2026-09-15T00:00:00+00:00", gaps=("表格置信度未知",))
+    command = command.model_copy(update={"task_revision": 2, "owner_acceptance": acceptance})
+    publisher = DeliveryPublisher(repository=repository, output_root=tmp_path / "out",
+                                  candidate_resolver=lambda _: {"candidate_json": candidate},
+                                  gate_reader=lambda _: PublicationGate())
+    with pytest.raises(ValueError, match="接受"):
+        publisher.publish(command, actor_id="owner-a")
+    WebUIStore(str(repository.db_path)).create_semantic_workspace_revision(
+        "owner-a", "task-a", objective_text="接受合成初稿", output_formats=["json"],
+        change_summary="用户接受", source_contract={"owner_acceptance": acceptance.model_dump(mode="json")},
+    )
+    publisher = DeliveryPublisher(repository=repository, output_root=tmp_path / "out",
+                                  candidate_resolver=lambda _: {"candidate_json": candidate},
+                                  gate_reader=lambda _: PublicationGate(owner_acceptance_current=True))
+    result = publisher.publish(command, actor_id="owner-a")
+    assert result.provenance["verification_status"] == "inconclusive"
+    assert result.provenance["owner_acceptance"]["gaps"] == ["表格置信度未知"]
+    assert publisher.publish(command, actor_id="owner-a").delivery_id == result.delivery_id
+
+
 def _semantic_codec(root: Path) -> ManagedPathCodec:
     return ManagedPathCodec(
         root,

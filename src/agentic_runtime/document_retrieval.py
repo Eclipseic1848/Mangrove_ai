@@ -371,7 +371,7 @@ class DocumentRetrievalModule:
     ) -> tuple[str, str, str, bool]:
         """低分辨率发现与权威 OCR 使用不同 Adapter 和缓存命名空间。"""
 
-        import pypdfium2 as pdfium
+        from src.parsers.pdf_render import render_pdf_page_png
 
         _raise_if_cancelled()
         legacy = self._legacy_discovery_text(
@@ -413,22 +413,22 @@ class DocumentRetrievalModule:
                 with Image.open(io.BytesIO(raw_bytes)) as original:
                     image = ImageOps.exif_transpose(original)
                     image.thumbnail((1600, 1600))
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG", optimize=True)
+                png_bytes = buffer.getvalue()
             else:
-                document = pdfium.PdfDocument(str(source.host_path))
-                page_handle = document[page - 1]
                 # 90 DPI 足以供小模型做关键词召回，候选仍须进入权威解析。
-                bitmap = page_handle.render(scale=1.25, grayscale=False)
-                image = bitmap.to_pil()
-            buffer = io.BytesIO()
-            image.save(buffer, format="PNG", optimize=True)
-            text, confidence = client.extract_text(buffer.getvalue())
+                png_bytes = render_pdf_page_png(
+                    source.host_path.read_bytes(), page_number=page, dpi=90,
+                )
+            text, confidence = client.extract_text(png_bytes)
         except Exception as exc:
             _raise_if_cancelled()
             raise DocumentRetrievalError(
                 f"第 {page} 页低成本发现失败：{type(exc).__name__}: {exc}"
             ) from exc
         finally:
-            for resource_name in ("image", "bitmap", "page_handle", "document"):
+            for resource_name in ("image",):
                 resource = locals().get(resource_name)
                 close = getattr(resource, "close", None)
                 if callable(close):

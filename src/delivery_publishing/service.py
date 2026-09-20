@@ -115,7 +115,13 @@ class DeliveryPublisher:
     ) -> DeliveryManifest:
         if actor_id != command.owner_id:
             raise PermissionError("发布 actor 不是任务所有者")
-        if command.verification_status != "passed":
+        if command.owner_acceptance is not None:
+            acceptance = command.owner_acceptance
+            if (acceptance.actor_id != actor_id or acceptance.source_revision >= command.task_revision
+                    or acceptance.candidate_set_hash != command.candidate_set_hash
+                    or not self._gate_reader(command).owner_acceptance_current):
+                raise ValueError("用户接受记录失效或不匹配，禁止发布")
+        elif command.verification_status != "passed":
             raise ValueError("候选独立验证未通过，禁止正式发布")
         candidate_formats = tuple(item.format for item in command.candidates)
         if sorted(candidate_formats) != sorted(
@@ -198,6 +204,7 @@ class DeliveryPublisher:
             gate.cancel_requested
             or gate.p0_blocked
             or not gate.revision_current
+            or (command.owner_acceptance is not None and not gate.owner_acceptance_current)
         ):
             reason = (
                 "任务已取消"
@@ -282,6 +289,9 @@ class DeliveryPublisher:
                     "candidate_set_hash": command.candidate_set_hash,
                     "verification_report_id": command.verification_report_id,
                     "verification_report_hash": command.verification_report_hash,
+                    **({"verification_status": command.verification_status,
+                        "owner_acceptance": command.owner_acceptance.model_dump(mode="json")}
+                       if command.owner_acceptance is not None else {}),
                     "delivery_spec_hash": command.delivery_spec_hash,
                     "publication_key": command.publication_key,
                     **(
@@ -305,6 +315,7 @@ class DeliveryPublisher:
                 gate.cancel_requested
                 or gate.p0_blocked
                 or not gate.revision_current
+                or (command.owner_acceptance is not None and not gate.owner_acceptance_current)
             ):
                 reason = (
                     "任务已取消"

@@ -5,6 +5,25 @@ import json
 from .catalog import model_max_output_tokens
 
 
+def collect_response_usage(api_format: str, body: bytes) -> None:
+    """把供应商实际返回的用量接回既有请求计数器，不估算缺失数据。"""
+    from types import SimpleNamespace
+    from src.llm.provider import _collect_usage
+
+    payload = json.loads(body)
+    usage = payload.get("usageMetadata" if api_format == "gemini_generate_content" else "usage") or {}
+    if not isinstance(usage, dict):
+        usage = {}
+    keys = {
+        "openai_chat_completions": ("prompt_tokens", "completion_tokens", "total_tokens"),
+        "openai_responses": ("input_tokens", "output_tokens", "total_tokens"),
+        "anthropic_messages": ("input_tokens", "output_tokens", "total_tokens"),
+        "gemini_generate_content": ("promptTokenCount", "candidatesTokenCount", "totalTokenCount"),
+    }.get(api_format, ("input_tokens", "output_tokens", "total_tokens"))
+    _collect_usage(SimpleNamespace(usage_metadata=dict(zip(("input_tokens", "output_tokens", "total_tokens"),
+                                                         (usage.get(key) for key in keys)))))
+
+
 def structured_request(
     *,
     api_format: str,
