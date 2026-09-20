@@ -47,6 +47,8 @@ def login(body: LoginIn, request: Request, response: Response):
     if retry:
         raise rate_limited(retry)
     user = store.get_user_by_name(username)
+    # 失败登录只关联已存在账号，不保存输入的未知用户名或密码。
+    request.state.operations_login_actor = {"user_id": user["user_id"], "role": user.get("role", "user")} if user else None
     # 不存在的账号也做同成本校验；不通过响应暴露账号存在性。
     verified = verify_password(body.password, user["password_hash"] if user else _DUMMY_PASSWORD_HASH)
     now = time.time()
@@ -95,6 +97,8 @@ def refresh_session(request: Request, response: Response):
     if rotated is None:
         raise _invalid_session()
     user, session = rotated
+    # 续期不经过 get_current_user；仅用已验证的刷新会话身份补齐审计，不能信任客户端 Owner 声明。
+    request.state.platform_user = user
     set_session_cookies(response, request, user_id=user["user_id"], session_id=session_id, refresh=refresh, now=now, access_expires_at=session["access_expires_at"], session_expires_at=session["absolute_expires_at"])
     return public_user(user, access_expires_at=session["access_expires_at"], session_expires_at=session["absolute_expires_at"])
 

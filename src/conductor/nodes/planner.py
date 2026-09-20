@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
+from src.timezone import now as beijing_now
 from typing import Any, Dict, Optional, Tuple
 
 from src.collectors import known_platforms, normalize_platform
@@ -60,6 +62,7 @@ async def _plan(understanding: dict, user_input: str, provider, model, lesson_te
     platforms = "、".join(known_platforms())
     system = PLANNER_SYSTEM.format(platforms=platforms) + skills_for_planner() + lesson_text
     user = (
+        f"当前北京时间：{beijing_now().isoformat()}；调度统一按 Asia/Shanghai（UTC+8）执行。\n"
         f"用户原始诉求：{user_input}\n"
         f"上游理解：{json.dumps(understanding, ensure_ascii=False)}"
     )

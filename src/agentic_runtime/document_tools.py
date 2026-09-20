@@ -402,6 +402,16 @@ class DocumentToolBroker:
         )
         self._assert_units_authorized(ledger, requested_units)
         if operation == "discover_content":
+            pending_units = ()
+            if not requested_units and contract.result_cardinality.value == "ordinal":
+                # ponytail: 序数查找每批最多五页；只限制发现批次，不把第 N 份等同第 N 页。
+                pending_units = tuple(
+                    unit for unit in grant.inspected_units.get(source_id, ())
+                    if unit in ledger.authorized_unit_ids and unit not in ledger.observed_unit_ids
+                )
+                if not pending_units:
+                    raise DocumentToolError("已完成发现；如需复核，请显式指定 unit_ids")
+                requested_units = pending_units[:5]
             result = await self._invoke(
                 grant,
                 self._retriever.discover(
@@ -414,6 +424,10 @@ class DocumentToolBroker:
             self._record_discovery(grant, ledger, result)
             return {
                 **result,
+                **({"next_unit_ids": [
+                    unit for unit in grant.inspected_units.get(source_id, ())
+                    if unit in ledger.authorized_unit_ids and unit not in grant.ledger.observed_unit_ids
+                ][:5]} if contract.result_cardinality.value == "ordinal" else {}),
                 "coverage": grant.ledger.public_progress(),
             }
         if operation == "read_evidence":
@@ -589,6 +603,14 @@ class DocumentToolBroker:
                     normalized_scope["source_ids"] = normalized_source_ids
                     normalized_payload["authorized_scope"] = normalized_scope
             draft = CoverageContractDraft.model_validate(normalized_payload)
+            # 不确定的页码限制不能成为不可改写的边界；拒绝本次提议，允许重新规划。
+            # 仅约束新冻结调用，历史契约恢复和已确认的用户限制保持原样。
+            if draft.authorized_scope.unit_ids and draft.confidence.value == "low":
+                raise DocumentToolError(
+                    "尚未确认页码范围，本次未冻结。请核对用户是否明确限定页面；"
+                    "未限定时省略 authorized_scope.unit_ids，用 discover_content 分批读取；"
+                    "有歧义时调用 request_clarification，不得仅提高 confidence 绕过确认。"
+                )
             inspected = tuple(
                 unit_id
                 for source_id in draft.authorized_scope.source_ids

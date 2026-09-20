@@ -20,6 +20,7 @@ import uuid
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from src.config.settings import settings
+from src.api.execution import execution_to_thread
 from src.services.upload_store import IMAGE_EXTENSIONS
 from src.candidate_verification import CandidateVerificationService
 from src.capability_catalog.models import PublicCapabilityDescriptor
@@ -35,6 +36,7 @@ from src.model_connections.catalog import runtime_context_window
 CapabilityMountResolverFn = Callable[[str, str, int], tuple[Path, ...]]
 
 from .candidate_qa import inspect_candidates
+from .verification_progress import VerificationProgress
 from .candidate_verifier import (
     BrokerSemanticJudge,
     CandidateVerifier,
@@ -100,6 +102,14 @@ _CAPABILITY_KIND_LABELS = {
 
 class PiRuntimeError(RuntimeError):
     """Pi Runtime 无法形成候选结果。"""
+
+
+class _DraftReviewPause(Exception):
+    """完整初稿已冻结，结束本轮执行以等待所有者决定。"""
+
+
+class PiVerificationStalled(PiRuntimeError):
+    """证据补救无进展，保留初稿并等待用户决定。"""
 
 
 class _MainCreateRejected(PiRuntimeError):
@@ -488,8 +498,10 @@ class PiRuntime:
         state_store: AgenticRuntimeRepository | None = None,
         configure_as_default_document_broker: bool = True,
         source_read_context=None,
+        draft_review_required: Callable[[PiRuntimeRequest], bool] | None = None,
     ) -> None:
         self._source_read_context = source_read_context
+        self._draft_review_required = draft_review_required
         self.image = image or settings.pi_runtime_image
         self.execution_root = Path(
             execution_root or settings.semantic_execution_root
@@ -1386,6 +1398,9 @@ class PiRuntime:
             reason="run_resumed",
         )
         if session_path is None:
+            if self._draft_review_required is not None and any((root / "drafts").glob("*/_draft")):
+                # 初稿决定只授权原运行；会话丢失不能悄悄升级为从头执行。
+                raise PiRuntimeError("初稿的原执行会话已丢失，不能继续核对；可接受初稿或明确创建新版本")
             await on_event(
                 RuntimeEvent(
                     event_type="runtime.replay_required",
@@ -1635,6 +1650,41 @@ class PiRuntime:
         validated_candidates = None
         validated_verification = None
         validated_coverage = None
+        candidate_progress = VerificationProgress()
+        draft_file_state = None
+        review_required = bool(self._draft_review_required and self._draft_review_required(request))
+        review_draft_id = None
+
+        async def capture_draft(*, settled: bool = False) -> None:
+            nonlocal draft_file_state, review_draft_id
+            from .draft_snapshot import freeze_draft
+
+            # 文件可打开不代表已写完；显式交稿或宿主已有冻结初稿才暂停，恢复不能越过决定门。
+            if review_required and not settled and not (root / "work" / "draft-ready").is_file() and not any((root / "drafts").glob("*/_draft")):
+                return
+            state = tuple(sorted((p.name, p.stat().st_size, p.stat().st_mtime_ns)
+                                 for p in output_dir.iterdir() if p.is_file() and p.name != "candidate-manifest.json"))
+            if not state or state == draft_file_state:
+                return
+            draft_file_state = state
+            try:
+                draft = await execution_to_thread(
+                    freeze_draft, root, owner_id=request.user_id, task_id=request.task_id,
+                    revision=request.revision, run_id=run_id, formats=request.requested_output_formats,
+                )
+            except PermissionError:
+                # 账号撤权不能当成半成品而继续执行。
+                raise
+            except (ValueError, OSError):
+                # 工具刚写完的文件可能尚未组成完整结果；不得登记半份初稿。
+                return
+            await on_event(RuntimeEvent(
+                event_type="draft.ready", summary="初稿已生成，正在暂停以等待你确认" if review_required else "初稿已生成，可查看；后台继续验证",
+                details={"draft_id": draft["draft_id"], "formal_delivery": False},
+            ))
+            if review_required:
+                review_draft_id = draft["draft_id"]
+                raise _DraftReviewPause
 
         async def verify_candidates(
             current_candidates: tuple[CandidateArtifact, ...],
@@ -1658,6 +1708,9 @@ class PiRuntime:
 
         async def check_settled_output() -> str | None:
             nonlocal validated_candidates, validated_verification, validated_coverage
+            if review_required:
+                # Agent 自行结束也是交稿信号；漏写标记不能绕过所有者决定门。
+                await capture_draft(settled=True)
             if self._document_clarification(request) is not None:
                 return None
             issue = _output_contract_issue(
@@ -1720,12 +1773,25 @@ class PiRuntime:
                 for check in current_verification.checks
                 if not check.passed
             ]
+            if not candidate_progress.observe(gaps=failed_summaries or ["验证未通过"], evidence={
+                "passed_checks": [check.code for check in current_verification.checks if check.passed],
+                "evidence_count": current_verification.evidence_count,
+            }):
+                raise PiVerificationStalled("连续两轮验证没有进展，已停止重复补救；请查看初稿及待核验事项")
             return (
                 "独立验证未通过："
                 + "；".join(failed_summaries[:3])
             )
 
         try:
+            # 恢复时先检查已写出的初稿，防止服务重启越过用户决定门。
+            if review_required:
+                await capture_draft()
+                initial_prompt = (initial_prompt or "读取 /workspace/work/goal.json 和其中冻结的来源，完成用户要求的初稿。") + (
+                    "\n本轮先交付初稿给用户查看：完成全部目标文件的实际内容后，写入 /workspace/work/draft-ready，"
+                    "然后停止，不执行后续补证、propose_completion 或核对。不可在占位文件、空壳或仅表头时写此标记。"
+                    "标记只表示初稿已写完，不表示准确性验证通过；用户选择继续核对后才恢复剩余检查。"
+                )
             final_text = await self._run_rpc(
                 request,
                 command=command,
@@ -1735,6 +1801,7 @@ class PiRuntime:
                 on_event=on_event,
                 settled_check=check_settled_output,
                 initial_prompt=initial_prompt,
+                capture_draft=capture_draft,
             )
             clarification = self._document_clarification(request)
             if clarification is not None:
@@ -1814,6 +1881,13 @@ class PiRuntime:
                 verification=verification,
                 candidate_coverage=candidate_coverage,
             )
+        except _DraftReviewPause:
+            session_files = sorted(session_dir.rglob("*.jsonl"))
+            return PiRuntimeResult(status=RuntimeStatus.NEEDS_INPUT, run_id=run_id,
+                workspace_root=root, container_name=container_name,
+                session_file=str(session_files[-1].relative_to(root)) if session_files else None,
+                summary="初稿已生成，等待你确认或选择继续核对",
+                clarification={"draft_review_id": review_draft_id})
         except asyncio.CancelledError:
             await self.cancel(
                 request.user_id,
@@ -2198,7 +2272,17 @@ Mangrove 只会在不挂载用户来源的独立依赖获取阶段处理已批�
 先调用 inspect_source 观察结构，
 再调用 freeze_coverage 冻结你对范围、结果数量、完整性和停止条件的理解。之后按目标自主
 选择 discover_content 和 read_evidence；发现结果只能用于召回，最终结果必须来自
-read_evidence 返回的权威证据。你认为完成时必须调用 propose_completion；若完成门返回
+read_evidence 返回的权威证据。
+freeze_coverage 的 authorized_scope 是整个任务的允许检索范围，不是首批读取页面。
+用户未明确限制页码时只填写 source_ids，省略 authorized_scope.unit_ids；不得把预览页、
+首批页面或猜测的目标页冻结为全部范围。分批读取通过 discover_content 的 unit_ids 或
+next_unit_ids 控制，不通过缩小授权范围控制。用户明确限定的页面仍须严格保留，不能扩大。
+对于第 N 份对象，默认发现只返回一小批页面；按 next_unit_ids 继续，不要默认扫描全文。
+第 N 份不等于第 N 页，必须证明前序对象和跨页边界。复用已返回的证据引用，
+只补读缺失页面；不要通过 sleep 等待服务恢复，也不要换 needs 名称重复请求相同读取。
+如果当前回合要求先交初稿，先写完目标文件和 /workspace/work/draft-ready 后停止，
+不得提前进行后续补证、propose_completion 或核对；用户批准恢复核对后再执行下述完成门。
+在完整验证阶段，你认为完成时必须调用 propose_completion；若完成门返回
 replan_required，应根据结构化缺口继续读取或修正结果，不能自行宣称完成。
 propose_completion 的 evidence_refs、boundary_evidence_refs 和
 required_field_evidence 都只能填写 read_evidence 返回的 evidence_ref，不能填写字段值或
@@ -2288,6 +2372,7 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
         on_event: EventSink,
         settled_check: SettledCheck,
         initial_prompt: str | None = None,
+        capture_draft: Callable[[], Awaitable[None]] | None = None,
     ) -> str:
         directory = self._lifecycle_dir((request.user_id, request.task_id, request.revision))
         journal = directory / "resources.json"
@@ -2345,6 +2430,8 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
         trace_path = trace_dir / "rpc-events.jsonl"
         settled = False
         repair_attempts = 0
+        document_failures = 0
+        verification_progress = VerificationProgress()
         final_text: list[str] = []
         try:
             async with asyncio.timeout(self.timeout_seconds):
@@ -2370,6 +2457,8 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
                             + "\n"
                         )
                         trace.flush()
+                        if event.get("type") == "tool_execution_end" and capture_draft is not None:
+                            await capture_draft()
                         message = event.get("message")
                         if (
                             isinstance(message, dict)
@@ -2418,6 +2507,31 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
                         safe_event = self._translate_event(event)
                         if safe_event is not None:
                             await on_event(safe_event)
+                            if safe_event.details.get("tool") == "propose_completion" and safe_event.event_type == "tool.failed":
+                                result = event.get("result")
+                                details = result.get("details") or {} if isinstance(result, dict) else {}
+                                decision = details.get("decision") or {}
+                                coverage = details.get("coverage") or {}
+                                evidence = {key: coverage.get(key) for key in (
+                                    "observed_unit_ids", "authoritatively_read_unit_ids", "low_quality_units",
+                                    "unknown_units", "evidence_bindings", "parser_versions",
+                                )}
+                                if not verification_progress.observe(
+                                    gaps=decision.get("gaps") or ["缺少明确的通过结论"], evidence=evidence,
+                                ):
+                                    raise PiVerificationStalled("连续两轮验证没有进展，已停止重复补救；请查看初稿及待核验事项")
+                            if safe_event.details.get("tool") in {
+                                "inspect_source", "discover_content", "read_evidence",
+                            } and safe_event.event_type in {"tool.completed", "tool.failed"}:
+                                # Shell 成功不代表文档服务恢复，不能重置连续失败预算。
+                                if safe_event.details.get("error_code") == "DOCUMENT_SCOPE_DENIED":
+                                    raise PiRuntimeError("本次规划的文档读取范围不足，后续页面被拒绝读取；请重新执行以重新规划范围")
+                                document_failures = document_failures + 1 if safe_event.event_type == "tool.failed" else 0
+                                if document_failures >= 3:
+                                    raise PiRuntimeError(
+                                        "文档读取连续失败 3 次，已停止无效重试；"
+                                        "请检查来源或解析服务后重新执行"
+                                    )
                         delta = event.get("assistantMessageEvent") or {}
                         if delta.get("type") == "text_delta":
                             final_text.append(str(delta.get("delta") or ""))
@@ -2558,16 +2672,30 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
         if event_type == "tool_execution_end":
             tool_name = str(event.get("toolName") or "tool")
             failed = bool(event.get("isError"))
+            result = event.get("result")
+            details = result.get("details") if isinstance(result, dict) else None
+            # 只映射固定范围错误，不把原始工具正文或宿主信息暴露给页面。
+            scope_denied = failed and tool_name in {"discover_content", "read_evidence"} and isinstance(result, dict) and any(
+                isinstance(part, dict) and "内容单元超出冻结的获准范围" in str(part.get("text", ""))
+                for part in (result.get("content") or [])
+            )
+            if tool_name == "discover_content" and isinstance(details, dict):
+                # 逐页解析失败可能以正常工具响应返回；整批无有效发现仍须计入失败预算。
+                failed = failed or bool(details.get("unknown_units") and not details.get("observed_unit_ids"))
+            if tool_name == "propose_completion":
+                decision = details.get("decision") if isinstance(details, dict) else None
+                # 工具成功返回不等于覆盖验证通过；缺少明确通过结论也不能显示完成。
+                failed = failed or not (isinstance(decision, dict) and decision.get("passed") is True)
             return RuntimeEvent(
                 event_type=(
                     "tool.failed" if failed else "tool.completed"
                 ),
                 summary=(
-                    f"{tool_name} 执行失败，Pi 将根据结果调整"
+                    "本次规划的文档读取范围不足，后续页面被拒绝读取" if scope_denied else f"{tool_name} 执行失败，Pi 将根据结果调整"
                     if failed
                     else f"{tool_name} 已完成"
                 ),
-                details={"tool": tool_name, "failed": failed},
+                details={"tool": tool_name, "failed": failed, **({"error_code": "DOCUMENT_SCOPE_DENIED"} if scope_denied else {})},
             )
         if event_type == "compaction_start":
             return RuntimeEvent(

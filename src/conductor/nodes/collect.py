@@ -19,6 +19,7 @@ from src.collectors._metrics import record as metrics_record
 from src.config.settings import settings
 
 from ..state import ConductorState
+from ..progress import emit_progress, source_links
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,9 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
         if collector is None:
             continue
         t0 = time.time()
+        scope = " · ".join([*spec.platforms, *spec.keywords])[:200]
+        emit_progress("collect", "started", (f"正在查找来源：{scope}" if scope and not spec.urls else "正在读取目标来源…") if idx == 0 else "正在尝试其他可用来源，补充资料…",
+                      sources=source_links([{"url": url} for url in spec.urls], "requested"))
         # mediacrawler 走真实浏览器，耗时远高于 HTTP 采集，单独用更长超时
         timeout = (
             settings.collect_timeout_mediacrawler_seconds
@@ -72,11 +76,13 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
             # 超时保护：单个采集器卡死不冻住整条流水线，超时即降级到下一个
             result = await asyncio.wait_for(collector.collect(spec), timeout=timeout)
         except asyncio.TimeoutError:
+            emit_progress("collect", "warning", "当前来源响应超时，将检查其他可用来源。")
             logger.warning("采集器 %s 超时（>%ss），降级", name, timeout)
             last_msg = f"{name} 超时（>{timeout}s）"
             attempts.append({"collector": name, "success": False, "count": 0, "message": last_msg})
             continue
         except Exception as e:
+            emit_progress("collect", "warning", "当前来源读取未成功，将检查其他可用来源。")
             logger.warning("采集器 %s 异常: %s", name, e)
             last_msg = f"{name} 异常: {e}"
             attempts.append({"collector": name, "success": False, "count": 0, "message": last_msg})
@@ -106,6 +112,8 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
                     break
             if added:
                 used_names.append(name)
+            emit_progress("collect", "completed", f"本次新增 {added} 条，累计取得 {len(merged)} 条资料。",
+                          sources=source_links(merged[-added:] if added else [], "received"))
             logger.info("采集成功：%s，新增 %d 条（累计 %d/%d）", name, added, len(merged), target)
             if "兜底" in (result.message or ""):
                 notes.append(f"ℹ️ {result.message}")
@@ -121,25 +129,15 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
             continue
 
         last_msg = f"{name}: {result.message}"
+        emit_progress("collect", "warning", "当前来源未返回可用资料，将检查其他可用来源。")
         attempts.append({
             "collector": name,
             "success": False,
             "count": 0,
             "message": result.message or "",
-            "failure_kind": result.failure_kind.value if result.failure_kind else None,
-            "credential_key": result.credential_key,
         })
         metrics_record(name, False, elapsed_ms)
         domain_health_record(name, spec.urls, False)
-        if result.failure_kind and result.failure_kind.value == "auth_invalid":
-            # 确定失效不能被公开兜底数据掩盖，否则计划会在错误来源上继续模型与交付。
-            return {
-                "raw_dataset": [],
-                "collector_used": "",
-                "collector_notes": notes,
-                "collector_attempts": attempts,
-                "error": f"认证来源已失效：{result.message}",
-            }
         # 社媒采集器失败且原因可操作（登录过期/风控/频次）时，记为面向用户的提示
         if name == "mediacrawler" and result.message:
             notes.append(f"⚠️ {result.message}")

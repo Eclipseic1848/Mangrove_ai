@@ -60,6 +60,8 @@ async def checker_node(state: ConductorState) -> Dict[str, Any]:
         }
     user = (
         f"任务目标：{spec.intent}\n"
+        + f"目标平台：{', '.join(spec.platforms)}；搜索词：{', '.join(spec.keywords)}\n"
+        + f"采集条数上限：{spec.max_items}；实际可用条数：{len(state.get('cleaned_dataset') or [])}\n"
         + (f"用户的具体要求：{spec.analysis_instruction}\n" if spec.analysis_instruction else "")
         + f"\n待审查的分析报告：\n{analysis[:settings.checker_max_report_chars]}"
     )
@@ -83,8 +85,8 @@ async def checker_node(state: ConductorState) -> Dict[str, Any]:
     issues = data.get("issues") or []
     if isinstance(issues, str):
         issues = [issues]
-    # 以阈值为准判定通过（兼容模型给的 passed 字段，但分数阈值更可控）
-    passed = score >= settings.checker_pass_threshold
+    # 高分不能覆盖明确拒绝；缺失或非布尔判定也不能冒充核验通过。
+    passed = score >= settings.checker_pass_threshold and data.get("passed") is True
     quality: Dict[str, Any] = {
         "score": score,
         "passed": passed,

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Boxes, ChevronDown, Eye, Loader2, Play, ShieldCheck, X } from "lucide-react";
 import { api, getSessionState } from "@/lib/api";
+import { beijingTime } from "@/lib/beijingTime";
 import { useAuth } from "@/lib/auth";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -19,6 +20,7 @@ type GovernanceItem = {
   digest: string | null;
   can_validate: boolean;
   promotion_gaps: PromotionGap[];
+  audience?: "admin_gray" | "users" | null;
 };
 
 type PromotionGap =
@@ -210,7 +212,7 @@ const REVIEW_GROUPS = [
   },
   {
     key: "verified",
-    label: "已晋级",
+    label: "已验证",
     match: (item: GovernanceItem) =>
       item.maturity === "verified" && item.lifecycle === "active",
   },
@@ -222,9 +224,21 @@ const REVIEW_GROUPS = [
   },
 ] as const;
 
-function shortDigest(digest: string) {
-  if (digest.length <= 32) return digest;
-  return `${digest.slice(0, 19)}…${digest.slice(-12)}`;
+function toolStatus(item: GovernanceItem) {
+  // 运行资格只是一个条件，不能单凭 eligible 把未验证或撤销版本标为可用。
+  if (item.eligibility === "quarantined") return "已隔离，禁止使用";
+  if (item.lifecycle === "revoked") return "已撤销，禁止使用";
+  if (item.lifecycle === "deprecated") return "已弃用，仅供历史任务";
+  if (item.source === "legacy_compat") return "历史兼容版本";
+  if (item.maturity !== "verified") return "待验证，暂不可用于常规任务";
+  return "已验证，调用前仍需检查";
+}
+
+function toolAudience(item: GovernanceItem) {
+  if (item.scope === "personal") return "仅所属用户";
+  if (item.audience === "admin_gray") return "仅管理员试用";
+  if (item.audience === "users") return "已向普通用户开放";
+  return "使用范围待确认";
 }
 
 function itemKey(item: GovernanceItem) {
@@ -235,11 +249,7 @@ function hasDigest(item: GovernanceItem): item is ResolvedGovernanceItem {
   return typeof item.digest === "string" && item.digest.length > 0;
 }
 
-function utcMinute(value: string) {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return "不可判定";
-  return `${parsed.toISOString().slice(0, 16).replace("T", " ")} UTC`;
-}
+const utcMinute = beijingTime;
 
 export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: boolean }) {
   const { user } = useAuth();
@@ -546,27 +556,29 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
       <CardHeader className="border-b border-border/60">
         <div className="flex items-center gap-2">
           <ShieldCheck className="h-4 w-4 text-primary" aria-hidden="true" />
-          <h2 className="text-base font-semibold">{ownerOnly ? "我的能力验证" : "能力治理状态"}</h2>
+          <h2 className="text-base font-semibold">{ownerOnly ? "我的工具验证" : "扩展工具管理"}</h2>
         </div>
         <p className="text-xs text-muted-foreground">
           {ownerOnly
-            ? "主动验证自己拥有的精确能力版本；一次业务成功不会自动改变成熟度。"
-            : "按精确版本展示成熟度、生命周期和运行资格。管理员查看不会改变能力或用户权限。"}
+            ? "验证自己添加的工具版本，不影响原任务结果。"
+            : "管理任务可调用的工具、MCP 和技能包。执行任务无需先来这里操作。"}
         </p>
+        <p className="text-xs text-muted-foreground">此处检查工具，不是报告质量校验；实际调用仍需通过权限与完整性检查。</p>
       </CardHeader>
       <CardContent className="space-y-3 pt-4">
         {loading ? (
           <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
-            正在读取治理状态
+            正在读取扩展工具
           </div>
         ) : error ? (
           <div role="alert" className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm text-destructive">
             {error}
+            <Button className="mt-2 block" variant="outline" size="sm" onClick={() => { setError(""); setLoading(true); void reload().catch((reason: Error) => setError(reason.message || "工具列表加载失败")).finally(() => setLoading(false)); }}>重新加载</Button>
           </div>
         ) : visibleItems.length === 0 ? (
           <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
-            当前没有可治理的能力包
+            暂无扩展工具。无需配置此页，可直接前往任务工作台。
           </div>
         ) : (
           groups.map((group) => (
@@ -593,35 +605,24 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
             return (
             <article
               key={itemKey(item)}
-              className="rounded-lg border border-border/70 p-4"
+              aria-label={`${item.pack_id} ${item.version}`}
+              className="min-w-0 rounded-lg border border-border/70 p-4"
             >
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <Boxes className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-                    <h3 className="truncate text-sm font-semibold">{item.pack_id}</h3>
+                    <h3 className="break-all text-sm font-semibold">{item.pack_id}</h3>
                     <Badge variant="outline">{item.version}</Badge>
                   </div>
                   <p className="mt-1 text-xs text-muted-foreground">
-                    {item.scope === "platform" ? "平台" : ownerOnly ? "个人能力" : `个人 · ${item.owner_id}`}
+                    {item.scope === "platform" ? "平台工具" : "个人工具"} · {toolAudience(item)}
                   </p>
+                  <p className="mt-1 text-xs text-muted-foreground">用途说明暂未提供</p>
                 </div>
-                <div className="flex flex-wrap gap-1.5" aria-label="三轴治理状态">
-                  <Badge variant={item.maturity === "verified" ? "success" : "outline"}>
-                    {MATURITY_LABEL[item.maturity]}
-                  </Badge>
-                  <Badge variant={item.lifecycle === "active" ? "success" : "warning"}>
-                    {LIFECYCLE_LABEL[item.lifecycle]}
-                  </Badge>
-                  <Badge variant={item.eligibility === "eligible" ? "success" : "danger"}>
-                    {ELIGIBILITY_LABEL[item.eligibility]}
-                  </Badge>
-                </div>
+                <Badge variant={item.eligibility === "quarantined" || item.lifecycle === "revoked" ? "danger" : "outline"}>{toolStatus(item)}</Badge>
               </div>
-              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border/60 pt-3 text-xs text-muted-foreground">
-                <code>{item.digest ? shortDigest(item.digest) : "digest 已脱敏"}</code>
-                <div className="flex items-center gap-2">
-                  <span>{item.source === "legacy_compat" ? "兼容读取" : "治理事件"}</span>
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
                   {item.can_validate && (
                     <Button variant="outline" size="sm" onClick={() => openValidation(item)}>
                       <Play className="h-3.5 w-3.5" aria-hidden="true" />
@@ -642,12 +643,11 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                       提交平台候选
                     </Button>
                   )}
-                </div>
               </div>
               {(item.promotion_gaps ?? []).length > 0 && (
                 <div className="mt-3 rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-medium text-foreground">距已验证还缺</span>
+                    <span className="font-medium text-foreground">验证待办</span>
                   </div>
                   <ul className="mt-1.5 list-inside list-disc space-y-0.5 text-muted-foreground">
                     {(item.promotion_gaps ?? []).map((gap) => (
@@ -656,12 +656,20 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                   </ul>
                 </div>
               )}
-              <div className="mt-3 rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs">
+              {supplyEvidence?.status === "blocked" && <p className="mt-3 text-sm text-destructive">安全检查未通过，请查看下方详情。</p>}
+              <details className="mt-3 rounded-md border border-border/60 bg-muted/20 px-3 py-2 text-xs">
+                <summary className="cursor-pointer rounded py-1 text-sm font-medium hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">技术详情与安全检查</summary>
+                <div className="my-3 space-y-2 break-words">
+                  <p>所属用户：{item.scope === "platform" ? "平台" : item.owner_id || "未提供"}</p>
+                  <p className="break-all">版本摘要：<code>{item.digest || "已脱敏"}</code></p>
+                  <p>记录来源：{item.source === "legacy_compat" ? "兼容读取" : "治理事件"}</p>
+                  <p aria-label="三轴治理状态">验证：{MATURITY_LABEL[item.maturity]} · 生命周期：{LIFECYCLE_LABEL[item.lifecycle]} · 运行资格：{ELIGIBILITY_LABEL[item.eligibility]}</p>
+                </div>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="font-medium text-foreground">供应链证据</span>
                   {supplyEvidence ? (
                     <Badge variant={supplyEvidence.status === "passed" ? "success" : "danger"}>
-                      {supplyEvidence.status === "passed" ? "扫描通过" : "存在硬门"}
+                      {supplyEvidence.status === "passed" ? "扫描通过" : "检查未通过"}
                     </Badge>
                   ) : (
                     <Badge variant="outline">尚未扫描</Badge>
@@ -680,7 +688,7 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                     )}
                   </div>
                 )}
-              </div>
+              </details>
               {run && (
                 <details
                   key={run.run_id}
@@ -701,7 +709,7 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                   <div className="mt-3 space-y-2">
                     <div role="status" aria-live="polite" className="rounded-md border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-foreground">
                       {["queued", "running", "cancelling"].includes(run.status)
-                        ? "验证正在后台执行，本页每 1.5 秒自动更新；你可以留在本页查看，也可以稍后返回能力治理。"
+                        ? "验证正在后台执行，本页每 1.5 秒自动更新；你可以留在本页查看，也可以稍后返回扩展工具管理。"
                         : run.status === "succeeded"
                           ? hasAllValidationSteps
                             ? "五项验证步骤已通过。全部证据通过后，该能力会自动晋级为已验证。"
@@ -798,12 +806,8 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                       <h4 className="truncate text-sm font-semibold">{candidate.pack_id}</h4>
                       <Badge variant="outline">{candidate.version}</Badge>
                     </div>
-                    <p className="mt-1 text-xs text-muted-foreground">
-                      平台 digest {shortDigest(candidate.platform_digest)} · 来源 {shortDigest(candidate.source_digest)}
-                    </p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      验证 {candidate.steps_passed}/{candidate.steps_total} 步 · {candidate.signed ? "已签名" : "未签名"} · 提交于 {utcMinute(candidate.submitted_at)} · 原因：{candidate.reason}
-                    </p>
+                    <p className="mt-1 text-xs text-muted-foreground">待发布 · 发布后仅管理员试用</p>
+                    <p className="mt-1 text-xs text-muted-foreground">验证 {candidate.steps_passed}/{candidate.steps_total} 步 · {candidate.signed ? "已签名" : "未签名"}</p>
                   </div>
                   <div className="flex items-center gap-2">
                     <Badge variant="outline">候选</Badge>
@@ -821,6 +825,12 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                     </Button>
                   </div>
                 </div>
+                <details className="mt-3 break-words text-xs text-muted-foreground">
+                  <summary className="cursor-pointer rounded py-1 hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">发布详情</summary>
+                  <p className="mt-2 break-all">平台摘要：{candidate.platform_digest}</p>
+                  <p className="break-all">来源摘要：{candidate.source_digest}</p>
+                  <p>提交于 {utcMinute(candidate.submitted_at)} · 原因：{candidate.reason}</p>
+                </details>
               </article>
             ))}
           </section>

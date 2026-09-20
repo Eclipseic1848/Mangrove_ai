@@ -196,9 +196,9 @@ const SEARCH_ENTRIES: GuideEntry[] = [
     key: "tavily_api_key",
     title: "Tavily API Key",
     steps: [
-      { text: "打开 Tavily 官网注册账号（有免费额度）", link: { label: "tavily.com", url: "https://tavily.com" } },
+      { text: "打开 Tavily 官网注册或登录账号", link: { label: "tavily.com", url: "https://tavily.com" } },
       { text: "登录后在控制台找到 API Key 并复制" },
-      { text: "回到本页粘贴保存；配置后搜索类任务会优先/兜底使用 Tavily" },
+      { text: "粘贴 Key 并保存；检查连接会发送测试搜索，可能消耗额度" },
     ],
   },
   {
@@ -206,8 +206,8 @@ const SEARCH_ENTRIES: GuideEntry[] = [
     title: "SearXNG 地址",
     steps: [
       { text: "SearXNG 是开源免费的自建元搜索引擎，需要自己部署（如 docker），不是在线注册服务" },
-      { text: "部署完成后把地址填进来，格式如 http://localhost:8080" },
-      { text: "不部署也可以，留空则用其他搜索后端" },
+      { text: "填写 Mangrove 服务器能访问的实例地址，例如 http://搜索服务器:8080；localhost 指 Mangrove 所在服务器" },
+      { text: "无需使用时保留当前设置；恢复默认请使用字段旁的恢复操作" },
     ],
   },
   {
@@ -223,47 +223,67 @@ const SEARCH_ENTRIES: GuideEntry[] = [
     key: "firecrawl_base_url",
     title: "Firecrawl 地址",
     steps: [
-      { text: "Firecrawl 通常自托管部署（见项目 docker/firecrawl/ 目录），用 docker 启动" },
-      { text: "部署完成后把地址填进来，格式如 http://localhost:3002" },
-      { text: "自托管通常不需要额外 API Key（下一项留空即可）" },
+      { text: "填写 Mangrove 服务器能访问的 Firecrawl 服务地址，由部署人员或服务商提供" },
+      { text: "自建实例示例：http://采集服务器:3002。localhost 指 Mangrove 所在服务器，不是浏览器所在电脑" },
+      { text: "若服务要求鉴权，同时填写对应 API Key；检查连接仅验证地址可达" },
     ],
   },
   {
     key: "firecrawl_api_key",
     title: "Firecrawl API Key",
     steps: [
-      { text: "自托管部署通常留空即可（无需鉴权）" },
-      { text: "如果改用云端 Firecrawl 服务，在其控制台创建 Key 后填入" },
+      { text: "从服务管理人员或 Firecrawl 控制台获取与上方地址匹配的 Key", link: { label: "Firecrawl 官网", url: "https://www.firecrawl.dev" } },
+      { text: "未配置且服务无需鉴权时可以不填；已有 Key 留空表示保留，不会清除" },
     ],
   },
   {
     key: "rsshub_base_url",
     title: "RSSHub 地址",
     steps: [
-      { text: "自托管：docker run -p 1200:1200 diygod/rsshub，然后填 http://localhost:1200" },
+      { text: "填写 Mangrove 服务器能访问的 RSSHub 实例地址，例如 http://订阅服务器:1200" },
       { text: "或直接用公共实例（有限流，仅建议轻量使用）", link: { label: "rsshub.app", url: "https://rsshub.app" } },
-      { text: "留空则不启用该采集方式" },
+      { text: "检查连接仅验证地址可达；具体订阅路由仍需在任务中核对" },
     ],
   },
 ];
 
-/** 历史外发配置只供查看，不引导新增凭据或恢复发送。 */
+/** 通知配置与任务发送授权分开；保存配置不主动外发。 */
 const EMAIL_FIELD_ENTRIES: GuideEntry[] = [
-  "smtp_enabled", "smtp_host", "smtp_port", "smtp_user", "smtp_password", "smtp_from", "smtp_use_ssl",
-].map((key) => ({ key, title: "历史 SMTP 配置（只读）", steps: [{ text: "历史凭据保留，不开放编辑、启用、验证或邮件发送。" }] }));
+  { key: "smtp_enabled", title: "启用邮件通知", steps: [{ text: "开启并保存后可发送邮件；保存配置不会自动发送。" }] },
+  { key: "smtp_host", title: "SMTP 服务器", steps: [{ text: "填写邮箱服务商提供的 SMTP 主机名，例如 smtp.qq.com，不加 http:// 或 https://。" }] },
+  { key: "smtp_port", title: "SMTP 端口", steps: [{ text: "按服务商要求填写：465 配合开启 SSL；587 配合关闭 SSL，系统使用 STARTTLS。" }] },
+  { key: "smtp_user", title: "SMTP 账号", steps: [{ text: "填写邮箱服务商提供的登录账号，通常为完整邮箱地址。" }] },
+  { key: "smtp_password", title: "SMTP 密码/授权码", steps: [{ text: "填写服务商要求的 SMTP 密码或授权码；已有凭据留空保留。要求授权码时不要填写网页登录密码。" }] },
+  { key: "smtp_from", title: "发件人", steps: [{ text: "填写服务商允许使用的发件邮箱；留空使用 SMTP 账号。" }] },
+  { key: "smtp_use_ssl", title: "SSL 加密", steps: [{ text: "465 端口开启 SSL；587 端口关闭 SSL，系统仍使用 STARTTLS 加密。" }] },
+];
 const EMAIL_GROUP_ENTRY: GuideEntry = {
-  key: "email_group", title: "历史 SMTP 配置（只读）", steps: EMAIL_FIELD_ENTRIES[0].steps,
+  key: "email_group", title: "邮件 SMTP", steps: [
+  { text: "填写邮箱服务商提供的 SMTP 服务器、账号和授权码；不要把网页登录密码当作授权码。" },
+  { text: "465 端口开启 SSL；587 端口关闭 SSL，系统使用 STARTTLS。发件人留空使用账号。" },
+  { text: "开启邮件通知后保存。密钥留空保留原值；检查连接只登录、不发邮件。" },
+  { text: "用户在任务中明确说将报告发至某邮箱，或点击结果的发送按钮后，才会发送。" },
+  ],
 };
-const SMTP_ENABLE_ENTRY = EMAIL_FIELD_ENTRIES[0];
-const SLACK_ENTRIES: GuideEntry[] = ["slack_enabled", "slack_webhook_url"].map((key) => ({
-  key, title: "历史 Slack 配置（只读）", steps: [{ text: "历史 Webhook 保留，不开放编辑、启用、验证或消息发送。" }],
-}));
+const SLACK_FIELD_ENTRIES: GuideEntry[] = [
+  { key: "slack_enabled", title: "启用 Slack 通知", steps: [{ text: "开启并保存后可发送到 Slack；保存配置不会自动发送。" }] },
+  { key: "slack_webhook_url", title: "Slack Webhook URL", steps: [{ text: "填写目标频道的 Incoming Webhook 地址，仅支持正文；已有凭据留空保留。发送附件需另配 Bot Token 和频道 ID。" }] },
+  { key: "slack_bot_token", title: "Slack Bot Token", steps: [{ text: "填写具有 chat:write、files:write 权限的 Bot Token；已有凭据留空保留。" }] },
+  { key: "slack_channel_id", title: "目标频道 ID", steps: [{ text: "填写频道 ID（不是频道名称），并邀请机器人加入该频道。" }] },
+];
+const SLACK_GROUP_ENTRY: GuideEntry = {
+  key: "slack_group", title: "Slack 通知", steps: [
+    { text: "只发文字可用 Incoming Webhook；需要文件附件时配置 Bot Token 和目标频道 ID。" },
+    { text: "Slack 应用需 chat:write、files:write 权限，安装到工作区并邀请机器人加入目标频道。" },
+    { text: "保存后检查连接只验证 Bot 身份；用户明确选择发送时才投递。Token 留空保留，不能把本机下载链接当作文件附件。" },
+  ],
+};
 
 function embeddingSteps(): GuideStep[] {
   return [
     { text: "用于模板自学习的语义召回匹配，不配置也能用（自动退化为关键词匹配），配置后召回更准" },
     { text: "若已自建本地 embedding 服务（如本地部署的 Qwen3-Embedding），把其 OpenAI 兼容地址填入「embedding 端点」" },
-    { text: "本地服务的「embedding API Key」通常可随便填一个占位值（自建服务一般不校验）" },
+    { text: "API Key 按服务的鉴权要求填写，不要用占位值代替真实凭据" },
     { text: "若不自建，留空「embedding 端点」，系统会自动改用阿里云百炼 DashScope 的 text-embedding-v4（需要先配好上面的百炼 API Key）" },
     { text: "「启用语义召回」开关打开后，上述配置才会生效" },
   ];
@@ -274,7 +294,7 @@ function rerankSteps(): GuideStep[] {
     { text: "精排是语义召回命中后的二次裁决，可选，不配就跳过精排直接用召回结果" },
     { text: "同样支持自建 vLLM 部署的 Cohere 兼容 /rerank 接口，把地址填入「rerank 端点」" },
     { text: "模型名示例：Qwen3-Reranker-8B" },
-    { text: "本地服务的「rerank API Key」通常可随便填一个占位值" },
+    { text: "API Key 按服务的鉴权要求填写；已有凭据留空保留" },
   ];
 }
 
@@ -286,11 +306,11 @@ const SEMANTIC_FIELD_ENTRIES: GuideEntry[] = [
   },
   {
     key: "embedding_base_url", title: "embedding 端点",
-    steps: [{ text: "若自建了本地 embedding 服务（如本地部署的 Qwen3-Embedding），填其 OpenAI 兼容地址；留空则自动改用阿里云百炼 DashScope" }],
+    steps: [{ text: "填写服务器可访问的 OpenAI 兼容向量服务地址。恢复服务器默认须单独确认；默认未配本地端点时可能回退百炼云端并产生费用" }],
   },
   {
     key: "embedding_api_key", title: "embedding API Key",
-    steps: [{ text: "自建本地服务通常可随便填一个占位值；留空走「模型·阿里百炼」组里配置的百炼 API Key" }],
+    steps: [{ text: "填写向量服务要求的 Key，不能用占位值代替真实凭据。留空保留已存值；未配置时可能使用平台百炼凭据" }],
   },
   {
     key: "embedding_model", title: "embedding 模型名",
@@ -298,11 +318,11 @@ const SEMANTIC_FIELD_ENTRIES: GuideEntry[] = [
   },
   {
     key: "rerank_base_url", title: "rerank 端点",
-    steps: [{ text: "可选的二次精排，支持自建 vLLM 部署的 Cohere 兼容 /rerank 接口；留空则跳过精排直接用召回结果" }],
+    steps: [{ text: "填写服务器可访问的重排服务地址，服务须提供兼容 /rerank 接口。未配置时跳过重排；恢复默认请使用恢复操作" }],
   },
   {
     key: "rerank_api_key", title: "rerank API Key",
-    steps: [{ text: "自建本地服务通常可随便填一个占位值" }],
+    steps: [{ text: "填写重排服务要求的 Key；已有凭据留空保留，不会清除" }],
   },
   {
     key: "rerank_model", title: "rerank 模型名",
@@ -451,9 +471,8 @@ const CHECKPOINT_ENTRIES: GuideEntry[] = [
     key: "checkpoint_enabled",
     title: "启用断点续跑",
     steps: [
-      { text: "开启后任务执行状态会持久化到本地 SQLite，中断后可用同一个任务 id 从断点恢复继续跑" },
-      { text: "关闭则每次都从头执行；没有远程服务可连，这里只是一个开关" },
-      { text: "设置页「连接器/增强」卡片里也有同一个开关" },
+      { text: "为支持检查点的任务保存执行进度；不保证所有任务都能从中断位置恢复" },
+      { text: "在此选择开启或关闭后保存。检查连接仅检查本地检查点存储，不会重跑任务" },
     ],
   },
 ];
@@ -465,7 +484,7 @@ const COOKIE_HEALTH_ENTRIES: GuideEntry[] = [
     steps: [
       { text: "开启后会按下面的间隔自动验证全部 10 个 Cookie（7 社媒 + 京东/淘宝/拼多多）并更新状态" },
       { text: "默认关闭：社媒平台的验证是真实浏览器自动化登录，定时反复跑有被平台风控识别的风险，建议按需开启" },
-      { text: "设置页/配置中心里点\"验证\"（手动触发）不受这个开关影响，随时可以点" },
+      { text: "共享账号中的「检查状态」和「一键检查 Cookie 状态」不受此开关影响，确认后才执行" },
     ],
   },
   {
@@ -521,8 +540,8 @@ export const ADMIN_GUIDE_SECTIONS: GuideSection[] = [
   { key: "proxy", title: "代理池", entries: PROXY_ENTRIES },
   { key: "mc_cdp", title: "MediaCrawler 反检测（CDP 模式）", entries: MC_CDP_ENTRIES },
   // 通知集成
-  { key: "email", title: "邮件 SMTP", entries: [SMTP_ENABLE_ENTRY, EMAIL_GROUP_ENTRY] },
-  { key: "slack", title: "Slack", entries: SLACK_ENTRIES },
+  { key: "email", title: "邮件 SMTP", entries: [EMAIL_GROUP_ENTRY] },
+  { key: "slack", title: "Slack", entries: [SLACK_GROUP_ENTRY] },
   // 高级 / 基础设施
   { key: "semantic", title: "语义召回（embedding/rerank）", entries: [EMBEDDING_GROUP_ENTRY, RERANK_GROUP_ENTRY] },
   { key: "mysql", title: "MySQL 入库", entries: [MYSQL_GROUP_ENTRY] },
@@ -535,9 +554,12 @@ const GUIDE_BY_KEY: Record<string, GuideEntry> = Object.fromEntries(
     ...CONFIG_GUIDE_SECTIONS.flatMap((s) => s.entries),
     ...ADMIN_GUIDE_SECTIONS.flatMap((s) => s.entries),
     ...EMAIL_FIELD_ENTRIES,
+    ...SLACK_FIELD_ENTRIES,
     ...SEMANTIC_FIELD_ENTRIES,
     ...KDL_FIELD_ENTRIES,
     ...MYSQL_FIELD_ENTRIES,
+    { key: "data_prep_mode_enabled", title: "旧采集流程默认模式", steps: [{ text: "仅影响旧采集流程的新任务默认模式，不影响新任务工作台；选择后保存。" }] },
+    { key: "data_prep_raw_retention_days", title: "原始制品保留天数", steps: [{ text: "历史参数只读保留。自动清理尚未开放，此数值不会触发原始制品删除。" }] },
   ].map((e) => [e.key, e]),
 );
 

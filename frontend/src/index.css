@@ -30,20 +30,27 @@
   --ring: 173 80% 33%;
   --sidebar: 195 24% 97%;
   --sidebar-foreground: 200 16% 28%;
+  --nav-background: #123c3a;
+  --nav-foreground: #e7eff0;
+  --nav-secondary: #b0c8c5;
+  --nav-hover: #1b4e4a;
+  --nav-active: #21635d;
+  --nav-indicator: #79e1cd;
+  --nav-border: #365d59;
 }
 
 .dark {
   /* 深色主题：近黑冷石板 + 青色点缀 */
-  --background: 200 24% 7%;
+  --background: 201 30% 9%;
   --foreground: 190 14% 92%;
-  --card: 200 22% 10%;
+  --card: 197 28% 15%;
   --card-foreground: 190 14% 92%;
   --primary: 172 72% 45%;
   --primary-foreground: 200 30% 8%;
   --secondary: 200 16% 15%;
   --secondary-foreground: 190 12% 86%;
   --muted: 200 16% 14%;
-  --muted-foreground: 195 10% 58%;
+  --muted-foreground: 194 13% 68%;
   --accent: 184 40% 18%;
   --accent-foreground: 172 72% 70%;
   --destructive: 0 62% 52%;
@@ -53,6 +60,33 @@
   --ring: 172 72% 45%;
   --sidebar: 200 26% 9%;
   --sidebar-foreground: 195 12% 72%;
+  --nav-background: #0d2928;
+  --nav-hover: #183f3d;
+  --nav-active: #235d58;
+}
+
+/* 全局导航使用独立语义色，不改变历史文件侧栏对 sidebar 的使用。 */
+.app-navigation {
+  background: var(--nav-background);
+  color: var(--nav-foreground);
+  border-color: var(--nav-border);
+  scrollbar-color: var(--nav-border) var(--nav-background);
+}
+.app-navigation .nav-secondary { color: var(--nav-secondary); }
+.nav-avatar { background: var(--nav-foreground); color: var(--nav-background); }
+.app-navigation .nav-footer { border-color: var(--nav-border); }
+.nav-action { cursor: pointer; transition: background-color 150ms, color 150ms; }
+.nav-action:hover { background: var(--nav-hover); }
+.nav-action:focus-visible { outline: 2px solid var(--nav-indicator); outline-offset: -2px; }
+.nav-link[aria-current="page"] { background: var(--nav-active); color: white; font-weight: 600; }
+.nav-link[aria-current="page"]::before {
+  content: ""; position: absolute; left: 0; top: 12px; bottom: 12px;
+  width: 3px; border-radius: 3px; background: var(--nav-indicator);
+}
+@media (prefers-reduced-motion: reduce) { .nav-action { transition: none; } }
+@media (forced-colors: active) {
+  .nav-link[aria-current="page"] { outline: 2px solid Highlight; outline-offset: -2px; }
+  .nav-action:focus-visible { outline-color: Highlight; }
 }
 
 * {

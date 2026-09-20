@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
+from src.timezone import wall_time
 
 
 def parse_cron_field(field: str, min_val: int, max_val: int) -> set:
@@ -70,7 +71,7 @@ def cron_matches(cron_expr: str, dt: datetime) -> bool:
 
 def next_cron_time(cron_expr: str, from_dt: Optional[datetime] = None) -> Optional[datetime]:
     """从 from_dt（默认现在）之后，找下一个匹配 cron 的整分钟时刻。最多向后探 1 年。"""
-    base = (from_dt or datetime.now()).replace(second=0, microsecond=0)
+    base = wall_time(from_dt).replace(second=0, microsecond=0)
     probe = base + timedelta(minutes=1)
     for _ in range(60 * 24 * 366):
         if cron_matches(cron_expr, probe):
@@ -104,7 +105,7 @@ def parse_schedule(schedule: str) -> Schedule:
             except Exception as e:
                 raise ValueError(f"once 时间无法解析: {rest!r}（{e}）")
             if run_at.tzinfo is not None:
-                run_at = run_at.astimezone().replace(tzinfo=None)
+                run_at = wall_time(run_at)
             return Schedule(trigger_type="once", run_at=run_at)
         if kind == "cron":
             cron_matches(rest, datetime.now())  # 校验合法性（非法抛 ValueError）
@@ -136,12 +137,17 @@ def compute_next_run(
     once 在未来则返回该时刻、已过返回 None；cron 返回下一匹配时刻；
     interval 返回 from_dt + interval_seconds（首次从创建/续算基准时刻起算）。
 
-    start_date/end_date（ISO 日期，可选）钳制生效区间：算出的时刻早于 start_date 则
-    钳到当天零点；晚于 end_date（钳到当天 23:59:59）则视为无后续，返回 None（任务置 done）。
+    start_date/end_date 限定北京时间生效区间；cron 保持原时分规则，
+    单次任务不挪动用户指定时刻，超出区间视为无后续。
     """
-    base = from_dt or datetime.now()
+    base = wall_time(from_dt)
+    if start_date:
+        start = wall_time(datetime.fromisoformat(start_date))
+        if schedule.trigger_type == 'cron' and base < start:
+            base = start - timedelta(microseconds=1)
     if schedule.trigger_type == "once":
-        next_run = schedule.run_at if (schedule.run_at and schedule.run_at > base) else None
+        run_at = wall_time(schedule.run_at) if schedule.run_at else None
+        next_run = run_at if (run_at and run_at > base) else None
     elif schedule.trigger_type == "cron" and schedule.cron_expr:
         next_run = next_cron_time(schedule.cron_expr, base)
     elif schedule.trigger_type == "interval" and schedule.interval_seconds:
@@ -152,11 +158,13 @@ def compute_next_run(
     if next_run is None:
         return None
     if start_date:
-        start_dt = datetime.fromisoformat(start_date)
+        start_dt = wall_time(datetime.fromisoformat(start_date))
         if next_run < start_dt:
+            if schedule.trigger_type == 'once':
+                return None
             next_run = start_dt
     if end_date:
-        end_dt = datetime.fromisoformat(end_date).replace(hour=23, minute=59, second=59)
+        end_dt = wall_time(datetime.fromisoformat(end_date)).replace(hour=23, minute=59, second=59)
         if next_run > end_dt:
             return None
     return next_run

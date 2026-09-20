@@ -1,7 +1,9 @@
 """内部入库与模板确认；旧邮件、Slack 和外部数据库写入接口明确拒绝。"""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from contextlib import ExitStack
+from fastapi import APIRouter, Depends, HTTPException, Request
+from src.operations import bind_object
 
 from src.conductor.db_writer import write_items
 from src.config.settings import settings
@@ -24,7 +26,8 @@ def _run_action(action, *args, **kwargs):
 
 
 @router.post("/db")
-async def confirm_db(body: ConfirmIn, user=Depends(get_execution_user)):
+async def confirm_db(body: ConfirmIn, user=Depends(get_execution_user), request: Request = None):
+    bind_object(request, "任务", body.task_id)
     if (settings.db_backend or "sqlite").lower() == "mysql":
         _reject_external_delivery(user)
     with pending_store.claim_action(user["user_id"], body.task_id, "db") as pend:
@@ -40,12 +43,14 @@ async def confirm_db(body: ConfirmIn, user=Depends(get_execution_user)):
 
 
 @router.post("/email")
-async def confirm_email(body: ConfirmIn, user=Depends(get_execution_user)):
+async def confirm_email(body: ConfirmIn, user=Depends(get_execution_user), request: Request = None):
+    bind_object(request, "任务", body.task_id)
     _reject_external_delivery(user)
 
 
 @router.post("/slack")
-async def confirm_slack(body: ConfirmIn, user=Depends(get_execution_user)):
+async def confirm_slack(body: ConfirmIn, user=Depends(get_execution_user), request: Request = None):
+    bind_object(request, "任务", body.task_id)
     _reject_external_delivery(user)
 
 
@@ -61,20 +66,35 @@ def _reject_external_delivery(user):
 
 
 @router.post("/template")
-async def confirm_template(body: ConfirmIn, user=Depends(get_execution_user)):
-    with pending_store.claim_action(user["user_id"], body.task_id, "template") as pend:
+async def confirm_template(body: ConfirmIn, user=Depends(get_execution_user), request: Request = None):
+    bind_object(request, "任务", body.task_id)
+    with pending_store.claim_action(user["user_id"], body.task_id, "template") as pend, ExitStack() as contexts:
         if not pend or not pend.get("analysis"):
             raise HTTPException(status_code=404, detail="没有可沉淀的模板或已处理")
+        if pend.get("provider") == "bound":
+            # 后续确认仍须绑定原任务选定连接，不能脱离授权回落平台默认模型。
+            if not pend.get("model_connection_id") or not pend.get("model_connection_version"):
+                raise HTTPException(409, "原模型连接身份缺失，请重新执行任务后提炼")
+            from src.model_connections.conductor import conductor_connection
+            contexts.enter_context(conductor_connection(
+                owner_id=user["user_id"], connection_id=pend["model_connection_id"],
+                connection_version=pend["model_connection_version"], model=pend["model"],
+                task_id=body.task_id, run_id="template:" + body.task_id,
+            ))
         try:
+            from src.llm.provider import verify_bound_model
             execution_checkpoint(required=True)
             tpl = await distill_template(pend["intent"], pend["data_type"], pend["analysis"],
                                          provider=pend.get("provider"), model=pend.get("model"), owner_id=user["user_id"])
+            verify_bound_model()
             execution_checkpoint(required=True)
             if not tpl:
                 raise HTTPException(status_code=422, detail="未能提炼出有效模板结构，请重试")
             execution_checkpoint(required=True)
             slug = await save_template(title=tpl["title"], data_type=pend["data_type"],
-                                       keywords=tpl["keywords"] or pend.get("keywords") or [], body=tpl["body"], owner_id=user["user_id"])
+                                       keywords=tpl["keywords"] or pend.get("keywords") or [], body=tpl["body"], owner_id=user["user_id"],
+                                       local_dedup=True)
+            verify_bound_model()
         except HTTPException:
             raise
         except ExecutionDenied:

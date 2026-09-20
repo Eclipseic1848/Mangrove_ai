@@ -69,14 +69,14 @@ def resolve_frozen_source(owner_id, ref):
             if key in ref and ref[key] != frozen[key]:
                 raise ValueError("正式输出冻结出处变化")
         result = dict(source_key="delivery_output:"+item["output_id"], kind=kind, identity="derived", label=item["filename"], acquired_at=item.get("created_at"), time_kind="generated", media_type=item["media_type"], size_bytes=item["size_bytes"], sha256=item["sha256"], output_id=item["output_id"], host_path=path, frozen_ref=frozen, origin=origin)
-    elif kind in {"web_artifact", "connector_artifact"}:
+    elif kind == "web_artifact":
         item = SourceAcquisitionRepository(settings.webui_db_path).get_artifact(owner_id, ref["artifact_id"], include_content=True)
         if item is None or item["snapshot_id"] != ref["snapshot_id"]:
             raise PermissionError("网页原件不存在或无权访问")
         raw = bytes(item["content_blob"])
         if hashlib.sha256(raw).hexdigest() != item["content_sha256"]:
             raise ValueError("网页原件完整性校验失败")
-        result = dict(source_key=kind+":"+item["artifact_id"], kind=kind, identity="original", label=item.get("title") or ("source.jsonl" if item["media_type"]=="application/x-ndjson" else "source.json" if kind=="connector_artifact" else "source.html"), acquired_at=item["read_at"], time_kind="acquired", media_type=item["media_type"], size_bytes=item["size_bytes"], sha256=item["content_sha256"], content_bytes=raw, frozen_ref=dict(ref), origin=origin, web=item)
+        result = dict(source_key="web_artifact:"+item["artifact_id"], kind=kind, identity="original", label=item.get("title") or "source.html", acquired_at=item["read_at"], time_kind="acquired", media_type=item["media_type"], size_bytes=item["size_bytes"], sha256=item["content_sha256"], content_bytes=raw, frozen_ref=dict(ref), origin=origin, web=item)
     else:
         item = uploads().resolve(owner_id, ref["upload_id"])
         result = dict(source_key="upload:"+item.upload_id, kind="upload", identity="original", label=item.original_name, acquired_at=getattr(item,"created_at",None), time_kind="acquired" if getattr(item,"created_at",None) else "unknown", media_type=item.media_type, size_bytes=item.size_bytes, sha256=item.sha256, upload_id=item.upload_id, host_path=Path(item.storage_path), frozen_ref=dict(upload_id=item.upload_id,sha256=item.sha256), origin=origin)
@@ -100,7 +100,7 @@ def resolve_choices(owner_id, upload_ids=(), snapshot_ids=(), output_ids=()):
                     if snapshot is None:
                         raise PermissionError("来源不可用")
                     for artifact in snapshot["artifacts"]:
-                        resolve_frozen_source(owner_id,dict(kind="connector_artifact" if snapshot.get("source_kind")=="connector" else "web_artifact",snapshot_id=identity,artifact_id=artifact["artifact_id"],sha256=artifact["content_sha256"]))
+                        resolve_frozen_source(owner_id,dict(kind="web_artifact",snapshot_id=identity,artifact_id=artifact["artifact_id"],sha256=artifact["content_sha256"]))
                     item = dict(source_key="snapshot:"+identity,kind=kind,identity="original",label=snapshot.get("request_url") or "网页资料",source_snapshot_id=identity, acquired_at=snapshot.get("created_at"),time_kind="acquired",media_type=None,size_bytes=sum(x["size_bytes"] for x in snapshot["artifacts"]),sha256=None,origin=dict(task_id=None,revision=None,run_id=None,delivery_id=None),availability="available" if snapshot["valid_page_count"] and snapshot["coverage"]["status"] != "hard_insufficient" else "unavailable",reason_code=None if snapshot["valid_page_count"] and snapshot["coverage"]["status"] != "hard_insufficient" else "source_coverage_insufficient",limitations=[],attempt_id=snapshot.get("attempt_id"),allowed_scope=snapshot["allowed_scope"],coverage=snapshot["coverage"])
                 else:
                     item = public_source(resolve_frozen_source(owner_id,{"kind":kind,field:identity}))
@@ -131,18 +131,18 @@ def history(owner_id):
     values = {}
     with closing(sqlite3.connect(settings.webui_db_path)) as connection:
         connection.row_factory=sqlite3.Row
-        connection.execute("BEGIN")
-        for row in connection.execute("SELECT snapshot_id FROM source_snapshots WHERE owner_id=?",(owner_id,)):
+        # 先读完游标再跨连接核验，避免列表读锁阻塞其他任务提交；选择时仍重新核验来源。
+        for row in connection.execute("SELECT snapshot_id FROM source_snapshots WHERE owner_id=?",(owner_id,)).fetchall():
             identity=row[0]
             snapshot=SourceAcquisitionRepository(settings.webui_db_path).get_snapshot(owner_id,identity,include_preview=False)
             if snapshot is None:
                 values['snapshot:'+identity]=dict(source_key='snapshot:'+identity,kind='snapshot',identity='original',label='已清理网页资料',source_snapshot_id=identity,acquired_at=None,time_kind='unknown',sha256=None,media_type=None,size_bytes=0,origin=dict(task_id=None,revision=None,run_id=None,delivery_id=None),availability='unavailable',reason_code='source_deleted',limitations=[])
                 continue
-            values["snapshot:"+identity]=dict(source_key="snapshot:"+identity,kind="snapshot",identity="original",label="连接资料" if snapshot.get("source_kind")=="connector" else "网页资料",source_snapshot_id=identity,acquired_at=snapshot.get("created_at"),time_kind="acquired",sha256=None,media_type=None,size_bytes=sum(x["size_bytes"] for x in snapshot["artifacts"]),origin=dict(task_id=None,revision=None,run_id=None,delivery_id=None),availability="available",reason_code=None,limitations=["使用时重新核验"],attempt_id=snapshot.get("attempt_id"),allowed_scope=snapshot["allowed_scope"],coverage=snapshot["coverage"])
+            values["snapshot:"+identity]=dict(source_key="snapshot:"+identity,kind="snapshot",identity="original",label="网页资料",source_snapshot_id=identity,acquired_at=snapshot.get("created_at"),time_kind="acquired",sha256=None,media_type=None,size_bytes=sum(x["size_bytes"] for x in snapshot["artifacts"]),origin=dict(task_id=None,revision=None,run_id=None,delivery_id=None),availability="available",reason_code=None,limitations=["使用时重新核验"],attempt_id=snapshot.get("attempt_id"),allowed_scope=snapshot["allowed_scope"],coverage=snapshot["coverage"])
             if not snapshot["valid_page_count"] or snapshot["coverage"]["status"]=="hard_insufficient":
                 values["snapshot:"+identity].update(availability="unavailable",reason_code="source_coverage_insufficient")
         for table,column in (("formal_delivery_outputs","owner_id"),("semantic_delivery_outputs","user_id")):
-            for row in connection.execute(f"SELECT output_id,delivery_id,run_id,filename,media_type,size_bytes,sha256,created_at FROM {table} WHERE {column}=?",(owner_id,)):
+            for row in connection.execute(f"SELECT output_id,delivery_id,run_id,filename,media_type,size_bytes,sha256,created_at FROM {table} WHERE {column}=?",(owner_id,)).fetchall():
                 item=dict(row);identity=item.pop("output_id")
                 producer=connection.execute("SELECT task_id,task_revision FROM formal_delivery_runs WHERE owner_id=? AND delivery_id=?",(owner_id,item["delivery_id"])).fetchone()
                 values["delivery_output:"+identity]=dict(source_key="delivery_output:"+identity,kind="delivery_output",identity="derived",label=item["filename"],output_id=identity,acquired_at=item["created_at"],time_kind="generated",media_type=item["media_type"],size_bytes=item["size_bytes"],sha256=item["sha256"],origin=dict(task_id=producer[0] if producer else None,revision=producer[1] if producer else None,run_id=item["run_id"],delivery_id=item["delivery_id"]),availability="available",reason_code=None,limitations=["使用时重新核验"])
@@ -173,22 +173,29 @@ from starlette.responses import Response
 def source_key(ref):
     if ref.get("kind") == "delivery_output":
         return "delivery_output:"+ref["output_id"]
-    if ref.get("kind") in {"web_artifact", "connector_artifact"}:
-        return ref["kind"]+":"+ref["artifact_id"]
+    if ref.get("kind") == "web_artifact":
+        return "web_artifact:"+ref["artifact_id"]
     return "upload:"+ref["upload_id"]
 
 
 @contextmanager
-def source_locks(owner_id, refs, *, timeout=0):
+def source_locks(owner_id, refs, *, timeout=0, read_registration=False):
     locks=[]
+    keys={source_key(ref) for ref in refs}
     directory=Path(settings.webui_db_path).parent/".source-read-locks"
     directory.mkdir(parents=True,exist_ok=True)
     try:
-        for key in sorted({source_key(ref) for ref in refs}):
+        for key in sorted(keys):
             identity="\0".join((str(Path(settings.webui_db_path).resolve()),owner_id,key))
             lock=FileLock(directory/(hashlib.sha256(identity.encode()).hexdigest()+".lock"),timeout=timeout,thread_local=False)
             lock.acquire()
             locks.append(lock)
+        if keys and not read_registration:
+            # 删除门与读登记共用短锁；读取期间由持久使用事实保护，不让读者互斥。
+            with closing(sqlite3.connect(settings.webui_db_path)) as connection:
+                rows=connection.execute("SELECT source_refs_json FROM source_read_uses WHERE owner_id=? AND state='active'",(owner_id,))
+                if any(keys.intersection(source_key(ref) for ref in json.loads(row[0])) for row in rows):
+                    raise ValueError("source_in_use")
         yield
     except Timeout as exc:
         raise ValueError("source_in_use") from exc
@@ -198,7 +205,7 @@ def source_locks(owner_id, refs, *, timeout=0):
 
 
 class SourceReadUse:
-    """独立锁可跨Response线程释放；只有实际读取收口后才能完成。"""
+    """短锁登记并发读，持久使用事实直到实际读取收口后才能完成。"""
     def __init__(self,owner_id,refs,*,operation,task_id=None,revision=None):
         self.owner_id=owner_id;self.refs=list(refs);self.operation=operation
         self.task_id=task_id;self.revision=revision;self.use_id="source_use_"+uuid.uuid4().hex
@@ -209,7 +216,8 @@ class SourceReadUse:
             resolve_frozen_source(self.owner_id,ref)
 
     def start(self, *, lock_timeout=0):
-        self._locks=source_locks(self.owner_id,self.refs,timeout=lock_timeout)
+        # 只等待短暂登记事务；文件传输、解析和运行读取不再占据独占锁。
+        self._locks=source_locks(self.owner_id,self.refs,timeout=max(5,lock_timeout),read_registration=True)
         self._locks.__enter__()
         registered=False
         try:
@@ -218,6 +226,7 @@ class SourceReadUse:
                 connection.execute("INSERT INTO source_read_uses VALUES (?,?,?,?,?,?,?,?,NULL)",(self.use_id,self.owner_id,self.task_id,self.revision,self.operation,json.dumps(self.refs,ensure_ascii=False),"active",datetime.now(timezone.utc).isoformat()))
                 connection.commit()
             registered=True
+            self._locks.__exit__(None,None,None);self._locks=None
             self.refs=[resolve_frozen_source(self.owner_id,ref)["frozen_ref"] for ref in self.refs]
             with closing(sqlite3.connect(settings.webui_db_path)) as connection:
                 connection.execute("UPDATE source_read_uses SET source_refs_json=? WHERE use_id=? AND owner_id=?",(json.dumps(self.refs,ensure_ascii=False),self.use_id,self.owner_id))
@@ -254,8 +263,8 @@ class SourceUseResponse(Response):
         response_started=False
         try:
             if self.materialized_json:
-                # 此JSON已在源锁内读完并序列化；发送前不再让出执行权重读原件。
-                # 权限和删除意图仍同步复核，锁与使用事实直到实际发送退出才释放。
+                # 此JSON已在读使用保护内物化；发送前不再让出执行权重读原件。
+                # 权限和删除意图仍同步复核，使用事实直到实际发送退出才释放。
                 from src.api.execution import execution_checkpoint
                 from src.source_acquisition.deletion import assert_sources_readable
                 execution_checkpoint()
@@ -319,9 +328,8 @@ def freeze_source_call(owner_id,refs,call,*args,**kwargs):
     from contextlib import ExitStack
     with ExitStack() as stack:
         try:
-            stack.enter_context(source_locks(owner_id,refs))
-            for ref in refs:
-                resolve_frozen_source(owner_id,ref)
+            use=SourceReadUse(owner_id,refs,operation="freeze").start()
+            stack.callback(use.finish,known=True)
         except PermissionError as exc:
             raise HTTPException(404,"来源不存在或无权访问") from exc
         except (ValueError,OSError) as exc:
@@ -331,7 +339,7 @@ def freeze_source_call(owner_id,refs,call,*args,**kwargs):
 
 
 def guarded_response(operation,refs_factory,*,joined_reader=False,lock_timeout=0,materialized_json=False):
-    """路由仅装配身份，锁与使用事实覆盖正文读取及完整响应。"""
+    """路由仅装配身份，使用事实覆盖正文读取及完整响应。"""
     import asyncio,functools,inspect
     from fastapi import HTTPException
     from fastapi.encoders import jsonable_encoder
@@ -428,7 +436,8 @@ def workspace_source_read_context(request,source_ids):
     if any(identity not in mapping for identity in source_ids):
         raise ValueError("来源不属于冻结修订")
     refs=[mapping[identity] for identity in source_ids]
-    with source_locks(request.user_id,refs):
+    use=SourceReadUse(request.user_id,refs,operation="execution",task_id=request.task_id,revision=request.revision).start()
+    try:
         execution_checkpoint(required=True)
         task=_store().get_semantic_workspace_task(request.user_id,request.task_id)
         if task is None or task.get("deleted_at"):
@@ -439,6 +448,9 @@ def workspace_source_read_context(request,source_ids):
             if frozen is None or frozen.sha256!=source["sha256"]:
                 raise ValueError("读取请求与原实体不一致")
         yield
+    finally:
+        # 同步读取栈已退出，失败也不留伪活跃；异步调用方负责等待读取线程收口。
+        use.finish(known=True)
 
 
 def bundle_response_refs(values):

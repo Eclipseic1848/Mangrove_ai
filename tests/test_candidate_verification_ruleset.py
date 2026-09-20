@@ -8,7 +8,7 @@ import pytest
 
 from src.agentic_runtime.candidate_verifier import CandidateVerifier
 from src.candidate_verification import CurrentVerifierRulesetResolver
-from src.candidate_verification.ruleset import _selected_nodes
+from src.candidate_verification.ruleset import _selected_nodes, _SOURCE_ALLOWLIST, _ALLOWLIST_VERSION
 
 
 def test_current_ruleset_resolver_is_deterministic_and_ignores_unrelated_worktree(
@@ -47,3 +47,38 @@ def test_ruleset_rejects_unbound_verifier_and_incomplete_symbol_contracts() -> N
             "class LocalBase: pass\nclass Contract(LocalBase): pass\n",
             ("Contract",),
         )
+
+
+def test_ruleset_covers_lesson_assessment_symbol_closure() -> None:
+    root = Path(__file__).resolve().parents[1]
+    symbols = dict(_SOURCE_ALLOWLIST)["src/agentic_runtime/models.py"]
+    assert "LessonAssessment" in symbols
+    assert _ALLOWLIST_VERSION == "adr-0033-v2"
+    source = (root / "src/agentic_runtime/models.py").read_text(encoding="utf-8")
+    assert dict(_selected_nodes(source, symbols))["LessonAssessment"]
+    with pytest.raises(RuntimeError, match="未覆盖的本地契约"):
+        _selected_nodes(source, tuple(name for name in symbols if name != "LessonAssessment"))
+
+
+def test_lesson_rule_identity_rejects_uncommitted_changes(tmp_path, monkeypatch) -> None:
+    import src.candidate_verification.ruleset as ruleset
+    root = Path(__file__).resolve().parents[1]
+    committed = {}
+    for relative, _ in _SOURCE_ALLOWLIST:
+        committed[relative] = (root / relative).read_text(encoding="utf-8")
+        target = tmp_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(committed[relative], encoding="utf-8")
+    monkeypatch.setattr(ruleset, "_git_text", lambda _root, _show, ref: committed[ref.split(":", 1)[1]])
+    before = ruleset._source_entries(tmp_path, "test-commit")
+    relative = "src/agentic_runtime/models.py"
+    changed = committed[relative].replace("candidate_quote: str = Field(max_length=120)", "candidate_quote: str = Field(max_length=121)")
+    assert changed != committed[relative]
+    (tmp_path / relative).write_text(changed, encoding="utf-8")
+    with pytest.raises(RuntimeError, match="未提交语义变化"):
+        ruleset._source_entries(tmp_path, "test-commit")
+    committed[relative] = changed
+    after = ruleset._source_entries(tmp_path, "test-commit")
+    assert after != before
+    (tmp_path / relative).write_text(changed + "\nclass Unrelated: pass\n", encoding="utf-8")
+    assert ruleset._source_entries(tmp_path, "test-commit") == after

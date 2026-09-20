@@ -1,3 +1,4 @@
+import { beijingTime } from "@/lib/beijingTime";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import { useQuery } from "@tanstack/react-query";
@@ -1006,6 +1007,7 @@ export function ResultPreview({
               <FileCheck2 className="h-5 w-5 text-primary" />
               <h2 className="font-semibold">结果与正式交付</h2>
               <QualityBadge warning={hasWarnings} />
+              {task.source_contract?.owner_acceptance && <span className="text-sm text-muted-foreground">用户接受 · 部分检查未完成</span>}
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
               已通过格式重开、文件大小和 SHA-256 校验。预览仅显示当前页，下载包含全部结果。
@@ -1093,7 +1095,7 @@ export function ResultPreview({
             <label className="flex flex-wrap items-center gap-2">预览输出<select aria-label="预览输出" value={outputId ?? ""} onChange={event => onSelectOutput(event.target.value)} className="min-w-0 max-w-full rounded-lg border bg-background px-2 py-2 text-foreground">
               {delivery.outputs.map(output => <option key={output.output_id} value={output.output_id}>{output.filename}</option>)}
             </select></label>
-            <p>版本 V{task.viewing_revision} · {preview.data?.representation?.kind === "derived_result" ? "同次交付的结构化结果" : preview.data?.representation?.kind === "output" ? "正式输出解析预览" : "未提供表示身份"} · 生成时间：{delivery.created_at ? new Date(delivery.created_at).toLocaleString() : "未提供"}</p>
+            <p>版本 V{task.viewing_revision} · {preview.data?.representation?.kind === "derived_result" ? "同次交付的结构化结果" : preview.data?.representation?.kind === "output" ? "正式输出解析预览" : "未提供表示身份"} · 生成时间：{delivery.created_at ? beijingTime(delivery.created_at) : "未提供"}</p>
             {!currentRevision && <p>历史结果不能用于新追问，请返回最新版本。</p>}
           </div>
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">

@@ -11,6 +11,31 @@ const resultHash = "b".repeat(64);
 const outputHash = "c".repeat(64);
 const itemRef = `item_${"d".repeat(64)}`;
 
+for (const width of [390, 1440]) test(`正式结果可选择正文附件发送，失败不丢报告且历史版本不能发送 ${width}`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 900 });
+  await mockCanvas(page);
+  const calls: unknown[] = [];
+  await page.route("**/api/semantic-workspace/tasks/canvas-task/notify", async route => {
+    calls.push(route.request().postDataJSON());
+    await route.fulfill({ json: { status: "unknown", message: "发送结果未知，请核对接收方；报告已保留" } });
+  });
+  await page.goto("/data-prep?task=canvas-task");
+  if (width < 768) await page.getByRole("button", { name: "关闭结果预览", exact: true }).click();
+  await page.getByRole("button", { name: "发送结果", exact: true }).click();
+  await page.getByLabel("收件邮箱", { exact: true }).fill("reader@example.invalid");
+  await page.getByLabel("报告正文", { exact: true }).uncheck();
+  await page.getByRole("button", { name: "确认发送", exact: true }).click();
+  await expect(page.getByRole("dialog")).toContainText("发送结果未知");
+  expect(calls).toEqual([{ expected_revision: 2, channel: "email", recipients: ["reader@example.invalid"], include_body: false, include_attachments: true, output_ids: ["output-2"] }]);
+  await page.evaluate(() => Promise.all(document.getAnimations().map(animation => animation.finished.catch(() => {}))));
+  expect((await new AxeBuilder({ page }).include('[role="dialog"]').analyze()).violations).toEqual([]);
+  await page.screenshot({ path: `${process.env.TEMP}/workspace-send-result-${width}.png` });
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("button", { name: "查看正式结果", exact: true })).toBeVisible();
+  await page.goto("/data-prep?task=canvas-task&revision=1");
+  await expect(page.getByRole("button", { name: "发送结果", exact: true })).toHaveCount(0);
+});
+
 function canvasTask(revision = 1) {
   return {
     task_id: "canvas-task", title: "画布往返任务", objective_text: "核对付款记录",

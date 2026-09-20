@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from src.api.auth import get_execution_user
+from src.api.workspace_feedback import WorkspaceFeedbackIn, read_feedback, write_feedback
 from src.account_execution import ExecutionDenied
 
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from src.timezone import now as beijing_now
 import hashlib
 import json
 from pathlib import Path
@@ -84,7 +86,7 @@ from src.conversation_steering import (
     build_context_rewriter,
 )
 from src.model_connections import GrantError, get_default_broker
-from src.conversation_steering.models import FrozenResultContext, ResultSelection
+from src.conversation_steering.models import FrozenResultContext, ResultSelection, RawUserTurn
 from src.conversation_steering.repository import ResultContextConflict
 from src.delivery_publishing.models import TableOutputContract
 from src.services.upload_store import IMAGE_EXTENSIONS, UploadStore
@@ -135,11 +137,35 @@ _FORMATS = {
 }
 _DOCUMENT_INPUTS = {".docx", ".pdf"} | IMAGE_EXTENSIONS
 _TABLE_INPUTS = {".xlsx", ".csv", ".tsv", ".json", ".jsonl", ".parquet"}
+_OUTPUT_FORMAT_TOKEN = r"(?:JSONL|JSON|XLSX|EXCEL|CSV|PARQUET|DOCX|WORD|PDF|PPTX|PPT|HTML|MARKDOWN|MD|TXT)(?![A-Za-z0-9_.])"
 _OUTPUT_FORMAT_PATTERN = re.compile(
-    r"(?:输出|导出|生成)(?:为|成)?\s*"
-    r"(JSONL|JSON|CSV|XLSX|DOCX|PDF|HTML|MARKDOWN|MD|TXT|PPTX)",
+    r"(?:(不要|不需要|无需|不用|不必|不)\s*)?(?:(只(?:需要|要)?|仅)\s*)?"
+    r"(输出|导出|生成|保存|改为|改成|换成|提供|不要|不需要|无需|不用|不必)(?:的)?(?:文件)?(?:格式)?(?:为|成|是)?\s*"
+    rf"({_OUTPUT_FORMAT_TOKEN}(?:\s*(?:、|,|，|和|与|及|以及|或|/|&|\+)\s*{_OUTPUT_FORMAT_TOKEN})*)",
     re.IGNORECASE,
 )
+
+
+def _output_format_intent(text: str) -> tuple[set[str], set[str], bool]:
+    requested: set[str] = set()
+    excluded: set[str] = set()
+    only = False
+    aliases = {"excel": "xlsx", "word": "docx", "ppt": "pptx", "md": "markdown"}
+    # 只校验当前用户明确指令；历史助手正文与代码示例不能变成输出授权。
+    objective = re.sub(r"```[\s\S]*?```", "", text.split("当前用户要求（更正以此为准）：\n")[-1])
+    for match in _OUTPUT_FORMAT_PATTERN.finditer(objective):
+        negative = bool(match[1]) or match[3] in {"不要", "不需要", "无需", "不用", "不必"}
+        if not negative and (match[2] or match[3] in {"改为", "改成", "换成"}):
+            requested.clear()
+            only = True
+        for value in re.findall(_OUTPUT_FORMAT_TOKEN, match[4], re.IGNORECASE):
+            value = aliases.get(value.lower(), value.lower())
+            target, other = (excluded, requested) if negative else (requested, excluded)
+            target.add(value)
+            other.discard(value)
+    return requested, excluded, only
+
+
 _HARD_SOURCE_REQUIREMENT_PATTERN = re.compile(
     r"全部|所有|完整覆盖|不得遗漏|必须\s*(?:至少\s*)?\d+"
 )
@@ -481,15 +507,6 @@ class WorkspaceTurnIn(BaseModel):
     @classmethod
     def strip_text(cls, value: str) -> str:
         return value.strip()
-
-
-class WorkspaceRegenerateIn(BaseModel):
-    """按原始用户消息重新请求回答，不伪造为普通重发。"""
-
-    model_config = ConfigDict(extra="forbid")
-
-    expected_revision: int = Field(ge=1)
-    external_api_confirmed: bool = False
 
 
 class CandidateReverificationIn(BaseModel):
@@ -849,6 +866,8 @@ def preview_task_context(
             output_formats=payload.output_formats,
             selection=payload.selection,
         )
+    except (OSError, UnicodeError) as exc:
+        raise HTTPException(status_code=503, detail="记忆暂时无法读取，请稍后重试") from exc
     except KeyError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ValueError as exc:
@@ -995,7 +1014,7 @@ def _public_workspace_events(events):
     public = []
     for event in events:
         # 本票的消费占位是内部恢复事实，不是用户进度或业务正文。
-        if event.get("event_type") in {"clarification.accepted", "clarification.send_claimed", "clarification.consumed", "message.regeneration_claimed"}:
+        if event.get("event_type") in {"clarification.accepted", "clarification.send_claimed", "clarification.consumed"}:
             continue
         projected = {**event, "details": dict(event.get("details") or {})}
         if projected["details"].get("question"):
@@ -1018,6 +1037,18 @@ def _steering_messages(user_id: str, task_id: str, revision: int) -> list[dict[s
     ]
 
 
+def _revision_runtime_context(user_id: str, task_id: str, revision: int):
+    repository = _runtime_repository()
+    row = repository.get(user_id, task_id, revision)
+    if row is not None:
+        return row
+    acceptance = (get_store().get_source_contract(user_id, task_id, revision) or {}).get("owner_acceptance")
+    # 接受初稿没有新 Run；后续新任务仍须从真实来源运行继承配置并重新授权。
+    if acceptance and 0 < acceptance.get("source_revision", revision) < revision:
+        return repository.get(user_id, task_id, acceptance["source_revision"])
+    return None
+
+
 def _public_runtime(
     user_id: str,
     task_id: str,
@@ -1028,10 +1059,12 @@ def _public_runtime(
     repository = _runtime_repository()
     row = repository.get(user_id, task_id, revision)
     if row is None:
+        origin = _revision_runtime_context(user_id, task_id, revision)
         return {
-            "runtime_version": RuntimeVersion.LEGACY.value,
-            "permission_profile": PermissionProfile.STANDARD.value,
-            "model_connection_id": None,
+            "runtime_version": origin["runtime_version"].value if origin else RuntimeVersion.LEGACY.value,
+            "permission_profile": origin["permission_profile"].value if origin else PermissionProfile.STANDARD.value,
+            "model_connection_id": origin["model_connection_id"] if origin else None,
+            "model_connection_model": origin["model_connection_model"] if origin else None,
             "external_api_confirmed": False,
             "status": None,
             "candidates": [],
@@ -1260,7 +1293,7 @@ def _resolve_mixed_sources(user_id, upload_ids, snapshot_ids, output_ids=()):
         if int(snapshot["valid_page_count"]) < 1 or snapshot.get("coverage", {}).get("status") == "hard_insufficient":
             raise HTTPException(409, "网页来源未达到冻结完整性门，不能通过其他来源抵消")
         snapshots.append(snapshot)
-        refs.extend({"kind": "connector_artifact" if snapshot.get("source_kind")=="connector" else "web_artifact", "snapshot_id": snapshot_id,
+        refs.extend({"kind": "web_artifact", "snapshot_id": snapshot_id,
                      "artifact_id": artifact["artifact_id"], "sha256": artifact["content_sha256"]}
                     for artifact in snapshot["artifacts"])
     from src.source_acquisition.reuse import resolve_frozen_source
@@ -1408,7 +1441,7 @@ def _read_workspace_source_findings(user_id: str, task: dict[str, Any]):
 
     for event in reversed(get_store().list_semantic_workspace_events(user_id, task["task_id"])):
         facts = event.get("details") or {}
-        if not any(ref.get("kind") in {"web_artifact","connector_artifact","delivery_output"} for ref in (frozen or {}).get("source_refs", [])) and event["event_type"] == "source.observed" and facts.get("revision") == revision and facts.get("inspected_sources") == inspected_sources:
+        if not any(ref.get("kind") in {"web_artifact","delivery_output"} for ref in (frozen or {}).get("source_refs", [])) and event["event_type"] == "source.observed" and facts.get("revision") == revision and facts.get("inspected_sources") == inspected_sources:
             return tuple(facts["source_findings"])
     reports = UploadSourceInspector(
         user_id=user_id, upload_store=_uploads(),
@@ -1420,7 +1453,7 @@ def _read_workspace_source_findings(user_id: str, task: dict[str, Any]):
     from types import SimpleNamespace
     repository = SourceAcquisitionRepository(settings.webui_db_path)
     for ref in (frozen or {}).get("source_refs", []):
-        if ref.get("kind") not in {"web_artifact", "connector_artifact"}:
+        if ref.get("kind") != "web_artifact":
             continue
         artifact = repository.get_artifact(user_id, ref["artifact_id"], include_content=True)
         if artifact is None or artifact["snapshot_id"] != ref["snapshot_id"] or artifact["content_sha256"] != ref["sha256"]:
@@ -1429,10 +1462,10 @@ def _read_workspace_source_findings(user_id: str, task: dict[str, Any]):
         if hashlib.sha256(content).hexdigest() != ref["sha256"]:
             raise ValueError("网页原件哈希不一致")
         with tempfile.TemporaryDirectory(prefix="mixed-source-observation-") as temporary:
-            path = Path(temporary) / ("source.jsonl" if artifact["media_type"]=="application/x-ndjson" else "source.json" if artifact["media_type"]=="application/json" else "source.html")
+            path = Path(temporary) / "source.html"
             path.write_bytes(content)
             _canvas_size_limit(path)
-            item = SimpleNamespace(storage_path=str(path), original_name=path.name, media_type=artifact["media_type"], sha256=ref["sha256"], size_bytes=len(content))
+            item = SimpleNamespace(storage_path=str(path), original_name="source.html", media_type="text/html", sha256=ref["sha256"], size_bytes=len(content))
             facade = SimpleNamespace(resolve=lambda owner, artifact_id: item)
             web_reports = UploadSourceInspector(user_id=user_id, upload_store=facade).inspect_artifacts((ref["artifact_id"],))
             findings.extend({**finding, "snapshot_id": ref["snapshot_id"]} for finding in public_source_findings(web_reports))
@@ -1746,6 +1779,19 @@ def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgres
         }
         for event in task["harness_events"]
     )
+    # 保留原始两阶段记录；同版本同执行的结束事件替代未知占位，避免重复计量。
+    completed_learning = {
+        (details.get("revision"), details.get("run_id"), details["learning_call_id"])
+        for event in raw_events
+        if isinstance(details := event.get("details"), dict)
+        and isinstance(details.get("learning_call_id"), str)
+        and details.get("learning_usage_state") == "finished"
+    }
+    raw_events = [event for event in raw_events if not (
+        isinstance(details := event.get("details"), dict)
+        and details.get("learning_usage_state") == "started"
+        and (details.get("revision"), details.get("run_id"), details.get("learning_call_id")) in completed_learning
+    )]
     for index, event in enumerate(raw_events, start=1):
         details = event.get("details") or {}
         outer_event_type = str(event.get("event_type") or event.get("type") or "progress")
@@ -1821,7 +1867,7 @@ def _structured_progress_events(task: dict[str, Any]) -> tuple[StructuredProgres
                 cache_tokens=(trace_details.get("cache_tokens") if isinstance(trace_details.get("cache_tokens"), int) and not isinstance(trace_details.get("cache_tokens"), bool) and trace_details.get("cache_tokens") >= 0 else None),
                 total_tokens=(trace_details.get("total_tokens") if isinstance(trace_details.get("total_tokens"), int) and not isinstance(trace_details.get("total_tokens"), bool) and trace_details.get("total_tokens") >= 0 else None),
                 audience=audience,
-                created_at=event.get("created_at") or datetime.now().astimezone(),
+                created_at=event.get("created_at") or beijing_now(),
             )
         )
     return tuple(projected)
@@ -2003,14 +2049,35 @@ def _task_detail(
     )
     task["progress"] = progress_view.model_dump(mode="json")
     runtime_run_id = task["agentic_runtime"].get("run_id")
+    usage_revision = int(selected_revision["revision"])
+    usage_runtime = task["agentic_runtime"]
+    usage_events = progress_view.events
+    usage_status = task["status"]
+    acceptance = (source_contract or {}).get("owner_acceptance")
+    if not runtime_run_id and acceptance:
+        source_revision = acceptance.get("source_revision")
+        # 接受初稿只发布新版本；用量仍归原执行，不伪造新 Run，也不借用其他版本。
+        if isinstance(source_revision, int) and source_revision > 0 and usage_revision == source_revision + 1:
+            source = store.get_semantic_workspace_revision(user_id, task_id, source_revision)
+            if source:
+                usage_runtime = _public_runtime(user_id, task_id, source_revision, inspect_offer=False)
+                runtime_run_id = usage_runtime.get("run_id")
+                usage_revision = source_revision
+                usage_status = source["status"]
+                usage_events = ProgressProjection().project(_structured_progress_events({
+                    "task_id": task_id, "viewing_revision": source_revision, "run_id": runtime_run_id,
+                    "agentic_runtime": usage_runtime,
+                    "events": store.list_semantic_workspace_events(user_id, task_id, revision=source_revision),
+                    "harness_events": store.list_semantic_harness_events(user_id, source["run_id"]) if source.get("run_id") else [],
+                }), audience=audience, task_status=usage_status).events
     task["work_session"] = (
         WorkTraceProjection().project(
             task_id=task_id,
-            revision=int(selected_revision["revision"]),
+            revision=usage_revision,
             run_id=str(runtime_run_id),
-            status=task["status"],
-            events=progress_view.events,
-            provider_usage=task["agentic_runtime"].get("provider_usage", []),
+            status=usage_status,
+            events=usage_events,
+            provider_usage=usage_runtime.get("provider_usage", []),
         ).model_dump(mode="json")
         if runtime_run_id
         else None
@@ -2088,40 +2155,162 @@ def resolve_reusable_sources(payload: ReusableSourceSelection, user=Depends(get_
     return {"items": resolve_choices(user["user_id"], payload.upload_ids, payload.source_snapshot_ids, payload.delivery_output_ids)}
 
 
-class WorkspaceFeedbackIn(BaseModel):
-    model_config=ConfigDict(extra="forbid")
-    revision:int=Field(ge=1)
-    output_id:str|None=Field(default=None,min_length=1,max_length=200)
-    result_id:str|None=Field(default=None,min_length=1,max_length=200)
-    rating:Literal["up","down"]
-    reasons:list[str]=Field(default_factory=list,max_length=7)
-    comment:str=Field(default="",max_length=10000)
-    expected_version:int=Field(ge=0)
+class DraftChatMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=8000)
+
+
+class DraftChatIn(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    request_id: str = Field(pattern=r"^[a-zA-Z0-9_-]{16,80}$")
+    text: str = Field(min_length=1, max_length=8000)
+    history: list[DraftChatMessage] = Field(default_factory=list, max_length=16)
+    model: str = Field(min_length=1, max_length=200)
+    model_connection_id: str | None = Field(default=None, max_length=120)
+    external_api_confirmed: bool = False
+    conv_id: str | None = Field(default=None, max_length=120)
 
     @model_validator(mode="after")
-    def one_feedback_target(self):
-        if (self.output_id is None)==(self.result_id is None):
-            raise ValueError("反馈必须且只能绑定一个正式结果或回答")
+    def bounded_context(self):
+        if len(self.text) + len(json.dumps([item.model_dump() for item in self.history], ensure_ascii=False)) > 16000:
+            raise ValueError("本次对话过长，请概括需求后清空对话再发送；不会静默丢弃早先要求")
         return self
 
-@router.post("/tasks/{task_id}/feedback")
-def submit_workspace_feedback(task_id:str,payload:WorkspaceFeedbackIn,idempotency_key:str=Header(alias="Idempotency-Key"),user=Depends(get_execution_user)):
-    from src.api.workspace_feedback import record_rejection,submit_feedback
-    store=get_store()
-    try:return submit_feedback(store,user,task_id,payload,idempotency_key)
-    except HTTPException as exc:
-        if record_rejection(store,user,task_id,payload,idempotency_key,exc.status_code):
-            exc.headers={**(exc.headers or {}),"X-Mangrove-Lifecycle-Outcome":"rejected"}
-        raise
 
-@router.get("/tasks/{task_id}/feedback")
-def read_workspace_feedback(task_id:str,revision:int,output_id:str|None=None,result_id:str|None=None,idempotency_key:str|None=None,user=Depends(get_current_user)):
-    _task_or_404(user["user_id"],task_id)
-    if (output_id is None)==(result_id is None):raise HTTPException(422,"反馈必须且只能绑定一个正式结果或回答")
-    from src.api.workspace_feedback import get_feedback,get_receipt
-    result={"feedback":get_feedback(get_store(),user["user_id"],task_id,revision,output_id=output_id,result_id=result_id)}
-    if idempotency_key is not None:result['receipt']=get_receipt(get_store(),user['user_id'],task_id,revision,output_id=output_id,result_id=result_id,key=idempotency_key)
-    return result
+@router.post("/draft/turns")
+async def draft_chat(payload: DraftChatIn, request: Request, user=Depends(get_execution_user)):
+    from src.api.execution import execution_checkpoint
+    from src.api.routes.chat import _RUNNING
+    from src.llm.provider import _usage_ctx
+
+    execution_checkpoint(required=True)
+    store = get_store()
+    history = [item.model_dump() for item in payload.history]
+    conversation_key = f'{user["user_id"]}:{payload.conv_id}' if payload.conv_id else None
+    if payload.conv_id:
+        conversation = store.get_conversation(payload.conv_id)
+        if not conversation or conversation["user_id"] != user["user_id"]:
+            raise HTTPException(404, "会话不存在或无权访问")
+        active = _RUNNING.get(conversation_key)
+        if active and not active.done():
+            raise HTTPException(409, "当前会话仍在执行，请等待完成或停止后再发送")
+        # 续聊以服务端本会话为准，浏览器传来的历史不能替换已保存的上下文。
+        history = [{"role": m["role"], "content": m["content"]} for m in store.list_messages(payload.conv_id)]
+        if len(json.dumps(history, ensure_ascii=False)) > 120000:
+            raise HTTPException(422, "当前会话过长，请新建任务并引用需要的报告；不会静默截断历史")
+    from src.memory.loader import conversation_memory_context, load_preferences
+    try:
+        memory_context = conversation_memory_context(
+            [item['text'] for item in store.memory_list(user['user_id']) if item['purpose'] == 'general'],
+            load_preferences(strict=True), '\n'.join([item['content'] for item in history[-4:] if item['role'] == 'user'] + [payload.text]),
+        )
+    except (OSError, UnicodeError):
+        raise HTTPException(503, "记忆暂时无法读取，请稍后重试") from None
+    binding = None
+    if payload.model_connection_id:
+        if not payload.external_api_confirmed:
+            raise HTTPException(422, "请确认将本次对话发送到所选模型")
+        try:
+            binding = get_default_broker().freeze_connection(user["user_id"], payload.model_connection_id)
+        except GrantError:
+            raise HTTPException(404, "模型连接不存在或无权访问") from None
+    elif not is_admin_role(user.get("role")):
+        raise HTTPException(403, "请选择自己的连接或管理员发布的连接")
+
+    # 复用持久发送占位但不创建业务任务；草稿命名空间隔离任务创建键，未知响应不自动重发。
+    draft_id = "draft_" + hashlib.sha256(f'{user["user_id"]}:{payload.request_id}'.encode("utf-8")).hexdigest()[:32]
+    try:
+        _, claimed = _runtime_repository().claim_idempotency(
+            user["user_id"], "draft-chat:" + payload.request_id,
+            request_hash=hashlib.sha256(payload.model_dump_json().encode("utf-8")).hexdigest(),
+            proposed_task_id=draft_id,
+        )
+    except ValueError:
+        raise HTTPException(409, "同一发送标识不能用于不同内容") from None
+    if not claimed:
+        raise HTTPException(409, "这条消息已发送或回复状态未知，不会重复请求模型")
+    context = SteeringRequest(
+        owner_id=user["user_id"], task_id=draft_id, revision=1, run_id=draft_id,
+        text=payload.text, current_status="preparing_no_sources",
+        memory_context=memory_context,
+        current_goal=json.dumps(history, ensure_ascii=False),
+        status_summary="仅讨论需求，尚未创建或执行任务，没有读取任何资料。",
+        provider="external" if binding else "local", model=payload.model,
+        model_connection_id=payload.model_connection_id,
+        model_connection_version=binding.connection_version if binding else None,
+        external_api_confirmed=payload.external_api_confirmed,
+        clarification_round_id=payload.request_id,
+    )
+    turn = RawUserTurn(turn_id=payload.request_id, owner_id=user["user_id"], task_id=draft_id, revision=1, text=payload.text)
+    pending = None
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
+    usage_token = _usage_ctx.set(usage)
+    if conversation_key:
+        _RUNNING[conversation_key] = asyncio.current_task()
+    try:
+        from src.memory.conversation import memory_command
+        command = memory_command(payload.text, store, _runtime_repository(), before_call=lambda: execution_checkpoint(required=True))
+        rewriter = command or build_context_rewriter(
+            context, before_call=lambda: execution_checkpoint(required=True),
+            system_prompt=(Path(__file__).parents[2] / "conversation_steering/prompts/prepare-v1.md").read_text(encoding="utf-8"),
+        )
+        pending = asyncio.create_task(rewriter.rewrite(turn, context))
+        while not pending.done():
+            await asyncio.wait({pending}, timeout=0.5)
+            if await request.is_disconnected():
+                # 关闭请求会撤销本次连接权利；不宣称外部供应商已经停止计费或推理。
+                raise HTTPException(499, "已停止等待回复")
+        result = await pending
+        execution_checkpoint(required=True)
+        if getattr(result, "selection_delta", {}).get("workflow") == "collection" and not getattr(result, "open_questions", ()):
+            from src.api.routes.chat import chat_stream
+            from src.api.schemas import ChatIn
+            # 复用已存在的采集/分析执行入口；传递原话和所选连接，不让模型摘要替代用户授权。
+            return await chat_stream(ChatIn(
+                conv_id=payload.conv_id, content=payload.text, history=[] if payload.conv_id else history,
+                provider="local" if not binding else None, model=payload.model,
+                model_connection_id=payload.model_connection_id,
+                model_connection_version=binding.connection_version if binding else None,
+                external_api_confirmed=payload.external_api_confirmed, mode="legacy_analysis",
+            ), request, user)
+        if not result.direct_answer or not result.direct_answer.strip() or len(result.direct_answer) > 8000:
+            raise ValueError("模型没有返回回复")
+        conv_id = payload.conv_id or store.create_conversation(user["user_id"], payload.text[:24])["conv_id"]
+        if not payload.conv_id:
+            for message in history:
+                store.add_message(conv_id, message["role"], message["content"])
+        from src.notifications import pending_user_text
+        pending_requirement = pending_user_text(store.list_messages(conv_id), payload.text)
+        store.add_message(conv_id, "user", payload.text)
+        token_usage = dict(usage) if usage["calls"] or command else None
+        if command and not usage['calls']:
+            token_usage['no_model_call'] = True
+        message_id = store.add_message(conv_id, "assistant", result.direct_answer, meta={
+            "kind": "clarification" if getattr(result, "open_questions", ()) else "chat",
+            "notification_user_text": pending_requirement if getattr(result, "open_questions", ()) else None,
+            "token_usage": token_usage, "model_id": payload.model,
+            "model_connection_id": payload.model_connection_id,
+            "model": payload.model,
+        })
+        saved_messages = store.list_messages(conv_id)
+        created_at = next(m["created_at"] for m in saved_messages if m["id"] == message_id)
+        user_created_at = next(m["created_at"] for m in reversed(saved_messages) if m["role"] == "user")
+        return {"reply": result.direct_answer, "output_formats": list(result.output_delta),
+                "conv_id": conv_id, "message_id": message_id, "created_at": created_at,
+                "user_created_at": user_created_at, "token_usage": token_usage}
+    except (HTTPException, ExecutionDenied):
+        raise
+    except Exception:
+        raise HTTPException(502, "本次模型回复未成功或状态未知，未启动任务。需求已保留，不会自动重试。") from None
+    finally:
+        _usage_ctx.reset(usage_token)
+        if conversation_key and _RUNNING.get(conversation_key) is asyncio.current_task():
+            _RUNNING.pop(conversation_key, None)
+        if pending is not None and not pending.done():
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
 
 @router.post("/tasks", status_code=status.HTTP_202_ACCEPTED, openapi_extra={"x-mangrove-task-control": True})
 async def create_task(
@@ -2131,6 +2320,7 @@ async def create_task(
         alias="Idempotency-Key",
     ),
     user=Depends(get_execution_user),
+    request: Request = None,
 ):
     claim_started = False
 
@@ -2139,7 +2329,10 @@ async def create_task(
         claim_started = True
 
     try:
-        return await _create_task(payload, idempotency_key, user, mark_claim_started=mark_claim_started)
+        result = await _create_task(payload, idempotency_key, user, mark_claim_started=mark_claim_started)
+        from src.operations import bind_object
+        bind_object(request, "任务", result.get("task_id"))
+        return result
     except HTTPException as exc:
         # 只提供首次认领前的确定拒绝事实，已有claim冲突或未知不能解锁新请求。
         if (not claim_started and exc.status_code in {404, 409, 422}
@@ -2148,7 +2341,7 @@ async def create_task(
         raise
 
 
-async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *, mark_claim_started, frozen_config_guard=None):
+async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *, mark_claim_started):
     user_id = user["user_id"]
     user_objective = payload.objective_text
     idempotency_payload = payload.model_dump(
@@ -2284,16 +2477,22 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
     if (
         payload.runtime_version is RuntimeVersion.PI
         and payload.model_connection_id is None
+        and payload.model is None
     ):
-        preference = get_default_broker().get_usage_preference(user_id)
+        # 默认值只补充未选型的请求，不覆盖用户本次明确选择的本地模型。
+        preference = get_default_broker().get_usage_preference(user_id, allow_local=is_admin_role(user.get("role")))
         if preference is not None:
             if not preference["available"]:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="默认模型连接已失效，请重新选择",
                 )
-            payload.model_connection_id = str(preference["connection_id"])
-            payload.model_connection_model = str(preference["model_id"])
+            if preference["connection_id"] == "__local__":
+                payload.provider = "local"
+                payload.model = str(preference["model_id"])
+            else:
+                payload.model_connection_id = str(preference["connection_id"])
+                payload.model_connection_model = str(preference["model_id"])
     if (
         payload.model_connection_id is not None
         and payload.runtime_version is not RuntimeVersion.PI
@@ -2398,8 +2597,6 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
             or set(payload.capability_need.output_formats) != actual_outputs):
             raise HTTPException(409, "工具匹配与当前文件或输出格式不一致，请重新匹配；网页来源尚无可复用格式合同")
     source_refs, source_snapshots = _resolve_mixed_sources(user_id, payload.upload_ids, payload.source_snapshot_ids or (), payload.delivery_output_ids)
-    if frozen_config_guard is not None:
-        frozen_config_guard(payload,source_refs,connection_binding)
     source_snapshot = source_snapshots[0] if source_snapshots else None
     for source_snapshot_item in source_snapshots:
         if (
@@ -2443,6 +2640,8 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
                 output_formats=payload.output_formats,
                 selection=payload.context_selection,
             )
+        except (OSError, UnicodeError) as exc:
+            raise HTTPException(status_code=503, detail="记忆暂时无法读取，请稍后重试") from exc
         except KeyError as exc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -2470,13 +2669,10 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
                 "文档和表格请分别创建任务。"
             ),
         )
-    requested_in_text = {
-        "markdown" if item.lower() == "md" else item.lower()
-        for item in _OUTPUT_FORMAT_PATTERN.findall(payload.objective_text)
-    }
+    requested_in_text, excluded_in_text, only_requested = _output_format_intent(user_objective)
     selected_formats = set(payload.output_formats)
     missing_formats = requested_in_text - selected_formats
-    if missing_formats:
+    if missing_formats or selected_formats & excluded_in_text or (only_requested and selected_formats - requested_in_text):
         requested_label = "、".join(
             item.upper() for item in sorted(requested_in_text)
         )
@@ -2487,9 +2683,23 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
                 f"文字要求输出 {requested_label}，"
-                f"但界面选择了 {selected_label}；请统一后再执行。"
+                f"但界面选择了 {selected_label}；"
+                + (f"文字还排除了 {'、'.join(item.upper() for item in sorted(excluded_in_text))}；" if excluded_in_text else "")
+                + "请按文字要求输出，或修改当前要求。"
             ),
         )
+    if payload.runtime_version is RuntimeVersion.PI:
+        from src.task_context import workspace_method_type
+        method_type = workspace_method_type(has_web=bool(source_snapshots), file_suffixes=input_suffixes)
+        try:
+            # 在认领幂等键之前读取，规范不可用不能留下无法重试的创建占位。
+            context_preview = _task_context_service().automatic_preview(
+                owner_id=user_id, purpose=payload.context_purpose,
+                objective_text=payload.objective_text, matching_text=user_objective,
+                output_formats=payload.output_formats, data_type=method_type, confirmed_preview=context_preview,
+            )
+        except (OSError, UnicodeError) as exc:
+            raise HTTPException(status_code=503, detail="记忆暂时无法读取，请稍后重试") from exc
     repository = _runtime_repository()
     claimed_key = None
     if idempotency_key is not None:
@@ -2669,19 +2879,13 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
             if context_base_hook is not None:
                 context_base_hook(connection)
             _task_context_service().freeze(connection, owner_id=user_id, task_id=task_id, revision=1,
-                                           preview=context_preview, expected_preview_sha256=payload.context_preview_sha256 or "", require_current=True)
+                                           preview=context_preview, expected_preview_sha256=context_preview.preview_sha256, require_current=True)
         transaction_hook = bind_confirmed_context
     frozen_source_contract = _source_contract(
         _freeze_goal_contract(payload, objective=user_objective, source_snapshot={"allowed_scope": {"groups": [item["allowed_scope"] for item in source_snapshots]}}) if source_snapshots else None,
         source_snapshots,
     )
-    if frozen_config_guard is not None:
-        frozen_base_hook=transaction_hook
-        def bind_frozen_schedule(connection):
-            if frozen_base_hook is not None:frozen_base_hook(connection)
-            # 调度冻结配置在创建提交前再次核对，不拿后来的默认模型补旧授权。
-            frozen_config_guard(payload,source_refs,connection_binding)
-        transaction_hook=bind_frozen_schedule
+    frozen_source_contract['notification_user_text'] = user_objective
     first_line = payload.objective_text.splitlines()[0].strip()
     title = first_line[:40] + ("…" if len(first_line) > 40 else "")
     store = get_store()
@@ -2723,19 +2927,22 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
-    except Exception:
+    except Exception as exc:
         if claimed_key:
             repository.release_idempotency(
                 user_id,
                 claimed_key,
                 task_id=task_id,
             )
+        if isinstance(exc, (OSError, UnicodeError)):
+            raise HTTPException(status_code=503, detail="任务资料暂时无法读取或保存，请稍后重试") from exc
         raise
     store.append_semantic_workspace_event(
         user_id,
         task_id,
         stage="queued",
         event_type="task_created",
+        details={"local_learning_version": 1} if payload.runtime_version is RuntimeVersion.PI and not payload.model_connection_id and payload.provider.lower() == "local" else None,
         summary=(
             f"任务已创建，共 {len(payload.upload_ids)} 个文件"
             if payload.upload_ids
@@ -2799,6 +3006,22 @@ def list_tasks(
             runtime["status"].value if runtime else None
         )
     return tasks
+
+
+@router.get("/tasks/{task_id}/feedback")
+def get_workspace_feedback(task_id: str, revision: int = Query(ge=1), result_id: str = Query(default="delivery", min_length=1, max_length=160), user=Depends(get_current_user)):
+    try:
+        return read_feedback(get_store(), user["user_id"], task_id, revision, result_id)
+    except LookupError:
+        raise HTTPException(404, "反馈对象不可用") from None
+
+
+@router.post("/tasks/{task_id}/feedback")
+def set_workspace_feedback(task_id: str, body: WorkspaceFeedbackIn, user=Depends(get_current_user)):
+    try:
+        return write_feedback(get_store(), user["user_id"], task_id, body)
+    except LookupError:
+        raise HTTPException(404, "反馈对象不可用") from None
 
 
 @router.get("/tasks/{task_id}")
@@ -2959,106 +3182,7 @@ async def steer_task(
     return await _steer_task(user, task_id, payload, idempotency_key)
 
 
-@router.post("/tasks/{task_id}/turns/{result_id}/regenerate")
-async def regenerate_turn(
-    task_id: str,
-    result_id: str,
-    payload: WorkspaceRegenerateIn,
-    idempotency_key: Annotated[str, Header(min_length=1, max_length=200)],
-    user=Depends(get_execution_user),
-):
-    """绑定原回答身份并只发送一次新的模型请求。"""
-
-    user_id = user["user_id"]
-    task = _task_or_404(user_id, task_id)
-    revision = int(task["active_revision"])
-    if payload.expected_revision != revision:
-        raise HTTPException(status.HTTP_409_CONFLICT, "任务版本已变化，请刷新后再重新生成")
-
-    repository = _steering_repository()
-    source_result = repository.get_result(user_id, result_id)
-    if source_result is None or source_result.task_id != task_id:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "原回答不存在或无权访问")
-    if source_result.revision != revision or not source_result.answer:
-        raise HTTPException(status.HTTP_409_CONFLICT, "只有当前版本的完整回答可以重新生成")
-    source_turn = repository.get_turn(user_id, source_result.turn_id)
-    if source_turn is None or source_turn.task_id != task_id or source_turn.revision != revision:
-        raise HTTPException(status.HTTP_409_CONFLICT, "原回答绑定的用户消息不完整")
-    source_delta = repository.get_delta(user_id, source_result.delta_id)
-    if source_delta is None or not source_delta.source_turn_ids or source_delta.source_turn_ids[-1] != source_turn.turn_id:
-        raise HTTPException(status.HTTP_409_CONFLICT, "原回答绑定的上下文不完整")
-    context_turn_ids = source_delta.source_turn_ids[:-1]
-    relevant_turns = tuple(repository.get_turn(user_id, turn_id) for turn_id in context_turn_ids)
-    if any(turn is None for turn in relevant_turns):
-        raise HTTPException(status.HTTP_409_CONFLICT, "原回答绑定的上下文不完整")
-    prior_delta = None
-    if relevant_turns:
-        prior_result = repository.get_result_for_turn(user_id, relevant_turns[-1].turn_id)
-        prior_delta = repository.get_delta(user_id, prior_result.delta_id) if prior_result else None
-        if prior_delta is None or prior_delta.source_turn_ids != context_turn_ids:
-            raise HTTPException(status.HTTP_409_CONFLICT, "原回答绑定的上下文不完整")
-
-    runtime = _runtime_repository().get(user_id, task_id, revision) or {}
-    if (
-        runtime.get("model_connection_id")
-        or task.get("model_connection_id")
-        or (task.get("provider") or "local").lower() != "local"
-    ) and not payload.external_api_confirmed:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "重新生成会再次调用外部模型，请确认本次数据外发")
-
-    request_hash = hashlib.sha256(json.dumps(
-        [result_id, revision, payload.external_api_confirmed],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")).hexdigest()
-    key_hash = hashlib.sha256(json.dumps(
-        [user_id, task_id, idempotency_key],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")).hexdigest()
-    effective_key = f"regenerate:{hashlib.sha256(json.dumps([task_id, result_id, idempotency_key], separators=(',', ':')).encode('utf-8')).hexdigest()}"
-    claim_token = uuid.uuid4().hex
-    store = get_store()
-    events = store.list_semantic_workspace_events(user_id, task_id)
-    claim = store.append_semantic_workspace_event(
-        user_id,
-        task_id,
-        event_id=f"message-regenerate:{key_hash}",
-        stage=events[-1]["stage"] if events else "understand",
-        event_type="message.regeneration_claimed",
-        summary="已接收消息重新生成请求",
-        details={"source_result_id": result_id, "request_hash": request_hash, "_claim_token": claim_token},
-    )
-    if claim.get("details", {}).get("request_hash") != request_hash:
-        raise HTTPException(status.HTTP_409_CONFLICT, "相同幂等键不能重新生成另一条回答")
-    if claim.get("details", {}).get("_claim_token") != claim_token:
-        turn = next((item for item in repository.list_turns(user_id, task_id, revision=revision) if item.idempotency_key == effective_key), None)
-        result = repository.get_result_for_turn(user_id, turn.turn_id) if turn else None
-        if result is None:
-            raise HTTPException(status.HTTP_409_CONFLICT, "本次重新生成已发送，结果未知；禁止自动重复请求模型")
-        return _public_steering_payload(result.model_dump(mode="json"))
-
-    selection = ResultSelection.model_validate(source_turn.result_context.model_dump(include={"revision", "output_id", "representation_sha256", "item_ref"})) if source_turn.result_context else None
-    result = await _steer_task(
-        user,
-        task_id,
-        WorkspaceTurnIn(text=source_turn.text, external_api_confirmed=payload.external_api_confirmed, result_context=selection),
-        effective_key,
-        replay_context=(relevant_turns, prior_delta),
-    )
-    store.append_semantic_workspace_event(
-        user_id,
-        task_id,
-        event_id=f"message-regenerated:{result['result_id']}",
-        stage=claim["stage"],
-        event_type="message.regenerated",
-        summary="已重新生成回答",
-        details={"source_result_id": result_id, "steering_result_id": result["result_id"], "revision": revision},
-    )
-    return result
-
-
-async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context=None, replay_context=None):
+async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context=None):
 
     user_id = user["user_id"]
     task = _task_or_404(user_id, task_id)
@@ -3068,9 +3192,7 @@ async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context
     result_context = _resolve_result_context(user_id, task_id, payload.result_context) if payload.result_context else None
     relevant_turns = ()
     prior_delta = None
-    if replay_context is not None:
-        relevant_turns, prior_delta = replay_context
-    elif answer_context and answer_context.get("origin_turn_id"):
+    if answer_context and answer_context.get("origin_turn_id"):
         origin_result = _steering_repository().get_result_for_turn(user_id, answer_context["origin_turn_id"])
         if origin_result is None or origin_result.revision != task["active_revision"]:
             raise ValueError("原澄清回合已失效")
@@ -3094,7 +3216,7 @@ async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context
         verify_current()
         if answer_context:
             get_store().claim_workspace_answer(user_id, task_id, answer_context["answer_turn_id"])
-    if not answer_context and replay_context is None:
+    if not answer_context:
         business_result = next((result for turn in reversed(_steering_repository().list_turns(user_id, task_id, revision=int(task["active_revision"]))) if (result := _steering_repository().get_result_for_turn(user_id, turn.turn_id)) is not None and result.action in {SteeringAction.NORMALIZED_NO_MATERIAL_CHANGE, SteeringAction.REVISION_PROPOSAL}), None)
         if business_result:
             prior_delta = _steering_repository().get_delta(user_id, business_result.delta_id)
@@ -3102,6 +3224,12 @@ async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context
             if any(item is None for item in relevant_turns):
                 raise HTTPException(409, "原业务回合数据不完整")
     findings = _workspace_source_findings(user_id, task)
+    from src.memory.loader import conversation_memory_context
+    frozen_memory = TaskContextRepository(settings.webui_db_path).get_frozen(user_id, task_id, int(task['active_revision']))
+    # 历史追问只参考该版本已冻结的偏好，不把后来新增的记忆写入旧任务。
+    memory_context = conversation_memory_context(
+        [item.summary for item in frozen_memory.memories], frozen_memory.global_preferences, '',
+    ) if frozen_memory else ''
     request = SteeringRequest(
         owner_id=user_id,
         task_id=task_id,
@@ -3109,6 +3237,7 @@ async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context
         run_id=runtime.get("run_id") or task.get("run_id"),
         text=payload.text,
         idempotency_key=idempotency_key,
+        memory_context=memory_context,
         current_status=task["status"],
         status_summary=task.get("summary") or "",
         current_goal=task.get("objective_text") or "",
@@ -3129,15 +3258,21 @@ async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context
         ),
     )
     try:
+        from src.memory.conversation import memory_command
+        command = memory_command(payload.text, get_store(), _runtime_repository(), before_call=verify_current)
+        rewriter = command or (build_context_rewriter(request, before_call=verify_current) if selection or answer_context else build_context_rewriter(request))
+        if task['status'] == 'completed' and command is None:
+            from src.notifications import ResultNotificationRewriter
+            rewriter = ResultNotificationRewriter(get_store(), rewriter)
         service = ConversationSteering(
             _steering_repository(),
-            build_context_rewriter(request, before_call=verify_current) if selection or answer_context or replay_context is not None else build_context_rewriter(request),
+            rewriter,
             before_result_call=claim_answer if answer_context or selection else None,
         )
         result = await service.handle_turn(request)
     except (ValueError, GrantError) as exc:
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT if answer_context or replay_context is not None or payload.result_context or isinstance(exc, ResultContextConflict) else status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=status.HTTP_409_CONFLICT if answer_context or payload.result_context or isinstance(exc, ResultContextConflict) else status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
     except Exception as exc:
@@ -3262,7 +3397,7 @@ async def _apply_confirmed_steering_revision(
     if int(task["active_revision"]) != decision.base_revision:
         raise HTTPException(status_code=409, detail="活动版本已变化，请重新确认修改")
 
-    previous_runtime = _runtime_repository().get(
+    previous_runtime = _revision_runtime_context(
         user_id,
         task_id,
         decision.base_revision,
@@ -3460,6 +3595,8 @@ async def _apply_confirmed_steering_revision(
             objective_text=objective,
             output_formats=formats,
             change_summary=delta.normalized_text,
+            source_contract={**(get_store().get_source_contract(user_id, task_id, decision.base_revision) or {}),
+                             'notification_user_text': '\n'.join(item.text for item in original_turns)},
             expected_revision=decision.base_revision + 1,
             expected_cancel_generation=generation,
             transaction_hook=transaction_hook,
@@ -3526,7 +3663,7 @@ async def decide_steering_revision(
         raise HTTPException(409, "当前没有继续运行的原子步骤，请选择立即停止并按补充重新开始，或创建独立任务")
     if int(task["active_revision"]) != proposal.base_revision:
         raise HTTPException(status_code=409, detail="活动版本已变化，请重新确认修改")
-    previous_runtime = _runtime_repository().get(
+    previous_runtime = _revision_runtime_context(
         user_id,
         task_id,
         proposal.base_revision,
@@ -3747,6 +3884,7 @@ async def decide_steering_revision(
                 title=f"{task['title']}（独立任务）",
                 objective_text=new_objective,
                 upload_ids=task["upload_ids"],
+                source_contract={'notification_user_text': '\n'.join(item.text for item in original_turns)},
                 output_formats=formats,
                 provider=task["provider"],
                 model=task["model"],
@@ -4021,6 +4159,8 @@ async def publish_candidate_verification(
         ) from exc
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    from src.notifications import auto_workspace
+    await auto_workspace(get_store(), user["user_id"], task_id)
     return delivery.model_dump(mode="json", exclude={"user_id"})
 
 
@@ -4122,7 +4262,7 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
     current_revision = store.get_semantic_workspace_revision(user_id, task_id, payload.expected_active_revision)
     current_contract = store.get_source_contract(user_id, task_id, payload.expected_active_revision)
     current_refs = current_revision["source_refs"]
-    old_snapshot_ids = tuple(dict.fromkeys(ref["snapshot_id"] for ref in current_refs if ref.get("kind") in {"web_artifact", "connector_artifact"}))
+    old_snapshot_ids = tuple(dict.fromkeys(ref["snapshot_id"] for ref in current_refs if ref.get("kind") == "web_artifact"))
     selected_upload_ids = payload.upload_ids if payload.upload_ids is not None else tuple(ref["upload_id"] for ref in current_refs if ref.get("upload_id"))
     selected_snapshot_ids = payload.source_snapshot_ids if payload.source_snapshot_ids is not None else ((payload.source_snapshot_id,) if payload.source_snapshot_id else old_snapshot_ids)
     selected_output_ids = payload.delivery_output_ids if payload.delivery_output_ids is not None else tuple(ref["output_id"] for ref in current_refs if ref.get("kind") == "delivery_output")
@@ -4131,7 +4271,7 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
     effective_snapshot_id = effective_snapshot["snapshot_id"] if effective_snapshot else None
     current_web_contract = ({"goal_contract": current_contract.get("goal_contract") or {"objective": task["objective_text"]}} if current_contract else None)
     previous_goal = json.loads(json.dumps((current_contract or {}).get("goal_contract"), ensure_ascii=False))
-    previous_runtime = _runtime_repository().get(
+    previous_runtime = _revision_runtime_context(
         user_id,
         task_id,
         int(task["active_revision"]),
@@ -4423,7 +4563,7 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
             output_formats=formats,
             change_summary=payload.instruction,
             source_refs=effective_source_refs,
-            source_contract=frozen_source_contract,
+            source_contract={**(frozen_source_contract or {}), 'notification_user_text': payload.instruction},
             table_output_contracts=(
                 [
                     item.model_dump(mode="json")
@@ -4676,7 +4816,7 @@ async def refresh_task_source(
     selected_revision = store.get_semantic_workspace_revision(user_id, task_id, payload.expected_active_revision)
     if selected_revision is None:
         raise HTTPException(404, "任务修订不存在")
-    selected_snapshot_ids = tuple(dict.fromkeys(ref["snapshot_id"] for ref in selected_revision["source_refs"] if ref.get("kind") in {"web_artifact", "connector_artifact"}))
+    selected_snapshot_ids = tuple(dict.fromkeys(ref["snapshot_id"] for ref in selected_revision["source_refs"] if ref.get("kind") == "web_artifact"))
     target_snapshot_id = payload.target_source_snapshot_id
     if target_snapshot_id is None:
         if len(selected_snapshot_ids) != 1:
@@ -4720,31 +4860,27 @@ async def refresh_task_source(
             detail="活动版本已变化，请查看最新版本后再刷新来源",
         )
     try:
-        if scope.get('kind')=='connector':
-            from src.source_acquisition.connection_source import refresh_connector
-            attempt=await refresh_connector(repository,owner=user_id,key=refresh_key,scope=scope,purpose=old_attempt['purpose'],request_context=f'source-refresh:{task_id}:revision:{payload.expected_active_revision}:cancel:{cancel_generation}:target:{target_snapshot_id}',cancel_if=refresh_cancelled)
-        else:
-            attempt = await _source_acquisition_service().acquire(
-                owner_id=user_id,
-                idempotency_key=refresh_key,
-                request=SourceAcquisitionRequest(
-                    url=scope.get("normalized_url", old_attempt["normalized_url"]),
-                    query=scope.get("query", ""),
-                    time_range=scope.get("time_range", "any"),
-                    domains=tuple(scope.get("domains", ())),
-                    purpose=old_attempt["purpose"],
-                    scope_kind=scope.get("kind", "current_page"),
-                    page_limit=int(scope.get("page_limit", 1)),
-                    completeness_mode=completeness.get("mode", "exploratory"),
-                    required_valid_pages=completeness.get("required_valid_pages"),
-                    request_context=(
-                        f"source-refresh:{task_id}:revision:"
-                        f"{payload.expected_active_revision}:cancel:{cancel_generation}:target:{target_snapshot_id}"
-                    ),
+        attempt = await _source_acquisition_service().acquire(
+            owner_id=user_id,
+            idempotency_key=refresh_key,
+            request=SourceAcquisitionRequest(
+                url=scope.get("normalized_url", old_attempt["normalized_url"]),
+                query=scope.get("query", ""),
+                time_range=scope.get("time_range", "any"),
+                domains=tuple(scope.get("domains", ())),
+                purpose=old_attempt["purpose"],
+                scope_kind=scope.get("kind", "current_page"),
+                page_limit=int(scope.get("page_limit", 1)),
+                completeness_mode=completeness.get("mode", "exploratory"),
+                required_valid_pages=completeness.get("required_valid_pages"),
+                request_context=(
+                    f"source-refresh:{task_id}:revision:"
+                    f"{payload.expected_active_revision}:cancel:{cancel_generation}:target:{target_snapshot_id}"
                 ),
-                resume_unknown=payload.resume_unknown,
-                cancel_if=refresh_cancelled,
-            )
+            ),
+            resume_unknown=payload.resume_unknown,
+            cancel_if=refresh_cancelled,
+        )
     except AcquisitionConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     if refresh_cancelled():
@@ -4893,6 +5029,238 @@ async def refresh_task_source(
         "attempt": attempt,
         "revision": revision,
     }
+
+
+def _frozen_draft(user_id: str, task_id: str, revision: int, draft_id: str | None = None):
+    from src.agentic_runtime.draft_snapshot import read_draft
+
+    runtime = _runtime_repository().get(user_id, task_id, revision)
+    if not runtime or not runtime.get("workspace_root"):
+        raise HTTPException(404, "尚无初稿")
+    if draft_id is None:
+        events = _runtime_repository().list_events(user_id, task_id, revision)
+        draft_id = next((event["details"].get("draft_id") for event in reversed(events)
+                         if event["event_type"] == "draft.ready"), None)
+    if not draft_id:
+        raise HTTPException(404, "尚无初稿")
+    root = Path(runtime["workspace_root"])
+    try:
+        draft = read_draft(root, draft_id, owner_id=user_id, task_id=task_id,
+                           revision=revision, run_id=runtime["run_id"])
+    except (OSError, ValueError, KeyError):
+        raise HTTPException(409, "初稿已失效或内容校验未通过") from None
+    return root, draft
+
+
+@router.get("/tasks/{task_id}/draft")
+@guarded_response("preview", workspace_response_refs)
+def get_task_draft(task_id: str, revision: int | None = Query(default=None, ge=1), user=Depends(get_current_user)):
+    task = _task_or_404(user["user_id"], task_id)
+    revision = revision or int(task["active_revision"])
+    accepted = (get_store().get_source_contract(user["user_id"], task_id, revision) or {}).get("owner_acceptance")
+    if accepted:
+        revision = accepted["source_revision"]
+    try:
+        root, draft = _frozen_draft(user["user_id"], task_id, revision, accepted["draft_id"] if accepted else None)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return {"draft": None}
+        raise
+    import csv
+    import io
+    from itertools import islice
+    previews = {}
+    tables = {}
+    truncated = {}
+    scopes = {}
+    for item in draft["files"]:
+        name = item["filename"]
+        path = root / "drafts" / draft["draft_id"] / name
+        if item["format"] in {"json", "csv", "markdown"}:
+            with path.open("r", encoding="utf-8", errors="replace") as stream:
+                text = stream.read(16001)
+            truncated[name] = len(text) > 16000
+            previews[name] = text[:16000]
+            if item["format"] == "csv":
+                text = previews[name]
+                try:
+                    rows = list(islice(csv.reader(io.StringIO(text.lstrip("\ufeff")), strict=True), 52))
+                    # 达到字符上限时末行可能被截断，不把它呈现为完整数据行。
+                    tables[name] = (rows[:-1] if truncated[name] and len(rows) < 52 else rows)[:51]
+                    truncated[name] = truncated[name] or len(rows) > 51
+                except csv.Error:
+                    pass  # 截断到引号字段内部时保留有界原文预览。
+        elif item["format"] == "docx":
+            # 复用正式文档预览解析，不把排版提取称为原件还原。
+            document = _file_document_preview(path, offset=0, limit=51, search="")
+            text = "\n\n".join(part["content"] for part in document["items"])
+            previews[name] = text[:16000]
+            truncated[name] = len(text) > 16000 or document["total"] > 51
+            scopes[name] = "文档文字与表格内容预览；原始排版见下载文件"
+        elif item["format"] == "xlsx":
+            from openpyxl import load_workbook
+            workbook = load_workbook(path, read_only=True, data_only=True)
+            try:
+                sheet = workbook.worksheets[0]
+                rows = [["" if value is None else str(value) for value in row]
+                        for row in sheet.iter_rows(max_row=min(sheet.max_row or 1, 52), max_col=min(sheet.max_column or 1, 50), values_only=True)]
+                tables[name] = rows[:51]
+                truncated[name] = (sheet.max_row or 0) > 51 or (sheet.max_column or 0) > 50 or len(workbook.worksheets) > 1
+                # 行列上限不足以限制长单元格；整个预览共用字符预算。
+                budget = 16000
+                bounded_rows = []
+                for row in tables[name]:
+                    bounded = []
+                    for cell in row:
+                        if len(cell) > budget:
+                            bounded.append(cell[:max(0, budget - 1)] + ("…" if budget else ""))
+                            truncated[name] = True
+                        else:
+                            bounded.append(cell)
+                        budget = max(0, budget - len(cell))
+                    bounded_rows.append(bounded)
+                    if not budget:
+                        truncated[name] = True
+                        break
+                tables[name] = bounded_rows
+                scopes[name] = f"工作表：{sheet.title}；最多前 50 数据行、50 列，其余工作表见完整文件"
+            finally:
+                workbook.close()
+    events = _runtime_repository().list_events(user["user_id"], task_id, revision)
+    created_at = next((event.get("created_at") for event in events
+                       if event["event_type"] == "draft.ready" and event["details"].get("draft_id") == draft["draft_id"]), None)
+    return {"draft": {
+        "draft_id": draft["draft_id"], "revision": revision, "status": "unverified",
+        "created_at": created_at,
+        "acceptance_pending": bool(accepted and task["status"] != "completed"),
+        "review_waiting": bool(task["status"] == "needs_input" and task["active_revision"] == revision
+                               and (task.get("question") or {}).get("draft_review_id") == draft["draft_id"]
+                               and not (task.get("question") or {}).get("draft_review_approved")),
+        "files": [{"filename": item["filename"], "format": item["format"], "size_bytes": item["size_bytes"],
+                   "preview": previews.get(item["filename"]),
+                   "preview_table": tables.get(item["filename"]),
+                   "preview_truncated": truncated.get(item["filename"]),
+                   "preview_scope": scopes.get(item["filename"]),
+                   "page_preview_url": (f"/api/semantic-workspace/tasks/{task_id}/drafts/{draft['draft_id']}/preview/{index}?revision={revision}"
+                                        if item["format"] == "pdf" else None),
+                   "download_url": f"/api/semantic-workspace/tasks/{task_id}/drafts/{draft['draft_id']}/files/{index}?revision={revision}"}
+                  for index, item in enumerate(draft["files"])],
+    }}
+
+
+@router.get("/tasks/{task_id}/drafts/{draft_id}/preview/{index}")
+@guarded_response("preview", workspace_response_refs)
+def preview_draft_pdf(task_id: str, draft_id: str, index: int, revision: int = Query(ge=1),
+                      page: int = Query(default=1, ge=1), user=Depends(get_current_user)):
+    import base64
+    from src.parsers.pdf_render import render_pdf_page_png, validate_pdf_source
+    _task_or_404(user["user_id"], task_id)
+    root, draft = _frozen_draft(user["user_id"], task_id, revision, draft_id)
+    if not 0 <= index < len(draft["files"]) or draft["files"][index]["format"] != "pdf":
+        raise HTTPException(404, "PDF 初稿不存在")
+    raw = (root / "drafts" / draft_id / draft["files"][index]["filename"]).read_bytes()
+    try:
+        count = validate_pdf_source(raw)
+        if page > count:
+            raise HTTPException(422, "页码超出初稿范围")
+        image = render_pdf_page_png(raw, page_number=page, dpi=100)
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise HTTPException(422, "该页暂时无法预览；初稿文件保留，可以下载查看") from exc
+    return {"image": "data:image/png;base64," + base64.b64encode(image).decode("ascii"),
+            "page": page, "page_count": count}
+
+
+class AcceptDraftIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1)
+    draft_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    accept_unverified: Literal[True]
+
+
+class SendResultIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1)
+    channel: Literal["email", "slack"]
+    recipients: list[str] = Field(default_factory=list, max_length=20)
+    include_body: bool = True
+    include_attachments: bool = True
+    output_ids: list[str] | None = Field(default=None, max_length=20)
+
+
+@router.post("/tasks/{task_id}/notify")
+async def send_task_result(task_id: str, payload: SendResultIn, user=Depends(get_execution_user)):
+    from src.notifications import Intent, send_workspace
+    _task_or_404(user["user_id"], task_id)
+    intent = Intent(channel=payload.channel, recipients=payload.recipients,
+                    body=payload.include_body, attachments=payload.include_attachments)
+    try:
+        return await send_workspace(get_store(), user["user_id"], task_id, payload.expected_revision, intent, payload.output_ids)
+    except (ValueError, PermissionError, FileNotFoundError):
+        raise HTTPException(409, "无法发送：请核对任务版本、接收人及正式文件权限") from None
+
+
+class ContinueDraftReviewIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_revision: int = Field(ge=1)
+    draft_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@router.post("/tasks/{task_id}/draft/verify")
+async def continue_draft_review(task_id: str, payload: ContinueDraftReviewIn, user=Depends(get_execution_user)):
+    from filelock import Timeout
+    from src.api.execution import execution_lock
+    owner = user["user_id"]
+    _task_or_404(owner, task_id)
+    store = get_store()
+    try:
+        with execution_lock(store, owner, "workspace", task_id):
+            root, draft = _frozen_draft(owner, task_id, payload.expected_revision, payload.draft_id)
+            runtime = _runtime_repository().get(owner, task_id, payload.expected_revision)
+            session = runtime.get("session_file") if runtime else None
+            # 缺少检查点时不偷偷重新执行；用户仍可接受初稿或明确创建新版本。
+            if not session or not (root / session).is_file() or (root / "session").resolve() not in (root / session).resolve().parents or (root / session).suffix.lower() != ".jsonl":
+                raise ValueError("原执行会话不可恢复；可接受初稿，或修改要求后创建新版本")
+            enqueue = store.approve_workspace_draft_review(owner, task_id, payload.expected_revision,
+                                                          draft["draft_id"], runtime["run_id"])
+    except Timeout as exc:
+        raise HTTPException(status_code=409, detail="任务仍在结束当前执行，请稍后检查状态") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if enqueue:
+        get_semantic_workspace_manager().enqueue(owner, task_id)
+    return {"status": "accepted", "revision": payload.expected_revision}
+
+
+@router.post("/tasks/{task_id}/draft/accept")
+async def accept_task_draft(task_id: str, payload: AcceptDraftIn, user=Depends(get_execution_user)):
+    from src.api.workspace_draft_acceptance import DraftAcceptanceConflict, accept_draft
+
+    _task_or_404(user["user_id"], task_id)
+    try:
+        result = await accept_draft(store=get_store(), manager=get_semantic_workspace_manager(),
+                                  output_root=Path(settings.semantic_execution_root), owner_id=user["user_id"],
+                                  task_id=task_id, source_revision=payload.expected_revision, draft_id=payload.draft_id)
+        from src.notifications import auto_workspace
+        await auto_workspace(get_store(), user["user_id"], task_id)
+        return result
+    except DraftAcceptanceConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except (ValueError, OSError, RuntimeError, ExecutionLockTimeout) as exc:
+        # 不把解析器、文件路径或原始异常暴露给前端。
+        raise HTTPException(409, "初稿发布尚未确认完成，初稿和已有记录仍保留。请先检查处理状态；如有待发布记录，可继续同一次发布，不必重跑任务。") from exc
+
+
+@router.get("/tasks/{task_id}/drafts/{draft_id}/files/{index}")
+@guarded_response("export", workspace_response_refs)
+def download_task_draft(task_id: str, draft_id: str, index: int,
+                        revision: int = Query(ge=1), user=Depends(get_current_user)):
+    _task_or_404(user["user_id"], task_id)
+    root, draft = _frozen_draft(user["user_id"], task_id, revision, draft_id)
+    if not 0 <= index < len(draft["files"]):
+        raise HTTPException(404, "初稿文件不存在")
+    item = draft["files"][index]
+    return FileResponse(root / "drafts" / draft_id / item["filename"], filename=item["filename"],
+                        media_type="application/octet-stream", headers={"X-Mangrove-Artifact-Status": "unverified-draft"})
 
 
 @router.get("/tasks/{task_id}/candidates/{artifact_id}")
@@ -5645,7 +6013,7 @@ def _frozen_canvas_sources(user_id, task_id, selected, manifest=None):
             sources.setdefault(ref["upload_id"], {"sha256":ref["sha256"]})
         if ref.get("kind") == "delivery_output":
             sources[ref["output_id"]] = {"sha256":ref["sha256"],"delivery_ref":ref}
-        if ref.get("kind") in {"web_artifact", "connector_artifact"}:
+        if ref.get("kind") == "web_artifact":
             artifact = SourceAcquisitionRepository(settings.webui_db_path).get_artifact(user_id, ref["artifact_id"])
             if not artifact or artifact["snapshot_id"] != ref.get("snapshot_id") or artifact["content_sha256"] != ref.get("sha256"):
                 raise HTTPException(409, "冻结网页来源身份不一致")
@@ -5988,13 +6356,12 @@ def _write_frozen_source_exports(archive, user_id, task_id, selected, sources, t
                         {key: failure.get(key) for key in ("request_url", "final_url", "error_code", "failed_at")}
                         for failure in snapshot.get("failures", [])
                     ]
-                scope = repository.get_snapshot(user_id,snapshot_id,include_preview=False)['allowed_scope']
-                path = Path(temporary) / (f"{len(entries)}" + (".jsonl" if web["media_type"]=="application/x-ndjson" else ".json" if web["media_type"]=="application/json" else ".html"))
+                path = Path(temporary) / f"{len(entries)}.html"
                 path.write_bytes(bytes(web["content_blob"]))
                 metadata = {
-                    "artifact_id": artifact_id, "original_name": (str(web["title"] or artifact_id) + path.suffix),
+                    "artifact_id": artifact_id, "original_name": f"{web['title'] or artifact_id}.html",
                     "media_type": web["media_type"], "sha256": source["sha256"], "size_bytes": web["size_bytes"],
-                    "provenance": {**{key: web[key] for key in ("snapshot_id", "request_url", "final_url", "read_at")}, **({"source_kind":"connector","connection_id":scope['connection_id'],"connection_version":scope['connection_version']} if scope.get('kind')=='connector' else {"source_kind":"web_artifact"})},
+                    "provenance": {key: web[key] for key in ("snapshot_id", "request_url", "final_url", "read_at")},
                 }
             elif source.get("delivery_ref"):
                 from src.source_acquisition.reuse import resolve_frozen_source
@@ -6178,5 +6545,5 @@ def storage_usage(user=Depends(get_current_user)):
         "delivery_bytes": output_bytes,
         "total_bytes": upload_bytes + output_bytes,
         "retention": "用户删除前永久保留；回收站保留 30 天",
-        "calculated_at": datetime.now().isoformat(timespec="seconds"),
+        "calculated_at": beijing_now().isoformat(timespec="seconds"),
     }

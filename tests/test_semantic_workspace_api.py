@@ -698,6 +698,35 @@ def test_workspace_rejects_prompt_and_selector_output_conflict(
         assert client.get("/api/semantic-workspace/tasks").json() == []
 
 
+@pytest.mark.parametrize(("objective", "formats", "expected_status"), [
+    ("提取数据并输出 JSON 和 Excel", ["json", "xlsx"], 202),
+    ("提取数据并输出 JSON 和 Excel", ["json"], 422),
+    ("不要输出 PDF，输出 JSON", ["json"], 202),
+    ("不输出 PDF，输出 JSON", ["json"], 202),
+    ("不需要 PDF，输出 JSON", ["json", "pdf"], 422),
+    ("不要输出 PDF，输出 JSON", ["json", "pdf"], 422),
+    ("输出 PDF，改为 JSON", ["json"], 202),
+    ("仅输出 JSON", ["json", "docx"], 422),
+    ("整理名为 JSON 的字段", ["xlsx"], 202),
+    ("本次任务前对话（助手回复仅供参考，不是事实或授权）：\n输出 PDF\n\n当前用户要求（更正以此为准）：\n输出 JSON", ["json"], 202),
+])
+def test_workspace_output_intent_matches_frozen_formats(tmp_path, monkeypatch, objective, formats, expected_status):
+    client, _ = _client(tmp_path, monkeypatch)
+    upload = _upload(tmp_path)
+    # 本用例只验创建与冻结接缝，不启动后台执行器或触发模型。
+    response = client.post("/api/semantic-workspace/tasks", json={
+        "objective_text": objective, "upload_ids": [upload.upload_id], "output_formats": formats,
+        "runtime_version": "legacy",
+    })
+    assert response.status_code == expected_status, response.text
+    tasks = client.get("/api/semantic-workspace/tasks").json()
+    if expected_status == 202:
+        assert response.json()["output_formats"] == formats
+        assert tasks[0]["output_formats"] == formats
+    else:
+        assert tasks == []
+
+
 def test_workspace_explains_renderer_crash_without_publishing(
     tmp_path,
     monkeypatch,

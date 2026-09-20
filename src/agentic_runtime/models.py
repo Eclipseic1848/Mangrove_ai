@@ -246,6 +246,19 @@ class VerificationCheck(BaseModel):
     summary: str = Field(min_length=1, max_length=500)
 
 
+class LessonAssessment(BaseModel):
+    """独立复核教训的实际应用及对应风险，不以任务成功替代。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_ref: str = Field(pattern=r"^lesson:[^:]{1,160}:[0-9a-f]{64}$")
+    adopted: bool
+    risk_passed: bool
+    candidate_quote: str = Field(max_length=120)
+    source_quote: str = Field(max_length=120)
+    reason: str = Field(min_length=1, max_length=100)
+
+
 class SemanticDecision(BaseModel):
     """独立语义模型只负责判断，不取得发布权限。"""
 
@@ -260,6 +273,18 @@ class SemanticDecision(BaseModel):
     # JSON 数组无法转 tuple，会造成「候选语义验证未形成结论」的既有缺陷
     # （#15 纵切面真实暴露）。
     missing_requirements: list[str] = []
+    lesson_assessments: list[LessonAssessment] = Field(default_factory=list, max_length=3)
+
+    @field_validator("lesson_assessments", mode="before")
+    @classmethod
+    def validate_optional_lesson_assessments(cls, value: Any) -> Any:
+        # 可选学习材料损坏只放弃学习，不能让合格的业务结果变成失败。
+        if not isinstance(value, list) or len(value) > 3:
+            return []
+        try:
+            return [LessonAssessment.model_validate(item) for item in value]
+        except ValueError:
+            return []
 
     @field_validator("missing_requirements", mode="before")
     @classmethod

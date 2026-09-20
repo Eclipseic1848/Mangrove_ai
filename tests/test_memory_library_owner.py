@@ -225,7 +225,7 @@ def test_real_consumers_use_execution_owner_and_private_draft_can_be_verified(tm
         calls.append(('template', messages))
         return json.dumps(dict(title='B_TEMPLATE', keywords=['common'], body='B_TEMPLATE_BODY'))
     async def check_model(messages, **kwargs):
-        return json.dumps(dict(score=90, issues=[], summary='通过'))
+        return json.dumps(dict(score=90, passed=True, issues=[], summary='通过'))
     async def consumer_model(messages, **kwargs):
         calls.append(('consumer', messages))
         return json.dumps(dict(intent='common', keywords=['common'], data_type='generic', analysis_type='summary'))
@@ -360,7 +360,7 @@ def test_checker_high_score_collection_failure_does_not_credit_lesson(scope, tmp
     else:
         entry = source
     async def quality_model(*args, **kwargs):
-        return json.dumps(dict(score=95, issues=[], summary='报告结构完整'))
+        return json.dumps(dict(score=95, passed=True, issues=[], summary='报告结构完整'))
     async def lesson_model(*args, **kwargs):
         return json.dumps(fields, ensure_ascii=False)
     monkeypatch.setattr(checker, 'achat', quality_model)

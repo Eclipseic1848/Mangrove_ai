@@ -1,183 +1,283 @@
 # Mangrove 零上下文交接
 
-> 状态：`P1_01_ENGINEERING_COMPLETE / REMEDIATION_IN_PROGRESS`
+> 更新：2026-09-20。状态：**本轮新手引导及验收修正已本机更新，等待用户验收；整个 P1 尚未完成。**
 >
-> 最后核验：2026-09-12
->
-> 公开仓库：`Eclipseic1848/Mangrove_ai`
+> 本文件已重整，删除重复过程流水、失效 PID、旧构建入口和被后续结果覆盖的阻塞描述。
+> 用户随后明确授权将最新代码与 README 等文档同步 GitHub；本轮同步现有开发分支，不重启、不清理运行数据、不覆盖受保护的 main。
 
-本文件写给完全没有上下文的新会话。先读 `AGENTS.md`、`docs/status/current.md`、`CONTEXT.md`，
-再现场读取 GitHub、Git 与运行态。历史计划是证据，不是当前状态。
+## 1. 新会话先知道这几件事
 
-## 0. 当前接手位置：#141/#186 本地验收通过；#138 保持暂停
+1. 产品是 Mangrove（howso@Mangrove），面向普通用户的统一数据任务平台；主工作台是 `/data-prep`，产品入口是 **8088**，5173 仅为前端开发。
+2. 用户正在逐模块人工验收。最近做完的是按角色的新手引导，最后又修了反馈教程越界、设置页教程位置、删除工作台旧帮助入口。**这些已经更新，不要再次当成未实施任务。**
+3. 新会话先只读核对下面的现场事实，再根据用户的新反馈处理。没有尚在执行的本轮测试或必修代码阻塞；不要自行启动历史整改地图或 P2。
+4. 本轮公开同步涉及多轮模块改动；冻结评测 WIP、本机审计、原型、品牌图片和运行数据仍保留本机。新会话先查 Git 状态，**不能切分支、stash、reset、clean、整仓覆盖或批量暂存。**
+5. 不打断用户任务。仅前端变更优先更新静态资源，不需要重启后端。后端源码会被本机监督进程监听，直接改 `src/` 可能自动触发重载。
+6. 用户偏好：中文、简明、沿用现有设计、最小改动、先说明修改及验证范围，不反复询问已确认的问题；但不能把“继续”解释为无限外发、删除、迁移或 Git 发布授权。
 
-#139 已完成、合并并关闭。真实 GitHub HTTPS、MySQL 8.0 和 PostgreSQL 16 均通过隔离工程验证；两名 Owner 使用不同只读账号、表和数据，重复水位经安全断点续读完整，跨 Owner 连接/快照与数据库权限隔离，DDL/DML 和公开 SQL 输入拒绝，密码未进入响应或产物。生产连接、生产迁移、部署和发布均未执行。
+权威读取顺序：`AGENTS.md` → 本交接 → `docs/status/current.md` 的最新对应模块条目 → `CONTEXT.md` → 相关 ADR/规格及实际代码。
+`current.md` 和历史计划有注明时间的分阶段记录；其“未部署”等旧过程不能推翻同模块后续上线结论。发现冲突时查代码/运行事实，不静默选择方便的版本。
 
-#138 仍为 `PAUSED_BY_USER`，普通“继续”不能解除。#140 已关闭；#141 与 #186 已完成本地工程和用户验收，PR #187 已合并，PR #183 与 Issue 最终状态须现场查询 GitHub。真实站点、生产 Cookie/Secret、生产数据库、部署和目标服务器仍是独立人工门。
+## 2. 当前现场：本次交接重新核实
 
-沿用现有 checkout；保留其他任务与用户改动，仅精确暂存本票文件。工作树中的规划文档、冻结评测数据及本机脚本可能有独立工作，不能清理或整体提交。
-主会话使用 GPT-5.6-Sol high；需要委派时固定使用 GPT-5.6-Sol medium，实际档位须核会话记录。
-Git 权限按当前用户授权及 AGENTS.md 执行；真实秘密、生产迁移/恢复、发布与不可逆操作保留独立门。
+| 项目 | 现场事实 |
+| --- | --- |
+| 本地分支 | `codex/issue-140-universal-context` |
+| 同步前 HEAD | `9eba189f68092c63daed57e77f3a0cd9aa171f41`；当前提交须以 `git rev-parse HEAD` 核实，见文末同步记录 |
+| 公开远端 | `origin = Eclipseic1848/Mangrove_ai`；另有两个 legacy 远端，不能误推 |
+| 远端 main | `ec4cf0593e7e858bb0ddb5b8a47af2fc9ed3302c`，本次用 `git ls-remote` 核实 |
+| 远端发布 | 本次远端 Tag 列表为空；GitHub Release 列表为空 |
+| 本机前端入口 | `frontend/dist/index.html` 引用 `index-K_CrxzO5.js`、`index-lCKhDMDV.css` |
+| 服务 | 8088、5173 均监听；8088 `/api/health` 返回 `ok=true` |
+| 进程快照 | 8088：10800，父32608；5173：33288，父27788。仅为核验快照，**禁止直接据此杀进程** |
+| 数据库 | 历次已批准迁移记录：WebUI 到 `webui_0022`、Scheduler 到 `scheduler_0004`。本次交接未重新读取数据库版本或运行任务，不能当作新的迁移/停机预检 |
+| 巡检 | 最近批准上线时模板巡检、Cookie 巡检均关闭，并按用户要求保持关闭。本次未重新查配置，更未开启 |
 
-下面是 2026-09-04 的历史交接记录，不是当前 Issues 或服务状态。
+本地 HEAD 不代表全部运行代码，8088 也不自动代表远端 main；必须区分 **HEAD、未提交源码、实际静态构建、运行后端**。
+GitHub 同步阶段已 fetch 核实 main 与当前远端分支；不执行 pull、PR、Tag、Release 或服务重启。提交/推送结果以本轮末尾同步记录和现场 Git 查询为准。
 
-## 1. 历史工作目标（2026-09-04）
+**main 合并阻塞**：远端 main 与本地的 `scheduler_0002/0003`、`webui_0019/0020/0021` 同号不同内容。独立分支可保存源码快照，但不是 main 的可直接升级版本。后续必须对两条既有迁移链做兼容设计、两类数据库副本演练及回退验证；不能直接合并 manifest、改号改哈希绕过检查，更不能用旧库覆盖原库。
 
-本轮目标是自主完成 GitHub 当时剩余的 Issues，执行相称验证、PR/CI/受保护合并与关闭，然后清理
-过期产物并留下零上下文交接。该目标已完成：2026-09-04 现场查询 Open Issues 为 0。
+## 3. 当前任务已经完成什么
 
-这不是“整个 P1 已完成”。完成的是 P1 决策地图与 P1-01 匿名网页首个纵切片；P1-02～P1-05、
-HTTP/数据库/认证来源、真实用户验收与发布仍是后续路线。
+### 3.1 最新交付：按角色的新手引导
 
-## 2. 已完成什么
+已接入：
 
-### GitHub 收口
+- 概览；工作台新任务/已有任务；自动化计划/运行记录；
+- 模板库/教训库/管理员巡检报告；个人/全局记忆；
+- 设置的个人、模型、采集账号、平台、扩展治理、诊断分区；
+- 运营六个子页；反馈管理；用户管理；历史对话兼容入口。
 
-- #83～#98 已全部关闭；父票 #81 已在全部决策子票完成后关闭。
-- CoreMind 0.7.1 薄 Adapter：PR #107 合入
-  `main@12170eebf1d2f4bad5c86c2a6c38d0bef0a4f998`，关闭 #97。
-- 锁定 CoreMind 身份：源码 `75b706a20ca4cdddef71cbcc0dd90b8b424ddd99`；wheel
-  `3fa5301c444da2e3bdaca51bd4800b1bdbcb6dc68e3abef4b39197bde3625e74`；Worker
-  `ba4590a68841e520dcd3a91e206ca9e346d10fd9a23b3ed4c560f59707cfa71e`；Protocol 2.0 fingerprint
-  `sha256:94c8e093979be73a13ecc1090167454567d0602a70b065ceffeed4cb1eca4ce3`。完整身份见 PR #107。
-- P1-01 工程收口：PR #110 合入
-  `main@5adeacf3aecbd55bd5fe771a35d25a4caa195af3`，关闭 #98；随后以证据评论关闭 #83 与 #81。
-- PR #110 minimum-ci run `33925622082`：`backend-fast`、`frontend-build`、`secret-scan` 全绿。
+行为：
 
-### 产品与工程结果
+- 复用已安装的 React Joyride 3.2.0，没有新增依赖或后端表。
+- 用户、角色、页面/子页独立；首次就绪后自动播放，完成/跳过后不再自动打扰，页面始终保留“新手教程”重播。
+- 进度在当前同源浏览器 localStorage；换设备/浏览器或清站点存储会重新播放，不承诺跨设备同步。
+- 普通用户不获得管理页面引导，管理员/超管步骤按现有权限过滤；引导不能充当后端授权。
+- 遮罩阻断误点、键盘焦点陷阱、Esc/方向键、主题、窄屏和减少动画已处理。
+- 等数据加载；输入时不抢焦点、失焦后重试；给业务弹窗让位；Token首次读取失败不把缺失步骤误记完成。
+- **验收修正已上线**：
+  1. 反馈第3步目标很高，旧定位把气泡挤到窗口外；红测实测 y=-261px。共用定位启用两轴视口避让。
+  2. 设置页把教程和刷新放入同一个右侧操作组，修复原397px间距。
+  3. 工作台右上角旧“帮助”入口及专属弹窗/状态已删除；新手教程、四分类任务示例及填入需求行为保留。
 
-- `/data-prep` 保持统一数据工作台：文件/来源、自然语言任务、预览、任务修订、追问、模板/记忆、
-  Candidate、正式 Delivery、预览与下载能力继续沿同一生命周期工作。
-- 受控匿名网页可幂等形成唯一正式 Delivery；Publisher 重启只恢复发布，不重复抓取、模型调用或
-  Delivery；Owner B 无法读取、恢复、取消、重试、验证、发布、预览、下载或复用 Owner A 的事实。
-- CoreMind 通过 `AgentKernel` 薄 Adapter 接入；Mangrove 继续拥有 Owner、TaskRevision、模型选择、
-  外发确认、Verifier、Publisher 和正式 Delivery 权威。
-- 工作记录默认折叠，展示时间、实际行动、工具、模型、Token 与 unknown，不展示逐字思维链、
-  Cookie、Secret、系统 Prompt、宿主路径或原始大日志。
-- 启动前数据库迁移预检会只读检查 WebUI/Scheduler schema；落后时给出受源 SHA 保护的显式命令并
-  失败关闭。`start_all.bat` 继续是本机忽略文件，不进入 Git。
-- 已保留 Agent-Reach 调研。结论是吸收渠道目录、后端路由、真实体检与修复处方；具体开源工具按
-  精确版本逐个进入现有 Capability/Source 边界，不整包安装，不自动启用 OpenCLI 或
-  xiaohongshu-mcp。
+代码入口：
 
-### 验证证据
+- `frontend/src/components/onboarding/PageGuide.tsx`：触发、进度、定位、焦点、角色生命周期。
+- `frontend/src/components/onboarding/guides.ts`：按页面配置及角色过滤。
+- `frontend/src/components/onboarding/guide.css`：尺寸、动画、减少动画。
+- 各页面操作区接 `PageGuide`，部分区域用 `data-guide` 锚点、`ready` 或 `data-guide-loading` 等待异步数据。
+- 工作台入口移除在 `SemanticWorkspacePage.tsx`；设置布局在 `Settings.tsx`。
 
-- Issue #98 后端组合：`235 passed, 1 skipped`。
-- 后端固定种子全量：`2352 passed, 13 skipped, 1 deselected`。唯一 deselect 是其他任务正在修改的
-  G1 freeze 自校验；未覆盖或重建该资产。
-- 前端正式构建：exit 0；完整 Playwright：`77 passed`，其中统一数据工作台 40 项并含明暗主题 axe。
-- 固定 Pi/CoreMind 0.7.1 golden：`1 passed`，覆盖运行中取消、无迟到事件与资源清理。
-- UTF-8：1249 个文件通过；`git diff --check` 通过。
-- Standards + Spec 双轴终审：无问题。
-- `start_all.bat --no-pause`：exit 0。最后复核时 8088、5173、8080、3002、1200 均监听；8088
-  与 5173 返回 HTTP 200；`/api/health` 返回 `{"ok":true,"service":"mangrove-webui"}`。
+最终证据：
 
-精确根命令保留在 `docs/status/current.md` 第 0.1 节。本轮结论是 `ENGINEERING_VERIFIED`，不是
-真实外部网页/Provider 用户验收、生产资格或发布证明。
+- TypeScript 检查、Vite 构建通过；保留已有大包警告，不声称零告警。
+- 34项完整引导回归、2项工作台深浅主题回归通过。
+- 更新8088后5项定向检查通过：反馈逐步/滚动/改变视口、设置按钮、旧帮助移除/示例保留、弹窗让位、键盘/窄屏无障碍。
+- 视口覆盖390/1440/2554px宽及缩小至600px高，最终桌面/手机截图已查看。
+- 以上用合成账号和全部API拦截，未读取真实反馈、未执行真实任务。**工程测试通过不是用户验收完成，也不是全站业务回归。**
+- 最后修正只更新前端静态入口、保留旧资源，没有重启后端。
 
-### 清理结果
+### 3.2 本会话前段已交付的模块摘要
 
-已确认并移入 Windows 回收站：
+具体证明、边界与未提交文件以 `docs/status/current.md` 最新对应章节为准；本次交接未重跑这些模块。
 
-- `.scratch/**`：旧 P0/P1 草稿、临时数据库副本、CI/PR 载荷与可抛弃原型；
-- `test-results/**`：旧 Playwright 失败上下文；
-- `frontend/premium-audit.json`：旧审计生成物。
+| 模块 | 已完成、不可退回旧设计的行为 | 证据/限制 |
+| --- | --- | --- |
+| 工作台文档执行 | 区分检索授权与分批读取，拒绝低置信度单页冻结；范围拒绝不再误报解析异常 | 真实Pi/DeepSeek合成7页PDF第5单JSON及独立校验通过；不是重跑用户原PDF |
+| 初稿与核对 | 初稿后暂停，所有者决定接受或继续同Run核对；刷新不能自动批准 | ADR-0047；真实探针只验证暂停与恢复首响应，未证明完整后续核对 |
+| 发送/停止与追问 | 同一位置40px圆形箭头/方块纯图标，保留无障碍名称和取消确认；追问可存储、恢复、确认修改后新版本 | 追问58项后端工程回归；不自动读取完整结果/全部聊天，真实多轮质量未全面验收 |
+| 工作台展示 | Logo、页眉、时间戳、复制/点赞/点踩/Token、历史用量恢复、用量入口强调、清理记录入口已修 | 清理仍需用户明确操作，不能进入页自动继续旧删除 |
+| 自动化任务 | 四档分页、历史弹窗换行与刷新体验、模型绑定、持久运行状态、结果通知、北京时间计划 | 最终模拟执行/模型/邮件验证；不声称真实定时和邮件全链路验收 |
+| 模板/教训/巡检 | 自动匹配与冻结、正式交付后幂等学习回执、四类任务覆盖、权限/搜索/巡检适配；已显式迁移webui_0022 | 接受初稿不算QA成功；真实语义学习/巡检质量仍未全量验收；巡检保持关闭 |
+| 记忆 | 个人/全局分区、搜索分页、编辑/草稿保护、范围隔离；明确“记住/忘记”命令，跨新任务参考、历史快照保持 | 本地关键词与预算，不是向量检索；隔离真实Qwen验证保存/召回/优先级/隔离/删除，不代表所有模型 |
+| 运营审计 | 命名、分页默认10/20/50/100、热度矩阵、统一页眉；按用户Token统计/模型明细/筛选排序/CSV与XLSX | 仅可信调用账本，缺失保持未知；权限复用运营规则，非真实账单对账 |
+| 参考计价 | 仅平台支持型号；本地/托管私有只计Token不计价；中国区官方原价配置 | 默认7款适用报价，其余未估价；美元仅示例汇率换算，缓存/峰谷等不作为实际账单 |
+| 反馈管理 | 原任务/用户问题/智能体输出按管理员审计查看；仅点踩需要处理；详情填写结论后选择处理结果 | 点赞无处理动作；待处理仅未处理点踩；平台总任务数与点踩率口径已改 |
+| 用户管理/导航 | 草稿/失败恢复、确认、四档分页、权限与禁用提示、移动端；管理顺序运营审计→反馈管理→用户管理→设置 | 模拟账号工程验证，不修改真实账号；不存在“高级用户”权限角色 |
 
-共约 118 MB，可从回收站恢复。没有删除源代码、测试、ADR、规格、正式执行证据、生产数据库、
-备份或他人未提交改动。
+## 4. 当前卡在哪里／尚不能宣布完成什么
 
-## 3. 当前卡在哪
+**最新引导修正没有已知必修阻塞，当前停点是用户验收。** 不要把已解决的“校验源码身份不匹配”“等待迁移0022”“旧帮助冲突”恢复成当前阻塞。
 
-没有阻塞，也没有未完成的 GitHub Issue。
+未关闭的总体资格缺口：
 
-以下事项故意不在本轮完成：
+1. 最新UI仍需用户在其真实浏览器/缩放/数据状态下验收；尚未完成全部浏览器、全部业务旅程与负载回归。
+2. 初稿暂停之后“完整继续核对到正式交付”、文件结果复杂追问的真实模型质量尚无全面验收结论。
+3. 自动化真实时钟触发、指定模型、结果通知/邮件端到端需要单独明确真实计划与收件范围。
+4. 自动学习和巡检有模拟/隔离证据，不代表所有模型的提炼、语义合并质量。**用户保留物理删除策略，但巡检开关仍由用户决定恢复。**
+5. 目标Linux/GPU部署、TLS、生产恢复/告警送达/持续负载、安全与真实用户黄金旅程未全部完成。历史50请求突发P95约4.79–5.08秒，不是达成2秒目标。
+6. 依赖风险与构建大包告警仍在；历史扫描不代表当前零漏洞。历史Node限期风险有2026-09-25复查节点，启动相关任务时重新核实。
+7. 大量本地WIP没有整理到远端main；本机可用不等于可发布制品。未确定下一版本号、发布日期或上线环境。
 
-- Issue #98 没有调用真实外部网页或真实 Provider，没有新增生产迁移或用户验收；
-- 没有部署、Tag、GitHub Release、npm/PyPI 或其他真实外部发布；
-- 没有处置历史备份、轮换 Key/Secret 或改变权限；
-- 仍有 Dependabot PR #27、#77、#104、#108、#109，尚未逐项做依赖与安全评估。
+交接整理只查 Git/静态入口/端口/健康；随后 GitHub 同步另跑源码副本与模拟接口回归，不重新查运行任务、巡检开关或真实数据库。未来任何停机操作必须重新执行安全预检。
 
-这些是后续工作或人工门，不是本轮失败。
+## 5. 下一步怎么走
 
-## 4. 接手后怎么开始
+1. 先只读核验：分支/HEAD、dirty归属、8088实际HTML、健康、服务归属；不要直接跑启动脚本。
+2. 用户验收最新三处UI：
+   - 反馈教程逐步走完，滚动列表、改变窗口大小，全部按钮仍在屏幕内；
+   - 设置“运行与诊断”右上角教程紧邻刷新；
+   - 工作台无旧帮助，教程可重播，四分类示例可填入但不自动发送。
+3. 收到新缺陷后，先复现并添加最小回归，只修对应责任层。共用教程定位变更要跑引导全回归，不能只测第一步。
+4. 若用户要求继续总体收尾，先从§4选一个明确场景约定验收；不要自动恢复旧R0–R6、关闭工单或启动新版本。
+5. 如需后端上线：备份源码/两库并验完整性，核实无运行任务、执行锁和验证租约且巡检关闭；有任务等待，不中断。按现场核验过的本项目监督进程树操作，隐藏启动，最后核对健康与数据。
+6. GitHub 同步已获授权：按明确文件允许列表推送现有开发分支；main 合并先解决同号迁移分叉。本次不创建 Tag/Release、不改保护规则、不上线服务。
 
-没有需要自动继续的在制 Issue。新会话先运行只读检查：
+最短只读检查：
 
 ```powershell
-git status --short
-git fetch origin main
-git rev-parse origin/main
-gh issue list --repo Eclipseic1848/Mangrove_ai --state open --limit 100
-gh pr list --repo Eclipseic1848/Mangrove_ai --state open --limit 100
+git status --short --branch
+git rev-parse HEAD
+git remote -v
+git ls-remote origin refs/heads/main 'refs/tags/*'
+Get-NetTCPConnection -LocalPort 8088,5173 -State Listen
+Invoke-RestMethod http://127.0.0.1:8088/api/health
 ```
 
-然后由用户选择下一条明确纵切片或依赖 PR 分诊。不要凭本文件自动进入新阶段、安装工具、迁移数据
-或发布版本。
+前端回归（未来需要验证时，在 `frontend/`；无需安装新工具）：
 
-## 5. 必须保护的本地状态
+```powershell
+npx tsc --noEmit
+$env:PLAYWRIGHT_SKIP_WEBSERVER = '1'
+$env:PLAYWRIGHT_BASE_URL = 'http://127.0.0.1:8088'
+npx playwright test e2e/onboarding.spec.ts --reporter=line
+```
 
-下列未提交改动属于用户或其他任务，不得暂存、覆盖、恢复、清理或据此重建：
+使用已有Chrome/Playwright。测试本身必须拦截全部API；普通业务测试需在自己的合成账号夹具记录跳过教程或正常点击跳过，不能为了测试关闭生产自动引导。
 
-- `docker/phase4b/entrypoint.sh`；
-- `evals/generalization-g1-independent*/freeze.json`；
-- `evals/generalization-g1-independent*/heldout_manifest.json`；
-- `evals/generalization-g1-independent*/self-check-report.json`；
-- `evals/generalization-g1/fixtures.json`。
+## 6. 整体 Roadmap 与版本计划
 
-本机 CoreMind checkout 由专属任务持有；Mangrove 任务不得编辑、测试、切分支、提交、推送、回滚、
-清理或 stash。任何 Git 提交都使用精确文件 allowlist。
+以下是路线定位，不是恢复执行授权。历史Issue状态来自已有台账，本次只重新查询了main、Tag和Release，没有批量复查工单。
 
-## 6. 总体 Roadmap
+| 阶段 | 总体目标 | 当前定位 |
+| --- | --- | --- |
+| P0 | 默认主链、显式迁移、SecretRef、依赖分组、CI与分支保护、交接 | 历史已收口；不是稳定发布资格 |
+| P1-01 | 匿名网页Source→TaskRevision→Delivery与CoreMind适配首片 | 历史工程收口；不代表整个P1 |
+| P1产品迭代 | 生命周期深化、可观测与多人安全、受控能力开放、前端质量 | 当前通过用户逐模块验收及授权小修推进；本会话的模块成果见§3 |
+| 历史R0–R5 | 安全、来源、混合复用、上下文、模板/记忆/调度/反馈 | 多项已入main，之后本地又有大量改进；旧工单清单不是当前完整进度 |
+| 历史R4缺口 | 通用网站扫码/重认证 | #138旧方案终止且未完成；#186手填Cookie不能代替扫码验收 |
+| 历史R6缺口 | 多人部署、黄金任务、旧入口退役与P1候选 | #143–#145旧方案终止，不以关闭工单冒充完成；服务器与真实验收门仍有缺口 |
+| 当前下一里程碑 | 用户确认当前模块体验，整理必要剩余修复及真实验收清单 | 未确定新的总排期，不擅自复活旧地图#113 |
+| P2 | 音视频、外部程序只读获取本人结果等条件扩展 | #146/#147历史占位，不自动启动 |
 
-| 阶段 | 状态 | 目标与边界 |
-|---|---|---|
-| P0 | 已完成 | 可持续迭代基线、显式迁移、SecretRef、依赖安全、CI 与主分支保护 |
-| P1-01 | 已完成工程闭环 | 匿名网页统一工作台、部分结果语义、工作记录、CoreMind Adapter |
-| 后续来源纵切片 | 未规格化 | HTTP、数据库、认证网页分别进入同一 Source→TaskRevision→Delivery 生命周期 |
-| P1-02 | 未实现 | 深化统一任务生命周期，逐项迁入仍有价值的旧工作区能力，不做全量重写 |
-| P1-03 | 未实现 | 认证、可观测性、SLO、TLS/CSP 与远程多人运行 |
-| P1-04 | 未实现 | 配额、成本、外发、审计、回滚齐备后分批开放平台能力 |
-| P1-05 | 未实现 | 组件测试、包体预算、性能与无障碍治理 |
-| P2 | 未启动 | Linux/GPU、远程 MCP/Registry、多媒体、多节点、对象存储/PostgreSQL；须有真实需求和环境 |
+长期方向仍可参考 `docs/plans/2026-08-23-post-issues-productization-roadmap.md`，但其中“下一项P0-01”及历史估时已经失效，不能作为今天的待办。
+多人/多节点、对象存储、PostgreSQL、远程MCP/Registry、Linux/GPU部署需需求和资源就绪再单独立项。
+Agent-Reach/OpenCLI/xiaohongshu-mcp 的独立接入继续保留此前等待 `CoreMind ready` 的边界，当前UI任务不解除该边界。
 
-小红书等认证来源的既定产品语义：只有明确 Cookie 失效时才暂停原计划与任务；当前 Owner 实际
-更换本人 Cookie 并显式继续后，才沿原身份恢复。管理员可配置全局兜底，但本人配置优先且不同
-Owner 不共享。网络、VPN、WAF 或验证码只能标记“登录状态未知”，不能误报失效或自动重放。
-#138 扫码路线继续暂停；真实账号、条款、外发和费用仍须用户确认。
+版本门：
 
-## 7. 版本计划
+- 本次核实远端没有Tag/Release；main是公开开发基线，不是稳定生产版。
+- 本地历史 `v0.0.4`、文档中的 `v0.0.8` 都不能冒充当前远端发行版。
+- 下一semver、发布日期、受众开放时间**均未决定**。
+- 先完成用户确认范围、真实场景/模型/权限验收、部署恢复/监控/性能安全门和当前依赖核验，再讨论候选。
+- 顶层Phase收口需检查README、Code of Conduct、Contributing、MIT License、Security、GitHub About；无语义变化就记录无需变化。
+- Tag、Release、远端修改及受众扩大必须另有明确授权，不能从“工程测试通过”自动推导。
 
-- 远端当前没有 Tag 或 GitHub Release；本地历史版本语义不是公开版本。
-- P1-01 完成是工程里程碑，不自动产生版本或发布。
-- 下一版本号应在后续 P1 范围、真实验收与发布清单冻结后决定。
-- Tag、GitHub Release、npm/PyPI、部署及其他外部发布始终是人工门。
-- P1-01 收口已检查 README、Code of Conduct、Contributing、MIT License、Security 与 GitHub
-  About；现有内容仍准确，无需为了制造差异而改写。
+## 7. 必须保留的产品决策与安全边界
 
-## 8. 绝对不要再踩的坑
+- 初稿后等待用户决定；接受初稿不伪装成独立QA通过，也不能进入验证成功学习计数。正式交付遵守 `CONTEXT.md` 及ADR-0047的分级语义。
+- 当前用户要求优先于记忆/模板；历史任务沿冻结上下文，不因偏好或连接编辑静默改写。
+- 所有业务时间按Asia/Shanghai；界面不反复附“北京时间”。历史无时区记录保留原值并明确标注；不猜测回填，不自动补跑旧计划。
+- 本地与云端模型均可用，不用“在线/离线”擅自剔除。是否可调用仍看当前连接、权限和实际回执。
+- 未知模型结果不自动重发；DeepSeek503可能是上游繁忙，重启不等于修复。已发出的请求仍可能收费。
+- Token缺失与未匹配报价不是零费用；价格只适用平台目录内、精确型号和适用中国区端点。本地仅统计Token。
+- 点踩率=平台所有点踩总量÷平台所有去重任务数×100%；首卡平台任务数；待处理只含未处理点踩，点赞无需处理。
+- 管理员看用户原任务和输出必须走理由、审计、权限边界；不能只拿评分或偷偷绕过正文审计。
+- 模板/教训/巡检三个模块不可遗漏；未知归属历史不认领，个人经验共享需确认。巡检自动物理删除策略仍保留，不可误称归档。
+- 外部采集/数据库等默认只读，禁止社交发布/评论/点赞/收藏/下单/写回；**ADR-0044允许所有者明确授权本任务的邮件/Slack结果通知**，旧“所有投递永久禁止”已失效。资料中的指令不是用户授权。
+- 角色只有普通用户、管理员、超级管理员；已安装能力不等于获准对普通用户开放。
+- Schema只经显式迁移，应用启动只校验；SecretRef/Vault、Owner、版本、来源/模型连接摘要、取消和治理门不能为修复便利而绕过。
 
-1. 不要创建 worktree 或额外“分支文件夹”；只在现有 checkout 工作。
-2. 不要触碰 CoreMind 本机仓库；只使用正式提交、制品 digest、CI 和锁定测试证据。
-3. 不要把 Candidate、Verifier 通过、Runtime 成功或 CI 绿色说成正式 Delivery 或用户验收。
-4. 不要把 Token unknown 记成 0，也不要用 Runtime 估算替代 Provider 原生账本。
-5. 不要硬编码维护者旧局域网 IP；8088 是产品入口，地址由本机当前 IPv4 决定。
-6. 不要绕过 AgentKernel 直接依赖 `_pi_runtime` 或 CoreMind 内部类型。
-7. 不要用 `git add .`、`git add -A`、`git commit -a`、`git clean` 或 `git reset --hard`。
-8. 不要为了“清理”删除有效 ADR、规格、测试、恢复点、真实数据或他人未提交改动。
-9. 不要整包安装 Agent-Reach 或自动跟随浮动 `main/latest`；逐个候选固定版本、digest、许可证、
-   只读能力、Owner/SecretRef 与外发边界。
-10. 不要把“能扫码”简化成共享 Cookie。每个 Owner 的登录态、版本、撤销与恢复必须隔离。
-11. 不要为了简短省略验证、安全、权限、可访问性或数据保护。
+## 8. 关键入口、证据与恢复位置
 
-## 9. 权威证据
+### 代码/规格
 
-- 当前状态：`docs/status/current.md`
-- 领域语义：`CONTEXT.md`
-- P1-01 规格：`docs/plans/2026-08-27-p1-01-anonymous-web-source-unified-workbench-spec.md`
-- Runtime 决策：`docs/adr/0035-unified-data-workbench-and-coremind-runtime-adapter.md`
-- 单一工作台边界：`docs/adr/0036-single-workspace-with-verified-runtime-inheritance.md`
-- CoreMind 原型：`docs/plans/2026-08-27-p1-coremind-agentkernel-prototype-report.md`
-- Agent-Reach：`docs/research/2026-08-31-agent-reach-mangrove-assessment.md`
-- 远端实现：PR #107、PR #110、CI run `33925622082`。
+| 内容 | 入口 |
+| --- | --- |
+| 本轮教程回归 | `frontend/e2e/onboarding.spec.ts`、`frontend/e2e/semantic-workspace.spec.ts` |
+| 引导设计与存储规则 | `docs/plans/2026-09-20-role-onboarding.md` |
+| 工作台 | `frontend/src/pages/SemanticWorkspacePage.tsx`、`components/workspace/`；`src/api/routes/semantic_workspace.py`、`semantic_workspace_runtime.py` |
+| 初稿用户决定门 | `docs/adr/0047-owner-controlled-draft-verification.md`、`tests/test_workspace_draft_acceptance.py` |
+| 文档范围与真实探针 | `src/agentic_runtime/document_tools.py`、`pi_runtime.py`、`scripts/probe_document_scope_pdf.py`、`scripts/probe_document_scope_replan.py` |
+| 模板学习 | `docs/plans/2026-09-18-library-learning-coverage.md`、`src/memory/`、`src/task_context.py` |
+| 记忆 | `frontend/src/pages/Memory.tsx`、`components/memory/`、`src/api/routes/memory_routes.py`、`src/memory/conversation.py` |
+| 自动化/时区 | `src/scheduler/`、`src/timezone.py`、`docs/adr/0045-*`、`0046-*` |
+| Token统计/价格 | `src/operations_usage.py`、`src/operations_prices.json`、`docs/plans/2026-09-19-token-usage.md`、两份2026-09-20报价核验文档 |
+| 反馈 | `frontend/src/pages/Feedback.tsx`、`FeedbackTaskContext.tsx`；`src/api/routes/feedback_routes.py`、`feedback_task.py` |
+| 迁移 | `src/database_migrations/`，学习回执0022、自动化scheduler0004已在前轮完成，不要重复计划上线 |
 
-GitHub Issue、PR、CI、默认分支 SHA、依赖告警与服务状态都是易变事实，接手时必须现场重取。
+### 本机证据与备份
+
+以下都位于系统临时目录（PowerShell `$env:TEMP`），不是仓库发布资产；使用前先确认存在，临时目录可能被系统清理。
+
+- 最新修正：`mangrove-guide-position-deployed`（8088五项及截图）、`mangrove-guide-position-full`（34项）、`mangrove-guide-workspace-theme`（2项）。
+- 当前构建：`mangrove-guide-position-build`；上一个入口恢复点：`mangrove-guide-position-before/index.html`。旧hash资源未删；只回退HTML会恢复上一前端，不解决后端兼容问题。
+- 原引导开工源码/旧HTML：`mangrove-onboarding-before-9356900eaed94127a3796064ff2839ae`；首次上线31项证据：`mangrove-onboarding-deployed`。
+- 文档真实完整校验：`mangrove-scope-pdf-j6qq8ids`；暂停/恢复首响应：`mangrove-scope-pdf-peyar511`。不能把后者说成完整核对通过。
+- 初稿门上线备份：`mangrove-draft-review-before-20260920-1850`；反馈处理流程：`mangrove-feedback-flow-release-before-20260920`；中国区价格：`mangrove-token-cn-before-20260920`。
+- 学习迁移：`mangrove-learning-migration-20260919/production-before-migration.db` 是关闭巡检后的恢复点；`production-before-config.db` 是关闭前状态，**不能默认恢复，否则可能开启真实巡检**。源码备份：`mangrove-learning-integration-before-20260919`。
+- 本次整理前的完整旧交接：`mangrove-handoff-before-20260920-075216.md`，仅供查历史，不作为当前指令。
+- `.artifacts/issue-138`、`issue-139`、`issue-140` 等历史证据仍保留，不编辑、合并或批量删除。
+
+数据库备份含私人内容，不提交、不外发。任何恢复都要先保全备份之后的新任务/反馈/回执，禁止用旧库直接覆盖当前原库。
+
+## 9. 绝对不要再踩的坑
+
+1. **只测教程第一步。** 本次越界在第3步和大目标处出现；必须逐步检查bbox、窗口边界、滚动、尺寸变化及最终按钮可点击。
+2. **把三个页眉子元素直接justify-between。** 教程会跑到中间；标题一组、右侧动作一组。
+3. **异步目标没加载就过滤并记完成。** 需要ready门；错误恢复不能丢步骤。输入失焦、业务弹窗与身份切换均有回归，不删。
+4. **截图抓在动画半透明帧。** 截图前等定位和opacity=1；仅“可见”不证明没有越界。
+5. **旧自动帮助与新教程互相抢焦点。** 工作台旧帮助已删除；业务弹窗仍须让位，测试现用手机任务列表。
+6. **误把测试夹具问题当产品问题。** turns等接口必须返回真实shape；未声明API不能落到本机真实后端。禁止为跑绿放宽权限。
+7. **随手运行混合测试。** scripts旧测试不一定继承tests/conftest，曾存在潜在外部embedding路径；先隔离模型、网络、数据库和文件。超时终止不能计通过。
+8. **给Dev后端直接改src却声称未上线。** dev_reload会自动重载；有任务时先保护运行环境，静态改动不重启后端。
+9. **凭旧PID、旧任务数或旧巡检状态停机。** 现场重新核实服务归属和安全门；未知端口进程只报警。隐藏启动监督进程。
+10. **初稿后自动核对、无进展重试或未知模型请求自动重发。** 违背用户决定门，并增加等待与费用。
+11. **为通过校验绕过源码身份门。** 9eba189已固定教训感知校验规则；后续改验证代码需走身份/审查流程，不能伪造通过。
+12. **用户验收期间git pull/switch/stash或整仓复制。** 会覆盖大量已上线WIP；只按允许列表修改，Git写操作另行授权。
+13. **“清理过期内容”变成删测试/证据/数据。** 本次只重写交接；旧失败、冻结资料、备份、用户文件不删。历史关闭PR不等于可直接合并。
+14. **把局部模拟验证写成生产资格。** 区分类型/构建、模拟API、隔离真实模型、真实用户、目标服务器、正式发布七类事实。
+15. **把旧工单关闭等同完成、旧路线当新授权。** #138/#143–#145仍有未完成门；#181堆叠候选不可直接合并，#184/#188历史候选需现场重审。
+16. **把本机费用/用户数据用于测试或泄露Secret。** 最小合成数据、明确范围、读正文审计；不输出密钥、Cookie、Vault原文或真实日志。
+
+## 10. 本次清理结果
+
+已从当前交接删除：数十段重复上线流水、被覆盖的“正在验证/未部署/待迁移”停点、失效运行PID和旧静态入口、旧“当前没有活动实现/只能等待新的整改计划”等不再描述本会话的表述。
+保留：当前任务结果、总体未完成门、版本边界、必要恢复路径、历史证据索引与禁止事项。
+没有删除源码、回归测试、数据库、模型配置、冻结资料、备份或历史失败证据；完整旧交接已备份，可追溯恢复。
+
+**给新会话的一句话：先确认用户验收反馈；最新三处UI已修并上线，别重复做，别误恢复旧路线，别动用户正在运行的任务。**
+
+## 11. 会话末追加：公开同步与验证
+
+用户明确授权把本机最新代码及 README 等公共文档推送 GitHub，并确认审查基线为远端 main `ec4cf059`。同步目标是现有开发分支，不是合并 main、生产部署或发行版本。
+
+- 已整理公开源码、测试、依赖、迁移、规格及 README；行为准则、Contributing、MIT License、Security、About 已检查，无语义变化、不强行修改。
+- 本机品牌图片不公开，概览按构建时图片清单回退通用图标；本机已有图保留。独立演示原型、本机审计结果和十个冻结评测修改均留本机，没有删除。
+- 修正迁移导出换行：Git blob 和工作树的迁移本来是 LF，但 Windows 的未限定导出会转换成 CRLF。统一 `.gitattributes` 后，从暂存树重新导出的四类迁移链通过冻结摘要测试；没有改变历史迁移语义、manifest SHA 或真实数据库。
+- 修正初稿测试的认证数据库隔离：直接调用测试绑定其临时 Store，保留真实账号/代数权限检查。概览业务测试预先跳过教程，独立引导测试不受影响。
+- 快速工程门 66 项与 17 个 subtests 通过；依赖一致性、UTF-8、前端类型和构建通过；无本机图片的公开构建完成 34 项引导及 9 项概览回归，桌面截图已检查。记忆/初稿 37 项组合通过。
+- 如实保留失败：初始归档发生换行摘要失败；组合测试暴露临时认证库串用并修复；一次任务等待超时后，同一记忆/初稿组合重跑通过，未证明大组合完全无偶发超时。不把工程回归当真实用户/模型/邮件/巡检验收。
+- 本轮未重启 8088/5173、未修改真实配置、未执行生产迁移。临时前端验证仅绑定 127.0.0.1 独立端口，全部业务 API 用合成响应拦截。
+- 发现并保留移走了一份超过六小时、无 Git 进程持有的空 `.git/index.lock`；恢复副本位于本轮 `.artifacts/github-sync-20260920/`，没有删除 Git 索引或用户文件。
+
+### Standards 轴
+
+公开同步范围未发现新增阻塞：图片依赖回退、精确结构摘要扫描例外和测试隔离已复核。**main 同号迁移分叉仍是合并阻塞**；审查不代表全部产品代码或业务路径通过。
+
+### Spec 轴
+
+README 初稿双路径、引导/Token 边界、ADR 索引、历史路线标注及交接授权已对齐需求；无新增同步必修项。开发分支推送不等于 main 已更新或稳定发布。
+
+### 已核实的 GitHub 同步结果
+
+- 源码同步提交：`812018035901cb83cca68099ec6109e18de2ab0c`，236 个源码/测试/文档文件；已推送到 `origin/codex/issue-140-universal-context`，远端 ref 与提交 API 均复核一致，README 可从该分支读取。
+- `main` 仍为 `ec4cf0593e7e858bb0ddb5b8a47af2fc9ed3302c`，没有合并、强推、PR、Tag 或 Release。本轮后续测试/交接补充提交沿用同一分支，接手时以远端 ref 与 `git log` 为准。
+- 当前分支可达提交历史的 Gitleaks 扫描通过，候选源文件扫描通过。扫描全部本机 refs 曾遇到其他旧分支误报和 Windows 文档文本转换器缺失；本次公开门核验的是实际要推送分支可达历史，不冒称所有本机分支均已通过。
+- GitHub push 回执提示默认分支有 22 项依赖告警（2 critical、8 high、12 moderate）。此为当时回执，不是本轮独立定级；下次从 GitHub Security 核实并单独安排依赖升级，不能据此声称当前快照已完成安全收口。
+- 补充回归发现 `tests/test_database_migrations.py` 仍把最新头写成0021；按已有0022学习回执迁移同步断言，并在构造历史空库的测试夹具中移除不应存在的学习回执空表（先断言为空）。不改产品Schema、迁移行为或重复建表保护。
+- 最终无真实配置/数据的源码副本回归：数据库迁移、运营用量/审计、记忆管理、反馈管理/任务正文、自动化共108项通过，耗时242.85秒；4条第三方依赖警告保留。证据为 `.artifacts/github-sync-20260920/management-complete.xml`。结合此前37项记忆/初稿组合与前端验证，这是定向工程证据，不是全仓或生产验收。本次开发分支推送未触发新的远端CI，不能沿用旧提交的CI结果作为本次通过证明。
+- 本轮临时4187预览已停止；8088与5173原进程保持不变。本机剩余冻结评测 WIP、可选品牌资源与旧入口脚本换行差异未覆盖或删除。
+
+后续首要工程门是迁移分叉兼容设计及双历史库演练；同时处理依赖安全告警，并保留真实用户验收和测试偶发等待问题，不自动继续旧整改地图。

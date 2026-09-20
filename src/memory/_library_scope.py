@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 from datetime import datetime
+from src.timezone import now as beijing_now
 from pathlib import Path
 
 import yaml
@@ -42,6 +44,22 @@ def content_digest(entry: dict) -> str:
 
 
 def valid_entry(entry: dict) -> bool:
+    # 单条损坏不能阻断其他 Owner 的列表、召回或巡检；保留原文件，不猜测统计值。
+    if not isinstance(entry.get("keywords") or [], (str, list)):
+        return False
+    try:
+        for field in ("uses", "verified_uses", "occurrences", "helped_avoid"):
+            value = entry.get(field)
+            if isinstance(value, bool):
+                return False
+            value = value or 0
+            if int(value) < 0 or int(value) != float(value):
+                return False
+        quality = float(entry.get("quality_avg") or 0)
+        if not math.isfinite(quality) or quality < 0:
+            return False
+    except (TypeError, ValueError, OverflowError):
+        return False
     owner = entry.get("owner_id")
     if not isinstance(owner, str) or not owner.strip():
         return False
@@ -85,6 +103,8 @@ def read_entry(directory: Path, slug: str) -> dict | None:
     if parsed is None:
         return None
     meta, body = parsed
+    if not isinstance(meta, dict):
+        return None
     entry = {**meta, "body": body, "slug": slug}
     return entry if valid_entry(entry) else None
 
@@ -112,7 +132,7 @@ def share_copy(directory: Path, slug: str, *, owner_id: str, title: str, keyword
     fields = content_fields(dict(title=title, keywords=keywords, body=body, data_type=data_type))
     if not fields["title"] or not fields["body"] or content_digest(fields) != expected_content_digest:
         raise ValueError("确认内容不一致")
-    now = datetime.now().isoformat()
+    now = beijing_now().isoformat()
     identity = json.dumps([owner_id, slug, expected_source_digest, expected_content_digest], ensure_ascii=False)
     shared_slug = "shared-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
     existing = read_entry(directory, shared_slug)

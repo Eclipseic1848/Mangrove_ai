@@ -26,15 +26,7 @@ from src.data_prep.checkpoints import Checkpoint
 from src.data_prep.models import ConnectorCapability, SourceSpec
 
 from .base import ProbeResult, RecordBatch, SourceConnector
-from .db_dialects import (
-    DbCredentials,
-    SchemaInfo,
-    classify_error,
-    classify_source_error,
-    get_dialect,
-    introspect_schema,
-    make_engine,
-)
+from .db_dialects import DbCredentials, SchemaInfo, classify_error, get_dialect, introspect_schema, make_engine
 
 logger = logging.getLogger(__name__)
 
@@ -232,14 +224,8 @@ class DatabaseConnector(SourceConnector):
                                     yield RecordBatch(retryable_error=message, checkpoint=_checkpoint(
                                         cfg.table, key_cols, last_key, part_no, rows_read, bytes_read, False))
                                 else:
-                                    yield RecordBatch(
-                                        fatal_error=message,
-                                        error_code=classify_source_error(exc, creds.dialect),
-                                        checkpoint=_checkpoint(
-                                            cfg.table, key_cols, last_key, part_no,
-                                            rows_read, bytes_read, False,
-                                        ),
-                                    )
+                                    yield RecordBatch(fatal_error=message, checkpoint=_checkpoint(
+                                        cfg.table, key_cols, last_key, part_no, rows_read, bytes_read, False))
                                 return
                             retries += 1
                             await asyncio.sleep(min(2 ** (retries - 1), 4))
@@ -292,10 +278,7 @@ class DatabaseConnector(SourceConnector):
                     yield batch
         except Exception as exc:
             # 预览和任务图都消费 fatal_error；预检或恢复错误也必须走同一脱敏失败路径。
-            yield RecordBatch(
-                fatal_error=_sanitize_error(exc, creds),
-                error_code=classify_source_error(exc, creds.dialect),
-            )
+            yield RecordBatch(fatal_error=_sanitize_error(exc, creds))
         finally:
             await asyncio.to_thread(eng.dispose)
 
@@ -319,10 +302,7 @@ class DatabaseConnector(SourceConnector):
             try:
                 rows, cell_warnings = await asyncio.to_thread(self._fetch_sql_batch, eng, creds, paged_sql)
             except Exception as exc:
-                yield RecordBatch(
-                    fatal_error=_sanitize_error(exc, creds),
-                    error_code=classify_source_error(exc, creds.dialect),
-                )
+                yield RecordBatch(fatal_error=_sanitize_error(exc, creds))
                 return
             if not rows:
                 yield RecordBatch(checkpoint=_checkpoint("custom_sql", [], None, part_no, rows_read, bytes_read, True))

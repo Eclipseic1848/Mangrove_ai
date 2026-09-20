@@ -1330,7 +1330,7 @@ export function DocumentWorkspacePage() {
                 <button
                   type="button"
                   onClick={() => {
-                    setSetName(`文件集 ${new Date().toLocaleDateString("zh-CN")}`);
+                    setSetName(`文件集 ${new Date().toLocaleDateString("zh-CN", { timeZone: "Asia/Shanghai" })}`);
                     setShowSetComposer(true);
                   }}
                   className="flex w-full items-center justify-center gap-1.5 rounded-md border border-primary/40 px-2 py-2 text-xs text-primary hover:bg-primary/5"

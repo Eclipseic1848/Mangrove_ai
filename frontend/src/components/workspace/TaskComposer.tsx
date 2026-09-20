@@ -1,3 +1,4 @@
+import { taskModelChoices } from "@/lib/taskModelChoices";
 import {
   useCallback,
   useEffect,
@@ -36,15 +37,16 @@ import {
   Loader2,
   Paperclip,
   RefreshCw,
-  Send,
+  ArrowUp,
   Settings2,
   Trash2,
   UploadCloud,
 } from "lucide-react";
 import { nanoid } from "nanoid/non-secure";
 import { getUploadMetadata, uploadFileWithProgress } from "@/lib/dataPrepApi";
-import { resolveWorkspaceCapabilities, type CapabilityNeed, type CapabilityResolution, type GrayCapability } from "@/lib/semanticWorkspaceApi";
+import { resolveWorkspaceCapabilities, type CapabilityNeed, type CapabilityResolution, type GrayCapability, type DraftChatMessage } from "@/lib/semanticWorkspaceApi";
 import { cn } from "@/lib/utils";
+import { outputSelection, resolveOutputFormats } from "@/lib/outputFormats";
 import type { UploadItem } from "@/types/dataPrep";
 
 const TABLE_EXTENSIONS = new Set([
@@ -253,18 +255,23 @@ function SortableFileCard({
 }
 
 export type WebIntakeDraft = {
+  sessionId?: string;
   prompt: string;
   connectionId: string | null;
   connectionModel: string | null;
   localModel: string | null;
+  legacyProvider?: string;
   formats?: string[];
+  formatSelection?: "auto" | "manual";
+  conversation?: DraftChatMessage[];
+  chatAttempt?: { requestId: string; fingerprint: string };
+  collection?: { convId: string; pending: boolean; prompt: string; steps: string[]; progress?: import("@/lib/api").ChatProgress[] };
 };
 
 export function TaskComposer({
   compact = false,
   unified = false,
-  onConfigureModels,
-  onReadWeb,
+  onChat,
   onPickSources,
   draft,
   onDraftChange,
@@ -277,10 +284,10 @@ export function TaskComposer({
   uploadStorageKey,
   initialUploads = [],
   webSourceCount = 0,
-  connectorSourceCount = 0,
   additionalSourceCount = 0,
   additionalInputFormats = [],
   sourceBusy = false,
+  stopAction,
   submitBlocked = false,
   sourceIdentity = "",
   modelLocked = false,
@@ -296,8 +303,7 @@ export function TaskComposer({
 }: {
   compact?: boolean;
   unified?: boolean;
-  onConfigureModels?: () => void;
-  onReadWeb?: (draft: WebIntakeDraft) => void;
+  onChat?: (draft: WebIntakeDraft, externalApiConfirmed: boolean) => Promise<void>;
   onPickSources?: () => void;
   draft?: WebIntakeDraft | null;
   onDraftChange?: (draft: WebIntakeDraft) => void;
@@ -327,10 +333,10 @@ export function TaskComposer({
   uploadStorageKey?: string;
   initialUploads?: UploadItem[];
   webSourceCount?: number;
-  connectorSourceCount?: number;
   additionalSourceCount?: number;
   additionalInputFormats?: string[];
   sourceBusy?: boolean;
+  stopAction?: ReactNode;
   submitBlocked?: boolean;
   sourceIdentity?: string;
   modelLocked?: boolean;
@@ -345,7 +351,11 @@ export function TaskComposer({
   grayCapabilities?: GrayCapability[];
 }) {
   const [prompt, setPrompt] = useState(initialPrompt);
-  const [formats, setFormats] = useState<string[]>(initialFormats);
+  const [selectedFormats, setFormats] = useState<string[]>(initialFormats);
+  const [formatSelection, setFormatSelection] = useState<"auto" | "manual">(initialFormats.length ? "manual" : "auto");
+  const resolvedOutput = resolveOutputFormats(prompt, formatSelection === "manual" ? selectedFormats : null, draft?.conversation);
+  const formats = unified ? resolvedOutput.formats : selectedFormats;
+  const formatConflict = unified && resolvedOutput.conflict;
   const [items, setItems] = useState<UploadDraft[]>(() => {
     try {
       const stored = uploadStorageKey && localStorage.getItem(uploadStorageKey);
@@ -415,14 +425,16 @@ export function TaskComposer({
     receivedDraft.current = draft;
     // 仅模型交接变化属于明确选型；编辑要求不能阻挡尚未返回的默认偏好。
     if (
-      draft.connectionId !== (selectedConnectionId && selectedConnectionId !== "__local__" ? selectedConnectionId : null)
+      Boolean(draft.legacyProvider && draft.legacyProvider !== selectedModel.split("::")[0])
+      || draft.connectionId !== (selectedConnectionId && selectedConnectionId !== "__local__" ? selectedConnectionId : null)
       || (draft.connectionId
         ? (draft.connectionModel ?? "") !== selectedConnectionModelId
         : Boolean(draft.localModel) && draft.localModel !== selectedModel.split("::").slice(1).join("::"))
     ) modelSelectionExplicit.current = true;
-    // 只交接输入和模型；附件、上传状态及运行路由留在原组件。
+    // 交接输入与模型身份；兼容模型同时恢复其路由，附件仍留在原组件。
     setPrompt(draft.prompt);
     if (draft.formats) setFormats(draft.formats);
+    setFormatSelection(outputSelection(draft.formats, draft.formatSelection));
     setSelectedConnectionId(draft.connectionId ?? (allowLocalPiRuntime ? "__local__" : ""));
     setSelectedConnectionModelId(draft.connectionModel ?? "");
     modelSelectionConnection.current = draft.connectionId ?? "";
@@ -430,15 +442,26 @@ export function TaskComposer({
       const connection = modelConnections.find(item => item.connection_id === draft.connectionId);
       setSelectedModel(`${connection?.preset_id || "external"}::${draft.connectionModel ?? ""}`);
     } else if (draft.localModel) {
-      setSelectedModel(`local::${draft.localModel}`);
+      if (draft.legacyProvider) setRuntimeSelection("legacy");
+      setSelectedModel(`${draft.legacyProvider || "local"}::${draft.localModel}`);
     }
     setExternalApiConfirmed(false);
   }, [active, draft, receivingDraft, allowLocalPiRuntime, modelConnections]);
   useLayoutEffect(() => {
     const input = promptRef.current;
     if (!active || !input || !input.getClientRects().length) return;
-    input.style.height = "auto";
-    input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
+    const resize = () => {
+      input.style.height = "auto";
+      // 高度上限由 CSS 随视口约束；超限保留原生滚动条。
+      input.style.height = `${input.scrollHeight}px`;
+    };
+    resize();
+    let width = input.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (input.clientWidth !== width) { width = input.clientWidth; resize(); }
+    });
+    observer.observe(input);
+    return () => observer.disconnect();
   }, [active, prompt]);
   useEffect(() => {
     if (!allowPiRuntime && runtimeSelection === "pi") {
@@ -452,7 +475,7 @@ export function TaskComposer({
     setSelectedCapabilityIds([]);
     setReuse(null);
     setExternalApiConfirmed(false);
-    if (defaultModel) {
+    if (defaultModel && !modelSelectionExplicit.current) {
       setSelectedModel(`${defaultModel.provider}::${defaultModel.model}`);
     }
   }, [defaultModel, runtimeSelection]);
@@ -518,7 +541,6 @@ export function TaskComposer({
           && selectedConnection.connection_id === defaultConnectionId
           && defaultConnectionModel
           && defaultConnectionModel !== selectedConnectionModelId
-          && available.some(item => item.model_id === defaultConnectionModel)
         ) {
           // 连接目录和本人偏好并行到达；后到偏好只能修正尚未明确选择的初始值。
           setSelectedConnectionModelId(defaultConnectionModel);
@@ -541,7 +563,13 @@ export function TaskComposer({
     }
     if (selectedConnectionId === "__local__") {
       modelSelectionConnection.current = "";
+      if (!modelSelectionExplicit.current && defaultConnectionId === "__local__" && defaultConnectionModel) {
+        setSelectedModel(`local::${defaultConnectionModel}`);
+        return;
+      }
       if (modelOptions.some(option => option.provider === "local" && `${option.provider}::${option.model}` === selectedModel)) return;
+      // 明确选择或恢复的模型失效时保留身份，让选择器阻止发送，不能换成首项。
+      if (modelSelectionExplicit.current || selectedModel.startsWith("local::")) return;
       const localModel = modelOptions.find(
         (option) => option.provider === "local",
       );
@@ -644,7 +672,7 @@ export function TaskComposer({
       }
       if (!drafts.length) return;
       setItems((current) => [...current, ...drafts]);
-      if (!formats.length) {
+      if (!unified && !formats.length) {
         const kind = inputKind(drafts);
         const nextFormats = kind === "document" ? ["docx", "pdf"] : ["xlsx"];
         setFormats(nextFormats);
@@ -679,6 +707,9 @@ export function TaskComposer({
       "image/jpeg": [".jpg", ".jpeg"],
       "image/webp": [".webp"],
       "application/pdf": [".pdf"],
+      "application/vnd.ms-excel": [".xls"],
+      "application/msword": [".doc"],
+      "application/vnd.ms-powerpoint": [".ppt"],
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": [".xlsx"],
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document": [".docx"],
       "application/vnd.openxmlformats-officedocument.presentationml.presentation": [".pptx"],
@@ -696,7 +727,7 @@ export function TaskComposer({
   const reuseInvalid = Boolean(reuse && !reusedMatch);
   const ready = items.filter((item) => item.status === "ready" && item.upload);
   const commonFormats =
-    kind === "document"
+    unified ? FORMAT_OPTIONS : kind === "document"
       ? DOCUMENT_COMMON_FORMATS
       : kind === "table"
         ? TABLE_COMMON_FORMATS
@@ -709,13 +740,19 @@ export function TaskComposer({
   ).length + selectedCapabilityIds.length;
   const externalConfirmationRequired =
     usesPiConfiguration && Boolean(selectedConnection);
+  const selectableModels = usesPiConfiguration
+    ? taskModelChoices(modelOptions, modelConnections, allowLocalPiRuntime, modelLocked ? { connectionId: defaultConnectionId, model: defaultConnectionModel } : undefined,
+      { connectionId: selectedConnectionId, model: selectedConnection ? selectedConnectionModelId : selectedModel.split("::").slice(1).join("::") })
+    : modelOptions.filter(item => !unified || items.length || webSourceCount || additionalSourceCount || item.provider === "local")
+      .map(item => ({ connectionId: item.provider, model: item.model, label: item.label, group: item.provider }));
+  const selectedChoice = selectableModels.find(item => item.connectionId === (usesPiConfiguration ? selectedConnectionId : selectedModel.split("::")[0]) && item.model === (selectedConnection ? selectedConnectionModelId : selectedModel.split("::").slice(1).join("::")));
   const piSelectionInvalid =
     (usesPiConfiguration
       && !selectedConnection
       && selectedConnectionId !== "__local__")
     || (
-      externalConfirmationRequired && (!externalApiConfirmed || !selectedConnectionModelId)
-    );
+      externalConfirmationRequired && ((!unified && !externalApiConfirmed) || !selectedConnectionModelId)
+    ) || (unified && !selectedChoice);
 
   const handlePaste = (event: ClipboardEvent<HTMLTextAreaElement>) => {
     const files = Array.from(event.clipboardData.files);
@@ -736,25 +773,26 @@ export function TaskComposer({
 
   const currentDraft: WebIntakeDraft = {
     prompt,
+    conversation: draft?.conversation,
+    sessionId: draft?.sessionId,
+    chatAttempt: draft?.chatAttempt,
+    collection: draft?.collection,
     formats,
-    connectionId: selectedConnectionId && selectedConnectionId !== "__local__" ? selectedConnectionId : null,
-    connectionModel: selectedConnectionId && selectedConnectionId !== "__local__" ? selectedConnectionModelId : null,
-    localModel: selectedConnectionId && selectedConnectionId !== "__local__" ? null : selectedModel.split("::").slice(1).join("::") || null,
+    formatSelection,
+    connectionId: selectedConnection?.connection_id ?? null,
+    connectionModel: selectedConnection ? selectedConnectionModelId : null,
+    localModel: selectedConnection ? null : selectedModel.split("::").slice(1).join("::") || null,
+    legacyProvider: usesPiConfiguration ? undefined : selectedModel.split("::")[0],
   };
   // 仅用户编辑回传，避免切换视图时旧渲染的 effect 覆盖外来草稿。
   const updateDraft = (change: Partial<WebIntakeDraft>) => {
     if (!active) return;
     const nextDraft = { ...currentDraft, ...change };
+    if (unified) nextDraft.formats = resolveOutputFormats(nextDraft.prompt, nextDraft.formatSelection === "manual" ? nextDraft.formats ?? [] : null, nextDraft.conversation).formats;
     // 本组件编辑的回声已在本地应用，不能当作外来选模阻止迟到偏好。
     receivedDraft.current = nextDraft;
     if (change.prompt !== undefined || change.formats !== undefined) setExternalApiConfirmed(false);
     onDraftChange?.(nextDraft);
-  };
-  const readWeb = () => {
-    if (!active || submitting || sourceBusy) return;
-    receivedDraft.current = currentDraft;
-    onDraftChange?.(currentDraft);
-    onReadWeb?.(currentDraft);
   };
 
   const reuseCapability = async (capability: GrayCapability) => {
@@ -784,14 +822,31 @@ export function TaskComposer({
 
   const submit = async () => {
     if (!active || submittingRef.current) return;
-    if (unified && prompt.trim() && !items.length && !webSourceCount && !connectorSourceCount && !additionalSourceCount && !submitting) {
-      readWeb();
+    // 统一输入框已明示数据去向；用户点击发送或按 Enter，仅确认这一份当前内容，不保存永久授权。
+    const confirmedForSend = unified ? externalConfirmationRequired : externalApiConfirmed;
+    if (unified && onChat && !items.length && !webSourceCount && !additionalSourceCount) {
+      if (!prompt.trim() || busy || submitBlocked || piSelectionInvalid || formatConflict) return;
+      submittingRef.current = true;
+      setSubmitting(true);
+      onBusyChange?.(true);
+      try {
+        await onChat(currentDraft, confirmedForSend);
+        setPrompt("");
+        setExternalApiConfirmed(false);
+      } catch {
+        // 草稿层展示错误并保留原发送身份，不能因网络错误自动重发。
+      } finally {
+        submittingRef.current = false;
+        setSubmitting(false);
+        onBusyChange?.(false);
+      }
       return;
     }
     if (
       !prompt.trim()
-      || (!ready.length && !webSourceCount && !connectorSourceCount && !additionalSourceCount)
+      || (!ready.length && !webSourceCount && !additionalSourceCount)
       || !formats.length
+      || formatConflict
       || busy
       || hasFailed
       || (kind === "mixed" && runtimeSelection === "legacy")
@@ -823,7 +878,7 @@ export function TaskComposer({
         externalApiConfirmed:
           usesPiConfiguration
           && Boolean(selectedConnection)
-          && externalApiConfirmed,
+          && confirmedForSend,
         ...(usesPiConfiguration && reuse && reusedMatch ? { capabilityNeed: reuse.need } : {}),
         capabilityPackRefs: usesPiConfiguration && reusedMatch ? [reusedMatch.ref] : usesPiConfiguration
           ? grayCapabilities
@@ -858,7 +913,7 @@ export function TaskComposer({
                     <span className="font-medium">模型连接</span>
                     <select
                       aria-label="模型连接"
-                      disabled={modelLocked}
+                      disabled={modelLocked || submitting}
                       value={selectedConnectionId}
                       onChange={(event) => {
                         modelSelectionExplicit.current = true;
@@ -904,7 +959,7 @@ export function TaskComposer({
                           <span className="text-muted-foreground">本任务模型</span>
                           <select
                             aria-label="本任务模型"
-                      disabled={modelLocked}
+                      disabled={modelLocked || submitting}
                             value={selectedConnectionModelId}
                             onChange={(event) => {
                               modelSelectionExplicit.current = true;
@@ -935,8 +990,8 @@ export function TaskComposer({
                           : kind === "document"
                             ? "文档内容"
                             : "上传文件内容"}
-                        {webSourceCount > 0 ? "、全部已选网页的标题、正文与网址，以及本次确认的上下文" : ""}{connectorSourceCount > 0 ? "、全部已选连接资料的记录、字段与来源信息，以及本次确认的上下文" : ""}{additionalSourceCount > 0 ? "、全部已选历史原件和正式处理结果正文及出处" : ""}
-                        与任务说明；仅用于当前任务版本，不授权其他任务复用。
+                        {webSourceCount > 0 ? "、全部已选网页的标题、正文与网址，以及本次确认的上下文" : ""}{additionalSourceCount > 0 ? "、全部已选历史原件和正式处理结果正文及出处" : ""}
+                        与任务说明{draft?.conversation?.length || kind === "empty" ? "和本次对话内容" : ""}；仅用于当前请求，不授权其他任务复用。
                       </p>
                       <label className="mt-2 flex items-start gap-2 text-foreground">
                         <input
@@ -959,7 +1014,7 @@ export function TaskComposer({
               <span className="font-medium">执行模型</span>
               <select
                 aria-label="执行模型"
-                      disabled={modelLocked}
+                      disabled={modelLocked || submitting}
                 value={selectedModel}
                 onChange={(event) => {
                   modelSelectionExplicit.current = true;
@@ -993,8 +1048,9 @@ export function TaskComposer({
   return (
     <div
       {...getRootProps()}
+      data-guide="workspace-composer"
       className={cn(
-        "relative rounded-2xl border bg-background shadow-[0_18px_60px_-38px_hsl(var(--primary)/0.65)] transition-colors",
+        "relative rounded-2xl border bg-background dark:bg-card shadow-[0_18px_60px_-38px_hsl(var(--primary)/0.65)] transition-colors",
         isDragActive && "border-primary bg-primary/[0.03]",
         compact ? "p-3" : "p-4",
       )}
@@ -1057,6 +1113,7 @@ export function TaskComposer({
         ref={promptRef}
         value={prompt}
         aria-label="任务要求"
+        disabled={submitting}
         onChange={(event) => {
           setPrompt(event.target.value);
           updateDraft({ prompt: event.target.value });
@@ -1072,17 +1129,10 @@ export function TaskComposer({
         placeholder={
           compact
             ? "继续提出修改，例如：增加按地区汇总，并同时输出 JSON"
-            : "描述你想得到的结果，例如：合并这些订单表，按订单号去重，输出 XLSX 和 JSON"
+            : "告诉我你想完成什么，也可以拖入或粘贴文件…"
         }
-        className="w-full min-h-16 max-h-40 resize-none overflow-y-auto bg-transparent px-1 text-[15px] leading-7 outline-none placeholder:text-muted-foreground/70"
+        className="w-full min-h-16 max-h-[min(320px,40dvh)] resize-none overflow-y-auto [scrollbar-gutter:stable] bg-transparent px-1 text-[15px] leading-7 outline-none placeholder:text-muted-foreground/70"
       />
-      {unified && (
-        <div className="space-y-2" data-testid="workspace-model-picker">
-          {usesPiConfiguration && modelControls}
-          {localModelControls}
-          <button type="button" onClick={onConfigureModels} className="rounded-lg border px-3 py-2 text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring">添加模型</button>
-        </div>
-      )}
       {kind === "mixed" && runtimeSelection === "legacy" && (
         <div className="mt-2 flex items-start gap-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
           <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
@@ -1115,16 +1165,33 @@ export function TaskComposer({
         </div>
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t pt-3">
-        <button
+        {onPickSources ? <details className="relative" onKeyDown={event => {
+          if (event.key === "Escape") { event.currentTarget.open = false; event.currentTarget.querySelector("summary")?.focus(); }
+        }}>
+          <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring">
+            <Paperclip aria-hidden="true" className="h-3.5 w-3.5" />添加文件<ChevronDown aria-hidden="true" className="h-3 w-3" />
+          </summary>
+          <div className="absolute bottom-full left-0 z-20 mb-2 w-48 space-y-1 rounded-xl border bg-background p-2 shadow-lg">
+            <button type="button" disabled={!active || submitting || sourceBusy} onClick={event => {
+              const menu = event.currentTarget.closest("details"); if (menu) { menu.open = false; menu.querySelector("summary")?.focus(); } open();
+            }} className="w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">上传本地文件</button>
+            <button type="button" disabled={!active || submitting || sourceBusy} onClick={event => {
+              const menu = event.currentTarget.closest("details"); if (menu) { menu.open = false; menu.querySelector("summary")?.focus(); } onPickSources();
+            }} className="w-full rounded-lg px-3 py-2 text-left text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">选择历史任务文件</button>
+          </div>
+        </details> : <button
           type="button"
           onClick={open}
+          disabled={submitting}
           className="inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium hover:bg-muted"
         >
           <Paperclip className="h-3.5 w-3.5" />
           添加文件
-        </button>
-        {unified && <button type="button" onClick={readWeb} disabled={submitting || sourceBusy} className="rounded-lg border px-2.5 py-1.5 text-xs hover:bg-muted disabled:opacity-50" title="添加公开网页，保留已有资料">公开网页</button>}
-        {onPickSources && <button type="button" onClick={onPickSources} disabled={!active || submitting || sourceBusy} className="rounded-lg border px-2.5 py-1.5 text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">历史资料</button>}
+        </button>}
+        <details open={unified ? undefined : true}>
+        <summary className={cn("cursor-pointer rounded-lg px-2 py-1.5 text-xs text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring", !unified && "hidden")}>{unified ? `输出：${formatSelection === "manual" ? formats.map(format => FORMAT_LABELS[format]).join("、") || "请选择" : resolvedOutput.explicit ? `${formats.map(format => FORMAT_LABELS[format]).join("、")} · 按你的要求` : "自动"}` : "输出选项"}</summary>
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+        {unified && <button type="button" aria-pressed={formatSelection === "auto"} className="rounded-full border px-2.5 py-1 text-xs hover:bg-muted" onClick={() => { setFormatSelection("auto"); updateDraft({ formatSelection: "auto" }); }}>自动</button>}
         <span className="mr-1 text-xs text-muted-foreground">
           {kind === "empty" && !formats.length ? "上传后自动推荐输出" : "输出格式"}
         </span>
@@ -1136,8 +1203,8 @@ export function TaskComposer({
               type="button"
               aria-pressed={selected}
               onClick={() => {
-                  const next = selected ? formats.filter(item => item !== format) : [...formats, format];
-                  setFormats(next); updateDraft({ formats: next });
+                  const next = unified && formatSelection === "auto" ? [format] : selected ? formats.filter(item => item !== format) : [...formats, format];
+                  setFormats(next); setFormatSelection("manual"); updateDraft({ formats: next, formatSelection: "manual" });
                 }}
               className={cn(
                 "rounded-full border px-2.5 py-1 text-[11px] font-medium uppercase transition-colors",
@@ -1166,30 +1233,56 @@ export function TaskComposer({
             />
           </button>
         )}
-        <button
+        </div>
+        </details>
+        {unified && <select aria-label="选择模型" data-testid="workspace-model-picker" disabled={modelLocked || submitting}
+          className="ml-auto h-9 min-w-0 max-w-[min(100%,16rem)] rounded-lg border bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          value={selectedChoice ? JSON.stringify([selectedChoice.connectionId, selectedChoice.model]) : ""}
+          onChange={event => {
+            const choice = selectableModels.find(item => JSON.stringify([item.connectionId, item.model]) === event.target.value);
+            if (!choice) return;
+            const connection = modelConnections.find(item => item.connection_id === choice.connectionId);
+            modelSelectionExplicit.current = true;
+            modelSelectionConnection.current = connection?.connection_id ?? "";
+            setSelectedConnectionId(choice.connectionId);
+            setSelectedConnectionModelId(connection ? choice.model : "");
+            setSelectedModel(`${usesPiConfiguration ? connection?.preset_id || (connection ? "external" : "local") : choice.connectionId}::${choice.model}`);
+            setExternalApiConfirmed(false);
+            setFileNotice("");
+            updateDraft({ connectionId: connection?.connection_id ?? null, connectionModel: connection ? choice.model : null, localModel: connection ? null : choice.model, legacyProvider: usesPiConfiguration ? undefined : choice.connectionId });
+          }}>
+          <option value="" disabled>{selectableModels.length ? "请选择可用模型" : "暂无模型，请在设置中配置"}</option>
+          {[...new Set(selectableModels.map(item => item.group))].map(group => <optgroup key={group} label={group}>{selectableModels.filter(item => item.group === group).map(item => <option key={JSON.stringify([item.connectionId, item.model])} value={JSON.stringify([item.connectionId, item.model])}>{item.label}</option>)}</optgroup>)}
+        </select>}
+        {stopAction || <button
           type="button"
           onClick={() => void submit()}
           disabled={
             !prompt.trim()
-            || ((!unified || items.length > 0 || webSourceCount > 0 || connectorSourceCount > 0 || additionalSourceCount > 0) && !ready.length && !webSourceCount && !connectorSourceCount && !additionalSourceCount)
+            || ((!unified || items.length > 0 || webSourceCount > 0 || additionalSourceCount > 0) && !ready.length && !webSourceCount && !additionalSourceCount)
             || (ready.length > 0 && !formats.length)
+            || formatConflict
             || busy
             || reuseInvalid
             || hasFailed
             || submitBlocked
             || (kind === "mixed" && runtimeSelection === "legacy")
-            || ((ready.length > 0 || webSourceCount > 0 || connectorSourceCount > 0 || additionalSourceCount > 0) && piSelectionInvalid)
+            || piSelectionInvalid
           }
-          className="ml-auto inline-flex h-9 items-center gap-2 rounded-lg bg-primary px-4 text-sm font-medium text-primary-foreground shadow-sm hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-45"
+          aria-label={compact ? "创建新版本" : unified && !items.length && !webSourceCount && !additionalSourceCount ? "发送" : webSourceCount ? "启动任务" : "开始执行"}
+          title={compact ? "创建新版本" : "发送"}
+          className="ml-auto inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-45"
         >
           {submitting ? (
-            <Loader2 className="h-4 w-4 animate-spin" />
+            <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin motion-reduce:animate-none" />
           ) : (
-            <Send className="h-4 w-4" />
+            <ArrowUp aria-hidden="true" className="h-5 w-5" />
           )}
-          {compact ? "创建新版本" : (webSourceCount || connectorSourceCount) ? "启动任务" : "开始执行"}
-        </button>
+        </button>}
       </div>
+      {formatConflict && <p role="alert" className="mt-2 text-sm text-amber-700">手动选择与文字要求不同。<button type="button" className="ml-2 underline focus-visible:ring-2 focus-visible:ring-ring" onClick={() => { setFormatSelection("auto"); updateDraft({ formatSelection: "auto" }); }}>按文字要求输出</button>，或修改上方要求。</p>}
+      {unified && formatSelection === "auto" && prompt.trim() && !resolvedOutput.explicit && <p className="mt-2 text-xs text-muted-foreground">按任务目标推荐：{formats.map(format => FORMAT_LABELS[format]).join("、")}，可在输出选项中调整。</p>}
+      {unified && selectedConnection && <p className="mt-2 text-[11px] leading-5 text-muted-foreground" data-testid="model-send-notice">发送即将本次对话{ready.length || webSourceCount || additionalSourceCount ? "及所选资料" : ""}交给 {selectedChoice?.label || selectedConnectionModelId}（{selectedConnection.display_name}）处理；如需采集，也使用该模型处理本次采集数据，仅限当前任务。</p>}
       {children}
       {advancedOpen && (
         <div className="mt-3 rounded-xl border bg-muted/20 p-3">
@@ -1321,8 +1414,8 @@ export function TaskComposer({
                   type="button"
                   aria-pressed={selected}
                   onClick={() => {
-                  const next = selected ? formats.filter(item => item !== format) : [...formats, format];
-                  setFormats(next); updateDraft({ formats: next });
+                  const next = unified && formatSelection === "auto" ? [format] : selected ? formats.filter(item => item !== format) : [...formats, format];
+                  setFormats(next); setFormatSelection("manual"); updateDraft({ formats: next, formatSelection: "manual" });
                 }}
                   className={cn(
                     "rounded-full border px-2.5 py-1 text-[11px] font-medium transition-colors",

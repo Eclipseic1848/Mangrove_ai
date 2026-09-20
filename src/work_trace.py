@@ -192,6 +192,7 @@ class WorkTraceProjection:
                     "cache_tokens": event.cache_tokens,
                     "total_tokens": event.total_tokens,
                     "request_count": 1,
+                    "purpose": event.purpose,
                 }
                 for event in selected
                 if _trace_type(event) == "provider.usage"
@@ -199,7 +200,8 @@ class WorkTraceProjection:
         recorded_agent_call_count = sum(
             int(item.get("request_count") or 0)
             for item in usage_rows
-            if not selected_usage or item.get("purpose") == "agent_inference"
+            if (item.get("purpose") == "agent_inference" if selected_usage
+                else item.get("purpose") not in {"方法学习", "教训学习"})
         )
         usage_rows.extend(
             {

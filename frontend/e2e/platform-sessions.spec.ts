@@ -78,13 +78,17 @@ for (const command of ["logout", "logout-all", "password"]) {
       await page.getByLabel("新密码", { exact: true }).fill("new-synthetic-password");
     }
     const submit = async () => {
-      if (command === "logout") await page.getByTitle("退出登录").click();
+      if (command === "logout") {
+        const account = page.locator('[data-account-options]:visible');
+        if (!await account.evaluate(element => (element as HTMLDetailsElement).open)) await account.locator("summary").click();
+        await page.getByTitle("退出登录").click();
+      }
       else if (command === "logout-all") await page.getByRole("button", { name: "退出所有设备", exact: true }).click();
       else await page.getByLabel("新密码", { exact: true }).press("Enter");
     };
     await submit();
     await expect(page.getByText("虚构服务暂不可用", { exact: true })).toBeVisible();
-    await expect(page.getByText("会话测试用户", { exact: true })).toBeVisible();
+    await expect(page.getByText("会话测试用户", { exact: true }).first()).toBeVisible();
     await expect(page).toHaveURL(/\/settings\?section=personal$/);
     fail = false;
     await submit();

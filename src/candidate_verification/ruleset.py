@@ -16,7 +16,7 @@ from .models import VerifierRulesetBinding
 
 
 _SCHEMA_VERSION = 1
-_ALLOWLIST_VERSION = "adr-0033-v1"
+_ALLOWLIST_VERSION = "adr-0033-v2"
 _SOURCE_ALLOWLIST: tuple[tuple[str, tuple[str, ...] | None], ...] = (
     ("src/agentic_runtime/candidate_verifier.py", None),
     (
@@ -28,6 +28,7 @@ _SOURCE_ALLOWLIST: tuple[tuple[str, tuple[str, ...] | None], ...] = (
             "PiRuntimeRequest",
             "CandidateArtifact",
             "VerificationCheck",
+            "LessonAssessment",
             "SemanticDecision",
             "VerificationReport",
         ),

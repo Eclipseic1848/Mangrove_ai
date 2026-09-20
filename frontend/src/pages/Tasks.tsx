@@ -1,21 +1,26 @@
-import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useEffect, useRef, useState } from "react";
+import { PageGuide } from "@/components/onboarding/PageGuide";
+import { Link, useSearchParams } from "react-router-dom";
+import { describeTrigger, type ScheduledTask as Task } from "@/lib/scheduleSummary";
 import {
   CalendarClock, Trash2, RefreshCw, Clock, CheckCircle2, XCircle,
   FileText, Download, ArrowLeft, Braces, Plus, Pencil, Play,
   MessageSquare, TrendingUp, Gavel, Newspaper, Rocket, ShoppingCart, Heart, Zap,
-  Sparkles, ListChecks, Search, ChevronLeft, ChevronRight,
+  Sparkles, ListChecks, Search,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Pagination } from "@/components/ui/pagination";
 import { Modal } from "@/components/ui/modal";
 import { Markdown } from "@/components/Markdown";
-import { api, downloadFile, getSessionState } from "@/lib/api";
-import { WorkspaceScheduleActions } from "@/components/workspace/WorkspaceLifecycleActions";
+import { api, downloadFile } from "@/lib/api";
 import { cn } from "@/lib/utils";
+import { useAuth, isAdminish } from "@/lib/auth";
+import { taskModelChoices, type TaskModelConnection } from "@/lib/taskModelChoices";
+import { beijingTime } from "@/lib/beijingTime";
 
 /** 开关样式沿用设置页「连接器/增强」的 Toggle（同一套视觉语言）。 */
 function Toggle({ checked, disabled, title, onChange }: {
@@ -45,29 +50,11 @@ function Toggle({ checked, disabled, title, onChange }: {
   );
 }
 
-interface Task {
-  task_id: string;
-  name?: string | null;
-  source?: string; // auto | manual | template
-  workspace?: { timezone:string };
-  credential_block?: { credential_key:string } | null;
-  status?: string; // active | paused
-  user_input: string;
-  trigger_type: string;
-  cron_expr?: string;
-  interval_seconds?: number | null;
-  run_at?: string;
-  next_run_at?: string;
-  start_date?: string | null;
-  end_date?: string | null;
-  run_count: number;
-  last_success?: number | null;
-  last_run_at?: string;
-  last_result?: string;
-  last_error?: string;
-}
-
 interface Run {
+  state?: string;
+  model?: string | null;
+  provider?: string | null;
+  notification?: { message?: string } | null;
   run_id: number;
   run_at: string;
   success: boolean;
@@ -101,42 +88,17 @@ const TEMPLATE_ICONS: Record<string, typeof Sparkles> = {
   one_time_collection: Zap,
 };
 
-const SOURCE_LABEL: Record<string, string> = { auto: "自动识别", manual: "手动创建", template: "模板创建", workspace: "工作台冻结计划" };
+const SOURCE_LABEL: Record<string, string> = { auto: "自动识别", manual: "手动创建", template: "模板创建" };
 const WEEKDAY_NAMES = ["日", "一", "二", "三", "四", "五", "六"];
-
-/** 触发方式的人话描述：cron/interval 拼时间点，once 给具体时刻。 */
-function describeTrigger(t: Pick<Task, "trigger_type" | "cron_expr" | "interval_seconds" | "run_at">): string {
-  if (t.trigger_type === "once") {
-    return `单次 ${(t.run_at || "").replace("T", " ").slice(0, 16)}`;
-  }
-  if (t.trigger_type === "interval") {
-    const s = t.interval_seconds || 0;
-    if (s > 0 && s % 3600 === 0) return `每 ${s / 3600} 小时`;
-    return `每 ${Math.max(1, Math.round(s / 60))} 分钟`;
-  }
-  const expr = (t.cron_expr || "").trim();
-  const parts = expr.split(/\s+/);
-  if (parts.length === 5) {
-    const [mm, hh, dom, mon, dow] = parts;
-    const time = `${hh.padStart(2, "0")}:${mm.padStart(2, "0")}`;
-    if (dom === "*" && mon === "*" && dow === "*") return `每天 ${time}`;
-    if (dom === "*" && mon === "*" && dow !== "*") {
-      const days = dow.split(",").map((d) => WEEKDAY_NAMES[Number(d) % 7] ?? d).join("、");
-      return `每周${days} ${time}`;
-    }
-    if (dom !== "*" && mon === "*" && dow === "*") return `每月 ${dom} 号 ${time}`;
-  }
-  return expr || "—";
-}
-
 /** 上次执行的人话摘要：不暴露服务器文件路径（用户拿到路径也没用） */
 function lastSummary(t: Task): string {
   if (!t.last_run_at) return "";
   const raw = (t.last_success ? t.last_result : t.last_error) || "";
   const note = raw.match(/^\[[^\]]+\]/)?.[0] ?? "";
   const body = raw.replace(/^\[[^\]]+\]\s*/, "");
+  const notification = body.match(/发送结果：([^;]+)/)?.[0];
   if (!t.last_success) return `${note ? note + " " : ""}${body || "执行失败"}`;
-  if (/report=/.test(body)) return `${note ? note + " " : ""}报告已生成，点击「报告」查看或下载`;
+  if (/report=/.test(body)) return `${note ? note + " " : ""}${notification ? notification + '；' : ''}报告已生成，点击「报告」查看或下载`;
   return `${note ? note + " " : ""}${body}`;
 }
 
@@ -153,6 +115,7 @@ type FreqMode = "cron" | "interval" | "once";
 type CronMode = "daily" | "weekly" | "monthly" | "advanced";
 
 interface FormState {
+  modelChoice?: string;
   name: string;
   prompt: string;
   freqMode: FreqMode;
@@ -166,7 +129,6 @@ interface FormState {
   runAt: string; // datetime-local
   startDate: string;
   endDate: string;
-  frozen?: boolean;
 }
 
 const EMPTY_FORM: FormState = {
@@ -213,7 +175,8 @@ function formToTrigger(f: FormState): { type: FreqMode; cron_expr?: string; inte
 }
 
 function taskToForm(t: Task): FormState {
-  const base = { ...EMPTY_FORM, name: t.name || "", prompt: t.user_input, startDate: t.start_date || "", endDate: t.end_date || "" };
+  const base = { ...EMPTY_FORM, name: t.name || "", prompt: t.user_input, startDate: t.start_date || "", endDate: t.end_date || "",
+    modelChoice: t.model && (t.model_connection_id || t.provider === 'local') ? JSON.stringify([t.model_connection_id || '__local__', t.model]) : '' };
   if (t.trigger_type === "interval") {
     const s = t.interval_seconds || 3600;
     const hours = s % 3600 === 0;
@@ -235,6 +198,27 @@ function TaskFormModal({
 }) {
   const [f, setF] = useState<FormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
+  const { user } = useAuth();
+  const [catalog, setCatalog] = useState<{ local: Array<{ provider: string; model: string }>; connections: TaskModelConnection[] }>({ local: [], connections: [] });
+  const [modelValue, setModelValue] = useState("");
+  const [modelError, setModelError] = useState("");
+  const [externalConfirmed, setExternalConfirmed] = useState(false);
+  const choices = taskModelChoices(catalog.local, catalog.connections, isAdminish(user?.role));
+  const selected = choices.find(item => JSON.stringify([item.connectionId, item.model]) === modelValue);
+
+  useEffect(() => {
+    if (!open || !initial) return;
+    let active = true;
+    setModelValue(initial.form.modelChoice || ''); setModelError(''); setExternalConfirmed(false);
+    Promise.all([api.get('/api/models'), api.get('/api/model-connections'), api.get('/api/model-connections/preferences/default')])
+      .then(([local, connections, preference]) => {
+        if (!active) return;
+        setCatalog({ local: local.options ?? [], connections: connections.items ?? [] });
+        if (!initial.form.modelChoice && initial.mode === 'create' && preference.preference?.available !== false && preference.preference?.connection_id)
+          setModelValue(JSON.stringify([preference.preference.connection_id, preference.preference.model_id]));
+      }).catch(() => { if (active) setModelError('模型列表加载失败，请关闭后重新打开。'); });
+    return () => { active = false; };
+  }, [open, initial, user?.user_id]);
 
   useEffect(() => {
     if (initial) setF(initial.form);
@@ -250,6 +234,9 @@ function TaskFormModal({
   };
 
   const save = async () => {
+    if (!selected || (selected.group === '云端模型' && !externalConfirmed)) {
+      toast.error('请选择可用模型，并确认云端模型的数据处理范围'); return;
+    }
     if (!f.name.trim() || !f.prompt.trim()) {
       toast.error("请填写名称和提示词");
       return;
@@ -268,12 +255,14 @@ function TaskFormModal({
       if (initial.mode === "create") {
         await api.post("/api/tasks/manual", {
           name: f.name.trim(), prompt: f.prompt.trim(), trigger,
+          model_connection_id: selected!.connectionId, model: selected!.model, external_api_confirmed: externalConfirmed,
           start_date: f.startDate || undefined, end_date: f.endDate || undefined,
         });
         toast.success("已创建自动化任务");
       } else {
         await api.patch(`/api/tasks/${initial.taskId}`, {
           name: f.name.trim(), prompt: f.prompt.trim(), trigger,
+          model_connection_id: selected.connectionId, model: selected.model, external_api_confirmed: externalConfirmed,
           start_date: f.startDate || undefined, end_date: f.endDate || undefined,
         });
         toast.success("已保存修改");
@@ -290,16 +279,28 @@ function TaskFormModal({
   return (
     <Modal open={open} onClose={onClose} title={initial.mode === "create" ? "添加自动化任务" : "编辑自动化任务"} wide>
       <div className="grid max-h-[70vh] gap-4 overflow-y-auto pr-1">
+        <p className="text-sm text-muted-foreground">计划时间统一为北京时间（UTC+8）。保存后按所选模型执行，不自动切换其他模型。</p>
+        <div>
+          <label htmlFor="automation-model" className="mb-1 block text-sm">执行模型</label>
+          <select id="automation-model" value={modelValue} onChange={event => { setModelValue(event.target.value); setExternalConfirmed(false); }}
+            className="h-10 w-full rounded-md border bg-background px-3 text-sm">
+            <option value="">请选择执行模型</option>
+            {choices.map(item => <option key={JSON.stringify([item.connectionId, item.model])} value={JSON.stringify([item.connectionId, item.model])}>{item.group} · {item.label}</option>)}
+          </select>
+          {modelError && <p role="alert" className="mt-2 text-sm text-destructive">{modelError}</p>}
+          {selected?.group === '云端模型' && <label className="mt-2 flex items-start gap-2 text-sm">
+            <input type="checkbox" checked={externalConfirmed} onChange={event => setExternalConfirmed(event.target.checked)} />
+            允许本计划将任务内容及所需资料交给所选云端模型处理。
+          </label>}
+        </div>
         <div>
           <label className="mb-1 block text-sm text-muted-foreground">名称</label>
           <Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="给这个自动化任务起个名字" />
         </div>
         <div>
           <label className="mb-1 block text-sm text-muted-foreground">提示词</label>
-          {f.frozen && <p className="mb-2 text-sm">资料、目标、模型与模板已冻结，此处只调整时间和名称。需改资料时请回工作台创建新版本。</p>}
           <textarea
             value={f.prompt}
-            readOnly={f.frozen}
             onChange={(e) => setF({ ...f, prompt: e.target.value })}
             placeholder="像对话一样描述要采集分析什么，例如：采集汽车之家上小米SU7的最新评论并输出口碑分析"
             rows={3}
@@ -445,10 +446,11 @@ function TemplatePickerModal({
 
 // ---------- 主页面 ----------
 
-const TASK_PAGE_SIZE = 10;
-const RUNS_PAGE_SIZE = 20;
+const PAGE_SIZES = [10, 20, 50, 100];
 
 export function Tasks() {
+  const [searchParams] = useSearchParams();
+  const selectedTask = searchParams.get("task");
   const [tab, setTab] = useState<"scheduled" | "runs">("scheduled");
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
@@ -460,6 +462,7 @@ export function Tasks() {
   const [taskQuery, setTaskQuery] = useState("");
   const [taskStatusFilter, setTaskStatusFilter] = useState<"all" | "active" | "paused">("all");
   const [taskPage, setTaskPage] = useState(1);
+  const [taskPageSize, setTaskPageSize] = useState(10);
 
   // 运行记录：按任务/成败/关键词筛选 + 后端分页（记录会无限增长，不能一次性全拉）
   const [recentRuns, setRecentRuns] = useState<RecentRun[]>([]);
@@ -469,12 +472,18 @@ export function Tasks() {
   const [runsSuccessFilter, setRunsSuccessFilter] = useState<"all" | "success" | "failed">("all");
   const [runsQuery, setRunsQuery] = useState("");
   const [runsPage, setRunsPage] = useState(1);
+  const [runsPageSize, setRunsPageSize] = useState(10);
+  const runsRequest = useRef(0);
 
   const [runsLoading, setRunsLoading] = useState(false);
 
   // 报告查看弹窗：既服务「某任务的执行历史」也服务「运行记录 Tab 里直接查看」
   const [historyFor, setHistoryFor] = useState<Task | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [historyPage, setHistoryPage] = useState(1);
+  const [historyPageSize, setHistoryPageSize] = useState(10);
+  const [historyTotal, setHistoryTotal] = useState(0);
+  const historyQuery = useRef('');
   const [reading, setReading] = useState<{ taskId: string; runAt: string; content: string } | null>(null);
 
   const [formState, setFormState] = useState<
@@ -486,11 +495,21 @@ export function Tasks() {
     api.get("/api/tasks").then(setTasks).catch(() => {}).finally(() => setLoading(false));
   };
   useEffect(load, []);
+  const [refreshTick, setRefreshTick] = useState(0);
+  useEffect(() => {
+    let active = true;
+    const timer = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      api.get('/api/tasks').then(items => { if (active) { setTasks(items); setRefreshTick(t => t + 1); } }).catch(() => {});
+    }, 5000);
+    return () => { active = false; clearInterval(timer); };
+  }, []);
   useEffect(() => {
     api.get("/api/tasks/templates").then(setTemplates).catch(() => {});
   }, []);
 
   const filteredTasks = tasks.filter((t) => {
+    if (selectedTask && t.task_id !== selectedTask) return false;
     if (taskStatusFilter === "active" && t.status === "paused") return false;
     if (taskStatusFilter === "paused" && t.status !== "paused") return false;
     if (taskQuery.trim()) {
@@ -499,37 +518,64 @@ export function Tasks() {
     }
     return true;
   });
-  const taskTotalPages = Math.max(1, Math.ceil(filteredTasks.length / TASK_PAGE_SIZE));
-  const pagedTasks = filteredTasks.slice((taskPage - 1) * TASK_PAGE_SIZE, taskPage * TASK_PAGE_SIZE);
-  useEffect(() => setTaskPage(1), [taskQuery, taskStatusFilter]);
+  const taskTotalPages = Math.max(1, Math.ceil(filteredTasks.length / taskPageSize));
+  const pagedTasks = filteredTasks.slice((taskPage - 1) * taskPageSize, taskPage * taskPageSize);
+  useEffect(() => setTaskPage(1), [taskQuery, taskStatusFilter, selectedTask]);
   useEffect(() => {
     if (taskPage > taskTotalPages) setTaskPage(taskTotalPages);
   }, [taskPage, taskTotalPages]);
 
   const loadRecentRuns = () => {
+    const request = ++runsRequest.current;
     setRecentRunsLoading(true);
     const params = new URLSearchParams();
     if (runsTaskFilter) params.set("task_id", runsTaskFilter);
     if (runsSuccessFilter !== "all") params.set("success", runsSuccessFilter === "success" ? "true" : "false");
     if (runsQuery.trim()) params.set("q", runsQuery.trim());
-    params.set("limit", String(RUNS_PAGE_SIZE));
-    params.set("offset", String((runsPage - 1) * RUNS_PAGE_SIZE));
+    params.set("limit", String(runsPageSize));
+    params.set("offset", String((runsPage - 1) * runsPageSize));
     api.get(`/api/tasks/runs/recent?${params.toString()}`)
       .then((res) => {
+        if (request !== runsRequest.current) return;
         setRecentRuns(res.items);
         setRunsTotal(res.total);
+        setRunsPage((page) => Math.min(page, Math.max(1, Math.ceil(res.total / runsPageSize))));
       })
-      .catch(() => {})
-      .finally(() => setRecentRunsLoading(false));
+      .catch((e) => { if (request === runsRequest.current) toast.error(e.message || "读取运行记录失败"); })
+      .finally(() => { if (request === runsRequest.current) setRecentRunsLoading(false); });
   };
   useEffect(() => setRunsPage(1), [runsTaskFilter, runsSuccessFilter, runsQuery]);
   useEffect(() => {
     if (tab !== "runs") return;
     const timer = setTimeout(loadRecentRuns, runsQuery ? 300 : 0);
-    return () => clearTimeout(timer);
+    return () => { clearTimeout(timer); runsRequest.current++; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, runsPage, runsTaskFilter, runsSuccessFilter, runsQuery]);
-  const runsTotalPages = Math.max(1, Math.ceil(runsTotal / RUNS_PAGE_SIZE));
+  }, [tab, runsPage, runsPageSize, runsTaskFilter, runsSuccessFilter, runsQuery, refreshTick]);
+  const runsTotalPages = Math.max(1, Math.ceil(runsTotal / runsPageSize));
+
+  useEffect(() => {
+    if (!historyFor) return;
+    let active = true;
+    const params = new URLSearchParams({ task_id: historyFor.task_id, limit: String(historyPageSize), offset: String((historyPage - 1) * historyPageSize) });
+    const background = historyQuery.current === params.toString();
+    historyQuery.current = params.toString();
+    // 轮询保留列表节点与滚动位置；只有切换查询才显示加载占位。
+    if (!background) setRunsLoading(true);
+    api.get(`/api/tasks/runs/recent?${params}`)
+      .then((res) => {
+        if (!active) return;
+        setRuns(res.items);
+        setHistoryTotal(res.total);
+        setHistoryPage((page) => Math.min(page, Math.max(1, Math.ceil(res.total / historyPageSize))));
+      })
+      .catch((e) => {
+        if (!active) return;
+        toast.error(e.message || "读取执行历史失败");
+        if (!background) setRuns([]);
+      })
+      .finally(() => { if (active) setRunsLoading(false); });
+    return () => { active = false; };
+  }, [historyFor, historyPage, historyPageSize, refreshTick]);
 
   const cancel = async (id: string) => {
     try {
@@ -559,6 +605,7 @@ export function Tasks() {
     try {
       await api.post(`/api/tasks/${t.task_id}/run_now`);
       toast.success("已开始执行，完成后可在「运行记录」中查看");
+      load(); setRefreshTick(tick => tick + 1);
     } catch (e: any) {
       toast.error(e.status === 409 ? "任务正在执行中，请稍候" : e.message || "执行失败");
     } finally {
@@ -585,21 +632,17 @@ export function Tasks() {
   };
 
   const openEdit = (t: Task) => {
-    setFormState({ mode: "edit", taskId: t.task_id, form: { ...taskToForm(t), frozen: t.source === "workspace" } });
+    setFormState({ mode: "edit", taskId: t.task_id, form: taskToForm(t) });
   };
 
-  const openHistory = async (t: Task) => {
+  const openHistory = (t: Task) => {
+    setHistoryPage(1);
+    setHistoryPageSize(10);
+    setHistoryTotal(0);
+    setRuns([]);
+    historyQuery.current = '';
     setHistoryFor(t);
     setReading(null);
-    setRunsLoading(true);
-    try {
-      setRuns(await api.get(`/api/tasks/${t.task_id}/runs`));
-    } catch (e: any) {
-      toast.error(e.message || "读取执行历史失败");
-      setRuns([]);
-    } finally {
-      setRunsLoading(false);
-    }
   };
 
   const readReport = async (taskId: string, runId: number, runAt: string) => {
@@ -630,22 +673,23 @@ export function Tasks() {
 
   return (
     <>
-      <header className="flex items-center justify-between border-b border-border px-7 py-4">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-7 py-4">
         <div>
           <h1 className="text-lg font-semibold tracking-tight">任务中心</h1>
           <p className="text-sm text-muted-foreground">对话中说出定时需求会自动创建，也可以手动添加或从模板快速开始</p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <PageGuide page={`tasks.${tab}`} ready={!(tab === "scheduled" ? loading : recentRunsLoading)} />
           <Button variant="outline" size="sm" onClick={tab === "scheduled" ? load : loadRecentRuns} className="gap-1.5">
             <RefreshCw className="h-4 w-4" /> 刷新
           </Button>
-          <Button size="sm" onClick={() => setPickerOpen(true)} className="gap-1.5">
+          <Button data-guide="automation-add" size="sm" onClick={() => setPickerOpen(true)} className="gap-1.5">
             <Plus className="h-4 w-4" /> 添加自动化
           </Button>
         </div>
       </header>
 
-      <div className="flex gap-1.5 border-b border-border px-7 pt-3">
+      <div data-guide="automation-tabs" className="flex gap-1.5 border-b border-border px-7 pt-3">
         <Button variant={tab === "scheduled" ? "secondary" : "ghost"} size="sm" onClick={() => setTab("scheduled")} className="gap-1.5">
           <CalendarClock className="h-3.5 w-3.5" /> 定时任务
         </Button>
@@ -655,6 +699,7 @@ export function Tasks() {
       </div>
 
       <div className="flex-1 overflow-y-auto px-7 py-6">
+        {selectedTask && <p role="status" className="mb-4 text-sm text-muted-foreground">已定位所选计划。<Link className="ml-2 text-primary underline" to="/tasks">查看全部计划</Link></p>}
         {tab === "scheduled" ? (
           <>
             {loading ? (
@@ -694,13 +739,14 @@ export function Tasks() {
                   <div className="grid gap-3">
                 {pagedTasks.map((t) => (
                   <Card key={t.task_id} className="animate-fade-in">
-                    <CardContent className="flex items-start justify-between gap-4 p-4">
+                    <CardContent className="flex flex-col items-start justify-between gap-4 p-4 lg:flex-row">
                       <div className="min-w-0 flex-1">
                         <div className="mb-1.5 flex flex-wrap items-center gap-2">
                           <p className="truncate text-sm font-medium">{t.name || t.user_input}</p>
                           <Badge variant="outline">{SOURCE_LABEL[t.source || "auto"] || "自动识别"}</Badge>
+                          {t.execution_state === 'blocked' && <Badge variant="danger">需处理</Badge>}
+                          {t.execution_state === 'running' && <Badge variant="secondary">执行中</Badge>}
                           {t.status === "paused" && <Badge variant="secondary">已暂停</Badge>}
-                          {t.source === "workspace" && t.status !== "active" && t.status !== "paused" && <Badge variant="secondary">{t.status === "cancelled" ? "已取消" : "已结束"}</Badge>}
                           {t.last_run_at && (
                             t.last_success ? (
                               <span className="inline-flex items-center gap-1 text-xs text-emerald-500">
@@ -714,13 +760,14 @@ export function Tasks() {
                           )}
                         </div>
                         <p className="truncate text-xs text-muted-foreground" title={t.user_input}>{t.user_input}</p>
+                        <p className="mt-1 text-xs text-muted-foreground">执行模型：{t.provider || '未记录'} · {t.model || '未记录'}</p>
+                        {t.blocked_reason && <p role="status" className="mt-1 text-xs text-destructive">{t.blocked_reason}</p>}
                         <div className="mt-1.5 flex flex-wrap gap-4 text-xs text-muted-foreground">
                           <code className="rounded bg-muted px-1.5 py-0.5 font-mono">{describeTrigger(t)}</code>
                           <span className="inline-flex items-center gap-1">
-                            <Clock className="h-3 w-3" /> 下次：{t.next_run_at || "—"}
+                            <Clock className="h-3 w-3" /> 下次：{beijingTime(t.next_run_at, t.time_zone === 'Asia/Shanghai')}
                           </span>
                           <span>已执行 {t.run_count} 次</span>
-                          {t.workspace && <span>时区：{t.workspace.timezone}</span>}
                           {(t.start_date || t.end_date) && (
                             <span>生效期 {t.start_date || "…"} ~ {t.end_date || "…"}</span>
                           )}
@@ -730,33 +777,26 @@ export function Tasks() {
                             className={`mt-1 truncate text-xs ${t.last_success ? "text-muted-foreground" : "text-destructive/80"}`}
                             title={lastSummary(t)}
                           >
-                            上次（{t.last_run_at}）：{lastSummary(t)}
+                            上次（{beijingTime(t.last_run_at)}）：{lastSummary(t)}
                           </p>
                         )}
-                        {t.credential_block && (
-                          <p role="status" className="mt-2 text-xs text-destructive">
-                            采集账号 Cookie 已失效。请先
-                            <Link className="mx-1 underline underline-offset-2" to="/settings?section=credentials">更新本人 Cookie</Link>
-                            ，再点击恢复。
-                          </p>
-                        )}
-                        {t.source === "workspace" && <WorkspaceScheduleActions key={`${getSessionState().user?.user_id}:${t.task_id}`} ownerId={getSessionState().user?.user_id ?? ""} scheduleId={t.task_id} canRun={t.status === "active" || t.status === "paused"} />}
                       </div>
-                      <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
+                      <div className="flex w-full shrink-0 flex-wrap items-center justify-start gap-1 lg:w-auto lg:justify-end">
                         <Toggle
-                          checked={t.source === "workspace" ? t.status === "active" : t.status !== "paused"}
-                          disabled={t.source === "workspace" && t.status !== "active" && t.status !== "paused"}
+                          disabled={t.execution_state === 'blocked'}
+                          checked={t.status !== "paused"}
                           title={t.status === "paused" ? "已暂停，点击恢复" : "启用中，点击暂停"}
                           onChange={() => toggleEnabled(t)}
                         />
-                        {t.source !== "workspace" && <Button variant="outline" size="sm" className="gap-1.5" disabled={runningNow.has(t.task_id) || !!t.credential_block}
+                        <Button variant="outline" size="sm" className="gap-1.5" disabled={runningNow.has(t.task_id) || t.execution_state === 'blocked' || t.execution_state === 'running'}
                           onClick={() => runNow(t)} title="立即执行一次">
                           <Play className="h-3.5 w-3.5" /> 立即执行
-                        </Button>}
-                        <Button variant="outline" size="sm" className="gap-1.5" disabled={t.source === "workspace" && t.status !== "active" && t.status !== "paused"} onClick={() => openEdit(t)}>
+                        </Button>
+                        <Button variant="outline" size="sm" className="gap-1.5" disabled={t.execution_state === 'blocked'} onClick={() => openEdit(t)}>
                           <Pencil className="h-3.5 w-3.5" /> 编辑
                         </Button>
-                        {t.source !== "workspace" && t.run_count > 0 && (
+                        {t.can_recreate && <Button variant="outline" size="sm" onClick={() => setFormState({ mode: 'create', form: taskToForm(t) })}>按北京时间重新创建</Button>}
+                        {t.run_count > 0 && (
                           <Button variant="outline" size="sm" className="gap-1.5" onClick={() => openHistory(t)}>
                             <FileText className="h-3.5 w-3.5" /> 历史
                           </Button>
@@ -772,19 +812,11 @@ export function Tasks() {
                   </div>
                 )}
 
-                {taskTotalPages > 1 && (
-                  <div className="mt-4 flex items-center justify-center gap-3 text-sm text-muted-foreground">
-                    <Button variant="outline" size="sm" disabled={taskPage <= 1}
-                      onClick={() => setTaskPage((p) => p - 1)} className="gap-1">
-                      <ChevronLeft className="h-3.5 w-3.5" /> 上一页
-                    </Button>
-                    第 {taskPage} / {taskTotalPages} 页 · 共 {filteredTasks.length} 条
-                    <Button variant="outline" size="sm" disabled={taskPage >= taskTotalPages}
-                      onClick={() => setTaskPage((p) => p + 1)} className="gap-1">
-                      下一页 <ChevronRight className="h-3.5 w-3.5" />
-                    </Button>
-                  </div>
-                )}
+                <nav aria-label="定时任务分页" className="mt-4">
+                  <Pagination page={taskPage} totalPages={taskTotalPages} total={filteredTasks.length}
+                    pageSize={taskPageSize} pageSizeOptions={PAGE_SIZES} onChange={setTaskPage}
+                    onPageSizeChange={(size) => { setTaskPageSize(size); setTaskPage(1); }} />
+                </nav>
               </>
             )}
           </>
@@ -824,12 +856,14 @@ export function Tasks() {
                   className="flex items-center justify-between gap-3 rounded-lg border border-border px-4 py-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 text-sm">
-                      {r.success ? (
+                      {r.state === 'running' ? <Badge variant="secondary">执行中</Badge> : r.state === 'unknown' ? <Badge variant="warning">停止状态待确认</Badge> : r.state === 'cancelled' ? <Badge variant="secondary">已停止</Badge> : r.success ? (
                         <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
                       ) : (
                         <XCircle className="h-3.5 w-3.5 shrink-0 text-destructive" />
                       )}
-                      <span className="font-mono text-xs text-muted-foreground">{r.run_at}</span>
+                      <span className="font-mono text-xs text-muted-foreground">{beijingTime(r.run_at)}</span>
+                      {r.model && <span className="text-xs text-muted-foreground">{r.provider} · {r.model}</span>}
+                      {r.notification?.message && <span className="text-xs">{r.notification.message}</span>}
                       <span className="truncate font-medium">{r.task_name}</span>
                     </div>
                     <p className={`mt-0.5 truncate text-xs ${r.success ? "text-muted-foreground" : "text-destructive/80"}`}
@@ -859,19 +893,12 @@ export function Tasks() {
             )}
             </div>
 
-            {runsTotalPages > 1 && (
-              <div className="mt-4 flex items-center justify-center gap-3 text-sm text-muted-foreground">
-                <Button variant="outline" size="sm" disabled={runsPage <= 1}
-                  onClick={() => setRunsPage((p) => p - 1)} className="gap-1">
-                  <ChevronLeft className="h-3.5 w-3.5" /> 上一页
-                </Button>
-                第 {runsPage} / {runsTotalPages} 页 · 共 {runsTotal} 条
-                <Button variant="outline" size="sm" disabled={runsPage >= runsTotalPages}
-                  onClick={() => setRunsPage((p) => p + 1)} className="gap-1">
-                  下一页 <ChevronRight className="h-3.5 w-3.5" />
-                </Button>
-              </div>
-            )}
+            <nav aria-label="运行记录分页" className="mt-4">
+              <Pagination page={runsPage} totalPages={runsTotalPages} total={runsTotal}
+                pageSize={runsPageSize} pageSizeOptions={PAGE_SIZES} onChange={setRunsPage}
+                disabled={recentRunsLoading}
+                onPageSizeChange={(size) => { setRunsPageSize(size); setRunsPage(1); }} />
+            </nav>
           </>
         )}
       </div>
@@ -932,20 +959,22 @@ export function Tasks() {
               ) : !runs.length ? (
                 <p className="py-6 text-center text-sm text-muted-foreground">还没有执行历史。</p>
               ) : (
-                <div className="grid gap-2">
+                <div className="grid min-w-0 grid-cols-1 gap-2">
                   {runs.map((r) => (
                     <div key={r.run_id}
-                      className="flex items-center justify-between gap-3 rounded-lg border border-border px-3 py-2">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 text-sm">
-                          {r.success ? (
+                      className="flex min-w-0 flex-col items-start justify-between gap-3 rounded-lg border border-border px-3 py-2 sm:flex-row">
+                      <div className="min-w-0 w-full flex-1 [overflow-wrap:anywhere]">
+                        <div className="flex flex-wrap items-center gap-2 text-sm">
+                          {r.state === 'running' ? <Badge variant="secondary">执行中</Badge> : r.state === 'unknown' ? <Badge variant="warning">停止状态待确认</Badge> : r.state === 'cancelled' ? <Badge variant="secondary">已停止</Badge> : r.success ? (
                             <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
                           ) : (
                             <XCircle className="h-3.5 w-3.5 shrink-0 text-destructive" />
                           )}
-                          <span className="font-mono text-xs">{r.run_at}</span>
+                          <span className="font-mono text-xs">{beijingTime(r.run_at)}</span>
+                          {r.model && <span className="text-xs text-muted-foreground">{r.provider} · {r.model}</span>}
+                          {r.notification?.message && <span className="text-xs">{r.notification.message}</span>}
                         </div>
-                        <p className={`mt-0.5 truncate text-xs ${r.success ? "text-muted-foreground" : "text-destructive/80"}`}
+                        <p className={`mt-0.5 whitespace-pre-wrap text-xs leading-relaxed ${r.success ? "text-muted-foreground" : "text-destructive/80"}`}
                           title={runSummary(r)}>
                           {runSummary(r)}
                         </p>
@@ -972,6 +1001,12 @@ export function Tasks() {
                 </div>
               )}
             </div>
+            <nav aria-label="执行历史分页" className="mt-4">
+              <Pagination page={historyPage} totalPages={Math.max(1, Math.ceil(historyTotal / historyPageSize))}
+                total={historyTotal} pageSize={historyPageSize} pageSizeOptions={PAGE_SIZES}
+                disabled={runsLoading} onChange={setHistoryPage}
+                onPageSizeChange={(size) => { setHistoryPageSize(size); setHistoryPage(1); }} />
+            </nav>
             <div className="mt-4 flex justify-end">
               <Button variant="outline" size="sm" onClick={closeHistory}>关闭</Button>
             </div>

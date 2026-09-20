@@ -34,8 +34,8 @@ class OutputFormat(str, Enum):
     REPORT_MD = "report_md"    # Markdown 分析报告
     JSON = "json"              # 结构化 JSON 数据
     DB = "db"                  # 入数据库（敏感动作，走 HITL 确认）
-    EMAIL = "email"            # 邮件发送报告（敏感动作，走 HITL 确认）
-    SLACK = "slack"            # 推送报告到 Slack 频道（敏感动作，走 HITL 确认）
+    EMAIL = "email"            # 邮件报告；宿主核对用户原文授权后发送
+    SLACK = "slack"            # Slack 报告；宿主核对用户原文授权后发送
 
 
 class AnalysisType(str, Enum):

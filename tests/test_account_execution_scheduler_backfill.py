@@ -11,7 +11,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
 
 from src.database_migrations import DatabaseTarget, _alembic_config, apply_migrations
-from tests.database_migration_helpers import migrated_profile_database
 
 
 def digest(path):
@@ -31,7 +30,12 @@ def legacy(tmp_path):
     engine.dispose()
     with sqlite3.connect(old_web) as conn:
         conn.execute("INSERT INTO users(user_id,username,password_hash,display_name,role,created_at) VALUES ('synthetic-owner','fixture','unused','fixture','user','2026-09-01')")
-    old_sched = migrated_profile_database(tmp_path / "legacy-scheduler.db", profile="scheduler")
+    # 历史回填必须模拟当年的冻结版本，不能跟随当前 head 自动升级。
+    old_sched = tmp_path / "legacy-scheduler.db"
+    engine = create_engine(URL.create("sqlite", database=str(old_sched)))
+    with engine.begin() as conn:
+        command.upgrade(_alembic_config(conn), "scheduler_0001")
+    engine.dispose()
     with sqlite3.connect(old_sched) as conn:
         conn.row_factory = sqlite3.Row
         conn.execute("INSERT INTO scheduled_tasks(task_id,user_input,owner_user_id,trigger_type,next_run_at,status,created_at) VALUES ('old-task','虚构正文','synthetic-owner','once','2999-01-01','active','2026-09-01')")
@@ -47,7 +51,15 @@ def legacy(tmp_path):
     shutil.copyfile(old_web, web)
     shutil.copyfile(old_sched, scheduler)
     apply_migrations(DatabaseTarget("webui", web), tmp_path / "web-before.db")
+    apply_migrations(DatabaseTarget("scheduler", scheduler), tmp_path / "scheduler-before.db")
     return web, scheduler, manifest, tmp_path / "backfill"
+
+
+def test_new_model_binding_is_not_accepted_as_unchanged_legacy(legacy):
+    with sqlite3.connect(legacy[1]) as conn:
+        conn.execute("UPDATE scheduled_tasks SET model_connection_id='changed-connection'")
+    with pytest.raises(ValueError, match="历史计划已变化"):
+        run(legacy)
 
 
 def run(legacy, *, apply=True):

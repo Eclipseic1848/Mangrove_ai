@@ -41,6 +41,7 @@ RUNTIME_CONFIG_SECRET_KEYS = frozenset(
         "qwen_api_key",
         "rerank_api_key",
         "slack_webhook_url",
+        "slack_bot_token",
         "smtp_password",
         "tavily_api_key",
         "tb_cookie",
