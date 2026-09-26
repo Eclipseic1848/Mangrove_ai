@@ -74,6 +74,14 @@ def _reopen(path: Path, fmt: str) -> tuple[str, ...]:
     return (*checks, "reopened")
 
 
+def verify_frozen_copies(candidates, expected_sha256_by_format):
+    """原样初稿不能被 Agent 重写；正式核验也必须遵守同一冻结摘要。"""
+    if expected_sha256_by_format:
+        actual = {item.format: item.sha256 for item in candidates}
+        if len(actual) != len(candidates) or actual != expected_sha256_by_format:
+            raise ValueError("输出与冻结采集快照不一致")
+
+
 def inspect_candidates(
     output_dir: Path,
     requested_formats: tuple[str, ...],

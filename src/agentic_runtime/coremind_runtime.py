@@ -28,6 +28,8 @@ from .candidate_verifier import load_qualified_omissions, load_result_items
 from .coremind_events import project_coremind_event
 from .coremind_worker_launcher import sanitized_worker_environment
 from .coverage import assess_web_candidate
+from src.account_execution import ExecutionDenied
+
 from .kernel import (
     AGENT_KERNEL_EVENT_SCHEMA_VERSION,
     AGENT_KERNEL_PROTOCOL_VERSION,
@@ -49,6 +51,7 @@ from .models import (
 )
 from src.model_connections import (
     ConnectionBroker,
+    ProviderNotSentError,
     ProviderOutcomeUnknownError,
     get_default_broker,
 )
@@ -100,6 +103,18 @@ class _WorkerSubprocess:
 
 
 def _tool_definitions(capability_tools_enabled: bool = False) -> tuple[dict[str, Any], ...]:
+    evidence_properties = {
+        key: {"type": "string", "minLength": 1, "pattern": r"\S"}
+        for key in ("source", "locator", "quote")
+    }
+    evidence_properties["source"]["description"] = "冻结来源的原始文件名，例如 source.txt"
+    evidence_schema = {"type": "object", "properties": evidence_properties,
+                       "required": list(evidence_properties), "additionalProperties": False}
+    result_properties = {**evidence_properties,
+                         "result_id": {"type": "string", "minLength": 1, "maxLength": 200, "pattern": r"\S"},
+                         "label": {"type": "string", "minLength": 1, "maxLength": 500, "pattern": r"\S"}}
+    result_schema = {"type": "object", "properties": result_properties,
+                     "required": list(result_properties), "additionalProperties": False}
     definitions = (
         {
             "schemaVersion": 1,
@@ -141,11 +156,11 @@ def _tool_definitions(capability_tools_enabled: bool = False) -> tuple[dict[str,
                     "format": {"type": "string", "minLength": 1},
                     "content": {"type": "string", "minLength": 1},
                     "description": {"type": "string", "minLength": 1},
-                    "evidence": {"type": "array", "items": {"type": "object"}},
-                    "result_items": {"type": "array", "items": {"type": "object"}},
+                    "evidence": {"type": "array", "items": evidence_schema},
+                    "result_items": {"type": "array", "items": result_schema},
                     "qualified_omissions": {
                         "type": "array",
-                        "items": {"type": "object"},
+                        "items": result_schema,
                     },
                     "result_search_complete": {"type": "boolean"},
                 },
@@ -405,7 +420,7 @@ class CoreMindAgentKernelAdapter:
             )
         except asyncio.CancelledError:
             raise
-        except (AgentKernelError, AgentKernelCapabilityError):
+        except (AgentKernelError, AgentKernelCapabilityError, ExecutionDenied):
             raise
         except (TimeoutError, OSError) as exc:
             raise AgentKernelResultUnknownError(
@@ -466,7 +481,7 @@ class CoreMindAgentKernelAdapter:
             )
         except asyncio.CancelledError:
             raise
-        except (AgentKernelError, AgentKernelCapabilityError):
+        except (AgentKernelError, AgentKernelCapabilityError, ExecutionDenied):
             raise
         except (TimeoutError, OSError) as exc:
             raise AgentKernelResultUnknownError(
@@ -1360,6 +1375,13 @@ class CoreMindAgentKernelAdapter:
         run_root: Path,
         args: Mapping[str, Any],
     ) -> dict[str, Any]:
+        from jsonschema import Draft202012Validator
+
+        # 完整校验嵌套证据后才写候选，避免参数错误造成部分写入及副作用未知。
+        schema = next(item["parameters"] for item in _tool_definitions()
+                      if item["name"] == "mangrove_submit_candidate")
+        if not Draft202012Validator(schema).is_valid(dict(args)):
+            raise ValueError("候选参数不符合工具契约")
         filename = str(args.get("filename") or "")
         if Path(filename).name != filename or filename == "candidate-manifest.json":
             raise ValueError("候选文件名必须是不含路径的普通文件名")
@@ -1484,6 +1506,10 @@ class CoreMindAgentKernelAdapter:
             report = VerificationReport.model_validate_json(attempt.report_json)
         except AgentKernelResultUnknownError:
             raise
+        except ProviderNotSentError as exc:
+            raise AgentKernelError(
+                "CoreMind 候选验证请求尚未发送，已停止自动重试"
+            ) from exc
         except ProviderOutcomeUnknownError as exc:
             raise AgentKernelResultUnknownError(
                 "CoreMind 候选验证结果不确定，禁止自动重试"

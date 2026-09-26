@@ -115,6 +115,7 @@ class PiRuntimeRequest(BaseModel):
     revision: int = Field(ge=1)
     objective_text: str = Field(min_length=1, max_length=20_000)
     requested_output_formats: tuple[str, ...] = Field(min_length=1)
+    expected_sha256_by_format: dict[str, str] = Field(default_factory=dict, exclude_if=lambda value: not value)
     table_output_contracts: tuple[TableOutputContract, ...] = Field(
         default=(),
         exclude_if=lambda value: not value,

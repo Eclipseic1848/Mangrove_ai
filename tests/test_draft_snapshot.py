@@ -44,9 +44,10 @@ def test_incomplete_office_or_pdf_is_not_a_fatal_runtime_error(tmp_path, fmt):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_session", [False, True])
 @pytest.mark.parametrize("name,content,fmt", [("result.json", '{"name":"文档"}', "json"),
     ("table.csv", "name,value\na,1\n", "csv"), ("collection.md", "# 合成来源报告", "markdown")])
-async def test_runtime_emits_frozen_draft_before_finishing_or_verifying(tmp_path, monkeypatch, name, content, fmt):
+async def test_runtime_emits_frozen_draft_before_finishing_or_verifying(tmp_path, monkeypatch, name, content, fmt, legacy_session):
     import hashlib
     from src.agentic_runtime.pi_runtime import PiRuntime, PiRuntimeError
     from src.agentic_runtime.repository import AgenticRuntimeRepository
@@ -56,11 +57,24 @@ async def test_runtime_emits_frozen_draft_before_finishing_or_verifying(tmp_path
     output.mkdir()
     source = tmp_path / "source.txt"
     source.write_text("synthetic", encoding="utf-8")
-    runtime = PiRuntime(execution_root=tmp_path, state_store=AgenticRuntimeRepository(migrated_webui_database(tmp_path / "db.sqlite")))
+    runtime = PiRuntime(execution_root=tmp_path, state_store=AgenticRuntimeRepository(migrated_webui_database(tmp_path / "db.sqlite")),
+                        draft_review_required=lambda _: legacy_session)
     events = []
+    if legacy_session:
+        (tmp_path / "work").mkdir()
+        (tmp_path / "work" / "goal.json").write_text('{}', encoding="utf-8")
+        nested = tmp_path / "session" / "nested"
+        nested.mkdir(parents=True)
+        (nested / "saved.jsonl").write_text('{}\n', encoding="utf-8")
+        async def unexpected_inference(*args, **kwargs):
+            pytest.fail("旧会话恢复不应新增输出提取请求")
+        monkeypatch.setattr("src.agentic_runtime.output_requirements.infer_output_requirements", unexpected_inference)
     async def sink(event):
         events.append(event)
     async def process_boundary(request, **kwargs):
+        if legacy_session:
+            assert not events
+            raise PiRuntimeError("合成进程停点：旧会话未新增提取请求")
         await kwargs["capture_draft"]()
         assert not events
         (output / name).write_text(content, encoding="utf-8")

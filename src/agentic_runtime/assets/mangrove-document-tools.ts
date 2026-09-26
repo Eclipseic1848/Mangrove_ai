@@ -66,7 +66,7 @@ export default function mangroveDocumentTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "inspect_source",
     label: "检查来源结构",
-    description: "检查一个获准来源的页数、页型和可用能力，不读取整份高质量 OCR。首次调用使用 goal.json source_scope 中的 /workspace/input/... 路径；返回的 source_id 是后续文档工具使用的规范标识。",
+    description: "仅检查获准PDF或图片的页数、页型和可用能力，不读取整份高质量OCR。使用goal.json sources中reader=document_tools的source_id；JSON、Excel、CSV使用文件或表格工具，不能传给本工具。",
     parameters: Type.Object({ source_id: Type.String() }),
     async execute(_toolCallId, params) {
       return result(await relay("inspect_source", params));

@@ -74,6 +74,10 @@ class ProviderOutcomeUnknownError(ConnectionError):
     """请求可能已到 Provider，但无法确认是否形成可用响应。"""
 
 
+class ProviderNotSentError(ConnectionError):
+    """连接阶段失败且尚未开始发送 HTTP 请求；不代表允许自动重试。"""
+
+
 class ConnectionBroker:
     """产品代码使用模型连接的唯一 Interface。"""
 
@@ -673,6 +677,19 @@ class ConnectionBroker:
             headers=outbound_headers,
             content=body,
         )
+        phase, transport_error = "unknown", None
+
+        async def trace(event, info):
+            nonlocal phase, transport_error
+            # 只保留阶段和异常类型，info 中的请求、地址、凭据与正文绝不落日志。
+            if event in {"connection.connect_tcp.started", "connection.start_tls.started"} and phase != "sending":
+                phase = "connecting"
+            elif event.endswith(".send_request_headers.started"):
+                phase = "sending"
+            if event.endswith(".failed") and isinstance(info.get("exception"), BaseException):
+                transport_error = type(info["exception"]).__name__
+
+        request.extensions["trace"] = trace
         try:
             # DNS与请求构造期间可能停用；发送前重新读取持久撤销事实。
             self._resolve_active_grant(grant_token)
@@ -681,15 +698,20 @@ class ConnectionBroker:
             raise
         try:
             response = await client.send(request, stream=True)
+            # httpcore 可在写入失败后收到服务端的完整响应头；旧写错误不能污染最终结果。
+            transport_error = None
         except httpx.HTTPError as exc:
             await client.aclose()
-            self._record_unknown_usage(grant)
-            raise ProviderOutcomeUnknownError(
-                "Provider 连接失败，Relay 结果无法确认"
-            ) from exc
-        except BaseException:
+            # 无阶段证据的自定义 Transport 仍按未知处理；不能仅凭异常名断言未发送。
+            unsent = phase == "connecting" and isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+            self._record_unknown_usage(grant, relay_outcome="not_sent" if unsent else "unknown",
+                                       error_type=type(exc).__name__)
+            if unsent:
+                raise ProviderNotSentError("Provider 连接失败，请求尚未发送") from exc
+            raise ProviderOutcomeUnknownError("Provider 连接失败，Relay 结果无法确认") from exc
+        except BaseException as exc:
             await client.aclose()
-            self._record_unknown_usage(grant)
+            self._record_unknown_usage(grant, relay_outcome="unknown", error_type=type(exc).__name__)
             raise
         try:
             self._resolve_active_grant(grant_token)
@@ -708,6 +730,8 @@ class ConnectionBroker:
                 str(grant["api_format"]),
                 response_body,
             )
+            if transport_error:
+                usage["native"].update(relay_outcome="unknown", error_type=transport_error)
             self._repository.record_usage(
                 grant=grant,
                 status=usage["status"],
@@ -731,6 +755,9 @@ class ConnectionBroker:
     def _record_unknown_usage(
         self,
         grant: Mapping[str, object],
+        *,
+        relay_outcome: str | None = None,
+        error_type: str | None = None,
     ) -> None:
         self._repository.record_usage(
             grant=dict(grant),
@@ -738,7 +765,7 @@ class ConnectionBroker:
             input_tokens=None,
             output_tokens=None,
             total_tokens=None,
-            native_json="{}",
+            native_json=json.dumps({"relay_outcome": relay_outcome, "error_type": error_type}) if relay_outcome else "{}",
         )
 
     def _resolve_active_grant(

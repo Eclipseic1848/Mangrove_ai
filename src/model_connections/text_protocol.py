@@ -5,6 +5,10 @@ import json
 from .catalog import model_max_output_tokens
 
 
+class ModelOutputTruncatedError(ValueError):
+    """供应商明确返回额度截断，不能当成完整业务判断。"""
+
+
 def collect_response_usage(api_format: str, body: bytes) -> None:
     """把供应商实际返回的用量接回既有请求计数器，不估算缺失数据。"""
     from types import SimpleNamespace
@@ -31,8 +35,13 @@ def structured_request(
     grant_token: str,
     system_prompt: str,
     payload: dict[str, object],
+    max_tokens: int | None = None,
 ) -> tuple[str, dict[str, object], dict[str, str]]:
     output_limit = model_max_output_tokens(model)
+    if max_tokens is not None:
+        if type(max_tokens) is not int or max_tokens < 1:
+            raise ValueError("操作输出预算必须是正整数")
+        output_limit = min(max_tokens, output_limit) if output_limit is not None else max_tokens
     user_text = json.dumps(
         payload,
         ensure_ascii=False,
@@ -64,6 +73,7 @@ def structured_request(
                 ],
                 # 回答额度不等于此协议的思考加回答总额；未核总额时沿服务端默认。
                 "store": False,
+                **({"max_output_tokens": output_limit} if max_tokens is not None else {}),
                 "stream": False,
             },
             {"authorization": f"Bearer {grant_token}"},
@@ -77,7 +87,7 @@ def structured_request(
                 "messages": [{"role": "user", "content": user_text}],
                 "temperature": 0,
                 # 此协议必须填额度，未知模型保持兼容值，不伪称模型最大值。
-                "max_tokens": 2000,
+                "max_tokens": output_limit if max_tokens is not None else 2000,
                 "stream": False,
             },
             {"x-api-key": grant_token},
@@ -97,6 +107,7 @@ def structured_request(
                 "generationConfig": {
                     "temperature": 0,
                     "responseMimeType": "application/json",
+                    **({"maxOutputTokens": output_limit} if max_tokens is not None else {}),
                 },
             },
             {"x-goog-api-key": grant_token},
@@ -112,6 +123,14 @@ def response_text(
         payload = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("外部语义验证返回的不是有效 JSON") from exc
+    truncated = (
+        (api_format == "openai_chat_completions" and any(choice.get("finish_reason") == "length" for choice in payload.get("choices", [])))
+        or (api_format == "openai_responses" and (payload.get("incomplete_details") or {}).get("reason") == "max_output_tokens")
+        or (api_format == "anthropic_messages" and payload.get("stop_reason") == "max_tokens")
+        or (api_format == "gemini_generate_content" and any(candidate.get("finishReason") == "MAX_TOKENS" for candidate in payload.get("candidates", [])))
+    )
+    if truncated:
+        raise ModelOutputTruncatedError("模型输出达到额度上限并被截断，结果未完成")
     if api_format == "openai_chat_completions":
         return str(payload["choices"][0]["message"]["content"])
     if api_format == "openai_responses":

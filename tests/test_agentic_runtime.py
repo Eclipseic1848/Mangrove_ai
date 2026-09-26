@@ -135,6 +135,70 @@ async def test_draft_freeze_pauses_before_any_verification(tmp_path, monkeypatch
         assert replay.status == RuntimeStatus.NEEDS_INPUT and calls == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fmt", ["csv", "xlsx"])
+@pytest.mark.parametrize("restored", [False, True])
+@pytest.mark.parametrize("available", [False, True])
+async def test_table_draft_derives_checks_only_for_new_runs_and_pauses(tmp_path, monkeypatch, fmt, restored, available):
+    from openpyxl import Workbook
+    from src.agentic_runtime import output_requirements
+    from src.api import auth
+    from src.api.store import WebUIStore
+
+    root = tmp_path / "run"
+    for directory in ("output", "sessions", "trace", "work"):
+        (root / directory).mkdir(parents=True)
+    (root / "work" / "goal.json").write_text('{}', encoding="utf-8")
+    if restored:
+        (root / "sessions" / "run.jsonl").write_text('{}\n', encoding="utf-8")
+    source = tmp_path / "source.csv"
+    source.write_text("name,value\na,1\n", encoding="utf-8")
+    request = PiRuntimeRequest(user_id="user-a", task_id="t", revision=1,
+        objective_text=f"输出result.{fmt}，包含name、value列。", requested_output_formats=(fmt,),
+        sources=(SourceInput(upload_id="s", original_name="source.csv", host_path=source,
+                             sha256=hashlib.sha256(source.read_bytes()).hexdigest()),),
+        model="test", base_url="http://127.0.0.1:1/v1", api_key="test")
+    database = migrated_webui_database(tmp_path / "runtime.db")
+    monkeypatch.setattr(auth, "_store", WebUIStore(str(database)))
+    runtime = PiRuntime(execution_root=tmp_path, state_store=AgenticRuntimeRepository(database), draft_review_required=lambda _: True)
+    monkeypatch.setattr(runtime, "_broker", lambda: None)
+    calls, events = [], []
+    async def infer(*_):
+        calls.append("infer")
+        if not available:
+            raise ValueError("合成提取失败")
+        return {"checks": [{"filename": f"result.{fmt}", "evidence": request.objective_text,
+            "table": {"format": fmt, "columns": ["name", "value"], "ordered": False, "allow_extra": True}}]}
+    monkeypatch.setattr(output_requirements, "infer_output_requirements", infer)
+    async def rpc(_request, **kwargs):
+        prompt = kwargs["initial_prompt"]
+        assert ("逐字使用所需字段名和格式" in prompt) is (available and not restored)
+        assert "因用户范围排除的资料仍已提供" in prompt
+        assert _request.objective_text == request.objective_text
+        if fmt == "csv":
+            (root / "output" / "result.csv").write_text("name,value\na,1\n", encoding="utf-8")
+        else:
+            book = Workbook()
+            book.active.append(["name", "value"])
+            book.active.append(["a", 1])
+            book.save(root / "output" / "result.xlsx")
+            book.close()
+        (root / "sessions" / "run.jsonl").write_text('{}\n', encoding="utf-8")
+        (root / "work" / "draft-ready").write_text("ready", encoding="utf-8")
+        await kwargs["capture_draft"]()
+        pytest.fail("初稿冻结后必须等用户决定")
+    monkeypatch.setattr(runtime, "_run_rpc", rpc)
+    async def emit(event):
+        events.append(event.event_type)
+    params = dict(request=request, run_id="r", root=root, output_dir=root / "output",
+        session_dir=root / "sessions", trace_dir=root / "trace", container_name="synthetic", command=(), on_event=emit)
+    for _ in range(2):
+        result = await runtime._execute_run(**params)
+        assert result.status == RuntimeStatus.NEEDS_INPUT and result.verification is None
+    assert calls == ([] if restored else ["infer"])
+    assert ("runtime.output_requirements" in events) is not restored
+
+
 @pytest.fixture(autouse=True)
 def _execution_authorization():
     with execution_context(ExecutionAuthorization("user-a", 0)):
@@ -2123,10 +2187,41 @@ async def test_pi_runtime_stops_after_ambiguous_provider_error(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("transport_failure", [None, "not_sent", "unknown", "body_timeout", "body_read", "body_protocol", "body_cancel"])
 async def test_pi_rpc_repairs_confirmed_omission_in_same_bounded_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    transport_failure,
 ) -> None:
+    import httpx
+    from src.agentic_runtime.candidate_verifier import BrokerSemanticJudge, CandidateVerifier
+    from src.model_connections import ProviderNotSentError, ProviderOutcomeUnknownError
+    error_type = ProviderNotSentError if transport_failure == "not_sent" else ProviderOutcomeUnknownError
+    if transport_failure == "body_cancel":
+        error_type = asyncio.CancelledError
+    body_errors = {"body_timeout": httpx.ReadTimeout, "body_read": httpx.ReadError,
+                   "body_protocol": httpx.RemoteProtocolError, "body_cancel": asyncio.CancelledError}
+    body_calls, revoked = [], []
+
+    class Broker:
+        def issue_grant(self, **kwargs):
+            return SimpleNamespace(token="synthetic", grant_id="grant", api_format="openai_chat_completions", model="fixture")
+
+        async def relay(self, **kwargs):
+            body_calls.append(1)
+            return self
+
+        async def iter_bytes(self):
+            yield b"{"
+            raise body_errors[transport_failure]("合成响应体传输故障")
+
+        def revoke_grant(self, *args):
+            revoked.append(args)
+
+    class Judge:
+        async def judge(self, **_kwargs):
+            raise error_type("合成运输故障")
+
     class MemoryStdin:
         def __init__(self) -> None:
             self.writes: list[bytes] = []
@@ -2171,6 +2266,13 @@ async def test_pi_rpc_repairs_confirmed_omission_in_same_bounded_process(
     async def settled_check() -> str | None:
         nonlocal checks
         checks += 1
+        if transport_failure:
+            judge = (BrokerSemanticJudge(broker=Broker(), owner_user_id="owner-a", connection_id="connection",
+                connection_version="version", model_id="fixture", task_id="task-a", revision=1, run_id="run")
+                if transport_failure in body_errors else Judge())
+            report = await CandidateVerifier(semantic_judge=judge)._verify_semantics(request=request,
+                candidates=(), checks=[], grounded_evidence=(), grounded_quotes=())
+            return report.summary
         if checks <= 3:
             return "已发现 1 项有证据的合格结果尚未进入候选，只能在当前 Run 内补齐。"
         return None
@@ -2199,7 +2301,7 @@ async def test_pi_rpc_repairs_confirmed_omission_in_same_bounded_process(
         api_key="local-runtime",
     )
 
-    await runtime._run_rpc(
+    execution = runtime._run_rpc(
         request,
         command=("docker", "run", "same-container"),
         container_name="pi-same-run",
@@ -2208,6 +2310,16 @@ async def test_pi_rpc_repairs_confirmed_omission_in_same_bounded_process(
         on_event=lambda _event: asyncio.sleep(0),
         settled_check=settled_check,
     )
+
+    if transport_failure:
+        with pytest.raises(error_type):
+            await execution
+        assert checks == 1
+        assert [json.loads(item)["id"] for item in process.stdin.writes] == ["start"]
+        if transport_failure in body_errors:
+            assert body_calls == [1] and len(revoked) == 1
+        return
+    await execution
 
     messages = [
         json.loads(item.decode("utf-8"))
@@ -2519,7 +2631,10 @@ def test_pi_runtime_installs_official_extension_based_context_gate(
     settings_payload = json.loads(
         (config_dir / "settings.json").read_text(encoding="utf-8")
     )
-    assert settings_payload["retry"] == {"enabled": False}
+    assert settings_payload["retry"] == {"enabled": False, "provider": {"maxRetries": 0}}
+    assert settings_payload["cacheWarming"] == "off"
+    assert settings_payload["enableInstallTelemetry"] is False
+    assert settings_payload["enableAnalytics"] is False
     extension = (
         config_dir / "extensions" / "mangrove-context-gate.ts"
     )
