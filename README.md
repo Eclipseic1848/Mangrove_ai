@@ -117,9 +117,11 @@ Agent 可以动态选择路线，但不能绕过这些边界。
 
 | 镜像 | 用途 |
 | --- | --- |
-| `mangrove/pi-coding-agent:0.87.1` | Pi 任务执行与 Capability Host |
+| `mangrove/pi-coding-agent:0.87.1-v1.0.0` | Pi 任务执行与 Capability Host |
 | `mangrove/smokescreen:da4840c9` | 任务出站代理 |
 | `mangrove/office-preview:local` | Office 文件隔离预览 |
+
+Pi 镜像标签中的 `0.87.1` 是 Pi 版本，`v1.0.0` 是此次 Mangrove 构建批次；服务器仍只安装一版 Pi。
 
 主服务使用单进程 FastAPI + systemd，Nginx 提供 HTTPS，Docker 按任务运行隔离容器。
 镜像针对 Ubuntu/Debian **x86_64 / linux/amd64**。完整迁移另需维护窗口内生成的业务数据和密钥，

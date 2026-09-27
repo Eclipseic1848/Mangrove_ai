@@ -10,8 +10,8 @@ def test_release_defaults_use_only_pi_0871():
     from src.config.settings import Settings
 
     fields = Settings.model_fields
-    assert fields["pi_runtime_image"].default == "mangrove/pi-coding-agent:0.87.1"
-    assert fields["pi_capability_host_image"].default == "mangrove/pi-coding-agent:0.87.1"
+    assert fields["pi_runtime_image"].default == "mangrove/pi-coding-agent:0.87.1-v1.0.0"
+    assert fields["pi_capability_host_image"].default == "mangrove/pi-coding-agent:0.87.1-v1.0.0"
     assert fields["pi_runtime_resume_images"].default_factory() == []
 
 

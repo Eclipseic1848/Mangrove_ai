@@ -27,7 +27,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* \
     && pip install --no-cache-dir \
         "pdfplumber==0.11.10" \
-        "pypdf==6.14.2" \
+        "pypdf==6.16.1" \
         "openpyxl==3.1.5" \
         "python-docx==1.2.0" \
         "xlrd==2.0.2" \

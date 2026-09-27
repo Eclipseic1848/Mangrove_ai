@@ -337,9 +337,11 @@ if ($LASTEXITCODE -ne 0) { throw '密钥包导出失败。' }
 
 ### 4.5 导出 Docker 镜像：Pi 只部署 0.87.1
 
+本版标签 `0.87.1-v1.0.0` 中，0.87.1 是 Pi 版本，v1.0.0 表示 Mangrove 镜像构建批次。该镜像更新了 PDF 依赖，不覆盖原机的旧镜像身份。
+
 当前主要镜像：
 
-- `mangrove/pi-coding-agent:0.87.1`：服务器唯一的 Pi 运行版本；
+- `mangrove/pi-coding-agent:0.87.1-v1.0.0`：服务器唯一的 Pi 运行版本；
 - `mangrove/smokescreen:da4840c9`：任务出站代理；
 - `mangrove/office-preview:local`：Office 隔离预览；
 
@@ -347,12 +349,12 @@ if ($LASTEXITCODE -ne 0) { throw '密钥包导出失败。' }
 
 ```powershell
 docker info --format '{{.OSType}}/{{.Architecture}}'
-docker image inspect --format '{{.Id}}' mangrove/pi-coding-agent:0.87.1
+docker image inspect --format '{{.Id}}' mangrove/pi-coding-agent:0.87.1-v1.0.0
 docker image inspect --format '{{.Id}}' mangrove/smokescreen:da4840c9
 docker image inspect --format '{{.Id}}' mangrove/office-preview:local
 
 docker image save --output (Join-Path $exportRoot 'runtime-images.tar') `
-  mangrove/pi-coding-agent:0.87.1 `
+  mangrove/pi-coding-agent:0.87.1-v1.0.0 `
   mangrove/smokescreen:da4840c9 `
   mangrove/office-preview:local
 if ($LASTEXITCODE -ne 0) { throw '镜像导出失败。' }
@@ -658,7 +660,7 @@ sudo -u mangrove test -f /opt/mangrove/app/frontend/dist/index.html
 
 ```bash
 sudo -u mangrove docker image load -i /opt/mangrove/incoming/runtime-images.tar
-sudo -u mangrove docker image inspect --format '{{.Id}}' mangrove/pi-coding-agent:0.87.1
+sudo -u mangrove docker image inspect --format '{{.Id}}' mangrove/pi-coding-agent:0.87.1-v1.0.0
 sudo -u mangrove docker image inspect --format '{{.Id}}' mangrove/smokescreen:da4840c9
 sudo -u mangrove docker image inspect --format '{{.Id}}' mangrove/office-preview:local
 ```
@@ -832,8 +834,8 @@ DATA_PREP_ARTIFACT_ROOT=downloads
 WEBUI_ALLOW_REGISTER=False
 
 AGENT_KERNEL_PRIMARY_ADAPTER=pi-runtime
-PI_RUNTIME_IMAGE=mangrove/pi-coding-agent:0.87.1
-PI_CAPABILITY_HOST_IMAGE=mangrove/pi-coding-agent:0.87.1
+PI_RUNTIME_IMAGE=mangrove/pi-coding-agent:0.87.1-v1.0.0
+PI_CAPABILITY_HOST_IMAGE=mangrove/pi-coding-agent:0.87.1-v1.0.0
 PI_RUNTIME_RESUME_IMAGES=[]
 PI_RUNTIME_EGRESS_IMAGE=mangrove/smokescreen:da4840c9
 COREMIND_RUNTIME_ENABLED=False
@@ -881,7 +883,7 @@ PY
 
 若与迁移期要求不符，由开发通过既有配置接口处理。IT 不要直接 SQL 修改 runtime_config 或把密文替换为明文。
 
-本次服务器的实际生效值必须满足：Pi 与 Capability Host 镜像均为 `mangrove/pi-coding-agent:0.87.1`，`pi_runtime_resume_images` 为空列表。不能只修改 env，却保留数据库里的旧镜像恢复配置。
+本次服务器的实际生效值必须满足：Pi 与 Capability Host 镜像均为 `mangrove/pi-coding-agent:0.87.1-v1.0.0`，`pi_runtime_resume_images` 为空列表。不能只修改 env，却保留数据库里的旧镜像恢复配置。
 
 需要重点检查的迁移差异：Windows 解释器路径、采集仓库路径、模型内网地址、旧机器 localhost 端口、浏览器缓存、数据库白名单、平台签名材料位置。`localhost` 在 Linux 上表示 Linux 自己，不是原 Windows 电脑。
 
@@ -1055,7 +1057,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://172.17.0.1:8088/
 
 ```bash
 sudo -u mangrove docker run --rm --network bridge \
-  mangrove/pi-coding-agent:0.87.1 \
+  mangrove/pi-coding-agent:0.87.1-v1.0.0 \
   node -e "fetch('http://172.17.0.1:8088/').then(r=>{console.log(r.status);process.exit(r.status===404?0:1)}).catch(()=>process.exit(1))"
 ```
 

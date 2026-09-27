@@ -11,7 +11,7 @@
 | 源码基线 | V3 快照 `880c306` 加 v1.0.0 发布增量；发行提交以 `v1.0.0` 标签和随包清单为准。原运行工作树及 10 项旧评测改动保留 |
 | origin / main | `Eclipseic1848/Mangrove_ai`；通过 PR #191 同步 V3 发行基线。原 main 为 `ec4cf05`，不提供其数据库的直接覆盖升级 |
 | 产品入口 | 2026-09-26 UTC 只读核验：8088 运行 V3，健康与 `/data-prep` 200，JS/CSS 匹配本机构建；既有 dev_reload 自动重载，无手动重启；非管理员 UI 验收 |
-| 默认运行时 | `pi-runtime`；Pi 与 Capability Host 均为 `mangrove/pi-coding-agent:0.87.1` |
+| 默认运行时 | `pi-runtime`；Pi 与 Capability Host 均为 `mangrove/pi-coding-agent:0.87.1-v1.0.0` |
 | 历史 Pi | 本机保留 `0.80.10`；用户已明确本次 Linux 服务器只部署 `0.87.1`，不迁旧镜像或承诺旧 Run 续跑 |
 | CoreMind | 未启用；主适配器保留 0.7.1 身份，1.0.1 仅独立候选资格通过，未接管默认任务 |
 | 本轮真实模型 | `deepseek-flash`，用户指定称 DeepSeek V4.1 Flash；不代表所有用户的模型设置 |
@@ -43,6 +43,8 @@
 用户明确授权更新 README 等公共入口、推送 GitHub 并发布 v1.0.0。复用 PR #191 已确定的“以本机已验收源码为准”同步方式，保留双方历史、不强推；在独立发布工作区完成。旧 main 的不同迁移链不做自动混合，不承诺旧 main 数据库直接升级，不修改真实数据库。
 
 发行增量统一 Python/API 版本为 1.0.0、配置与 Dockerfile 的默认 Pi 为 0.87.1、旧镜像恢复列表为空；保留显式配置与历史冻结身份校验。永久回归先复现旧默认值，再验证新值。旧 main 的八项 Secret 扫描命中经核对均为 Schema 摘要和合成幂等键，只增加精确提交/文件/行号例外；不跳过提交或目录。
+
+推送时发现既有运行依赖安全告警，补齐 AnyIO 4.14.2、pypdf 6.16.1、Protego 0.6.2，并同步永久版本断言。Pi 仍为 0.87.1，镜像以 `0.87.1-v1.0.0` 单独构建并包含 PDF 补丁，避免覆盖本机原镜像身份；代码/配置模板/部署手册同步。构建与离线评测等其余告警见 SECURITY，不声称所有依赖无漏洞。
 
 README、CHANGELOG、CONTRIBUTING、SECURITY、IT 手册和工程规则已同步；Code of Conduct 与 MIT License 已检查、无需变化。GitHub About 随发布同步产品介绍。发布流程要求 backend-fast、frontend-build、secret-scan 三项通过后合并，最终提交号、CI 与资产校验值记录在 Release 和随包清单。
 
