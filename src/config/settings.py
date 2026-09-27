@@ -351,6 +351,10 @@ class Settings(BaseSettings):
         default="mangrove/pi-coding-agent:0.80.10",
         description="任务级 Pi Runtime 固定镜像",
     )
+    pi_runtime_resume_images: list[str] = Field(
+        default_factory=list,
+        description="仅供历史冻结任务继续执行的保留镜像；仍核验原内容摘要",
+    )
     pi_capability_host_enabled: bool = Field(
         default=False,
         description="是否灰度启用任务级原生能力 Sidecar；关闭时现有 Pi 路径零变化",

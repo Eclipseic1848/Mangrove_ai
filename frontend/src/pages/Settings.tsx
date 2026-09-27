@@ -57,13 +57,15 @@ const SETTINGS_SECTIONS: Array<{
 function DomainHealthPanel() {
   const [flagged, setFlagged] = useState<Record<string, DomainStat>>({});
   const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
+  const [loadError, setLoadError] = useState(false);
   const [releasing, setReleasing] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
     api.get("/api/config/domain-health")
-      .then((d) => setFlagged(d.flagged || {}))
-      .catch(() => {})
+      .then((d) => { setFlagged(d.flagged || {}); setLoaded(true); setLoadError(false); })
+      .catch(() => setLoadError(true))
       .finally(() => setLoading(false));
   };
   useEffect(load, []);
@@ -95,9 +97,13 @@ function DomainHealthPanel() {
         </p>
       </CardHeader>
       <CardContent className="space-y-2">
-        {loading ? (
+        {loadError && <div role="alert" className="space-y-2 text-sm text-red-700 dark:text-red-300">
+          <p>{loaded ? "域名状态更新失败，当前显示上次读取的数据。" : "域名状态读取失败，请重试。"}</p>
+          <Button variant="outline" size="sm" disabled={loading} onClick={load}>重试读取域名状态</Button>
+        </div>}
+        {loading && !loaded ? (
           <p className="py-3 text-center text-sm text-muted-foreground">加载中…</p>
-        ) : domains.length === 0 ? (
+        ) : domains.length === 0 ? (loadError ? null :
           <p className="py-3 text-center text-sm text-muted-foreground">当前没有被短路的域名</p>
         ) : (
           domains.map(([domain, stat]) => (
@@ -216,6 +222,8 @@ function SettingsContent() {
     navigation.current?.querySelector('[aria-current="page"]')?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [section]);
   const [ov, setOv] = useState<Overview | null>(null);
+  const [overviewError, setOverviewError] = useState(false);
+  const [overviewLoading, setOverviewLoading] = useState(true);
   const [testing, setTesting] = useState<string | null>(null); // 正在自检的 target
   const [results, setResults] = useState<Record<string, CheckResult>>({});
 
@@ -226,7 +234,9 @@ function SettingsContent() {
   };
 
   const load = () => {
-    api.get("/api/overview").then(setOv).catch(() => {});
+    setOverviewLoading(true);
+    api.get("/api/overview").then(value => { setOv(value); setOverviewError(false); })
+      .catch(() => setOverviewError(true)).finally(() => setOverviewLoading(false));
   };
   useEffect(load, []);
 
@@ -341,6 +351,10 @@ function SettingsContent() {
 
             {section === "diagnostics" && manager && (
               <>
+                {overviewError && <div role="alert" className="flex flex-wrap items-center gap-2 text-sm text-red-700 dark:text-red-300">
+                  <span>{ov ? "配置状态更新失败，当前显示上次读取的数据。" : "配置状态读取失败，请重试。"}</span>
+                  <Button variant="outline" size="sm" disabled={overviewLoading} onClick={load}>重试读取配置</Button>
+                </div>}
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-base">平台连接器 / 增强</CardTitle>
@@ -361,9 +375,9 @@ function SettingsContent() {
                             <div className="truncate text-sm">{c.label}</div>
                             <div className="truncate text-[11px] text-muted-foreground">{c.hint}</div>
                           </div>
-                          <span className="text-sm">{enabled ? "已启用" : "已停用"}</span>
+                          <span className="text-sm">{!ov ? "状态未知" : enabled ? "已启用" : "已停用"}</span>
                           <Link className="inline-flex h-8 items-center rounded-md border px-3 text-xs hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" to={`/settings?section=platform${c.key === "embedding" ? "&service=semantic" : ""}`}>前往平台配置</Link>
-                          <Badge variant={c.on ? "success" : "outline"}>{c.on ? "已配置" : "未配"}</Badge>
+                          <Badge variant={c.on ? "success" : "outline"}>{!ov ? "状态未知" : c.on ? "已配置" : "未配"}</Badge>
                           {c.target && (
                             <Button
                               variant="outline"

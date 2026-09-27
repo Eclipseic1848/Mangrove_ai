@@ -19,6 +19,8 @@ export function ConnectionEditor({ connectionId, onSaved }: { connectionId: stri
   const [operation, setOperation] = useState("");
   const [state, setState] = useState("idle");
   const [message, setMessage] = useState("");
+  const [readAttempt, setReadAttempt] = useState(0);
+  const [loading, setLoading] = useState(false);
   const path = `/api/model-connections/${encodeURIComponent(connectionId)}/configuration`;
   const pendingKey = `model-configuration-operation:${getSessionState().user?.user_id || "anonymous"}:${connectionId}`;
   const busy = state === "testing" || state === "saving";
@@ -26,6 +28,7 @@ export function ConnectionEditor({ connectionId, onSaved }: { connectionId: stri
   useEffect(() => {
     if (!open) return;
     let active = true;
+    setLoading(true); setMessage("");
     api.get(path).then(async value => {
       if (!active) return;
       setOriginal(value); setDraft(value);
@@ -39,9 +42,10 @@ export function ConnectionEditor({ connectionId, onSaved }: { connectionId: stri
         setMessage(result.state === "verified" ? "此前验证已通过，可保存配置。" : "此前验证尚未完成或未通过，可核对记录；不会自动重复请求。");
       }
     })
-      .catch(error => { if (active) setMessage(error.message); });
+      .catch(error => { if (active) setMessage(error.message); })
+      .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [open, path]);
+  }, [open, path, readAttempt]);
   const update = (value: Partial<Configuration>) => { setDraft(current => current && { ...current, ...value }); setState("idle"); setOperation(""); sessionStorage.removeItem(pendingKey); setMessage(""); };
   async function test() {
     if (!draft || busy) return;
@@ -79,7 +83,10 @@ export function ConnectionEditor({ connectionId, onSaved }: { connectionId: stri
   return <section className="w-full space-y-3 rounded-lg border bg-muted/20 p-4" aria-label="编辑模型配置">
     <h3 className="font-medium">编辑模型配置</h3>
     <p className="text-sm text-muted-foreground">修改 → 验证 → 保存。验证会发送极短测试请求，可能产生少量用量；不会发送任务资料。</p>
-    {!draft ? <p role="status">{message || "正在加载配置…"}</p> : <>
+    {!draft ? <div className="space-y-2">
+      <p role="status">{loading ? "正在加载配置…" : message}</p>
+      {!loading && <Button variant="outline" onClick={() => setReadAttempt(value => value + 1)}>重试读取配置</Button>}
+    </div> : <>
       <fieldset disabled={busy || draft.superseded || state === "unknown" || state === "testing"} className="grid gap-3 sm:grid-cols-2">
         <label htmlFor={`${id}-name`} className="space-y-1 text-sm">名称<Input id={`${id}-name`} value={draft.display_name} onChange={e => update({ display_name: e.target.value })} /></label>
         <label htmlFor={`${id}-url`} className="space-y-1 text-sm">API 地址<Input id={`${id}-url`} value={draft.base_url} onChange={e => { update({ base_url: e.target.value }); setConfirmed(false); }} /></label>
@@ -94,8 +101,8 @@ export function ConnectionEditor({ connectionId, onSaved }: { connectionId: stri
         <Button onClick={() => void test()} disabled={busy || draft.superseded || (endpointChanged && !confirmed)}>{busy ? "处理中…" : state === "unknown" ? "核对验证结果" : "验证配置"}</Button>
         <Button onClick={() => void save()} disabled={state !== "verified"}>保存配置</Button>
         {state === "unknown" && <Button variant="outline" onClick={() => { if (window.confirm("此前请求可能已产生用量。确认已核对服务商记录，并放弃本次待确认结果？这不会自动发送新请求。")) update({}); }}>已核对，重新编辑</Button>}
-        <Button variant="outline" disabled={busy} onClick={() => { setKey(""); setOpen(false); setDraft(null); if (state !== "unknown") { setOperation(""); setState("idle"); } }}>关闭编辑</Button>
       </div>
     </>}
+    <Button variant="outline" disabled={busy} onClick={() => { setKey(""); setOpen(false); setDraft(null); if (state !== "unknown") { setOperation(""); setState("idle"); } }}>关闭编辑</Button>
   </section>;
 }

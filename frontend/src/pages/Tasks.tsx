@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { PageGuide } from "@/components/onboarding/PageGuide";
 import { Link, useSearchParams } from "react-router-dom";
 import { describeTrigger, type ScheduledTask as Task } from "@/lib/scheduleSummary";
@@ -197,6 +197,7 @@ function TaskFormModal({
   onSaved: () => void;
 }) {
   const [f, setF] = useState<FormState>(EMPTY_FORM);
+  const formId = useId();
   const [saving, setSaving] = useState(false);
   const { user } = useAuth();
   const [catalog, setCatalog] = useState<{ local: Array<{ provider: string; model: string }>; connections: TaskModelConnection[] }>({ local: [], connections: [] });
@@ -279,7 +280,7 @@ function TaskFormModal({
   return (
     <Modal open={open} onClose={onClose} title={initial.mode === "create" ? "添加自动化任务" : "编辑自动化任务"} wide>
       <div className="grid max-h-[70vh] gap-4 overflow-y-auto pr-1">
-        <p className="text-sm text-muted-foreground">计划时间统一为北京时间（UTC+8）。保存后按所选模型执行，不自动切换其他模型。</p>
+        <p id={`${formId}-timing-help`} className="text-sm text-muted-foreground">计划时间统一为 UTC+8。保存后按所选模型执行，不自动切换其他模型。</p>
         <div>
           <label htmlFor="automation-model" className="mb-1 block text-sm">执行模型</label>
           <select id="automation-model" value={modelValue} onChange={event => { setModelValue(event.target.value); setExternalConfirmed(false); }}
@@ -294,12 +295,13 @@ function TaskFormModal({
           </label>}
         </div>
         <div>
-          <label className="mb-1 block text-sm text-muted-foreground">名称</label>
-          <Input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="给这个自动化任务起个名字" />
+          <label htmlFor={`${formId}-name`} className="mb-1 block text-sm text-muted-foreground">名称</label>
+          <Input id={`${formId}-name`} value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} placeholder="给这个自动化任务起个名字" />
         </div>
         <div>
-          <label className="mb-1 block text-sm text-muted-foreground">提示词</label>
+          <label htmlFor={`${formId}-prompt`} className="mb-1 block text-sm text-muted-foreground">提示词</label>
           <textarea
+            id={`${formId}-prompt`}
             value={f.prompt}
             onChange={(e) => setF({ ...f, prompt: e.target.value })}
             placeholder="像对话一样描述要采集分析什么，例如：采集汽车之家上小米SU7的最新评论并输出口碑分析"
@@ -308,8 +310,8 @@ function TaskFormModal({
           />
         </div>
 
-        <div>
-          <label className="mb-1 block text-sm text-muted-foreground">执行频率</label>
+        <fieldset className="min-w-0" aria-describedby={`${formId}-timing-help`}>
+          <legend className="mb-1 block text-sm text-muted-foreground">执行频率</legend>
           <div className="mb-2 flex gap-1.5">
             {([["cron", "周期"], ["interval", "按间隔"], ["once", "单次"]] as [FreqMode, string][]).map(([m, label]) => (
               <Button key={m} type="button" size="sm" variant={f.freqMode === m ? "default" : "outline"}
@@ -330,7 +332,7 @@ function TaskFormModal({
                 ))}
               </div>
               {f.cronMode === "advanced" ? (
-                <Input value={f.advancedCron} onChange={(e) => setF({ ...f, advancedCron: e.target.value })}
+                <Input aria-label="Cron 表达式" value={f.advancedCron} onChange={(e) => setF({ ...f, advancedCron: e.target.value })}
                   placeholder="分 时 日 月 周，例如 30 9 * * 1,3,5" className="font-mono text-xs" />
               ) : (
                 <div className="flex flex-wrap items-center gap-3">
@@ -347,13 +349,13 @@ function TaskFormModal({
                   {f.cronMode === "monthly" && (
                     <div className="flex items-center gap-1.5 text-sm">
                       每月
-                      <Input type="number" min={1} max={31} value={f.monthDay}
+                      <Input aria-label="每月执行日期" type="number" min={1} max={31} value={f.monthDay}
                         onChange={(e) => setF({ ...f, monthDay: Number(e.target.value) || 1 })}
                         className="w-16" />
                       号
                     </div>
                   )}
-                  <Input type="time" value={f.time} onChange={(e) => setF({ ...f, time: e.target.value })} className="w-28" />
+                  <Input aria-label="执行时间" aria-describedby={`${formId}-timing-help`} type="time" value={f.time} onChange={(e) => setF({ ...f, time: e.target.value })} className="w-28" />
                 </div>
               )}
             </div>
@@ -362,9 +364,9 @@ function TaskFormModal({
           {f.freqMode === "interval" && (
             <div className="flex items-center gap-1.5 rounded-lg border border-border p-3 text-sm">
               每
-              <Input type="number" min={1} value={f.intervalValue}
+              <Input aria-label="间隔数值" type="number" min={1} value={f.intervalValue}
                 onChange={(e) => setF({ ...f, intervalValue: Number(e.target.value) || 1 })} className="w-20" />
-              <select value={f.intervalUnit} onChange={(e) => setF({ ...f, intervalUnit: e.target.value as "minutes" | "hours" })}
+              <select aria-label="间隔单位" value={f.intervalUnit} onChange={(e) => setF({ ...f, intervalUnit: e.target.value as "minutes" | "hours" })}
                 className="h-9 rounded-md border border-input bg-background px-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 <option value="minutes">分钟</option>
                 <option value="hours">小时</option>
@@ -375,19 +377,19 @@ function TaskFormModal({
 
           {f.freqMode === "once" && (
             <div className="rounded-lg border border-border p-3">
-              <Input type="datetime-local" value={f.runAt} onChange={(e) => setF({ ...f, runAt: e.target.value })} />
+              <Input aria-label="单次执行时间" aria-describedby={`${formId}-timing-help`} type="datetime-local" value={f.runAt} onChange={(e) => setF({ ...f, runAt: e.target.value })} />
             </div>
           )}
-        </div>
+        </fieldset>
 
-        <div>
-          <label className="mb-1 block text-sm text-muted-foreground">生效日期区间（可选，留空则始终生效）</label>
+        <fieldset className="min-w-0">
+          <legend className="mb-1 block text-sm text-muted-foreground">生效日期区间（可选，留空则始终生效）</legend>
           <div className="flex items-center gap-2">
-            <Input type="date" value={f.startDate} onChange={(e) => setF({ ...f, startDate: e.target.value })} />
+            <Input aria-label="开始日期" className="min-w-0" type="date" value={f.startDate} onChange={(e) => setF({ ...f, startDate: e.target.value })} />
             <span className="text-muted-foreground">至</span>
-            <Input type="date" value={f.endDate} onChange={(e) => setF({ ...f, endDate: e.target.value })} />
+            <Input aria-label="结束日期" className="min-w-0" type="date" value={f.endDate} onChange={(e) => setF({ ...f, endDate: e.target.value })} />
           </div>
-        </div>
+        </fieldset>
       </div>
       <div className="mt-4 flex justify-end gap-2">
         <Button variant="outline" size="sm" onClick={onClose}>取消</Button>
@@ -410,33 +412,29 @@ function TemplatePickerModal({
   return (
     <Modal open={open} onClose={onClose} title="添加自动化任务" wide>
       <div className="grid max-h-[70vh] grid-cols-1 gap-3 overflow-y-auto pr-1 sm:grid-cols-2 lg:grid-cols-3">
-        <Card className="cursor-pointer border-dashed transition-colors hover:border-primary/50 hover:bg-primary/[0.03]"
+        <button type="button" className="flex items-center gap-3 rounded-lg border border-dashed bg-card p-4 text-left transition-colors hover:border-primary/50 hover:bg-primary/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
           onClick={() => onPick(undefined)}>
-          <CardContent className="flex items-center gap-3 p-4">
-            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-muted text-muted-foreground">
               <Plus className="h-4 w-4" />
-            </div>
-            <div>
-              <p className="text-sm font-medium">空白创建</p>
-              <p className="mt-0.5 text-xs text-muted-foreground">从头填写，不使用模板</p>
-            </div>
-          </CardContent>
-        </Card>
+            </span>
+            <span>
+              <span className="block text-sm font-medium">空白创建</span>
+              <span className="mt-0.5 block text-xs text-muted-foreground">从头填写，不使用模板</span>
+            </span>
+        </button>
         {templates.map((tpl) => {
           const Icon = TEMPLATE_ICONS[tpl.id] || Sparkles;
           return (
-            <Card key={tpl.id} className="cursor-pointer transition-colors hover:border-primary/50 hover:bg-primary/[0.03]"
+            <button key={tpl.id} type="button" className="flex items-start gap-3 rounded-lg border bg-card p-4 text-left transition-colors hover:border-primary/50 hover:bg-primary/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               onClick={() => onPick(tpl)}>
-              <CardContent className="flex items-start gap-3 p-4">
-                <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary/12 text-primary">
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-primary/12 text-primary">
                   <Icon className="h-4 w-4" />
-                </div>
-                <div className="min-w-0">
-                  <p className="text-sm font-medium">{tpl.name}</p>
-                  <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{tpl.description}</p>
-                </div>
-              </CardContent>
-            </Card>
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-medium">{tpl.name}</span>
+                  <span className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{tpl.description}</span>
+                </span>
+            </button>
           );
         })}
       </div>
@@ -454,8 +452,13 @@ export function Tasks() {
   const [tab, setTab] = useState<"scheduled" | "runs">("scheduled");
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
+  const [lastReadAt, setLastReadAt] = useState("");
   const [templates, setTemplates] = useState<Template[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [cancelTarget, setCancelTarget] = useState<Task | null>(null);
+  const [cancelling, setCancelling] = useState(false);
+  const cancelPending = useRef(false);
   const [runningNow, setRunningNow] = useState<Set<string>>(new Set());
 
   // 定时任务列表：搜索 + 状态筛选 + 前端分页（任务量级有限，一次拉全量本地过滤足够）
@@ -492,7 +495,9 @@ export function Tasks() {
 
   const load = () => {
     setLoading(true);
-    api.get("/api/tasks").then(setTasks).catch(() => {}).finally(() => setLoading(false));
+    api.get("/api/tasks").then(items => {
+      setTasks(items); setLoadError(false); setLastReadAt(new Date().toISOString());
+    }).catch(() => setLoadError(true)).finally(() => setLoading(false));
   };
   useEffect(load, []);
   const [refreshTick, setRefreshTick] = useState(0);
@@ -500,7 +505,9 @@ export function Tasks() {
     let active = true;
     const timer = setInterval(() => {
       if (document.visibilityState !== 'visible') return;
-      api.get('/api/tasks').then(items => { if (active) { setTasks(items); setRefreshTick(t => t + 1); } }).catch(() => {});
+      api.get('/api/tasks').then(items => { if (active) {
+        setTasks(items); setLoadError(false); setLastReadAt(new Date().toISOString()); setRefreshTick(t => t + 1);
+      } }).catch(() => { if (active) setLoadError(true); });
     }, 5000);
     return () => { active = false; clearInterval(timer); };
   }, []);
@@ -577,13 +584,21 @@ export function Tasks() {
     return () => { active = false; };
   }, [historyFor, historyPage, historyPageSize, refreshTick]);
 
-  const cancel = async (id: string) => {
+  const cancel = async () => {
+    if (!cancelTarget || cancelPending.current) return;
+    const id = cancelTarget.task_id;
+    cancelPending.current = true;
+    setCancelling(true);
     try {
       await api.del(`/api/tasks/${id}`);
       toast.success("已删除定时任务");
       setTasks((t) => t.filter((x) => x.task_id !== id));
+      setCancelTarget(null);
     } catch (e: any) {
       toast.error(e.message || "删除失败");
+    } finally {
+      cancelPending.current = false;
+      setCancelling(false);
     }
   };
 
@@ -702,9 +717,13 @@ export function Tasks() {
         {selectedTask && <p role="status" className="mb-4 text-sm text-muted-foreground">已定位所选计划。<Link className="ml-2 text-primary underline" to="/tasks">查看全部计划</Link></p>}
         {tab === "scheduled" ? (
           <>
-            {loading ? (
+            {loadError && <div role="alert" className="mb-4 flex flex-wrap items-center gap-2 text-sm text-red-700 dark:text-red-300">
+              <span>{lastReadAt ? `任务更新失败，当前显示上次读取的数据（${beijingTime(lastReadAt)}）。` : "任务加载失败，请重试。"}</span>
+              <Button variant="outline" size="sm" disabled={loading} onClick={load}>重试读取任务</Button>
+            </div>}
+            {loading && !lastReadAt ? (
               <p className="text-sm text-muted-foreground">加载中…</p>
-            ) : !tasks.length ? (
+            ) : !tasks.length ? (loadError ? null :
               <div className="mx-auto max-w-md py-12 text-center">
                 <CalendarClock className="mx-auto mb-3 h-10 w-10 text-muted-foreground/40" />
                 <p className="mb-4 text-sm text-muted-foreground">
@@ -795,13 +814,13 @@ export function Tasks() {
                         <Button variant="outline" size="sm" className="gap-1.5" disabled={t.execution_state === 'blocked'} onClick={() => openEdit(t)}>
                           <Pencil className="h-3.5 w-3.5" /> 编辑
                         </Button>
-                        {t.can_recreate && <Button variant="outline" size="sm" onClick={() => setFormState({ mode: 'create', form: taskToForm(t) })}>按北京时间重新创建</Button>}
+                        {t.can_recreate && <Button variant="outline" size="sm" onClick={() => setFormState({ mode: 'create', form: taskToForm(t) })}>重新创建计划</Button>}
                         {t.run_count > 0 && (
                           <Button variant="outline" size="sm" className="gap-1.5" onClick={() => openHistory(t)}>
                             <FileText className="h-3.5 w-3.5" /> 历史
                           </Button>
                         )}
-                        <Button variant="ghost" size="icon" onClick={() => cancel(t.task_id)} title="删除任务"
+                        <Button variant="ghost" size="icon" onClick={() => setCancelTarget(t)} title="删除任务"
                           className="text-muted-foreground hover:text-destructive">
                           <Trash2 className="h-4 w-4" />
                         </Button>
@@ -902,6 +921,14 @@ export function Tasks() {
           </>
         )}
       </div>
+
+      <Modal open={cancelTarget !== null} onClose={() => { if (!cancelPending.current) setCancelTarget(null); }} title="删除自动化计划？">
+        <p className="break-words text-sm leading-6">将停止「{cancelTarget?.name || cancelTarget?.user_input}」后续自动执行，已有执行记录保留。临时停止可取消并使用计划的暂停开关。</p>
+        <div className="mt-4 flex justify-end gap-2">
+          <Button variant="outline" disabled={cancelling} onClick={() => setCancelTarget(null)}>取消</Button>
+          <Button variant="destructive" disabled={cancelling} onClick={() => void cancel()}>{cancelling ? "正在删除…" : "确认删除"}</Button>
+        </div>
+      </Modal>
 
       <TemplatePickerModal
         open={pickerOpen}

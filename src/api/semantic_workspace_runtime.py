@@ -43,7 +43,8 @@ from src.agentic_runtime.kernel import (
     PiAgentKernelAdapter,
 )
 from src.agentic_runtime.coremind_runtime import CoreMindAgentKernelAdapter
-from src.agentic_runtime.pi_runtime import PiRuntime, PiVerificationStalled
+from src.agentic_runtime.pi_runtime import PiRuntime, PiRuntimeError, PiVerificationStalled
+from src.agentic_runtime.document_tools import get_default_document_tool_broker
 from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.api.auth import get_store
 from src.api.execution import execution_lock, execution_to_thread
@@ -660,6 +661,7 @@ class SemanticWorkspaceManager:
         self._heavy = asyncio.Semaphore(1)
         self._candidate_verification = candidate_verification
         self._agent_kernels = dict(agent_kernels or {})
+        self._pi_resume_kernels: dict[str, AgentKernel] = {}
         self._capability_agent_kernel = capability_agent_kernel
         self._primary_adapter_id = primary_adapter_id
         if agent_kernel is not None:
@@ -669,36 +671,42 @@ class SemanticWorkspaceManager:
             self._primary_adapter_id = agent_kernel.adapter_id
         if not self._agent_kernels:
             from src.source_acquisition.reuse import workspace_source_read_context
-            runtime = pi_runtime or PiRuntime(
-                source_read_context=workspace_source_read_context,
-                draft_review_required=self._draft_review_required,
-                capability_mount_resolver=DefaultCapabilityMounts(
-                    db_path=settings.webui_db_path,
-                    oci_layout_path=settings.capability_oci_layout_path,
-                    mount_root=settings.capability_mount_cache_path,
-                    platform_oci_layout_path=(
-                        settings.capability_platform_oci_layout_path
-                    ),
-                    platform_oras_executable_factory=_platform_oras_executable,
-                    platform_signing_public_key_path=(
-                        settings.capability_platform_signing_public_key
-                    ),
-                    signing_runtime_factory=_platform_signing_runtime_factory,
-                    actor_role_resolver=_resolve_actor_role,
-                ),
-                capability_host=(
-                    CapabilityHost(
-                        image=settings.pi_capability_host_image,
-                        execution_root=(
-                            Path(settings.semantic_execution_root)
-                            / "capability-hosts"
+            def create_pi_runtime(image: str | None = None):
+                return PiRuntime(
+                    image=image,
+                    # 多版本 Runtime 与 Relay 共用授权表，旧版不能覆盖新版 Broker。
+                    document_tool_broker=get_default_document_tool_broker() if image is not None else None,
+                    configure_as_default_document_broker=image is None,
+                    source_read_context=workspace_source_read_context,
+                    draft_review_required=self._draft_review_required,
+                    capability_mount_resolver=DefaultCapabilityMounts(
+                        db_path=settings.webui_db_path,
+                        oci_layout_path=settings.capability_oci_layout_path,
+                        mount_root=settings.capability_mount_cache_path,
+                        platform_oci_layout_path=(
+                            settings.capability_platform_oci_layout_path
                         ),
-                    )
-                    if settings.pi_capability_host_enabled
-                    else None
-                ),
-                candidate_verification=candidate_verification,
-            )
+                        platform_oras_executable_factory=_platform_oras_executable,
+                        platform_signing_public_key_path=(
+                            settings.capability_platform_signing_public_key
+                        ),
+                        signing_runtime_factory=_platform_signing_runtime_factory,
+                        actor_role_resolver=_resolve_actor_role,
+                    ),
+                    capability_host=(
+                        CapabilityHost(
+                            image=image or settings.pi_capability_host_image,
+                            execution_root=(
+                                Path(settings.semantic_execution_root)
+                                / "capability-hosts"
+                            ),
+                        )
+                        if settings.pi_capability_host_enabled
+                        else None
+                    ),
+                    candidate_verification=candidate_verification,
+                )
+            runtime = pi_runtime or create_pi_runtime()
             repository_factory = lambda: AgenticRuntimeRepository(
                 settings.webui_db_path
             )
@@ -707,6 +715,13 @@ class SemanticWorkspaceManager:
                 repository=repository_factory,
             )
             self._agent_kernels[pi_kernel.adapter_id] = pi_kernel
+            if pi_runtime is None:
+                for image in settings.pi_runtime_resume_images:
+                    if image != settings.pi_runtime_image:
+                        self._pi_resume_kernels[image] = AgentKernel(
+                            adapter=PiAgentKernelAdapter(create_pi_runtime(image)),
+                            repository=repository_factory,
+                        )
             if settings.coremind_runtime_enabled:
                 coremind_options = dict(
                     source_read_context=workspace_source_read_context,
@@ -821,18 +836,31 @@ class SemanticWorkspaceManager:
         task_id: str,
         revision: int,
     ) -> AgentKernel:
-        if len(self._agent_kernels) == 1 and self._capability_agent_kernel is None:
+        if len(self._agent_kernels) == 1 and self._capability_agent_kernel is None and not self._pi_resume_kernels:
             return self._agent_kernel
         binding = self._agent_kernel.frozen_binding(user_id, task_id, revision)
+        binding_values = (binding.model_dump() if hasattr(binding, "model_dump") else vars(binding)) if binding is not None else {}
         enabled = False
         if binding is not None:
             # 历史 Run 只按原合同选择；不能随新配置把两工具 Run 改为三工具 Run。
-            enabled = self._uses_capability_contract(binding.model_dump() if hasattr(binding, "model_dump") else vars(binding))
+            enabled = self._uses_capability_contract(binding_values)
         elif self._primary_adapter_id == "coremind-runtime":
             from src.capability_catalog import SqliteCapabilityCatalogRepository
             selection = SqliteCapabilityCatalogRepository(settings.webui_db_path).get_selection(user_id, task_id, revision)
             enabled = bool(selection and selection.pack_refs)
-        return self._kernel(binding.adapter_id if binding is not None else None, capability_tools_enabled=enabled)
+        return self._kernel_for_binding(binding_values, capability_tools_enabled=enabled)
+
+    def _kernel_for_binding(self, binding: dict[str, Any], *, capability_tools_enabled: bool = False) -> AgentKernel:
+        # 只从管理员保留清单选择旧镜像；Kernel 仍验证冻结的完整内容摘要。
+        if binding.get("adapter_id") == "pi-runtime":
+            artifact = str(binding.get("runtime_artifact", ""))
+            prefix = "oci-image-ref="
+            if artifact.startswith(prefix):
+                image = artifact[len(prefix):].split(";content-digest=", 1)[0]
+                retained = self._pi_resume_kernels.get(image)
+                if retained is not None:
+                    return retained
+        return self._kernel(binding.get("adapter_id"), capability_tools_enabled=capability_tools_enabled)
 
     def _uses_capability_contract(self, binding: dict[str, Any]) -> bool:
         return bool(self._capability_agent_kernel is not None
@@ -841,7 +869,7 @@ class SemanticWorkspaceManager:
 
     async def prepare_runtime_binding(self, *, model_connection_id: str | None, model_connection_version: str | None, model: str, expected_binding: dict[str, Any] | None = None, capability_tools_enabled: bool = False):
         """沿原绑定解析新 Run；全局默认改变不能替换已确认的执行内核。"""
-        binding, manifest = await self._kernel((expected_binding or {}).get("adapter_id"), capability_tools_enabled=capability_tools_enabled or self._uses_capability_contract(expected_binding or {})).prepare_binding(
+        binding, manifest = await self._kernel_for_binding(expected_binding or {}, capability_tools_enabled=capability_tools_enabled or self._uses_capability_contract(expected_binding or {})).prepare_binding(
             model_connection_id=model_connection_id, model_connection_version=model_connection_version, model=model,
         )
         if expected_binding:
@@ -869,7 +897,7 @@ class SemanticWorkspaceManager:
                     get_default_broker().revoke_grant(provider_attempt_id, reason)
                 ),
             )
-        for kernel in (*self._agent_kernels.values(), *([self._capability_agent_kernel] if self._capability_agent_kernel is not None else [])):
+        for kernel in (*self._agent_kernels.values(), *self._pi_resume_kernels.values(), *([self._capability_agent_kernel] if self._capability_agent_kernel is not None else [])):
             kernel.bind_candidate_verification(self._candidate_verification)
         return self._candidate_verification
 
@@ -2644,6 +2672,7 @@ class SemanticWorkspaceManager:
                 user_id,
                 task_id,
                 str(exc) or exc.__class__.__name__,
+                error=exc,
                 elapsed_ms=max(
                     0,
                     int((time.monotonic() - started) * 1000),
@@ -2692,6 +2721,7 @@ class SemanticWorkspaceManager:
                 user_id,
                 task_id,
                 str(exc) or exc.__class__.__name__,
+                error=exc,
                 elapsed_ms=max(
                     0,
                     int((time.monotonic() - started) * 1000),
@@ -2868,6 +2898,7 @@ class SemanticWorkspaceManager:
                 else None
             ),
             "source_coverage": source_coverage,
+            "expected_sha256_by_format": (source_contract or {}).get("initial_copy_sha256_by_format", {}) if revision == 1 else {},
             "permission_profile": runtime["permission_profile"],
             # 外部 Provider 只能使用创建运行记录时已经冻结的用户确认，不能在执行时推断。
             "external_api_confirmed": bool(
@@ -3809,6 +3840,7 @@ class SemanticWorkspaceManager:
         message: str,
         *,
         elapsed_ms: int,
+        error: Exception | None = None,
     ) -> dict[str, Any]:
         """把 Harness/转换器错误归一为普通用户可理解的失败说明。"""
         store = get_store()
@@ -3821,7 +3853,22 @@ class SemanticWorkspaceManager:
             runtime is not None
             and runtime["runtime_version"] is RuntimeVersion.PI
         ):
-            if "扫描 PDF OCR 服务不可用" in message:
+            external_provider = bool(runtime.get("model_connection_id"))
+            outcome_unknown = (
+                isinstance(error, AgentKernelResultUnknownError)
+                or "模型请求结果不确定" in message
+                or (
+                    external_provider
+                    and any(
+                        marker in message
+                        for marker in (
+                            "Pi 执行超过",
+                            "Pi RPC 在任务稳定结束前退出",
+                        )
+                    )
+                )
+            )
+            if not outcome_unknown and "扫描 PDF OCR 服务不可用" in message:
                 failure = {
                     "error_code": "SOURCE_OCR_UNAVAILABLE",
                     "stage": "inspect",
@@ -3856,34 +3903,21 @@ class SemanticWorkspaceManager:
             )
             source_read = any(
                 event["event_type"] == "tool.completed"
-                and str(event["details"].get("tool") or "") == "read"
+                and str(event["details"].get("tool") or "") in {"read", "read_evidence"}
                 for event in runtime_events
             )
             infrastructure_failure = any(
                 marker in message.lower()
                 for marker in ("docker", "runtime 镜像", "image inspect")
             )
-            external_provider = bool(runtime.get("model_connection_id"))
-            outcome_unknown = (
-                "模型请求结果不确定" in message
-                or (
-                    external_provider
-                    and any(
-                        marker in message
-                        for marker in (
-                            "Pi 执行超过",
-                            "Pi RPC 在任务稳定结束前退出",
-                        )
-                    )
-                )
-            )
             failure = {
                 "error_code": (
                     "MODEL_OUTCOME_UNKNOWN"
                     if outcome_unknown
-                    else "PI_RUNTIME_FAILED"
+                    else error.error_code if isinstance(error, PiRuntimeError) else "PI_RUNTIME_FAILED"
                 ),
-                "stage": "execute",
+                # 只信任宿主异常类型携带的分类；模型文本不能指定失败阶段或解除未知态。
+                "stage": error.stage if isinstance(error, PiRuntimeError) and not outcome_unknown else "execute",
                 "cause_summary": message[:500],
                 "attempt_count": 1,
                 "elapsed_ms": elapsed_ms,

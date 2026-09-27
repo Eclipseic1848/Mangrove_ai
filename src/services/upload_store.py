@@ -74,7 +74,8 @@ def inspect_uploaded_image(data: bytes | Path) -> dict[str, int]:
             with Image.open(source(), formats=("PNG", "JPEG", "WEBP")) as image:
                 image.load()
                 result["image_orientation"] = int(image.getexif().get(274, 1))
-                if result["image_orientation"] not in range(1, 9):
+                # 部分来源保留 0 表示方向未知；原值传给 OCR，未知方向不得声称坐标已映射。
+                if result["image_orientation"] not in range(0, 9):
                     raise ValueError("图片方向元数据无效")
             return result
     except (OSError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:

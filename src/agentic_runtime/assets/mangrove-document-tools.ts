@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 type ToolConfig = {
   relayBaseUrl: string;
@@ -14,7 +15,7 @@ type ToolConfig = {
 };
 
 const config = JSON.parse(
-  readFileSync("/root/.pi/agent/document-tools.json", "utf8"),
+  readFileSync(join(process.env.PI_CODING_AGENT_DIR || "/root/.pi/agent", "document-tools.json"), "utf8"),
 ) as ToolConfig;
 
 async function relay(operation: string, payload: unknown) {

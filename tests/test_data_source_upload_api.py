@@ -6,7 +6,7 @@ import io
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
 from src.api.auth import get_current_user
@@ -89,6 +89,73 @@ def test_mismatched_magic_returns_413(tmp_path: Path, monkeypatch):
     )
 
     assert response.status_code == 413
+
+
+def test_upload_without_multipart_is_validation_error(tmp_path, monkeypatch):
+    client = _make_client(tmp_path, monkeypatch)
+    assert client.post("/api/data-sources/uploads").status_code == 422
+    assert client.post("/api/data-sources/uploads", json={"file": "text"}).status_code == 422
+
+
+@pytest.mark.parametrize("partial_file", [False, True])
+def test_malformed_multipart_returns_400_and_closes_temp_files(tmp_path, monkeypatch, partial_file):
+    from starlette import formparsers
+
+    client = _make_client(tmp_path, monkeypatch)
+    files = []
+    original = formparsers.SpooledTemporaryFile
+
+    def tracked_file(*args, **kwargs):
+        file = original(*args, **kwargs)
+        files.append(file)
+        return file
+
+    monkeypatch.setattr(formparsers, "SpooledTemporaryFile", tracked_file)
+    body = (
+        b'--boundary\r\nContent-Disposition: form-data; name="file"; filename="test.txt"\r\n\r\ndata\r\n'
+        b'--boundary\r\ninvalid-header\r\n\r\nextra\r\n--boundary--\r\n'
+        if partial_file else b"wrong initial boundary\r\n"
+    )
+    response = client.post("/api/data-sources/uploads", content=body,
+                           headers={"Content-Type": "multipart/form-data; boundary=boundary"})
+    assert response.status_code == 400
+    assert len(files) == int(partial_file)
+    assert all(file.closed for file in files)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authenticated", [False, True])
+@pytest.mark.parametrize("declared_length", [None, "8"])
+async def test_upload_rejects_before_consuming_unbounded_body(
+    tmp_path, monkeypatch, authenticated, declared_length,
+):
+    """身份失败不消费正文；无长度或虚报长度都不能绕过实际字节上限。"""
+    import httpx
+
+    app = _make_client(tmp_path, monkeypatch, max_bytes=1024).app
+    if not authenticated:
+        def deny():
+            raise HTTPException(401, "请登录")
+        app.dependency_overrides[get_current_user] = deny
+    consumed = 0
+
+    async def body():
+        nonlocal consumed
+        yield b'--boundary\r\nContent-Disposition: form-data; name="file"; filename="data.csv"\r\n\r\n'
+        for _ in range(100):
+            consumed += 1
+            yield b"x" * 16384
+        yield b"\r\n--boundary--\r\n"
+
+    headers = {"Content-Type": "multipart/form-data; boundary=boundary"}
+    if declared_length is not None:
+        headers["Content-Length"] = declared_length
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver") as client:
+        response = await client.post("/api/data-sources/uploads", content=body(), headers=headers)
+    assert response.status_code == (413 if authenticated else 401)
+    assert consumed < 10 if authenticated else consumed == 0
+    assert not list(tmp_path.rglob("staging/*"))
+    assert not list(tmp_path.rglob("objects/*"))
 
 
 def test_image_upload_download_keeps_verified_mime_bytes_and_owner(tmp_path: Path, monkeypatch):

@@ -24,8 +24,10 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 from src import account_execution as execution
 from src.timezone import now as beijing_now, BEIJING
 from .feedback_audit import REASONS, fixed_reasons
+from .roles import ROLE_LEVEL, role_level
 from src.database_migrations import DatabaseTarget, inspect_database
 from src.config.secret_refs import (
+    SECRET_REF_PREFIX,
     RUNTIME_CONFIG_SECRET_KEYS,
     SecretRefResolutionError,
     load_or_create_vault,
@@ -146,7 +148,22 @@ class WebUIStore:
             for key, value in values.items():
                 self._config_set(conn, scope, key, value, updated_by)
 
+    def config_replace_secret(self, scope: str, key: str, value: str, *, expected_version: str | None, updated_by: str) -> bool:
+        """只替换验证开始时的凭证版本，防止慢探针覆盖其他请求的新配置。"""
+        if key not in RUNTIME_CONFIG_SECRET_KEYS:
+            raise ValueError("只支持凭证版本")
+        with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT value FROM runtime_config WHERE scope=? AND key=?", (scope, key)).fetchone()
+            if (str(row["value"]) if row else None) != expected_version:
+                return False
+            self._config_set(conn, scope, key, value, updated_by)
+            return True
+
     def _config_set(self, conn: sqlite3.Connection, scope: str, key: str, value: str, updated_by: str) -> None:
+        if scope == "global":
+            # 健康结论属于旧值；必须与凭证替换同事务作废，个人覆盖不影响共享记录。
+            conn.execute("DELETE FROM cookie_health WHERE key=?", (key,))
         if key in RUNTIME_CONFIG_SECRET_KEYS:
             previous = conn.execute(
                 "SELECT value FROM runtime_config WHERE scope=? AND key=?",
@@ -198,6 +215,8 @@ class WebUIStore:
 
     def config_delete(self, scope: str, key: str) -> None:
         with self._lock, self._conn() as conn:
+            if scope == "global":
+                conn.execute("DELETE FROM cookie_health WHERE key=?", (key,))
             previous = conn.execute(
                 "SELECT value FROM runtime_config WHERE scope=? AND key=?",
                 (scope, key),
@@ -220,24 +239,73 @@ class WebUIStore:
                     raise SecretRefResolutionError("SecretRef 无法解析")
 
     # ---------- Cookie 健康状态（手动/定时验证结果落库，供配置中心展示） ----------
-    def cookie_health_set(self, key: str, status: str, message: str, checked_by: str) -> None:
+    def config_secret_snapshot(self, scope: str, key: str) -> tuple[str, str] | None:
+        """一次读取版本及对应密文，防止其他进程轮换后拼出混合快照。"""
+        if key not in RUNTIME_CONFIG_SECRET_KEYS:
+            raise ValueError("只支持凭证版本")
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT c.value, s.ciphertext FROM runtime_config c "
+                "LEFT JOIN runtime_config_secrets s ON c.value=? || s.secret_id "
+                "AND s.owner_scope=c.scope AND s.config_key=c.key "
+                "WHERE c.scope=? AND c.key=?", (SECRET_REF_PREFIX, scope, key),
+            ).fetchone()
+            if row is None:
+                return None
+            parse_secret_ref(str(row["value"]))
+            if row["ciphertext"] is None:
+                raise SecretRefResolutionError("SecretRef 无法解析")
+            try:
+                value = load_vault(self.db_path).decrypt(str(row["ciphertext"]))
+            except VaultDecryptionError as exc:
+                raise SecretRefResolutionError("运行时配置 Vault 无法解密 SecretRef") from exc
+            return str(row["value"]), value
+
+    def cookie_health_set(self, key: str, status: str, message: str, checked_by: str, *, expected_version: str | None = None, expected_binding: str | None = None) -> bool:
         """写入/覆盖某 Cookie 的最近一次验证结果（key 唯一，覆盖旧记录）。"""
+        from src.config.cookie_probe_binding import cookie_probe_binding
+        from src.config.runtime_config import global_secret_snapshot
+        if expected_binding is None:
+            version, value = global_secret_snapshot(self, key)
+            expected_binding = cookie_probe_binding(key, version, value)
         with self._lock, self._conn() as conn:
+            # 跨连接串行化版本检查和落库，不能让旧探测覆盖新凭证的待验证状态。
+            conn.execute("BEGIN IMMEDIATE")
+            if expected_version is not None:
+                row = conn.execute("SELECT value FROM runtime_config WHERE scope='global' AND key=?", (key,)).fetchone()
+                if (str(row["value"]) if row else "") != expected_version:
+                    return False
             conn.execute(
-                "INSERT INTO cookie_health (key, status, message, checked_at, checked_by) "
-                "VALUES (?, ?, ?, ?, ?) "
+                "INSERT INTO cookie_health (key, status, message, checked_at, checked_by, verification_binding) "
+                "VALUES (?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET status=excluded.status, message=excluded.message, "
-                "checked_at=excluded.checked_at, checked_by=excluded.checked_by",
-                (key, status, message, _now(), checked_by),
+                "checked_at=excluded.checked_at, checked_by=excluded.checked_by, verification_binding=excluded.verification_binding",
+                (key, status, message, _now(), checked_by, expected_binding),
             )
+            return True
 
     def cookie_health_all(self) -> Dict[str, Dict[str, str]]:
         """返回 {key: {status, message, checked_at, checked_by}}；没验证过的 key 不出现在字典里。"""
         with self._conn() as conn:
             rows = conn.execute(
-                "SELECT key, status, message, checked_at, checked_by FROM cookie_health"
+                "SELECT key, status, message, checked_at, checked_by, verification_binding FROM cookie_health"
             ).fetchall()
-        return {r["key"]: dict(r) for r in rows}
+        from src.config.cookie_probe_binding import cookie_probe_binding
+        from src.config.runtime_config import global_secret_snapshot
+        result = {}
+        for row in rows:
+            item = dict(row)
+            binding = item.pop("verification_binding")
+            try:
+                version, value = global_secret_snapshot(self, item["key"])
+                current = cookie_probe_binding(item["key"], version, value)
+            except Exception:
+                current = None
+            # 旧记录、其他节点或已换凭证的结果不能继续展示为当前登录态。
+            if not binding or binding != current:
+                item.update(status="unknown", message="验证环境或凭证已变化，请重新验证")
+            result[item["key"]] = item
+        return result
 
     # ---------- 个人记忆（按用户隔离，区别于全局共享的 memory/user-preferences.md） ----------
     def memory_add(
@@ -545,9 +613,12 @@ class WebUIStore:
     def create_user(
         self, username: str, password_hash: str, display_name: str = "",
         role: str = "user", pending: bool = False,
+        *, actor_user_id: str | None = None,
     ) -> Dict[str, Any]:
         user_id = f"u_{uuid.uuid4().hex[:12]}"
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._require_account_management(conn, actor_user_id, assigned_role=role)
             conn.execute(
                 "INSERT INTO users (user_id, username, password_hash, display_name, role, pending, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -710,9 +781,10 @@ class WebUIStore:
             row = conn.execute("SELECT user_id,username,display_name,role,disabled,pending,created_at FROM users WHERE user_id=?", (user_id,)).fetchone()
             return {**dict(row), "execution_hold": self._hold_projection(conn, user_id)} if row else None
 
-    def retry_account_execution_hold(self, user_id: str, operation_id: str) -> None:
+    def retry_account_execution_hold(self, user_id: str, operation_id: str, *, actor_user_id: str | None = None) -> None:
         with self._lock, self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._require_account_management(conn, actor_user_id, user_id)
             operation = conn.execute("SELECT * FROM account_execution_holds WHERE owner_user_id=? AND operation_id=?", (user_id, operation_id)).fetchone()
             if operation is None:
                 raise KeyError("停止操作不存在")
@@ -772,6 +844,21 @@ class WebUIStore:
         with self._conn() as conn:
             return conn.execute("SELECT COUNT(*) AS c FROM users WHERE pending=1").fetchone()["c"]
 
+    @staticmethod
+    def _require_account_management(conn, actor_user_id, target_user_id=None, *, assigned_role=None) -> None:
+        # 无操作者仅供注册、引导和内部维护；管理路由必须传入已认证的账号 ID。
+        if actor_user_id is None:
+            return
+        actor = conn.execute("SELECT role,disabled,pending FROM users WHERE user_id=?", (actor_user_id,)).fetchone()
+        if actor is None or actor["disabled"] or actor["pending"] or role_level(actor["role"]) < ROLE_LEVEL["admin"]:
+            raise PermissionError("当前账号已无管理权限")
+        if target_user_id is not None:
+            target = conn.execute("SELECT role FROM users WHERE user_id=?", (target_user_id,)).fetchone()
+            if target is None or role_level(actor["role"]) <= role_level(target["role"]):
+                raise PermissionError("只能管理权限低于你的账号")
+        if assigned_role is not None and (assigned_role not in ROLE_LEVEL or role_level(assigned_role) >= role_level(actor["role"])):
+            raise PermissionError("无权赋予该角色（不能高于或等于你自己）")
+
     def update_user(
         self,
         user_id: str,
@@ -797,6 +884,8 @@ class WebUIStore:
         vals.append(user_id)
         with self._lock, self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            # 校验和写入共用写事务，防止路由预检后角色变更导致越权。
+            self._require_account_management(conn, actor_user_id, user_id, assigned_role=role)
             if disabled is not None or pending is not None:
                 execution.update_account_status(conn, user_id, disabled=disabled, pending=pending, actor_user_id=actor_user_id or "system:account-update", now=time.time())
             if sets:
@@ -808,6 +897,7 @@ class WebUIStore:
         """删除用户及其全部会话/消息/个人记忆。"""
         with self._lock, self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            self._require_account_management(conn, actor_user_id, user_id)
             execution.update_account_status(conn, user_id, disabled=True, actor_user_id=actor_user_id or "system:account-delete", now=time.time())
             self._revoke_platform_sessions(conn, user_id, "account_deleted", time.time(), actor_user_id=actor_user_id)
             rows = conn.execute(
@@ -913,7 +1003,7 @@ class WebUIStore:
             conn.execute("DELETE FROM conversations WHERE conv_id=?", (conv_id,))
 
     # ---------- 消息 ----------
-    def start_chat_execution(self, user_id: str, conv_id: str, content: str) -> str:
+    def start_chat_execution(self, user_id: str, conv_id: str, content: str, *, task_id: str | None = None) -> str:
         run_id = f"chat_{uuid.uuid4().hex}"
         with self._lock, self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -921,7 +1011,7 @@ class WebUIStore:
             if conn.execute("SELECT 1 FROM conversations WHERE user_id=? AND conv_id=?", (user_id, conv_id)).fetchone() is None:
                 raise KeyError("会话不存在或无权访问")
             execution.bind_execution(conn, auth, "chat", run_id, now=time.time())
-            conn.execute("INSERT INTO messages(conv_id,role,content,created_at) VALUES (?,'user',?,?)", (conv_id, content, _now()))
+            conn.execute("INSERT INTO messages(conv_id,role,content,created_at,task_id) VALUES (?,'user',?,?,?)", (conv_id, content, _now(), task_id))
             conn.execute("UPDATE conversations SET updated_at=? WHERE conv_id=?", (_now(), conv_id))
         return run_id
 
@@ -3389,6 +3479,8 @@ class WebUIStore:
         status: str | None = None,
         deleted: bool = False,
         limit: int = 100,
+        offset: int = 0,
+        task_filter: str = "all",
     ) -> List[Dict[str, Any]]:
         where = ["user_id=?"]
         args: List[Any] = [user_id]
@@ -3396,12 +3488,21 @@ class WebUIStore:
         if status:
             where.append("status=?")
             args.append(status)
-        args.append(max(1, min(limit, 500)))
+        filter_statuses = {
+            "active": ("queued", "running", "cancelling"),
+            "needs_input": ("needs_input", "candidate_ready"),
+            "completed": ("completed",),
+        }
+        if task_filter in filter_statuses:
+            statuses = filter_statuses[task_filter]
+            where.append("status IN (" + ",".join("?" for _ in statuses) + ")")
+            args.extend(statuses)
+        args.extend((max(1, min(limit, 500)), max(0, offset)))
         with self._conn() as conn:
             rows = conn.execute(
                 "SELECT * FROM semantic_workspace_tasks WHERE "
                 + " AND ".join(where)
-                + " ORDER BY updated_at DESC LIMIT ?",
+                + " ORDER BY updated_at DESC, task_id DESC LIMIT ? OFFSET ?",
                 args,
             ).fetchall()
         return [
@@ -3555,8 +3656,13 @@ class WebUIStore:
             ):
                 raise ValueError("当前问题已变化")
             if question.get("continuation") == "steering":
-                if current and not current.get("answer") and row["status"] == "needs_input":
-                    raise ValueError("请先处理当前执行问题")
+                from src.conversation_steering.repository import SqliteSteeringRepository
+
+                latest = SqliteSteeringRepository.latest_business_result_in_transaction(conn, user_id, task_id, expected_revision)
+                if latest is None or latest.turn_id != question.get("origin_turn_id"):
+                    raise ValueError("当前澄清轮次已变化")
+                # 业务追问只形成待确认理解；不能要求先接受原执行问题才能继续讨论。
+                # 原执行问题不是本轮round_id，下面不会消费它或把任务恢复为queued。
                 latest_round = next((json.loads(item[0]).get("round_id") for item in conn.execute(
                     "SELECT details_json FROM semantic_workspace_events WHERE user_id=? AND task_id=? AND event_type='question_required' ORDER BY sequence DESC",
                     (user_id, task_id),

@@ -16,6 +16,8 @@ from urllib.parse import urlsplit
 
 import yaml
 
+from src.utils.docker_user import docker_user_args
+
 
 @dataclass(frozen=True, slots=True)
 class DockerCommandResult:
@@ -382,6 +384,7 @@ class SmokescreenEgressController:
                 "--label", f"mangrove.owner-run={lease.owner_identity}",
                 "--mount",
                 mount,
+                *docker_user_args(),
                 self.image,
                 "--config-file",
                 "/etc/smokescreen/config.yaml",

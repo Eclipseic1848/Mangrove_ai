@@ -137,6 +137,70 @@ def test_beijing_boundaries_and_naive_history_are_not_shifted(platform):
     assert result['items'][0]['last_used'] == '2026-09-19T23:59:59+08:00'
 
 
+def test_usage_survives_beijing_midnight_and_repository_reopen(platform, monkeypatch):
+    from src.model_connections import storage
+    client, actor, users, store = platform
+    actor['user'] = users['root']
+    owner = users['member']['user_id']
+    seed_usage(store, owner, tokens=(10, 2, 12), created='2026-09-18T15:59:59Z')
+    with store._conn() as conn:
+        grant = dict(conn.execute('SELECT * FROM model_connection_grants WHERE owner_user_id=?', (owner,)).fetchone())
+    repository = storage.ModelConnectionRepository(store.db_path)
+    for created in ('2026-09-19T00:00:00+08:00', '2026-09-19T23:59:59+08:00', '2026-09-20T00:00:00+08:00'):
+        monkeypatch.setattr(storage, '_now', lambda: created)
+        repository.record_usage(grant=grant, status='recorded', input_tokens=10,
+                                output_tokens=2, total_tokens=12, native_json='{}')
+    # 新 Repository 与 API 使用独立连接；跨日与进程重建不能把旧统计覆盖为当天。
+    reopened = storage.ModelConnectionRepository(store.db_path)
+    assert len(reopened.list_usage(owner, task_id=grant['task_id'], revision=1)) == 4
+    for start, end, requests in (
+        ('2026-09-18', '2026-09-18', 1), ('2026-09-19', '2026-09-19', 2),
+        ('2026-09-20', '2026-09-20', 1), ('2026-09-18', '2026-09-20', 4),
+    ):
+        result = client.post('/api/operations/tokens/query', json={'start': start, 'end': end}).json()
+        assert result['summary']['requests'] == requests
+        assert result['summary']['total_tokens'] == requests * 12
+
+
+def test_undated_history_is_visible_without_changing_date_totals_or_scope(platform):
+    client, actor, users, store = platform
+    for owner, model, total in (
+        ('member', 'deepseek-flash', 500), ('member', 'other-model', 100),
+        ('manager', 'deepseek-flash', 100), ('peer', 'deepseek-flash', 900),
+    ):
+        seed_usage(store, users[owner]['user_id'], model=model, tokens=(None, None, total),
+                   created='2026-09-18T12:00:00')
+    seed_usage(store, 'deleted-synthetic-owner', tokens=(None, None, 50), created='2026-09-18T12:00:00')
+    seed_usage(store, users['member']['user_id'], tokens=(10, 2, 12), created='2026-09-19T00:00:00+08:00')
+    filters = {'start': '2026-09-19', 'end': '2026-09-19'}
+    actor['user'] = users['manager']
+    result = client.post('/api/operations/tokens/query', json=filters).json()
+    assert result['summary']['requests'] == 1 and result['summary']['total_tokens'] == 12
+    assert result['undated_usage'] == {'requests': 3, 'total_tokens': 700}
+    assert '3 次' in result['coverage_note'] and '700' in result['coverage_note']
+    assert '全历史' in result['coverage_note'] and '未计入' in result['coverage_note']
+    exported = client.post('/api/operations/tokens/export', json={'filters': filters, 'format': 'csv'})
+    assert result['coverage_note'] in exported.text
+    filtered = {**filters, 'search': 'member', 'model': 'deepseek-flash', 'api_format': 'openai_chat'}
+    result = client.post('/api/operations/tokens/query', json=filtered).json()
+    assert result['undated_usage'] == {'requests': 1, 'total_tokens': 500}
+    actor['user'] = users['root']
+    result = client.post('/api/operations/tokens/query', json=filters).json()
+    assert result['undated_usage'] == {'requests': 5, 'total_tokens': 1650}
+    actor['user'] = users['member']
+    assert client.post('/api/operations/tokens/query', json=filters).status_code == 403
+
+
+def test_undated_history_keeps_missing_tokens_unknown(platform):
+    client, actor, users, store = platform
+    actor['user'] = users['root']
+    seed_usage(store, users['member']['user_id'], tokens=(None, None, None), created='2026-09-18T12:00:00')
+    result = client.post('/api/operations/tokens/query', json=period()).json()
+    assert result['summary']['requests'] == 0
+    assert result['undated_usage'] == {'requests': 1, 'total_tokens': None}
+    assert '未知' in result['coverage_note']
+
+
 def test_out_of_catalog_qwen_usage_is_preserved_without_pricing(platform):
     client, actor, users, store = platform
     actor['user'] = users['root']

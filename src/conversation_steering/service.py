@@ -111,6 +111,31 @@ class ConversationSteering:
         )
         if existing is not None:
             return existing
+        # 只读取本 Owner、任务及活动版本的已完成回合；调用者不能注入助手历史。
+        previous_turns = [item for item in self._repository.list_turns(
+            request.owner_id, request.task_id, revision=request.revision,
+        ) if item.turn_id != turn.turn_id]
+        completed_pairs = []
+        for previous in reversed(previous_turns):
+            previous_result = self._repository.get_result_for_turn(request.owner_id, previous.turn_id)
+            if previous_result is not None:
+                answer = previous_result.answer or previous_result.acknowledgement
+                if previous_result.proposal_id:
+                    proposal = self._repository.get_proposal(request.owner_id, previous_result.proposal_id)
+                    # 历史回复不可变；当前提案状态须随上下文提供，避免拒绝的修改再次生效。
+                    answer += f"\n[提案当前状态：{proposal.status.value if proposal else 'unavailable'}；以冻结任务为当前目标]"
+                completed_pairs.append([
+                    {"role": "user", "content": previous.text},
+                    {"role": "assistant", "content": answer},
+                ])
+                if len(completed_pairs) == 8:
+                    break
+        recent_messages = [message for pair in reversed(completed_pairs) for message in pair]
+        try:
+            request = SteeringRequest.model_validate({**request.model_dump(), "recent_messages": recent_messages})
+        except ValueError:
+            # 验证异常可能带历史正文；公开错误只说明预算边界，不回显用户数据。
+            raise ValueError("追问上下文超过预算，请新建任务并引用需要的结果；本次未请求模型") from None
         if request.clarification_round_id and self._before_result_call is None:
             raise ValueError("澄清回答缺少持久发送授权")
         if turn.result_context or request.clarification_round_id:

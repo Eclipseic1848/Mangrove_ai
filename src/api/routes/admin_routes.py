@@ -58,7 +58,10 @@ def create_user(body: AdminUserCreateIn, admin=Depends(require_admin)):
     _assert_can_assign(admin, body.role)
     if store.get_user_by_name(username):
         raise HTTPException(status_code=409, detail="用户名已存在")
-    user = store.create_user(username, hash_password(body.password), body.display_name or "", role=body.role)
+    try:
+        user = store.create_user(username, hash_password(body.password), body.display_name or "", role=body.role, actor_user_id=admin["user_id"])
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return {"ok": True, "user_id": user["user_id"]}
 
 
@@ -79,11 +82,14 @@ def update_user(user_id: str, body: AdminUserUpdateIn, admin=Depends(require_adm
         raise HTTPException(status_code=400, detail="昵称须为 1~32 个字符")
 
     pwd_hash = hash_password(body.password) if body.password else None
-    store.update_user(
-        user_id, role=body.role, disabled=body.disabled,
-        pending=body.pending, password_hash=pwd_hash, display_name=display_name,
-        actor_user_id=admin["user_id"],
-    )
+    try:
+        store.update_user(
+            user_id, role=body.role, disabled=body.disabled,
+            pending=body.pending, password_hash=pwd_hash, display_name=display_name,
+            actor_user_id=admin["user_id"],
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     if request is not None:
         # 只记录角色与开关差异；个人资料和密码仅保留修改事实。
         request.state.operations_changes = [
@@ -110,7 +116,9 @@ def retry_execution_hold(user_id: str, body: ExecutionHoldRetryIn, admin=Depends
         raise HTTPException(status_code=404, detail="用户不存在")
     _assert_outranks(admin, target)
     try:
-        store.retry_account_execution_hold(user_id, body.operation_id)
+        store.retry_account_execution_hold(user_id, body.operation_id, actor_user_id=admin["user_id"])
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="停止操作不存在") from exc
     return {"ok": True, "user": store.admin_user(user_id)}
@@ -123,7 +131,10 @@ def delete_user(user_id: str, admin=Depends(require_admin)):
     if not target:
         raise HTTPException(status_code=404, detail="用户不存在")
     _assert_outranks(admin, target)  # 不能删自己/同级/更高（自删因此被禁）
-    store.delete_user(user_id, actor_user_id=admin["user_id"])
+    try:
+        store.delete_user(user_id, actor_user_id=admin["user_id"])
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     return {"ok": True}
 
 

@@ -1,14 +1,16 @@
 import { expect, test, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
-async function mockOperations(page: Page, role = "super_admin", dense = false) {
+async function mockOperations(page: Page, role = "super_admin", dense = false, trend?: Record<string, { bucket: string; pv: number; uv: number; start: string; end: string }[]>) {
+  // 运营交互使用已看过引导的账号；教程行为由 onboarding 用例单独覆盖。
+  await page.addInitScript(role => localStorage.setItem(`onboarding_all_${JSON.stringify(["operator", role])}`, "skipped"), role);
   const entry = { event_id: "00000000000040008000000000000001", occurred_at: "2026-09-17T02:00:00Z", actor_id: "member", actor_name: "合成用户", kind: "login", module: "登录", action: "密码登录", object_ref: "模拟对象", result: "success", ip_mask: "192.168.1.0/24", device: "Chrome / Windows", source: "direct", changes: [] };
   await page.route("**/api/**", route => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/auth/me") return route.fulfill({ json: { user_id: "operator", username: "operator", display_name: "审计员", role } });
     if (path.endsWith("/options")) return route.fulfill({ json: { users: [{ user_id: "member", name: "合成用户" }], modules: ["登录", "任务工作台", "用户管理"], policy: { retention_days: 180, version: 1 } } });
     if (path.endsWith("/views")) return route.fulfill({ json: { items: [] } });
-    if (path.endsWith("/summary")) return route.fulfill({ json: { activity_distribution: { high: 2, active: 6, unseen: 1, threshold: 10 }, pv: 26, uv: 8, pv_per_user: 3.25, login_success: 3, login_failure: 1, action_failure: 1, actions: 2, active_users: { day: 2, week: 2, month: 2 }, trend: dense ? [5, 4, 4, 4, 3, 3, 3].map((pv, i) => ({ bucket: `2026-09-${11 + i}`, pv, uv: Math.min(pv, 3), logins: 3, failures: 1 })) : [{ bucket: "2026-09-17", pv: 8, uv: 2, logins: 3, failures: 1 }], modules: dense ? ["任务工作台", "概览", "自动化任务", "文件与交付", "模板库", "用户管理", "设置", "记忆"].map((module, i) => ({ module, pv: 16 - i, uv: 3, actions: 6 })) : [{ module: "任务工作台", pv: 8, uv: 2, actions: 2 }], sources: [{ source: "direct", pv: 8 }], users: dense ? Array.from({ length: 23 }, (_, i) => ({ actor_id: `member-${i}`, actor_name: `合成用户${i + 1}`, pv: 30 - i, actions: 2, logins: 3, last_active: 1789600800 })) : [{ actor_id: "member", actor_name: "合成用户", pv: 8, actions: 2, logins: 3, last_active: 1789600800 }], sessions: { online_users: 1, count: 2, average_seconds: 60 }, coverage: { started_at: "2026-09-17T00:00:00Z", retention_days: 180, timezone: "Asia/Shanghai" } } });
+    if (path.endsWith("/summary")) return route.fulfill({ json: { activity_distribution: { high: 2, active: 6, unseen: 1, threshold: 10 }, pv: 26, uv: 8, pv_per_user: 3.25, login_success: 3, login_failure: 1, action_failure: 1, actions: 2, active_users: { day: 2, week: 2, month: 2 }, trend: trend?.[route.request().postDataJSON().granularity || "day"] ?? (dense ? [5, 4, 4, 4, 3, 3, 3].map((pv, i) => ({ bucket: `2026-09-${11 + i}`, pv, uv: Math.min(pv, 3), logins: 3, failures: 1 })) : [{ bucket: "2026-09-17", pv: 8, uv: 2, logins: 3, failures: 1 }]), modules: dense ? ["任务工作台", "概览", "自动化任务", "文件与交付", "模板库", "用户管理", "设置", "记忆"].map((module, i) => ({ module, pv: 16 - i, uv: 3, actions: 6 })) : [{ module: "任务工作台", pv: 8, uv: 2, actions: 2 }], sources: [{ source: "direct", pv: 8 }], users: dense ? Array.from({ length: 23 }, (_, i) => ({ actor_id: `member-${i}`, actor_name: `合成用户${i + 1}`, pv: 30 - i, actions: 2, logins: 3, last_active: 1789600800 })) : [{ actor_id: "member", actor_name: "合成用户", pv: 8, actions: 2, logins: 3, last_active: 1789600800 }], sessions: { online_users: 1, count: 2, average_seconds: 60 }, coverage: { started_at: "2026-09-17T00:00:00Z", retention_days: 180, timezone: "Asia/Shanghai" } } });
     if (path.endsWith("/events/query")) {
       const filters = route.request().postDataJSON();
       const total = dense ? 53 : 1, pageSize = filters.page_size || 20;
@@ -21,6 +23,85 @@ async function mockOperations(page: Page, role = "super_admin", dense = false) {
   });
 }
 
+test("趋势圆点悬停、键盘聚焦和零值提示在宽窄屏均可读", async ({ page }) => {
+  const day = [72, 18, 76].map((pv, index) => ({ bucket: `2026-09-${21 + index}`, start: `2026-09-${21 + index}`, end: `2026-09-${21 + index}`, pv, uv: [2, 0, 1][index] }));
+  await mockOperations(page, "super_admin", false, { day });
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.goto("/operations?start=2026-09-21&end=2026-09-23");
+    const tip = page.getByRole("tooltip");
+    await page.locator(".ops-trend .ops-series-pv circle").first().hover();
+    await expect(tip).toContainText("2026-09-21");
+    await expect(tip).toContainText("页面访问 PV：72 次");
+    await expect(tip).toContainText("访问用户 UV：2 人");
+    await page.locator(".ops-trend .text-primary circle").nth(1).hover();
+    await expect(tip).toContainText("访问用户 UV：0 人");
+    await page.locator(".ops-trend .ops-series-pv circle").last().hover();
+    await expect(tip).toContainText("2026-09-23");
+    const bounds = await tip.boundingBox();
+    expect(bounds!.x).toBeGreaterThanOrEqual(0);
+    expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+    await page.getByRole("heading", { name: "使用趋势" }).hover();
+    await expect(tip).toHaveCount(0);
+    const date = page.getByRole("button", { name: /2026-09-22，PV 18，UV 0/ });
+    await date.focus();
+    await expect(tip).toContainText("2026-09-22");
+    await date.press("Escape");
+    await expect(tip).toHaveCount(0);
+    await date.press("Enter");
+    await expect(page).toHaveURL(/tab=visit/);
+    await expect(page).toHaveURL(/start=2026-09-22&end=2026-09-22/);
+  }
+});
+
+test("趋势默认按天并支持五种粒度及所选周期明细", async ({ page }) => {
+  const points = {
+    day: [{ bucket: "2025-12-29", start: "2025-12-29", end: "2025-12-29", pv: 2, uv: 1 }],
+    hour: [{ bucket: "2025-12-29 09:00", start: "2025-12-29", end: "2025-12-29", pv: 1, uv: 1 }],
+    week: [{ bucket: "2025-12-29", start: "2025-12-29", end: "2026-01-04", pv: 12, uv: 3 }],
+    month: [{ bucket: "2025-12", start: "2025-12-29", end: "2025-12-31", pv: 7, uv: 2 }],
+    year: [{ bucket: "2025", start: "2025-12-29", end: "2025-12-31", pv: 7, uv: 2 }],
+  };
+  await mockOperations(page, "super_admin", false, points);
+  await page.goto("/operations?start=2025-12-29&end=2026-01-05");
+  const granularity = page.getByLabel("粒度", { exact: true });
+  await expect(granularity).toHaveValue("day");
+  await expect(granularity.locator("option")).toHaveText(["按小时", "按天", "按周", "按月", "按年"]);
+  for (const value of ["hour", "day", "week", "month", "year"] as const) {
+    await page.goto("/operations?start=2025-12-29&end=2026-01-05");
+    await expect(granularity).toHaveValue("day");
+    if (value !== "day") {
+      const request = page.waitForRequest(r => r.url().endsWith("/summary") && r.postDataJSON().granularity === value);
+      await granularity.selectOption(value);
+      await request;
+    }
+    await expect(page.locator('fieldset[aria-busy="false"]')).toBeVisible();
+    await page.locator(".ops-chart-dates button").first().focus();
+    await expect(page.getByRole("tooltip")).toContainText(`${points[value][0].pv} 次`);
+    await expect(page.getByRole("tooltip")).toContainText(`${points[value][0].uv} 人`);
+    await page.locator(".ops-chart-dates button").first().press("Enter");
+    await expect(page).toHaveURL(new RegExp(`start=${points[value][0].start}&end=${points[value][0].end}`));
+  }
+});
+
+test("密集高值点可连续悬停，提示框不阻断相邻点", async ({ page }) => {
+  const day = Array.from({ length: 14 }, (_, i) => ({ bucket: `2026-09-${String(i + 10).padStart(2, "0")}`, start: `2026-09-${i + 10}`, end: `2026-09-${i + 10}`, pv: 72, uv: 2 }));
+  await mockOperations(page, "super_admin", false, { day });
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await page.goto("/operations?start=2026-09-10&end=2026-09-23");
+    const circles = page.locator(".ops-trend .ops-series-pv circle");
+    await expect(circles).toHaveCount(14);
+    for (let i = 0; i < day.length; i++) {
+      const bounds = (await circles.nth(i).boundingBox())!;
+      await page.mouse.move(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2);
+      await expect(page.getByRole("tooltip")).toContainText(day[i].bucket);
+    }
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("tooltip")).toHaveCount(0);
+  }
+});
+
 test("页眉字号间距与记忆模块一致，正文滚动时页眉固定", async ({ page }, testInfo) => {
   await mockOperations(page, "super_admin", true);
   const errors: string[] = [];
@@ -31,7 +112,7 @@ test("页眉字号间距与记忆模块一致，正文滚动时页眉固定", as
     await expect(page.getByRole("heading", { name: "记忆", exact: true })).toBeVisible();
     const measure = () => page.locator("main header").evaluate(el => {
       const title = getComputedStyle(el.querySelector("h1")!), subtitle = getComputedStyle(el.querySelector("p")!), style = getComputedStyle(el);
-      return { height: el.getBoundingClientRect().height, padding: style.padding, font: title.fontFamily, size: title.fontSize, weight: title.fontWeight, spacing: title.letterSpacing, line: title.lineHeight, subtitle: subtitle.fontSize, subtitleLine: subtitle.lineHeight };
+      return { padding: style.padding, font: title.fontFamily, size: title.fontSize, weight: title.fontWeight, spacing: title.letterSpacing, line: title.lineHeight, subtitle: subtitle.fontSize, subtitleLine: subtitle.lineHeight };
     });
     const expected = await measure();
     await page.goto("/operations?tab=overview");

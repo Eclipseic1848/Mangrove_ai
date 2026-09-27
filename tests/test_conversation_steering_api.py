@@ -166,9 +166,11 @@ def test_running_followup_uses_turn_api_without_creating_revision(
         ).status_code == 404
 
 
+@pytest.mark.parametrize("waiting", [False, True])
 def test_material_followup_only_creates_confirmation_proposal(
     tmp_path,
     monkeypatch,
+    waiting,
 ) -> None:
     database = migrated_webui_database(tmp_path / "workspace.db")
     seed_execution_owner(database, "user-a")
@@ -182,11 +184,18 @@ def test_material_followup_only_creates_confirmation_proposal(
         "role": "user",
         "execution_generation": 0,
     }
-    monkeypatch.setattr(
-        semantic_workspace,
-        "build_context_rewriter",
-        lambda _request: _ApiMaterialRewriter(),
-    )
+    requests = []
+
+    class RecordingRewriter(_ApiMaterialRewriter):
+        async def rewrite(self, turn, request):
+            requests.append(request)
+            delta = await super().rewrite(turn, request)
+            return delta.model_copy(update={
+                "delta_id": "delta-" + turn.turn_id,
+                "open_questions": ("需要哪些字段？",) if request.text == "先讨论字段" else (),
+            })
+
+    monkeypatch.setattr(semantic_workspace, "build_context_rewriter", lambda _request, **kwargs: RecordingRewriter())
     store = get_store()
     store.create_semantic_workspace_task(
         "user-a",
@@ -202,11 +211,18 @@ def test_material_followup_only_creates_confirmation_proposal(
     store.update_semantic_workspace_task(
         "user-a",
         "workspace-2",
-        status="running",
+        status="needs_input" if waiting else "running",
         run_id="run-existing",
     )
 
+    execution_question = store.publish_workspace_question("user-a", "workspace-2", {
+        "kind": "external", "question_id": "execution-permission", "prompt": "是否允许执行外发？",
+        "purpose": "authorization", "continuation": "unavailable", "options": [], "allow_free_text": False,
+    }) if waiting else None
+
     with TestClient(app) as client:
+        older = client.post("/api/semantic-workspace/tasks/workspace-2/turns", json={"text": "先讨论字段"})
+        assert older.status_code == 200 and older.json()["clarification"]
         response = client.post(
             "/api/semantic-workspace/tasks/workspace-2/turns",
             headers={"Idempotency-Key": "material-1"},
@@ -240,8 +256,8 @@ def test_material_followup_only_creates_confirmation_proposal(
             "/api/semantic-workspace/tasks/workspace-2/turns"
         )
         assert thread.status_code == 200, thread.text
-        assert thread.json()["turns"][0]["text"] == "改成 CSV"
-        assert thread.json()["deltas"][0]["normalized_text"].startswith("输出格式")
+        assert thread.json()["turns"][1]["text"] == "改成 CSV"
+        assert thread.json()["deltas"][1]["normalized_text"].startswith("输出格式")
         assert thread.json()["proposals"][0]["status"] == "pending"
 
         rejected = client.post(
@@ -253,9 +269,27 @@ def test_material_followup_only_creates_confirmation_proposal(
         unchanged = client.get(
             "/api/semantic-workspace/tasks/workspace-2"
         ).json()
-        assert unchanged["status"] == "running"
+        assert unchanged["status"] == ("needs_input" if waiting else "running")
         assert unchanged["run_id"] == "run-existing"
         assert unchanged["active_revision"] == 1
+        assert unchanged["question"] == execution_question
+
+        calls_before_stale = len(requests)
+        stale = client.post("/api/semantic-workspace/tasks/workspace-2/answer", headers={"Idempotency-Key": "stale-answer"}, json={
+            "answer": "保留全部字段", "expected_revision": 1, "question_round_id": older.json()["clarification"]["round_id"],
+        })
+        assert stale.status_code == 409, stale.text
+        assert len(requests) == calls_before_stale
+
+        # 拒绝后只能回到冻结目标，不能将该草案继续作为有效增量。
+        followup = client.post("/api/semantic-workspace/tasks/workspace-2/turns", json={"text": "保留全部字段，其他按原任务"})
+        assert followup.status_code == 200, followup.text
+        assert requests[-1].prior_delta is None
+        assert requests[-1].relevant_turns == ()
+        assert any("rejected" in item["content"] for item in requests[-1].recent_messages if item["role"] == "assistant")
+        assert "CSV" not in unchanged["understanding"]["summary"]
+        assert unchanged["understanding"]["question"] is None
+        assert followup.json()["action"] == "revision_proposal"
 
 
 def test_confirmed_cancel_now_applies_semantic_delta_as_v2(

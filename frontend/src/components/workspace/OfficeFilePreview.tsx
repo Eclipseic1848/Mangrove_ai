@@ -1,9 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Document, Page } from "react-pdf";
+import { Document, Page, pdfjs } from "react-pdf";
 import { authenticatedFetch, readAuthenticatedBlob } from "@/lib/api";
+import "react-pdf/dist/Page/TextLayer.css";
 
-export function OfficeFilePreview({ uploadId, slides }: { uploadId: string; slides: boolean }) {
+pdfjs.GlobalWorkerOptions.workerSrc = new URL("pdfjs-dist/build/pdf.worker.min.mjs", import.meta.url).toString();
+
+export function OfficeFilePreview({ uploadId, previewUrl, slides }: { slides: boolean } & (
+  { uploadId: string; previewUrl?: never } | { uploadId?: never; previewUrl: string }
+)) {
   const [page, setPage] = useState(1);
   const [count, setCount] = useState(0);
   const [width, setWidth] = useState(0);
@@ -13,9 +18,10 @@ export function OfficeFilePreview({ uploadId, slides }: { uploadId: string; slid
   const [error, setError] = useState("");
   const viewport = useRef<HTMLDivElement>(null);
   const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
-  const result = useQuery({ queryKey: ["office-original-preview", uploadId], retry: false,
+  const endpoint = previewUrl ?? `/api/data-sources/uploads/${encodeURIComponent(uploadId!)}/office-preview`;
+  const result = useQuery({ queryKey: ["office-original-preview", endpoint], retry: false,
     queryFn: async ({ signal }) => {
-      const response = await authenticatedFetch(`/api/data-sources/uploads/${encodeURIComponent(uploadId)}/office-preview`, { signal });
+      const response = await authenticatedFetch(endpoint, { signal });
       if (!response.ok) throw new Error("Office 预览暂不可用：文件可能加密、超限或转换服务未就绪，请重试或下载原件。");
       return readAuthenticatedBlob(response);
     },
@@ -48,7 +54,7 @@ export function OfficeFilePreview({ uploadId, slides }: { uploadId: string; slid
       onPointerDown={e => { if (!pan || e.button !== 0 || e.pointerType !== "mouse") return; const el = e.currentTarget, rect = el.getBoundingClientRect(); if (e.clientX-rect.left >= el.clientWidth || e.clientY-rect.top >= el.clientHeight) return; drag.current = { x: e.clientX, y: e.clientY, left: el.scrollLeft, top: el.scrollTop }; el.setPointerCapture(e.pointerId); e.preventDefault(); }}
       onPointerMove={e => { if (drag.current) { e.currentTarget.scrollLeft = drag.current.left + drag.current.x-e.clientX; e.currentTarget.scrollTop = drag.current.top + drag.current.y-e.clientY; } }}
       onPointerUp={e => { drag.current = null; if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId); }} onPointerCancel={() => { drag.current = null; }} onLostPointerCapture={() => { drag.current = null; }}>
-      {result.isFetching ? <p role="status">正在生成隔离预览，最长约 90 秒；原文件不变…</p> : url && width > 0 && !error && <Document file={url} onLoadSuccess={({ numPages }) => setCount(numPages)} onLoadError={() => setError("预览副本无法读取") }>
+      {result.isFetching ? <p role="status">正在生成预览，最长约 90 秒；原文件不变…</p> : url && width > 0 && !error && !result.isError && <Document file={url} onLoadSuccess={({ numPages }) => setCount(numPages)} onLoadError={() => setError("预览副本无法读取") }>
         <Page pageNumber={page} width={Math.round(width*zoom)} renderAnnotationLayer={false} onRenderError={() => setError("页面渲染失败")} />
       </Document>}
     </div>

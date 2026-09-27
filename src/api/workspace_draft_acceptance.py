@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.agentic_runtime.draft_snapshot import read_draft
+from src.agentic_runtime.draft_snapshot import draft_table_issues, read_draft
 from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.api.execution import execution_lock, execution_to_thread
 from src.delivery_publishing.models import CandidateRef, DeliverySpec, OwnerAcceptance, PublicationGate, PublishCommand, canonical_hash
@@ -69,6 +69,7 @@ async def accept_draft(*, store, manager, output_root: Path, owner_id: str, task
             acceptance = OwnerAcceptance.model_validate(existing)
         else:
             gaps = ["用户选择停止后续验证；未完成的系统检查不视为通过"]
+            gaps.extend(draft_table_issues(root, draft, source.get("table_output_contracts", [])))
             failure = runtime.get("failure")
             if failure:
                 cause = failure.get("cause_summary") if isinstance(failure, dict) else getattr(failure, "cause_summary", None)

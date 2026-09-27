@@ -1,9 +1,10 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const config = JSON.parse(
-  readFileSync("/root/.pi/agent/capability-host.json", "utf8"),
+  readFileSync(join(process.env.PI_CODING_AGENT_DIR || "/root/.pi/agent", "capability-host.json"), "utf8"),
 ) as {
   relayUrl: string;
   relayToken: string;

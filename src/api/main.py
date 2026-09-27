@@ -17,9 +17,17 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import asdict
 from pathlib import Path
+
+if __name__ == "__main__" and sys.platform == "win32":
+    import signal
+
+    # 导入原生依赖前接管 SIGBREAK；启动中退出和 Uvicorn 收尾后的信号重放
+    # 都须经过 Python 清理，避免默认原生终止使 DuckDB 在 Windows 上崩溃。
+    signal.signal(signal.SIGBREAK, signal.default_int_handler)
+
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,9 +41,9 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.config.settings import settings  # noqa: E402
-from src.api.services import start_scheduler  # noqa: E402
-from src.api.cookie_health_scanner import start_cookie_health_scanner  # noqa: E402
-from src.api.library_dedup_scanner import start_library_dedup_scanner  # noqa: E402
+from src.api.services import start_scheduler, stop_scheduler  # noqa: E402
+from src.api.cookie_health_scanner import start_cookie_health_scanner, stop_cookie_health_scanner  # noqa: E402
+from src.api.library_dedup_scanner import start_library_dedup_scanner, stop_library_dedup_scanner  # noqa: E402
 from src.api.routes import (  # noqa: E402
     admin_routes, auth_routes, capability_governance, chat, config_routes, confirm, conversations, data_sources, data_tasks, downloads,
     feedback_routes, lessons_routes, library_dedup_routes, memory_routes, model_connections, model_relay, models, overview,
@@ -72,30 +80,33 @@ async def lifespan(app: FastAPI):
             shutdown_workspace_telemetry(timeout_millis=0)
             raise
     try:
-        start_scheduler()  # 启用时拉起定时任务后台轮询
-        start_cookie_health_scanner()  # Cookie 健康巡检：循环常驻，开关关闭时内部自己空转
-        start_library_dedup_scanner()  # 模板库/教训库定时巡检：循环常驻，开关关闭时内部自己空转
-        workspace_manager = get_semantic_workspace_manager()
-        workspace_manager.start()
-        from src.api.capability_governance_runtime import (
-            get_capability_validation_manager,
-            get_platform_validation_manager,
-        )
-        capability_validation_manager = get_capability_validation_manager()
-        capability_validation_manager.start()
-        platform_validation_manager = get_platform_validation_manager()
-        platform_validation_manager.start()
-        from src.api.account_execution_runtime import AccountExecutionManager
-        from src.api.services import get_scheduler_service
-        account_execution_manager = AccountExecutionManager(get_store(), workspace_manager, get_scheduler_service(), capability_validation_manager, platform_validation_manager)
-        account_execution_manager.start()
-        try:
+        async with AsyncExitStack() as cleanup:
+            # 启动前登记清理，部分启动失败或某个 stop 抛错也不能遗漏其他服务。
+            cleanup.push_async_callback(stop_scheduler)
+            start_scheduler()
+            cleanup.push_async_callback(stop_cookie_health_scanner)
+            start_cookie_health_scanner()
+            cleanup.push_async_callback(stop_library_dedup_scanner)
+            start_library_dedup_scanner()
+            workspace_manager = get_semantic_workspace_manager()
+            cleanup.push_async_callback(workspace_manager.stop)
+            workspace_manager.start()
+            from src.api.capability_governance_runtime import (
+                get_capability_validation_manager,
+                get_platform_validation_manager,
+            )
+            capability_validation_manager = get_capability_validation_manager()
+            cleanup.push_async_callback(capability_validation_manager.stop)
+            capability_validation_manager.start()
+            platform_validation_manager = get_platform_validation_manager()
+            cleanup.push_async_callback(platform_validation_manager.stop)
+            platform_validation_manager.start()
+            from src.api.account_execution_runtime import AccountExecutionManager
+            from src.api.services import get_scheduler_service
+            account_execution_manager = AccountExecutionManager(get_store(), workspace_manager, get_scheduler_service(), capability_validation_manager, platform_validation_manager)
+            cleanup.push_async_callback(account_execution_manager.stop)
+            account_execution_manager.start()
             yield
-        finally:
-            await account_execution_manager.stop()
-            await capability_validation_manager.stop()
-            await platform_validation_manager.stop()
-            await workspace_manager.stop()
     finally:
         # 初始化或管理器收尾失败时也关闭遥测，不能遗留新建的导出 worker。
         await asyncio.to_thread(shutdown_workspace_telemetry)

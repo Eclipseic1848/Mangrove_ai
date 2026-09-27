@@ -64,7 +64,8 @@ def cron_matches(cron_expr: str, dt: datetime) -> bool:
     # Python weekday: Monday=0..Sunday=6；cron 约定 Sunday=0/7
     py_wd = dt.weekday()
     cron_wd = 0 if py_wd == 6 else py_wd + 1
-    weekday_vals = parse_cron_field(weekday_s.replace("7", "0"), 0, 6)
+    # 先解析合法数值再折叠星期日别名，避免破坏 1-7、*/7 或放行非法 70。
+    weekday_vals = {value % 7 for value in parse_cron_field(weekday_s, 0, 7)}
     weekday_ok = cron_wd in weekday_vals
     return minute_ok and hour_ok and day_ok and month_ok and weekday_ok
 
@@ -123,6 +124,17 @@ def parse_schedule(schedule: str) -> Schedule:
     # 无前缀：尝试当作裸 cron（5 段）
     cron_matches(text, datetime.now())  # 非法（如段数不对）会抛 ValueError
     return Schedule(trigger_type="cron", cron_expr=text)
+
+
+def normalize_schedule(schedule: str) -> str:
+    """校验并规范回执格式，不重排 cron 数值或改变时区、执行时刻。"""
+    parsed = parse_schedule(schedule)
+    if parsed.trigger_type == "cron":
+        return "cron@" + " ".join(parsed.cron_expr.split())
+    # 单次时间保留显式时区；不把业务时区转换后的无时区值当成用户原话。
+    if parsed.trigger_type == "once":
+        return "once@" + schedule.partition("@")[2].strip()
+    return f"every@{parsed.interval_seconds}"
 
 
 def compute_next_run(

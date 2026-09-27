@@ -35,6 +35,7 @@ from src.api.execution import execution_http_checkpoint, execution_http_checkpoi
 # achat/chat 每次调用把 resp.usage_metadata 累加进去；未 set 时零开销跳过。
 _usage_ctx: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("llm_usage", default=None)
 _bound_chat: contextvars.ContextVar[Any] = contextvars.ContextVar("bound_model_chat", default=None)
+_bound_chat_identity: contextvars.ContextVar[Any] = contextvars.ContextVar("bound_model_identity", default=None)
 _bound_chat_failure: contextvars.ContextVar[Optional[list[str]]] = contextvars.ContextVar("bound_model_failure", default=None)
 
 
@@ -418,7 +419,7 @@ class MultiModelProvider:
         bound = _bound_chat.get()
         if bound is not None:
             # 工作台已冻结连接时，全部编排节点沿用该连接，禁止回退到全局模型。
-            return await bound(_inject_system_context(messages))
+            return await bound(_inject_system_context(messages), **({"max_tokens": max_tokens} if max_tokens is not None else {}))
         chat_model = self.get_chat_model(
             provider, model=model, temperature=temperature, max_tokens=max_tokens
         )

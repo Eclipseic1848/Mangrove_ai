@@ -125,6 +125,42 @@ async def test_unknown_provider_failure_keeps_safe_cause_without_resending(tmp_p
     assert calls == [1]
 
 
+@pytest.mark.asyncio
+async def test_local_rejection_preserves_safe_reason_without_resending(tmp_path):
+    req = request()
+    async def model():
+        return {"checks": [{"filename": "result.json", "evidence": req.objective_text,
+            "schema": {"type": "object", "format": "含敏感输入的未知格式"}}]}
+
+    frozen = await freeze_output_requirements(tmp_path, req, "run", model)
+    assert frozen["status"] == "unverified" and frozen["checks"] == []
+    assert frozen["error_type"] == "ValueError"
+    assert frozen.get("error_stage") == "validation"
+    assert frozen.get("validation_reason") == "输出检查含未支持的关键字"
+    assert "敏感输入" not in json.dumps(frozen, ensure_ascii=False)
+    async def forbidden():
+        pytest.fail("已有拒绝记录不得重发模型请求")
+    assert await freeze_output_requirements(tmp_path, req, "run", forbidden) == frozen
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["inference", "validation"])
+async def test_untrusted_exception_text_never_enters_requirement_diagnostics(tmp_path, stage):
+    req = request()
+    secret = "凭据和业务原文不应落入异常诊断"
+    async def model():
+        if stage == "inference":
+            raise ValueError(secret)
+        return {"checks": [{"filename": "result.json", "evidence": req.objective_text,
+            "schema": {"type": secret}}]}
+
+    frozen = await freeze_output_requirements(tmp_path, req, "run", model)
+    assert frozen["status"] == "unverified" and frozen["checks"] == []
+    assert frozen.get("error_stage") == stage
+    assert "validation_reason" not in frozen
+    assert secret not in json.dumps(frozen, ensure_ascii=False)
+
+
 @pytest.mark.parametrize("field", ["name", "金额", "flag", "item_42", "schedule", "标题", "x-y", "字段八"])
 @pytest.mark.parametrize("schema,good,bad", [
     ({"type": "boolean"}, True, "true"),

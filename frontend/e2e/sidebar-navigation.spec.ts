@@ -2,6 +2,9 @@ import { expect, test, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
 async function mockNavigation(page: Page, role = "super_admin") {
+  await page.addInitScript(currentRole => {
+    localStorage.setItem(`onboarding_all_${JSON.stringify(["sidebar-owner", currentRole])}`, "skipped");
+  }, role);
   // 所有请求留在合成边界，不读取真实身份、配置或任务。
   await page.route("**/api/**", route => {
     const path = new URL(route.request().url()).pathname;

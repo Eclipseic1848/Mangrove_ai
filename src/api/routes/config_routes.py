@@ -14,7 +14,8 @@ import logging
 import shutil
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -22,7 +23,7 @@ from pydantic import BaseModel
 
 from src.config import runtime_config as rc
 from src.config.settings import settings
-from src.config.user_ctx import set_user_overrides
+from src.config.user_ctx import set_user_overrides, user_overrides_context
 
 from ..auth import get_current_user, get_store, is_admin_role, require_admin
 
@@ -200,9 +201,8 @@ _MC_COOKIE_PLATFORM = {
     "mc_cookie_ks": ("快手", "ks"), "mc_cookie_tieba": ("贴吧", "tieba"),
 }
 
-# 电商 Cookie 真实校验：访问一个必须登录才能访问的页面，看是否被重定向回登录页。
-# 只看最终落地 URL 是否命中登录页特征，不解析页面正文（改版不影响判定），但登录跳转
-# 策略本身变化时仍可能需要更新这里的 url/login_markers——如实标注维护成本，不假装稳定。
+# 电商登录页探测：明确跳回登录页可判定未认证，HTTP 200 只证明页面可达。
+# 尚未接通稳定身份接口的平台保持 unknown，不靠页面壳或搜索结果证明账号身份。
 # 拼多多/淘宝反爬更激进，标 best_effort=True：请求被拦截时不误判为"Cookie 失效"，
 # 而是回"无法判断"，避免让管理员误删一个其实还有效的 Cookie。
 # 淘宝 2026-07-08 实测：探测请求（无真实浏览器 TLS/JS 指纹）会被淘宝 WAF 转发到内部边缘节点
@@ -235,18 +235,42 @@ _ECOMMERCE_UA = (
 )
 
 
+class CookieProbeError(RuntimeError):
+    """明确的认证证据才标失效，其他失败保留为未知。"""
+
+    def __init__(self, message: str, *, reason: str, status: str = "unknown"):
+        super().__init__(message)
+        self.reason = reason
+        self.status = status
+
+
+def _cookie_failure_status(error: Exception) -> str:
+    return error.status if isinstance(error, CookieProbeError) else "unknown"
+
+
+def _cookie_verification_evidence(error: Exception | None = None) -> dict:
+    # 原因来自有限代码表，不能把第三方返回的任意字符串当成公开分类透传。
+    reasons = {"login_required", "rate_limited", "challenge_required", "access_denied", "network_error",
+               "http_error", "identity_unverified", "identity_probe_unsupported", "identity_probe_failed",
+               "empty_result", "collection_failed", "collector_unavailable", "credential_missing", "credential_changed"}
+    reason = error.reason if isinstance(error, CookieProbeError) and error.reason in reasons else "probe_failed"
+    status = ("invalid" if _cookie_failure_status(error) == "invalid" else "unknown") if error is not None else "valid"
+    return {"scope": "identity", "status": status,
+            "reason": reason if error is not None else "authenticated", "operations": "not_checked"}
+
+
 def _classify_ecommerce_probe(
     landed_url: str, status_code: int, cn: str, login_markers: tuple, best_effort: bool,
 ) -> str:
-    """纯函数：根据探测请求最终落地的 URL + 状态码判定 Cookie 状态，返回结论文案；
-    判定为失效/无法判断时抛 RuntimeError（消息含"无法判断"四字表示"测不准，非确定失效"）。
-    """
-    if any(marker in landed_url for marker in login_markers):
-        raise RuntimeError(f"{cn} 登录状态已失效，请重新导出 Cookie")
+    """跳回登录页可证明当前探测未认证；页面成功加载不证明身份。"""
+    url = urlsplit(landed_url)
+    if any((url.path == marker if marker.startswith("/") else url.hostname == marker) for marker in login_markers):
+        raise CookieProbeError(f"{cn} 登录状态已失效，请重新导出 Cookie", reason="login_required", status="invalid")
     if status_code != 200:
         hint = "，可能是反爬拦截而非 Cookie 失效" if best_effort else "，请稍后重试确认"
-        raise RuntimeError(f"{cn} 无法判断 Cookie 状态（HTTP {status_code}）{hint}")
-    return f"{cn} Cookie 有效（{landed_url}）"
+        reason = "rate_limited" if status_code == 429 else "access_denied" if status_code == 403 else "http_error"
+        raise CookieProbeError(f"{cn} 无法判断 Cookie 状态（HTTP {status_code}）{hint}", reason=reason)
+    raise CookieProbeError(f"{cn} 无法判断 Cookie 状态：页面可达，但未取得已登录身份凭据", reason="identity_unverified")
 
 
 async def _verify_ecommerce_cookie(cookie_key: str) -> str:
@@ -256,22 +280,23 @@ async def _verify_ecommerce_cookie(cookie_key: str) -> str:
     probe = _ECOMMERCE_PROBES[cookie_key]
     cookie = (effective(cookie_key) or "").strip()
     if not cookie:
-        raise RuntimeError(f"{probe['cn']} 未配置 Cookie")
+        raise CookieProbeError(f"{probe['cn']} 未配置 Cookie", reason="credential_missing")
     headers = {"User-Agent": _ECOMMERCE_UA, "Cookie": cookie}
     try:
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
             r = await c.get(probe["url"], headers=headers)
-    except Exception as e:  # noqa: BLE001 网络异常也是"测不了"，不该冒充"Cookie失效"
-        raise RuntimeError(f"{probe['cn']} 探测请求失败：{e}")
+    except httpx.RequestError:
+        # 不透传带请求地址或凭证的第三方异常。
+        raise CookieProbeError(f"{probe['cn']} 无法判断 Cookie 状态：网络探测失败，请稍后重试", reason="network_error") from None
     return _classify_ecommerce_probe(
         str(r.url), r.status_code, probe["cn"], probe["login_markers"], probe["best_effort"],
     )
 
 
 async def _verify_mc_cookie(cookie_key: str) -> str:
-    """真实探测：跑一次最小的 MediaCrawler 搜索，检验该平台 Cookie 是否还能登录。
+    """运行独立身份探针；缺少探针时不回落到搜索。
 
-    这是真实浏览器自动化（登录+搜索），不是轻量探活，耗时可能从十几秒到几分钟不等——
+    这是真实浏览器自动化（登录+身份接口），不是轻量探活，耗时可能从十几秒到几分钟不等——
     前端对这类目标会先弹确认框（仿 Slack 侧效应验证），不会被误触。
     """
     from src.collectors.registry import get_registry
@@ -283,21 +308,38 @@ async def _verify_mc_cookie(cookie_key: str) -> str:
         raise RuntimeError("未知的平台 Cookie 项")
     platform_cn, platform_code = entry
     if not _platform_cookie(platform_code):
-        raise RuntimeError(f"{platform_cn} 未配置 Cookie，无需探测（未配置时走扫码登录，不受此项影响）")
+        raise CookieProbeError(f"{platform_cn} 未配置 Cookie，无法验证账号身份", reason="credential_missing")
     collector = get_registry().get("mediacrawler")
     if collector is None or not collector.is_available():
-        raise RuntimeError("MediaCrawler 未配置（MEDIACRAWLER_PATH），无法探测")
-    spec = TaskSpec(intent="Cookie 连通验证", platforms=[platform_cn], keywords=["你好"], max_items=1)
-    result = await collector.collect(spec)
-    if result.success:
-        return f"{platform_cn} Cookie 有效（真实登录并采到 {len(result.items)} 条数据）"
+        raise CookieProbeError("MediaCrawler 未配置（MEDIACRAWLER_PATH），无法探测", reason="collector_unavailable")
+    # 小红书与专属采集使用同一独立浏览器入口，不能借 CDP/持久会话证明所填 Cookie 有效。
+    spec = TaskSpec(intent="Cookie 连通验证", platforms=[platform_cn], keywords=["你好"], max_items=1,
+                    xhs_sort="general" if platform_code == "xhs" else None)
+    probe = getattr(collector, "verify_cookie", None)
+    if not callable(probe):
+        raise CookieProbeError(f"{platform_cn} 暂不支持独立身份验证", reason="identity_probe_unsupported")
+    result = await probe(spec)
+    authentication = getattr(result, "authentication", {})
+    if callable(probe) and authentication:
+        if result.success and authentication.get("status") == "valid":
+            return f"{platform_cn} 本次登录身份验证通过；尚未验证搜索、详情或评论权限"
+        if authentication.get("status") == "invalid":
+            raise CookieProbeError(f"{platform_cn} 身份接口明确返回未登录，请重新认证", reason="login_required", status="invalid")
+        raise CookieProbeError(f"{platform_cn} 尚未取得可确认的登录身份，不能判断 Cookie 是否有效",
+                               reason=authentication.get("reason") or "identity_unverified")
+    if result.has_data:
+        # 公开搜索可匿名成功，采集器尚未提供独立的账号身份证据，不能据此标记有效。
+        raise CookieProbeError(
+            f"{platform_cn} 搜索可用（采到 {len(result.items)} 条数据），账号身份未验证，无法判断 Cookie 是否有效",
+            reason="identity_unverified",
+        )
     msg = result.message or ""
-    # 唯一真正"没崩溃、只是没搜到内容"的情况：进程正常退出但没解析出数据。
-    # 其余（启动失败/运行超时/退出码非0的登录过期/验证码/频次/IP 等诊断）都是采集本身没跑成功，
-    # 必须算验证失败——此前误把这些也归为"未产出数据"，会把真实故障显示成绿色的"未报错"。
+    # 空结果既不能证明身份有效，也不能证明凭证过期；只有明确登录证据才判失效。
     if msg == "MediaCrawler 未产出可解析结果":
-        return f"{platform_cn} 登录未报错，但本次探测未产出数据（{msg}）"
-    raise RuntimeError(msg or "MediaCrawler 采集失败，原因未知")
+        raise CookieProbeError(f"{platform_cn} 无法判断 Cookie 状态：探测未产出数据", reason="empty_result")
+    if "登录已过期" in msg:
+        raise CookieProbeError(msg, reason="login_required", status="invalid")
+    raise CookieProbeError(msg or "MediaCrawler 采集失败，原因未知", reason="collection_failed")
 
 
 async def _verify_http(url: str, name: str, ok_codes=(200,)) -> str:
@@ -343,14 +385,44 @@ def _detect_local_browser() -> Optional[str]:
     return None
 
 
-def _record_cookie_health(key: str, status: str, message: str, checked_by: str) -> None:
+def _record_cookie_health(key: str, status: str, message: str, checked_by: str, *, expected_version: str | None = None, expected_binding: str | None = None) -> bool | None:
     """验证结果顺带落库，供配置中心展示"最后一次验证状态"；旁路副作用，落库失败只记日志。"""
     safe_message = rc.redact_sensitive_text(str(message))[:500]
     try:
-        get_store().cookie_health_set(key, status, safe_message, checked_by)
+        if expected_binding is not None:
+            from src.config.cookie_probe_binding import cookie_probe_binding
+            version, value = rc.global_secret_snapshot(get_store(), key)
+            if cookie_probe_binding(key, version, value) != expected_binding:
+                return False
+        return get_store().cookie_health_set(key, status, safe_message, checked_by, expected_version=expected_version, expected_binding=expected_binding)
     except Exception:  # noqa: BLE001 落库失败不该影响验证结果本身返回给前端
         # 持久化异常可能携带连接参数或 Cookie；旁路日志只保留目标标识。
         logger.warning("cookie_health 写入失败 key=%s", key)
+
+
+async def _verify_global_cookie(key: str, checked_by: str) -> str:
+    version, value = rc.global_secret_snapshot(get_store(), key)
+    from src.config.cookie_probe_binding import cookie_probe_binding, capture_probe_environment, probe_environment_context
+    environment = capture_probe_environment()
+    binding = cookie_probe_binding(key, version, value, environment=environment)
+    # 明确冻结所选平台凭证，不继承调用协程中的个人覆盖，也不在探测中途换账号。
+    with user_overrides_context({key: value}), probe_environment_context(environment):
+        try:
+            # 空覆盖会回落进程设置；验证必须停在冻结凭证，不能借旧值或扫码换账号。
+            if not value:
+                raise CookieProbeError("未配置 Cookie，无法验证账号身份", reason="credential_missing")
+            detail = await _verify_target(key)
+        except Exception as error:
+            # 必须在冻结旧凭证仍可见时脱敏，退出上下文后全局值可能已经轮换。
+            safe_detail = rc.redact_sensitive_text(str(error.detail if isinstance(error, HTTPException) else error))[:500]
+            if _record_cookie_health(key, _cookie_failure_status(error), safe_detail, checked_by, expected_version=version, expected_binding=binding) is False:
+                raise CookieProbeError("凭证已更新或验证环境已变化，本次旧探测结果已丢弃，请重新验证", reason="credential_changed") from None
+            if isinstance(error, HTTPException):
+                raise HTTPException(error.status_code, safe_detail, headers=error.headers) from None
+            raise CookieProbeError(safe_detail, reason=error.reason if isinstance(error, CookieProbeError) else "probe_failed", status=_cookie_failure_status(error)) from None
+        if _record_cookie_health(key, "valid", detail, checked_by, expected_version=version, expected_binding=binding) is False:
+            raise CookieProbeError("凭证已更新或验证环境已变化，本次旧探测结果已丢弃，请重新验证", reason="credential_changed")
+        return detail
 
 
 async def _verify_target(target: str) -> str:
@@ -425,8 +497,8 @@ async def _verify_target(target: str) -> str:
             return "CDP 模式未启用，采集仍使用 MediaCrawler 自带的 Chromium"
         found = await asyncio.to_thread(_detect_local_browser)
         if found:
-            return f"CDP 模式已启用，检测到本机浏览器：{found}"
-        raise RuntimeError("CDP 模式已启用，但本机未检测到 Chrome/Edge，采集时会启动失败，请先安装浏览器")
+            return f"检测到本机浏览器：{found}；当前平台采集强制使用独立会话，不连接共享 CDP"
+        return "未检测到本机浏览器；当前平台采集使用独立 Chromium，不连接共享 CDP"
     if target == "checkpoint":
         if not settings.checkpoint_enabled:
             raise RuntimeError("断点续跑未启用")
@@ -460,12 +532,10 @@ async def verify_config(body: VerifyIn, user=Depends(get_current_user)):
         mine = get_store().config_all(user["user_id"]) or {}
         set_user_overrides({k: v for k, v in mine.items() if k in rc.USER_KEYS})
     try:
-        detail = await _verify_target(body.target)
-        # 只有管理员验证时测的才是全局配置中心展示的那份值；普通用户验证的是自己的
-        # 个人覆盖（见上面 set_user_overrides），写进全局表会污染管理员看到的状态。
-        if is_admin and body.target in _COOKIE_HEALTH_KEYS:
-            _record_cookie_health(body.target, "valid", detail, checked_by="manual")
-        return {"ok": True, "detail": detail}
+        detail = (await _verify_global_cookie(body.target, "manual")
+                  if is_admin and body.target in _COOKIE_HEALTH_KEYS else await _verify_target(body.target))
+        return {"ok": True, "detail": detail,
+                **({"verification": _cookie_verification_evidence()} if body.target in _COOKIE_HEALTH_KEYS else {})}
     except HTTPException as exc:
         detail = rc.redact_sensitive_text(str(exc.detail))[:300]
         raise HTTPException(
@@ -475,7 +545,50 @@ async def verify_config(body: VerifyIn, user=Depends(get_current_user)):
         ) from exc
     except Exception as e:  # noqa: BLE001 验证失败把原因回前端
         detail = rc.redact_sensitive_text(str(e))[:300]
-        if is_admin and body.target in _COOKIE_HEALTH_KEYS:
-            status = "unknown" if "无法判断" in detail else "invalid"
-            _record_cookie_health(body.target, status, detail, checked_by="manual")
-        return {"ok": False, "detail": detail}
+        return {"ok": False, "detail": detail,
+                **({"verification": _cookie_verification_evidence(e)} if body.target in _COOKIE_HEALTH_KEYS else {})}
+
+
+class CookieReauthenticationIn(BaseModel):
+    key: str
+    value: str
+    scope: Literal["personal", "platform"] = "personal"
+
+
+@router.post("/reauthenticate")
+async def reauthenticate_cookie(body: CookieReauthenticationIn, user=Depends(get_current_user), request: Request = None):
+    """用户正常登录后验证新凭证；仅成功时采用，不自动恢复或重放任务。"""
+    if body.scope == "platform" and not is_admin_role(user.get("role")):
+        raise HTTPException(403, "无权更新平台凭证")
+    if body.key not in _COOKIE_HEALTH_KEYS or body.key not in rc.USER_KEYS:
+        raise HTTPException(400, "不支持的采集账号")
+    value = body.value.strip()
+    if not value:
+        raise HTTPException(400, "新凭证不能为空")
+    from src.config.cookie_probe_binding import capture_probe_environment, probe_environment_context
+    from src.config.user_ctx import frozen_effective_values
+
+    store = get_store()
+    scope = "global" if body.scope == "platform" else user["user_id"]
+    snapshot = store.config_secret_snapshot(scope, body.key)
+    version = snapshot[0] if snapshot is not None else None
+    environment = capture_probe_environment()
+    with user_overrides_context({body.key: value}), frozen_effective_values([body.key]), probe_environment_context(environment):
+        try:
+            await _verify_target(body.key)
+        except Exception as error:
+            # 新值尚未进入Vault；固定提示避免第三方异常携带凭证正文。
+            return {"ok": False, "saved": False, "detail": "新凭证未通过身份验证，原配置未修改",
+                    "verification": _cookie_verification_evidence(error)}
+    if capture_probe_environment() != environment:
+        raise HTTPException(409, "验证环境已变化，原配置未修改，请重新验证")
+    if body.scope == "platform":
+        with _audit_config_changes(request, [body.key]):
+            saved = rc.replace_global_secret(store, body.key, value, expected_version=version, updated_by=user["user_id"])
+    else:
+        saved = store.config_replace_secret(scope, body.key, value, expected_version=version, updated_by=user["user_id"])
+    if not saved:
+        raise HTTPException(409, "验证期间凭证已被更新，未覆盖新配置，请重新加载后核对")
+    # 身份有效不证明新旧凭证为同一账号；保留旧任务绑定和未知调用不重放边界。
+    return {"ok": True, "saved": True, "detail": "新凭证已验证并保存；原任务未自动恢复",
+            "verification": _cookie_verification_evidence(), "task_resume": "requires_explicit_recovery"}

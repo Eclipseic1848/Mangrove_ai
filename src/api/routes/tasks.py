@@ -197,7 +197,7 @@ def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_execution_use
             store.set_status(sched_id, "paused")
             return {"ok": True}
         if task.get('time_zone') != 'Asia/Shanghai':
-            raise HTTPException(status_code=409, detail="历史时区未记录，请核对北京时间后重新创建计划")
+            raise HTTPException(status_code=409, detail="历史时区未记录，请核对执行时间后重新创建计划")
         # 恢复：原定时刻可能已过去，需重算 next_run_at
         cur_sched = Schedule(
             trigger_type=task["trigger_type"], cron_expr=task.get("cron_expr"),
@@ -213,7 +213,7 @@ def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_execution_use
         return {"ok": True}
 
     if task.get('time_zone') != 'Asia/Shanghai':
-        raise HTTPException(status_code=409, detail="历史时区未记录，原计划保持不变；请按北京时间重新创建")
+        raise HTTPException(status_code=409, detail="历史时区未记录，原计划保持不变；请核对执行时间后重新创建")
     # 整体编辑：未传的字段沿用旧值
     name = body.name if body.name is not None else task.get("name")
     user_input = body.prompt if body.prompt is not None else task["user_input"]

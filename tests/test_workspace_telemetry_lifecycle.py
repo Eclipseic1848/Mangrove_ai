@@ -131,6 +131,10 @@ print("EXPORT_BLOCKED_MAIN_EXIT", flush=True)
 
 def test_unreachable_http_export_keeps_explicit_timeout(monkeypatch):
     from requests import ConnectionError
+    from opentelemetry.exporter.otlp.proto.http import trace_exporter
+
+    # 固定合法退避上界，让网络失败的清理时间不受随机抖动影响。
+    monkeypatch.setattr(trace_exporter.random, "uniform", lambda lower, upper: upper)
 
     posts = []
     closed = threading.Event()
@@ -156,7 +160,8 @@ def test_unreachable_http_export_keeps_explicit_timeout(monkeypatch):
         telemetry.shutdown_workspace_telemetry()
     assert posts
     assert all(0 < timeout <= 5 for timeout in posts)
-    assert closed.wait(1)
+    # 关闭调用只等待 1 秒；在途导出仍可用完既定的 5 秒期限后释放会话。
+    assert closed.wait(5)
 
 
 def test_shutdown_during_configuration_prevents_late_activation(monkeypatch):

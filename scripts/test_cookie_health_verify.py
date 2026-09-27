@@ -46,6 +46,7 @@ def test_record_cookie_health_swallow_store_errors():
 
 def test_verify_config_admin_success_writes_health():
     store = _tmp_store()
+    store.config_set("global", "mc_cookie_xhs", "synthetic-cookie")
     admin_user = {"user_id": "u_admin", "role": "admin"}
 
     async def fake_verify_target(target):
@@ -68,10 +69,11 @@ def test_verify_config_admin_success_writes_health():
 
 def test_verify_config_admin_failure_writes_invalid():
     store = _tmp_store()
+    store.config_set("global", "jd_cookie", "synthetic-cookie")
     admin_user = {"user_id": "u_admin", "role": "admin"}
 
     async def fake_verify_target(target):
-        raise RuntimeError("京东 登录状态已失效，请重新导出 Cookie")
+        raise cr.CookieProbeError("京东 登录状态已失效，请重新导出 Cookie", reason="login_required", status="invalid")
 
     async def run():
         with patch.object(cr, "get_store", return_value=store), \
@@ -87,6 +89,7 @@ def test_verify_config_admin_failure_writes_invalid():
 
 def test_verify_config_ambiguous_failure_writes_unknown():
     store = _tmp_store()
+    store.config_set("global", "pdd_cookie", "synthetic-cookie")
     admin_user = {"user_id": "u_admin", "role": "admin"}
 
     async def fake_verify_target(target):

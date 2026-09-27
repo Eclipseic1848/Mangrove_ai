@@ -29,7 +29,7 @@ import logging
 import re
 import time
 from typing import List, Optional, Tuple
-from urllib.parse import quote_plus, unquote, urlsplit
+from urllib.parse import quote_plus, unquote
 
 import httpx
 
@@ -43,7 +43,7 @@ from ._extract import extract_content
 from ._net import decode_html, get_rate_limiter, pick_headers, retry_async, smart_client
 from ._recency import apply_recency, parse_time_range
 from .base import BaseCollector, CollectedItem, CollectResult
-from .platforms import resolve_domains
+from .platforms import resolve_domains, url_in_domains
 from .registry import register
 
 # 时效档位 → 各搜索后端的时间过滤参数取值
@@ -118,7 +118,7 @@ class SearchDiscoveryCollector(BaseCollector):
         return backends
 
     async def collect(self, spec: TaskSpec) -> CollectResult:
-        domain = _resolve_domain(spec)
+        domains = resolve_domains(spec.platforms, spec.site_domains)
         limit = max(1, min(spec.max_items, settings.collector_max_items))
         query, _ = self._build_query(spec)
         # 时效：解析时间窗，向搜索后端传时间档位，并在抓取后按发布日期过滤+倒序
@@ -127,8 +127,8 @@ class SearchDiscoveryCollector(BaseCollector):
 
         kw = " ".join(spec.keywords).strip()
         tavily_done = False
-        # 尝试域名序列：指定平台时先"站内限定"，采不到再"全网兜底"（用户所选策略：先试平台，失败全网）
-        dom_seq = [domain, ""] if domain else [""]
+        # 换搜索后端不能放宽用户的站点范围；多个站点逐一尝试，无站点约束才搜索全网。
+        dom_seq = domains or [""]
 
         # 跨后端累积补齐：单个后端不足 limit 时继续用后续后端挖（按 URL 去重），
         # 凑够即返回、穷尽有多少交多少——根治"首命中即交差"导致的数量不足。
@@ -140,15 +140,17 @@ class SearchDiscoveryCollector(BaseCollector):
         parts: List[str] = []  # 各后端贡献说明（含站内/全网标注），拼进结果 message
 
         def _note(dom: str) -> str:
-            """结果说明：站内命中标注限定域名；全网兜底时明确告知数据非来自指定平台。"""
+            """结果说明保留当前检索范围。"""
             if dom:
                 return f"（限定 {dom}）"
-            return f"（全网兜底，数据非来自 {domain}）" if domain else "（全网）"
+            return "（全网）"
 
         def _add(items: List[CollectedItem], source: str, dom: str) -> None:
             """合并一批结果：按 URL（无 URL 用标题+正文前缀）去重，总量不超过 limit。"""
             added = 0
             for it in items:
+                if dom and not url_in_domains(it.url or "", [dom]):
+                    continue
                 key = (it.url or "").strip() or (it.title or "") + (it.content or "")[:200]
                 if key in seen_urls:
                     continue
@@ -203,7 +205,7 @@ class SearchDiscoveryCollector(BaseCollector):
                 if _done():
                     return _result()
 
-        # 1) Tavily 正文优先（auto + 开关开 + 有 key）：站内→全网依次尝试，直接拿内联正文，最快
+        # 1) Tavily 正文优先（auto + 开关开 + 有 key），逐个授权站点检索。
         if settings.search_tavily_first and self._use_tavily():
             tavily_done = True
             for dom in dom_seq:
@@ -211,9 +213,9 @@ class SearchDiscoveryCollector(BaseCollector):
                 if _done():
                     return _result()
 
-        # 2) 免费链接发现后端（SearXNG / DDG）→ 抓正文：同样站内→全网兜底
+        # 2) 免费链接发现后端（SearXNG / DDG）→ 抓正文，保持原站点范围。
         for dom in dom_seq:
-            # 站内用 site: 限定；全网兜底用纯关键词（避免带平台名反而排除掉其它来源）
+            # 有站点约束用 site: 限定，无约束用纯关键词。
             q = f"site:{dom} {kw}".strip() if dom else kw
             for backend in self._discovery_backends():
                 if _done():
@@ -224,13 +226,13 @@ class SearchDiscoveryCollector(BaseCollector):
                     logger.warning("%s 发现失败: %s", backend, e)
                     continue
                 # 过滤已采 URL、只抓还缺的数量，避免重复抓取浪费时间
-                links = [u for u in links if u not in seen_urls][: limit - len(merged)]
+                links = [u for u in links if u not in seen_urls and url_in_domains(u, [dom] if dom else [])][: limit - len(merged)]
                 if not links:
                     continue
                 items = apply_recency(await self._fetch_all(links, deadline), window)
                 _add(items, backend, dom)
 
-        # 3) Tavily 兜底（若上面未优先用过；省额度的旧顺序下在此触发）：站内→全网
+        # 3) Tavily 兜底（若上面未优先用过），仍保持原站点范围。
         if self._use_tavily() and not tavily_done:
             for dom in dom_seq:
                 if _done():
@@ -249,7 +251,7 @@ class SearchDiscoveryCollector(BaseCollector):
                 except Exception as e:
                     logger.warning("%s HTML 兜底失败: %s", backend, e)
                     continue
-                links = [u for u in links if u not in seen_urls][: limit - len(merged)]
+                links = [u for u in links if u not in seen_urls and url_in_domains(u, [dom] if dom else [])][: limit - len(merged)]
                 if not links:
                     continue
                 items = apply_recency(await self._fetch_all(links, deadline), window)
@@ -306,6 +308,8 @@ class SearchDiscoveryCollector(BaseCollector):
         data = resp.json()
         items: List[CollectedItem] = []
         for r in (data.get("results") or [])[:limit]:
+            if domain and not url_in_domains(r.get("url", ""), [domain]):
+                continue
             content = (r.get("raw_content") or r.get("content") or "").strip()
             if not content:
                 continue
@@ -330,6 +334,10 @@ class SearchDiscoveryCollector(BaseCollector):
                             return await client.get(u, headers=pick_headers())
                     resp2 = await retry_async(_get)
                     resp2.raise_for_status()
+                    # 来源身份以最终响应为准，不能把重定向后的站外正文标成站内来源。
+                    item.url = str(resp2.url)
+                    if domain and not url_in_domains(item.url, [domain]):
+                        continue
                     title2, text2, meta2 = extract_content(decode_html(resp2), item.url)
                     if (text2 or "").strip() and len(text2) > len(item.content or ""):
                         item.content = text2
@@ -339,7 +347,7 @@ class SearchDiscoveryCollector(BaseCollector):
                 except Exception as e:
                     logger.warning("Tavily 补采失败 %s: %s", item.url, e)
 
-        return items
+        return [item for item in items if not domain or url_in_domains(item.url or "", [domain])]
 
     async def _search_anysearch(self, keywords: str, domain: str, *, limit: int,
                                  time_label: Optional[str] = None) -> List[CollectedItem]:
@@ -352,16 +360,9 @@ class SearchDiscoveryCollector(BaseCollector):
         if not items:
             return []
 
-        # AnySearch 不直接支持 site: 限定，但可通过 domain 垂直领域间接限定；
-        # 通用搜索时在结果端按域名过滤，精度低于 Tavily 的 include_domains 但够用
+        # 即使后端忽略站点参数，也不能把站外结果计为站内样本或继续抓取其正文。
         if domain:
-            filtered = []
-            for item in items:
-                if domain in (item.url or ""):
-                    filtered.append(item)
-            if filtered:
-                items = filtered
-            # 不全部滤掉——AnySearch 通用搜索可能在其它站找到相关内容
+            items = [item for item in items if url_in_domains(item.url or "", [domain])]
 
         # 补采：AnySearch 对部分 URL 可能只返回摘要，短内容补抓完整正文
         thin_urls = [item.url for item in items if len(item.content or "") < 200]
@@ -377,6 +378,9 @@ class SearchDiscoveryCollector(BaseCollector):
                             return await client.get(u, headers=pick_headers())
                     resp2 = await retry_async(_get)
                     resp2.raise_for_status()
+                    item.url = str(resp2.url)
+                    if domain and not url_in_domains(item.url, [domain]):
+                        continue
                     title2, text2, meta2 = extract_content(decode_html(resp2), item.url)
                     if (text2 or "").strip() and len(text2) > len(item.content or ""):
                         item.content = text2
@@ -386,7 +390,7 @@ class SearchDiscoveryCollector(BaseCollector):
                 except Exception as e:
                     logger.warning("AnySearch 补采失败 %s: %s", item.url, e)
 
-        return items
+        return [item for item in items if not domain or url_in_domains(item.url or "", [domain])]
 
     def _build_query(self, spec: TaskSpec) -> Tuple[str, str]:
         """构造检索式与目标域名。命中平台域名则用 site: 限定。"""
@@ -407,7 +411,7 @@ class SearchDiscoveryCollector(BaseCollector):
         for link in urls:
             if not link or not link.startswith("http"):
                 continue
-            if domain and not (urlsplit(link).netloc or "").endswith(domain):
+            if domain and not url_in_domains(link, [domain]):
                 continue
             if link in seen:
                 continue
@@ -527,7 +531,8 @@ class SearchDiscoveryCollector(BaseCollector):
                         meta = getattr(result, "metadata", {}) or {}
                         if content.strip():
                             items.append(CollectedItem(
-                                url=url, title=meta.get("title", ""), content=content,
+                                url=str(getattr(result, "redirected_url", None) or getattr(result, "url", None) or url),
+                                title=meta.get("title", ""), content=content,
                                 metadata={"engine": self.name, "via": "crawl4ai", **meta},
                             ))
                 if items:
@@ -552,11 +557,12 @@ class SearchDiscoveryCollector(BaseCollector):
                 continue
             if dedup_seen(url):
                 continue
-            title, text, meta = extract_content(decode_html(resp), url)
+            final_url = str(resp.url)
+            title, text, meta = extract_content(decode_html(resp), final_url)
             if (text or "").strip():
                 dedup_mark(url, self.name)
                 items.append(CollectedItem(
-                    url=url, title=title, content=text,
+                    url=final_url, title=title, content=text,
                     metadata={"engine": self.name, "via": meta.get("via", "httpx")},
                 ))
         return items

@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 
 export type Draft = {
   draft_id: string; revision: number; acceptance_pending?: boolean; review_waiting?: boolean; created_at?: string | null;
+  issues?: string[];
   files: Array<{ filename: string; download_url: string; preview?: string | null; preview_table?: string[][] | null;
     preview_truncated?: boolean | null; preview_scope?: string | null; page_preview_url?: string | null }>;
 };
@@ -128,6 +129,10 @@ export function DraftResultPanel({ taskId, revision, ownerId, status, active, on
     setConfirmDraft(draft); setConfirming(true);
   };
   const feedback = <>
+    {!!draft.issues?.length && <div role="status" className="mt-2 text-sm">
+      <p className="font-medium">已发现的问题（由你决定是否接受）</p>
+      <ul className="list-disc space-y-1 pl-5">{draft.issues.map((issue, index) => <li key={index}>{issue}</li>)}</ul>
+    </div>}
     {updateNotice}
     {reviewing && <p role="status" className="mt-2 text-sm">正在恢复核对，初稿仍可查看。</p>}
     {busy && <p role="status" className="mt-2 text-sm">{status === "cancelling" ? "正在等待验证停止。" : draft.acceptance_pending ? "正在保存正式结果。" : "已请求停止验证并保存正式结果。"}你可以继续查看内容，完成后自动更新。</p>}

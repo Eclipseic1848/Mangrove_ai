@@ -5,6 +5,8 @@ import subprocess
 import threading
 import uuid
 
+from src.utils.docker_user import docker_user_args
+
 
 _SLOTS = threading.BoundedSemaphore(2)
 _CONVERT = '''
@@ -33,6 +35,7 @@ def office_preview(path: Path, extension: str) -> bytes:
         process = subprocess.run([
             "docker", "run", "--rm", "--name", name, "--network=none", "--read-only",
             "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=768m", "--cpus=1", "--pids-limit=128",
+            *docker_user_args(),
             "--tmpfs", "/tmp:rw,size=256m,mode=1777", "--mount", f"type=bind,source={path.resolve()},target=/input{extension},readonly",
             "--entrypoint", "python", "mangrove/office-preview:local", "-c", _CONVERT, f"/input{extension}",
         ], capture_output=True, timeout=85)

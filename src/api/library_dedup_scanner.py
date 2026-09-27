@@ -251,7 +251,13 @@ def start_library_dedup_scanner() -> None:
     """幂等启动。即使巡检开关关闭也会启动循环本身（循环内部自己空转直到开关打开），
     这样管理员切换开关不需要重启进程。需在已有事件循环内调用（FastAPI 启动钩子）。"""
     global _scanner
-    if _scanner is not None:
-        return
-    _scanner = LibraryDedupScanner()
+    if _scanner is None:
+        _scanner = LibraryDedupScanner()
     _scanner.start()
+
+
+async def stop_library_dedup_scanner() -> None:
+    global _scanner
+    if _scanner is not None:
+        await _scanner.stop()
+        _scanner = None

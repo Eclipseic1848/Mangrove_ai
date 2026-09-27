@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
+from contextlib import closing
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -1680,7 +1681,7 @@ def test_passed_candidate_without_delivery_is_waiting_for_publication(
     repository, _previous = _prepare_candidate(tmp_path, _PassingVerifier())
 
     offer = asyncio.run(
-        _service(repository, "9").inspect_reverification(
+        _service(repository, "5").inspect_reverification(
             owner_id="owner-a",
             task_id="task-a",
             revision=1,
@@ -1690,6 +1691,43 @@ def test_passed_candidate_without_delivery_is_waiting_for_publication(
     assert offer.eligible is False
     assert offer.blockers == ("already_passed",)
     assert offer.awaiting_publication is True
+
+
+def test_passed_candidate_can_reverify_after_ruleset_change(tmp_path: Path) -> None:
+    repository, previous = _prepare_candidate(tmp_path, _PassingVerifier())
+    # 完整重验 Worker 还需检查工作台任务没有取消或删除。
+    with closing(sqlite3.connect(tmp_path / "workspace.db")) as connection, connection:
+        connection.execute(
+            "INSERT INTO semantic_workspace_tasks (task_id,user_id,title,objective_text,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?)", ("task-a", "owner-a", "合成重验", "读取来源并输出 JSON", _NOW.isoformat(), _NOW.isoformat()),
+        )
+    service = _service(repository, "9")
+    offer = service.inspect_reverification_sync(owner_id="owner-a", task_id="task-a", revision=1)
+    assert offer.eligible and not offer.awaiting_publication
+    assert offer.reason is AttemptReason.RULESET_CHANGED
+    assert offer.blockers == ()
+    with pytest.raises(ValueError):
+        service.prepare_publication(owner_id="owner-a", task_id="task-a", revision=1, attempt_id=previous.attempt_id)
+    requested = asyncio.run(service.request_reverification(
+        owner_id="owner-a", task_id="task-a", revision=1,
+        expected_previous_attempt_id=previous.attempt_id,
+        external_api_confirmed=False, idempotency_key="passed-ruleset-change",
+        verifier_factory=lambda *_args: _PassingVerifier(),
+    ))
+    assert requested.status is AttemptStatus.REQUESTED
+    assert requested.previous_attempt_id == previous.attempt_id
+    assert requested.verifier_ruleset_hash == "9" * 64
+    completed = asyncio.run(service.execute_requested_reverification(
+        owner_id="owner-a", attempt_id=requested.attempt_id,
+        verifier_factory=lambda *_args: _PassingVerifier(),
+    ))
+    assert completed.status is AttemptStatus.PASSED
+    offer = service.inspect_reverification_sync(owner_id="owner-a", task_id="task-a", revision=1)
+    assert offer.awaiting_publication and not offer.eligible and offer.ruleset_changed is False
+    assert service.prepare_publication(
+        owner_id="owner-a", task_id="task-a", revision=1, attempt_id=completed.attempt_id,
+    ) == completed
+    assert repository.get("owner-a", previous.attempt_id) == previous
 
 
 def test_passed_candidate_with_drift_is_not_waiting_for_publication(

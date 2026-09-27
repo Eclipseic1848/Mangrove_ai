@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Component, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { LayoutDashboard, CalendarClock, Moon, Sun, LogOut, Library, Brain, Settings, Users, BarChart3, Database, Menu, X, PanelLeftClose, PanelLeftOpen, ChevronUp, ShieldCheck } from "lucide-react";
@@ -7,6 +7,21 @@ import { useAuth, isAdminish, roleLabel } from "@/lib/auth";
 import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { OperationsActivity } from "@/components/OperationsActivity";
+import { Button } from "@/components/ui/button";
+
+class PageErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+  static getDerivedStateFromError() { return { failed: true }; }
+  render() {
+    if (!this.state.failed) return this.props.children;
+    // 分块加载失败只替换内容区，导航和账号操作仍可用；不自动刷新丢失现场。
+    return <section role="alert" className="space-y-3 p-6">
+      <h1 className="text-xl font-semibold">页面加载失败</h1>
+      <p className="text-sm text-muted-foreground">请检查网络后重新加载页面，也可以通过导航前往其他页面。</p>
+      <Button onClick={() => window.location.reload()}>重新加载页面</Button>
+    </section>;
+  }
+}
 
 const NAV = [
   { to: "/", label: "概览", icon: LayoutDashboard, end: true },
@@ -99,6 +114,16 @@ export function Layout() {
   useEffect(() => {
     setMobileNavOpen(false);
   }, [location.key]);
+
+  useEffect(() => {
+    // 运营审计自行标记当前子页，其他路由按导航名称更新，避免遗留上页标题。
+    if (location.pathname.startsWith("/operations")) return () => { document.title = "Mangrove"; };
+    const item = [...NAV, ...NAV_ADMIN, SETTINGS].find(item => item.end
+      ? location.pathname === item.to
+      : location.pathname === item.to || location.pathname.startsWith(`${item.to}/`));
+    document.title = item ? `${item.label} · Mangrove` : "Mangrove";
+    return () => { document.title = "Mangrove"; };
+  }, [location.pathname]);
 
   useEffect(() => {
     const desktop = window.matchMedia("(min-width: 768px)");
@@ -220,7 +245,11 @@ export function Layout() {
             <span className="text-xs font-medium text-muted-foreground">Mangrove {[...NAV, SETTINGS, ...NAV_ADMIN].find(item => item.end ? location.pathname === item.to : location.pathname.startsWith(item.to))?.label || "工作台"}</span>
           </div>
         <OperationsActivity />
-        <Outlet />
+        <PageErrorBoundary key={location.pathname}>
+          <Suspense fallback={<div role="status" className="p-6 text-sm text-muted-foreground">正在加载页面…</div>}>
+            <Outlet />
+          </Suspense>
+        </PageErrorBoundary>
       </main>
     </div>
   );

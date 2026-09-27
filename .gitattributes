@@ -9,6 +9,8 @@ evals/generalization-g1-independent-v2/sources/*.xlsx binary
 evals/generalization-g1-independent-v3/sources/*.pdf binary
 evals/generalization-g1-independent-v3/sources/*.docx binary
 evals/generalization-g1-independent-v3/sources/*.xlsx binary
-# 冻结迁移摘要按 LF 字节生成；所有平台的检出和归档必须保留同一字节格式。
+# 冻结迁移摘要按原始字节核验，跨平台检出不得改变已经生效的文件。
 src/database_migrations/alembic/versions/*.py text eol=lf
 src/database_migrations/alembic/versions/*.sql text eol=lf
+# 0023 已以 CRLF 冻结并迁移，精确保留原字节，不重写既有摘要。
+src/database_migrations/alembic/versions/webui_0023_cookie_health_binding.py -text

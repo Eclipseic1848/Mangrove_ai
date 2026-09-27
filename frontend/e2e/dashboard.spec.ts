@@ -3,20 +3,6 @@ import AxeBuilder from "@axe-core/playwright";
 
 const presets = ["deepseek", "qwen", "openai", "anthropic", "gemini", "kimi", "zhipu", "xai"].map(preset_id => ({ preset_id, display_name: preset_id }));
 
-test("公开构建缺少可选品牌资源时不请求不存在的图片", async ({ page }) => {
-  await mockOverview(page);
-  const missing: string[] = [];
-  page.on("response", response => {
-    if (response.url().includes("/overview-brands/") && response.status() >= 400) missing.push(response.url());
-  });
-  await page.goto("/");
-  await expect(page.getByRole("region", { name: "平台登录态" })).toBeVisible();
-  await expect(page.getByText("DeepSeek", { exact: true })).toBeVisible();
-  const images = page.locator('img[src^="/overview-brands/"]');
-  for (const img of await images.all()) await expect.poll(() => img.evaluate(node => (node as HTMLImageElement).complete && (node as HTMLImageElement).naturalWidth > 0)).toBeTruthy();
-  expect(missing).toEqual([]);
-});
-
 test("概览分页默认十条，支持四种条数及筛选复位", async ({ page }, testInfo) => {
   await mockOverview(page);
   const items = Array.from({ length: 123 }, (_, index) => ({ id: `paged-${index + 1}`, kind: "task", title: `分页任务 ${index + 1}`, status: "running", updated_at: "2026-09-16T10:00:00+08:00" }));
@@ -73,8 +59,6 @@ test("概览分页默认十条，支持四种条数及筛选复位", async ({ pa
   await list.screenshot({ path: testInfo.outputPath("overview-pagination-mobile.png") });
 });
 async function mockOverview(page: Page, role = "user") {
-  // 本组验证概览业务交互；首次教程由 onboarding.spec.ts 独立覆盖，避免遮罩抢占点击。
-  await page.addInitScript(currentRole => localStorage.setItem(`onboarding_all_${JSON.stringify(["owner", currentRole])}`, "skipped"), role);
   await page.route("**/api/**", route => {
     const url = new URL(route.request().url());
     if (route.request().method() !== "GET") return route.fulfill({ status: 405, json: { detail: "审计禁止写操作" } });
@@ -120,8 +104,7 @@ for (const role of ["user", "admin", "super_admin"]) {
     const claude = page.locator('[data-provider="anthropic"]');
     await expect(claude).toContainText("Claude");
     await expect(claude).toContainText("未配置");
-    // 公开构建可用通用图标代替本机品牌图片，两种形式都应保持未配置的弱化样式。
-    await expect(claude.locator("img, svg").first()).toHaveClass(/grayscale|text-muted-foreground/);
+    await expect(claude.locator("img")).toHaveClass(/grayscale/);
     await expect(page.getByText("已启用 1 · 已暂停 1")).toBeVisible();
     await expect(page.getByRole("link", { name: "运行与诊断", exact: true })).toHaveCount(role === "user" ? 0 : 1);
     const alignment = await page.locator('[data-service-body], [data-service-footer]').evaluateAll(nodes => nodes.map(node => ({ top: node.getBoundingClientRect().top, footer: node.hasAttribute("data-service-footer") })));

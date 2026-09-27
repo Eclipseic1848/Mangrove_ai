@@ -225,7 +225,8 @@ def test_real_consumers_use_execution_owner_and_private_draft_can_be_verified(tm
         calls.append(('template', messages))
         return json.dumps(dict(title='B_TEMPLATE', keywords=['common'], body='B_TEMPLATE_BODY'))
     async def check_model(messages, **kwargs):
-        return json.dumps(dict(score=90, passed=True, issues=[], summary='通过'))
+        return json.dumps(dict(score=90, passed=True, issues=[], summary='通过',
+                               source_checks=[dict(source_id=i, usable=True, reason='原件支持') for i in range(1, 31)]))
     async def consumer_model(messages, **kwargs):
         calls.append(('consumer', messages))
         return json.dumps(dict(intent='common', keywords=['common'], data_type='generic', analysis_type='summary'))
@@ -347,6 +348,8 @@ def test_checker_high_score_collection_failure_does_not_credit_lesson(scope, tmp
     checker = importlib.import_module('src.conductor.nodes.checker')
     monkeypatch.setattr(lessons, 'LESSONS_DIR', tmp_path)
     monkeypatch.setattr(settings, 'checker_enabled', True)
+    # 本用例检查终轮学习记账；首次失败的报告重写由其他测试覆盖。
+    monkeypatch.setattr(settings, 'checker_rerun_enabled', False)
     monkeypatch.setattr(settings, 'lesson_learning_enabled', True)
     monkeypatch.setattr(settings, 'template_learning_enabled', True)
     monkeypatch.setattr(settings, 'embedding_enabled', False)
@@ -370,7 +373,7 @@ def test_checker_high_score_collection_failure_does_not_credit_lesson(scope, tmp
     with execution_context(ExecutionAuthorization('bob', 0)), execution_validation(lambda auth: None):
         for _ in range(10 if scope == 'platform' else 1):
             result = asyncio.run(checker.checker_node(state))
-            assert result['quality']['passed'] is True
+            assert result['quality']['passed'] is False
         final = next(t for t in lessons.load_lessons(owner_id='bob') if t['slug'] == entry['slug'])
     assert final['helped_avoid'] == 0
     assert final['status'] == ('retired' if scope == 'platform' else 'draft')

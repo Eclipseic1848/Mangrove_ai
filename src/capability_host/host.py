@@ -13,6 +13,7 @@ from typing import Awaitable, Callable
 
 from src.agentic_runtime.egress_policy import DockerCommandResult
 from src.capability_adapters import load_runtime_manifests
+from src.utils.docker_user import docker_user_args
 
 from .models import CapabilityHostLease, CapabilityHostRequest
 from src.agentic_runtime.egress_policy import await_creation, owned_resource_id, resource_owner_identity, ResourceOwnershipError
@@ -123,6 +124,7 @@ class CapabilityHost:
             "--read-only", "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges",
             "--pids-limit", "128", "--memory", "2g", "--cpus", "2",
+            *docker_user_args(),
             "--tmpfs", "/tmp:rw,noexec,nosuid,size=64m",
             "--env-file", str(token_file),
             "--mount",

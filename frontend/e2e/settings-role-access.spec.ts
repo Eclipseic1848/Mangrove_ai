@@ -1,6 +1,28 @@
 import { expect, test, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
 
+test("配置首次读取失败可关闭或重试，不触发模型验证", async ({ page }) => {
+  await mockSettings(page, "admin");
+  await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [UX_CONNECTION] } }));
+  const configuration = { display_name: "DeepSeek", base_url: "https://models.example/v1", model: "deepseek-v4-flash", models: ["deepseek-v4-flash"], api_format: "openai_chat_completions", locality: "public_external", thinking: "default", version: "v1", has_key: true, superseded: false };
+  let unavailable = true, posts = 0;
+  page.on("request", request => { if (request.method() === "POST" && request.url().includes("/configuration/")) posts++; });
+  await page.route("**/api/model-connections/ux-shared/configuration", route => unavailable ? route.fulfill({ status: 503, json: { detail: "配置暂时无法读取" } }) : route.fulfill({ json: configuration }));
+  await page.goto("/settings?section=models&scope=platform");
+  await page.getByRole("button", { name: "管理 DeepSeek · 合成模型", exact: true }).click();
+  await page.getByRole("button", { name: "编辑配置", exact: true }).click();
+  const editor = page.getByRole("region", { name: "编辑模型配置" });
+  await expect(editor.getByText("配置暂时无法读取", { exact: true })).toBeVisible();
+  await expect(editor.getByRole("button", { name: "关闭编辑" })).toBeEnabled();
+  await editor.getByRole("button", { name: "关闭编辑" }).click();
+  await page.getByRole("button", { name: "编辑配置", exact: true }).click();
+  await expect(editor.getByRole("button", { name: "重试读取配置" })).toBeEnabled();
+  unavailable = false;
+  await editor.getByRole("button", { name: "重试读取配置" }).click();
+  await expect(editor.getByLabel("API 地址", { exact: true })).toHaveValue(configuration.base_url);
+  expect(posts).toBe(0);
+});
+
 test("平台配置可编辑验证再保存，窄屏不溢出", async ({ page }, testInfo) => {
   await mockSettings(page, "admin");
   await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [UX_CONNECTION] } }));
@@ -383,9 +405,12 @@ async function mockSettings(
 ) {
   // 未声明的请求留在隔离环境，避免旧用例落到真实后端并触发登录失效。
   await page.route("**/api/**", route => route.fulfill({ status: 404, json: { detail: "隔离API" } }));
-  await page.addInitScript(() => {
+  await page.addInitScript((currentRole) => {
     localStorage.setItem("mangrove_token", "e2e-token");
-  });
+    // 这组覆盖设置功能；新手教程由独立用例覆盖。
+    localStorage.setItem(`onboarding_all_${JSON.stringify([`${currentRole}-a`, currentRole])}`, "skipped");
+  }, role);
+  await page.route(/\/api\/operations\/(?:visits|heartbeat)$/, route => route.fulfill({ json: { ok: true } }));
   await page.addInitScript((selectedTheme) => {
     localStorage.setItem("mangrove_theme", selectedTheme);
   }, theme);
@@ -665,7 +690,7 @@ test("管理员从能力卡片创建验证并渐进查看步骤缺口", async ({
   await expect(grayCard).toContainText("供应链证据");
   await expect(grayCard).toContainText("检查未通过");
   await expect(grayCard).toContainText("阻断原因：存在 Critical 或可修复 High 安全误配置、Trivy 漏洞库已过期");
-  await expect(grayCard).toContainText("DB 更新 2026-08-07 00:00 UTC");
+  await expect(grayCard).toContainText("DB 更新 2026/08/07 08:00:00");
   const retiredCard = page.locator("article").filter({ hasText: "everything-mcp" }).first();
   await retiredCard.locator("summary").filter({ hasText: "技术详情与安全检查" }).click();
   await expect(retiredCard.locator("code")).toHaveText(`sha256:${"b".repeat(64)}`);
@@ -1526,7 +1551,7 @@ for (const role of ["admin", "super_admin"] as const) {
     await page.setViewportSize(role === "admin" ? { width: 1366, height: 768 } : { width: 390, height: 844 });
     const writes: string[] = [];
     page.on("request", (request) => {
-      if (request.method() !== "GET") writes.push(request.url());
+      if (request.method() !== "GET" && !["/api/operations/visits", "/api/operations/heartbeat"].includes(new URL(request.url()).pathname)) writes.push(request.url());
     });
     await page.route(/\/api\/config(?:\?.*)?$/, (route) => route.fulfill({ json: { groups: [
       ...["email", "slack"].map((key) => ({ key, label: `历史 ${key}`, items: [{

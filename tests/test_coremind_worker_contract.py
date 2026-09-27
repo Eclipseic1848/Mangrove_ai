@@ -31,10 +31,12 @@ def _worker_environment(directory):
 
 @unittest.skipUnless(os.environ.get("MANGROVE_COREMIND_TEST") == "1", "需显式启用隔离 Worker 验证")
 class CoreMindWorkerContractTests(unittest.TestCase):
+    expected_version = "0.7.1"
+
     def test_v2_handshake_unknown_run_and_idempotent_close(self):
         import coremind
 
-        self.assertEqual(coremind.__version__, "0.7.1")
+        self.assertEqual(coremind.__version__, self.expected_version)
         with tempfile.TemporaryDirectory(prefix="mangrove-coremind-") as directory:
             environment = _worker_environment(directory)
             client = coremind.CoreMindClient(

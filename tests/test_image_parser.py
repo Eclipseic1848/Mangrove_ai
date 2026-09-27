@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import pytest
 from dataclasses import replace
 from PIL import Image
 from src.data_prep.artifact_store import ArtifactStore
@@ -99,11 +100,13 @@ def test_image_parser_rejects_corrupt_original_before_external_call(tmp_path):
     assert rejects[0]["reason"] == "invalid_image"
 
 
-def test_rotated_image_does_not_claim_unmapped_ocr_box(tmp_path):
+@pytest.mark.parametrize("orientation", [0, 6])
+@pytest.mark.parametrize("format", ["JPEG", "WEBP"])
+def test_rotated_image_does_not_claim_unmapped_ocr_box(tmp_path, orientation, format):
     buffer = io.BytesIO()
     exif = Image.Exif()
-    exif[274] = 6
-    Image.new("RGB", (50, 40), "white").save(buffer, format="JPEG", exif=exif)
+    exif[274] = orientation
+    Image.new("RGB", (50, 40), "white").save(buffer, format=format, exif=exif)
     payload = buffer.getvalue()
     store = ArtifactStore(root=str(tmp_path))
     artifact = store.write_raw("task", "upload:image", payload, uri="image.jpg", media_type="image/jpeg", ext="jpg")
@@ -111,6 +114,8 @@ def test_rotated_image_does_not_claim_unmapped_ocr_box(tmp_path):
     element = records[0].data["elements"][0]
     assert element["bbox"] is None
     assert element["review_required"] is True
+    assert element["metadata"]["source_orientation"] == orientation
+    assert (tmp_path / artifact.storage_path).read_bytes() == payload
     assert element["page"] == 1 and element["text"] == "发票号码：001"
 
 

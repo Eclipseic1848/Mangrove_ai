@@ -5,6 +5,9 @@ const owner = { user_id: "session-owner", username: "session-owner", display_nam
 
 async function mockSession(page: Page, initiallyLoggedIn: boolean) {
   let loggedIn = initiallyLoggedIn;
+  await page.addInitScript(() => {
+    localStorage.setItem(`onboarding_all_${JSON.stringify(["session-owner", "user"])}`, "skipped");
+  });
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/auth/me") return loggedIn
@@ -17,6 +20,7 @@ async function mockSession(page: Page, initiallyLoggedIn: boolean) {
     if (path === "/api/overview") return route.fulfill({ json: { collectors: [], scheduler: { enabled: false, active_count: 0 },
       connectors: {}, connectors_enabled: {} } });
     if (path === "/api/models") return route.fulfill({ json: { options: [], available: [], default: null, document_default: null } });
+    if (["/api/operations/visits", "/api/operations/heartbeat"].includes(path)) return route.fulfill({ json: { ok: true } });
     return route.fulfill({ status: 404, json: { detail: "未匹配的虚构 API" } });
   });
 }
@@ -26,7 +30,7 @@ test("仅有 HttpOnly Cookie 时能恢复设备会话，不依赖脚本凭证", 
     path: "/api", httpOnly: true, secure: false, sameSite: "Strict" }]);
   await mockSession(page, true);
   await page.goto("/settings?section=personal");
-  await expect(page.getByText("会话测试用户", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("账号选项").getByText("会话测试用户", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem("mangrove_token"))).toBeNull();
   expect(await page.evaluate(() => document.cookie)).not.toContain("synthetic-http-only-access");
 });
@@ -39,7 +43,7 @@ test("过期后提示并在重新登录后返回原站内位置", async ({ page 
   await page.getByLabel("密码", { exact: true }).fill("synthetic-password");
   await page.getByLabel("密码", { exact: true }).press("Enter");
   await expect(page).toHaveURL(/\/settings\?section=personal$/);
-  await expect(page.getByText("会话测试用户", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("账号选项").getByText("会话测试用户", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => localStorage.getItem("mangrove_token"))).toBeNull();
 });
 
@@ -59,7 +63,9 @@ for (const command of ["logout", "logout-all", "password"]) {
     let fail = true;
     const mutations: string[] = [];
     page.on("request", (request) => {
-      if (request.method() === "POST") mutations.push(new URL(request.url()).pathname);
+      const path = new URL(request.url()).pathname;
+      // 页面访问审计不属于账号命令；仍捕获任何意外业务写入。
+      if (request.method() === "POST" && !["/api/operations/visits", "/api/operations/heartbeat"].includes(path)) mutations.push(path);
     });
     await page.route(`**/api/auth/${command}`, async (route) => {
       expect(route.request().headers()["x-mangrove-csrf"]).toBe("1");
@@ -72,6 +78,7 @@ for (const command of ["logout", "logout-all", "password"]) {
     });
     await page.goto("/settings?section=personal");
     if (command === "password") {
+      await page.getByRole("button", { name: "修改密码", exact: true }).click();
       await expect(page.getByLabel("当前密码", { exact: true })).toHaveAttribute("autocomplete", "current-password");
       await expect(page.getByLabel("新密码", { exact: true })).toHaveAttribute("autocomplete", "new-password");
       await page.getByLabel("当前密码", { exact: true }).fill("old-synthetic-password");
@@ -83,7 +90,10 @@ for (const command of ["logout", "logout-all", "password"]) {
         if (!await account.evaluate(element => (element as HTMLDetailsElement).open)) await account.locator("summary").click();
         await page.getByTitle("退出登录").click();
       }
-      else if (command === "logout-all") await page.getByRole("button", { name: "退出所有设备", exact: true }).click();
+      else if (command === "logout-all") {
+        page.once("dialog", dialog => dialog.accept());
+        await page.getByRole("button", { name: "退出所有设备", exact: true }).click();
+      }
       else await page.getByLabel("新密码", { exact: true }).press("Enter");
     };
     await submit();

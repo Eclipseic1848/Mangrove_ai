@@ -727,7 +727,8 @@ class CandidateVerificationService:
                 )
         blockers.extend(authority_blockers)
         ruleset_retry = (
-            previous.status is AttemptStatus.FAILED and ruleset_changed is True
+            previous.status in (AttemptStatus.FAILED, AttemptStatus.PASSED)
+            and ruleset_changed is True
         )
         eligible = (
             semantic_retry or ruleset_retry or legacy_rebaseline
@@ -790,6 +791,7 @@ class CandidateVerificationService:
             ),
             awaiting_publication=(
                 previous.status is AttemptStatus.PASSED
+                and ruleset_changed is False
                 and not delivery_exists
                 and not blockers
             ),
@@ -853,10 +855,10 @@ class CandidateVerificationService:
         )
         if offer.previous_attempt_id != attempt_id:
             raise ValueError("候选验证 Attempt 已不是当前精确结果")
-        if not offer.awaiting_publication:
-            raise ValueError("当前候选不具备显式发布资格")
         if offer.ruleset_changed is not False:
             raise ValueError("当前验证规则身份已变化或无法证明")
+        if not offer.awaiting_publication:
+            raise ValueError("当前候选不具备显式发布资格")
         return attempt
 
     async def retry_semantic(

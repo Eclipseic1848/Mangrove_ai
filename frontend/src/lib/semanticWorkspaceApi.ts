@@ -32,13 +32,25 @@ export async function sendDraftTurn(payload: {
   const response = await authenticatedFetch(`${BASE}/draft/turns`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal,
   });
+  return readDraftTurnResponse(response, payload.text, signal, events);
+}
+
+export async function resumeCollection(taskId: string, requestId: string, signal: AbortSignal, events: ChatEvents = {}) {
+  const response = await authenticatedFetch(`/api/chat/collections/${encodeURIComponent(taskId)}/resume`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ request_id: requestId, external_api_confirmed: true }), signal,
+  });
+  return readDraftTurnResponse(response, "恢复原采集任务", signal, events);
+}
+
+async function readDraftTurnResponse(response: Response, text: string, signal: AbortSignal, events: ChatEvents): ReturnType<typeof sendDraftTurn> {
   if (response.ok && response.headers.get("content-type")?.includes("text/event-stream")) {
     // 复用旧采集流的解析和登录检查，不再次提交请求。
     return new Promise((resolve, reject) => {
       let received = false;
       let stop = () => {};
       const cancel = () => { stop(); reject(new Error("已停止等待执行结果")); };
-      stop = streamChat({ content: payload.text }, {
+      stop = streamChat({ content: text }, {
         ...events,
         onResult: result => {
           received = true;
@@ -220,8 +232,12 @@ export function getWorkspaceGuidance(): Promise<WorkspaceGuidance> {
 
 export function listWorkspaceTasks(
   deleted = false,
+  offset = 0,
+  filter: "all" | "active" | "needs_input" | "completed" = "all",
+  signal?: AbortSignal,
 ): Promise<WorkspaceTask[]> {
-  return api.get(`${BASE}/tasks?deleted=${deleted ? "true" : "false"}`);
+  // 多读一条判断后续页，避免把“恰好一页”误报为仍有历史。
+  return api.get(`${BASE}/tasks?deleted=${deleted ? "true" : "false"}&offset=${offset}&limit=101&filter=${filter}`, { signal });
 }
 
 export function getWorkspaceTask(

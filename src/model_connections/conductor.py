@@ -6,9 +6,9 @@ from contextlib import contextmanager
 
 from src.api.execution import execution_checkpoint
 from src.account_execution import ExecutionDenied
-from src.llm.provider import _bound_chat, _bound_chat_failure, verify_bound_model
+from src.llm.provider import _bound_chat, _bound_chat_failure, _bound_chat_identity, verify_bound_model
 from src.model_connections import get_default_broker
-from src.model_connections.text_protocol import structured_request, response_text, collect_response_usage
+from src.model_connections.text_protocol import structured_request, response_text, collect_response_usage, ModelOutputTruncatedError
 
 
 @contextmanager
@@ -16,7 +16,7 @@ def conductor_connection(*, owner_id, connection_id, connection_version, model, 
     broker = get_default_broker()
     failure = []
 
-    async def generate(messages):
+    async def generate(messages, *, max_tokens=8192):
         verify_bound_model()
         execution_checkpoint(required=True)
         grant = None
@@ -29,7 +29,7 @@ def conductor_connection(*, owner_id, connection_id, connection_version, model, 
             system = "\n".join(str(message["content"]) for message in messages if message["role"] == "system")
             turns = [dict(message) for message in messages if message["role"] != "system"]
             path, body, headers = structured_request(api_format=grant.api_format, model=grant.model,
-                                                     grant_token=grant.token, system_prompt=system, payload={})
+                                                     grant_token=grant.token, system_prompt=system, payload={}, max_tokens=max_tokens)
             if grant.api_format == "openai_chat_completions":
                 body["messages"] = [{"role": "system", "content": system}, *turns]
             elif grant.api_format == "openai_responses":
@@ -54,6 +54,9 @@ def conductor_connection(*, owner_id, connection_id, connection_version, model, 
             return response_text(grant.api_format, raw)
         except ExecutionDenied:
             raise
+        except ModelOutputTruncatedError:
+            # 已知额度截断由调用方保留为未完成，不冒充连接失效，由任务层决定是否进行已授权的限次扩额重试。
+            raise
         except Exception:
             # 旧节点可能捕获模型异常并降级；冻结连接失败后必须阻止后续采集或产出。
             failure.append("所选模型调用失败或结果未知，任务已停止，未切换模型或自动重发")
@@ -63,9 +66,11 @@ def conductor_connection(*, owner_id, connection_id, connection_version, model, 
                 broker.revoke_grant(grant.grant_id, "conductor_call_finished")
 
     token = _bound_chat.set(generate)
+    identity_token = _bound_chat_identity.set((owner_id, connection_id, connection_version, model, task_id, run_id, revision))
     failure_token = _bound_chat_failure.set(failure)
     try:
         yield
     finally:
         _bound_chat.reset(token)
+        _bound_chat_identity.reset(identity_token)
         _bound_chat_failure.reset(failure_token)

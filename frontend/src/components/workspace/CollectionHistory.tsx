@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, downloadFile, type ChatProgress } from "@/lib/api";
+import { api, ApiError, downloadFile, type ChatProgress } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { Markdown } from "@/components/Markdown";
 import { CollectionProgress } from "./CollectionProgress";
@@ -9,12 +9,12 @@ import { TemplateAction } from "./TemplateAction";
 import type { TokenUsage } from "@/lib/messageActions";
 import { WorkspaceSourceComposer } from "./WorkspaceSourceComposer";
 import { type WebIntakeDraft } from "./TaskComposer";
-import { sendDraftTurn } from "@/lib/semanticWorkspaceApi";
+import { sendDraftTurn, resumeCollection } from "@/lib/semanticWorkspaceApi";
 import { nanoid } from "nanoid/non-secure";
 import { SourcePreviewPanel } from "./SourcePreviewPanel";
 import type { UploadItem } from "@/types/dataPrep";
 
-type Message = { id: number; role: string; content: string; created_at?: string; meta?: { work_progress?: ChatProgress[]; files?: Array<{ name: string; url: string }>; token_usage?: TokenUsage; model_connection_id?: string | null; model_id?: string } };
+type Message = { id: number; role: string; content: string; task_id?: string; created_at?: string; meta?: { work_progress?: ChatProgress[]; files?: Array<{ name: string; url: string }>; token_usage?: TokenUsage; model_connection_id?: string | null; model_id?: string } };
 
 export function CollectionHistory({ convId, composerProps }: { convId: string; composerProps: Omit<ComponentProps<typeof WorkspaceSourceComposer>, "ownerId"> }) {
   const { user } = useAuth();
@@ -25,6 +25,7 @@ export function CollectionHistory({ convId, composerProps }: { convId: string; c
   const [sending, setSending] = useState("");
   const [progress, setProgress] = useState<ChatProgress[]>([]);
   const controller = useRef<AbortController | null>(null);
+  const recoveryAttempt = useRef<{ task: string; id: string } | null>(null);
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [previewId, setPreviewId] = useState<string | null>(null);
   const messagesArea = useRef<HTMLDivElement | null>(null);
@@ -39,6 +40,40 @@ export function CollectionHistory({ convId, composerProps }: { convId: string; c
     refetchInterval: query => query.state.data?.running ? 2000 : false,
   });
   const lastMessage = state.data?.messages[state.data.messages.length - 1];
+  const recoveryTask = [...(state.data?.messages ?? [])].reverse().find(message => message.task_id)?.task_id;
+  const recovery = useQuery({
+    queryKey: ["collection-recovery", user?.user_id, convId, recoveryTask, lastMessage?.id, state.data?.running],
+    enabled: Boolean(recoveryTask) && !state.data?.running && !sending,
+    retry: false,
+    queryFn: async () => {
+      try {
+        return await api.get(`/api/chat/collections/${encodeURIComponent(recoveryTask!)}/recovery`) as { message: string };
+      } catch (reason) {
+        if (reason instanceof ApiError && [404, 409].includes(reason.status)) return null;
+        throw reason;
+      }
+    },
+  });
+  const resume = async () => {
+    if (!recoveryTask || controller.current) return;
+    const request = new AbortController();
+    controller.current = request;
+    if (recoveryAttempt.current?.task !== recoveryTask) recoveryAttempt.current = { task: recoveryTask, id: crypto.randomUUID().replace(/-/g, "") };
+    setSending("恢复原采集任务"); setProgress([]); setError("");
+    try {
+      await resumeCollection(recoveryTask, recoveryAttempt.current.id, request.signal, {
+        onMeta: () => { if (!request.signal.aborted) void state.refetch(); },
+        onProgress: value => { if (!request.signal.aborted) setProgress(current => [...current, value]); },
+      });
+      recoveryAttempt.current = null;
+    } catch (reason) {
+      if (!request.signal.aborted) setError(reason instanceof Error ? reason.message : "恢复未成功，请读取任务状态");
+    } finally {
+      if (controller.current === request) { controller.current = null; setSending(""); }
+      await state.refetch();
+      await queryClient.invalidateQueries({ queryKey: ["collection-recovery"] });
+    }
+  };
   useEffect(() => {
     const area = messagesArea.current;
     if (area) area.scrollTop = area.scrollHeight;
@@ -100,6 +135,10 @@ export function CollectionHistory({ convId, composerProps }: { convId: string; c
         }}>{stopping ? "正在请求停止…" : "停止执行"}</button>
       </>}
       {!data.running && !sending && data.messages[data.messages.length - 1]?.role === "user" && <p role="alert" className="text-sm text-amber-700">本次执行没有完整结果，请检查服务状态；不会自动重新采集。</p>}
+      {!data.running && !sending && recovery.data && <div className="rounded-lg border p-3 text-sm">
+        <p>{recovery.data.message} 点击恢复即确认继续使用原模型处理原任务数据；已有文件保留。</p>
+        <button type="button" className="mt-2 rounded border px-3 py-2" onClick={() => void resume()}>恢复原采集任务</button>
+      </div>}
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
     </div>
     </div>

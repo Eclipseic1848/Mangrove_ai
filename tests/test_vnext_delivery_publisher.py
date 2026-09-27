@@ -142,6 +142,50 @@ def test_table_output_contract_changes_new_lineage_without_rewriting_legacy(
     assert structured.publication_key != legacy.publication_key
 
 
+@pytest.mark.parametrize("fmt,shape", [
+    ("json", "records"), ("json", "columns_rows"), ("csv", None), ("xlsx", None),
+])
+@pytest.mark.parametrize("columns", [
+    ("name", "amount"), ("姓名", "金额"), ("amount", "name"), ("name",),
+    ("name", "amount", "extra"),
+])
+def test_publisher_checks_actual_columns_against_frozen_contract(
+    tmp_path, repository, fmt, shape, columns,
+):
+    candidate = tmp_path / ("result." + fmt)
+    if fmt == "json":
+        rows = [{column: "测试" for column in columns}]
+        value = rows if shape == "records" else {"columns": list(columns), "rows": rows}
+        candidate.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
+    elif fmt == "csv":
+        candidate.write_text(",".join(columns) + "\n" + ",".join("测试" for _ in columns) + "\n", encoding="utf-8")
+    else:
+        from openpyxl import Workbook
+        book = Workbook()
+        book.active.append(columns)
+        book.active.append(["测试"] * len(columns))
+        book.save(candidate)
+        book.close()
+    base = _command(candidate)
+    command = PublishCommand.build(
+        **base.model_dump(exclude={"publication_key", "candidate_set_hash", "delivery_spec_hash", "candidates", "delivery_spec", "candidate_id"}),
+        candidates=(CandidateRef(artifact_id="candidate_json", filename=candidate.name,
+            format=fmt, sha256=_sha256(candidate), size_bytes=candidate.stat().st_size),),
+        delivery_spec=DeliverySpec(requested_formats=(fmt,), output_name="表格",
+            table_output_contracts=(TableOutputContract(format=fmt,
+                exact_columns=("name", "amount"), json_shape=shape),)),
+    )
+    publisher = _publisher(tmp_path, repository, candidate)
+    if columns != ("name", "amount"):
+        with pytest.raises(ValueError, match="列|契约"):
+            publisher.publish(command, actor_id="owner-a")
+        assert repository.latest_delivery("owner-a", "pi-run-a") is None
+    else:
+        result = publisher.publish(command, actor_id="owner-a")
+        assert result.outputs[0].sha256 == _sha256(candidate)
+        assert publisher.publish(command, actor_id="owner-a").delivery_id == result.delivery_id
+
+
 @pytest.fixture
 def candidate(tmp_path: Path) -> Path:
     path = tmp_path / "workspace" / "result.json"

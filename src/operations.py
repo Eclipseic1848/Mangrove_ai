@@ -8,6 +8,7 @@ import ipaddress
 import json
 import sqlite3
 import time
+from calendar import monthrange
 from datetime import date, datetime, time as daytime, timedelta, timezone
 from uuid import uuid4
 
@@ -45,7 +46,7 @@ class Filters(BaseModel):
     search: str = Field(default="", max_length=80)
     page: int = Field(default=1, ge=1, le=10000)
     page_size: int = Field(default=10, ge=1, le=100)
-    granularity: Literal["day", "hour"] = "day"
+    granularity: Literal["hour", "day", "week", "month", "year"] = "day"
 
     @model_validator(mode="after")
     def validate_range(self):
@@ -230,14 +231,30 @@ def summary(conn, actor, filters):
         {FROM} WHERE {where}""", params).fetchone()
     result = dict(row)
     result["pv_per_user"] = round(result["pv"] / result["uv"], 2) if result["uv"] else 0
-    pattern = "%Y-%m-%d %H:00" if filters.granularity == "hour" else "%Y-%m-%d"
+    # 周以北京时间周一为起点；直接按周期去重，不能累加每日 UV。
+    bucket_sql = "strftime(?,e.occurred_at,'unixepoch','+8 hours')"
+    bucket_params = [{"hour": "%Y-%m-%d %H:00", "day": "%Y-%m-%d", "month": "%Y-%m", "year": "%Y"}.get(filters.granularity)]
+    if filters.granularity == "week":
+        bucket_sql = "date(e.occurred_at,'unixepoch','+8 hours','-6 days','weekday 1')"
+        bucket_params = []
     result["trend"] = [dict(item) for item in conn.execute(f"""SELECT
-        strftime(?,e.occurred_at,'unixepoch','+8 hours') AS bucket,
+        {bucket_sql} AS bucket,
         COUNT(CASE WHEN e.kind='visit' THEN 1 END) AS pv,
         COUNT(DISTINCT CASE WHEN e.kind='visit' THEN e.actor_id END) AS uv,
         COUNT(CASE WHEN e.kind='login' AND e.result='success' THEN 1 END) AS logins,
         COUNT(CASE WHEN e.result='failure' THEN 1 END) AS failures
-        {FROM} WHERE {where} AND e.kind!='access' GROUP BY bucket ORDER BY bucket""", [pattern, *params])]
+        {FROM} WHERE {where} AND e.kind!='access' GROUP BY bucket ORDER BY bucket""", [*bucket_params, *params])]
+    for point in result["trend"]:
+        first = date.fromisoformat(point["bucket"][:10] + {"month": "-01", "year": "-01-01"}.get(filters.granularity, ""))
+        last = first
+        if filters.granularity == "week":
+            last = first + timedelta(days=6)
+        elif filters.granularity == "month":
+            last = first.replace(day=monthrange(first.year, first.month)[1])
+        elif filters.granularity == "year":
+            last = first.replace(month=12, day=31)
+        # 周期明细只落在用户当前筛选内，点击不扩大日期范围。
+        point.update(start=max(first, filters.start).isoformat(), end=min(last, filters.end).isoformat())
     result["modules"] = [dict(item) for item in conn.execute(f"""SELECT e.module,
         COUNT(CASE WHEN e.kind='visit' THEN 1 END) AS pv,
         COUNT(DISTINCT CASE WHEN e.kind='visit' THEN e.actor_id END) AS uv,

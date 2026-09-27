@@ -135,7 +135,8 @@ def test_legacy_plan_is_visible_as_blocked(fixture, monkeypatch):
     with TestClient(app) as client:
         item = client.get('/api/tasks').json()[0]
     assert item['execution_state'] == 'blocked'
-    assert '北京时间' in item['blocked_reason']
+    assert '核对模型及执行时间' in item['blocked_reason']
+    assert '北京时间' not in item['blocked_reason']
 
 
 def test_manual_execution_returns_before_completion(fixture, monkeypatch):

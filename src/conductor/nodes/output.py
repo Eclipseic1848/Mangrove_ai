@@ -93,6 +93,10 @@ def _assemble_grade(state: ConductorState) -> Dict[str, Any]:
 
 async def output_node(state: ConductorState) -> Dict[str, Any]:
     spec = state["task_spec"]
+    if state.get("evidence_collection") or state.get("bank_collection"):
+        from ..bank_benefits_export import export_snapshot
+        from src.api.execution import execution_to_thread
+        return await execution_to_thread(export_snapshot, state)
     task_id = state.get("task_id") or beijing_now().strftime("%Y%m%d_%H%M%S")
     out_dir: Path = PROJECT_ROOT / "downloads" / task_id
     out_dir.mkdir(parents=True, exist_ok=True)

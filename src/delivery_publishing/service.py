@@ -240,6 +240,15 @@ class DeliveryPublisher:
                 target = staging / filename
                 shutil.copyfile(source, target)
                 report = qa_delivery_artifact(target, fmt)
+                if command.owner_acceptance is None:
+                    # 自动发布不能仅信任通过标记；对即将提交的副本复核冻结结构。
+                    # 延迟导入避免 Runtime 模型与发布模块初始化时循环依赖。
+                    from src.agentic_runtime.candidate_verifier import _read_table_columns
+
+                    for contract in command.delivery_spec.table_output_contracts:
+                        if contract.format == candidate.format:
+                            if _read_table_columns(target, contract) != contract.exact_columns:
+                                raise ValueError("表格列名或列顺序不符合冻结契约")
                 output_id = f"output_{uuid.uuid4().hex[:16]}"
                 outputs.append(
                     DeliveryOutput(

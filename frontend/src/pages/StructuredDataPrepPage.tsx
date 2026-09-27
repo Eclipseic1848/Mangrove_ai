@@ -4,7 +4,7 @@
  * 独立路由 /data-prep，避免侵入 743 行的 Chat.tsx。用原生 input[type=file]
  * 上传（无新依赖）；复用 lib/api 鉴权与 downloadFile。
  */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AlertCircle } from "lucide-react";
 import type { UploadItem, DataTaskPreview, DataTask, DatasetManifest } from "@/types/dataPrep";
 import {
@@ -55,6 +55,7 @@ export function StructuredDataPrepPage() {
   const [dbTimeField, setDbTimeField] = useState("");
   const [dbTimeStart, setDbTimeStart] = useState("");
   const [dbTimeEnd, setDbTimeEnd] = useState("");
+  const schemaRequest = useRef(0);
   const [showDbForm, setShowDbForm] = useState(false);
   const [dbDraft, setDbDraft] = useState({
     name: "", dialect: "sqlite", host: "", port: 0,
@@ -151,17 +152,28 @@ export function StructuredDataPrepPage() {
     }
   }
 
-  async function onSelectConnection(id: string) {
-    setSelectedDbConnId(id);
-    setSelectedTable("");
+  function onSelectTable(table: string) {
+    setSelectedTable(table);
     setSelectedFields([]);
     setDbWatermarkField("");
+    setDbTimeField("");
+    setDbTimeStart("");
+    setDbTimeEnd("");
+  }
+
+  async function onSelectConnection(id: string) {
+    const request = ++schemaRequest.current;
+    setSelectedDbConnId(id);
+    setDbSchema(null);
+    setError(null);
+    onSelectTable("");
     if (!id) return;
     try {
       const s = await getDbSchema(id);
-      setDbSchema(s);
+      // 连接切换后，旧请求的成功和失败都不得覆盖当前连接状态。
+      if (request === schemaRequest.current) setDbSchema(s);
     } catch (e: any) {
-      setError(e.message || "加载 Schema 失败");
+      if (request === schemaRequest.current) setError(e.message || "加载 Schema 失败");
     }
   }
 
@@ -198,8 +210,7 @@ export function StructuredDataPrepPage() {
     setBusy("db-delete");
     try {
       await deleteDbConnection(selectedDbConnId);
-      setSelectedDbConnId("");
-      setDbSchema(null);
+      await onSelectConnection("");
       await loadConnections();
     } catch (e: any) {
       setError(e.message || "删除连接失败");
@@ -380,7 +391,7 @@ export function StructuredDataPrepPage() {
                   <select
                     aria-label="表"
                     value={selectedTable}
-                    onChange={(e) => setSelectedTable(e.target.value)}
+                    onChange={(e) => onSelectTable(e.target.value)}
                     className="w-full rounded border bg-background px-3 py-2"
                   >
                     <option value="">-- 选表 --</option>

@@ -27,7 +27,7 @@ const guides: Record<string, Guide> = {
   ] },
   "tasks.scheduled": { title: "自动化任务", steps: [
     step(header, "安排重复的工作", "可以在工作台说出定时需求，也可以手动添加自动化。计划只会在启用且配置有效时触发。"),
-    step('[data-guide="automation-add"]', "创建计划", "填写任务要求、执行时间、模型和需要的通知方式，再保存。时间按北京时间执行；保存不等于立即执行。"),
+    step('[data-guide="automation-add"]', "创建计划", "填写任务要求、执行时间、模型和需要的通知方式，再保存。保存不等于立即执行。"),
     step('[data-guide="automation-tabs"]', "查看计划和运行结果", "定时任务中可启停、编辑和查看历史；立即执行会真实发起任务。运行记录查看每次执行结果和失败原因。"),
   ] },
   "tasks.runs": { title: "自动化运行记录", steps: [
@@ -113,7 +113,7 @@ const operations: Record<string, [string, string]> = {
 for (const [key, [title, description]] of Object.entries(operations)) {
   guides[`operations.${key}`] = { title, managerOnly: true, steps: [
     step(header, title, description),
-    step('[aria-label="快捷时间范围"]', "先选择统计时间", "可选今天、昨天、近7天、近30天或自定义日期。更换时间后再查看统计和导出，日期按北京时间理解。"),
+    step('[aria-label="快捷时间范围"]', "先选择统计时间", "可选今天、昨天、近7天、近30天或自定义日期。更换时间后再查看统计和导出。"),
     step('[aria-label="运营子页面"]', "按问题选择查看方向", "登录、访问、操作审计、用户和Token用量分别统计，不要把不同口径直接比较。"),
     step('.ops-scope', "只查看授权范围", "普通管理员查看本人及普通用户范围，超级管理员可查看全平台。业务正文仍受独立审计权限控制。"),
     ...(key === "tokens" ? [step('[aria-label="用户Token统计"]', "展开模型明细与导出", "按消耗、成本或请求次数排序，展开用户查看模型明细，可导出CSV。参考价格仅供估算，实际以官方账单为准。")]: []),

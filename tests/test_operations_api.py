@@ -163,6 +163,63 @@ def test_statistics_drilldown_and_user_options_share_scope(platform):
     assert detail["total"] == 1
 
 
+def test_trend_calendar_buckets_deduplicate_users_and_keep_scope(platform, monkeypatch):
+    from src import operations as ops
+    client, actor, users, store = platform
+    clock = [0.0]
+    monkeypatch.setattr(ops.time, "time", lambda: clock[0])
+    visits = [
+        ("2025-12-28T15:59:00+00:00", "member"),
+        ("2025-12-28T16:00:00+00:00", "member"),
+        ("2025-12-31T15:59:00+00:00", "manager"),
+        ("2025-12-31T16:00:00+00:00", "member"),
+        ("2026-01-04T15:59:00+00:00", "member"),
+        ("2026-01-04T16:00:00+00:00", "manager"),
+        ("2025-12-31T16:00:00+00:00", "peer"),
+    ]
+    with store._conn() as conn:
+        for when, name in visits:
+            clock[0] = datetime.fromisoformat(when).timestamp()
+            event = ops.begin(conn, kind="visit", module="任务工作台", action="访问页面", actor=users[name])
+            ops.finish(conn, event, actor=users[name])
+    clock[0] = datetime.fromisoformat("2026-01-06T00:00:00+08:00").timestamp()
+    actor["user"] = users["manager"]
+    dates = ["2025-12-28", "2025-12-29", "2025-12-31", "2026-01-01", "2026-01-04", "2026-01-05"]
+    expected = {
+        "hour": [(day + hour, 1, 1, day, day) for day, hour in zip(dates, [" 23:00", " 00:00", " 23:00", " 00:00", " 23:00", " 00:00"])],
+        "day": [(day, 1, 1, day, day) for day in dates],
+        "week": [("2025-12-22", 1, 1, "2025-12-28", "2025-12-28"), ("2025-12-29", 4, 2, "2025-12-29", "2026-01-04"), ("2026-01-05", 1, 1, "2026-01-05", "2026-01-05")],
+        "month": [("2025-12", 3, 2, "2025-12-28", "2025-12-31"), ("2026-01", 3, 2, "2026-01-01", "2026-01-05")],
+        "year": [("2025", 3, 2, "2025-12-28", "2025-12-31"), ("2026", 3, 2, "2026-01-01", "2026-01-05")],
+    }
+    filters = {"start": dates[0], "end": dates[-1], "kind": "visit"}
+    for granularity, points in expected.items():
+        response = client.post("/api/operations/summary", json={**filters, "granularity": granularity})
+        assert response.status_code == 200
+        stats = response.json()
+        assert (stats["pv"], stats["uv"]) == (6, 2)
+        assert [(p["bucket"], p["pv"], p["uv"], p["start"], p["end"]) for p in stats["trend"]] == points
+        assert all(p["logins"] == p["failures"] == 0 for p in stats["trend"])
+    default = client.post("/api/operations/summary", json=filters).json()["trend"]
+    assert [p["bucket"] for p in default] == dates
+    assert client.post("/api/operations/summary", json={**filters, "granularity": "quarter"}).status_code == 422
+    actor["user"] = users["member"]
+    assert client.post("/api/operations/summary", json={**filters, "granularity": "year"}).status_code == 403
+
+
+def test_month_bucket_keeps_leap_day_within_selected_range(platform, monkeypatch):
+    from src import operations as ops
+    client, actor, users, store = platform
+    monkeypatch.setattr(ops.time, "time", lambda: datetime.fromisoformat("2024-02-29T12:00:00+08:00").timestamp())
+    with store._conn() as conn:
+        event = ops.begin(conn, kind="visit", module="任务工作台", action="访问页面", actor=users["member"])
+        ops.finish(conn, event, actor=users["member"])
+    actor["user"] = users["manager"]
+    response = client.post("/api/operations/summary", json={"start": "2024-02-15", "end": "2024-03-02", "granularity": "month"})
+    assert response.status_code == 200
+    assert response.json()["trend"] == [{"bucket": "2024-02", "pv": 1, "uv": 1, "logins": 0, "failures": 0, "start": "2024-02-15", "end": "2024-02-29"}]
+
+
 def test_saved_views_are_private_and_retention_requires_super_admin(platform):
     client, actor, users, _ = platform
     actor["user"] = users["manager"]

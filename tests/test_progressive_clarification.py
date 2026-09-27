@@ -98,7 +98,8 @@ def test_understanding_rejects_foreign_history_before_any_model_call():
 
 
 @pytest.mark.parametrize("send_outcome", ["success", "unknown"])
-def test_http_answer_consumes_original_turn_and_persists_next_question(tmp_path, monkeypatch, send_outcome):
+@pytest.mark.parametrize("waiting_execution", [False, True])
+def test_http_answer_consumes_original_turn_and_persists_next_question(tmp_path, monkeypatch, send_outcome, waiting_execution):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from src.api import auth
@@ -112,6 +113,12 @@ def test_http_answer_consumes_original_turn_and_persists_next_question(tmp_path,
     store = auth.get_store()
     store.create_semantic_workspace_task("owner-a", task_id="task-http", title="订单", objective_text="统计订单，不含作废", upload_ids=[], output_formats=["json"], provider="local", model="fixture", external_api_confirmed=False)
     store.update_semantic_workspace_task("owner-a", "task-http", status="running")
+    execution_question = None
+    if waiting_execution:
+        execution_question = store.publish_workspace_question("owner-a", "task-http", {
+            "kind": "candidate", "question_id": "candidate-confirm", "prompt": "请核对初稿",
+            "purpose": "control", "continuation": "unavailable", "options": [], "allow_free_text": False,
+        })
     requests = []
     class Rewriter:
         async def rewrite(self, turn, request):
@@ -147,6 +154,11 @@ def test_http_answer_consumes_original_turn_and_persists_next_question(tmp_path,
         body = {"answer":"  按到账日期，仍不要作废  ", "expected_revision":1, "question_round_id":question["round_id"]}
         answer_text = body["answer"].strip()
         response = client.post("/api/semantic-workspace/tasks/task-http/answer", json=body, headers={"Idempotency-Key":"answer"})
+        if waiting_execution:
+            current_task = store.get_semantic_workspace_task("owner-a", "task-http")
+            assert current_task["question"] == execution_question
+            assert current_task["status"] == "needs_input"
+            assert current_task["active_revision"] == 1
         if send_outcome == "unknown":
             assert response.status_code == 200 and response.json()["answer_receipt"]["status"] == "unknown"
             monkeypatch.setattr(auth, "_store", None)
@@ -154,7 +166,7 @@ def test_http_answer_consumes_original_turn_and_persists_next_question(tmp_path,
             assert repeat.status_code == 200 and repeat.json()["answer_receipt"] == response.json()["answer_receipt"]
             assert len(requests) == 3
             detail = client.get("/api/semantic-workspace/tasks/task-http").json()
-            assert detail["clarification_history"][0]["answer"] == answer_text
+            assert next(h for h in detail["clarification_history"] if h["round_id"] == question["round_id"])["answer"] == answer_text
             assert detail["understanding"]["status"] == "unavailable"
             return
         assert response.status_code == 200, response.text
@@ -173,7 +185,7 @@ def test_http_answer_consumes_original_turn_and_persists_next_question(tmp_path,
         assert changed.status_code == 409
         turns = client.get("/api/semantic-workspace/tasks/task-http/turns").json()
         assert turns["results"][-1]["turn_id"] == receipt["turn_id"]
-        assert response.json()["clarification_history"][0]["answer"] == answer_text
+        assert next(h for h in response.json()["clarification_history"] if h["round_id"] == question["round_id"])["answer"] == answer_text
         correction = client.post("/api/semantic-workspace/tasks/task-http/turns", json={"text":"刚说错了，改应收，作废还是不要"})
         assert correction.status_code == 200, correction.text
         assert tuple(item.text for item in requests[-1].relevant_turns) == ("输出 CSV", answer_text)

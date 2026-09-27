@@ -165,7 +165,8 @@ def test_collection_request_enters_existing_execution_stream(draft_api, monkeypa
     class CollectionIntent:
         async def rewrite(self, turn, request):
             return SimpleNamespace(direct_answer="开始采集分析", output_delta=(),
-                                   selection_delta={"workflow": "collection"}, open_questions=())
+                                   selection_delta={"workflow": "collection"}, open_questions=(),
+                                   intent="new_task", permission_delta=())
 
     async def execute(body, request, user):
         started.append((body, user))

@@ -20,6 +20,7 @@ class CollectedItem:
     title: str = ""
     content: str = ""                       # 正文（Markdown 或纯文本）
     metadata: Dict[str, Any] = field(default_factory=dict)
+    access_handle: str | None = field(default=None, repr=False)  # 仅适配器解密，不进入公开字段
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -37,6 +38,8 @@ class CollectResult:
     collector: str
     items: List[CollectedItem] = field(default_factory=list)
     message: str = ""
+    coverage: Dict[str, Any] = field(default_factory=dict)
+    authentication: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_data(self) -> bool:

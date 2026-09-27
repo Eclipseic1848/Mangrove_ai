@@ -32,8 +32,6 @@ const PROVIDERS: Record<string, { label: string; file?: string }> = {
   zhipu: { label: "智谱", file: "zhipu-color.png" }, xai: { label: "Grok", file: "grok.png" },
 };
 const PLATFORMS: Record<string, string> = { xiaohongshu: "小红书", weibo: "微博", douyin: "抖音", bilibili: "B站", zhihu: "知乎", kuaishou: "快手", tieba: "贴吧", jd: "京东", taobao: "淘宝", pdd: "拼多多" };
-// 品牌图片是可选本机资源，公开构建缺少图片时保留通用图标与服务名称。
-const BRAND_FILES = new Set(Object.keys(import.meta.glob("/public/overview-brands/*.png")).map(path => path.split("/").pop()));
 const STATUS: Record<string, string> = { running: "执行中", queued: "排队中", pausing: "正在暂停", paused: "已暂停", needs_input: "需要确认", candidate_ready: "待验证", cancelling: "正在停止", cancelled: "已停止", failed: "失败", completed: "已完成" };
 const FILTERS: Record<Filter, string> = { all: "全部任务", active: "进行中", attention: "待处理", completed: "近7天完成" };
 const PAGE_SIZES = [10, 20, 50, 100];
@@ -152,7 +150,7 @@ export function Dashboard() {
               {models.data && <div className="grid auto-rows-[52px] grid-cols-2 gap-x-2">
                 {(expandedProviders ? providerList : providerList.slice(0, 8)).map(provider => <div key={provider.preset_id} data-provider={provider.preset_id} title={`${provider.label || provider.display_name}：${provider.configured ? `已配置（${provider.scope}）；连接健康请查看验证记录` : "未配置 API Key"}`} className="my-1 flex min-w-0 items-center gap-2 rounded-lg border border-border bg-muted/20 px-2">
                   <span className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted/60", provider.preset_id === "kimi" && "bg-slate-900")}>
-                    {provider.file && BRAND_FILES.has(provider.file) ? <img src={`/overview-brands/${provider.file}`} alt="" className={cn("h-5 w-5 object-contain", provider.preset_id === "xai" && "dark:invert", !provider.configured && "grayscale opacity-45")} /> : provider.preset_id === "openai" ? <SiOpenai aria-hidden className={cn("h-5 w-5", !provider.configured && "text-muted-foreground")} /> : <Cpu className="h-5 w-5 text-muted-foreground" />}
+                    {provider.file ? <img src={`/overview-brands/${provider.file}`} alt="" className={cn("h-5 w-5 object-contain", provider.preset_id === "xai" && "dark:invert", !provider.configured && "grayscale opacity-45")} /> : provider.preset_id === "openai" ? <SiOpenai aria-hidden className={cn("h-5 w-5", !provider.configured && "text-muted-foreground")} /> : <Cpu className="h-5 w-5 text-muted-foreground" />}
                   </span><span className="min-w-0"><span className={cn("block truncate text-sm", !provider.configured && "text-muted-foreground")}>{provider.label || provider.display_name}</span><span className="block truncate text-[11px] text-muted-foreground">{provider.configured ? provider.scope : "未配置"}</span></span>
                 </div>)}
               </div>}
@@ -165,7 +163,7 @@ export function Dashboard() {
                 const label = cookie.status === "valid" ? "有效" : cookie.status === "invalid" ? "失效" : "未检查";
                 return <div key={cookie.platform} tabIndex={0} aria-label={`${PLATFORMS[cookie.platform] || cookie.platform}：${label}，${dateLabel(cookie.checked_at)}`} title={`上次检查：${label} · ${dateLabel(cookie.checked_at)}`} className="flex min-w-0 items-center gap-1.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                   <CircleDot aria-hidden className={cn("h-3 w-3 shrink-0", cookie.status === "valid" ? "text-emerald-600 dark:text-emerald-400" : cookie.status === "invalid" ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground")} />
-                  {BRAND_FILES.has(`${cookie.platform}.png`) ? <img src={`/overview-brands/${cookie.platform}.png`} alt="" className={cn("h-5 w-5 shrink-0 rounded object-contain", cookie.status !== "valid" && "grayscale opacity-50")} /> : <Globe aria-hidden className="h-5 w-5 shrink-0 text-muted-foreground" />}<span className="min-w-0"><span className="block truncate text-sm">{PLATFORMS[cookie.platform] || cookie.platform}</span><span className="block text-[11px] text-muted-foreground">{label}</span></span>
+                  <img src={`/overview-brands/${cookie.platform}.png`} alt="" className={cn("h-5 w-5 shrink-0 rounded object-contain", cookie.status !== "valid" && "grayscale opacity-50")} /><span className="min-w-0"><span className="block truncate text-sm">{PLATFORMS[cookie.platform] || cookie.platform}</span><span className="block text-[11px] text-muted-foreground">{label}</span></span>
                 </div>;
               })}</div>}
             </ServiceCard>

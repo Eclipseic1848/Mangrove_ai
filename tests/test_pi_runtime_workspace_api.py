@@ -1010,7 +1010,8 @@ def test_runtime_rollout_only_changes_new_tasks_and_p0_restores_legacy(
 
 
 def _wait_for_delivery(client: TestClient, task_id: str) -> dict:
-    deadline = time.monotonic() + 10
+    # Windows 隔离库的验证、持久回执及发布实测会越过 10 秒；仍有界等待且失败立即退出。
+    deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
         response = client.get(
             f"/api/semantic-workspace/tasks/{task_id}"
@@ -1022,7 +1023,7 @@ def _wait_for_delivery(client: TestClient, task_id: str) -> dict:
         if payload["status"] == "failed":
             raise AssertionError(f"Pi 正式发布失败：{payload.get('failure')}")
         time.sleep(0.05)
-    raise AssertionError("Pi 任务未形成正式交付终态")
+    raise AssertionError(f"Pi 任务 30 秒内未形成正式交付终态，最后状态：{payload['status']}")
 
 
 def _wait_for_status(

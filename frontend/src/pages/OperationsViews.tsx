@@ -1,9 +1,9 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { AlertCircle, CheckCircle2, ChevronRight, Clock3, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Pagination } from "@/components/ui/pagination";
-import type { Entry, Summary } from "./Operations";
+import type { Entry, Granularity, Summary } from "./Operations";
 
 export const resultLabels: Record<string, string> = { success: "成功", failure: "失败", unknown: "结果未知" };
 export const sourceLabels: Record<string, string> = { direct: "直接访问", internal: "站内跳转", external: "外部来源", unknown: "来源未知" };
@@ -39,9 +39,16 @@ export function EventsTable({ items, kind, compact = false, onUser, onDetail }: 
   </div>;
 }
 
-export function Trend({ rows, onDay }: { rows: Summary["trend"]; onDay: (bucket: string) => void }) {
+export function Trend({ rows, granularity, onSelect }: { rows: Summary["trend"]; granularity: Granularity; onSelect: (point: Summary["trend"][number]) => void }) {
   const [page, setPage] = useState(1);
   const [hover, setHover] = useState<string | null>(null);
+  const tipId = useId();
+  useEffect(() => {
+    if (!hover) return;
+    const dismiss = (event: KeyboardEvent) => { if (event.key === "Escape") setHover(null); };
+    document.addEventListener("keydown", dismiss);
+    return () => document.removeEventListener("keydown", dismiss);
+  }, [hover]);
   const totalPages = Math.max(1, Math.ceil(rows.length / 14));
   const current = Math.min(page, totalPages);
   const points = rows.slice((current - 1) * 14, current * 14);
@@ -49,17 +56,35 @@ export function Trend({ rows, onDay }: { rows: Summary["trend"]; onDay: (bucket:
   const x = (i: number) => 36 + i * 624 / Math.max(1, points.length - 1);
   const y = (value: number) => 172 - value / max * 148;
   const selected = points.find(point => point.bucket === hover);
+  const selectedX = x(points.findIndex(point => point.bucket === hover));
+  const label = (bucket: string) => granularity === "year" ? `${bucket}年` : granularity === "month" ? bucket : `${bucket.slice(5).replace("-", "/")}${granularity === "week" ? " 起" : ""}`;
   return <>
     <div className="ops-legend"><span className="text-primary">● 访问用户 UV</span><span className="ops-series-pv">━ 页面访问 PV</span></div>
     {!points.length ? <Empty text="暂无已采集的访问记录" /> : <>
-      <div className="ops-chart-readout" aria-live="polite">{selected ? `${selected.bucket} · PV ${selected.pv} · UV ${selected.uv}` : "悬停或聚焦日期查看数值，点击查看明细"}</div>
-      <svg className="ops-trend" viewBox="0 0 680 190" preserveAspectRatio="none" role="img" aria-label="页面访问与访问用户趋势，数值可通过下方日期按钮查看">
+      <div className="ops-chart-readout">悬停图表或聚焦日期查看数值；点击日期查看{granularity === "hour" ? "当天" : "该周期"}明细</div>
+      <div className="ops-chart-plot" onPointerLeave={() => setHover(null)} onPointerMove={event => {
+        // 提示层也跟踪位置，避免遮住相邻数据点后仍显示旧值；日期按钮独立选中。
+        if ((event.target as Element).closest(".ops-chart-dates")) return;
+        const bounds = event.currentTarget.getBoundingClientRect();
+        const index = Math.round(((event.clientX - bounds.left) / bounds.width * 680 - 36) / 624 * (points.length - 1));
+        setHover(points[Math.max(0, Math.min(points.length - 1, index))].bucket);
+      }}>
+      <svg className="ops-trend" viewBox="0 0 680 190" preserveAspectRatio="none" role="img" aria-label="页面访问与访问用户趋势，数值可通过悬停或下方日期按钮查看">
         {[0, 1, 2, 3, 4].map(n => <g key={n}><line x1="36" x2="660" y1={y(max * n / 4)} y2={y(max * n / 4)} className="ops-gridline" /><text x="2" y={y(max * n / 4) + 4} className="ops-axis">{Math.round(max * n / 4)}</text></g>)}
-        {(["pv", "uv"] as const).map(key => <g key={key} className={key === "pv" ? "ops-series-pv" : "text-primary"}><polyline fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray={key === "uv" ? "5 3" : undefined} points={points.map((point, i) => `${x(i)},${y(point[key])}`).join(" ")} />{points.map((point, i) => <circle key={point.bucket} cx={x(i)} cy={y(point[key])} r="3" fill="currentColor" />)}</g>)}
+        {selected && <line x1={selectedX} x2={selectedX} y1="20" y2="172" className="ops-gridline" strokeDasharray="4 3" />}
+        {(["pv", "uv"] as const).map(key => <g key={key} className={key === "pv" ? "ops-series-pv" : "text-primary"}><polyline fill="none" stroke="currentColor" strokeWidth="2" strokeDasharray={key === "uv" ? "5 3" : undefined} points={points.map((point, i) => `${x(i)},${y(point[key])}`).join(" ")} />{points.map((point, i) => <circle key={point.bucket} cx={x(i)} cy={y(point[key])} r={point.bucket === hover ? 4 : 3} fill="currentColor" />)}</g>)}
       </svg>
-      <div className="ops-chart-dates">{points.map(point => <button type="button" key={point.bucket} aria-label={`${point.bucket}，PV ${point.pv}，UV ${point.uv}，查看明细`} onFocus={() => setHover(point.bucket)} onMouseEnter={() => setHover(point.bucket)} onClick={() => onDay(point.bucket)}>{point.bucket.length > 10 ? point.bucket.slice(11) : point.bucket.slice(5).replace("-", "/")}</button>)}</div>
+      {selected && <div id={tipId} role="tooltip" className="ops-chart-tooltip" style={{ left: `clamp(8px, calc(${selectedX / 680 * 100}% + ${selectedX < 340 ? 12 : -232}px), calc(100% - 228px))` }}>
+        <strong>{selected.bucket}{granularity === "week" ? " 起的一周" : granularity === "year" ? "年" : granularity === "month" ? "月" : ""}</strong>
+        {selected.start && selected.end && !["hour", "day"].includes(granularity) && <small>统计范围：{selected.start} 至 {selected.end}</small>}
+        <span className="ops-series-pv">页面访问 PV：{selected.pv.toLocaleString()} 次</span>
+        <span className="text-primary">访问用户 UV：{selected.uv.toLocaleString()} 人</span>
+        <small>周期内用户去重</small>
+      </div>}
+      <div className="ops-chart-dates">{points.map(point => <button type="button" key={point.bucket} aria-label={`${point.bucket}，PV ${point.pv}，UV ${point.uv}，查看${granularity === "hour" ? "当天" : "周期"}明细`} aria-describedby={point.bucket === hover ? tipId : undefined} onFocus={() => setHover(point.bucket)} onBlur={() => setHover(null)} onMouseEnter={() => setHover(point.bucket)} onClick={() => onSelect(point)}>{label(point.bucket)}</button>)}</div>
+      </div>
     </>}
-    {totalPages > 1 && <nav aria-label="趋势时间分页"><Pagination page={current} totalPages={totalPages} total={rows.length} onChange={setPage} /></nav>}
+    {totalPages > 1 && <nav aria-label="趋势时间分页"><Pagination page={current} totalPages={totalPages} total={rows.length} onChange={value => { setPage(value); setHover(null); }} /></nav>}
   </>;
 }
 

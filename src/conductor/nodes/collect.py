@@ -27,6 +27,14 @@ logger = logging.getLogger(__name__)
 _ENOUGH_RATIO = 0.6
 
 
+class CollectionInterrupted(asyncio.CancelledError):
+    """保持取消语义，同时携带之前已完成采集器的数据供总预算停点保存。"""
+
+    def __init__(self, partial_result):
+        super().__init__()
+        self.partial_result = partial_result
+
+
 def _item_key(item: Dict[str, Any]) -> str:
     """跨采集器去重键：优先 URL；无 URL 时用标题+正文前 200 字哈希。"""
     url = (item.get("url") or "").strip()
@@ -38,6 +46,12 @@ def _item_key(item: Dict[str, Any]) -> str:
 
 async def collect_node(state: ConductorState) -> Dict[str, Any]:
     spec = state["task_spec"]
+    if spec.evidence_collection:
+        from ..evidence_collection import collect_topics
+        return await collect_topics(state)
+    if spec.bank_benefits:
+        from ..bank_benefits import collect_bank_benefits
+        return await collect_bank_benefits(state)
     names = state.get("collector_candidates")
     if not names:
         names = [c.name for c in select_collectors(spec)]
@@ -75,6 +89,9 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
         try:
             # 超时保护：单个采集器卡死不冻住整条流水线，超时即降级到下一个
             result = await asyncio.wait_for(collector.collect(spec), timeout=timeout)
+        except asyncio.CancelledError as exc:
+            raise CollectionInterrupted({"raw_dataset": merged, "collector_used": "+".join(used_names),
+                "collector_notes": notes, "collector_attempts": attempts}) from exc
         except asyncio.TimeoutError:
             emit_progress("collect", "warning", "当前来源响应超时，将检查其他可用来源。")
             logger.warning("采集器 %s 超时（>%ss），降级", name, timeout)

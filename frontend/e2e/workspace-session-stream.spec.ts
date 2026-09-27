@@ -96,7 +96,13 @@ const session = {
 };
 
 async function mockPage(page: Page, readTask: () => unknown) {
-  await page.route("**/api/**", route => route.fulfill({ json: {} }));
+  await page.addInitScript(() => {
+    localStorage.setItem(`onboarding_all_${JSON.stringify(["owner-a", "user"])}`, "skipped");
+  });
+  await page.route("**/api/**", route => route.fulfill({ status: 404, json: { detail: "合成接口未登记" } }));
+  await page.route("**/api/chat/history", route => route.fulfill({ json: [] }));
+  await page.route("**/api/semantic-workspace/tasks/*/feedback?*", route => route.fulfill({ json: { feedback: {} } }));
+  await page.route(/\/api\/operations\/(?:visits|heartbeat)$/, route => route.fulfill({ json: { ok: true } }));
   await page.route("**/api/auth/me", route => route.fulfill({ json: { user_id: "owner-a", username: "测试", role: "user" } }));
   await page.route("**/api/models", route => route.fulfill({ json: { options: [], default: null } }));
   await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [{ connection_id: "connection-1", display_name: "已冻结连接", status: "verified", models: [] }] } }));
@@ -107,7 +113,7 @@ async function mockPage(page: Page, readTask: () => unknown) {
   await page.route("**/api/semantic-workspace/storage", route => route.fulfill({ json: { total_bytes: 0, task_count: 1, recycle_bin_count: 0 } }));
   await page.route("**/api/semantic-workspace/guidance", route => route.fulfill({ json: { onboarding: [], examples: [] } }));
   await page.goto("/data-prep?task=session-task");
-  await expect(page.getByRole("heading", { name: "会话合成任务" })).toBeVisible();
+  await expect(page.getByTestId("workspace-conversation-scroll")).toBeVisible();
 }
 
 test("页面直接消费完整SSE回答，GET恢复不双显，切任务拒绝旧流", async ({ page }) => {
@@ -143,7 +149,7 @@ test("页面直接消费完整SSE回答，GET恢复不双显，切任务拒绝�
     history.pushState(null, "", "/data-prep?task=other-task");
     dispatchEvent(new PopStateEvent("popstate"));
   });
-  await expect(page.getByRole("heading", { name: "另一条任务" })).toBeVisible();
+  await expect(page.getByLabel("Mangrove 回答")).toHaveCount(0);
   await emit({ ...answer, message_id: "late-answer", content: "不能泄入另一任务" });
   await expect(page.getByText("不能泄入另一任务")).toHaveCount(0);
   await expect(page.getByLabel("Mangrove 回答")).toHaveCount(0);

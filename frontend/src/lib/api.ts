@@ -213,11 +213,21 @@ export async function readAuthenticatedBlob(response: Response) {
 
 async function handle(res: Response) {
   if (!res.ok) {
-    let detail = `${res.status}`;
+    let detail = `请求未完成（HTTP ${res.status}），请核对输入或稍后重试。`;
     if (res.headers.get("content-type")?.includes("application/json")) {
       try {
         const j = await readAuthenticatedJson(res);
-        detail = j.detail || JSON.stringify(j);
+        const value: unknown = j?.detail ?? j;
+        if (typeof value === "string" && value.trim()) detail = value;
+        else {
+          // 只提取服务端错误说明，不回显校验响应中的原始输入或密钥。
+          const messages = (Array.isArray(value) ? value : [value]).flatMap(item => {
+            if (!item || typeof item !== "object") return [];
+            const message = item.msg ?? item.message;
+            return typeof message === "string" && message.trim() ? [message] : [];
+          });
+          if (messages.length) detail = messages.join("；");
+        }
       } catch {
         /* 保留状态码，避免用 JSON 解析异常覆盖真正的 HTTP 错误。 */
       }

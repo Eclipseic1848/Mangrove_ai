@@ -83,7 +83,7 @@ class ScheduleStore:
 
         web = get_store()
         if expected_task.get('time_zone') != 'Asia/Shanghai':
-            raise execution.ExecutionDenied('历史时区未记录，请核对北京时间后重新创建计划')
+            raise execution.ExecutionDenied('历史时区未记录，请核对执行时间后重新创建计划')
         if manual:
             # 手动操作只能使用请求冻结的授权，不能借用后来恢复的账号代数。
             auth = execution.current_authorization()
@@ -325,7 +325,7 @@ class ScheduleStore:
                 return {'execution_state': 'running', 'blocked_reason': '', 'can_recreate': False}
             reason = '停止状态待确认，请联系管理员核查；不会自动重试'
         elif task.get('time_zone') != 'Asia/Shanghai':
-            reason = '历史时区未记录，请核对模型及北京时间后重新创建；不会自动补跑'
+            reason = '历史时区未记录，请核对模型及执行时间后重新创建；不会自动补跑'
         elif not binding:
             reason = '缺少执行授权，请重新创建计划'
         elif binding['state'] == 'paused' and task['status'] == 'active':

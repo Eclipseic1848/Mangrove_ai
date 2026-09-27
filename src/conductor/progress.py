@@ -7,7 +7,7 @@ LABELS = {
     "intent": "理解需求", "planner": "制定处理计划", "target_resolve": "识别资料来源",
     "router": "准备采集", "collect": "采集数据", "video_enrich": "提取视频资料",
     "clean": "整理数据", "analyze": "分析资料", "checker": "核对分析结果",
-    "output": "生成报告", "schedule": "整理自动任务要求",
+    "output": "生成产出", "schedule": "整理自动任务要求",
 }
 
 

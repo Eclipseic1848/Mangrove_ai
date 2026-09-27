@@ -57,7 +57,7 @@ function isBroadRootScan(command: string): boolean {
 }
 
 function readsRuntimeSecret(command: string): boolean {
-  return /\/root\/\.pi\/agent\/(?:document-tools|capability-host|models)\.json\b/.test(
+  return /\/(?:root\/\.pi\/agent|workspace\/config)\/(?:document-tools|capability-host|models)\.json\b/.test(
     command,
   );
 }

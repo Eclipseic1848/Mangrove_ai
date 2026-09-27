@@ -9,7 +9,7 @@ import sqlite3
 from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, event, inspect
 
 from src.connectors.db_dialects import (
     DbDialect,
@@ -53,6 +53,26 @@ def _make_credentials(dialect="sqlite", **kw):
 
 
 class TestIntrospectSqlite:
+    def test_discovery_limit_bounds_metadata_and_count_queries(self, tmp_path, monkeypatch):
+        from src.config.settings import settings
+
+        engine = create_engine(f"sqlite:///{tmp_path / 'bounded.db'}")
+        with engine.begin() as conn:
+            for index in range(5):
+                conn.exec_driver_sql(f"CREATE TABLE synthetic_{index} (id INTEGER PRIMARY KEY)")
+                conn.exec_driver_sql(f"INSERT INTO synthetic_{index} VALUES (1)")
+        statements = []
+        event.listen(engine, "before_cursor_execute", lambda conn, cursor, statement, parameters, context, many: statements.append(statement))
+        monkeypatch.setattr(settings, "data_prep_db_max_discovery_tables", 2)
+        try:
+            result = introspect_schema(engine)
+            assert [table.name for table in result.tables] == ["synthetic_0", "synthetic_1"]
+            assert [table.estimated_rows for table in result.tables] == [1, 1]
+            assert sum(sql.startswith("SELECT COUNT(*)") for sql in statements) == 2
+            assert not any(f"synthetic_{index}" in sql for sql in statements for index in (2, 3, 4))
+        finally:
+            engine.dispose()
+
     def test_single_table(self, tmp_path):
         db_path = str(tmp_path / "test.db")
         # 手工建库再用 create_engine introspect
@@ -151,6 +171,28 @@ class TestReadonlySession:
 
 
 class TestStatementTimeout:
+    def test_sqlite_timeout_measures_time_and_preserves_large_count(self, monkeypatch):
+        from src.config.settings import settings
+        from sqlalchemy.exc import OperationalError
+
+        engine = create_engine("sqlite://")
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql("CREATE VIRTUAL TABLE items USING fts5(content)")
+                conn.exec_driver_sql("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<100000) INSERT INTO items SELECT '合成' FROM n")
+            monkeypatch.setattr(settings, "data_prep_db_max_discovery_tables", 1)
+            monkeypatch.setattr(settings, "data_prep_db_query_timeout_seconds", 30)
+            assert introspect_schema(engine).tables[0].estimated_rows == 100000
+            # 用可控时钟验证到期中断，不让测试真实等待 30 秒。
+            ticks = iter((0.0, 31.0))
+            monkeypatch.setattr("src.connectors.db_dialects.monotonic", lambda: next(ticks))
+            with engine.connect() as conn:
+                apply_statement_timeout(conn, "sqlite", 30)
+                with pytest.raises(OperationalError, match="interrupted"):
+                    conn.exec_driver_sql("SELECT COUNT(*) FROM items").scalar()
+        finally:
+            engine.dispose()
+
     def test_sqlite_progress_handler(self, tmp_path):
         db_path = str(tmp_path / "test.db")
         bare = sqlite3.connect(db_path)

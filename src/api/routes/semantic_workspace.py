@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from src.timezone import now as beijing_now
 import hashlib
 import json
+import logging
 from pathlib import Path
 import re
 import sqlite3
@@ -32,7 +33,8 @@ from fastapi import (
     Request,
     status,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
+from src.conversation_steering.rewriter import ContextRewriteError
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -342,6 +344,7 @@ class WorkspaceTaskCreateIn(BaseModel):
 
     objective_text: str = Field(min_length=1, max_length=20_000)
     upload_ids: tuple[str, ...] = ()
+    source_copy_upload_ids: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     delivery_output_ids: tuple[Annotated[str, Field(min_length=1,max_length=200)], ...] = Field(default=(), max_length=100)
     source_snapshot_id: str | None = Field(default=None, min_length=1, max_length=160)
     source_snapshot_ids: tuple[str, ...] | None = None
@@ -364,6 +367,7 @@ class WorkspaceTaskCreateIn(BaseModel):
         max_length=100,
     )
     model_connection_model: str | None = Field(default=None, min_length=1, max_length=200)
+    model_connection_version: str | None = Field(default=None, min_length=1, max_length=200, exclude_if=lambda value: value is None)
     capability_pack_refs: tuple[CapabilityPackRef, ...] = ()
     capability_need: ToolNeed | None = None
     # #15 D9 验证任务标记：本任务是为验证该个人 draft 能力而创建；
@@ -2089,9 +2093,10 @@ def _task_detail(
     steering_rounds = [item for item in history if item["question"].get("continuation") == "steering"]
     pending = [steering_rounds[-1]["question"]] if steering_rounds and steering_rounds[-1]["answer"] is None else []
     findings = next((event.get("details", {}).get("source_findings", []) for event in reversed(task["events"]) if event.get("event_type") == "source.observed" and "source_findings" in event.get("details", {})), [])
-    results = [result for turn in _steering_repository().list_turns(user_id, task_id, revision=selected) if (result := _steering_repository().get_result_for_turn(user_id, turn.turn_id)) is not None]
-    business_results = [item for item in results if item.action in {SteeringAction.NORMALIZED_NO_MATERIAL_CHANGE, SteeringAction.REVISION_PROPOSAL}]
-    latest = business_results[-1] if business_results else None
+    latest = _steering_repository().latest_business_result(user_id, task_id, selected)
+    # 旧澄清留在历史，但不能覆盖后来已明确或已拒绝的业务要求。
+    if pending and (latest is None or pending[-1].get("origin_turn_id") != latest.turn_id):
+        pending = []
     unfinished_answer = any(item["turn_id"] and _steering_repository().get_result_for_turn(user_id, item["turn_id"]) is None and not any(event["event_id"] == f"answer-done:{item['turn_id']}" for event in task["events"]) for item in history)
     delta = _steering_repository().get_delta(user_id, latest.delta_id) if latest else None
     current_question = task.get("question")
@@ -2264,6 +2269,9 @@ async def draft_chat(payload: DraftChatIn, request: Request, user=Depends(get_ex
         result = await pending
         execution_checkpoint(required=True)
         if getattr(result, "selection_delta", {}).get("workflow") == "collection" and not getattr(result, "open_questions", ()):
+            # 分流标记不能盖过问答意图或尚待授予的权限，矛盾草案不得触发采集。
+            if getattr(result, "intent", None) != "new_task" or getattr(result, "permission_delta", ()):
+                raise HTTPException(422, "采集提议与追问意图或权限不一致，未启动任务，请明确本次处理范围")
             from src.api.routes.chat import chat_stream
             from src.api.schemas import ChatIn
             # 复用已存在的采集/分析执行入口；传递原话和所选连接，不让模型摘要替代用户授权。
@@ -2299,9 +2307,14 @@ async def draft_chat(payload: DraftChatIn, request: Request, user=Depends(get_ex
         return {"reply": result.direct_answer, "output_formats": list(result.output_delta),
                 "conv_id": conv_id, "message_id": message_id, "created_at": created_at,
                 "user_created_at": user_created_at, "token_usage": token_usage}
+    except ContextRewriteError as error:
+        return JSONResponse(status_code=502, content={"detail": str(error), "error_code": error.error_code,
+            "provider_status": error.provider_status, "validation_types": list(error.validation_types)})
     except (HTTPException, ExecutionDenied):
         raise
-    except Exception:
+    except Exception as error:
+        # 只记异常类型，不能把供应商正文、输入或凭证写入日志。
+        logging.getLogger(__name__).warning("draft_turn_failed type=%s", type(error).__name__)
         raise HTTPException(502, "本次模型回复未成功或状态未知，未启动任务。需求已保留，不会自动重试。") from None
     finally:
         _usage_ctx.reset(usage_token)
@@ -2549,6 +2562,9 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
                     user_id,
                     payload.model_connection_id,
                 )
+                # 比较实际冻结值，避免采集期间换端点后沿用旧外发确认。
+                if payload.model_connection_version and payload.model_connection_version != connection_binding.connection_version:
+                    raise HTTPException(status_code=409, detail="模型连接版本已变化，请重新确认后创建初稿")
             except GrantError as exc:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
@@ -2597,6 +2613,18 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
             or set(payload.capability_need.output_formats) != actual_outputs):
             raise HTTPException(409, "工具匹配与当前文件或输出格式不一致，请重新匹配；网页来源尚无可复用格式合同")
     source_refs, source_snapshots = _resolve_mixed_sources(user_id, payload.upload_ids, payload.source_snapshot_ids or (), payload.delivery_output_ids)
+    expected_source_copies = {}
+    if payload.source_copy_upload_ids:
+        if payload.runtime_version is not RuntimeVersion.PI or not set(payload.source_copy_upload_ids).issubset(payload.upload_ids):
+            raise HTTPException(422, "原样输出必须使用当前任务已选的文件与初稿执行路径")
+        for upload_id in payload.source_copy_upload_ids:
+            upload = _uploads().resolve(user_id, upload_id)
+            fmt = Path(upload.original_name).suffix.lower().lstrip(".")
+            if fmt not in payload.output_formats or fmt in expected_source_copies:
+                raise HTTPException(422, "原样输出须按请求格式各选择一个来源文件")
+            expected_source_copies[fmt] = upload.sha256
+        if set(expected_source_copies) != set(payload.output_formats):
+            raise HTTPException(422, "原样输出来源未覆盖全部请求格式")
     source_snapshot = source_snapshots[0] if source_snapshots else None
     for source_snapshot_item in source_snapshots:
         if (
@@ -2886,6 +2914,8 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
         source_snapshots,
     )
     frozen_source_contract['notification_user_text'] = user_objective
+    if expected_source_copies:
+        frozen_source_contract["initial_copy_sha256_by_format"] = expected_source_copies
     first_line = payload.objective_text.splitlines()[0].strip()
     title = first_line[:40] + ("…" if len(first_line) > 40 else "")
     store = get_store()
@@ -2975,6 +3005,8 @@ def list_tasks(
     task_status: str | None = Query(default=None, alias="status"),
     deleted: bool = False,
     limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0, le=2**63 - 1),
+    task_filter: Literal["all", "active", "needs_input", "completed"] = Query(default="all", alias="filter"),
     user=Depends(get_current_user),
 ):
     tasks = get_store().list_semantic_workspace_tasks(
@@ -2982,6 +3014,8 @@ def list_tasks(
         status=task_status,
         deleted=deleted,
         limit=limit,
+        offset=offset,
+        task_filter=task_filter,
     )
     for task in tasks:
         runtime = _runtime_repository().get(
@@ -3217,7 +3251,7 @@ async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context
         if answer_context:
             get_store().claim_workspace_answer(user_id, task_id, answer_context["answer_turn_id"])
     if not answer_context:
-        business_result = next((result for turn in reversed(_steering_repository().list_turns(user_id, task_id, revision=int(task["active_revision"]))) if (result := _steering_repository().get_result_for_turn(user_id, turn.turn_id)) is not None and result.action in {SteeringAction.NORMALIZED_NO_MATERIAL_CHANGE, SteeringAction.REVISION_PROPOSAL}), None)
+        business_result = _steering_repository().latest_business_result(user_id, task_id, int(task["active_revision"]))
         if business_result:
             prior_delta = _steering_repository().get_delta(user_id, business_result.delta_id)
             relevant_turns = tuple(_steering_repository().get_turn(user_id, turn_id) for turn_id in prior_delta.source_turn_ids)
@@ -5129,8 +5163,11 @@ def get_task_draft(task_id: str, revision: int | None = Query(default=None, ge=1
     events = _runtime_repository().list_events(user["user_id"], task_id, revision)
     created_at = next((event.get("created_at") for event in events
                        if event["event_type"] == "draft.ready" and event["details"].get("draft_id") == draft["draft_id"]), None)
+    from src.agentic_runtime.draft_snapshot import draft_table_issues
+    frozen_revision = get_store().get_semantic_workspace_revision(user["user_id"], task_id, revision)
     return {"draft": {
         "draft_id": draft["draft_id"], "revision": revision, "status": "unverified",
+        "issues": draft_table_issues(root, draft, (frozen_revision or {}).get("table_output_contracts", [])),
         "created_at": created_at,
         "acceptance_pending": bool(accepted and task["status"] != "completed"),
         "review_waiting": bool(task["status"] == "needs_input" and task["active_revision"] == revision
@@ -5217,8 +5254,11 @@ async def continue_draft_review(task_id: str, payload: ContinueDraftReviewIn, us
             root, draft = _frozen_draft(owner, task_id, payload.expected_revision, payload.draft_id)
             runtime = _runtime_repository().get(owner, task_id, payload.expected_revision)
             session = runtime.get("session_file") if runtime else None
+            from src.agentic_runtime.draft_snapshot import host_copy_pending
+            host_copy = bool(runtime and host_copy_pending(root, owner_id=owner, task_id=task_id,
+                revision=payload.expected_revision, run_id=runtime["run_id"]))
             # 缺少检查点时不偷偷重新执行；用户仍可接受初稿或明确创建新版本。
-            if not session or not (root / session).is_file() or (root / "session").resolve() not in (root / session).resolve().parents or (root / session).suffix.lower() != ".jsonl":
+            if not host_copy and (not session or not (root / session).is_file() or (root / "session").resolve() not in (root / session).resolve().parents or (root / session).suffix.lower() != ".jsonl"):
                 raise ValueError("原执行会话不可恢复；可接受初稿，或修改要求后创建新版本")
             enqueue = store.approve_workspace_draft_review(owner, task_id, payload.expected_revision,
                                                           draft["draft_id"], runtime["run_id"])

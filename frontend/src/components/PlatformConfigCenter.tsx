@@ -5,8 +5,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { api, ApiError } from "@/lib/api";
+import { verificationLabel } from "@/lib/configVerification";
 import { ConfigGuideModal, GuideStepsInline } from "@/components/ConfigGuideModal";
-import { ADMIN_GUIDE_SECTIONS, getGuideForKey } from "@/lib/configGuides";
+import { ADMIN_GUIDE_SECTIONS, COOKIE_KEY_ORDER, getGuideForKey } from "@/lib/configGuides";
 
 type Item = { key: string; label: string; secret: boolean; value: string; source: string;
   default_value?: string; type?: string; choices?: string[]; minimum?: number; maximum?: number;
@@ -81,7 +82,7 @@ function services(group: Group): Service[] {
   if (remaining.length) sets.push({ key: `${group.key}_remaining`, label: group.key === "data_prep" ? "制品保留（未开放）" : `${group.label} · 其他配置`, items: remaining });
   return sets.filter(s => s.items.length).map(s => {
     const check = s.key === "mysql" && s.items.find(it => it.key === "db_backend")?.value !== "mysql" ? undefined
-      : group.key === "cookies" ? [s.key, "使用已保存的共享 Cookie 访问对应平台；社交平台可能启动浏览器并小范围搜索，耗时十几秒至几分钟。结果可能受反爬影响。"] : CHECKS[s.key];
+      : group.key === "cookies" ? [s.key, "使用已保存的共享 Cookie 检查登录身份，可能启动独立浏览器访问平台，不执行搜索或评论采集。结果可能受限流或挑战影响。"] : CHECKS[s.key];
     return { ...s, items: s.items.map(it => ({ ...it, value: normalizedValue(it), label: FIELD_LABELS[it.key] || it.label })), help: SERVICE_HELP[s.key] || HELP[group.key] || "", target: check?.[0], check: check?.[1] };
   });
 }
@@ -170,7 +171,7 @@ export function AdminConfigCenter() {
     setEdit(service); setValues(Object.fromEntries(service.items.map(it => [it.key, it.secret ? "" : it.value])));
     setError(""); setUnknown(false); setInvalidKey(""); setRevealed([]);
   }
-  async function save() {
+  async function save(verifyFirst = false) {
     if (!edit || lock.current || unknown) return;
     const changed: Record<string, string> = {};
     for (const it of visibleItems(edit, values)) {
@@ -187,8 +188,12 @@ export function AdminConfigCenter() {
     if (!Object.keys(changed).length) { setError("没有需要保存的修改。密钥留空表示保留原值。"); return; }
     lock.current = true; setBusy(true); setError("");
     try {
-      await api.put("/api/config/batch", { values: changed });
-      setNotice(`${edit.label} 已保存。`);
+      if (verifyFirst) {
+        const [key, value] = Object.entries(changed)[0];
+        const result = await api.post("/api/config/reauthenticate", { key, value, scope: "platform" });
+        if (!result.saved) { setError(result.detail || "新凭证未通过验证，原配置未修改"); return; }
+      } else await api.put("/api/config/batch", { values: changed });
+      setNotice(verifyFirst ? "新凭证已验证并保存；原任务未自动恢复。" : `${edit.label} 已保存。`);
       setResults(old => ({ ...old, [edit.key]: { status: "配置已修改，尚未重新检查" } }));
       setEdit(null); await load();
       window.dispatchEvent(new CustomEvent("mangrove:config-changed"));
@@ -212,7 +217,7 @@ export function AdminConfigCenter() {
         try {
           const result = await api.post("/api/config/verify", { target: service.target });
           if (!mounted.current) break;
-          setResults(old => ({ ...old, [service.key]: { status: result.ok ? "本次检查通过" : "本次检查未通过", log: result.detail, time: new Date().toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" }) } }));
+          setResults(old => ({ ...old, [service.key]: { status: verificationLabel(result), log: result.detail, time: new Date().toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" }) } }));
         } catch {
           if (!mounted.current) break;
           setResults(old => ({ ...old, [service.key]: { status: "检查结果未知", log: "请重新加载核对；未自动重试。" } }));
@@ -238,7 +243,7 @@ export function AdminConfigCenter() {
         window.dispatchEvent(new CustomEvent("mangrove:config-changed"));
       } else {
         const result = await api.post("/api/config/verify", { target: service.target });
-        setResults(old => ({ ...old, [service.key]: { status: result.ok ? "本次检查通过" : "本次检查未通过", log: result.detail, time: new Date().toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" }) } }));
+        setResults(old => ({ ...old, [service.key]: { status: verificationLabel(result), log: result.detail, time: new Date().toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" }) } }));
       }
       setConfirm(null); await load();
     } catch (e) {
@@ -269,7 +274,7 @@ export function AdminConfigCenter() {
       <p className="text-sm text-muted-foreground">{query.trim() ? "全部分类的搜索结果" : category} · {listed.reduce((total, g) => total + g.services.length, 0)} 项服务</p>
       {showCookieManagement && <section aria-label="Cookie 检查管理" className="rounded-lg border border-primary/25 border-l-4 border-l-primary bg-primary/5 p-4 space-y-3">
         <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="font-semibold text-primary">Cookie 检查管理</h2><p className="text-xs text-muted-foreground mt-1">{configuredCookies.length} 个已配置，{cookies.length - configuredCookies.length} 个未配置。手动检查覆盖全部已配置账号。</p></div>
-        <Button disabled={disabled || !configuredCookies.length} onClick={() => { setConfirm({ service: { key: "cookie_batch", label: "全部共享 Cookie", items: [], help: "", check: `将检查 ${configuredCookies.length} 个已配置的共享 Cookie，未配置的跳过。会真实访问对应平台，可能启动浏览器并进行少量搜索，耗时数分钟；按顺序执行，不自动重试。` }, batch: configuredCookies }); setError(""); setUnknown(false); }}>一键检查 Cookie 状态</Button>
+        <Button disabled={disabled || !configuredCookies.length} onClick={() => { setConfirm({ service: { key: "cookie_batch", label: "全部共享 Cookie", items: [], help: "", check: `将检查 ${configuredCookies.length} 个已配置的共享 Cookie，未配置的跳过。会真实访问对应平台检查登录身份，可能启动独立浏览器；不执行搜索或评论采集，按顺序执行，不自动重试。` }, batch: configuredCookies }); setError(""); setUnknown(false); }}>一键检查 Cookie 状态</Button>
         </div>
         {cookieScan && <div className="flex flex-wrap items-center justify-between gap-3 border-t border-primary/20 pt-3"><div className="text-sm"><span className="font-medium">定时巡检</span><span className="ml-2">{cookieScan.items.find(it => it.key === "cookie_health_scan_enabled")?.value === "True" ? "开启" : "关闭"}</span><span className="ml-3 text-xs text-muted-foreground">间隔 {cookieScan.items.find(it => it.key === "cookie_health_scan_interval_hours")?.value || "未设置"} 小时</span></div><div className="flex gap-2"><Button variant="outline" size="sm" disabled={disabled} aria-label={`配置 ${cookieScan.label}`} onClick={() => openEdit(cookieScan)}>编辑巡检</Button><Button variant="ghost" size="sm" onClick={() => setGuideService(cookieScan)}>巡检说明</Button></div></div>}
       </section>}
@@ -307,8 +312,9 @@ export function AdminConfigCenter() {
           <div id={`help-${it.key}`} className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground"><span>{it.source === "override" ? "平台设置" : "服务器默认"}{it.secret && ` · ${it.value ? "已存凭据" : "未配置"}`}{it.type === "number" && ` · 最小 ${it.minimum}${it.maximum ? `，最大 ${it.maximum}` : ""}`}</span>{it.source === "override" && <Button type="button" size="sm" variant="outline" onClick={() => { setConfirm({ service: edit, item: it }); setError(""); setUnknown(false); }}>恢复 {it.label} 默认</Button>}</div>
           {getGuideForKey(it.key) && <details><summary className="cursor-pointer text-sm text-primary">如何填写</summary><GuideStepsInline configKey={it.key} /></details>}
         </div>)}</fieldset>
+        {edit.items.length === 1 && COOKIE_KEY_ORDER.includes(edit.items[0].key) && <p className="text-xs text-muted-foreground">验证并更新将访问平台身份接口，可能耗时数分钟；验证失败保留原凭证，不会自动恢复任务。</p>}
         {error && <p id="config-error" role="alert" className="text-sm text-destructive">{error}</p>}
-        <div className="flex justify-end gap-2"><Button type="button" variant="outline" disabled={busy} onClick={() => setEdit(null)}>{unknown ? "关闭并核对" : "取消"}</Button><Button type="submit" disabled={busy || unknown}>{busy ? "保存中…" : "保存配置"}</Button></div>
+        <div className="flex justify-end gap-2"><Button type="button" variant="outline" disabled={busy} onClick={() => setEdit(null)}>{unknown ? "关闭并核对" : "取消"}</Button>{edit.items.length === 1 && COOKIE_KEY_ORDER.includes(edit.items[0].key) && <Button type="button" variant="outline" disabled={busy || unknown} onClick={() => void save(true)}>验证并更新</Button>}<Button type="submit" disabled={busy || unknown}>{busy ? "保存中…" : "保存配置"}</Button></div>
       </form>}
     </Modal>
     <ConfigGuideModal open={!!guideService} onClose={() => setGuideService(null)} title={`${guideService?.label || "服务"} 配置说明`} sections={guideService ? [{ key: guideService.key, title: guideService.help, entries: ADMIN_GUIDE_SECTIONS.find(section => section.key === guideService.key)?.entries ?? guideService.items.map(it => getGuideForKey(it.key) || { key: it.key, title: it.label, steps: [{ text: guideService.help || "按服务维护者提供的参数填写。" }] }) }] : []} />

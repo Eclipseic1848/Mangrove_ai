@@ -22,17 +22,10 @@ from src.config.settings import settings
 from src.services.managed_paths import ManagedPathCodec
 
 from .store import WebUIStore
+from .roles import ROLE_LEVEL, role_level
 
 _PBKDF2_ROUNDS = 200_000
 _ALGO = "HS256"
-
-# RBAC 角色分级：数值越大权限越高。super_admin（超级管理员）为顶层，仅由系统引导设定、不可经 UI 授予。
-ROLE_LEVEL = {"super_admin": 3, "admin": 2, "user": 1}
-
-
-def role_level(role: str | None) -> int:
-    return ROLE_LEVEL.get(role or "user", 1)
-
 
 def is_admin_role(role: str | None) -> bool:
     """是否具备管理权限（管理员或超级管理员）。"""

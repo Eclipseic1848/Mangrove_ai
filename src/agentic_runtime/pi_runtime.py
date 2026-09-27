@@ -20,6 +20,7 @@ import uuid
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from src.config.settings import settings
+from src.utils.docker_user import docker_user_args
 from src.api.execution import execution_to_thread
 from src.services.upload_store import IMAGE_EXTENSIONS
 from src.candidate_verification import CandidateVerificationService
@@ -380,6 +381,12 @@ def build_docker_command(
         "--add-host",
         "host.docker.internal:host-gateway",
     ]
+    user_args = docker_user_args()
+    config_target = "/workspace/config" if user_args else "/root/.pi/agent"
+    if user_args:
+        # 同 UID 写出的 0600 候选/会话可由宿主读取；配置不再依赖 root 私有目录。
+        command.extend((*user_args, "--env", "HOME=/workspace/work",
+                        "--env", f"PI_CODING_AGENT_DIR={config_target}"))
     if network_name:
         command.extend(("--network", network_name))
     if egress_proxy_url:
@@ -447,7 +454,7 @@ def build_docker_command(
             "--mount",
             mount(session_dir, "/workspace/session"),
             "--mount",
-            mount(config_dir, "/root/.pi/agent"),
+            mount(config_dir, config_target),
             "--workdir",
             "/workspace/work",
             image,
@@ -468,7 +475,7 @@ def build_docker_command(
             "--session-dir",
             "/workspace/session",
             "--append-system-prompt",
-            "/root/.pi/agent/mangrove-system.md",
+            f"{config_target}/mangrove-system.md",
         )
     )
     if session_file:

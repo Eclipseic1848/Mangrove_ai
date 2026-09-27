@@ -31,11 +31,13 @@ const categories: { title: string; icon: typeof Globe; description: string; summ
   },
 ];
 
-export function WorkspaceExamples({ hasPrompt, onFill }: { hasPrompt: boolean; onFill: (prompt: string) => void }) {
+export function WorkspaceExamples({ hasPrompt, onFill, compact = false }: { hasPrompt: boolean; onFill: (prompt: string) => void; compact?: boolean }) {
+  const [expanded, setExpanded] = useState(false);
   const [categoryIndex, setCategoryIndex] = useState<number | null>(null);
   const [exampleIndex, setExampleIndex] = useState(0);
   const categoryButtons = useRef<(HTMLButtonElement | null)[]>([]);
   const detailId = useId();
+  const examplesId = useId();
   const category = categoryIndex === null ? null : categories[categoryIndex];
   const example = category?.examples[exampleIndex];
   return (
@@ -45,6 +47,8 @@ export function WorkspaceExamples({ hasPrompt, onFill }: { hasPrompt: boolean; o
         <h2 className="mt-4 text-2xl font-semibold tracking-tight">今天想完成什么？</h2>
         <p className="mt-2 text-sm text-muted-foreground">从信息到结果，直接说出你的需求。</p>
       </div>
+      {compact && <Button variant="outline" className="mb-3 w-full" aria-expanded={expanded} aria-controls={examplesId} onClick={() => setExpanded(value => !value)}>{expanded ? "收起任务示例" : "查看任务示例"}<ChevronDown aria-hidden="true" className={cn(expanded && "rotate-180")} /></Button>}
+      <div id={examplesId} hidden={compact && !expanded}>
       <div className="mb-3 flex flex-wrap items-center justify-between gap-2 text-xs">
         <p className="font-medium">选一个方向，看看任务示例</p><span className="text-muted-foreground">4 大类 · 8 个示例</span>
       </div>
@@ -77,6 +81,7 @@ export function WorkspaceExamples({ hasPrompt, onFill }: { hasPrompt: boolean; o
           <Button size="sm" className="hover:bg-primary" onClick={() => onFill(example.prompt)}>{hasPrompt ? "追加到需求" : "填入需求"}<ArrowRight aria-hidden="true" /></Button>
         </div>
       </div>}
+      </div>
     </section>
   );
 }

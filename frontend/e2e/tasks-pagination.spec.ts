@@ -35,6 +35,7 @@ test("自动化列表、运行记录和历史统一分页", async ({ page }, tes
   await pager.getByLabel("每页条数").selectOption("10");
   await pager.getByRole("button", { name: "3", exact: true }).click();
   await page.getByTitle("删除任务", { exact: true }).click();
+  await page.getByRole("dialog", { name: "删除自动化计划？" }).getByRole("button", { name: "确认删除", exact: true }).click();
   await expect(pager).toContainText("2 / 2 页");
   await page.getByPlaceholder("搜索任务名称或提示词").fill("合成任务1");
   await expect(pager).toContainText("1 / 2 页");

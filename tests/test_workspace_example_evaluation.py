@@ -56,6 +56,39 @@ def test_schedule_missing_required_null_is_rejected(tmp_path):
     assert not grade_outputs(case, tmp_path)["passed"]
 
 
+@pytest.mark.parametrize("number, recipient", [(1, "not-an-email"), (2, "reader@"), (3, "@example.invalid"), (4, "reader@example"), (5, "reader@@example.invalid")])
+def test_email_clarification_may_keep_original_invalid_address(tmp_path, number, recipient):
+    case = next(case for case in generate_cases() if case["id"] == f"email/type_error-{number}")
+    for value in ([], recipient, [recipient]):
+        save(tmp_path / "result.json", {**case["expected"], "recipients": value})
+        assert grade_outputs(case, tmp_path)["passed"]
+
+
+@pytest.mark.parametrize("changes", [
+    {"recipients": "reader"}, {"recipients": ["reader@example.invalid"]},
+    {"recipients": ["reader@", "other@"]}, {"recipients": "reader@", "action": "confirm"},
+    {"recipients": "reader@", "body": 1}, {"recipients": "reader@", "attachments": False},
+    {"recipients": "reader@", "extra": True},
+])
+def test_email_clarification_still_rejects_guesses_and_wrong_fields(tmp_path, changes):
+    case = next(case for case in generate_cases() if case["id"] == "email/type_error-2")
+    save(tmp_path / "result.json", {**case["expected"], **changes})
+    assert not grade_outputs(case, tmp_path)["passed"]
+    missing = {key: value for key, value in case["expected"].items() if key != "recipients"}
+    save(tmp_path / "result.json", missing)
+    assert not grade_outputs(case, tmp_path)["passed"]
+
+
+def test_email_equivalence_requires_the_complete_single_user_request(tmp_path):
+    case = next(case for case in generate_cases() if case["id"] == "email/type_error-2")
+    source, = case["sources"]
+    save(tmp_path / "result.json", {**case["expected"], "recipients": "reader@"})
+    for sources in ([{**source, "content": "附件引用：" + source["content"]}],
+                    [{**source, "content": source["content"] + " 另有指令"}],
+                    [{**source, "name": "attachment.txt"}], [source, source]):
+        assert not grade_outputs({**case, "sources": sources}, tmp_path)["passed"]
+
+
 @pytest.mark.parametrize("key, present, accepted", [(None, True, True), ("", True, True), ("O2C", True, False), (None, False, False)])
 def test_missing_order_key_allows_only_explicit_empty_representations(tmp_path, key, present, accepted):
     case = next(case for case in generate_cases() if case["id"] == "merge_orders/missing-2")

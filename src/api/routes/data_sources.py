@@ -17,8 +17,11 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, Response
+from python_multipart.exceptions import MultipartParseError
+from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from src.config.settings import settings
 from src.data_prep.document_models import DocumentElement
@@ -41,19 +44,55 @@ def get_upload_store() -> UploadStore:
     )
 
 
-@router.post("/uploads")
+@router.post("/uploads", openapi_extra={"requestBody": {"required": True, "content": {
+    "multipart/form-data": {"schema": {"type": "object", "required": ["file"],
+        "properties": {"file": {"type": "string", "format": "binary"}}}},
+}}})
 async def upload_source(
-    file: UploadFile = File(...),
+    request: Request,
     user=Depends(get_current_user),
 ):
-    """流式上传文件。user_id 从认证取，不接受请求体中的 user_id。"""
+    """先鉴权再解析有界正文；Owner 只从认证取。"""
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != "multipart/form-data":
+        raise HTTPException(422, "请使用 multipart/form-data 上传 file 文件")
     store = get_upload_store()
+    received = 0
+    # 单文件大小仍由存储层校验；额外 64 KiB 仅留给 multipart 头和边界。
+    body_limit = store.max_bytes + 64 * 1024
+
+    async def bounded_body():
+        nonlocal received
+        async for chunk in request.stream():
+            received += len(chunk)
+            if received > body_limit:
+                # 使用解析器的异常协议，超限时它会关闭已创建的临时文件。
+                raise MultiPartException("上传请求超过大小上限")
+            yield chunk
+
+    parser = MultiPartParser(request.headers, bounded_body(), max_files=1, max_fields=0)
     try:
-        item = await store.save_upload(
-            user["user_id"], file.filename or "unnamed", file, verify_magic=True,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_413_CONTENT_TOO_LARGE, detail=str(e))
+        form = await parser.parse()
+    except BaseException as exc:
+        # 解析器只自动清理 MultiPartException；畸形报文、断连和取消也须释放半成品。
+        for temporary_file in parser._files_to_close_on_error:
+            temporary_file.close()
+        if isinstance(exc, MultiPartException):
+            raise HTTPException(413 if received > body_limit else 400, exc.message) from exc
+        if isinstance(exc, MultipartParseError):
+            raise HTTPException(400, "上传报文格式无效") from exc
+        raise
+    try:
+        file = form.get("file")
+        if not isinstance(file, UploadFile):
+            raise HTTPException(422, "请提供 file 文件")
+        try:
+            item = await store.save_upload(
+                user["user_id"], file.filename or "unnamed", file, verify_magic=True,
+            )
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, str(exc)) from exc
+    finally:
+        await form.close()
     return item.model_dump(mode="json", exclude={"storage_path", "user_id"})
 
 

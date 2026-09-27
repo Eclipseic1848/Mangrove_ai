@@ -197,17 +197,20 @@ test("一键检查共享 Cookie：确认后逐项反馈，跳过空配置且不�
     const target = route.request().postDataJSON().target;
     calls.push(target);
     await new Promise(resolve => setTimeout(resolve, 500));
-    return route.fulfill({ json: { ok: target === "mc_cookie_xhs", detail: target === "mc_cookie_xhs" ? "登录有效" : "Cookie 已失效" } });
+    return route.fulfill({ json: { ok: target === "mc_cookie_xhs", detail: target === "mc_cookie_xhs" ? "登录有效" : "尚未接通身份探针",
+      verification: { scope: "identity", status: target === "mc_cookie_xhs" ? "valid" : "unknown", operations: "not_checked" } } });
   });
   await page.goto("/settings?section=platform");
   await page.getByRole("button", { name: "共享账号", exact: true }).click();
   await page.getByRole("button", { name: "一键检查 Cookie 状态", exact: true }).click();
   expect(calls).toEqual([]);
   await expect(page.getByRole("dialog")).toContainText("2 个已配置");
+  await expect(page.getByRole("dialog")).toContainText("不执行搜索或评论采集");
   await page.getByRole("button", { name: "开始检查", exact: true }).click();
   await expect(page.getByRole("button", { name: "一键检查 Cookie 状态", exact: true })).toBeDisabled();
   await expect(page.getByRole("region", { name: "小红书", exact: true })).toContainText("登录有效");
-  await expect(page.getByRole("region", { name: "抖音", exact: true })).toContainText("Cookie 已失效");
+  await expect(page.getByRole("region", { name: "小红书", exact: true })).toContainText("身份验证通过，业务操作尚未验证");
+  await expect(page.getByRole("region", { name: "抖音", exact: true })).toContainText("登录身份尚未确认");
   await expect(page.getByRole("status").filter({ hasText: "批量检查完成" })).toContainText("2/2");
   expect(calls).toEqual(["mc_cookie_xhs", "mc_cookie_dy"]);
   await expect(page.getByRole("button", { name: "检查 京东", exact: true })).toBeDisabled();
@@ -259,6 +262,26 @@ async function mockPlatform(page: Page, role = "admin") {
   });
   return counts;
 }
+
+for (const [status, label] of [
+  ["valid", "身份验证通过，业务操作尚未验证"],
+  ["invalid", "登录身份无效，请重新登录后更新凭证"],
+  ["unknown", "登录身份尚未确认"],
+]) test(`个人登录态验证说明与状态 ${status}`, async ({ page }) => {
+  await mockPlatform(page, "user");
+  await page.route("**/api/config/self", route => route.fulfill({ json: { items: [{
+    key: "mc_cookie_xhs", label: "小红书 Cookie", secret: true, group: "cookies", set: true, value: "····demo",
+  }] } }));
+  await page.route("**/api/config/verify", route => route.fulfill({ json: {
+    ok: status === "valid", detail: "合成探针结果", verification: { scope: "identity", status, operations: "not_checked" },
+  } }));
+  await page.goto("/settings");
+  await page.getByRole("button", { name: "采集账号", exact: true }).click();
+  await page.getByRole("button", { name: "验证", exact: true }).click();
+  await expect(page.getByRole("dialog")).toContainText("不会执行搜索或评论采集");
+  await page.getByRole("button", { name: "开始验证", exact: true }).click();
+  await expect(page.locator("[data-sonner-toast]")).toContainText(label);
+});
 
 test("服务一次编辑、密钥掩码、空值与重复提交保护", async ({ page }) => {
   const writes: unknown[] = [];
@@ -417,4 +440,45 @@ for (const width of [1440, 390]) test(`桌面和窄屏键盘可访问性 ${width
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: `${process.env.TEMP}/platform-config-editor-${width}.png`, fullPage: true });
   expect(errors).toEqual([]);
+});
+
+for (const scope of ["personal", "platform"]) for (const outcome of ["valid", "invalid", "unknown"]) test(`重新认证 ${scope} ${outcome} 保留旧配置`, async ({ page }, testInfo) => {
+  const counts = await mockPlatform(page, scope === "platform" ? "admin" : "user");
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  const item = { key: "mc_cookie_xhs", label: "小红书 Cookie", value: "····old", secret: true, set: true, source: "override", group: "cookies" };
+  await page.route("**/api/config", route => route.fulfill({ json: { groups: [{ key: "cookies", label: "共享账号", items: [item] }] } }));
+  await page.route("**/api/config/self", route => route.fulfill({ json: { items: [item] } }));
+  const requests: unknown[] = [];
+  await page.route("**/api/config/reauthenticate", async route => {
+    requests.push(route.request().postDataJSON());
+    await route.fulfill({ status: outcome === "unknown" ? 503 : 200, json: outcome === "unknown" ? { detail: "响应未知" } : {
+      ok: outcome === "valid", saved: outcome === "valid", detail: "新凭证未通过身份验证，原配置未修改",
+    } });
+  });
+  await page.goto(scope === "platform" ? "/settings?section=platform" : "/settings");
+  if (scope === "platform") {
+    await page.getByRole("button", { name: "共享账号", exact: true }).click();
+    await page.getByRole("button", { name: "配置 小红书", exact: true }).click();
+    await page.getByLabel("小红书 Cookie", { exact: true }).fill("synthetic-new-cookie");
+  } else {
+    await page.getByRole("button", { name: "采集账号", exact: true }).click();
+    await page.getByRole("button", { name: "修改", exact: true }).click();
+    await page.getByPlaceholder("粘贴从浏览器导出的 Cookie").fill("synthetic-new-cookie");
+  }
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("失败保留原凭证");
+  await dialog.getByRole("button", { name: "验证并更新", exact: true }).click();
+  await expect.poll(() => requests.length).toBe(1);
+  expect(requests[0]).toEqual({ key: "mc_cookie_xhs", value: "synthetic-new-cookie", scope });
+  if (outcome === "valid") await expect(dialog).toHaveCount(0);
+  else if (outcome === "invalid") await expect(scope === "platform" ? dialog : page.locator("[data-sonner-toast]")).toContainText("原配置未修改");
+  else {
+    await expect(dialog.getByRole("button", { name: "验证并更新", exact: true })).toBeDisabled();
+    await expect(dialog.getByRole("button", { name: "关闭并核对", exact: true })).toBeVisible();
+  }
+  expect(counts.save).toBe(0);
+  expect(counts.verify).toBe(0);
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: testInfo.outputPath(`reauth-${scope}-${outcome}.png`) });
 });

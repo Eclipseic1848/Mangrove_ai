@@ -26,6 +26,12 @@ const assert = require('node:assert/strict');
     assert.equal(result.block, true, command);
   }
   const input = {command: 'python process.py', timeout: 1800};
+  for (const directory of ['/root/.pi/agent', '/workspace/config']) {
+    for (const file of ['models.json', 'document-tools.json', 'capability-host.json']) {
+      const command = `cat ${directory}/${file}`;
+      assert.equal((await handlers.tool_call({toolName: 'bash', input: {command}})).block, true);
+    }
+  }
   assert.equal(await handlers.tool_call({toolName: 'bash', input}), undefined);
   assert.equal(input.timeout, 300);
   assert.equal(await handlers.tool_call({toolName: 'read', input: {path: 'sleep.txt'}}), undefined);

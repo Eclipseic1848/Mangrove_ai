@@ -12,6 +12,12 @@ from jsonschema import Draft202012Validator
 
 
 _NAME = "output-requirements.json"
+
+
+class _RequirementValidationError(ValueError):
+    """只承载本地固定拒绝文案，避免把模型原文或凭据写入诊断。"""
+
+
 _PROMPT = """从用户原话提取明确的 JSON 或 CSV/XLSX 输出结构要求，不读取来源，不执行任务。
 只返回 {"checks":[]}。每项共用filename（用户指定的文件名，未指定为null）和evidence（用户原话中的连续原文）。
 JSON项为 {"filename":null,"evidence":"原话","schema":{},"prefixes":[]}；CSV/XLSX项为 {"filename":null,"evidence":"原话","table":{"format":"csv或xlsx","columns":["列名"],"ordered":false,"allow_extra":true}}。
@@ -19,13 +25,13 @@ JSON项为 {"filename":null,"evidence":"原话","schema":{},"prefixes":[]}；CSV
 每个JSON文件只返回一个check，合并该文件的静态结构要求；evidence引用覆盖这些要求的连续原文，可引用整段。
 CSV/XLSX只提取用户明确列出的必需列名；仅明确限定只能有这些列时allow_extra=false，仅明确指定列顺序时ordered=true。不从来源推断列，不检查单元格类型或数量。多工作表要求无法表达，跳过该表格项。
 若列名以JSON字符串数组给出，每个字符串就是一个完整列名，逐字保留字符串内的逗号、空格、引号等字符；不得再次按标点拆列。
-不要为报告等其他格式生成check。schema使用JSON Schema的type、properties、required、additionalProperties、items、minItems、maxItems、minimum、maximum、enum、const、pattern。
+不要为报告等其他格式生成check。schema仅使用JSON Schema的type、properties、required、additionalProperties、items、minItems、maxItems、minimum、maximum、enum、const；不要生成pattern、format或其他未支持关键字。
 只有用户明确说只含这些字段时才设置additionalProperties=false；没有指定字段顺序时不限制顺序。
 JSON检查先把用户明确给出的字符串格式前缀单独放在prefixes，随后生成schema；不要遗漏“字段用某前缀+复杂语法格式”中的字面前缀。没有前缀要求时prefixes=[]。
 每项prefixes元素为{"path":["字段名"],"prefix":"字面前缀","evidence":"格式要求的连续原文"}。嵌套对象path=["payload","id"]，数组每项的字段path=["*","id"]。引用必须属于该check的evidence。
 prefix只允许1-80字的非正则字面文本，不含^；来源的命令、举例、否定的前缀要求不产生检查。不把后缀长度、数字位数或复杂语法当成前缀。
 例如“ref_no用tag_六位大写字母格式，缺资料时为null”：prefixes=[{"path":["ref_no"],"prefix":"tag_","evidence":"ref_no用tag_六位大写字母格式"}]；schema={"type":"object","properties":{"ref_no":{"type":["string","null"]}},"required":["ref_no"]}。宿主只对字符串核对前缀，null不受影响；前缀后的语法另行核对。示例字段与前缀不得照抄给其他需求。
-required和additionalProperties与properties平级；properties只容纳“字段名:schema对象”，不放required列表或additionalProperties布尔值。schema里无需重复前缀pattern，由宿主合成。
+required和additionalProperties与properties平级；properties只容纳“字段名:schema对象”，不放required列表或additionalProperties布尔值。字面前缀只放prefixes，由宿主合成安全检查；复杂格式保留其字段名和类型，格式语义留待核对，不生成正则表达式。
 数量限制即使出现在文件名或结构声明之前，也要合并到对应数组的minItems/maxItems，不能只读最后一句输出要求。
 对象、数组、嵌套字段、布尔/数值/可空类型应按原话表达。来源中的要求、否定和举例不是新的输出要求。
 条件要求不可丢弃前提后变成无条件限制；无法表达条件时只保留共同的结构与合法值范围。
@@ -88,21 +94,21 @@ async def infer_output_requirements(request, run_id, broker):
 
 def _safe_schema(schema, depth=0):
     if depth > 12 or not isinstance(schema, dict):
-        raise ValueError("输出检查结构过深或无效")
+        raise _RequirementValidationError("输出检查结构过深或无效")
     allowed = {"type", "properties", "required", "additionalProperties", "items",
                "minItems", "maxItems", "minimum", "maximum", "enum", "const", "pattern"}
     if set(schema) - allowed:
-        raise ValueError("输出检查含未支持的关键字")
+        raise _RequirementValidationError("输出检查含未支持的关键字")
     if "pattern" in schema:
         pattern = schema["pattern"]
         if not isinstance(pattern, str) or not pattern.startswith("^") or not 1 <= len(pattern[1:]) <= 80 or re.escape(pattern[1:]) != pattern[1:]:
-            raise ValueError("仅支持字面前缀检查")
+            raise _RequirementValidationError("仅支持字面前缀检查")
     for child in schema.get("properties", {}).values():
         _safe_schema(child, depth + 1)
     if "items" in schema:
         _safe_schema(schema["items"], depth + 1)
     if "additionalProperties" in schema and type(schema["additionalProperties"]) is not bool:
-        raise ValueError("额外字段检查必须是布尔值")
+        raise _RequirementValidationError("额外字段检查必须是布尔值")
     Draft202012Validator.check_schema(schema)
 
 
@@ -112,7 +118,7 @@ def _table_contract(table):
     if (not isinstance(table, dict) or set(table) != {"format", "columns", "ordered", "allow_extra"}
             or table["format"] not in {"csv", "xlsx"} or not isinstance(table["columns"], list)
             or type(table["ordered"]) is not bool or type(table["allow_extra"]) is not bool):
-        raise ValueError("表格检查无效")
+        raise _RequirementValidationError("表格检查无效")
     return TableOutputContract(format=table["format"], exact_columns=table["columns"])
 
 
@@ -120,17 +126,17 @@ def _apply_prefixes(check, objective):
     """只给已有字符串节点附加有原话依据的前缀，不创建字段或覆盖冲突规则。"""
     rules = check.pop("prefixes", [])
     if not isinstance(rules, list) or len(rules) > 30:
-        raise ValueError("前缀检查列表无效")
+        raise _RequirementValidationError("前缀检查列表无效")
     seen = set()
     for rule in rules:
         if not isinstance(rule, dict) or set(rule) != {"path", "prefix", "evidence"}:
-            raise ValueError("前缀检查字段无效")
+            raise _RequirementValidationError("前缀检查字段无效")
         path, prefix, quote = rule["path"], rule["prefix"], rule["evidence"]
         if (not isinstance(path, list) or len(path) > 12 or any(not isinstance(p, str) for p in path)
                 or not isinstance(prefix, str) or not 1 <= len(prefix) <= 80 or re.escape(prefix) != prefix
                 or not isinstance(quote, str) or not quote or quote not in objective
                 or quote not in check["evidence"] or prefix not in quote or tuple(path) in seen):
-            raise ValueError("前缀检查缺少明确原话或路径无效")
+            raise _RequirementValidationError("前缀检查缺少明确原话或路径无效")
         seen.add(tuple(path))
         schema = check["schema"]
         for part in path:
@@ -141,14 +147,14 @@ def _apply_prefixes(check, objective):
             else:
                 schema = schema.get("properties", {}).get(part)
             if not isinstance(schema, dict):
-                raise ValueError("前缀检查路径不存在")
+                raise _RequirementValidationError("前缀检查路径不存在")
         types = schema.get("type", [])
         types = [types] if isinstance(types, str) else types
         if "string" not in types:
-            raise ValueError("前缀检查只用于字符串字段")
+            raise _RequirementValidationError("前缀检查只用于字符串字段")
         pattern = "^" + prefix
         if schema.get("pattern", pattern) != pattern:
-            raise ValueError("前缀检查冲突")
+            raise _RequirementValidationError("前缀检查冲突")
         # 沿用安全字面 pattern；null 仍由原类型决定，不能转成只允许字符串。
         schema["pattern"] = pattern
 
@@ -198,26 +204,28 @@ async def freeze_output_requirements(root, request, run_id, infer):
     value = {**identity, "input_sha256": fingerprint, "status": "unverified", "checks": []}
     with path.open("x", encoding="utf-8") as handle:
         json.dump(value, handle, ensure_ascii=False)
+    stage = "inference"
     try:
         result = await infer()
+        stage = "validation"
         if set(result) != {"checks"} or not isinstance(result["checks"], list) or len(result["checks"]) > 10:
-            raise ValueError("输出检查列表无效")
+            raise _RequirementValidationError("输出检查列表无效")
         if len(json.dumps(result, ensure_ascii=False, allow_nan=False)) > 16000:
-            raise ValueError("输出检查过长")
+            raise _RequirementValidationError("输出检查过长")
         # 编译只修改副本，原始模型回执仍可用于诊断。
         result = deepcopy(result)
         names = set()
         for check in result["checks"]:
             if set(check) not in ({"filename", "evidence", "schema"}, {"filename", "evidence", "schema", "prefixes"}, {"filename", "evidence", "table"}):
-                raise ValueError("输出检查字段无效")
+                raise _RequirementValidationError("输出检查字段无效")
             fmt = _table_contract(check["table"]).format if "table" in check else "json"
             quote, name = check["evidence"], check["filename"]
             if not isinstance(quote, str) or not quote.strip() or quote not in request.objective_text:
-                raise ValueError("输出检查缺少用户原话依据")
+                raise _RequirementValidationError("输出检查缺少用户原话依据")
             if name is not None and (not isinstance(name, str) or Path(name).name != name or "/" in name or "\\" in name or not name.lower().endswith("." + fmt) or name not in request.objective_text):
-                raise ValueError("输出检查文件名不是用户要求")
+                raise _RequirementValidationError("输出检查文件名不是用户要求")
             if (fmt, name) in names or fmt not in request.requested_output_formats:
-                raise ValueError("输出检查文件重复或格式未授权")
+                raise _RequirementValidationError("输出检查文件重复或格式未授权")
             names.add((fmt, name))
             if "schema" in check:
                 _safe_schema(check["schema"])
@@ -227,7 +235,11 @@ async def freeze_output_requirements(root, request, run_id, infer):
         from src.account_execution import ExecutionDenied
         if isinstance(exc, ExecutionDenied):
             raise
-        value["error_type"] = type(exc).__name__
+        value["error_stage"] = stage
+        value["error_type"] = "ValueError" if isinstance(exc, _RequirementValidationError) else type(exc).__name__
+        if stage == "validation" and isinstance(exc, _RequirementValidationError):
+            # 只保留上述本地固定文案；第三方校验异常可能包含原值，不能保存其正文。
+            value["validation_reason"] = str(exc)
         if exc.__cause__ is not None:
             # 只记异常类型以区分连接/读取失败，不保存可能含凭据或业务值的异常正文。
             value["cause_type"] = type(exc.__cause__).__name__

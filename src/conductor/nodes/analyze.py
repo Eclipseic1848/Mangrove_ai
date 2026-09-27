@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from src.config.settings import settings
 from src.llm import achat
+from src.model_connections.text_protocol import ModelOutputTruncatedError
 from src.memory._library_scope import execution_owner
 from src.memory import lesson_for_analyze, match_template, skill_for_analysis
 
@@ -77,6 +78,9 @@ async def _classify_route_llm(spec: TaskSpec, provider, model) -> Optional[str]:
             [{"role": "system", "content": _ROUTE_SYSTEM}, {"role": "user", "content": user}],
             provider=provider, model=model, temperature=0,
         )
+    except ModelOutputTruncatedError:
+        # 路由判断截断与普通不可用不同，不能继续生成未经完整判断的报告。
+        raise
     except Exception as e:
         logger.warning("模板路由 LLM 分类失败，回退词表通道：%s", e)
         return None
@@ -249,6 +253,9 @@ async def analyze_node(state: ConductorState) -> Dict[str, Any]:
             provider=state.get("provider"),
             model=state.get("model"),
         )
+    except ModelOutputTruncatedError:
+        # 分析未完成时不能生成看似成功的报告。
+        raise
     except Exception as e:
         logger.exception("分析 LLM 调用失败")
         return {"analysis": None, "error": f"分析失败：{e}", **consumed}

@@ -20,6 +20,10 @@ class ConductorState(TypedDict, total=False):
     model: Optional[str]                # 具体模型覆盖（None=用该供应商默认模型）
     session_id: str                     # 会话/线程标识
     task_id: str                        # 本次任务标识（用于隔离工作目录）
+    collection_output_attempt: Optional[str]  # 恢复快照另存，旧下载保持原字节
+    execution_binding: str             # 恢复必须属于同一执行身份和冻结模型连接
+    execution_started_at: float        # 本轮入口时间；总预算包含理解与规划已消耗的时间
+    budget_exhausted: bool             # 已用尽总预算时不再进入后续模型或采集节点
 
     # ---- 意图阶段 ----
     needs_clarification: bool           # 是否需要向用户追问
@@ -35,6 +39,9 @@ class ConductorState(TypedDict, total=False):
     collector_notes: List[str]          # 采集过程给用户的说明（如登录过期/全网兜底），供 output 透出
     collector_attempts: List[Dict[str, Any]]  # 各候选采集器的执行结果，供 trace/排障展示
     raw_dataset: List[Dict[str, Any]]   # 原始数据
+    bank_collection: Dict[str, Any]    # 银行权益冻结参数、候选证据和逐银行执行说明
+    evidence_collection: Dict[str, Any]  # 通用主题发现与证据抽取快照
+    collection_outcome: Dict[str, Any]   # 获取失败、覆盖缺口与初稿资格
     cleaned_dataset: List[Dict[str, Any]]  # 清洗后数据
     clean_stats: Optional[Dict[str, int]]  # 清洗剔除统计：{原因: 条数}（质量门透明化，白盒卡片透出）
     analysis: Optional[str]             # 分析结果（Markdown 正文）

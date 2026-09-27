@@ -4,7 +4,7 @@
 services:
   searxng:
     image: searxng/searxng:latest
-    container_name: mangrove-searxng
+    container_name: mangrove-v3-searxng
     ports:
       - "8080:8080"
     volumes:

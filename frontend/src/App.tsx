@@ -1,17 +1,19 @@
+import { lazy } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth, isAdminish } from "@/lib/auth";
 import { Layout } from "@/components/Layout";
 import { Login } from "@/pages/Login";
-import { Dashboard } from "@/pages/Dashboard";
-import { Chat } from "@/pages/Chat";
-import { DataPrepPage } from "@/pages/DataPrepPage";
-import { Tasks } from "@/pages/Tasks";
-import { Templates } from "@/pages/Templates";
-import { Memory } from "@/pages/Memory";
-import { Settings } from "@/pages/Settings";
-import { Admin } from "@/pages/Admin";
-import { Feedback } from "@/pages/Feedback";
-import { Operations } from "@/pages/Operations";
+
+const Dashboard = lazy(() => import("@/pages/Dashboard").then(module => ({ default: module.Dashboard })));
+const Chat = lazy(() => import("@/pages/Chat").then(module => ({ default: module.Chat })));
+const DataPrepPage = lazy(() => import("@/pages/DataPrepPage").then(module => ({ default: module.DataPrepPage })));
+const Tasks = lazy(() => import("@/pages/Tasks").then(module => ({ default: module.Tasks })));
+const Templates = lazy(() => import("@/pages/Templates").then(module => ({ default: module.Templates })));
+const Memory = lazy(() => import("@/pages/Memory").then(module => ({ default: module.Memory })));
+const Settings = lazy(() => import("@/pages/Settings").then(module => ({ default: module.Settings })));
+const Admin = lazy(() => import("@/pages/Admin").then(module => ({ default: module.Admin })));
+const Feedback = lazy(() => import("@/pages/Feedback").then(module => ({ default: module.Feedback })));
+const Operations = lazy(() => import("@/pages/Operations").then(module => ({ default: module.Operations })));
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();

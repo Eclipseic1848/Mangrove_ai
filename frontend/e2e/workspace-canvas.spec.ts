@@ -11,6 +11,45 @@ const resultHash = "b".repeat(64);
 const outputHash = "c".repeat(64);
 const itemRef = `item_${"d".repeat(64)}`;
 
+for (const width of [390, 1440]) test(`Word 正式结果默认原版式并保留条目追问 ${width}`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 960 });
+  await mockCanvas(page);
+  await page.route(/\/api\/semantic-workspace\/tasks\/canvas-task(?:\?.*)?$/, route => {
+    const task = canvasTask(2);
+    task.delivery.outputs = [{ ...task.delivery.outputs[0], format: "docx", filename: "合成分析报告.docx" },
+      { ...task.delivery.outputs[0], output_id: "other-word", format: "docx", filename: "另一份合成报告.docx" }];
+    return route.fulfill({ json: task });
+  });
+  await page.route("**/api/semantic-deliveries/outputs/output-2/office-preview", route => route.fulfill({
+    contentType: "application/pdf", path: path.resolve(process.cwd(), "../tests/fixtures/document_golden/contract_01_digital.pdf"),
+  }));
+  await page.route("**/api/semantic-deliveries/outputs/other-word/office-preview", route => route.fulfill({ status: 422, json: { detail: "合成转换故障" } }));
+  await page.goto("/data-prep?task=canvas-task");
+  const reader = page.getByRole("region", { name: "Word 原版式预览" });
+  await expect(reader.locator('.react-pdf__Page[data-page-number="1"] canvas')).toBeVisible();
+  await expect(page.getByLabel("在全部结果中搜索")).toHaveCount(0);
+  await reader.getByRole("button", { name: "下一页", exact: true }).click();
+  await expect(reader.locator('.react-pdf__Page[data-page-number="2"] canvas')).toBeVisible();
+  await reader.getByRole("button", { name: "放大", exact: true }).click();
+  await expect(reader).toContainText("125%");
+  await reader.getByRole("button", { name: "适应宽度", exact: true }).click();
+  if (width > 768) await page.getByRole("button", { name: "展开预览", exact: true }).click();
+  await reader.evaluate(element => element.scrollIntoView({ block: "start" }));
+  await expect(reader.locator('.react-pdf__Page[data-page-number="2"] canvas')).toBeVisible();
+  await page.screenshot({ path: `${process.env.TEMP}/mangrove-result-preview-fix/word-preview-${width}.png` });
+  await page.getByRole("button", { name: "结果条目与追问", exact: true }).click();
+  await expect(page.getByLabel("在全部结果中搜索")).toBeVisible();
+  await expect(page.getByRole("button", { name: "围绕此结果追问", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "原版式预览", exact: true }).click();
+  await expect(reader.locator("canvas")).toBeVisible();
+  await page.getByLabel("预览输出").selectOption("other-word");
+  await expect(reader.getByRole("alert")).toContainText("Office 预览暂不可用");
+  await expect(reader.locator("canvas")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "下载 另一份合成报告.docx", exact: true })).toBeVisible();
+  await page.getByLabel("预览输出").selectOption("output-2");
+  await expect(reader.locator('.react-pdf__Page[data-page-number="1"] canvas')).toBeVisible();
+});
+
 for (const width of [390, 1440]) test(`正式结果可选择正文附件发送，失败不丢报告且历史版本不能发送 ${width}`, async ({ page }) => {
   await page.setViewportSize({ width, height: 900 });
   await mockCanvas(page);
@@ -61,9 +100,15 @@ function canvasTask(revision = 1) {
 async function mockCanvas(page: Page) {
   const queries: URL[] = [];
   let messages: Array<Record<string, unknown>> = [];
-  await page.addInitScript(() => { localStorage.setItem("mangrove_token", "e2e-token"); localStorage.setItem("mangrove_theme", "light"); });
+  await page.addInitScript(() => {
+    localStorage.setItem("mangrove_token", "e2e-token");
+    localStorage.setItem("mangrove_theme", "light");
+    // 本组验证结果画布；教程另有测试，避免自动遮罩抢占点击。
+    localStorage.setItem(`onboarding_all_${JSON.stringify(["canvas-owner", "admin"])}`, "skipped");
+  });
   await page.route("**/api/**", route => route.fulfill({ status: 404, json: { detail: "合成接口未登记" } }));
   await page.route("**/api/auth/me", route => route.fulfill({ json: { user_id: "canvas-owner", username: "canvas", display_name: "画布用户", role: "admin" } }));
+  await page.route("**/api/semantic-workspace/tasks/canvas-task/feedback?*", route => route.fulfill({ json: { feedback: {} } }));
   await page.route("**/api/settings/onboarding/model-connections", route => route.fulfill({ json: { completed: true } }));
   await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [] } }));
   await page.route("**/api/model-connections/presets", route => route.fulfill({ json: { presets: [] } }));
@@ -274,7 +319,9 @@ test("资料包下载换版本和换Owner均丢弃旧响应", async ({ page }) =
   await page.getByRole("button", { name: "下载完整资料包", exact: true }).click();
   await expect.poll(() => requests).toBe(2);
   await page.route("**/api/auth/me", route => route.fulfill({ json: { user_id: "new-owner", username: "new-owner", display_name: "新用户", role: "admin" } }));
-  await page.evaluate(async modulePath => { const api = await import(modulePath); await api.bootstrapSession(); }, "/src/lib/api.ts");
+  // 走正式跨标签通知，避免 Vite 热更新后的第二份模块实例无法更新页面身份。
+  await page.evaluate(() => { const channel = new BroadcastChannel("mangrove-platform-session"); channel.postMessage("identity-changed"); channel.close(); });
+  await expect(page.getByText("新用户", { exact: true }).first()).toBeVisible();
   release!();
   await page.waitForEvent("download", { timeout: 500 }).then(() => { throw new Error("旧身份仍触发下载"); }, error => { expect(error.name).toBe("TimeoutError"); });
   expect(downloads).toEqual([]);
@@ -287,7 +334,7 @@ test("同身份画布往返和关闭保留筛选分页，跨修订仍重置", as
   await page.getByPlaceholder("在全部结果中搜索").fill("付款");
   await page.getByRole("button", { name: "搜索", exact: true }).click();
   await page.getByRole("button", { name: "结果", exact: true }).click();
-  await page.locator("button:has(svg.lucide-chevron-right)").click();
+  await page.getByRole("button", { name: "下一页结果", exact: true }).click();
   await expect(page.getByText("V2第101条结果", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "查看来源", exact: true }).click();
   await expect(page.getByText("来源段落40", { exact: true })).toBeVisible();
@@ -373,7 +420,7 @@ test("输出身份错位与来源拒绝不展示其它内容，失败后能重�
   await expect(page.getByRole("alert").filter({ hasText: "来源超出预览限额" })).toBeVisible();
   await expect(page.getByText(/已定位来源/)).toHaveCount(0);
   failSource = false;
-  await page.getByRole("button", { name: "重试", exact: true }).click();
+  await page.getByLabel("来源内容", { exact: true }).getByRole("button", { name: "重试", exact: true }).click();
   await expect(page.getByRole("alert").filter({ hasText: "来源冻结版本不匹配" })).toBeVisible();
   await page.getByRole("button", { name: "查看结果", exact: true }).click();
   await page.route("**/api/semantic-workspace/tasks/canvas-task/preview?*", route => route.fulfill({ json: { kind: "document", task_id: "other-task", revision: 2, output_id: "output-other", items: [{ id: "private", label: "不能显示", content: "另一个输出的正文", evidence_refs: [] }], total: 1, offset: 0, limit: 100 } }));
@@ -405,7 +452,20 @@ test("真实结果选择保留输入，仅发送身份并恢复持久回答来�
   await page.getByRole("button", { name: "发送", exact: true }).click();
   await expect(page.getByText("这是基于所选结果的完整回答", { exact: true })).toBeVisible();
   expect(requests).toEqual([{ text: "解释这笔付款", result_context: context }]);
-  await expect(page.getByLabel("本次追问引用的结果", { exact: true })).toHaveCount(0);
+  await expect(page.getByLabel("本次追问引用的结果", { exact: true })).toBeVisible();
+  for (const text of ["那这一条的来源呢", "解释刚才这条", "只说明差异，不重新采集", "继续说明这条的限制"]) {
+    await page.getByLabel("继续对话").fill(text);
+    await page.getByRole("button", { name: "发送", exact: true }).click();
+    await expect(page.getByLabel("继续对话")).toHaveValue("");
+    expect(requests.at(-1)).toEqual({ text, result_context: context });
+    await expect(page.getByLabel("本次追问引用的结果", { exact: true })).toBeVisible();
+  }
+  await page.screenshot({ path: test.info().outputPath("continuous-result-focus.png") });
+  await page.getByRole("button", { name: "移除引用", exact: true }).click();
+  await page.getByLabel("继续对话").fill("现在讨论其他问题");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(page.getByLabel("继续对话")).toHaveValue("");
+  expect(requests.at(-1)).toEqual({ text: "现在讨论其他问题" });
   await page.reload();
   await expect(page.getByText("这是基于所选结果的完整回答", { exact: true })).toHaveCount(1);
   await page.getByLabel("本次追问引用的结果和来源").getByRole("button", { name: "来源 2" }).click();
@@ -642,7 +702,7 @@ test("图片解码错误可恢复，异源身份拒绝读取原件", async ({ pa
   await page.getByRole("button", { name: "原文件预览", exact: true }).click();
   await expect(page.getByRole("alert").filter({ hasText: "图片无法解码" })).toBeVisible();
   await page.route("**/api/data-sources/uploads/canvas-source/content", route => route.fulfill({ contentType: "image/png", body: imageOriginal }));
-  await page.getByRole("button", { name: "重试", exact: true }).click();
+  await page.getByLabel("来源内容", { exact: true }).getByRole("button", { name: "重试", exact: true }).click();
   await expect(page.getByRole("img", { name: "扫描原件.png原件" })).toBeVisible();
   let contentReads = 0;
   await page.route("**/api/data-sources/uploads/canvas-source/content", route => { contentReads++; return route.abort(); });

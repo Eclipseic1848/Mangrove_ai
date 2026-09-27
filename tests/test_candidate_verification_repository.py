@@ -82,9 +82,16 @@ def test_repository_connections_enforce_integrity_and_lock_timeout(
     repository = _migrated_repository(tmp_path)
     real_connect = sqlite3.connect
     connections: list[sqlite3.Connection] = []
+    pragmas = []
+
+    class Connection(sqlite3.Connection):
+        def close(self):
+            pragmas.append((self.execute("PRAGMA foreign_keys").fetchone()[0],
+                            self.execute("PRAGMA busy_timeout").fetchone()[0]))
+            return super().close()
 
     def tracked_connect(*args, **kwargs):
-        connection = real_connect(*args, **kwargs)
+        connection = real_connect(*args, **kwargs, factory=Connection)
         connections.append(connection)
         return connection
 
@@ -95,11 +102,9 @@ def test_repository_connections_enforce_integrity_and_lock_timeout(
 
     assert repository.get("owner-a", "missing-attempt") is None
     connection = connections[-1]
-    try:
-        assert connection.execute("PRAGMA foreign_keys").fetchone()[0] == 1
-        assert connection.execute("PRAGMA busy_timeout").fetchone()[0] == 5000
-    finally:
-        connection.close()
+    assert pragmas == [(1, 5000)]
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connection.execute("SELECT 1")
 
 
 def test_repository_rejects_malformed_candidate_verification_schema(

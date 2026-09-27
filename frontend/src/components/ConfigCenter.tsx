@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { BookOpen, Loader2, Pencil, Play, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
-import { api } from "@/lib/api";
+import { api, ApiError } from "@/lib/api";
+import { verificationLabel } from "@/lib/configVerification";
 import { ConfigGuideModal, GuideStepsInline } from "@/components/ConfigGuideModal";
 import { CONFIG_GUIDE_SECTIONS, COOKIE_KEY_ORDER } from "@/lib/configGuides";
 
@@ -62,7 +63,7 @@ function isSlowVerifyTarget(target: string): boolean {
 }
 
 function slowVerifyConfirmText(): string {
-  return "会真实启动一次 MediaCrawler 浏览器自动化登录并小范围搜索，用来确认该平台 Cookie 是否还有效——耗时可能从十几秒到几分钟不等。";
+  return "将通过独立会话检查登录身份，可能启动浏览器并访问来源平台。不会执行搜索或评论采集；不支持身份探测的平台会返回尚未确认。";
 }
 
 function useVerify() {
@@ -71,7 +72,12 @@ function useVerify() {
     setVerifying(target);
     try {
       const r = await api.post("/api/config/verify", { target });
-      r.ok ? toast.success(r.detail) : toast.error(r.detail);
+      if (r.verification?.scope === "identity") {
+        const message = `${verificationLabel(r)}。${r.detail}`;
+        if (r.verification.status === "valid") toast.success(message);
+        else if (r.verification.status === "invalid") toast.error(message);
+        else toast.info(message);
+      } else r.ok ? toast.success(r.detail) : toast.error(r.detail);
     } catch (e: any) {
       toast.error(e.message || "验证失败");
     } finally {
@@ -91,6 +97,24 @@ export function SelfConfigCenter() {
   const [guideOpen, setGuideOpen] = useState(false);
   const { verifying, run } = useVerify();
   const [confirmTarget, setConfirmTarget] = useState<string | null>(null);
+  const updateLock = useRef(false);
+  const [updating, setUpdating] = useState(false);
+  const [updateUnknown, setUpdateUnknown] = useState(false);
+  const reauthenticate = async () => {
+    if (!edit || updateLock.current || updateUnknown) return;
+    updateLock.current = true; setUpdating(true);
+    try {
+      const result = await api.post("/api/config/reauthenticate", { key: edit.key, value: val, scope: "personal" });
+      if (!result.saved) { toast.error(result.detail); return; }
+      toast.success("新凭证已验证并保存；原任务未自动恢复。");
+      setEdit(null); await load();
+    } catch (error) {
+      const uncertain = !(error instanceof ApiError) || error.status >= 500;
+      setUpdateUnknown(uncertain);
+      toast.error(uncertain ? "更新结果未知，请关闭后重新加载核对，不要重复提交。" : (error as Error).message);
+    } finally { updateLock.current = false; setUpdating(false); }
+  };
+
 
   const runOrConfirm = (target: string) => {
     if (isSlowVerifyTarget(target)) setConfirmTarget(target);
@@ -101,7 +125,7 @@ export function SelfConfigCenter() {
   useEffect(() => { load(); }, []);
 
   const save = async () => {
-    if (!edit) return;
+    if (!edit || updateLock.current || updateUnknown) return;
     try {
       await api.put(`/api/config/self/${edit.key}`, { value: val });
       toast.success(`${edit.label} 已保存，之后你的任务将优先使用它`);
@@ -138,7 +162,7 @@ export function SelfConfigCenter() {
         </code>
         <span className="ml-auto flex items-center gap-1">
           <Button variant="ghost" size="sm" className="h-7 gap-1 px-2"
-            onClick={() => { setEdit(it); setVal(""); }}>
+            onClick={() => { setEdit(it); setVal(""); setUpdateUnknown(false); }}>
             <Pencil className="h-3.5 w-3.5" /> {it.set ? "修改" : "配置"}
           </Button>
           {it.set && (
@@ -181,14 +205,16 @@ export function SelfConfigCenter() {
         </div>
       </CardContent>
 
-      <Modal open={!!edit} onClose={() => setEdit(null)} title={`${edit?.set ? "修改" : "配置"} · ${edit?.label ?? ""}`}>
+      <Modal open={!!edit} onClose={() => { if (!updateLock.current) setEdit(null); }} title={`${edit?.set ? "修改" : "配置"} · ${edit?.label ?? ""}`}>
         {edit && <GuideStepsInline configKey={edit.key} />}
         <Input placeholder={edit?.key.includes("cookie") ? "粘贴从浏览器导出的 Cookie" : "输入 API Key"}
-          value={val} onChange={(e) => setVal(e.target.value)}
+          disabled={updating || updateUnknown} value={val} onChange={(e) => setVal(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && save()} />
+        <p className="mt-2 text-xs text-muted-foreground">验证并更新将访问平台身份接口，可能耗时数分钟；失败保留原凭证，不会自动恢复任务。</p>
         <div className="mt-4 flex justify-end gap-2">
-          <Button variant="outline" size="sm" onClick={() => setEdit(null)}>取消</Button>
-          <Button size="sm" disabled={!val.trim()} onClick={save}>保存</Button>
+          <Button variant="outline" size="sm" disabled={updating} onClick={() => setEdit(null)}>{updateUnknown ? "关闭并核对" : "取消"}</Button>
+          <Button variant="outline" size="sm" disabled={!val.trim() || updating || updateUnknown} onClick={() => void reauthenticate()}>{updating ? "验证中…" : "验证并更新"}</Button>
+          <Button size="sm" disabled={!val.trim() || updating || updateUnknown} onClick={() => void save()}>保存</Button>
         </div>
       </Modal>
 

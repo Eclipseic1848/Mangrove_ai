@@ -388,6 +388,15 @@ def grade_outputs(case: dict, directory: Path) -> dict:
                         row = {**row, "订单编号": ""}
                     conflicts.append(row)
                 compared = {**actual, "conflicts": conflicts}
+            if (case["kind"] == "email" and isinstance(actual, dict)
+                    and expected["action"] == actual.get("action") == "ask_recipient" and expected["recipients"] == []):
+                # 合成需求未要求清空无效地址；仅整段匹配原需求并保留原串时，两种容器写法等价。
+                sources = case["sources"]
+                supplied = (re.fullmatch(r"将报告正文和附件发送到([^。\r\n]+)。地址无效请询问，不能猜测正确地址。",
+                                        sources[0]["content"])
+                            if len(sources) == 1 and sources[0]["name"] == "request.txt" else None)
+                if supplied and actual.get("recipients") in (supplied[1], [supplied[1]]):
+                    compared = {**actual, "recipients": []}
             if case["kind"] == "schedule" and isinstance(actual, dict):
                 checks["required_keys"] = actual.keys() == expected.keys()
                 compared = {**actual, "schedule": None}

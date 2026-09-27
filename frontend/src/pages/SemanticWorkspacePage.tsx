@@ -1,7 +1,7 @@
 import { beijingTime } from "@/lib/beijingTime";
 import { PageGuide } from "@/components/onboarding/PageGuide";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSearchParams } from "react-router-dom";
 import { nanoid } from "nanoid/non-secure";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
@@ -176,8 +176,6 @@ function FollowupComposer({
   latestIdentity.current = currentIdentity;
   const latestQuestionScope = useRef({ scopeIdentity, question });
   latestQuestionScope.current = { scopeIdentity, question };
-  const latestContext = useRef(resultContext);
-  latestContext.current = resultContext;
   const answerText = answerDraft.text;
   const latestAnswerDraft = useRef(answerDraft);
   latestAnswerDraft.current = answerDraft;
@@ -255,7 +253,6 @@ function FollowupComposer({
     }
     if (!text.trim() || inFlight.current) return;
     const capturedIdentity = currentIdentity;
-    const capturedContext = resultContext;
     const submitted = text;
     const context = resultContext ? { revision: resultContext.revision, output_id: resultContext.output_id,
       representation_sha256: resultContext.representation_sha256, item_ref: resultContext.item_ref } : undefined;
@@ -271,7 +268,7 @@ function FollowupComposer({
       if (latestIdentity.current !== capturedIdentity) return;
       submitAttempt.current = null;
       setText(current => current === submitted ? "" : current);
-      if (context && latestContext.current === capturedContext) onClearResultContext();
+      // 保留显式选中的结果供连续追问；用户移除或切换任务版本时才清除。
     } catch {
       // 父级展示请求错误；失败保留原稿，不自动重复发送。
     } finally {
@@ -571,11 +568,15 @@ export function SemanticWorkspacePage() {
   const scrollPositions = useRef(new Map<string, { top: number; follow: boolean }>());
 
 
-  const tasks = useQuery({
-    queryKey: ["semantic-workspace-tasks", recycleBin],
-    queryFn: () => listWorkspaceTasks(recycleBin),
+  const taskFilter = recycleBin ? "all" : filter;
+  const tasks = useInfiniteQuery({
+    queryKey: ["semantic-workspace-tasks", recycleBin, taskFilter],
+    initialPageParam: 0,
+    queryFn: ({ pageParam, signal }) => listWorkspaceTasks(recycleBin, pageParam, taskFilter, signal),
+    getNextPageParam: (lastPage, pages) => lastPage.length > 100 ? pages.length * 100 : undefined,
     refetchInterval: 3_000,
   });
+  const loadedTasks = [...new Map((tasks.data?.pages.flatMap(page => page.slice(0, 100)) || []).map(task => [task.task_id, task])).values()];
   const collectionHistory = useQuery<Array<{ conv_id: string; title: string; status: import("@/types/semanticWorkspace").WorkspaceTaskStatus; updated_at: string }>>({
     queryKey: ["collection-history", user?.user_id],
     queryFn: () => api.get("/api/chat/history"),
@@ -919,11 +920,18 @@ export function SemanticWorkspacePage() {
 
   const taskNavigation = (
           <WorkspaceTaskSidebar
-          tasks={[...(tasks.data || []), ...(recycleBin ? [] : collectionHistory.data || []).map(item => ({ ...item, task_id: `conversation:${item.conv_id}` }))].sort((a, b) => b.updated_at.localeCompare(a.updated_at))}
+          tasks={[...loadedTasks, ...(recycleBin ? [] : collectionHistory.data || []).map(item => ({ ...item, task_id: `conversation:${item.conv_id}` }))].sort((a, b) => b.updated_at.localeCompare(a.updated_at))}
           activeTaskId={selectedConversationId ? `conversation:${selectedConversationId}` : selectedTaskId}
           filter={filter}
           recycleBin={recycleBin}
           storage={storage.data}
+          loading={tasks.isLoading || (!recycleBin && collectionHistory.isLoading)}
+          error={[tasks.isError && "任务列表", !recycleBin && collectionHistory.isError && "采集历史"].filter(Boolean).join("、")}
+          lastReadAt={Math.max(tasks.dataUpdatedAt, recycleBin ? 0 : collectionHistory.dataUpdatedAt)}
+          onRetry={() => { void tasks.refetch(); if (!recycleBin) void collectionHistory.refetch(); }}
+          hasMore={tasks.hasNextPage}
+          loadingMore={tasks.isFetching}
+          onLoadMore={() => { if (!tasks.isFetching) void tasks.fetchNextPage(); }}
           onSelect={(taskId) => {
             if (narrow) setNavigationOpen(false);
             if (taskId.startsWith("conversation:")) {
@@ -1084,7 +1092,7 @@ export function SemanticWorkspacePage() {
                 >
                 {draftUploads.length === 0 && !composerDraft?.conversation?.length && !composerDraft?.chatAttempt ? (
                   <div className="flex flex-1 flex-col justify-center">
-                  <WorkspaceExamples hasPrompt={Boolean(composerDraft?.prompt.trim())} onFill={prompt => {
+                  <WorkspaceExamples compact={narrow} hasPrompt={Boolean(composerDraft?.prompt.trim())} onFill={prompt => {
                     setComposerDraft(current => ({ ...current, prompt: current?.prompt.trim() ? `${current.prompt}\n\n${prompt}` : prompt,
                       connectionId: current?.connectionId ?? null, connectionModel: current?.connectionModel ?? null, localModel: current?.localModel ?? null }));
                     requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务要求"]')?.focus());

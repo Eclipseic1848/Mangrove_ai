@@ -199,14 +199,18 @@ test("输入时不抢焦点，停止输入后继续首次引导", async ({ page 
 
 test("引导遇任务列表弹窗延后，不产生两个焦点陷阱", async ({ page }) => {
   const state = await fixture(page);
+  // 先固定教程计时，再打开弹窗，避免慢机器上自动引导抢在测试点击前启动。
+  await page.clock.install({ time: new Date("2026-09-26T00:00:00Z") });
+  await page.clock.pauseAt(new Date("2026-09-26T00:00:01Z"));
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/data-prep");
   await page.locator("#task-list-toggle").click();
   await expect(page.getByRole("dialog", { name: "任务列表", exact: true })).toBeVisible();
-  await page.waitForTimeout(900);
+  await page.clock.runFor(900);
   const guide = page.getByRole("dialog", { name: "新手教程" });
   await expect(guide).toBeHidden();
   await page.keyboard.press("Escape");
+  await page.clock.runFor(900);
   await expect(guide).toBeVisible();
   // 模拟后台状态打开既有弹窗；教程应让位而不是覆盖它。
   await page.locator("#task-list-toggle").evaluate((element: HTMLButtonElement) => element.click());
@@ -214,6 +218,7 @@ test("引导遇任务列表弹窗延后，不产生两个焦点陷阱", async ({
   await expect(guide).toBeHidden();
   await page.keyboard.press("Escape");
   await page.getByRole("button", { name: "新手教程", exact: true }).click();
+  await page.clock.runFor(900);
   await expect(guide).toBeVisible();
   expect(state.errors).toEqual([]);
 });

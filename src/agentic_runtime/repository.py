@@ -76,7 +76,7 @@ class AgenticRuntimeRepository:
     ) -> None:
         """幂等保存冻结契约和可追加账本；既有契约身份不可替换。"""
 
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             authorization = execution.current_authorization(required=False)
             if authorization is not None:
@@ -125,7 +125,7 @@ class AgenticRuntimeRepository:
         revision: int,
         run_id: str,
     ) -> tuple[CoverageContract, CoverageLedger] | None:
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             row = conn.execute(
                 """
                 SELECT contract_json, ledger_json
@@ -154,7 +154,7 @@ class AgenticRuntimeRepository:
         """冻结 Candidate 对应的覆盖结论；同一身份只允许完全一致的重放。"""
 
         encoded = assessment.model_dump_json()
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             conn.execute(
                 """
                 INSERT OR IGNORE INTO candidate_coverage_assessments (
@@ -193,7 +193,7 @@ class AgenticRuntimeRepository:
         revision: int,
         candidate_set_hash: str,
     ) -> PartialCandidateAssessment | None:
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             row = conn.execute(
                 """
                 SELECT assessment_json
@@ -223,7 +223,7 @@ class AgenticRuntimeRepository:
         """原子占用 Owner 动作；同一幂等键不能表达另一个决定。"""
 
         now = _now()
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO candidate_gap_actions (
@@ -275,7 +275,7 @@ class AgenticRuntimeRepository:
     ) -> dict[str, Any]:
         if status not in {"completed", "rejected"}:
             raise ValueError("缺口动作只能完成或拒绝")
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             cursor = conn.execute(
                 """
                 UPDATE candidate_gap_actions
@@ -312,7 +312,7 @@ class AgenticRuntimeRepository:
         task_id: str,
         source_revision: int,
     ) -> list[dict[str, Any]]:
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             rows = conn.execute(
                 """
                 SELECT action, status, target_revision, created_at, updated_at
@@ -334,7 +334,7 @@ class AgenticRuntimeRepository:
     ) -> tuple[str, bool]:
         """原子占用创建键；相同键只能代表完全相同的用户动作。"""
 
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO agentic_runtime_idempotency (
@@ -365,7 +365,7 @@ class AgenticRuntimeRepository:
 
     def has_idempotency(self, user_id: str, idempotency_key: str) -> bool:
         """读取同 Owner 原请求事实，避免预检拒绝解除已有未知占位。"""
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             return conn.execute(
                 "SELECT 1 FROM agentic_runtime_idempotency WHERE user_id=? AND idempotency_key=?",
                 (user_id, idempotency_key),
@@ -380,7 +380,7 @@ class AgenticRuntimeRepository:
     ) -> None:
         """仅在任务创建失败时释放自己刚占用的键。"""
 
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             conn.execute(
                 """
                 DELETE FROM agentic_runtime_idempotency
@@ -390,7 +390,7 @@ class AgenticRuntimeRepository:
             )
 
     def register(self, config: RuntimeTaskConfig) -> dict[str, Any]:
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             self.register_in_transaction(conn, config)
         saved = self.get(config.user_id, config.task_id, config.revision)
         assert saved is not None
@@ -471,7 +471,7 @@ class AgenticRuntimeRepository:
         task_id: str,
         revision: int,
     ) -> dict[str, Any] | None:
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             row = conn.execute(
                 """
                 SELECT * FROM agentic_runtime_runs
@@ -559,7 +559,7 @@ class AgenticRuntimeRepository:
         changes["updated_at"] = _now()
         assignments = ", ".join(f"{key}=?" for key in changes)
         values = [*changes.values(), user_id, task_id, revision]
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             if run_id is not None:
                 frozen_row = conn.execute(
                     """
@@ -607,7 +607,7 @@ class AgenticRuntimeRepository:
         resolved_event_id = event_id or f"agent_event_{uuid.uuid4().hex[:16]}"
         payload = details or {}
         created_at = _now()
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             cursor = conn.execute(
                 f"""
                 {"INSERT OR IGNORE" if event_id is not None else "INSERT"}
@@ -683,7 +683,7 @@ class AgenticRuntimeRepository:
         """原子冻结 Run ID 与绑定事件；同一 revision 不允许改绑。"""
 
         if connection is None:
-            with _LOCK, self._conn() as own_connection:
+            with _LOCK, closing(self._conn()) as own_connection, own_connection:
                 return self.freeze_runtime_binding(
                     user_id,
                     task_id,
@@ -797,7 +797,7 @@ class AgenticRuntimeRepository:
         task_id: str,
         revision: int,
     ) -> list[dict[str, Any]]:
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             rows = conn.execute(
                 """
                 SELECT * FROM agentic_runtime_events

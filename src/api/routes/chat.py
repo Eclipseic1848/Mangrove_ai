@@ -19,6 +19,8 @@ from src.api.auth import get_execution_user
 
 import asyncio
 import json
+import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -57,6 +59,8 @@ _NODE_LABELS = {
 
 # 产出 state 键 -> (下载文件名, mime)
 _FILE_MAP = {
+    "xlsx": ("data.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    "evidence_zip": ("evidence.zip", "application/zip"),
     "report_md": ("report.md", "text/markdown"),
     "json": ("data.json", "application/json"),
     "trace_file": ("trace.json", "application/json"),
@@ -120,6 +124,8 @@ def _build_result(
     files: List[Dict[str, str]] = []
     for key, (fname, mime) in _FILE_MAP.items():
         if outputs.get(key):
+            if state.get("collection_output_attempt"):
+                fname = Path(outputs[key]).name
             # 下载按磁盘 downloads/<task_id>/<fname> 解析（重载会话/重启后仍可下载）
             files.append({"name": fname, "url": f"/api/downloads/{task_id}/{fname}", "mime": mime})
 
@@ -144,8 +150,11 @@ def _build_result(
     if pending:
         pending_store.put(user_id, task_id, pending)
 
+    outcome = state.get("collection_outcome") or {}
+    result_kind = "output" if not outcome or outcome.get("ready_for_review") else "notice" if outcome.get("status") == "empty" else "error"
     return {
-        "conv_id": conv_id, "task_id": task_id, "kind": "output",
+        "conv_id": conv_id, "task_id": task_id, "kind": result_kind,
+        "collection_outcome": outcome or None,
         "reply": reply, "analysis": analysis,
         "files": files, "actions": actions,
         "grade": state.get("grade"),
@@ -154,6 +163,70 @@ def _build_result(
         "collector": state.get("collector_used") or state.get("collector"),
         "item_count": len(state.get("cleaned_dataset", []) or []),
     }
+
+
+async def _create_bank_review(state, body, user, provider, model, request=None, *, connection_version=None):
+    """当前 Owner 的采集快照进入既有初稿门，不伪造网页来源或发布记录。"""
+    from src.api.execution import execution_checkpoint
+    from src.config.settings import settings
+    from src.data_prep.artifact_store import ArtifactStore
+    from src.services.upload_store import UploadStore
+    from .semantic_workspace import RuntimeVersion, WorkspaceTaskCreateIn, create_task
+    from src.conductor.collection_results import collection_outcome
+
+    execution_checkpoint()
+    snapshot = state.get("evidence_collection") or state.get("bank_collection") or {}
+    if not collection_outcome(snapshot)["ready_for_review"]:
+        raise ValueError("采集未满足业务初稿条件，诊断快照不进入初稿工作台")
+    artifacts = ArtifactStore()
+    task_id = state["task_id"]
+    root = artifacts.task_dir(task_id).resolve()
+    uploads = UploadStore(settings.data_prep_upload_root, max_bytes=settings.data_prep_max_upload_bytes)
+    saved = artifacts.read_json_if_exists(task_id, "workspace-import.json")
+    if saved is not None and saved.get("owner_id") != user["user_id"]:
+        raise PermissionError("采集快照归属不一致")
+    if saved is None:
+        items = []
+        files = [(Path(state.get("outputs", {}).get("json") or root / "data.json"), "采集快照.json", "application/json"),
+                 (Path(state.get("outputs", {}).get("xlsx") or root / "data.xlsx"), "采集快照.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")]
+        seen = set()
+        for note in snapshot["candidates"]:
+            for image in note.get("images") or []:
+                ref = image.get("artifact_path")
+                if ref and ref not in seen:
+                    source = artifacts.resolve_path(ref)
+                    if source.is_symlink() or not source.resolve().is_relative_to(root):
+                        raise ValueError("图片证据越过采集任务目录")
+                    files.append((source, source.name, image["media_type"]))
+                    seen.add(ref)
+        for source, name, media_type in files:
+            if source.is_symlink() or not source.resolve().is_relative_to(root):
+                raise ValueError("采集快照越过任务目录")
+            execution_checkpoint()
+            item = uploads.save_bytes(user["user_id"], name, source.read_bytes(), media_type=media_type,
+                                      verify_magic=media_type != "application/json")
+            items.append({"upload_id": item.upload_id, "sha256": item.sha256, "name": name})
+        saved = {"owner_id": user["user_id"], "files": items}
+        artifacts.write_json(task_id, "workspace-import.json", saved)
+    for item in saved["files"]:
+        resolved = uploads.resolve(user["user_id"], item["upload_id"])
+        if resolved.sha256 != item["sha256"]:
+            raise ValueError("采集输入已变化")
+    objective = (
+        body.content + "\n\n输入是本次采集的冻结观察快照，未知、失败项和覆盖缺口仍以快照为准，"
+        "与同名XLSX来自同一份数据。将这两个文件逐字节复制为JSON、XLSX初稿，保持文件SHA256；"
+        "不要重新采集、重写正文、重新抽取、补造字段或生成分析报告。图片输入供复核，保留来源关联。"
+        "不足目标、排除原因和未知值必须保留。生成可下载初稿后等待用户核对，未经用户确认不得正式发布。"
+    )
+    payload = WorkspaceTaskCreateIn(objective_text=objective,
+        upload_ids=tuple(item["upload_id"] for item in saved["files"]), output_formats=("json", "xlsx"),
+        source_copy_upload_ids=tuple(item["upload_id"] for item in saved["files"][:2]),
+        runtime_version=RuntimeVersion.PI, provider=provider or "local", model=model,
+        model_connection_id=body.model_connection_id, model_connection_model=model if body.model_connection_id else None,
+        model_connection_version=connection_version,
+        external_api_confirmed=body.external_api_confirmed)
+    execution_checkpoint()
+    return await create_task(payload, idempotency_key="bank-review:" + task_id, user=user, request=request)
 
 
 # data_prep 产出的数据文件格式 -> mime
@@ -223,6 +296,56 @@ def _build_data_prep_result(
 
 @router.post("/stream", openapi_extra={"x-mangrove-task-control": True})
 async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution_user)):
+    return await _chat_stream(body, request, user)
+
+
+def _load_owned_recovery(user, task_id):
+    from src.conductor.collection_recovery import load_recovery
+    try:
+        recovery = load_recovery(user["user_id"], task_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    state = recovery["state"]
+    conv = get_store().get_conversation(state["session_id"])
+    if not conv or conv["user_id"] != user["user_id"]:
+        raise HTTPException(404, "会话不存在或无权访问")
+    connection = recovery["saved"]["binding_fields"].get("connection")
+    if connection and (len(connection) != 7 or connection[0] != user["user_id"]
+                       or connection[4] != state["session_id"] or connection[3] != state["model"]):
+        raise HTTPException(409, "原模型连接身份不完整，不能恢复")
+    return recovery
+
+
+@router.get("/collections/{task_id}/recovery")
+async def collection_recovery_status(task_id: str, user=Depends(get_current_user)):
+    recovery = _load_owned_recovery(user, task_id)
+    return {"task_id": task_id, "conv_id": recovery["state"]["session_id"],
+            "message": "请先在登录态设置验证当前账号；恢复将沿用原任务和模型，仅继续可安全执行的未完成步骤。"}
+
+
+class CollectionResumeIn(BaseModel):
+    request_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    external_api_confirmed: bool = False
+
+
+@router.post("/collections/{task_id}/resume", openapi_extra={"x-mangrove-task-control": True})
+async def resume_collection(task_id: str, body: CollectionResumeIn, request: Request,
+                            user=Depends(get_execution_user)):
+    recovery = _load_owned_recovery(user, task_id)
+    if any(item.get("attempt_id") == body.request_id for item in recovery["saved"].get("recovery_attempts", [])):
+        raise HTTPException(409, "该恢复请求已采用，请查看任务状态，不会重复执行")
+    recovery["attempt_id"] = body.request_id
+    state = recovery["state"]
+    connection = recovery["saved"]["binding_fields"].get("connection")
+    original = ChatIn(conv_id=state["session_id"], content=state["user_input"],
+                      provider=state["provider"], model=state["model"], mode="legacy_analysis",
+                      model_connection_id=connection[1] if connection else None,
+                      model_connection_version=connection[2] if connection else None,
+                      external_api_confirmed=body.external_api_confirmed)
+    return await _chat_stream(original, request, user, recovery)
+
+
+async def _chat_stream(body, request, user, recovery=None):
     store = get_store()
     user_id = user["user_id"]
     binding = None
@@ -264,7 +387,10 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
     if not history:
         history = [message.model_dump() for message in body.history]
     history.append({"role": "user", "content": body.content})
-    run_id = store.start_chat_execution(user_id, conv_id, body.content)
+    from src.config.settings import settings as _settings
+    mode = body.mode or ("data_prep" if _settings.data_prep_mode_enabled else "legacy_analysis")
+    collection_task_id = recovery["task_id"] if recovery else ("c_" + uuid.uuid4().hex if mode == "legacy_analysis" else None)
+    run_id = store.start_chat_execution(user_id, conv_id, "恢复原采集任务" if recovery else body.content, task_id=collection_task_id)
 
     queue: asyncio.Queue = asyncio.Queue()
     progress: list[dict] = []
@@ -283,14 +409,17 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
 
             usage = initial_usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
             _usage_tok = _usage_ctx.set(usage)
-            hist = await compress_history(history, provider=provider, model=model)
+            hist = [] if recovery else await compress_history(history, provider=provider, model=model)
             # 模式选择：body.mode 优先，否则按全局开关（6B 默认 data_prep，可回退 legacy_analysis）
             from src.config.settings import settings as _settings
             mode = body.mode or ("data_prep" if _settings.data_prep_mode_enabled else "legacy_analysis")
 
             state: Dict[str, Any] = {}
             seen: set[str] = set()
-            if mode == "data_prep":
+            if recovery:
+                from src.conductor.graph import astream_collection_recovery
+                stream = astream_collection_recovery(recovery["state"])
+            elif mode == "data_prep":
                 from src.data_prep.graph import astream_data_prep
                 stream = astream_data_prep(
                     user_input=body.content, messages=hist,
@@ -299,7 +428,7 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
             else:
                 stream = astream_conductor(
                     user_input=notification_text, messages=hist,
-                    provider=provider, model=model, session_id=conv_id,
+                    provider=provider, model=model, session_id=conv_id, task_id=collection_task_id,
                 )
             async for kind, payload in stream:
                 if kind == "progress":
@@ -329,9 +458,20 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
                 result = _build_result(user_id, conv_id, state, reply, provider, model, notification_text,
                                        model_connection_id=body.model_connection_id,
                                        model_connection_version=binding.connection_version if binding else None)
+                from src.conductor.collection_results import collection_outcome
+                snapshot = state.get("evidence_collection") or state.get("bank_collection")
+                if snapshot and state.get("outputs") and collection_outcome(snapshot)["ready_for_review"]:
+                    try:
+                        review = await _create_bank_review(state, body, user, provider, model, request,
+                                                          connection_version=binding.connection_version if binding else None)
+                    except (HTTPException, ValueError, OSError):
+                        result["reply"] += "\n\n采集快照已保留，初稿工作台创建未成功；请检查当前执行环境和模型连接后重试。"
+                    else:
+                        result["semantic_task_id"] = review["task_id"]
+                        result["reply"] += f"\n\n[进入初稿工作台核对](/data-prep?task={review['task_id']})。初稿生成后等待你确认。"
             if result.get('kind') == 'clarification':
                 result['notification_user_text'] = notification_text
-            if result.get("kind") == "output":
+            if result.get("kind") == "output" and not (state.get("bank_collection") or state.get("evidence_collection")):
                 from src.notifications import auto_conductor
                 await auto_conductor(store, user_id, 'chat:' + run_id, notification_text,
                                      state, result, provider=provider, model=model)
@@ -344,7 +484,7 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
             # 不持久化一次性 HITL 动作(actions/schedule)，它们依赖服务端暂存，重载后不可再确认。
             persist_meta = {
                 k: result.get(k)
-                for k in ("files", "grade", "collector", "item_count", "data_type", "template_status", "kind", "token_usage", "record_counts", "quality", "notification", "notification_user_text", "scheduled_task_id", "next_run_at")
+                for k in ("files", "grade", "collector", "item_count", "data_type", "template_status", "kind", "token_usage", "record_counts", "quality", "notification", "notification_user_text", "scheduled_task_id", "next_run_at", "collection_outcome")
                 if result.get(k) not in (None, [], "")
             }
             persist_meta["work_progress"] = progress
@@ -396,14 +536,23 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
         try:
             async with running_execution(store, "chat", run_id):
                 execution_checkpoint(required=True)
+                async def execute():
+                    if recovery:
+                        from src.conductor.collection_recovery import recovery_request
+                        with recovery_request(recovery["saved"]["binding"], recovery["attempt_id"]):
+                            await pipeline()
+                    else:
+                        await pipeline()
                 if binding:
                     from src.model_connections.conductor import conductor_connection
+                    frozen = recovery["saved"]["binding_fields"].get("connection") if recovery else None
                     with conductor_connection(owner_id=user_id, connection_id=body.model_connection_id,
                                               connection_version=binding.connection_version, model=body.model,
-                                              task_id=conv_id, run_id=run_id):
-                        await pipeline()
+                                              task_id=frozen[4] if frozen else conv_id, run_id=frozen[5] if frozen else run_id,
+                                              revision=frozen[6] if frozen else 1):
+                        await execute()
                 else:
-                    await pipeline()
+                    await execute()
         except ExecutionDenied:
             queue.put_nowait({"event": "error", "data": json.dumps({"message": "账号执行已暂停"}, ensure_ascii=False)})
             queue.put_nowait({"event": "done", "data": "{}"})
@@ -421,7 +570,7 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
         if not platform_session_valid(request):
             yield {"event": "auth-expired", "data": json.dumps({"message": "登录已失效，请重新登录"}, ensure_ascii=False)}
             return
-        yield {"event": "meta", "data": json.dumps({"conv_id": conv_id}, ensure_ascii=False)}
+        yield {"event": "meta", "data": json.dumps({"conv_id": conv_id, "task_id": collection_task_id}, ensure_ascii=False)}
         while True:
             # 空闲时也复核撤销；只结束读取，不取消已经开始的后台流水线。
             if not platform_session_valid(request):

@@ -86,10 +86,28 @@ def query(conn, actor, filters, *, export=False):
     # 复用用户元数据可见范围；不能通过请求参数扩大角色范围。
     scope, params = ('1=1', []) if actor['role'] == 'super_admin' else (
         "(u.role='user' OR u.user_id=?)", [actor['user_id']])
+    source_sql = f"""
+        FROM model_provider_usage v LEFT JOIN users u ON u.user_id=v.owner_user_id
+        LEFT JOIN model_connection_grants g ON g.grant_id=v.grant_id AND g.owner_user_id=v.owner_user_id
+            AND g.task_id=v.task_id AND g.revision=v.revision AND g.run_id=v.run_id AND g.connection_id=v.connection_id
+        WHERE {scope}
+            AND (instr(lower(COALESCE(u.username,'')),lower(?))>0 OR instr(lower(COALESCE(u.display_name,'')),lower(?))>0 OR instr(v.owner_user_id,?)>0)
+            AND (?='' OR g.model=?) AND (?='' OR g.api_format=?)
+    """
+    params = [*params, *[filters.search.strip()]*3, filters.model, filters.model, filters.api_format, filters.api_format]
+    dated = "(julianday(v.created_at) IS NOT NULL AND (substr(v.created_at,-1)='Z' OR substr(v.created_at,-6,1) IN ('+','-')))"
     catalog = prices()
     deadline = time.monotonic() + 5
     conn.set_progress_handler(lambda: int(time.monotonic() > deadline), 10000)
     try:
+        # 无时区旧记录仍然存在；单独披露全历史小计，不猜日期、不混入所选时段。
+        undated = dict(conn.execute(f"""
+        SELECT COALESCE(SUM(v.request_count),0) AS requests,
+            SUM(CASE WHEN v.total_tokens>=0 THEN v.total_tokens END) AS total_tokens
+        {source_sql} AND NOT {dated}
+        """, params).fetchone())
+        if not undated['requests']:
+            undated['total_tokens'] = 0
         rows = conn.execute(f"""
         SELECT v.owner_user_id AS user_id, COALESCE(u.username,'已删除用户') AS username,
             COALESCE(u.display_name,u.username,'已删除用户') AS name,
@@ -104,17 +122,11 @@ def query(conn, actor, filters, *, export=False):
             SUM(CASE WHEN v.input_tokens>=0 AND v.output_tokens>=0 THEN v.output_tokens ELSE 0 END) AS priced_output,
             SUM(CASE WHEN v.input_tokens>=0 AND v.output_tokens>=0 THEN v.request_count ELSE 0 END) AS complete_requests,
             MAX(julianday(v.created_at)) AS last_used_jd
-        FROM model_provider_usage v LEFT JOIN users u ON u.user_id=v.owner_user_id
-        LEFT JOIN model_connection_grants g ON g.grant_id=v.grant_id AND g.owner_user_id=v.owner_user_id
-            AND g.task_id=v.task_id AND g.revision=v.revision AND g.run_id=v.run_id AND g.connection_id=v.connection_id
-        WHERE {scope} AND julianday(v.created_at)>=julianday(?) AND julianday(v.created_at)<julianday(?)
-            AND (substr(v.created_at,-1)='Z' OR substr(v.created_at,-6,1) IN ('+','-'))
-            AND (instr(lower(COALESCE(u.username,'')),lower(?))>0 OR instr(lower(COALESCE(u.display_name,'')),lower(?))>0 OR instr(v.owner_user_id,?)>0)
-            AND (?='' OR g.model=?) AND (?='' OR g.api_format=?)
+        {source_sql} AND {dated}
+            AND julianday(v.created_at)>=julianday(?) AND julianday(v.created_at)<julianday(?)
         GROUP BY v.owner_user_id,g.model,g.api_format,g.base_url,g.locality,v.input_tokens
         LIMIT 10001
-        """, [*params, start.isoformat(), end.isoformat(), *[filters.search.strip()]*3,
-            filters.model, filters.model, filters.api_format, filters.api_format]).fetchall()
+        """, [*params, start.isoformat(), end.isoformat()]).fetchall()
     except sqlite3.OperationalError as error:
         if 'interrupted' in str(error):
             raise HTTPException(503, '统计范围较大，请缩短时间范围后重试') from None
@@ -189,10 +201,15 @@ def query(conn, actor, filters, *, export=False):
         if row['cost'] is not None:
             row['cost'] = format(Decimal(row['cost']), '.6f')
     page = min(filters.page, max(1, (len(items)+filters.page_size-1)//filters.page_size))
+    coverage_note = '仅统计所选日期内已保存且带时区的调用记录；未采集的用量不回填。'
+    if undated['requests']:
+        total = '未知' if undated['total_tokens'] is None else f"{undated['total_tokens']:,}"
+        coverage_note += (f" 另保留 {undated['requests']:,} 次时间或时区不完整的历史请求，已知总Token小计：{total}"
+            '（同一权限及用户、模型、接口筛选下的全历史，未计入上述日期汇总）。')
     return {'items': items if export else items[(page-1)*filters.page_size:page*filters.page_size], 'total': len(items),
         'page': page, 'page_size': filters.page_size,
         'summary': summary, 'currency': filters.currency, 'pricing': catalog,
-        'coverage_note': '仅统计已保存且带时区的调用记录；未采集的历史用量不回填。'}
+        'undated_usage': undated, 'coverage_note': coverage_note}
 
 
 def export_data(conn, actor, filters, format):

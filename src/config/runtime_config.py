@@ -36,7 +36,7 @@ GROUPS: List[Dict[str, str]] = [
     {"key": "slack", "label": "Slack"},
     {"key": "semantic", "label": "语义召回（embedding/rerank）"},
     {"key": "proxy", "label": "代理池"},
-    {"key": "mc_cdp", "label": "MediaCrawler 反检测（CDP 模式）"},
+    {"key": "mc_cdp", "label": "浏览器隔离（旧版 CDP 配置）"},
     {"key": "mysql", "label": "MySQL 入库"},
     {"key": "checkpoint", "label": "断点续跑"},
     {"key": "library_dedup", "label": "知识库巡检"},
@@ -152,7 +152,7 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     "mc_wandou_app_key": {"label": "豌豆HTTP app_key", "group": "proxy", "secret": True, "user": False},
     # MediaCrawler 反检测（CDP 模式）
     "mc_enable_cdp_mode": {
-        "label": "启用 CDP 模式（连接本机真实浏览器）", "group": "mc_cdp", "secret": False, "user": False,
+        "label": "旧版 CDP 配置（当前采集强制独立会话）", "group": "mc_cdp", "secret": False, "user": False,
         "type": "select", "choices": ["True", "False"],
     },
     # MySQL
@@ -280,6 +280,15 @@ def apply_global_overrides(store) -> int:
     return n
 
 
+def global_secret_snapshot(store, key: str) -> tuple[str, str]:
+    """与全局保存共用锁，冻结本次探测的版本和值，调用者不得记录明文。"""
+    with _CONFIG_LOCK:
+        _snapshot_baseline()
+        snapshot = store.config_secret_snapshot("global", key)
+        # 其他进程可能已删除覆盖；只能回到启动基线，不能复活本进程缓存的旧凭证。
+        return snapshot if snapshot is not None else ("", str(_BASELINE.get(key) or ""))
+
+
 def set_global(store, key: str, raw: str, updated_by: str = "") -> None:
     """管理员设置全局覆盖：校验→落库→热生效。"""
     # 写入与运行态更新共用锁，避免并发保存导致数据库和当前进程取值相反。
@@ -291,6 +300,20 @@ def set_global(store, key: str, raw: str, updated_by: str = "") -> None:
         store.config_set("global", key, raw, updated_by)
         setattr(settings, key, value)
         _after_set(key)
+
+
+def replace_global_secret(store, key: str, raw: str, *, expected_version: str | None, updated_by: str) -> bool:
+    """验证后的凭证按版本替换，仍使用原热配置和Vault边界。"""
+    with _CONFIG_LOCK:
+        _snapshot_baseline()
+        if key not in REGISTRY or not REGISTRY[key]["secret"]:
+            raise ValueError("只支持凭证配置")
+        value = cast_value(key, raw)
+        if not store.config_replace_secret("global", key, raw, expected_version=expected_version, updated_by=updated_by):
+            return False
+        setattr(settings, key, value)
+        _after_set(key)
+        return True
 
 
 def set_global_many(store, values: Dict[str, str], updated_by: str = "") -> None:

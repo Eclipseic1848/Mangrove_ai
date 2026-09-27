@@ -284,8 +284,12 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     ]
 
     assert "useDefault = true" in config
-    assert config.count('targetRules = ["generic-api-key"]') == 5
-    assert config.count('condition = "AND"') == 5
+    assert config.count('targetRules = ["generic-api-key"]') == 6
+    assert config.count('condition = "AND"') == 6
+    deletion_digest = next(item for item in tomllib.loads(config)["allowlists"]
+                           if "index:ix_deletion_owner_key" in item["regexes"][0])
+    assert deletion_digest["paths"] == [r"^src/database_migrations/schema_manifest\.json$"]
+    assert not re.search(deletion_digest["regexes"][0], '"index:ix_deletion_owner_key": "unexpected-secret"')
     assert 'regexTarget = "line"' in config
     assert '^src/database_migrations/schema_manifest\\.json$' in config
     assert 'model_connection_secrets|runtime_config_secrets' in config

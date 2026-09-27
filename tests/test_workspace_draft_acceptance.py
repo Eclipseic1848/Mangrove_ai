@@ -3,6 +3,7 @@ import pytest
 from types import SimpleNamespace
 
 from src.account_execution import ExecutionAuthorization, execution_context
+from src.api.execution import execution_validation
 from src.agentic_runtime.draft_snapshot import freeze_draft
 from src.agentic_runtime.models import RuntimeTaskConfig, RuntimeVersion, RuntimeStatus, PermissionProfile
 from src.agentic_runtime.repository import AgenticRuntimeRepository
@@ -71,6 +72,7 @@ def test_draft_review_requires_explicit_same_run_decision_and_survives_restart(d
 @pytest.mark.parametrize("initial_status", ["failed", "cancelled"])
 @pytest.mark.parametrize("name,content,fmt", [("document.json", '{"name":"测试"}', "json"),
                                            ("table.csv", "name,value\na,1\n", "csv"),
+                                           ("table.xlsx", None, "xlsx"),
                                            ("collection.md", "# 合成来源分析", "markdown")])
 async def test_accept_draft_publishes_same_bytes_without_rerunning_and_replays(tmp_path, monkeypatch, name, content, fmt, initial_status):
     db = migrated_webui_database(tmp_path / "db.sqlite")
@@ -78,14 +80,21 @@ async def test_accept_draft_publishes_same_bytes_without_rerunning_and_replays(t
     monkeypatch.setattr(settings, "webui_db_path", str(db))
     monkeypatch.setattr(settings, "semantic_execution_root", str(tmp_path))
     store = WebUIStore(str(db), semantic_paths=ManagedPathCodec(tmp_path / "deliveries", legacy_anchor=("data", "semantic-executions")))
-    # 执行安全点复用认证 Store；绑定本例临时库，避免借用其他测试留下的全局实例。
-    import src.api.auth as auth
-    monkeypatch.setattr(auth, "_store", store)
     root = tmp_path / "run"
     (root / "output").mkdir(parents=True)
-    (root / "output" / name).write_text(content, encoding="utf-8")
-    with execution_context(ExecutionAuthorization("a", 0)):
-        store.create_semantic_workspace_task("a", task_id="t", title="合成任务", objective_text="整理来源",
+    if fmt == "xlsx":
+        from openpyxl import Workbook
+        book = Workbook()
+        book.active.append(["name", "value"])
+        book.active.append(["a", 1])
+        book.save(root / "output" / name)
+        book.close()
+    else:
+        (root / "output" / name).write_text(content, encoding="utf-8")
+    objective = f"输出{name}，只含部门、金额列。" if fmt in {"csv", "xlsx"} else "整理来源"
+    # 显式临时库调用绑定本库授权校验，不能借用其他测试缓存的 API Store。
+    with execution_context(ExecutionAuthorization("a", 0)), execution_validation(store.require_account_authorization):
+        store.create_semantic_workspace_task("a", task_id="t", title="合成任务", objective_text=objective,
                                             upload_ids=[], output_formats=[fmt], provider="local", model=None,
                                             external_api_confirmed=False)
         store.update_semantic_workspace_task("a", "t", status=initial_status, cancel_requested=initial_status == "cancelled")
@@ -93,6 +102,14 @@ async def test_accept_draft_publishes_same_bytes_without_rerunning_and_replays(t
         repository.register(RuntimeTaskConfig(user_id="a", task_id="t", revision=1,
                                               runtime_version=RuntimeVersion.PI, permission_profile=PermissionProfile.STANDARD))
         repository.update("a", "t", 1, status=RuntimeStatus.FAILED, run_id="r", workspace_root=root)
+        if fmt in {"csv", "xlsx"}:
+            from src.agentic_runtime.output_requirements import freeze_output_requirements
+            async def infer():
+                return {"checks": [{"filename": name, "evidence": objective,
+                    "table": {"format": fmt, "columns": ["部门", "金额"], "ordered": False, "allow_extra": False}}]}
+            req = SimpleNamespace(user_id="a", task_id="t", revision=1, objective_text=objective, requested_output_formats=(fmt,))
+            frozen = await freeze_output_requirements(root, req, "r", infer)
+            assert frozen["status"] == "ready"
         draft = freeze_draft(root, owner_id="a", task_id="t", revision=1, run_id="r", formats=(fmt,))
         result = await accept_draft(store=store, manager=None, output_root=tmp_path / "deliveries",
                                     owner_id="a", task_id="t", source_revision=1, draft_id=draft["draft_id"])
@@ -100,6 +117,8 @@ async def test_accept_draft_publishes_same_bytes_without_rerunning_and_replays(t
         delivery = store.get_semantic_delivery("a", result["delivery_id"])
         assert delivery["provenance"]["verification_status"] == "inconclusive"
         assert delivery["outputs"][0]["sha256"] == draft["files"][0]["sha256"]
+        if fmt in {"csv", "xlsx"}:
+            assert any("列名或列顺序" in gap for gap in delivery["provenance"]["owner_acceptance"]["gaps"])
         replay = await accept_draft(store=store, manager=None, output_root=tmp_path / "deliveries",
                                    owner_id="a", task_id="t", source_revision=1, draft_id=draft["draft_id"])
         assert replay == result
@@ -118,14 +137,16 @@ def draft_task(tmp_path, monkeypatch, request):
     monkeypatch.setattr(auth, "_store", store)
     root = tmp_path / "run"
     (root / "output").mkdir(parents=True)
-    (root / "output" / "draft.json").write_text('{"name":"合成初稿"}', encoding="utf-8")
+    (root / "output" / "draft.json").write_text(
+        getattr(request, "param", {}).get("content", '{"name":"合成初稿"}'), encoding="utf-8")
     with execution_context(ExecutionAuthorization("a", 0)):
         from src.source_acquisition.reuse import uploads
         upload = uploads().save_bytes("a", "source.csv", b"name,value\nA,2\n", media_type="text/csv")
         store.create_semantic_workspace_task("a", task_id="t", title="合成任务", objective_text=getattr(request, 'param', {}).get('objective', '整理'),
             source_contract={'notification_user_text': getattr(request, 'param', {}).get('user_text', getattr(request, 'param', {}).get('objective', '整理'))},
             upload_ids=[upload.upload_id], source_refs=[{"upload_id": upload.upload_id, "sha256": upload.sha256}],
-            output_formats=["json"], provider="local", model=None, external_api_confirmed=False)
+            output_formats=["json"], provider="local", model=None, external_api_confirmed=False,
+            table_output_contracts=getattr(request, "param", {}).get("table_output_contracts", []))
         store.update_semantic_workspace_task("a", "t", status="failed")
         repository = AgenticRuntimeRepository(db)
         repository.register(RuntimeTaskConfig(user_id="a", task_id="t", revision=1,
@@ -133,6 +154,43 @@ def draft_task(tmp_path, monkeypatch, request):
         repository.update("a", "t", 1, status=RuntimeStatus.FAILED, run_id="r", workspace_root=root)
         draft = freeze_draft(root, owner_id="a", task_id="t", revision=1, run_id="r", formats=("json",))
         yield store, root, draft
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("draft_task,expected_issues", [
+    ({"content": '[{"姓名":"合成初稿","金额":10}]', "table_output_contracts": [{
+        "format": "json", "exact_columns": ["name", "amount"], "json_shape": "records",
+    }]}, 1),
+    ({"content": '[{"name":"合成初稿","amount":10}]', "table_output_contracts": [{
+        "format": "json", "exact_columns": ["name", "amount"], "json_shape": "records",
+    }]}, 0),
+], indirect=["draft_task"])
+async def test_draft_discloses_structure_issue_but_owner_can_accept(draft_task, expected_issues):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from src.api.auth import get_current_user
+    from src.api.routes import semantic_workspace as routes
+
+    store, root, draft = draft_task
+    repo = AgenticRuntimeRepository(store.db_path)
+    repo.append_event("a", "t", 1, event_type="draft.ready", summary="初稿", details={"draft_id": draft["draft_id"]})
+    app = FastAPI()
+    app.include_router(routes.router)
+    app.dependency_overrides[get_current_user] = lambda: {"user_id": "a", "execution_generation": 0}
+    with TestClient(app) as client:
+        shown = client.get("/api/semantic-workspace/tasks/t/draft?revision=1")
+        assert shown.status_code == 200
+        issues = shown.json()["draft"]["issues"]
+        assert len(issues) == expected_issues
+        if expected_issues:
+            assert "name" in issues[0] and "amount" in issues[0]
+    accepted = await accept_draft(store=store, manager=None, output_root=root.parent,
+        owner_id="a", task_id="t", source_revision=1, draft_id=draft["draft_id"])
+    delivery = store.get_semantic_delivery("a", accepted["delivery_id"])
+    assert delivery["provenance"]["verification_status"] == "inconclusive"
+    if expected_issues:
+        assert issues[0] in delivery["provenance"]["owner_acceptance"]["gaps"]
+    assert delivery["outputs"][0]["sha256"] == draft["files"][0]["sha256"]
 
 
 @pytest.mark.asyncio
