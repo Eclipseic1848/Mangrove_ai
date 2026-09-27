@@ -5,11 +5,11 @@
 </p>
 
 <p align="center">
-  <a href="./docs/status/current.md"><img alt="status: public development" src="https://img.shields.io/badge/status-public%20development-F59E0B"></a>
+  <a href="https://github.com/Eclipseic1848/Mangrove_ai/releases/tag/v1.0.0"><img alt="release: v1.0.0" src="https://img.shields.io/badge/release-v1.0.0-2563EB"></a>
   <img alt="Python 3.13" src="https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?logo=fastapi&logoColor=white">
   <img alt="React and Vite" src="https://img.shields.io/badge/React%20%2B%20Vite-646CFF?logo=vite&logoColor=white">
-  <img alt="Windows and Docker" src="https://img.shields.io/badge/platform-Windows%20%7C%20Docker-2563EB">
+  <img alt="Windows, Linux and Docker" src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20Docker-2563EB">
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-22C55E"></a>
 </p>
 
@@ -19,6 +19,7 @@
 
 <p align="center">
   <a href="#快速开始">快速开始</a> ·
+  <a href="#linux-服务器部署">Linux 部署</a> ·
   <a href="#当前仓库具备什么能力">能力概览</a> ·
   <a href="#从目标到正式交付">任务链路</a> ·
   <a href="#开发与验证">开发验证</a> ·
@@ -32,22 +33,25 @@ Mangrove 是一个统一数据任务平台。用户描述目标，平台负责�
 价值创造上。
 
 > [!IMPORTANT]
-> 当前 `main` 是公开开发基线，不是稳定生产版本，也不代表 Phase 4 已完成或已创建 `v0.0.8`
-> 标签。能力状态、验收阶段和未完成门禁只以
-> [`docs/status/current.md`](docs/status/current.md) 为准。
+> **v1.0.0** 以当前 V3 完整源码为发布基线，默认任务运行时为 **Pi 0.87.1**。
+> [下载发行包](https://github.com/Eclipseic1848/Mangrove_ai/releases/tag/v1.0.0) ·
+> [更新记录](CHANGELOG.md) · [Linux 部署手册](docs/deployment/linux-migration-it-guide.md)。
+> 版本发布不代表目标公司服务器已部署或所有业务场景均已验收；当前能力与证据边界见
+> [`docs/status/current.md`](docs/status/current.md)。
 
 > [!WARNING]
-> 当前开发快照与 `main` 存在同号不同内容的数据库迁移，不能直接用于 `main` 既有实例的升级。
-> 合并前须完成迁移兼容设计及副本演练，不能通过改写已执行迁移或覆盖原库解决。详见当前状态台账。
+> **旧开发版升级注意：** 发布前的 `main`（`ec4cf05`）与本版存在同号不同内容的数据库迁移。
+> 旧 `main` 实例不能直接覆盖升级到 v1.0.0，须单独设计并演练数据转换；不要改迁移账本或覆盖原库。
+> 新实例可以显式初始化；已有 V3 实例须先核对迁移内容摘要与数据/密钥备份。
 
 > [!NOTE]
 > 企业 API、业务系统、本地路径、对象存储、远程 MCP、普通用户平台能力开放和目标
-> Linux/多人生产门仍在规划或后续验证中。G2 的完整 PG-05 已有工程与代表任务证据，但不
-> 等于上述部署、受众开放或稳定 Release 已完成。
+> Linux/多人生产验收仍在后续验证中。发行包包含三项核心镜像；Firecrawl、SearXNG、MediaCrawler
+> 等可选采集/搜索服务需单独准备，不能仅导入核心镜像就认定全部功能可用。
 
 ## 当前仓库具备什么能力
 
-以下说明对应当前检出的开发代码，不代表所有开发分支均已合入 `main`，也不等于完成生产验收。
+以下说明对应 v1.0.0 的源码与已有验证范围，不等于目标服务器生产验收。
 
 | 能力 | 当前状态 | 边界 |
 | --- | --- | --- |
@@ -61,7 +65,7 @@ Mangrove 是一个统一数据任务平台。用户描述目标，平台负责�
 | 自动化任务 | **工程验证** | 自然语言或手动创建计划、绑定执行模型、查看运行记录与结果；通知需明确授权，旧计划的未知时区需重新确认 |
 | 模板库与教训库 | **工程验证** | 同类任务自动参考已积累的方法与教训；个人默认私有，共享须确认，巡检按角色开放 |
 | 记忆 | **工程验证** | 管理个人偏好、对话中记住或忘记、后续任务召回；全局规范由获授权角色维护，当前任务要求优先 |
-| 运营审计与 Token | **工程验证** | 按权限查看使用情况和操作记录；按用户/模型统计用量、筛选和导出。中国区参考价格可配置，本地模型仅统计 Token |
+| 运营审计与 Token | **工程验证** | 保留历史 Token 统计；使用趋势支持悬停查看数值、小时/天/周/月/年，默认天。按用户/模型筛选和导出；参考成本不是账单 |
 | 反馈与用户管理 | **工程验证** | 点赞记录保留，只有点踩进入处理流程；查看原任务正文须走原因说明与审计，账号操作遵循角色层级 |
 | 按角色的新手教程 | **工程验证** | 首次进入自动播放，可跳过、随时重播；用户/角色/页面分别保存，仅当前浏览器持久化，不替代接口权限检查 |
 | Agentic Capability | **两条真实纵切面已验证** | Python Tool 与 Everything MCP 均完成个人验证→晋级 verified→脱敏快照→签名→admin_gray 发布→真实装载→完整治理动作链（#15/#16 真实执行，AC-07 主线 #9-#17 全部关闭）；受众固定 admin_gray，未开放普通用户 |
@@ -101,7 +105,29 @@ Agent 可以动态选择路线，但不能绕过这些边界。
 - Token 统计来自调用记录，不将历史未知用量补成零。参考成本不是账单；本地模型不计价，
   缺少匹配中国区报价的云模型显示未计价。价格与更新方法见
   [分用户用量说明](docs/plans/2026-09-19-token-usage.md)。
-- 新记录和计划使用北京时间；无时区历史记录保留原值并明确标注，不猜测转换。
+- 新记录和计划采用 UTC+8；无时区历史记录保留原值并明确标注，不猜测转换。
+
+## Linux 服务器部署
+
+公司 IT 请先下载 [v1.0.0 Release](https://github.com/Eclipseic1848/Mangrove_ai/releases/tag/v1.0.0)
+中的 `mangrove-v1.0.0-linux-amd64.zip`，解压并阅读 `00-先读我.md`，随后按
+[详细部署手册](docs/deployment/linux-migration-it-guide.md) 操作。
+
+发行包包含固定版本 Git 源码、已构建前端、三项 Docker 镜像、手册和 SHA-256 清单：
+
+| 镜像 | 用途 |
+| --- | --- |
+| `mangrove/pi-coding-agent:0.87.1` | Pi 任务执行与 Capability Host |
+| `mangrove/smokescreen:da4840c9` | 任务出站代理 |
+| `mangrove/office-preview:local` | Office 文件隔离预览 |
+
+主服务使用单进程 FastAPI + systemd，Nginx 提供 HTTPS，Docker 按任务运行隔离容器。
+镜像针对 Ubuntu/Debian **x86_64 / linux/amd64**。完整迁移另需维护窗口内生成的业务数据和密钥，
+公开发行包不含它们。公司尚未完成目标服务器验收，外部采集服务与 GPU 模型部署不包含在核心包中。
+
+GitHub 自动生成的 Source code 压缩包不含 `.git`，不能直接替代部署包中的 Git 仓库包：正式核验
+规则需要提交身份。开发者也可 `git clone` 后检出 `v1.0.0`。旧 Pi 镜像不随本版分发，旧版未结束
+任务不保证原地续跑。
 
 ## 快速开始
 
@@ -120,6 +146,8 @@ Set-Location ..
 ```
 
 按需在 `.env` 中配置模型与采集账号。真实凭据、Cookie、数据库、日志和任务制品不得提交。
+运行 Pi 任务前须安装 Docker，并从发行包导入核心镜像：`docker image load -i runtime-images.tar`。
+镜像位置和逐项核对步骤见部署手册第 7.4 节；Windows 使用 Docker Desktop 的 Linux 容器模式。
 `JWT_SECRET` 必须显式配置为至少 32 字节的随机值；缺失、过短或使用默认/示例值时网关拒绝启动。
 已有实例不要自动更换密钥；若数据库连接凭据依赖 JWT 密钥派生，须先规划兼容与受控轮换。
 
@@ -195,7 +223,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 
 `Python 3.13` · `FastAPI` · `React` · `Vite` · `TypeScript` · `SQLite` · `Docker Desktop`
 
-Docker Desktop 用于 Pi Runtime、Capability Host 与隔离验证。维护者本机的一键启停脚本包含
+Windows 使用 Docker Desktop，Linux 使用 Docker Engine；它们用于 Pi Runtime、Capability Host 与隔离验证。维护者本机的一键启停脚本包含
 本地解释器、局域网和服务编排配置，因此不随公开仓库发布。
 
 ### 安装测试依赖
@@ -258,7 +286,7 @@ JUnit 证据。`heavy-ci-manual` 只能由维护者人工选择完整回归、G1
 
 | 使用与状态 | 架构与工程 | 社区与安全 |
 | --- | --- | --- |
-| [当前状态](docs/status/current.md)<br>[当前交接](handoff.md) | [领域词汇](CONTEXT.md)<br>[ADR 索引](docs/adr/README.md)<br>[工程规则](AGENTS.md)<br>[Agent 协作](docs/agents/) | [参与贡献](CONTRIBUTING.md)<br>[行为准则](CODE_OF_CONDUCT.md)<br>[安全策略](SECURITY.md)<br>[第三方许可](THIRD_PARTY_NOTICES.md) |
+| [Linux 部署](docs/deployment/linux-migration-it-guide.md)<br>[更新记录](CHANGELOG.md)<br>[当前状态](docs/status/current.md)<br>[当前交接](handoff.md) | [领域词汇](CONTEXT.md)<br>[ADR 索引](docs/adr/README.md)<br>[工程规则](AGENTS.md)<br>[Agent 协作](docs/agents/) | [参与贡献](CONTRIBUTING.md)<br>[行为准则](CODE_OF_CONDUCT.md)<br>[安全策略](SECURITY.md)<br>[第三方许可](THIRD_PARTY_NOTICES.md) |
 
 ## 数据与安全
 

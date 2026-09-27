@@ -34,3 +34,13 @@
 72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:98
 72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:151
 72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:199
+
+# 同一 Issue #141 内容经 squash 合入旧 main 后的精确命中：两项 Schema 摘要和六个合成幂等键。
+47ad95760829b665cb17516c2c978e95eccbff59:src/database_migrations/schema_manifest.json:generic-api-key:34
+47ad95760829b665cb17516c2c978e95eccbff59:src/database_migrations/schema_manifest.json:generic-api-key:248
+47ad95760829b665cb17516c2c978e95eccbff59:tests/test_workspace_lifecycle.py:generic-api-key:56
+47ad95760829b665cb17516c2c978e95eccbff59:tests/test_workspace_lifecycle.py:generic-api-key:84
+47ad95760829b665cb17516c2c978e95eccbff59:tests/test_workspace_lifecycle.py:generic-api-key:87
+47ad95760829b665cb17516c2c978e95eccbff59:tests/test_workspace_lifecycle.py:generic-api-key:98
+47ad95760829b665cb17516c2c978e95eccbff59:tests/test_workspace_lifecycle.py:generic-api-key:151
+47ad95760829b665cb17516c2c978e95eccbff59:tests/test_workspace_lifecycle.py:generic-api-key:199

@@ -1,7 +1,4 @@
-"""
-LangChain Agent 项目
-基于 LangChain 的智能体应用
-"""
+"""Mangrove 统一数据任务平台。"""
 
-__version__ = "1.0.2"
+__version__ = "1.0.0"
 

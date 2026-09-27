@@ -26,6 +26,10 @@
 3. 安全问题不要开公开 Issue，请按 `SECURITY.md` 私密报告。
 4. 不要提交真实 API Key、Cookie、用户文件、数据库、日志、浏览器状态或任务制品。
 
+复现发行版问题请检出对应标签（当前为 `v1.0.0`），并注明部署系统、提交号、Pi 镜像版本和
+脱敏后的复现步骤。开发基线为 `main`；Linux 环境准备见
+[部署手册](docs/deployment/linux-migration-it-guide.md)，发行变更见 [CHANGELOG](CHANGELOG.md)。
+
 ## 本地开发
 
 ```powershell

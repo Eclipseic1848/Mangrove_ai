@@ -6,6 +6,15 @@ from src.agentic_runtime.models import PiRuntimeCheckpoint
 from tests.test_agent_kernel import _FakePiRuntimeEngine, _registered_repository, _request
 
 
+def test_release_defaults_use_only_pi_0871():
+    from src.config.settings import Settings
+
+    fields = Settings.model_fields
+    assert fields["pi_runtime_image"].default == "mangrove/pi-coding-agent:0.87.1"
+    assert fields["pi_capability_host_image"].default == "mangrove/pi-coding-agent:0.87.1"
+    assert fields["pi_runtime_resume_images"].default_factory() == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("changed_digest", [False, True])
 async def test_upgrade_keeps_original_run_image_and_digest(tmp_path, monkeypatch, changed_digest):

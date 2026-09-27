@@ -151,7 +151,13 @@ def test_authoritative_requirement_references_must_be_safe_and_exist(tmp_path) -
     )
     assert accepted.returncode == 0
 
-    for unsafe in ("-c missing.txt\n", "-r ../outside.txt\n", f"-c {constraints.resolve()}\n"):
+    # 根目录路径不受工作区空格影响，确保此例检查绝对路径，而非引用语法。
+    absolute_reference = Path(constraints.anchor) / "constraints.txt"
+    for unsafe, expected_error in (
+        ("-c missing.txt\n", "依赖引用不存在"),
+        ("-r ../outside.txt\n", "依赖引用禁止目录穿越"),
+        (f"-c {absolute_reference}\n", "依赖引用必须是同目录树内的相对 .txt 文件"),
+    ):
         base.write_text(f"pydantic==2.12.5\n{unsafe}", encoding="utf-8")
         rejected = _run(
             "scripts/ci/check_requirement_consistency.py",
@@ -161,7 +167,7 @@ def test_authoritative_requirement_references_must_be_safe_and_exist(tmp_path) -
             str(subset),
         )
         assert rejected.returncode == 1
-        assert "依赖引用" in rejected.stderr
+        assert expected_error in rejected.stderr
 
 
 def test_minimum_ci_workflow_is_pinned_bounded_and_evidence_producing() -> None:
@@ -296,7 +302,7 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     assert "commits =" not in config
     assert "tests/.*" not in config
     assert "evals/.*" not in config
-    assert len(ignored) == 21
+    assert len(ignored) == 29
     assert (
         "8f23acbdcb69890cc94c733bb47baa3a75d5de22:"
         "tests/test_source_account_generation.py:generic-api-key:19"
@@ -314,6 +320,16 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     assert ignored.count("115c990c60a865ceb0749b7993664d963c112251:src/database_migrations/schema_manifest.json:generic-api-key:100") == 1
     assert ignored.count("72891b7572e1bf7c91ae90bf0905e2faead55df2:src/database_migrations/schema_manifest.json:generic-api-key:131") == 1
     assert ignored.count("72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:56") == 1
+    # 旧 main 的 squash 提交仅沿用已审计内容的精确行，不豁免后续版本。
+    squash_prefix = "47ad95760829b665cb17516c2c978e95eccbff59:"
+    assert {item for item in ignored if item.startswith(squash_prefix)} == {
+        f"{squash_prefix}{path}:generic-api-key:{line}"
+        for path, lines in (
+            ("src/database_migrations/schema_manifest.json", (34, 248)),
+            ("tests/test_workspace_lifecycle.py", (56, 84, 87, 98, 151, 199)),
+        )
+        for line in lines
+    }
     assert all("*" not in fingerprint for fingerprint in ignored)
     assert all(fingerprint.count(":") >= 3 for fingerprint in ignored)
 

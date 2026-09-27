@@ -348,7 +348,7 @@ class Settings(BaseSettings):
         ),
     )
     pi_runtime_image: str = Field(
-        default="mangrove/pi-coding-agent:0.80.10",
+        default="mangrove/pi-coding-agent:0.87.1",
         description="任务级 Pi Runtime 固定镜像",
     )
     pi_runtime_resume_images: list[str] = Field(
@@ -360,7 +360,7 @@ class Settings(BaseSettings):
         description="是否灰度启用任务级原生能力 Sidecar；关闭时现有 Pi 路径零变化",
     )
     pi_capability_host_image: str = Field(
-        default="mangrove/pi-coding-agent:0.80.10",
+        default="mangrove/pi-coding-agent:0.87.1",
         description="Capability Host 固定镜像",
     )
     pi_runtime_egress_image: str = Field(

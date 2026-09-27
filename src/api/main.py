@@ -40,6 +40,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from src import __version__  # noqa: E402
 from src.config.settings import settings  # noqa: E402
 from src.api.services import start_scheduler, stop_scheduler  # noqa: E402
 from src.api.cookie_health_scanner import start_cookie_health_scanner, stop_cookie_health_scanner  # noqa: E402
@@ -112,7 +113,7 @@ async def lifespan(app: FastAPI):
         await asyncio.to_thread(shutdown_workspace_telemetry)
 
 
-app = FastAPI(title="Mangrove Web UI Gateway", version="1.0", lifespan=lifespan)
+app = FastAPI(title="Mangrove Web UI Gateway", version=__version__, lifespan=lifespan)
 
 from src.api.operations_middleware import OperationsMiddleware
 app.add_middleware(OperationsMiddleware)

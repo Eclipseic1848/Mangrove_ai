@@ -4,7 +4,7 @@ FROM python@sha256:9d7f287598e1a5a978c015ee176d8216435aaf335ed69ac3c38dd1bbb10e8
 # Node/Git/curl/bash。摘要固定后不会被 latest 漂移影响实际构建。
 FROM ghcr.io/firecrawl/firecrawl@sha256:d538fabd8436bcbb28aa1f4d8653f71a91fdbecc0ee888111444d695cac1ff60
 
-ARG PI_VERSION=0.80.10
+ARG PI_VERSION=0.87.1
 
 USER root
 
