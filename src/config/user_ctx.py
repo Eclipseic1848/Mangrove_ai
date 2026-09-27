@@ -17,6 +17,7 @@ from src.config.settings import settings
 
 _OVERRIDES: ContextVar[Dict[str, str]] = ContextVar("user_config_overrides", default={})
 _MEMORIES: ContextVar[List[str]] = ContextVar("user_memories", default=[])
+_FROZEN_VALUES: ContextVar[Dict[str, str]] = ContextVar("frozen_effective_values", default={})
 
 
 def set_user_overrides(overrides: Dict[str, str]):
@@ -41,10 +42,24 @@ def get_user_override(key: str) -> Optional[str]:
 
 def effective(key: str) -> str:
     """取值链：用户覆盖 → settings（全局覆盖/.env）。返回字符串（未配置为空串）。"""
+    frozen = _FROZEN_VALUES.get()
+    if key in frozen:
+        return frozen[key]
     ov = get_user_override(key)
     if ov is not None:
         return ov
     return str(getattr(settings, key, "") or "")
+
+
+@contextmanager
+def frozen_effective_values(keys: List[str]) -> Iterator[Dict[str, str]]:
+    """冻结本次实际取值；包括空值，防止任务中途换用另一凭证。"""
+    values = {key: effective(key) for key in keys}
+    token = _FROZEN_VALUES.set({**_FROZEN_VALUES.get(), **values})
+    try:
+        yield values
+    finally:
+        _FROZEN_VALUES.reset(token)
 
 
 def set_user_memories(texts: List[str]):

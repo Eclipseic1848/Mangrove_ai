@@ -17,12 +17,15 @@ from src.api.routes.config_routes import _classify_ecommerce_probe, _verify_ecom
 
 
 def test_classify_valid():
-    # 落地 URL 就是预期页面本身、状态码 200 → 有效
-    msg = _classify_ecommerce_probe(
-        "https://order.jd.com/center/list.action", 200, "京东",
-        ("passport.jd.com",), False,
-    )
-    assert "京东 Cookie 有效" in msg, msg
+    # 页面可达没有身份凭据，不能宣称 Cookie 有效。
+    try:
+        _classify_ecommerce_probe(
+            "https://order.jd.com/center/list.action", 200, "京东",
+            ("passport.jd.com",), False,
+        )
+        assert False, "缺少身份凭据必须保持未知"
+    except RuntimeError as exc:
+        assert "无法判断" in str(exc)
 
 
 def test_classify_invalid_login_redirect():

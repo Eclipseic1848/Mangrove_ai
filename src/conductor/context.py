@@ -27,7 +27,7 @@ async def compress_history(
 ) -> List[Message]:
     """对话历史压缩：超过 context_max_messages 时，把较早消息摘要成一条，保留最近 context_keep_recent 条。
 
-    未超阈值则原样返回。摘要失败则退化为"硬截断最近若干条"，不阻断主流程。
+    未超阈值则原样返回。摘要失败保留原文，不能静默删除历史约束。
     """
     max_n = settings.context_max_messages
     keep = settings.context_keep_recent
@@ -40,17 +40,17 @@ async def compress_history(
         summary = await achat(
             [
                 {"role": "system", "content": HISTORY_COMPRESS_SYSTEM},
-                {"role": "user", "content": convo[:8000]},
+                {"role": "user", "content": convo},
             ],
             provider=provider,
             model=model,
         )
         summary = (summary or "").strip()
     except Exception:
-        logger.warning("对话历史压缩失败，退化为只保留最近消息", exc_info=True)
-        return recent
+        logger.warning("对话历史压缩失败，保留完整历史")
+        return messages
 
     if not summary:
-        return recent
+        return messages
     logger.info("对话历史已压缩：%d 条 → 摘要 + 最近 %d 条", len(messages), keep)
     return [{"role": "system", "content": f"【早前对话摘要】\n{summary}"}] + recent

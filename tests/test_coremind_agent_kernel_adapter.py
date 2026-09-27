@@ -1019,9 +1019,17 @@ async def test_candidate_side_effect_requires_checkpoint_and_effect_receipt(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("not_sent", [False, True])
 async def test_unknown_candidate_verification_pauses_without_model_retry(
     tmp_path: Path,
+    not_sent,
 ) -> None:
+    from src.model_connections import ProviderNotSentError
+
+    class NotSentService:
+        async def verify_initial_current(self, **_kwargs):
+            raise ProviderNotSentError("合成连接未建立")
+
     client = _InteractiveCoreMindClient()
     adapter = CoreMindAgentKernelAdapter(
         execution_root=tmp_path / "runs",
@@ -1029,16 +1037,16 @@ async def test_unknown_candidate_verification_pauses_without_model_retry(
         candidate_verifier_factory=lambda _request, _run_id: object(),
         poll_interval_seconds=0,
     )
-    adapter.bind_candidate_verification(_UnknownCandidateService())
+    adapter.bind_candidate_verification(NotSentService() if not_sent else _UnknownCandidateService())
 
-    with pytest.raises(Exception, match="结果不确定") as caught:
-        await adapter.start(
+    with pytest.raises(Exception, match="尚未发送" if not_sent else "结果不确定") as caught:
+        await asyncio.wait_for(adapter.start(
             _request(tmp_path),
             binding=_binding(adapter, "cm_run_verification_unknown"),
             on_event=lambda _event: asyncio.sleep(0),
-        )
+        ), timeout=5)
 
-    assert type(caught.value).__name__ == "AgentKernelResultUnknownError"
+    assert type(caught.value).__name__ == ("AgentKernelError" if not_sent else "AgentKernelResultUnknownError")
     assert len(client.run_calls) == 1
     assert client.verification_results == []
     assert client.closed is True
@@ -1275,6 +1283,10 @@ async def test_locked_worker_executes_real_tools_and_host_verification(
             [event.model_dump(mode="json") for event in events],
         )
         assert requests[0].get("tools")
+        outgoing = {item["function"]["name"]: item["function"]["parameters"] for item in requests[0]["tools"]}
+        assert outgoing["mangrove_read_source"].get("required") == ["source_id"], outgoing
+        assert "filename" in outgoing["mangrove_submit_candidate"]["required"]
+        assert "content" in outgoing["mangrove_submit_candidate"]["properties"]
         assert len(requests) == 3
         assert [item.filename for item in result.candidates] == ["result.txt"]
         assert all(item["model"] == "chosen-model" for item in requests)
@@ -1345,3 +1357,22 @@ async def test_restarted_worker_cleanup_requires_original_grant_revocation(tmp_p
     fail = False
     await restarted.cancel('user-a', 'task-a', 1)
     assert revoked == [('user-a', 'task-a', 1, 'original-run')] * 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["start", "resume"])
+async def test_execution_denied_is_preserved_and_worker_closed(tmp_path, monkeypatch, operation):
+    from src.account_execution import ExecutionDenied
+    client = _FakeCoreMindClient()
+    adapter = CoreMindAgentKernelAdapter(execution_root=tmp_path, client_factory=lambda **kw: client)
+
+    async def denied(*args, **kwargs):
+        raise ExecutionDenied("执行绑定已阻断")
+
+    monkeypatch.setattr(adapter, "_wait_for_terminal", denied)
+    with pytest.raises(ExecutionDenied):
+        kwargs = {"binding": _binding(adapter, "cm_denied"), "on_event": denied}
+        if operation == "resume":
+            kwargs["checkpoint"] = PiRuntimeCheckpoint(run_id="cm_denied", workspace_root=_workspace(tmp_path, "cm_denied"))
+        await getattr(adapter, operation)(_request(tmp_path), **kwargs)
+    assert client.closed

@@ -74,8 +74,9 @@ async def selfcheck(body: SelfCheckIn, _admin=Depends(require_admin)):
             return {"ok": True, "detail": "SMTP 连接并登录成功（未发送邮件）"}
 
         if target == "slack":
-            from src.external_readonly import reject_external_write
-            reject_external_write()
+            from src.conductor.slack_sender import verify_connection
+            await verify_connection()
+            return {"ok": True, "detail": "Slack 身份验证成功（未发送消息）"}
 
         if target == "embedding":
             from src.memory.embeddings import (

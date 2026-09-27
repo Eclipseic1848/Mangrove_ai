@@ -1,3 +1,4 @@
+import { beijingTime } from "@/lib/beijingTime";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { WebIntakeDraft } from "./TaskComposer";
 import {
@@ -62,7 +63,6 @@ type WebSourceIntakeProps = {
   onTaskCreated: (task: WorkspaceTask) => Promise<void> | void;
   onSourceSelected?: (snapshot: SourceSnapshot, attemptId: string) => void;
   onAcquisitionBusy?: (busy: boolean) => void;
-  onAcquisitionRecoveryChange?: (raw: string | null) => void;
   storageScope?: string;
 };
 
@@ -85,7 +85,6 @@ const ERROR_LABELS: Record<string, string> = {
 type StoredSourceAcquisition = {
   attempt_id: string | null;
   idempotency_key: string;
-  status?: SourceAcquisitionAttempt["status"];
   url: string;
   purpose: string;
   scope_kind: "current_page" | "same_site" | "public_search";
@@ -153,7 +152,6 @@ function readStoredAcquisition(value: string): StoredSourceAcquisition | null {
       return {
         attempt_id: typeof parsed.attempt_id === "string" ? parsed.attempt_id : null,
         idempotency_key: parsed.idempotency_key,
-        status: ["acquiring", "cancelling", "succeeded", "failed", "canceled"].includes(String(parsed.status)) ? parsed.status : undefined,
         url: parsed.url,
         purpose: parsed.purpose,
         scope_kind: parsed.scope_kind === "public_search" ? "public_search" : parsed.scope_kind === "same_site" ? "same_site" : "current_page",
@@ -190,17 +188,9 @@ function storeAcquisition(
   storageKey: string,
   attempt: SourceAcquisitionAttempt,
 ) {
-  const current = readStoredValueStrict(storageKey);
-  if (!current.ok || storedIdempotencyKey(current.value) !== attempt.idempotency_key) return false;
-  writeStoredValue(storageKey, storedAcquisition(attempt));
-  return storedIdempotencyKey(readStoredValueStrict(storageKey).value) === attempt.idempotency_key;
-}
-
-function storedAcquisition(attempt: SourceAcquisitionAttempt): StoredSourceAcquisition {
-  return {
+  writeStoredValue(storageKey, {
     attempt_id: attempt.attempt_id,
     idempotency_key: attempt.idempotency_key,
-    status: attempt.status,
     url: attempt.normalized_url,
     purpose: attempt.purpose,
     scope_kind: attempt.allowed_scope.kind,
@@ -210,18 +200,14 @@ function storedAcquisition(attempt: SourceAcquisitionAttempt): StoredSourceAcqui
     page_limit: attempt.allowed_scope.page_limit ?? 1,
     completeness_mode: attempt.allowed_scope.completeness?.mode ?? "exploratory",
     required_valid_pages: attempt.allowed_scope.completeness?.required_valid_pages ?? null,
-  };
+  } satisfies StoredSourceAcquisition);
 }
 
 function readStoredValue(storageKey: string) {
-  return readStoredValueStrict(storageKey).value;
-}
-
-function readStoredValueStrict(storageKey: string): { ok: boolean; value: string | null } {
   try {
-    return { ok: true, value: localStorage.getItem(storageKey) };
+    return localStorage.getItem(storageKey);
   } catch {
-    return { ok: false, value: null };
+    return null;
   }
 }
 
@@ -239,152 +225,6 @@ function removeStoredValue(storageKey: string) {
   } catch {
     // 存储不可用时没有可清理的持久状态。
   }
-}
-
-const sourceStorageKey = (ownerId: string, storageScope?: string) => `mangrove_web_source_attempt_${ownerId}${storageScope ? `_${storageScope}` : ""}`;
-const detachedStoragePrefix = (ownerId: string) => `mangrove_web_source_detached_${ownerId}_`;
-const detachedFlights = new Map<string, Promise<boolean>>();
-const detachedReruns = new Set<string>();
-
-type DetachedAcquisition = { storageScope: string; raw: string };
-
-function readDetachedAcquisitions(ownerId: string): Array<{ key: string; value: DetachedAcquisition }> {
-  try {
-    return Array.from({ length: localStorage.length }, (_, index) => localStorage.key(index))
-      .filter((key): key is string => Boolean(key?.startsWith(detachedStoragePrefix(ownerId))))
-      .flatMap(key => {
-        try {
-          const value = JSON.parse(localStorage.getItem(key) || "null") as Partial<DetachedAcquisition> | null;
-          return value && typeof value.storageScope === "string" && typeof value.raw === "string"
-            ? [{ key, value: { storageScope: value.storageScope, raw: value.raw } }] : [];
-        } catch { return []; }
-      });
-  } catch {
-    return [];
-  }
-}
-
-function storedIdempotencyKey(raw: string | null) {
-  return raw ? readStoredAcquisition(raw)?.idempotency_key ?? null : null;
-}
-
-function isDetachedSourceAcquisition(ownerId: string, storageScope: string, raw: string) {
-  const key = storedIdempotencyKey(raw);
-  return Boolean(key && readDetachedAcquisitions(ownerId).some(value => value.value.storageScope === storageScope && storedIdempotencyKey(value.value.raw) === key));
-}
-
-export function hasRestorableStoredSourceAcquisition(ownerId: string, storageScope?: string) {
-  const raw = readStoredValue(sourceStorageKey(ownerId, storageScope));
-  return Boolean(raw && !isDetachedSourceAcquisition(ownerId, storageScope ?? "", raw));
-}
-
-export function migrateLegacyStoredSourceAcquisition(ownerId: string, storageScope: string) {
-  const markerKey = `mangrove_web_source_legacy_claimed_${ownerId}`;
-  const scopedKey = sourceStorageKey(ownerId, storageScope);
-  if (readStoredValue(scopedKey)) return;
-  const marker = readStoredValue(markerKey);
-  if (marker) {
-    let claimedScope: string | null = null;
-    try { const parsed = JSON.parse(marker); claimedScope = typeof parsed === "string" ? parsed : null; } catch { /* 非法标记按无主状态清理。 */ }
-    let claimedRaw = claimedScope ? readStoredValue(sourceStorageKey(ownerId, claimedScope)) : null;
-    if (claimedRaw && !storedIdempotencyKey(claimedRaw)) {
-      removeStoredValue(sourceStorageKey(ownerId, claimedScope!));
-      claimedRaw = null;
-    }
-    if (claimedScope && claimedScope !== storageScope && claimedRaw && !detachStoredSourceAcquisition(ownerId, claimedScope, claimedRaw)) return;
-    removeStoredValue(markerKey);
-    removeStoredValue(sourceStorageKey(ownerId));
-    return;
-  }
-  const legacy = readStoredValue(sourceStorageKey(ownerId));
-  if (!legacy) return;
-  const stored = readStoredAcquisition(legacy);
-  if (!stored) { removeStoredValue(sourceStorageKey(ownerId)); return; }
-  writeStoredValue(scopedKey, stored);
-  if (storedIdempotencyKey(readStoredValue(scopedKey)) === stored.idempotency_key) {
-    writeStoredValue(markerKey, storageScope);
-    const marker = readStoredValueStrict(markerKey);
-    try {
-      if (marker.ok && JSON.parse(marker.value || "null") === storageScope) removeStoredValue(sourceStorageKey(ownerId));
-    } catch { /* 标记未确认时保留旧键，避免跨会话恢复身份丢失。 */ }
-  }
-}
-
-export function detachStoredSourceAcquisition(ownerId: string, storageScope: string, raw: string | null) {
-  const stored = raw === null ? readStoredValueStrict(sourceStorageKey(ownerId, storageScope)) : null;
-  if (stored && !stored.ok) return false;
-  const recovery = raw ?? stored?.value ?? null;
-  if (!recovery) return true;
-  try {
-    const key = storedIdempotencyKey(recovery);
-    if (!key) return false;
-    const detachedKey = `${detachedStoragePrefix(ownerId)}${key}`;
-    writeStoredValue(detachedKey, { storageScope, raw: recovery });
-    return readDetachedAcquisitions(ownerId).some(value => value.key === detachedKey && value.value.storageScope === storageScope);
-  } catch {
-    return false;
-  }
-}
-
-async function settleDetachedSourceAcquisitionsOnce(ownerId: string) {
-  const queue = readDetachedAcquisitions(ownerId);
-  const outcomes = await Promise.all(queue.map(async entry => {
-    const stored = readStoredAcquisition(entry.value.raw);
-    if (!stored?.idempotency_key) return { entry, keep: false, retry: false, nextRaw: entry.value.raw };
-    try {
-      const saved = stored.attempt_id
-        ? await getSourceAcquisition(stored.attempt_id)
-        : await createSourceAcquisition({
-            url: stored.url,
-            purpose: stored.purpose,
-            allowed_scope: stored.scope_kind,
-            query: stored.query,
-            time_range: stored.time_range,
-            domains: stored.domains,
-            page_limit: stored.page_limit,
-            completeness_mode: stored.completeness_mode,
-            required_valid_pages: stored.required_valid_pages,
-          }, stored.idempotency_key);
-      const settled = saved.status === "acquiring"
-        ? await cancelSourceAcquisition(saved.attempt_id)
-        : saved;
-      const keep = settled.status === "acquiring" || settled.status === "cancelling";
-      const next = storedAcquisition(settled);
-      if (!keep) {
-        const activeKey = sourceStorageKey(ownerId, entry.value.storageScope);
-        const active = readStoredValueStrict(activeKey);
-        if (!active.ok) return { entry, keep: true, retry: false, nextRaw: JSON.stringify(next) };
-        if (storedIdempotencyKey(active.value) === stored.idempotency_key) removeStoredValue(activeKey);
-      }
-      return { entry, keep, retry: keep, nextRaw: JSON.stringify(next) };
-    } catch {
-      // 断网时保留原身份，下次进入工作台继续确认并停止。
-      return { entry, keep: true, retry: false, nextRaw: entry.value.raw };
-    }
-  }));
-  for (const outcome of outcomes) {
-    if (outcome.keep) writeStoredValue(outcome.entry.key, { ...outcome.entry.value, raw: outcome.nextRaw });
-    else removeStoredValue(outcome.entry.key);
-  }
-  return outcomes.some(outcome => outcome.retry);
-}
-
-export function settleDetachedSourceAcquisitions(ownerId: string) {
-  const current = detachedFlights.get(ownerId);
-  if (current) { detachedReruns.add(ownerId); return current; }
-  const run = async () => {
-    let retry: boolean;
-    do {
-      detachedReruns.delete(ownerId);
-      retry = await settleDetachedSourceAcquisitionsOnce(ownerId);
-    } while (detachedReruns.delete(ownerId));
-    return retry;
-  };
-  const flight = run().finally(() => {
-    if (detachedFlights.get(ownerId) === flight) detachedFlights.delete(ownerId);
-  });
-  detachedFlights.set(ownerId, flight);
-  return flight;
 }
 
 function normalizedUrl(value: string) {
@@ -418,7 +258,6 @@ export function WebSourceIntake({
   onTaskCreated,
   onSourceSelected,
   onAcquisitionBusy,
-  onAcquisitionRecoveryChange,
   storageScope,
 }: WebSourceIntakeProps) {
   const initialConnectionId = defaultConnectionId
@@ -518,7 +357,6 @@ export function WebSourceIntake({
   const taskKeyRef = useRef<{ fingerprint: string; key: string } | null>(null);
   const taskReplayPromiseRef = useRef<Promise<WorkspaceTask> | null>(null);
   const onTaskCreatedRef = useRef(onTaskCreated);
-  const recoveryChangeRef = useRef(onAcquisitionRecoveryChange);
   const normalized = useMemo(() => normalizedUrl(url), [url]);
   const searching = scopeKind === "public_search";
   const domainList = domains.split(/[\s,，]+/).map(value => value.trim()).filter(Boolean);
@@ -573,17 +411,15 @@ export function WebSourceIntake({
   useEffect(() => {
     onTaskCreatedRef.current = onTaskCreated;
   }, [onTaskCreated]);
-  useEffect(() => { recoveryChangeRef.current = onAcquisitionRecoveryChange; }, [onAcquisitionRecoveryChange]);
 
   useEffect(() => {
     const raw = readStoredValue(storageKey);
-    if (!raw || isDetachedSourceAcquisition(ownerId, storageScope ?? "", raw)) return;
+    if (!raw) return;
     const stored = readStoredAcquisition(raw);
     if (!stored) {
       removeStoredValue(storageKey);
       return;
     }
-    recoveryChangeRef.current?.(raw);
     let active = true;
     if (stored.url) setUrl(stored.url);
     if (stored.purpose) setPurpose(stored.purpose);
@@ -629,7 +465,6 @@ export function WebSourceIntake({
       .then((saved) => {
         if (!active) return;
         setAttempt((previous) => preserveStopping(previous, saved));
-        recoveryChangeRef.current?.(JSON.stringify(storedAcquisition(saved)));
         setUrl(saved.normalized_url);
         setPurpose(saved.purpose);
         if (saved.allowed_scope.kind === "public_search") {
@@ -726,7 +561,6 @@ export function WebSourceIntake({
       void request.then((saved) => {
         if (!active) return;
         setAttempt((previous) => preserveStopping(previous, saved));
-        recoveryChangeRef.current?.(JSON.stringify(storedAcquisition(saved)));
         storeAcquisition(storageKey, saved);
       }).catch(() => {
         // 短暂断网不改变服务端持久状态，保持轮询即可。
@@ -774,18 +608,7 @@ export function WebSourceIntake({
       completeness_mode: completenessMode,
       required_valid_pages: effectiveRequired,
     };
-    const raw = JSON.stringify(stored);
-    recoveryChangeRef.current?.(raw);
-    const current = readStoredValueStrict(storageKey);
-    if (!current.ok) {
-      toast.error("浏览器存储不可用；本次读取可继续，但关闭页面前请勿新建任务");
-    } else if (current.value && storedIdempotencyKey(current.value) !== stored.idempotency_key && !isDetachedSourceAcquisition(ownerId, storageScope ?? "", current.value)) {
-      toast.error("另一页面正在准备网页来源，请先在原页面完成或新建任务");
-      recoveryChangeRef.current?.(null);
-      return;
-    } else {
-      writeStoredValue(storageKey, stored);
-    }
+    writeStoredValue(storageKey, stored);
     setLoading(true);
     setAttempt(pendingAcquisition(stored));
     try {
@@ -802,7 +625,6 @@ export function WebSourceIntake({
       }, keyRef.current.key);
       if (generation !== requestGeneration.current || keyRef.current?.key !== stored.idempotency_key) return;
       setAttempt((previous) => preserveStopping(previous, saved));
-      recoveryChangeRef.current?.(JSON.stringify(storedAcquisition(saved)));
       storeAcquisition(storageKey, saved);
       if (saved.status === "succeeded") toast.success("网页来源已冻结");
     } catch (error) {
@@ -811,7 +633,7 @@ export function WebSourceIntake({
       if (error instanceof ApiError && [400, 401, 403, 404, 409, 422].includes(error.status)) {
         setAttempt((previous) => previous?.attempt_id === "pending" ? null : previous);
         const raw = readStoredValue(storageKey);
-        if (raw && readStoredAcquisition(raw)?.attempt_id === null) { removeStoredValue(storageKey); recoveryChangeRef.current?.(null); }
+        if (raw && readStoredAcquisition(raw)?.attempt_id === null) removeStoredValue(storageKey);
       }
       toast.error(error instanceof Error ? error.message : "网页来源获取失败");
     } finally {
@@ -827,7 +649,6 @@ export function WebSourceIntake({
       const saved = await cancelSourceAcquisition(attempt.attempt_id);
       if (generation !== requestGeneration.current || keyRef.current?.key !== canceledKey) return;
       setAttempt((previous) => preserveStopping(previous, saved));
-      recoveryChangeRef.current?.(JSON.stringify(storedAcquisition(saved)));
       storeAcquisition(storageKey, saved);
     } catch (error) {
       if (generation !== requestGeneration.current || keyRef.current?.key !== canceledKey) return;
@@ -839,7 +660,6 @@ export function WebSourceIntake({
     if (acquiring || starting) return;
     requestGeneration.current += 1;
     removeStoredValue(storageKey);
-    recoveryChangeRef.current?.(null);
     keyRef.current = null;
     setLoading(false);
     setAttempt(null);
@@ -1275,7 +1095,7 @@ export function WebSourceIntake({
                   {snapshot.artifacts.map((item) => (
                     <li key={item.artifact_id} className="break-all">
                       <span className="text-emerald-700 dark:text-emerald-300">成功</span>
-                      {" · "}{item.final_url}{" · "}{new Date(item.read_at).toLocaleString("zh-CN")}
+                      {" · "}{item.final_url}{" · "}{beijingTime(item.read_at)}
                     </li>
                   ))}
                   {snapshot.failures.map((item) => (
@@ -1292,7 +1112,7 @@ export function WebSourceIntake({
           <dl className="mt-4 grid gap-x-6 gap-y-3 border-y py-4 text-xs sm:grid-cols-3">
             <div>
               <dt className="text-muted-foreground">读取时间</dt>
-              <dd className="mt-1 font-medium">{new Date(artifact.read_at).toLocaleString("zh-CN")}</dd>
+              <dd className="mt-1 font-medium">{beijingTime(artifact.read_at)}</dd>
             </div>
             <div>
               <dt className="text-muted-foreground">内容类型 / 大小</dt>

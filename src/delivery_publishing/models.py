@@ -101,6 +101,19 @@ class PublicationGate(FrozenModel):
     cancel_requested: bool = False
     p0_blocked: bool = False
     revision_current: bool = True
+    owner_acceptance_current: bool = False
+
+
+class OwnerAcceptance(FrozenModel):
+    """所有者接受精确初稿的事实，不代表独立验证通过。"""
+
+    actor_id: str = Field(min_length=1)
+    cancel_generation: int = Field(default=0, ge=0)
+    source_revision: int = Field(ge=1)
+    draft_id: str = Field(pattern=_HASH_PATTERN)
+    candidate_set_hash: str = Field(pattern=_HASH_PATTERN)
+    accepted_at: str = Field(min_length=1)
+    gaps: tuple[str, ...]
 
 
 class PublishCommand(FrozenModel):
@@ -116,6 +129,7 @@ class PublishCommand(FrozenModel):
     verification_report_id: str = Field(min_length=1)
     verification_report_hash: str = Field(pattern=_HASH_PATTERN)
     verification_status: Literal["passed", "failed", "inconclusive"]
+    owner_acceptance: OwnerAcceptance | None = Field(default=None, exclude_if=lambda value: value is None)
     verification_attempt_id: str | None = Field(
         default=None,
         min_length=1,
@@ -149,6 +163,7 @@ class PublishCommand(FrozenModel):
         source_snapshot_refs: tuple[str, ...],
         verification_attempt_id: str | None = None,
         request_idempotency_key: str | None = None,
+        owner_acceptance: OwnerAcceptance | None = None,
     ) -> "PublishCommand":
         if not candidates:
             raise ValueError("发布命令缺少候选文件")
@@ -171,6 +186,11 @@ class PublishCommand(FrozenModel):
             publication_identity["verification_attempt_id"] = (
                 verification_attempt_id
             )
+        if owner_acceptance is not None:
+            if (owner_acceptance.actor_id != owner_id or owner_acceptance.source_revision >= task_revision
+                    or owner_acceptance.candidate_set_hash != candidate_set_hash):
+                raise ValueError("用户接受记录与候选或新修订不一致")
+            publication_identity["owner_acceptance"] = owner_acceptance.model_dump(mode="json")
         if request_idempotency_key is not None and not request_idempotency_key:
             raise ValueError("幂等键不能为空")
         publication_key = canonical_hash(publication_identity)
@@ -187,6 +207,7 @@ class PublishCommand(FrozenModel):
             verification_report_id=verification_report_id,
             verification_report_hash=verification_report_hash,
             verification_status=verification_status,
+            owner_acceptance=owner_acceptance,
             verification_attempt_id=verification_attempt_id,
             request_idempotency_hash=(
                 canonical_hash(request_idempotency_key)

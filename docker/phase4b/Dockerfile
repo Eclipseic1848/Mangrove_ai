@@ -87,6 +87,7 @@ RUN chmod -R a+rX /ms-playwright \
     && chown -R 10001:10001 /app/data /app/logs /home/mangrove
 
 COPY src ./src
+COPY scripts/mediacrawler_isolated.py scripts/mediacrawler_xhs.py scripts/mediacrawler_identity.py ./scripts/
 COPY config ./config
 COPY skills ./skills
 COPY docker/phase4b/entrypoint.sh /app/docker/phase4b/entrypoint.sh

@@ -42,22 +42,23 @@ def test_forward_backfills_without_rewriting_roots_and_restore_is_exact(tmp_path
         original_grants = conn.execute('SELECT * FROM model_connection_grants ORDER BY grant_id').fetchall()
         publication_columns = [row[1] for row in conn.execute('PRAGMA table_info(delivery_publish_intents)')]
         original_columns = [row[1] for row in conn.execute('PRAGMA table_info(users)')]
+        root_columns = {table: [row[1] for row in conn.execute(f'PRAGMA table_info({table})')] for table in ('semantic_workspace_tasks', 'capability_platform_validation_runs')}
         roots = {table: conn.execute(f'SELECT * FROM {table}').fetchall() for table in ('users', 'semantic_workspace_tasks', 'capability_platform_validation_runs', 'delivery_publish_intents')}
         conn.commit()
     before = database.read_bytes()
     target = migrations.DatabaseTarget('webui', database)
-    assert migrations.inspect_database(target).pending_revisions == ('webui_0012', 'webui_0013', 'webui_0014', 'webui_0015', 'webui_0016', 'webui_0017', 'webui_0018', 'webui_0019', 'webui_0020', 'webui_0021')
+    assert migrations.inspect_database(target).pending_revisions == tuple(f'webui_{number:04d}' for number in range(12, 24))
     with pytest.raises(migrations.SchemaNotCurrentError):
         migrations.inspect_database(target).require_current()
     assert database.read_bytes() == before
     receipt = migrations.apply_migrations(target, tmp_path / 'backup.db', expected_source_sha256=hashlib.sha256(before).hexdigest())
-    assert receipt.applied_revisions == ('webui_0012', 'webui_0013', 'webui_0014', 'webui_0015', 'webui_0016', 'webui_0017', 'webui_0018', 'webui_0019', 'webui_0020', 'webui_0021')
+    assert receipt.applied_revisions == tuple(f'webui_{number:04d}' for number in range(12, 24))
     with closing(sqlite3.connect(database)) as conn:
         assert conn.execute('SELECT ' + ','.join(original_columns) + ' FROM users').fetchall() == roots['users']
         assert conn.execute('SELECT ' + ','.join(publication_columns) + ' FROM delivery_publish_intents').fetchall() == roots['delivery_publish_intents']
         assert conn.execute('SELECT execution_generation,status FROM delivery_publish_intents').fetchone() == (0, 'committing')
         for table in ('semantic_workspace_tasks', 'capability_platform_validation_runs'):
-            assert conn.execute(f'SELECT * FROM {table}').fetchall() == roots[table]
+            assert conn.execute('SELECT ' + ','.join(root_columns[table]) + ' FROM ' + table).fetchall() == roots[table]
         assert dict(conn.execute('SELECT user_id,execution_generation FROM users')) == {'active': 0, 'disabled': 1, 'pending': 1}
         grants = {row[0]: row[1:] for row in conn.execute('SELECT grant_id,revoked_at,revoke_reason FROM model_connection_grants')}
         assert grants['active-grant'] == (None, None)

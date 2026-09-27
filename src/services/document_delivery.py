@@ -481,6 +481,10 @@ def write_document_delivery(
     spec_path = store.write_json(
         task_id, "extraction/extraction_spec.json", spec.model_dump(mode="json")
     )
+    # 覆盖统计是交付节点的输入；单独冻结，不能在重放时从质量输出反推。
+    coverage_path = None
+    if coverage is not None:
+        coverage_path = store.write_json(task_id, "extraction/coverage.json", dict(coverage))
     fields_path = store.write_jsonl(
         task_id, "extraction", "extracted_fields.jsonl", field_rows
     )
@@ -717,6 +721,8 @@ def write_document_delivery(
         _artifact_entry(store, quality_path, "quality"),
         _artifact_entry(store, lineage_path, "lineage"),
     ]
+    if coverage_path is not None:
+        generated_artifacts.append(_artifact_entry(store, coverage_path, "extraction_coverage"))
     if raw_tables_path is not None:
         generated_artifacts.append(
             _artifact_entry(store, raw_tables_path, "extracted_tables_raw")

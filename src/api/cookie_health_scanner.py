@@ -55,28 +55,17 @@ class CookieHealthScanner:
     async def _run_one_scan(self) -> None:
         # 延迟导入，避免 config_routes 与本模块之间的循环导入；_COOKIE_HEALTH_KEYS 是
         # 10 个 Cookie key 的唯一权威列表（config_routes.py 里定义），这里直接复用，不重复声明。
-        from src.api.routes.config_routes import (
-            _COOKIE_HEALTH_KEYS,
-            _cookie_failure_status,
-            _record_cookie_health,
-            _verify_target,
-        )
+        from src.api.routes.config_routes import _COOKIE_HEALTH_KEYS, _verify_global_cookie
 
         logger.info("Cookie 健康巡检：开始一轮扫描（%d 项）", len(_COOKIE_HEALTH_KEYS))
         for key in _COOKIE_HEALTH_KEYS:
-            if self._stop.is_set():
+            # 管理员关闭后不再发起下一平台探测；已发送的请求仍正常收尾。
+            if self._stop.is_set() or not settings.cookie_health_scan_enabled:
                 break
             try:
-                detail = await _verify_target(key)
-                _record_cookie_health(key, "valid", detail, checked_by="scheduled")
+                await _verify_global_cookie(key, "scheduled")
             except Exception as e:  # noqa: BLE001 单项失败不影响本轮其余项，也不该崩掉循环
-                detail = str(e)[:500]
-                _record_cookie_health(
-                    key,
-                    _cookie_failure_status(e),
-                    detail,
-                    checked_by="scheduled",
-                )
+                logger.info("Cookie 巡检本项未通过 key=%s type=%s", key, type(e).__name__)
             await self._sleep(_BETWEEN_ITEM_SECONDS)
         logger.info("Cookie 健康巡检：本轮扫描完成")
 
@@ -109,7 +98,13 @@ def start_cookie_health_scanner() -> None:
     """幂等启动。即使巡检开关关闭也会启动循环本身（循环内部自己空转直到开关打开），
     这样管理员切换开关不需要重启进程。需在已有事件循环内调用（FastAPI 启动钩子）。"""
     global _scanner
-    if _scanner is not None:
-        return
-    _scanner = CookieHealthScanner()
+    if _scanner is None:
+        _scanner = CookieHealthScanner()
     _scanner.start()
+
+
+async def stop_cookie_health_scanner() -> None:
+    global _scanner
+    if _scanner is not None:
+        await _scanner.stop()
+        _scanner = None

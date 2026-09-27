@@ -59,12 +59,8 @@ def test_verify_target_mc_cdp_enabled_not_found():
     cr.settings.mc_enable_cdp_mode = True
     try:
         with patch.object(cr, "_detect_local_browser", return_value=None):
-            try:
-                asyncio.run(cr._verify_target("mc_cdp"))
-                raised = False
-            except RuntimeError:
-                raised = True
-        assert raised
+            detail = asyncio.run(cr._verify_target("mc_cdp"))
+        assert "独立 Chromium" in detail and "不连接共享 CDP" in detail
     finally:
         cr.settings.mc_enable_cdp_mode = orig
 

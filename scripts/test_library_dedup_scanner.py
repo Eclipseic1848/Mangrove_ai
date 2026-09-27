@@ -384,7 +384,8 @@ def test_run_one_scan_deletes_stale_drafts():
     from datetime import datetime, timedelta
 
     td = _setup_tpl_tmp()
-    old_created = (datetime.now() - timedelta(days=31)).isoformat()
+    from src.timezone import now as beijing_now
+    old_created = (beijing_now() - timedelta(days=31)).isoformat()
     (td / "stale.md").write_text(
         f"---\nowner_id: library-test-owner\nscope: owner\ntitle: 停滞模板\ndata_type: generic\nkeywords: [x]\nstatus: draft\nuses: 0\n"
         f"quality_avg: 0\ncreated_at: {old_created}\n---\n正文\n",

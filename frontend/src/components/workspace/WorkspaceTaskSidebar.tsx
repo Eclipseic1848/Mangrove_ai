@@ -10,6 +10,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { beijingTime } from "@/lib/beijingTime";
 import type {
   WorkspaceStorage,
   WorkspaceTask,
@@ -68,6 +69,7 @@ export const workspaceStatusLabel = (status: WorkspaceTaskStatus) =>
   STATUS[status].label;
 
 function relativeTime(value: string) {
+  if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(value)) return beijingTime(value);
   const diff = Date.now() - new Date(value).getTime();
   const minutes = Math.max(0, Math.round(diff / 60_000));
   if (minutes < 1) return "刚刚";
@@ -89,22 +91,37 @@ export function WorkspaceTaskSidebar({
   filter,
   recycleBin,
   storage,
+  loading,
+  error,
+  lastReadAt,
+  onRetry,
+  hasMore,
+  loadingMore,
+  onLoadMore,
   onSelect,
   onFilter,
   onNew,
   onToggleRecycleBin,
 }: {
-  tasks: WorkspaceTask[];
+  tasks: Pick<WorkspaceTask, "task_id" | "title" | "status" | "updated_at">[];
   activeTaskId: string | null;
   filter: "all" | "active" | "needs_input" | "completed";
   recycleBin: boolean;
   storage?: WorkspaceStorage;
+  loading?: boolean;
+  error?: string;
+  lastReadAt?: number;
+  onRetry: () => void;
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  onLoadMore: () => void;
   onSelect: (taskId: string) => void;
   onFilter: (filter: "all" | "active" | "needs_input" | "completed") => void;
   onNew: () => void;
   onToggleRecycleBin: () => void;
 }) {
   const filtered = tasks.filter((task) => {
+    if (recycleBin) return true;
     if (filter === "active") {
       return ["queued", "running", "cancelling"].includes(task.status);
     }
@@ -122,7 +139,7 @@ export function WorkspaceTaskSidebar({
   ];
 
   return (
-    <aside className="flex h-full min-h-0 w-[280px] shrink-0 flex-col border-r bg-muted/20">
+    <aside aria-label="任务列表" className="flex h-full min-h-0 w-[280px] shrink-0 flex-col border-r bg-muted/20">
       <div className="p-3">
         <button
           type="button"
@@ -153,6 +170,12 @@ export function WorkspaceTaskSidebar({
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+        {error && <div role="alert" className="space-y-2 px-2 py-3 text-xs text-red-700 dark:text-red-300">
+          <p>{error}读取失败，已加载的任务仍保留。</p>
+          {Boolean(lastReadAt) && <p>最近成功读取：{beijingTime(new Date(lastReadAt!).toISOString())}</p>}
+          <button type="button" onClick={onRetry} className="rounded-md border px-3 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring">重试读取列表</button>
+        </div>}
+        {loading && !tasks.length && <p role="status" className="p-3 text-xs text-muted-foreground">正在读取任务列表…</p>}
         {filtered.length ? (
           <div className="space-y-1">
             {filtered.map((task) => {
@@ -191,12 +214,13 @@ export function WorkspaceTaskSidebar({
               );
             })}
           </div>
-        ) : (
+        ) : !loading && !error && (
           <div className="flex h-44 flex-col items-center justify-center px-5 text-center text-xs text-muted-foreground">
             <Inbox className="mb-2 h-6 w-6 opacity-50" />
             {recycleBin ? "回收站为空" : "当前筛选下没有任务"}
           </div>
         )}
+        {hasMore && <button type="button" disabled={loadingMore} onClick={onLoadMore} className="mt-3 w-full rounded-lg border px-3 py-2 text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">{loadingMore ? "正在加载…" : "加载更早任务"}</button>}
       </div>
 
       <div className="border-t p-3">

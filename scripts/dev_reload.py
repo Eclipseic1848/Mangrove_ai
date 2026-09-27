@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -50,6 +51,14 @@ def _stop_backend(proc: subprocess.Popen) -> None:
     if proc.poll() is not None:
         return
     if os.name == "nt":
+        # 子进程由本监督器建立独立进程组；先让 ASGI 收尾事务，超时才回收进程树。
+        try:
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+            proc.wait(timeout=10)
+            return
+        except (OSError, subprocess.TimeoutExpired):
+            if proc.poll() is not None:
+                return
         subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], check=False)
     else:
         proc.terminate()

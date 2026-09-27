@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import Any, Dict, List
 
 from src.conductor.task_spec import TaskSpec
@@ -21,6 +20,7 @@ class CollectedItem:
     title: str = ""
     content: str = ""                       # 正文（Markdown 或纯文本）
     metadata: Dict[str, Any] = field(default_factory=dict)
+    access_handle: str | None = field(default=None, repr=False)  # 仅适配器解密，不进入公开字段
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -31,16 +31,6 @@ class CollectedItem:
         }
 
 
-class CollectFailureKind(str, Enum):
-    """采集失败的稳定分类；用户文案变化不能改写恢复决策。"""
-
-    AUTH_INVALID = "auth_invalid"
-    RISK_CONTROL = "risk_control"
-    NETWORK = "network"
-    NO_DATA = "no_data"
-    UNKNOWN = "unknown"
-
-
 @dataclass
 class CollectResult:
     """一次采集的结果汇总。"""
@@ -48,8 +38,8 @@ class CollectResult:
     collector: str
     items: List[CollectedItem] = field(default_factory=list)
     message: str = ""
-    failure_kind: CollectFailureKind | None = None
-    credential_key: str | None = None
+    coverage: Dict[str, Any] = field(default_factory=dict)
+    authentication: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def has_data(self) -> bool:

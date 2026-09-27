@@ -151,7 +151,13 @@ def test_authoritative_requirement_references_must_be_safe_and_exist(tmp_path) -
     )
     assert accepted.returncode == 0
 
-    for unsafe in ("-c missing.txt\n", "-r ../outside.txt\n", f"-c {constraints.resolve()}\n"):
+    # 根目录路径不受工作区空格影响，确保此例检查绝对路径，而非引用语法。
+    absolute_reference = Path(constraints.anchor) / "constraints.txt"
+    for unsafe, expected_error in (
+        ("-c missing.txt\n", "依赖引用不存在"),
+        ("-r ../outside.txt\n", "依赖引用禁止目录穿越"),
+        (f"-c {absolute_reference}\n", "依赖引用必须是同目录树内的相对 .txt 文件"),
+    ):
         base.write_text(f"pydantic==2.12.5\n{unsafe}", encoding="utf-8")
         rejected = _run(
             "scripts/ci/check_requirement_consistency.py",
@@ -161,7 +167,7 @@ def test_authoritative_requirement_references_must_be_safe_and_exist(tmp_path) -
             str(subset),
         )
         assert rejected.returncode == 1
-        assert "依赖引用" in rejected.stderr
+        assert expected_error in rejected.stderr
 
 
 def test_minimum_ci_workflow_is_pinned_bounded_and_evidence_producing() -> None:
@@ -284,15 +290,19 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     ]
 
     assert "useDefault = true" in config
-    assert config.count('targetRules = ["generic-api-key"]') == 5
-    assert config.count('condition = "AND"') == 5
+    assert config.count('targetRules = ["generic-api-key"]') == 6
+    assert config.count('condition = "AND"') == 6
+    deletion_digest = next(item for item in tomllib.loads(config)["allowlists"]
+                           if "index:ix_deletion_owner_key" in item["regexes"][0])
+    assert deletion_digest["paths"] == [r"^src/database_migrations/schema_manifest\.json$"]
+    assert not re.search(deletion_digest["regexes"][0], '"index:ix_deletion_owner_key": "unexpected-secret"')
     assert 'regexTarget = "line"' in config
     assert '^src/database_migrations/schema_manifest\\.json$' in config
     assert 'model_connection_secrets|runtime_config_secrets' in config
     assert "commits =" not in config
     assert "tests/.*" not in config
     assert "evals/.*" not in config
-    assert len(ignored) == 37
+    assert len(ignored) == 29
     assert (
         "8f23acbdcb69890cc94c733bb47baa3a75d5de22:"
         "tests/test_source_account_generation.py:generic-api-key:19"
@@ -307,42 +317,19 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
         "9a428600063e4e56e2c626dea6690b6461f85eb8:"
         "src/database_migrations/schema_manifest.json:generic-api-key:100"
     ) == 1
-    new_false_positives = {
-        "115c990c60a865ceb0749b7993664d963c112251:"
-        "src/database_migrations/schema_manifest.json:generic-api-key:100",
-        "72891b7572e1bf7c91ae90bf0905e2faead55df2:"
-        "src/database_migrations/schema_manifest.json:generic-api-key:131",
-        "72891b7572e1bf7c91ae90bf0905e2faead55df2:"
-        "src/database_migrations/schema_manifest.json:generic-api-key:142",
-        *{
-            "72891b7572e1bf7c91ae90bf0905e2faead55df2:"
-            f"tests/test_workspace_lifecycle.py:generic-api-key:{line}"
-            for line in (56, 84, 87, 98, 151, 199)
-        },
+    assert ignored.count("115c990c60a865ceb0749b7993664d963c112251:src/database_migrations/schema_manifest.json:generic-api-key:100") == 1
+    assert ignored.count("72891b7572e1bf7c91ae90bf0905e2faead55df2:src/database_migrations/schema_manifest.json:generic-api-key:131") == 1
+    assert ignored.count("72891b7572e1bf7c91ae90bf0905e2faead55df2:tests/test_workspace_lifecycle.py:generic-api-key:56") == 1
+    # 旧 main 的 squash 提交仅沿用已审计内容的精确行，不豁免后续版本。
+    squash_prefix = "47ad95760829b665cb17516c2c978e95eccbff59:"
+    assert {item for item in ignored if item.startswith(squash_prefix)} == {
+        f"{squash_prefix}{path}:generic-api-key:{line}"
+        for path, lines in (
+            ("src/database_migrations/schema_manifest.json", (34, 248)),
+            ("tests/test_workspace_lifecycle.py", (56, 84, 87, 98, 151, 199)),
+        )
+        for line in lines
     }
-    assert new_false_positives.issubset(ignored)
-    assert {
-        "e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:src/database_migrations/schema_manifest.json:generic-api-key:247",
-        "e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:56",
-        "e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:84",
-        "e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:87",
-        "e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:98",
-        "e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:151",
-        "e73e32bc61f18a2e8291be3a9fb5e4af24c3c2d0:tests/test_workspace_lifecycle.py:generic-api-key:199",
-    } <= set(ignored)
-    assert ignored.count(
-        "71948135456e009bdbd4744faff48f6645553fd2:"
-        "src/database_migrations/schema_manifest.json:generic-api-key:34"
-    ) == 1
-    assert {
-        "47ad95760829b665cb17516c2c978e95eccbff59:src/database_migrations/schema_manifest.json:generic-api-key:34",
-        "47ad95760829b665cb17516c2c978e95eccbff59:src/database_migrations/schema_manifest.json:generic-api-key:248",
-        *{
-            "47ad95760829b665cb17516c2c978e95eccbff59:"
-            f"tests/test_workspace_lifecycle.py:generic-api-key:{line}"
-            for line in (56, 84, 87, 98, 151, 199)
-        },
-    } <= set(ignored)
     assert all("*" not in fingerprint for fingerprint in ignored)
     assert all(fingerprint.count(":") >= 3 for fingerprint in ignored)
 

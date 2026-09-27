@@ -187,11 +187,12 @@ def test_grant_issuer_cannot_impersonate_other_owner(grants):
 @pytest.mark.parametrize("state", ["active", "missing", "disabled", "late"])
 def test_real_qualification_entry_freezes_existing_owner_once(grants, tmp_path, state):
     from scripts.verify_g4_provider_safety import QualificationError, execute_qualification, freeze_manifest
+    from src.model_connections.catalog import PRESETS_BY_ID
 
     store, repository, vault, _ = grants
     broker = ConnectionBroker(repository=repository, vault=vault, resolver=lambda _: ["8.8.8.8"],
         transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"choices": [{"message": {"content": "OK"}}]})))
-    asyncio.run(broker.configure_platform_preset(actor_user_id="synthetic-owner", display_name="虚构平台连接", preset_id="deepseek", api_key="synthetic-provider-secret", model="deepseek-v4-flash"))
+    asyncio.run(broker.configure_platform_preset(actor_user_id="synthetic-owner", display_name="虚构平台连接", preset_id="deepseek", api_key="synthetic-provider-secret", model=PRESETS_BY_ID["deepseek"].recommended_model))
     database = Path(store.db_path)
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps(freeze_manifest(db_path=database, presets=["deepseek"])), encoding="utf-8")

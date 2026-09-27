@@ -88,7 +88,7 @@ async def test_output_keeps_local_report_but_never_offers_external_confirmation(
              "outputs": {"email_pending": True, "slack_pending": True}}
     result = await output.output_node(state)
     assert (tmp_path / "downloads/task/report.md").is_file()
-    assert "外部只读" in result["reply"]
+    assert "宿主将核对" in result["reply"]
     assert not result["outputs"].get("email_pending")
     assert not result["outputs"].get("slack_pending")
     assert "确认发送" not in result["reply"]
@@ -97,10 +97,12 @@ async def test_output_keeps_local_report_but_never_offers_external_confirmation(
 
 
 @pytest.mark.asyncio
-async def test_slack_selfchecks_reject_without_reading_saved_webhook(monkeypatch):
-    monkeypatch.setattr(slack_sender, "settings", UnreadableSettings())
-    with pytest.raises(PermissionError, match="外部只读"):
+async def test_slack_selfcheck_without_bot_does_not_send_webhook_message(monkeypatch):
+    monkeypatch.setattr(slack_sender.settings, "slack_enabled", True)
+    monkeypatch.setattr(slack_sender.settings, "slack_bot_token", "")
+    monkeypatch.setattr(slack_sender.settings, "slack_webhook_url", "https://hooks.slack.com/services/synthetic")
+    with pytest.raises(ValueError, match="Bot Token"):
         await config_routes._verify_target("slack")
     result = await settings_routes.selfcheck(settings_routes.SelfCheckIn(target="slack"), _admin={"role": "admin"})
     assert result["ok"] is False
-    assert "外部只读" in result["detail"]
+    assert "Bot Token" in result["detail"]

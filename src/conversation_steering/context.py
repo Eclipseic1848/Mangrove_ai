@@ -37,6 +37,10 @@ class ContextCompiler:
             for item in request.task_template_summaries
         )
         optional.extend(
+            ("lesson", item.source_ref, item.summary)
+            for item in request.lesson_summaries
+        )
+        optional.extend(
             ("owner_memory", item.source_ref, item.summary)
             for item in request.owner_memory_summaries
         )

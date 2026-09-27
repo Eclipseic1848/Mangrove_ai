@@ -2,6 +2,8 @@
 """CandidateVerification 的 SQLite Adapter。"""
 from __future__ import annotations
 
+from contextlib import closing
+
 from datetime import datetime
 import hashlib
 import json
@@ -407,7 +409,7 @@ class SqliteCandidateVerificationRepository:
     ) -> None:
         """初验原子认领尚未落库的 Run ID，并拒绝覆盖既有身份。"""
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             execution.require_authorized(connection, self._execution_auth(owner_id))
             connection.execute(
@@ -435,7 +437,7 @@ class SqliteCandidateVerificationRepository:
     ) -> None:
         """验证精确 Runtime 身份，不泄露其他 Owner 的记录是否存在。"""
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT 1 FROM agentic_runtime_runs "
                 "WHERE user_id=? AND task_id=? AND revision=? "
@@ -453,7 +455,7 @@ class SqliteCandidateVerificationRepository:
     ) -> dict[str, object] | None:
         """读取语义重试所需的冻结 Runtime 字段。"""
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT runtime_version, status, run_id, workspace_root, "
                 "external_api_confirmed, "
@@ -477,7 +479,7 @@ class SqliteCandidateVerificationRepository:
     ) -> HistoricalReverificationAuthority | None:
         """只在精确 Owner 与冻结候选身份下返回窄重验权威。"""
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM candidate_reverification_authorities "
                 "WHERE owner_id=? AND task_id=? AND revision=? AND run_id=? "
@@ -505,7 +507,7 @@ class SqliteCandidateVerificationRepository:
     ) -> HistoricalReverificationAuthority | None:
         """恢复权威已落库但 Attempt 尚未创建时，按 Owner 幂等键继续原请求。"""
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM candidate_reverification_authorities "
                 "WHERE owner_id=? AND idempotency_key=?",
@@ -524,7 +526,7 @@ class SqliteCandidateVerificationRepository:
         """幂等追加 Owner 的历史重验权威，绝不回填 RuntimeAssignment。"""
 
         values = authority.model_dump(mode="json")
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             execution.require_authorized(connection, self._execution_auth(authority.owner_id))
             by_idempotency = connection.execute(
@@ -572,7 +574,7 @@ class SqliteCandidateVerificationRepository:
     def has_succeeded_delivery(self, owner_id: str, run_id: str) -> bool:
         """只读检查新旧正式交付；任一路径命中都必须阻断重复重验。"""
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             tables = {
                 row[0]
                 for row in connection.execute(
@@ -607,7 +609,7 @@ class SqliteCandidateVerificationRepository:
         attempt: VerificationAttempt,
     ) -> tuple[VerificationAttempt, bool]:
         self._validate_requested_attempt(attempt)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 "SELECT 1 FROM candidate_verification_attempts "
@@ -641,7 +643,7 @@ class SqliteCandidateVerificationRepository:
         return auth
 
     def require_account_execution(self, owner_id: str, attempt_id: str) -> None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN")
             execution.require_binding(connection, self._execution_auth(owner_id), "candidate", attempt_id)
 
@@ -804,7 +806,7 @@ class SqliteCandidateVerificationRepository:
         """在同一写事务内重查 P0，并创建、启动一个新 Attempt。"""
 
         self._validate_requested_attempt(attempt)
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             routing_table = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' "
@@ -849,7 +851,7 @@ class SqliteCandidateVerificationRepository:
     ) -> tuple[VerificationAttempt, bool, bool]:
         """原子重查运行身份、正式交付与 P0，并认领 requested Attempt。"""
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             execution.require_binding(connection, self._execution_auth(owner_id), "candidate", attempt_id)
             row = connection.execute(
@@ -1094,7 +1096,7 @@ class SqliteCandidateVerificationRepository:
         return VerificationAttempt.model_validate(dict(row)), True, False
 
     def get(self, owner_id: str, attempt_id: str) -> VerificationAttempt | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             # Owner 条件是数据隔离边界，不回退全局查询以免泄露 Attempt 是否存在。
             row = connection.execute(
                 "SELECT * FROM candidate_verification_attempts "
@@ -1108,7 +1110,7 @@ class SqliteCandidateVerificationRepository:
         owner_id: str,
         idempotency_key: str,
     ) -> VerificationAttempt | None:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             row = connection.execute(
                 "SELECT * FROM candidate_verification_attempts "
                 "WHERE owner_id=? AND idempotency_key=?",
@@ -1125,7 +1127,7 @@ class SqliteCandidateVerificationRepository:
     ) -> tuple[VerificationAttempt, bool]:
         """只收口尚未开始的 Attempt；已认领或终态记录保持原样。"""
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             started = connection.execute(
                 "UPDATE candidate_verification_attempts "
@@ -1154,7 +1156,7 @@ class SqliteCandidateVerificationRepository:
     def list_requested_local(self) -> tuple[VerificationAttempt, ...]:
         """恢复尚未认领的 requested；Provider 尚未运行时允许安全接管。"""
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT * FROM candidate_verification_attempts "
                 "WHERE status='requested' "
@@ -1167,7 +1169,7 @@ class SqliteCandidateVerificationRepository:
     def list_running_local(self) -> tuple[VerificationAttempt, ...]:
         """进程启动时收口上一个 Worker 遗留的 running Attempt。"""
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             rows = connection.execute(
                 "SELECT * FROM candidate_verification_attempts "
                 "WHERE status='running' "
@@ -1186,7 +1188,7 @@ class SqliteCandidateVerificationRepository:
         run_id: str,
         candidate_set_hash: str,
     ) -> tuple[VerificationAttempt, ...]:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             # 历史列表也必须在 Owner 边界内过滤，管理员诊断另走审计接口。
             rows = connection.execute(
                 "SELECT * FROM candidate_verification_attempts "
@@ -1205,7 +1207,7 @@ class SqliteCandidateVerificationRepository:
         *,
         started_at: datetime,
     ) -> VerificationAttempt:
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             execution.require_binding(connection, self._execution_auth(owner_id), "candidate", attempt_id)
             updated = connection.execute(
@@ -1271,7 +1273,7 @@ class SqliteCandidateVerificationRepository:
         elif has_report:
             raise ValueError("未知或取消终态不得伪造确定性报告")
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             self._finish_account_binding(connection, owner_id, attempt_id, status, finished_at)
             updated = connection.execute(
@@ -1336,7 +1338,7 @@ class SqliteCandidateVerificationRepository:
         if not isinstance(report, dict) or report.get("status") != status.value:
             raise ValueError("候选验证报告状态与 Attempt 终态不一致")
 
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
             self._finish_account_binding(connection, owner_id, attempt_id, status, finished_at)
             attempt_row = connection.execute(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import copy
 import hashlib
 from importlib import metadata
 import inspect
@@ -16,8 +17,9 @@ from .models import VerifierRulesetBinding
 
 
 _SCHEMA_VERSION = 1
-_ALLOWLIST_VERSION = "adr-0033-v1"
+_ALLOWLIST_VERSION = "adr-0033-v3"
 _SOURCE_ALLOWLIST: tuple[tuple[str, tuple[str, ...] | None], ...] = (
+    ("src/candidate_verification/ruleset.py", None),
     ("src/agentic_runtime/candidate_verifier.py", None),
     (
         "src/agentic_runtime/models.py",
@@ -28,6 +30,7 @@ _SOURCE_ALLOWLIST: tuple[tuple[str, tuple[str, ...] | None], ...] = (
             "PiRuntimeRequest",
             "CandidateArtifact",
             "VerificationCheck",
+            "LessonAssessment",
             "SemanticDecision",
             "VerificationReport",
         ),
@@ -36,8 +39,26 @@ _SOURCE_ALLOWLIST: tuple[tuple[str, tuple[str, ...] | None], ...] = (
         "src/delivery_publishing/models.py",
         ("FrozenModel", "TableOutputContract"),
     ),
+    ("src/model_connections/text_protocol.py", (
+        "ModelOutputTruncatedError", "structured_request", "response_text",
+    )),
+    ("src/model_connections/broker.py", (
+        "ConnectionBroker.__init__", "ConnectionBroker.issue_grant", "ConnectionBroker.revoke_grant",
+        "ConnectionBroker.relay", "ConnectionBroker._resolve_active_grant", "ConnectionBroker._record_unknown_usage",
+        "ConnectionError", "GrantError", "ProviderNotSentError", "ProviderOutcomeUnknownError",
+        "_token_hash", "_connection_version", "_validate_protocol_path", "_validate_local_tool_request",
+        "_provider_endpoint", "_safe_provider_headers", "_inject_provider_auth",
+        "_extract_native_usage", "_collect_usage", "_last_int", "_OFFICIAL_PRESET_HTTPS_HOSTS",
+    )),
+    ("src/model_connections/contracts.py", ("AccessGrant", "RelayResponse")),
+    ("src/model_connections/pinned_transport.py", ("PinnedAsyncHTTPTransport",)),
+    ("src/model_connections/catalog.py", (
+        "ProviderModelPreset", "ProviderPreset", "_model", "_PRESETS", "PRESETS_BY_ID", "model_max_output_tokens",
+    )),
 )
 _DEPENDENCIES = (
+    "beautifulsoup4",
+    "httpcore",
     "httpx",
     "instructor",
     "openai",
@@ -83,6 +104,8 @@ def _git_text(repository_root: Path, *arguments: str) -> str:
 def _selected_nodes(
     source: str,
     symbols: tuple[str, ...] | None,
+    *,
+    catalog_runtime: bool = False,
 ) -> tuple[tuple[str, ast.AST], ...]:
     try:
         module = ast.parse(source)
@@ -90,17 +113,47 @@ def _selected_nodes(
         raise RuntimeError("VerifierRuleset 相关源码无法解析") from exc
     if symbols is None:
         return (("<module>", module),)
+    if catalog_runtime:
+        # 目录只有模型额度与可信主机参与核验；展示名、说明和帮助链接不改变规则身份。
+        for node in ast.walk(module):
+            if isinstance(node, ast.ClassDef) and node.name in {"ProviderModelPreset", "ProviderPreset"}:
+                fields = {"model_id", "max_output_tokens", "preset_id", "base_url", "model_catalog"}
+                presentation = {"public_dict", "for_region", "models", "model_preset"}
+                node.body = [item for item in node.body if not (
+                    isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name) and item.target.id not in fields
+                    or isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name in presentation)]
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                if node.func.id == "ProviderPreset":
+                    if node.args or any(key.arg is None for key in node.keywords):
+                        raise RuntimeError("VerifierRuleset 目录参数形式未覆盖")
+                    node.keywords = [key for key in node.keywords if key.arg in {"preset_id", "base_url", "model_catalog"}]
+                elif node.func.id == "_model":
+                    if len(node.args) > 3 or any(key.arg is None for key in node.keywords):
+                        raise RuntimeError("VerifierRuleset 模型参数形式未覆盖")
+                    node.args = node.args[:1]
+                    node.keywords = [key for key in node.keywords if key.arg in {"model_id", "max_output_tokens"}]
     definitions: dict[str, list[ast.AST]] = {}
     local_names: set[str] = set()
+    methods: dict[str, set[str]] = {}
     for node in module.body:
         if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             definitions.setdefault(node.name, []).append(node)
             local_names.add(node.name)
+            if isinstance(node, ast.ClassDef):
+                methods.setdefault(node.name, set()).update(item.name for item in node.body
+                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)))
+                for method in node.body:
+                    if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        # 保留类头，避免更换基类或装饰器后仍声称方法身份相同。
+                        shell = copy.copy(node)
+                        shell.body = [method]
+                        definitions.setdefault(f"{node.name}.{method.name}", []).append(shell)
         elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            local_names.update(
-                target.id for target in targets if isinstance(target, ast.Name)
-            )
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    local_names.add(target.id)
+                    definitions.setdefault(target.id, []).append(node)
     if any(len(definitions.get(name, ())) != 1 for name in symbols):
         raise RuntimeError("VerifierRuleset 允许列表符号缺失或重复")
     selected = set(symbols)
@@ -112,7 +165,31 @@ def _selected_nodes(
         }
         if (referenced & local_names) - selected:
             raise RuntimeError("VerifierRuleset 存在未覆盖的本地契约")
-    return tuple((name, definitions[name][0]) for name in symbols)
+        if "." in name:
+            owner = name.split(".", 1)[0]
+            if len(definitions.get(owner, ())) != 1:
+                raise RuntimeError("VerifierRuleset 方法所属类缺失或重复")
+            called = {f"{owner}.{node.attr}" for node in ast.walk(definitions[name][0])
+                if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                and node.value.id in {"self", "cls"} and node.attr in methods[owner]}
+            if called - selected:
+                raise RuntimeError("VerifierRuleset 存在未覆盖的本地方法")
+    nodes = [(name, definitions[name][0]) for name in symbols]
+    referenced = {node.id for _, selected_node in nodes for node in ast.walk(selected_node)
+                  if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
+    imports = {}
+    for node in module.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                name = alias.asname or (alias.name.split(".")[0] if isinstance(node, ast.Import) else alias.name)
+                if name in referenced:
+                    if name in imports:
+                        raise RuntimeError("VerifierRuleset 关联导入重名")
+                    binding = copy.copy(node)
+                    binding.names = [alias]
+                    imports[name] = binding
+    # 相同函数体换了导入目标，也可能改变结论；无关导入不进入身份。
+    return tuple(nodes + [(f"<import:{name}>", node) for name, node in sorted(imports.items())])
 
 
 def _source_entries(
@@ -129,8 +206,11 @@ def _source_entries(
             "show",
             f"{commit}:{relative_path}",
         )
-        current_nodes = _selected_nodes(current_source, symbols)
-        committed_nodes = dict(_selected_nodes(committed_source, symbols))
+        catalog_runtime = relative_path == "src/model_connections/catalog.py"
+        current_nodes = _selected_nodes(current_source, symbols, catalog_runtime=catalog_runtime)
+        committed_nodes = dict(_selected_nodes(committed_source, symbols, catalog_runtime=catalog_runtime))
+        if {name for name, _ in current_nodes} != committed_nodes.keys():
+            raise RuntimeError("VerifierRuleset 关联导入存在未提交变化")
         for symbol, current_node in current_nodes:
             current_dump = ast.dump(current_node, include_attributes=False)
             committed_dump = ast.dump(
@@ -143,7 +223,7 @@ def _source_entries(
                 {
                     "path": relative_path,
                     "symbol": symbol,
-                    "strategy": "python_ast_without_attributes",
+                    "strategy": "catalog_runtime_ast" if catalog_runtime else "python_ast_without_attributes",
                     "ast_sha256": _sha256_text(current_dump),
                 }
             )

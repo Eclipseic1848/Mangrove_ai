@@ -1,10 +1,14 @@
 """
-保留 SMTP 无邮件连接自检；外部报告投递在共享入口拒绝。
+SMTP 连接检查与经过任务授权的报告发送。
 """
 from __future__ import annotations
 
 import re
 import smtplib
+import ssl
+import mimetypes
+from email.message import EmailMessage
+from pathlib import Path
 from typing import List, Optional
 
 from src.config.settings import settings
@@ -24,8 +28,8 @@ def is_email_configured() -> bool:
 def unavailable_reason() -> str:
     """区分"管理员临时关闭"和"从未配置"两种不可用原因，避免误导。"""
     if not settings.smtp_enabled:
-        return "历史 SMTP 连接开关关闭；平台不支持邮件投递"
-    return "SMTP 未配置（需在 .env 设置 SMTP_HOST / SMTP_USER 等）"
+        return "邮件发送已关闭，请管理员在平台配置的通知分类中启用"
+    return "SMTP 未配置，请管理员在平台配置的通知分类中配置"
 
 
 def parse_recipients(raw: Optional[str]) -> List[str]:
@@ -56,7 +60,45 @@ def verify_connection() -> None:
 
 
 def send_report(
-    to: List[str], subject: str, body: str, attachments: Optional[List[str]] = None
+    to: List[str], subject: str, body: str, attachments: Optional[List[str]] = None,
+    *, authorized: bool = False, before_send=None,
 ) -> int:
-    """保留旧调用接口，但确认标记也不能重新开启外部投递。"""
-    reject_external_write()
+    """仅由任务通知服务授权；旧调用和历史批准标记默认仍拒绝。"""
+    if not authorized:
+        reject_external_write()
+    if not to or len(to) > 20 or any(not _EMAIL_RE.fullmatch(address) or any(c in address for c in '\r\n,;<>') for address in to):
+        raise ValueError("收件人地址无效")
+    if any(c in subject for c in '\r\n'):
+        raise ValueError("邮件主题不能包含换行")
+    if not is_email_configured():
+        raise ValueError(unavailable_reason())
+    config = settings.model_copy()
+    message = EmailMessage()
+    message['From'] = config.smtp_from.strip() or config.smtp_user.strip()
+    message['To'] = ', '.join(dict.fromkeys(to))
+    message['Subject'] = subject
+    message.set_content(body)
+    total = 0
+    for filename in attachments or []:
+        path = Path(filename)
+        total += path.stat().st_size
+        if total > 20 * 1024 * 1024:
+            raise ValueError("附件总大小超过 20 MB，请减少附件后重新选择发送")
+        content_type = mimetypes.guess_type(path.name)[0] or 'application/octet-stream'
+        main, sub = content_type.split('/', 1)
+        message.add_attachment(path.read_bytes(), maintype=main, subtype=sub, filename=path.name)
+    context = ssl.create_default_context()
+    factory = smtplib.SMTP_SSL if config.smtp_use_ssl else smtplib.SMTP
+    options = {'context': context} if config.smtp_use_ssl else {}
+    if before_send:
+        before_send()
+    with factory(config.smtp_host.strip(), int(config.smtp_port), timeout=30, **options) as smtp:
+        if not config.smtp_use_ssl:
+            smtp.starttls(context=context)
+        smtp.login(config.smtp_user, config.smtp_password)
+        if before_send:
+            before_send()
+        refused = smtp.send_message(message, to_addrs=list(dict.fromkeys(to)))
+        if refused:
+            raise RuntimeError("部分收件人未被接受；请核对投递结果，不要直接重发全部收件人")
+    return len(set(to))

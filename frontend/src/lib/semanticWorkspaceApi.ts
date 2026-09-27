@@ -1,5 +1,5 @@
 import { fetchEventSource } from "@microsoft/fetch-event-source";
-import { api, downloadFile, authenticatedFetch, getAuthGeneration, revalidateStreamSession, ApiError, readAuthenticatedJson } from "@/lib/api";
+import { api, downloadFile, authenticatedFetch, getAuthGeneration, revalidateStreamSession, ApiError, readAuthenticatedJson, streamChat, ChatConnectionInterrupted, type ChatEvents } from "@/lib/api";
 import type {
   WorkspaceEvent,
   WorkspaceMessage,
@@ -22,6 +22,55 @@ import type {
 } from "@/types/semanticWorkspace";
 
 const BASE = "/api/semantic-workspace";
+
+export type DraftChatMessage = { role: "user" | "assistant"; content: string; files?: Array<{ name: string; url: string }>; id?: number; created_at?: string; token_usage?: import("@/lib/messageActions").TokenUsage | null; work_progress?: import("@/lib/api").ChatProgress[] };
+export async function sendDraftTurn(payload: {
+  request_id: string; text: string; history: DraftChatMessage[]; model: string;
+  model_connection_id: string | null; external_api_confirmed: boolean;
+  conv_id?: string;
+}, signal: AbortSignal, events: ChatEvents = {}): Promise<{ reply: string; output_formats: string[]; files?: DraftChatMessage["files"]; conv_id?: string; message_id?: number; created_at?: string; user_created_at?: string; token_usage?: DraftChatMessage["token_usage"] }> {
+  const response = await authenticatedFetch(`${BASE}/draft/turns`, {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal,
+  });
+  return readDraftTurnResponse(response, payload.text, signal, events);
+}
+
+export async function resumeCollection(taskId: string, requestId: string, signal: AbortSignal, events: ChatEvents = {}) {
+  const response = await authenticatedFetch(`/api/chat/collections/${encodeURIComponent(taskId)}/resume`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ request_id: requestId, external_api_confirmed: true }), signal,
+  });
+  return readDraftTurnResponse(response, "恢复原采集任务", signal, events);
+}
+
+async function readDraftTurnResponse(response: Response, text: string, signal: AbortSignal, events: ChatEvents): ReturnType<typeof sendDraftTurn> {
+  if (response.ok && response.headers.get("content-type")?.includes("text/event-stream")) {
+    // 复用旧采集流的解析和登录检查，不再次提交请求。
+    return new Promise((resolve, reject) => {
+      let received = false;
+      let stop = () => {};
+      const cancel = () => { stop(); reject(new Error("已停止等待执行结果")); };
+      stop = streamChat({ content: text }, {
+        ...events,
+        onResult: result => {
+          received = true;
+          resolve({ reply: [result.reply, result.analysis].filter(Boolean).join("\n\n"), output_formats: [], files: result.files,
+            conv_id: result.conv_id, message_id: result.message_id, created_at: result.created_at, user_created_at: result.user_created_at, token_usage: result.token_usage });
+        },
+        onError: error => reject(error.code === "stream_interrupted" ? new ChatConnectionInterrupted(error.message) : new Error(error.message)),
+        onDone: () => {
+          signal.removeEventListener("abort", cancel);
+          if (!received) reject(new Error("执行连接已结束，请查看已保存的任务状态，不会重复采集。"));
+        },
+      }, response);
+      signal.addEventListener("abort", cancel, { once: true });
+      if (signal.aborted) cancel();
+    });
+  }
+  const body = await readAuthenticatedJson(response);
+  if (!response.ok) throw new ApiError(response.status, typeof body?.detail === "string" ? body.detail : "对话未成功，需求已保留，请检查模型与对话长度。");
+  return body;
+}
 
 function sourcePageQuery(cursor?: string | null, token?: string) {
   const query = new URLSearchParams({ limit: "30" });
@@ -183,8 +232,12 @@ export function getWorkspaceGuidance(): Promise<WorkspaceGuidance> {
 
 export function listWorkspaceTasks(
   deleted = false,
+  offset = 0,
+  filter: "all" | "active" | "needs_input" | "completed" = "all",
+  signal?: AbortSignal,
 ): Promise<WorkspaceTask[]> {
-  return api.get(`${BASE}/tasks?deleted=${deleted ? "true" : "false"}`);
+  // 多读一条判断后续页，避免把“恰好一页”误报为仍有历史。
+  return api.get(`${BASE}/tasks?deleted=${deleted ? "true" : "false"}&offset=${offset}&limit=101&filter=${filter}`, { signal });
 }
 
 export function getWorkspaceTask(
@@ -419,20 +472,6 @@ export function sendWorkspaceTurn(
   );
 }
 
-export function regenerateWorkspaceTurn(
-  taskId: string,
-  resultId: string,
-  expectedRevision: number,
-  externalApiConfirmed: boolean,
-  idempotencyKey: string,
-): Promise<SteeringResult> {
-  return api.post(
-    `${BASE}/tasks/${taskId}/turns/${resultId}/regenerate`,
-    { expected_revision: expectedRevision, external_api_confirmed: externalApiConfirmed },
-    { "Idempotency-Key": idempotencyKey },
-  );
-}
-
 export function decideWorkspaceRevision(
   taskId: string,
   proposalId: string,
@@ -496,6 +535,7 @@ export function getWorkspacePreview(
     sortDirection?: "asc" | "desc";
     revision?: number;
     outputId?: string;
+    signal?: AbortSignal;
   },
 ): Promise<WorkspacePreview> {
   const query = new URLSearchParams({
@@ -507,7 +547,34 @@ export function getWorkspacePreview(
   if (params.sortBy) query.set("sort_by", params.sortBy);
   if (params.revision) query.set("revision", String(params.revision));
   if (params.outputId) query.set("output_id", params.outputId);
-  return api.get(`${BASE}/tasks/${taskId}/preview?${query}`);
+  return api.get(`${BASE}/tasks/${taskId}/preview?${query}`, { signal: params.signal });
+}
+
+export async function workspaceResultText(taskId: string, revision: number, outputId?: string): Promise<string> {
+  const parts: string[] = [];
+  const signal = AbortSignal.timeout(15000);
+  let offset = 0, total = 1, identity = "", bytes = 0;
+  while (offset < total) {
+    const page = await getWorkspacePreview(taskId, { revision, outputId, offset, limit: 500, signal });
+    const key = JSON.stringify([page.task_id, page.revision, page.delivery_id, page.output_id, page.representation?.sha256]);
+    if (page.task_id !== taskId || page.revision !== revision || (outputId && page.output_id !== outputId)
+      || (identity && identity !== key)) throw new Error("结果版本已变化，请刷新后重试");
+    identity = key;
+    total = page.total;
+    // ponytail: 剪贴板仅承载两兆字节/一万条，超过上限用已有文件下载，绝不静默复制半份结果。
+    if (total > 10000) throw new Error("结果较大，请在正式结果中下载完整文件");
+    const cell = (value: unknown) => /[\t\r\n"]/.test(String(value ?? "")) ? `"${String(value ?? "").replace(/"/g, '""')}"` : String(value ?? "");
+    const lines = page.kind === "table"
+      ? [...(offset === 0 ? [page.columns.map(cell).join("\t")] : []), ...page.rows.map(row => page.columns.map(column => cell(row[column])).join("\t"))]
+      : page.items.map(item => [item.label, item.content].filter(Boolean).join("\n"));
+    const text = lines.join("\n"); bytes += new TextEncoder().encode(text).length + 1;
+    if (bytes > 2 * 1024 * 1024) throw new Error("结果较大，请在正式结果中下载完整文件");
+    parts.push(text);
+    const count = page.kind === "table" ? page.rows.length : page.items.length;
+    if (!count && offset < total) throw new Error("结果未完整读取，请重试或下载文件");
+    offset += count;
+  }
+  return parts.join("\n");
 }
 
 export function getWorkspaceStorage(): Promise<WorkspaceStorage> {

@@ -9,6 +9,8 @@ from src.model_connections import (
     ConnectionBroker,
     ConnectionError,
     GrantError,
+    ProviderNotSentError,
+    ProviderOutcomeUnknownError,
 )
 
 from .model_connections import get_connection_broker
@@ -83,6 +85,14 @@ async def relay_model_request(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=str(exc),
         ) from exc
+    except ProviderNotSentError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="上游模型连接失败，请求尚未发送，请检查连接后再决定是否重试",
+            headers={"X-Mangrove-Provider-Outcome": "not_sent"}) from exc
+    except ProviderOutcomeUnknownError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="上游模型回执未知，请先核对服务商记录再决定是否重试",
+            headers={"X-Mangrove-Provider-Outcome": "unknown"}) from exc
     except ConnectionError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,

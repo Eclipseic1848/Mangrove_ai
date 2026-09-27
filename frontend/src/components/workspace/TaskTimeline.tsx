@@ -1,13 +1,17 @@
+import { beijingTime } from "@/lib/beijingTime";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { nanoid } from "nanoid/non-secure";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import * as Dialog from "@radix-ui/react-dialog";
 import * as Collapsible from "@radix-ui/react-collapsible";
 import {
   AlertCircle,
+  BarChart3,
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronRight,
   CircleStop,
   Clock3,
   FileCheck2,
@@ -28,7 +32,7 @@ import type {
   WorkspaceTask,
 } from "@/types/semanticWorkspace";
 import { workspaceStatusLabel } from "./WorkspaceTaskSidebar";
-import { ConnectorScopeFacts } from "./ConnectorScopeFacts";
+import { MessageTimestamp } from "./MessageFooter";
 
 const STAGE_LABELS: Record<string, string> = {
   queued: "等待执行",
@@ -145,6 +149,7 @@ function eventFailed(event: WorkspaceEvent) {
 function buildMilestones(
   events: WorkspaceEvent[],
   taskStatus: WorkspaceTask["status"],
+  ownerAccepted = false,
 ): TimelineMilestone[] {
   const byStage = new Map<string, WorkspaceEvent[]>();
   events.forEach((event) => {
@@ -225,9 +230,11 @@ function buildMilestones(
     const failure =
       [...stageEvents].reverse().find(eventFailed)
       || (stage === failureStage ? taskFailure : null);
-    const inferredCompletion =
-      index < furthestObserved
-      || (taskStatus === "completed" && index <= stageOrder.indexOf("deliver"));
+    // 用户接受只证明交付完成，不能倒推此前所有检查通过。
+    const inferredCompletion = ownerAccepted
+      ? taskStatus === "completed" && stage === "deliver"
+      : index < furthestObserved
+        || (taskStatus === "completed" && index <= stageOrder.indexOf("deliver"));
 
     if (failure) {
       return {
@@ -266,18 +273,14 @@ function buildMilestones(
     return {
       stage,
       status: "pending",
-      summary: "尚未开始",
+      summary: ownerAccepted ? "未确认完成，保留原检查记录" : "尚未开始",
       created_at: null,
     };
   });
 }
 
 function formatTime(value: string) {
-  return new Intl.DateTimeFormat("zh-CN", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(new Date(value));
+  return beijingTime(value);
 }
 
 function formatElapsed(milliseconds: number) {
@@ -518,9 +521,9 @@ export function TaskTimeline({
   onAnswer,
   onRefreshQuestion,
   onCancel,
+  cancelTarget,
   onRecycle,
   onRetry,
-  externalConnection = false,
   onRefreshSource,
   onGapAction,
   onRevisionChange,
@@ -532,9 +535,9 @@ export function TaskTimeline({
   onAnswer: (question: WorkspaceQuestion, answer: string, key: string) => Promise<WorkspaceTask>;
   onRefreshQuestion: () => void;
   onCancel: () => Promise<void>;
+  cancelTarget?: HTMLElement | null;
   onRecycle: () => Promise<void>;
-  onRetry: (unchanged?: boolean, externalApiConfirmed?: boolean) => void | Promise<void>;
-  externalConnection?: boolean;
+  onRetry: (unchanged?: boolean) => void | Promise<void>;
   onRefreshSource: (externalApiConfirmed: boolean, targetSourceSnapshotId?: string) => Promise<void>;
   onGapAction: (
     action: "accept_gap" | "reject_gap" | "supplement_source" | "refresh_source",
@@ -547,15 +550,11 @@ export function TaskTimeline({
   const [progressOpen, setProgressOpen] = useState(false);
   const [eventsOpen, setEventsOpen] = useState(true);
   const [retryingUnknown, setRetryingUnknown] = useState(false);
-  const [retryExternalConfirmed, setRetryExternalConfirmed] = useState(false);
   const [refreshingSource, setRefreshingSource] = useState(false);
   const allWebSources = task.web_sources ?? (task.web_source ? [task.web_source] : []);
   const webSources = allWebSources.flatMap(source => source.snapshot ? [{ ...source, snapshot: source.snapshot }] : []);
   const [refreshTarget, setRefreshTarget] = useState("");
   const selectedWebSource = webSources.find(source => source.source_snapshot_id === refreshTarget) ?? webSources[0];
-  const connectorSource = selectedWebSource?.snapshot.allowed_scope.kind === "connector";
-  const refreshSourceLabel = connectorSource ? "获取最新连接资料" : "获取最新网页";
-  const sourceGroupLabel = webSources.some(source => source.snapshot.allowed_scope.kind === "connector") ? "获取最新的资料组" : "获取最新的网页组";
   const [gapAction, setGapAction] = useState<string | null>(null);
   const [retryingStop, setRetryingStop] = useState(false);
   const events = useMemo(() => {
@@ -576,7 +575,7 @@ export function TaskTimeline({
       && event.details.recovery_status === "pending",
   );
   const milestones = useMemo(() => {
-    if (!task.progress) return buildMilestones(events, task.status);
+    if (!task.progress || task.source_contract?.owner_acceptance) return buildMilestones(events, task.status, Boolean(task.source_contract?.owner_acceptance));
     return task.progress.stages.map((stage) => {
       const latest = [...task.progress!.events]
         .reverse()
@@ -588,7 +587,7 @@ export function TaskTimeline({
         created_at: latest?.created_at || null,
       };
     });
-  }, [events, task.progress, task.status]);
+  }, [events, task.progress, task.status, task.source_contract?.owner_acceptance]);
   const completedMilestones = milestones.filter(
     (milestone) => milestone.status === "completed",
   ).length;
@@ -633,12 +632,12 @@ export function TaskTimeline({
     || 0;
 
   return (
-    <section className="mx-auto w-full max-w-4xl px-6 py-6">
+    <section data-guide="task-timeline" className="mx-auto w-full max-w-4xl px-6 py-6">
       {task.status === "needs_input" && (task.viewing_revision ?? task.current_revision ?? task.active_revision) === (task.current_revision ?? task.active_revision) && task.question && task.question.purpose !== "business" && task.question.purpose !== "control" && (
         <QuestionDialog key={`${task.task_id}:${task.viewing_revision}:${task.question.round_id ?? task.question.question_id}`} question={task.question} onAnswer={onAnswer} onRefreshQuestion={onRefreshQuestion} />
       )}
       {task.question?.purpose === "control" && <p role="status" className="mb-4 rounded-xl border p-4 text-sm leading-6">{task.question.prompt} 仍可继续对话提出更正；补充要求需要明确确认后，以新版本重新开始。</p>}
-      {allWebSources.filter(source => !source.snapshot).map(source => <p key={source.source_snapshot_id} role="status" className="mb-4 break-all rounded-xl border p-4 text-sm">来源组已清理：{source.source_snapshot_id}。原文不可读取，不能按此组重跑；可明确移除此组并换新资料创建版本。</p>)}
+      {allWebSources.filter(source => !source.snapshot).map(source => <p key={source.source_snapshot_id} role="status" className="mb-4 break-all rounded-xl border p-4 text-sm">网页来源组已清理：{source.source_snapshot_id}。原文不可读取，不能按此组重跑；可明确移除此组并换新资料创建版本。</p>)}
       {selectedWebSource && (
         <div className="mb-4 flex flex-wrap items-start gap-3 border-b pb-4 text-sm">
           <Globe2 className="mt-0.5 h-4 w-4 shrink-0 text-primary" />
@@ -647,18 +646,17 @@ export function TaskTimeline({
             <p className="mt-1 break-all text-xs leading-5 text-muted-foreground">
               {selectedWebSource.snapshot.artifacts[0]?.final_url}
               {" · "}
-              {new Date(selectedWebSource.snapshot.created_at).toLocaleString("zh-CN")}
+              {beijingTime(selectedWebSource.snapshot.created_at)}
               {" · "}
-              {connectorSource ? `${selectedWebSource.snapshot.artifact_count ?? selectedWebSource.snapshot.artifacts.length} 个连接原件` : `${selectedWebSource.snapshot.valid_page_count} 个有效页面`}
+              {selectedWebSource.snapshot.valid_page_count} 个有效页面
               {" · "}
               {selectedWebSource.snapshot.allowed_scope.kind === "same_site"
                 ? `${selectedWebSource.snapshot.allowed_scope.site} 内最多 ${selectedWebSource.snapshot.allowed_scope.page_limit} 页`
-                : selectedWebSource.snapshot.allowed_scope.kind === "public_search" ? "公开搜索范围" : connectorSource ? "本次有界读取" : "仅当前页"}
+                : selectedWebSource.snapshot.allowed_scope.kind === "public_search" ? "公开搜索范围" : "仅当前页"}
               {" · "}
-              {connectorSource ? "重试不会重新读取连接" : "重试不会重新读取网页"}
+              重试不会重新读取网页
             </p>
-            {selectedWebSource.snapshot.allowed_scope.kind === "connector" && <ConnectorScopeFacts scope={selectedWebSource.snapshot.allowed_scope} />}
-            {webSources.length > 1 && <label className="mt-2 block text-xs">{sourceGroupLabel}<select aria-label={sourceGroupLabel} value={selectedWebSource.source_snapshot_id} disabled={refreshingSource} onChange={event => setRefreshTarget(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-2 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{webSources.map(source => <option key={source.source_snapshot_id} value={source.source_snapshot_id}>{source.snapshot.allowed_scope.query || source.snapshot.artifacts[0]?.title || source.source_snapshot_id}</option>)}</select></label>}
+            {webSources.length > 1 && <label className="mt-2 block text-xs">获取最新的网页组<select aria-label="获取最新的网页组" value={selectedWebSource.source_snapshot_id} disabled={refreshingSource} onChange={event => setRefreshTarget(event.target.value)} className="mt-1 w-full rounded-lg border bg-background px-2 py-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{webSources.map(source => <option key={source.source_snapshot_id} value={source.source_snapshot_id}>{source.snapshot.allowed_scope.query || source.snapshot.artifacts[0]?.title || source.source_snapshot_id}</option>)}</select></label>}
           </div>
           {task.viewing_revision === task.current_revision && (
             task.model_connection_id ? (
@@ -672,15 +670,15 @@ export function TaskTimeline({
                     {refreshingSource
                       ? <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
                       : <RotateCcw className="h-3.5 w-3.5" />}
-                    {refreshSourceLabel}
+                    获取最新网页
                   </button>
                 </AlertDialog.Trigger>
                 <AlertDialog.Portal>
                   <AlertDialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
                   <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(90vw,440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl">
-                    <AlertDialog.Title className="font-semibold">{refreshSourceLabel}并创建新版本？</AlertDialog.Title>
+                    <AlertDialog.Title className="font-semibold">获取最新网页并创建新版本？</AlertDialog.Title>
                     <AlertDialog.Description className="mt-2 text-sm leading-6 text-muted-foreground">
-                      {connectorSource ? "系统会核对原连接版本，沿用原表、字段、筛选或公开数据地址的读取范围。成功冻结新资料后才创建新版本，并把连接记录、字段与来源信息发送给当前模型连接；有界读取不保证整个来源完整。旧版本和旧 Run 保持不变。" : "系统会沿用原来的站点和页数边界。只有新快照满足原完整性要求后，才会创建新版本，并把公开网页内容发送给当前模型连接；旧版本和旧 Run 保持不变。"}
+                      系统会沿用原来的站点和页数边界。只有新快照满足原完整性要求后，才会创建新版本，并把公开网页内容发送给当前模型连接；旧版本和旧 Run 保持不变。
                     </AlertDialog.Description>
                     <div className="mt-5 flex justify-end gap-2">
                       <AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm">取消</AlertDialog.Cancel>
@@ -714,7 +712,7 @@ export function TaskTimeline({
                 {refreshingSource
                   ? <Loader2 className="h-3.5 w-3.5 animate-spin motion-reduce:animate-none" />
                   : <RotateCcw className="h-3.5 w-3.5" />}
-                {refreshSourceLabel}
+                获取最新网页
               </button>
             )
           )}
@@ -772,8 +770,10 @@ export function TaskTimeline({
           <p className="mt-2 max-w-2xl whitespace-pre-wrap text-sm leading-6 text-muted-foreground">
             {task.objective_text}
           </p>
+          <MessageTimestamp value={task.revisions?.find(item => item.revision === (task.viewing_revision ?? task.active_revision))?.created_at ?? ((task.viewing_revision ?? task.active_revision) === 1 ? task.created_at : undefined)} />
         </div>
         <div className="flex shrink-0 items-center gap-2">
+          {cancelTarget && createPortal(<>
           {task.status === "cancelling" && (
             <button
               type="button"
@@ -782,10 +782,11 @@ export function TaskTimeline({
                 setRetryingStop(true);
                 void onCancel().finally(() => setRetryingStop(false));
               }}
-              className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted disabled:opacity-50"
+              aria-label={retryingStop ? "正在重试停止" : "重试停止"}
+              title={retryingStop ? "正在重试停止" : "重试停止"}
+              className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-45"
             >
-              <RotateCcw className="h-3.5 w-3.5" />
-              {retryingStop ? "正在重试停止" : "重试停止"}
+              {retryingStop ? <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin motion-reduce:animate-none" /> : <Square aria-hidden="true" className="h-3.5 w-3.5 fill-current" />}
             </button>
           )}
           {canCancel && task.status !== "cancelling" && (
@@ -793,10 +794,12 @@ export function TaskTimeline({
               <AlertDialog.Trigger asChild>
                 <button
                   type="button"
-                  className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted"
+                  disabled={retryingStop}
+                  aria-label={retryingStop ? "正在停止" : "停止"}
+                  title={retryingStop ? "正在停止" : "停止"}
+                  className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground hover:bg-primary/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:opacity-45"
                 >
-                  <Square className="h-3.5 w-3.5" />
-                  取消任务
+                  {retryingStop ? <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin motion-reduce:animate-none" /> : <Square aria-hidden="true" className="h-3.5 w-3.5 fill-current" />}
                 </button>
               </AlertDialog.Trigger>
               <AlertDialog.Portal>
@@ -813,7 +816,10 @@ export function TaskTimeline({
                       继续执行
                     </AlertDialog.Cancel>
                     <AlertDialog.Action
-                      onClick={() => void onCancel()}
+                      onClick={() => {
+                        setRetryingStop(true);
+                        void onCancel().finally(() => setRetryingStop(false));
+                      }}
                       className="rounded-lg bg-destructive px-3 py-2 text-sm font-medium text-destructive-foreground"
                     >
                       确认取消
@@ -823,6 +829,7 @@ export function TaskTimeline({
               </AlertDialog.Portal>
             </AlertDialog.Root>
           )}
+          </>, cancelTarget)}
           {["completed", "candidate_ready", "failed", "cancelled"].includes(
             task.status,
           ) && (
@@ -1124,7 +1131,11 @@ export function TaskTimeline({
         </Collapsible.Trigger>
         <Dialog.Root key={`${task.task_id}:${task.viewing_revision}:${workSession?.run_id}`}>
           <Dialog.Trigger asChild>
-            <button type="button" className="mb-4 rounded-lg border px-3 py-2 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">查看本次用量</button>
+            <button type="button" className="mb-4 inline-flex min-h-10 items-center gap-2 rounded-lg border border-primary/40 bg-primary/10 px-4 py-2 text-sm font-semibold text-teal-800 shadow-sm transition-colors hover:border-primary hover:bg-primary/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background dark:text-teal-200 motion-reduce:transition-none">
+              <BarChart3 aria-hidden="true" className="h-4 w-4 shrink-0" />
+              <span>查看本次用量</span>
+              <ChevronRight aria-hidden="true" className="h-4 w-4 shrink-0" />
+            </button>
           </Dialog.Trigger>
           <Dialog.Portal>
             <Dialog.Overlay className="fixed inset-0 z-50 bg-slate-950/45" />
@@ -1134,14 +1145,15 @@ export function TaskTimeline({
                 <Dialog.Close aria-label="关闭用量" className="rounded-lg p-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring"><X className="h-4 w-4" /></Dialog.Close>
               </div>
               <Dialog.Description className="mt-2 text-xs text-muted-foreground">当前查看版本的执行记录。未报告的用量显示未知。</Dialog.Description>
+              {workSession && workSession.revision !== (task.viewing_revision ?? task.active_revision) && <p className="mt-2 text-xs text-muted-foreground">用量来自 V{workSession.revision} 的执行；当前版本接受初稿，未新增模型调用。</p>}
               <div tabIndex={0} role="region" aria-label="执行用量详情" className="mt-4 min-h-0 space-y-4 overflow-y-auto text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                 <p>{usageLabel}</p>
                 <p>模型：{task.agentic_runtime?.model_connection_model || task.web_source?.runtime_binding.model || task.model || "型号未记录"}<br />连接：{connectionLabel || (task.model_connection_id ? "原连接不可用" : "任务冻结配置")}</p>
                 {workSession && <>
                   <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2">
-                    <dt>状态</dt><dd>{workspaceStatusLabel(task.status)}</dd>
-                    <dt>开始时间</dt><dd>{workSession.started_at ? new Date(workSession.started_at).toLocaleString("zh-CN") : "时间未记录"}</dd>
-                    <dt>结束时间</dt><dd>{workSession.ended_at ? new Date(workSession.ended_at).toLocaleString("zh-CN") : ["completed", "cancelled", "failed", "candidate_ready"].includes(task.status) ? "时间未记录" : "尚未结束"}</dd>
+                    <dt>状态</dt><dd>{workspaceStatusLabel((workSession.status || task.status) as WorkspaceTask["status"])}</dd>
+                    <dt>开始时间</dt><dd>{workSession.started_at ? beijingTime(workSession.started_at) : "时间未记录"}</dd>
+                    <dt>结束时间</dt><dd>{workSession.ended_at ? beijingTime(workSession.ended_at) : ["completed", "cancelled", "failed", "candidate_ready"].includes(task.status) ? "时间未记录" : "尚未结束"}</dd>
                     <dt>工作耗时</dt><dd>{workSession.started_at ? formatElapsed(workSession.work_duration_ms) : "时间未记录"}</dd>
                     <dt>等待耗时</dt><dd>{workSession.started_at ? formatElapsed(workSession.waiting_duration_ms) : "时间未记录"}</dd>
                     <dt>行动记录</dt><dd>{workSession.action_count} 个行动 · {workSession.tool_call_count} 次工具 · 已处理 {workSession.handled_retry_count} 次重试</dd>
@@ -1151,7 +1163,7 @@ export function TaskTimeline({
                   {!!workSession.provider_usage?.length && <ol className="space-y-3 border-t pt-3" aria-label="模型调用明细">
                     {workSession.provider_usage.map((usage, index) => <li key={index} className="break-words text-xs leading-6">
                       <p className="font-medium">{usage.model} · {usage.purpose}</p>
-                      <p>{new Date(usage.created_at).toLocaleString("zh-CN")} · {usage.request_count} 次请求</p>
+                      <p>{beijingTime(usage.created_at)} · {usage.request_count} 次请求</p>
                       <p>输入 {tokens(usage.input_tokens)} · 输出 {tokens(usage.output_tokens)} · 缓存 {tokens(usage.cache_tokens)} · 总计 {tokens(usage.total_tokens)}</p>
                     </li>)}
                   </ol>}
@@ -1277,7 +1289,8 @@ export function TaskTimeline({
       </Collapsible.Root>
 
       {(task.status === "failed"
-        || task.failure?.error_code === "MODEL_OUTCOME_UNKNOWN") && (
+        || task.failure?.error_code === "MODEL_OUTCOME_UNKNOWN"
+        || task.failure?.error_code === "VERIFICATION_STALLED") && (
         <div
           data-testid="task-failure-explanation"
           className="mt-3 rounded-2xl border border-destructive/20 bg-destructive/[0.04] p-4"
@@ -1286,7 +1299,7 @@ export function TaskTimeline({
             <AlertCircle className="mt-0.5 h-5 w-5 text-destructive" />
             <div className="min-w-0 flex-1">
               <h3 className="text-sm font-semibold">
-                {task.failure?.error_code === "MODEL_OUTCOME_UNKNOWN"
+                {["MODEL_OUTCOME_UNKNOWN", "VERIFICATION_STALLED"].includes(task.failure?.error_code ?? "")
                   ? "等待你的决定"
                   : "任务未完成"}
               </h3>
@@ -1334,7 +1347,7 @@ export function TaskTimeline({
                 </p>
               )}
               {task.failure?.error_code === "MODEL_OUTCOME_UNKNOWN" ? (
-                <AlertDialog.Root onOpenChange={(open) => { if (!open) setRetryExternalConfirmed(false); }}>
+                <AlertDialog.Root>
                   <AlertDialog.Trigger asChild>
                     <button
                       type="button"
@@ -1354,16 +1367,15 @@ export function TaskTimeline({
                         平台无法确认模型是否已经收到上一次请求。重新执行会创建新版本，
                         并可能产生重复调用和费用。
                       </AlertDialog.Description>
-                      {externalConnection && <label className="mt-3 flex items-start gap-2 rounded-lg border p-3 text-sm"><input type="checkbox" className="mt-0.5" checked={retryExternalConfirmed} onChange={(event) => setRetryExternalConfirmed(event.target.checked)} /><span>我确认把当前任务范围内的必要数据再次发送到已选外部模型连接。</span></label>}
                       <div className="mt-5 flex justify-end gap-2">
                         <AlertDialog.Cancel className="rounded-lg border px-3 py-2 text-sm hover:bg-muted">
                           取消
                         </AlertDialog.Cancel>
                         <AlertDialog.Action
-                          disabled={retryingUnknown || task.source_integrity?.can_rerun === false || (externalConnection && !retryExternalConfirmed)}
+                          disabled={retryingUnknown || task.source_integrity?.can_rerun === false}
                           onClick={() => {
                             setRetryingUnknown(true);
-                            void Promise.resolve(onRetry(true, retryExternalConfirmed)).finally(() => {
+                            void Promise.resolve(onRetry(true)).finally(() => {
                               setRetryingUnknown(false);
                             });
                           }}
@@ -1406,7 +1418,9 @@ export function TaskTimeline({
       {task.status === "completed" && (
         <div className="mt-3 flex items-center gap-3 rounded-2xl border border-emerald-500/20 bg-emerald-500/[0.05] p-4 text-sm text-emerald-700 dark:text-emerald-300">
           <CheckCircle2 className="h-5 w-5" />
-          最终验证和格式重开检查已完成，可以预览或下载。
+          {task.source_contract?.owner_acceptance
+            ? "已按你接受的初稿保存正式结果；未完成的系统检查仍为未验证。"
+            : "最终验证和格式重开检查已完成，可以预览或下载。"}
         </div>
       )}
       {task.status === "candidate_ready" && (

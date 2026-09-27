@@ -1,3 +1,4 @@
+import { beijingTime } from "@/lib/beijingTime";
 import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import * as AlertDialog from "@radix-ui/react-alert-dialog";
 import { useQuery } from "@tanstack/react-query";
@@ -32,6 +33,7 @@ import {
 } from "@/lib/semanticWorkspaceApi";
 import { cn } from "@/lib/utils";
 import { productText } from "@/lib/productText";
+import { OfficeFilePreview } from "./OfficeFilePreview";
 import type {
   DocumentPreviewItem,
   HistoricalAuthorityRecoveryConfirmation,
@@ -943,6 +945,10 @@ export function ResultPreview({
   const { page, searchInput, search, sorting } = viewState;
   const [includeSources, setIncludeSources] = useState(false);
   const [bundleBusy, setBundleBusy] = useState(false);
+  const [showResultItems, setShowResultItems] = useState(false);
+  const selectedOutput = task.delivery?.outputs.find(output => output.output_id === outputId);
+  const officeOutput = Boolean(selectedOutput && ["doc", "docx", "ppt", "pptx"].includes(selectedOutput.format));
+  useLayoutEffect(() => setShowResultItems(false), [task.task_id, task.viewing_revision, outputId]);
   const preview = useQuery({
     queryKey: [
       "semantic-workspace-preview",
@@ -1006,9 +1012,10 @@ export function ResultPreview({
               <FileCheck2 className="h-5 w-5 text-primary" />
               <h2 className="font-semibold">结果与正式交付</h2>
               <QualityBadge warning={hasWarnings} />
+              {task.source_contract?.owner_acceptance && <span className="text-sm text-muted-foreground">用户接受 · 部分检查未完成</span>}
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
-              已通过格式重开、文件大小和 SHA-256 校验。预览仅显示当前页，下载包含全部结果。
+              已通过格式重开、文件大小和 SHA-256 校验。{officeOutput ? "原版式预览可翻页阅读；结果条目支持搜索、查看来源和追问。" : "预览仅显示当前页，下载包含全部结果。"}
             </p>
           </div>
           <div className="flex flex-[1_1_260px] flex-wrap items-center justify-end gap-3">
@@ -1093,9 +1100,16 @@ export function ResultPreview({
             <label className="flex flex-wrap items-center gap-2">预览输出<select aria-label="预览输出" value={outputId ?? ""} onChange={event => onSelectOutput(event.target.value)} className="min-w-0 max-w-full rounded-lg border bg-background px-2 py-2 text-foreground">
               {delivery.outputs.map(output => <option key={output.output_id} value={output.output_id}>{output.filename}</option>)}
             </select></label>
-            <p>版本 V{task.viewing_revision} · {preview.data?.representation?.kind === "derived_result" ? "同次交付的结构化结果" : preview.data?.representation?.kind === "output" ? "正式输出解析预览" : "未提供表示身份"} · 生成时间：{delivery.created_at ? new Date(delivery.created_at).toLocaleString() : "未提供"}</p>
+            <p>版本 V{task.viewing_revision} · {officeOutput && !showResultItems ? "正式文件原版式预览" : preview.data?.representation?.kind === "derived_result" ? "同次交付的结构化结果" : preview.data?.representation?.kind === "output" ? "正式输出解析预览" : "未提供表示身份"} · 生成时间：{delivery.created_at ? beijingTime(delivery.created_at) : "未提供"}</p>
             {!currentRevision && <p>历史结果不能用于新追问，请返回最新版本。</p>}
           </div>
+          {officeOutput && <div className="mb-4 flex flex-wrap items-center gap-2" role="group" aria-label="结果预览方式">
+            <button type="button" aria-pressed={!showResultItems} onClick={() => setShowResultItems(false)} className={cn("rounded-lg border px-3 py-2 text-sm", !showResultItems && "bg-primary text-primary-foreground")}>原版式预览</button>
+            <button type="button" aria-pressed={showResultItems} onClick={() => setShowResultItems(true)} className={cn("rounded-lg border px-3 py-2 text-sm", showResultItems && "bg-primary text-primary-foreground")}>结果条目与追问</button>
+          </div>}
+          {officeOutput && !showResultItems && outputId ? <div className="h-[70vh] min-h-[360px]">
+            <OfficeFilePreview key={`${task.task_id}:${task.viewing_revision}:${outputId}`} previewUrl={`/api/semantic-deliveries/outputs/${encodeURIComponent(outputId)}/office-preview`} slides={["ppt", "pptx"].includes(selectedOutput!.format)} />
+          </div> : <>
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
             <div className="flex min-w-0 basis-full items-center gap-2">
               <div className="relative max-w-md flex-1">
@@ -1110,6 +1124,8 @@ export function ResultPreview({
                   }}
                   placeholder="在全部结果中搜索"
                   aria-label="在全部结果中搜索"
+                  maxLength={200}
+                  title="搜索内容最多 200 个字符"
                   className="h-9 w-full rounded-lg border bg-background pl-9 pr-3 text-sm outline-none focus:border-primary"
                 />
               </div>
@@ -1124,6 +1140,7 @@ export function ResultPreview({
                 搜索
               </button>
             </div>
+            <span className="text-xs text-muted-foreground">搜索内容最多 200 个字符</span>
             <div className="flex items-center gap-2 text-xs text-muted-foreground">
               <span>
                 预览 {start}–{end}，共 {total} 条
@@ -1183,6 +1200,7 @@ export function ResultPreview({
               askUnavailable={askUnavailable}
             />
           ) : null}
+          </>}
         </div>
       </div>
     </section>

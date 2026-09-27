@@ -15,6 +15,8 @@ from .models import (
     RevisionDecisionStatus,
     RevisionSwitchMode,
     RevisionProposal,
+    RevisionProposalStatus,
+    SteeringAction,
     SteeringResult,
 )
 from src.database_migrations import DatabaseTarget, inspect_database
@@ -229,6 +231,40 @@ class SqliteSteeringRepository:
             except sqlite3.IntegrityError as exc:
                 raise ValueError("Revision 草案已存在，禁止覆盖") from exc
         return proposal
+
+    def latest_business_result(self, owner_id: str, task_id: str, revision: int) -> SteeringResult | None:
+        with self._connect() as connection:
+            return self.latest_business_result_in_transaction(connection, owner_id, task_id, revision)
+
+    @staticmethod
+    def latest_business_result_in_transaction(connection, owner_id: str, task_id: str, revision: int) -> SteeringResult | None:
+        """最新草案已处理时回到冻结目标；回答接收复用同一事务，不能复活旧草案。"""
+        rows = connection.execute(
+            "SELECT r.payload_json FROM conversation_raw_turns t JOIN conversation_steering_results r "
+            "ON r.owner_id=t.owner_id AND r.task_id=t.task_id AND r.turn_id=t.turn_id "
+            "WHERE t.owner_id=? AND t.task_id=? AND t.revision=? ORDER BY t.created_at DESC,t.turn_id DESC",
+            (owner_id, task_id, revision),
+        )
+        for row in rows:
+            result = SteeringResult.model_validate_json(row[0])
+            if result.action not in {SteeringAction.NORMALIZED_NO_MATERIAL_CHANGE, SteeringAction.REVISION_PROPOSAL}:
+                continue
+            if result.action is SteeringAction.NORMALIZED_NO_MATERIAL_CHANGE:
+                from .service import SemanticDiffGate
+                saved = connection.execute("SELECT payload_json FROM conversation_context_deltas WHERE owner_id=? AND delta_id=?",
+                                           (owner_id, result.delta_id)).fetchone()
+                delta = ContextDelta.model_validate_json(saved[0]) if saved else None
+                # 无变化且无未决问题已回到冻结目标；不能复活更早的草案或累计口头计算。
+                if delta is None or (not delta.open_questions and not SemanticDiffGate.material_changes(delta)):
+                    return None
+            if result.action is SteeringAction.REVISION_PROPOSAL:
+                saved = connection.execute("SELECT payload_json FROM conversation_revision_proposals WHERE owner_id=? AND proposal_id=?",
+                                           (owner_id, result.proposal_id)).fetchone()
+                proposal = RevisionProposal.model_validate_json(saved[0]) if saved else None
+                if proposal is None or proposal.status is not RevisionProposalStatus.PENDING:
+                    return None
+            return result
+        return None
 
     def get_proposal(
         self,

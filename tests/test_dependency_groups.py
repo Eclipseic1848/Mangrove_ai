@@ -43,7 +43,7 @@ def test_scrapling_fetchers_extra_has_a_complete_compatible_constraint_set() -> 
     assert "scrapling[fetchers]==0.4.9" in collectors
     assert "-c requirements.txt" not in collectors
     assert {
-        "anyio==4.14.0",
+        "anyio==4.14.2",
         "click==8.3.3",
         "curl_cffi==0.15.0",
         "playwright==1.60.0",
@@ -51,7 +51,7 @@ def test_scrapling_fetchers_extra_has_a_complete_compatible_constraint_set() -> 
         "browserforge==1.2.4",
         "apify-fingerprint-datapoints==0.13.0",
         "msgspec==0.21.1",
-        "protego==0.6.1",
+        "protego==0.6.2",
     }.issubset(production)
     assert "chardet==5.2.0" in collectors
     assert "pydantic-settings==2.14.2" in runtime
@@ -157,7 +157,7 @@ def test_runtime_document_data_and_protocol_pins_meet_security_floors() -> None:
         "pyarrow==23.0.1",
         "pyasn1==0.6.4",
         "pydantic-settings==2.14.2",
-        "pypdf==6.15.0",
+        "pypdf==6.16.1",
         "python-dotenv==1.2.2",
         "Werkzeug==3.1.6",
     }.issubset(runtime)

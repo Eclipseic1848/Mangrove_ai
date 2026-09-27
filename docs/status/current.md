@@ -1,274 +1,275 @@
 # Mangrove 当前状态台账
 
-> status: `P1_01_ENGINEERING_COMPLETE / REMEDIATION_IN_PROGRESS`
->
-> last_verified: 2026-09-12（#141/#186 本地工程与用户验收通过；远端状态现场核对 GitHub）
->
-> authoritative_branch: `main`
->
-> p0_engineering_baseline: `453e900837109be18da47985db997e58863fbf30`
->
-> identity_rule: 公开身份以 GitHub `main` 与本文件所在提交现场读取结果为准
+> 核验：2026-09-27。范围：V3 部署快照与 v1.0.0 发行准备；本机运行和目标服务器验收分别记录。
+> 本文件仅维护当前能力、完成证据与路线；接手操作见根目录 `handoff.md`。本机、远端 main、发行版是不同状态。
 
-本文件只保留当前能力、有效治理门和下一阶段路线。历史细节以第 8 节列出的不可变规格、ADR 与
-执行报告为证据，不再在滚动台账中重复时间线。`ENGINEERING_VERIFIED`、`LIVE_ACCEPTED`、
-`REMOTE_ENFORCED` 和 `RELEASED` 是不同证据等级，不能互相替代。
+## 1. 当前身份
 
-## 0. 当前 P1 状态
+| 项目 | 已核验事实 |
+|---|---|
+| 工作副本 | `mangrove_platform_V3`；V2 独立保留，交替启动、不同时运行 |
+| 源码基线 | V3 快照 `880c306` 加 v1.0.0 发布增量；发行提交以 `v1.0.0` 标签和随包清单为准。原运行工作树及 10 项旧评测改动保留 |
+| origin / main | `Eclipseic1848/Mangrove_ai`；通过 PR #191 同步 V3 发行基线。原 main 为 `ec4cf05`，不提供其数据库的直接覆盖升级 |
+| 产品入口 | 2026-09-26 UTC 只读核验：8088 运行 V3，健康与 `/data-prep` 200，JS/CSS 匹配本机构建；既有 dev_reload 自动重载，无手动重启；非管理员 UI 验收 |
+| 默认运行时 | `pi-runtime`；Pi 与 Capability Host 均为 `mangrove/pi-coding-agent:0.87.1-v1.0.0` |
+| 历史 Pi | 本机保留 `0.80.10`；用户已明确本次 Linux 服务器只部署 `0.87.1`，不迁旧镜像或承诺旧 Run 续跑 |
+| CoreMind | 未启用；主适配器保留 0.7.1 身份，1.0.1 仅独立候选资格通过，未接管默认任务 |
+| 本轮真实模型 | `deepseek-flash`，用户指定称 DeepSeek V4.1 Flash；不代表所有用户的模型设置 |
+| 数据库 | 只读实查 WebUI=`webui_0023`，Scheduler=`scheduler_0004`；不要重复迁移 |
+| 发行 | 用户授权版本 `v1.0.0`；公开回执见 [Release](https://github.com/Eclipseic1848/Mangrove_ai/releases/tag/v1.0.0)。V2/V3 是副本名，Pi 0.87.1 是依赖版本 |
 
-- 当前整改权威为 [#113](https://github.com/Eclipseic1848/Mangrove_ai/issues/113)。#138 由用户暂停；#186 已补齐管理员全局与用户本人手填 Cookie 的 Owner 隔离、验证、确定失效暂停和原计划显式恢复链，并通过本地阶段用户验收。真实站点、生产 Cookie/Secret、部署和目标服务器仍未验收。
-- #139 已完成、合并并关闭：真实 GitHub HTTPS 与 MySQL/PostgreSQL 实库均经产品连接、范围冻结和来源获取入口验证；两个 Owner 使用不同只读账号、表与数据，重复水位在安全断点后同 Attempt 续读完整，跨 Owner 与数据库权限双层隔离。PostgreSQL Schema 发现只展示具备 `SELECT` 权限的表。生产连接、生产迁移、部署和发布均未执行。
-- #140 已完成并关闭。#141 已完成自动计划、原身份恢复和反馈生命周期的本地工程及用户验收；PR #187 已合并，PR #183 与 #141/#186 的最终远端状态须现场查询 GitHub。普通“继续”不解除 #138 暂停，也不代表 P1 完成或发布资格。
+## 2. 本轮完成矩阵
 
-### 历史 P1-01 核验快照（2026-09-04）
+现场核对：总单 **#193**、子项 **#194—#207** 及预览修复 **#208** 均 CLOSED/COMPLETED。只表示各票原范围完成，不表示完整 P1、生产部署或所有历史业务成功。
 
-- P1-01 的决策、规格、原型与实现工单 #83～#98 已全部关闭；2026-09-04 现场查询 GitHub Open
-  Issues 为 0。关闭 #81 只表示 P1 决策地图与首个纵切片完成，不代表 P1-02～P1-05 已实现。
-- CoreMind 0.7.1 已通过锁定制品接入。PR #107 合入
-  `main@12170eebf1d2f4bad5c86c2a6c38d0bef0a4f998`，Issue #97 已关闭；精确源码、协议、Worker、
-  wheel 与 digest 见 [PR #107](https://github.com/Eclipseic1848/Mangrove_ai/pull/107)，架构原型见
-  [原型报告](../plans/2026-08-27-p1-coremind-agentkernel-prototype-report.md)。本任务没有修改本机
-  CoreMind 仓库，也没有发布制品。
-- #98 由 PR #110 合入 `main@5adeacf3aecbd55bd5fe771a35d25a4caa195af3` 并关闭。它新增统一
-  收口测试、启动前数据库迁移只读预检与缺失的 PDF 开发测试依赖，并移除固定旧局域网 IP、
-  直接访问已被 AgentKernel 取代的 `_pi_runtime` 两条过期测试假设。
-- 后端固定种子全量回归为 `2352 passed, 13 skipped, 1 deselected`；唯一 deselect 是被其他任务
-  修改且受保护的 G1 freeze 自校验。Issue #98 相关后端组合为 `235 passed, 1 skipped`。
-- 前端正式构建通过；完整 Playwright 为 `77 passed`，其中统一数据工作台 40 项，含 light/dark
-  axe 检查。固定 Pi/CoreMind 黄金对照为 `1 passed`，覆盖两种 Runtime 的同场景运行中取消、
-  无迟到事件与资源清理。
-- `start_all.bat --no-pause` 实际返回 0；8088、5173、8080、3002、1200 均监听，8088 与 5173
-  返回 HTTP 200，`/api/health` 返回后端健康。脚本继续是本机忽略文件；可提交的只读迁移预检
-  位于 `scripts/check_dev_database_migrations.py`。
-- UTF-8 检查通过 1249 个文件，`git diff --check` 通过；Standards + Spec 双轴终审均无问题。
-  PR #110 的 minimum-ci run `33925622082` 中 `backend-fast`、`frontend-build`、`secret-scan`
-  全部成功。
-- 上述结论仅为 `ENGINEERING_VERIFIED`。Issue #98 没有执行真实外部网页/Provider 用户旅程、
-  新的本机生产迁移、用户验收、部署、Tag、GitHub Release 或包发布；2026-08-26 的历史本机
-  生产迁移已完成，本工单未授权的是新增迁移、恢复覆盖、备份处置与 Key/Secret 轮换。
-  这些证据等级不得互相替代。
-- Agent-Reach 调研继续作为有效候选知识源；不整包安装，不自动启用 OpenCLI/xiaohongshu-mcp。
-  当前认证来源按 Owner 隔离 Cookie/SecretRef，本人配置优先、管理员全局配置只作兜底；明确失效时
-  暂停原计划并由该 Owner 更换 Cookie 后显式继续。#138 扫码路线继续暂停。
-- 已清理可再生旧产物：`.scratch/**`、`test-results/**`、`frontend/premium-audit.json`，共约
-  118 MB，进入 Windows 回收站；源代码、测试、ADR、规格、正式证据、数据库、备份与他人改动未删。
+| 工单 | 当前结论与证据边界 |
+|---|---|
+| #194 历史基线 | 26 项节点重放：9 项一致、6 项完整比较差异、11 项缺输入。失败/缺失保留，全链路业务成功率未知。见 `issue194-closure.md`、`issue194-unified-index.json` |
+| #195 参数保真 | TaskSpec 共享转换层补齐参数传递和严格校验，不按银行名打补丁。见 GitHub #195、`src/conductor/task_spec.py` |
+| #196—#198 登录态与恢复 | 身份/操作能力/未知网络故障分开，个人/平台及浏览器隔离；同账号新 Cookie 真实恢复，已完成组保留，未知搜索不重发。最终 2 篇 partial，未正式发布。十平台矩阵为工程测试，不等于十站真实验收。见 `issue198-closure.md`、`issue198-live-rotation-verified.json` |
+| #199—#200 多轮 | 上下文和结果焦点连续，回答/复用/补采分开。最终 40 组中 39 组完整、158 轮严格匹配，未知轮保留；另起会话补验 4 轮通过，不能写成原 40 组全过。见 `issue200-closure.md`、`issue200-acceptance-statistics.json` |
+| #201 能力矩阵 | 旧 Harness 的 10 类 TaskFamily 中接线 7 类/2 种能力，3 类在该入口拒绝；工作台仍走 AgentKernel，不另造关键词分派。失败分类不等于底层网络故障已消除。见 `docs/agents/task-capability-matrix.md`、`issue201-verification.json` |
+| #204 泛化 | 500 个离线合同用例：各家族 40 个、采集 40 个、组合 60 个，修复后全部通过。全部 `execution=not_run`，不是 500 个真实业务成功。见 `scripts/evaluate_task_generalization.py`、`docs/agents/task-generalization.md` |
+| #205 热更新 | Windows 正常退出窗口修复；真实模型运行时仍避免触发源码重载。见 `scripts/dev_reload.py`、GitHub #205 |
+| #206 采集范围 | 图像读取与 OCR 预算分开；在详情扇出前限制上游强制最少 20 篇的问题。真实 1 篇由 120s 超时变为 28.35s 成功；明确不读图时零图片下载。见 `issue206-closure.md` |
+| #202 / #207 Pi | 0.87.1 已默认切换；151 项相关回归、35 项工作台 API 通过，2 项默认 Docker 开关跳过。真实模型生成两条精确 CSV 记录；9 个旧任务仍匹配 0.80.10；上次 V2 1681 个基线文件核验未变。见 `pi-cutover-closure.md`、`pi-cutover-history-binding.json` |
+| #203 CoreMind | 公开 1.0.1，提交 `4b2c09f01fcaa26683746e5138df3aaadb450d75`，10 产物核验、49 项真实 SDK/Worker 契约通过。真实模型输出逐字一致、4 项核验通过；独立未版本化验证器，无正式 Attempt/交付，未默认切换。7 次尝试及旧失败保留。见 `issue203-closure.md`、`coremind-1.0.1-final-evidence.json` |
+| #208 Word 预览 | Word/PPT 正式输出默认原版式阅读，条目搜索/来源/追问可切回。正式接口 4 项、原上传 Office 5 项、相关 E2E 8 项通过，最后 2 项复验与前组重叠；构建、双轴、8088 新资源核对通过。合成文档测试，未读用户面试报告本体。见 `tests/test_delivery_office_preview.py`、`frontend/e2e/workspace-canvas.spec.ts`、GitHub #208 |
 
-### 0.1 本轮可复现命令
+表中未带目录的证据均在本地 `logs/system-evaluation-20260925/`。不同组测试有重叠，禁止简单加总。CoreMind 验证期间另修宿主嵌套工具 Schema、写前校验及 Pi 旧 Adapter 绑定兼容，相关 68 项通过、1 项旧 SDK 默认开关跳过。
 
-以下命令均从仓库根目录执行并返回 exit code 0；前端命令先进入 `frontend/`。完整后端仅排除一项
-被其他任务修改的 G1 freeze 自校验。
+## 2.0k v1.0.0 发行（2026-09-27）
 
-```powershell
-.\.artifacts\ci-clean-venv\Scripts\python.exe -X utf8 -m pytest -q tests/test_source_acquisition.py tests/test_source_acquisition_api.py tests/test_web_source_delivery_api.py tests/test_work_trace.py tests/test_agent_kernel.py tests/test_coremind_agent_kernel_adapter.py tests/test_pi_runtime_workspace_api.py tests/test_semantic_workspace_api.py tests/test_database_migrations.py tests/test_dev_database_preflight.py tests/test_issue98_workbench_closeout.py
-.\.artifacts\ci-clean-venv\Scripts\python.exe -X utf8 -m pytest -q --randomly-seed=0 --deselect tests/test_g1_independent_runner.py::test_independent_g1_dry_run_verifies_frozen_blind_set
-Push-Location frontend
-npm run build
-npx playwright test --workers=1
-Pop-Location
-$env:MANGROVE_RUNTIME_ADAPTER_GOLDEN_TEST='1'; $env:PYTHONPATH=(Resolve-Path '.\.venv-coremind-host-verification\Lib\site-packages').Path; .\.artifacts\ci-clean-venv\Scripts\python.exe -X utf8 -m pytest -q tests\test_runtime_adapter_golden.py
-.\.artifacts\ci-clean-venv\Scripts\python.exe -X utf8 scripts\ci\check_utf8.py
-git diff --check 12170eebf1d2f4bad5c86c2a6c38d0bef0a4f998..HEAD
-cmd.exe /d /c start_all.bat --no-pause
-```
+用户明确授权更新 README 等公共入口、推送 GitHub 并发布 v1.0.0。复用 PR #191 已确定的“以本机已验收源码为准”同步方式，保留双方历史、不强推；在独立发布工作区完成。旧 main 的不同迁移链不做自动混合，不承诺旧 main 数据库直接升级，不修改真实数据库。
 
-端口证据：8088、5173、8080、3002、1200 均处于 Listen；8088/5173 HTTP 200；
-`http://127.0.0.1:8088/api/health` 返回 `{"ok":true,"service":"mangrove-webui"}`。
+发行增量统一 Python/API 版本为 1.0.0、配置与 Dockerfile 的默认 Pi 为 0.87.1、旧镜像恢复列表为空；保留显式配置与历史冻结身份校验。永久回归先复现旧默认值，再验证新值。旧 main 的八项 Secret 扫描命中经核对均为 Schema 摘要和合成幂等键，只增加精确提交/文件/行号例外；不跳过提交或目录。
 
-## 1. 当前公开身份
+推送时发现既有运行依赖安全告警，补齐 AnyIO 4.14.2、pypdf 6.16.1、Protego 0.6.2，并同步永久版本断言。Pi 仍为 0.87.1，镜像以 `0.87.1-v1.0.0` 单独构建并包含 PDF 补丁，避免覆盖本机原镜像身份；代码/配置模板/部署手册同步。构建与离线评测等其余告警见 SECURITY，不声称所有依赖无漏洞。
 
-- 公开仓库：`Eclipseic1848/Mangrove_ai`；默认分支：`main`；当前访问权限：管理员。
-- P1-01 实现基线为 `main@5adeacf3aecbd55bd5fe771a35d25a4caa195af3`，随后只有状态/交接收口；
-  当前公开 SHA 按顶部 identity rule 现场查询，不依据本地 `main` 名称判断。P0 #56～#60 的历史
-  基线保留在第 4 节。
-- 远端当前没有 Tag 或 GitHub Release；本地 `v0.0.4` 只保留历史版本语义，不是远端当前
-  Tag、Release 或本轮发布事实。不得把路线图版本名、本地标签或工程验证结果表述为已发布版本。
-- GitHub About 当前描述为“面向在线/离线与公域/私域数据的智能数据任务平台”，无主页；Topics
-  为 `ai-agent`、`data-engineering`、`data-pipeline`、`document-processing`、`fastapi`、
-  `mcp`、`react`。P1-01 收口再次检查 README、Code of Conduct、Contributing、MIT License、
-  Security 与 GitHub About，均无需语义变化。
-- 当前没有 Open Issues。仍有 Dependabot PR #27、#77、#104、#108、#109；它们不是本轮 Issue
-  目标，也未经过依赖与安全评估，后续应逐项分诊，不能因自动生成而直接合并。
+README、CHANGELOG、CONTRIBUTING、SECURITY、IT 手册和工程规则已同步；Code of Conduct 与 MIT License 已检查、无需变化。GitHub About 随发布同步产品介绍。发布流程要求 backend-fast、frontend-build、secret-scan 三项通过后合并，最终提交号、CI 与资产校验值记录在 Release 和随包清单。
 
-## 2. 产品与稳定边界
+发行附件包含固定提交的 Git 源码包、前端构建、Pi 0.87.1/Smokescreen/Office 三项镜像、IT 手册和 SHA-256 清单；不包含真实数据、密钥、Cookie 或本机审计报告。目标公司服务器尚未验收，数据迁移仍待停写窗口；Firecrawl、SearXNG、MediaCrawler 等可选服务仍需单独交付和验收，不能因发布 v1.0.0 就称全部部署完成。
+## 2.0j 本机部署源码快照与 IT 手册（2026-09-27）
 
-Mangrove 是统一数据任务平台。用户从文件或其他来源创建不可变 TaskRevision，系统冻结 Owner、
-来源、连接版本、外发确认和能力身份，经 Runtime 形成 Candidate，再由独立 Verifier 验证；只有
-完整性与 QA 通过并进入 `delivery_published` 的 `output_id` 才是正式 Delivery。
+用户已授权完整本机提交并按该版本制作部署包。源码、测试、配置模板、依赖、迁移、第三方补丁一并冻结；本机审计/原型/品牌图片和运行数据继续排除。10 个旧 G1 评测 JSON 仅有历史 SHA/派生摘要变化，保留本机改动，提交中保留原历史证据；本次不重新冻结或认证 G1。当前版本的 Git 对象以浅层裸仓库包交付，原提交号不变，不携带已删除的旧历史样本。
 
-- `8088` 是统一产品入口；`5173` 只用于前端开发。
-- `/data-prep` 是统一工作台；按 ADR-0036 不把未上线历史任务/Delivery 的迁移作为新平台完成门，
-  但未经授权不删除真实数据，移除旧入口前须证明对应用户能力仍可用。
-- Candidate、验证通过、`eligible_for_delivery`、中间 AST 或 Parquet 都不是正式交付。
-- 普通用户、管理员、超级管理员是产品角色；“高级用户”不是权限角色。
-- TaskRevision、来源快照、Owner、Run、CandidateSet、连接版本、外发确认、Ruleset/能力 digest
-  必须冻结并失败关闭。
-- Mangrove 自有 Schema 只经 `src/database_migrations` 显式迁移；应用和 Repository 只验证版本。
-  LangGraph checkpoint 和用户连接器数据库不属于该迁移体系。
-- 25 个 `runtime_config secret=True` 键只允许业务表保存 Owner/配置键绑定的 SecretRef；原值由
-  共享 Vault 密文边界持有。本机生产迁移已于 2026-08-26 显式完成；旧备份处置和 Key/Secret
-  轮换仍是独立人工门。
+用户追加确认：目标服务器只部署 Pi **0.87.1**。镜像包仅含 Pi 0.87.1、Smokescreen 和 Office 预览三项；不含 Pi 0.80.10。目标配置的旧版本恢复列表为空，同时核对数据库覆盖项。历史记录和正式文件仍迁移，旧版本未结束 Run 不承诺续跑；本机旧镜像不删除。
 
-## 3. 当前能力矩阵
+提交前补正了 Linux 部署的确定性问题：0023 已生效迁移按原 CRLF 字节入库，保留冻结摘要；Pi、Egress、Office 与 Capability Host 按非 root 服务账号映射 UID/GID，Pi 配置迁到可访问目录，扩展读配置和凭据拦截同步。Windows/root 宿主保留原行为，隔离标志不变。迁移测试的当前版本预期、合成历史库结构及既有精准扫描白名单断言同步，无生产库改动。
 
-| 能力 | 当前证据等级 | 当前边界或尚缺 |
-|---|---|---|
-| 公域采集与 Conductor | 可用 | 企业 API、业务系统、对象存储和统一生产 Adapter 尚未完成 |
-| 数据工作台 `/data-prep` | 可用 | 历史任务与 Legacy Delivery 仍保留兼容路径 |
-| P1-01 匿名网页统一工作台 | `ENGINEERING_VERIFIED / CLOSED` | 受控工程闭环已验；真实外部网页、Provider 与用户体验未验收 |
-| HTTP/数据库只读连接来源 #139 | `ENGINEERING_VERIFIED` | 真实 HTTPS 与 MySQL/PostgreSQL、双 Owner、断点续读、只读权限及统一任务交付已验证；不代表生产连接、部署或发布 |
-| 三类来源模板与个人记忆 #140 | `ENGINEERING_VERIFIED / CLOSED` | 既有模板、Owner 记忆纠正和冻结链已闭合；不代表生产运行或发布 |
-| vNext 默认正式 Delivery | `LIVE_ACCEPTED` | 默认/Pi/Legacy、P0 回滚与 Owner 隔离已验收；不代表稳定 Release |
-| Candidate 同 Run 重验 | `LIVE_ACCEPTED` | 追加式 Attempt、独立 Provider 授权、精确 Attempt 发布；未知结果不自动重试 |
-| 11 种交付预览 | `ENGINEERING_VERIFIED` | 不等于每种格式均有生产用户验收 |
-| 覆盖感知文档检索 | 代表任务验证 | 不等于所有文档类型和部署环境资格 |
-| 多模型连接与 Provider 安全门 | 工程验证 + 受控真实资格 | 新 Provider、真实业务外发和费用仍逐次授权 |
-| Agentic Capability #9～#17 | 已完成并关闭 | admin_gray 治理纵切面完成；普通用户能力市场、远程 MCP/Registry 未开放 |
-| G1/G2/G3/G4 与 G5 本机门 | 已取得正式或真实证据 | 目标 Linux/GPU 服务器、长期容量与灾难恢复仍待部署时验收 |
-| 显式数据库迁移 #56 | `LOCAL_PRODUCTION_MIGRATED / CLOSED` | 体系已完成；本机 WebUI 后续已显式迁至 `webui_0009`，Scheduler 为 `scheduler_0001`，当前启动修复见第 0 节 |
-| SecretRef 统一 #57 | `LOCAL_PRODUCTION_MIGRATED / CLOSED` | 高敏副本演练后，本机生产 `webui_0004` 已真实应用；原 Vault key 保留，未轮换或销毁 |
-| 依赖与漏洞治理 #58 | `ENGINEERING_VERIFIED / CLOSED` | 历史固定制品扫描通过；不代表当前仓库零漏洞。新增依赖告警待诊断，Node 限期风险按 2026-09-25 复查 |
-| 远端 CI 与主分支保护 | `REMOTE_ENFORCED` | Ruleset `21624053` 强制 PR、strict 三项 CI、讨论解决和禁止强推；单维护者审批数为 0且无 bypass |
+验证：相关运行时/预览/Host **145 passed、2 skipped**；提交检查首轮发现 10 项过期测试设置，修正后受影响的两个测试文件 **59 passed**，其余门检查已通过；前端 API 单测 **6 passed**、类型检查及独立生产构建通过。断网 Linux 合成权限探针实际验证两版 Pi RPC/扩展/0600 清单、Office PDF、Egress 和 Host；手册 57 段 Bash、7 段 PowerShell 等语法核对、SQLite 合成备份及 Nginx 配置检查通过。两路独立 Agent 复核无剩余必修；这些是工程验证，不是目标服务器或真实业务验收。详情见本机 `logs/deployment-snapshot-20260927/`，最终交付清单记录归档校验值。
 
-## 4. P0 #54～#60 收口矩阵
+操作手册：`docs/deployment/linux-migration-it-guide.md`，包括 Ubuntu/Debian 环境、Git/前端/镜像还原、数据和密钥、systemd、容器回连、IP HTTPS、验收、备份及回退。公司服务器版本/架构/资源、公网 IP 固定性和 80/443 连通仍待确认；现有镜像为 linux/amd64。最终数据与密钥包等待停写窗口，未停服务、未推送或发布。Windows 未结束 Pi 会话不能保证原 Run 续跑；能力缓存摘要包含权限 mode，须迁移前清点并在目标验证，不改冻结路径/摘要绕门。外部采集配套服务仍按本次启用范围单独验收。
 
-| Issue | 目标 | 当前事实 | 尚缺的完成证据 |
-|---|---|---|---|
-| #54 P0-01 | vNext 默认链路与真实普通用户闭环 | `CLOSED / LIVE_ACCEPTED`；实现基线 `20d3a2a9` | 无；保留历史证据，不重复执行 |
-| #55 P0-04A | 最小 CI 工程门 | `CLOSED / REMOTE_CI_VERIFIED`；运行 `32947317082` 三项全绿 | 无；required checks 由 #59 落地 |
-| #56 P0-05 | 显式数据库迁移体系 | `CLOSED / LOCAL_PRODUCTION_MIGRATED`；PR #76 合入 `453e9008`，副本演练后于 2026-08-26 显式迁移本机生产 WebUI 与 Scheduler | 无；恢复覆盖仍须重新授权 |
-| #57 P0-02 | 配置中心 SecretRef 统一 | `CLOSED / LOCAL_PRODUCTION_MIGRATED`；PR #76 合入 `453e9008`，生产 `webui_0004` 已应用，原 key 保留 | 无；Secret/key 轮换和备份处置仍是独立人工门 |
-| #58 P0-03 | 依赖拆分与漏洞治理 | `CLOSED / ENGINEERING_VERIFIED`；PR #76 合入 `453e9008`，五组 clean install、真实 Linux 镜像、完整核心回归、最终审查和风险记录完成 | 无；Node 限期风险仍须复查 |
-| #59 P0-04B | `main` 分支保护 | `CLOSED / REMOTE_ENFORCED`；用户确认单维护者模式，Ruleset `21624053` active；PR #78 证明失败阻断、修复后可合并且未合并探针 | 无；未来有第二维护者时另开权限变更把审批数从 0 提升为 1 |
-| #60 P0-06 | 当前状态与交接收口 | `CLOSED`；PR #79 普通合入 `main@a2f13e3d`，合并后 CI 33041624585 三项全绿；公共/权威文档与 Security 已同步，Code of Conduct、MIT License、About 无需变化 | 无；最终状态只从本文件所在提交和 GitHub #60 现场读取 |
+## 2.0i 全平台时间文案（2026-09-27，#222）
 
-## 5. 生产差异与风险
+按用户要求，已移除前端固定界面中的“北京时间”字样，覆盖运营审计、自动化任务、引导及展示到页面的接口提示；自动化仍明确 UTC+8，实际时间转换、调度和统计规则不变，用户正文与历史原始记录不重写。六个产品文件仅改固定字符串，三个既有测试同步预期。
 
-### 5.1 数据库与 Secret
+前端源码/public 及新构建文本零匹配，相关前端 **6/6**、后端 **8/8**、类型检查和构建通过。Browser 隔离合成页面核对列表/表单/引导/趋势提示，无相关运行错误；8088 的 99 个构建文件 HTTP 哈希匹配，旧资源保留，健康 200。工单 [#222](https://github.com/Eclipseic1848/Mangrove_ai/issues/222) 已记录并 CLOSED/COMPLETED；临时服务与标签清理，无 Git 提交/推送、依赖安装或生产迁移。
 
-- 以下为 2026-08-26 P0 历史迁移证据；当前 Schema 与启动修复以第 0 节、0.1 节和 PR #110 为准。
-- #56 已在生产 `data/webui.db` 的只读一致性副本上应用 `webui_0001..0003`：原 74 张表、
-  10,216 行历史数据无意外改写，重放零 revision 且字节不变，恢复副本与备份逐字节一致；真实
-  合法 `vnext_default` 缺口已修复并回归。生产原库 SHA、大小和 mtime 全程未变。
-- #57 高敏生产副本演练已完成：生产库与匹配 key 在 8088 无监听、源库静止时复制到受限目录；
-  副本从 legacy 迁至 `webui_0004`，实际 1 条配置 Secret 形成 1 个 opaque ref 与 1 条密文，
-  孤儿密文为 0，受信读取、恢复点重放、完整性和外键验证通过。
-- 迁移副本、迁移后新备份和恢复点重放副本的明文命中均为 0；现场不存在 WAL/journal/shm，
-  因而没有可扫描 sidecar。迁移前恢复点按预期命中 1 项旧明文，仅在受限目录用于恢复重放。
-  完成后已不可恢复地删除受限目录内 11 个临时文件（145,882,653 bytes）并确认目录不存在；
-  演练当时生产原库与原 key 未改写。
-- 用户随后于 2026-08-26 单独授权本机生产迁移：`webui.db` 从 legacy 显式迁至
-  `webui_0004`，恢复点为 `data/backups/webui-before-startup-20260826-225554.db`（SHA-256
-  `3133e3db82f20699b7554d8916a065260e643e0224190e048f2ce9d6858302bc`）；`scheduler.db` 迁至
-  `scheduler_0001`，恢复点为 `data/backups/scheduler-before-startup-20260826-225954.db`
-  （SHA-256 `477f923f55f43f04ef4a527a4b154ba79ed400ebcda1e615a0b29d2b7fce6a79`）。两库
-  `status` 均为 current，相邻 receipt 均已生成；恢复覆盖、旧备份处置和 key 轮换未授权。
-- `start_all.bat` 已在本机接入 `scripts/check_dev_database_migrations.py`：服务启动前一次检查
-  WebUI 与 Scheduler，任一落后就列全显式迁移命令并失败关闭，不再让监督器隐藏 Schema
-  异常。历史迁移回归 49 passed，干净启动曾返回 0；真正 API 健康检查使用 `/api/health`，
-  不把 `/health` 的 SPA HTML 200 当作后端健康证明。
+## 2.0h 运营趋势悬停与五种粒度（2026-09-27，#221）
 
-### 5.2 依赖与供应链
+已完成用户两项新增要求：图中悬停显示日期/周期与 PV/UV，支持小时、天、周、月、年，默认天。北京时间周一至周日、自然月/年；UV 按整个周期去重，点击周期明细仅落在当前日期筛选内，小时仍进入当天明细并明确提示。没有增加依赖、修改 Token 图表或扩大权限/留存/日期上限。
 
-- 以下扫描只证明 P0 当时的固定依赖/制品，不是当前持续零漏洞声明。
-- Python runtime/collectors/dev/evaluation/gpu 五组已从空环境安装，`pip check`、深导入和
-  `pip-audit==2.10.1` 通过；最终生产镜像实际 site-packages 为 0 个已知漏洞，GPU overlay
-  为空，生产镜像不含评测/GPU 开发依赖。
-- 前端 React Router 6.30.6 仍有 2 个 Moderate，当前 CSR/internal-route 接缝没有识别到公告
-  可达路径；Promptfoo 0.122.1 隔离评测树仍有 5 个 High 传递节点，冻结六案例不进入相关 ZIP、
-  图像或模型路径。两项均不进入无限期接受：Owner 最晚 2026-09-25 复查，触发条件变化立即停门。
-- 公共证据只提交可复现摘要；本地 venv、漏洞 JSON、容器审计产物和 Promptfoo 结果不得入 Git。
+后端 **14/14**、前端运营 **22/22**、类型检查与构建通过；双轴复审发现的密集点浮层遮挡已补红例修复，最终无剩余必修。Browser 插件已使用生产构建和隔离合成数据实测鼠标、键盘、五粒度、手机边界及明暗主题；不是生产管理员数据验收。8088 运行接口已识别五粒度和默认天，156 个构建目录文件 HTTP 字节匹配，131 个既有静态资源保留；健康 200。原大分块警告保留。
 
-### 5.3 工作树与提交安全
+六个代码/测试文件最小增量及完整失败/复验记录见 `logs/ops-trend-20260927/REPORT.md`、`code-changes.patch`、`reviews.md`；工单 [#221](https://github.com/Eclipseic1848/Mangrove_ai/issues/221) 已记录验证结果并 CLOSED/COMPLETED，本轮临时服务和 Browser 标签已清理。没有 Git 提交/推送、生产库迁移或手动重启，原 WIP 保留。
 
-- 用户持有的 10 个 G1 freeze/fixture 修改和 `docker/phase4b/entrypoint.sh` 不属于本轮提交范围，
-  禁止覆盖、清理或暂存。已确认可再生的 `.scratch/**`、`test-results/**` 与
-  `frontend/premium-audit.json` 已按用户授权移入回收站。
-- 只允许按审计过的文件 allowlist 逐文件暂存；禁止 `git add .`、`git add -A`、
-  `git commit -a`、`git reset --hard` 和 `git clean`。
-- #56～#58 已按同一可构建边界由 PR #76 合入；当前后续提交仍必须排除用户 G1 与本地产物。
+## 2.0g 输出规则协议与真实任务定向复验（2026-09-27，#220）
 
-## 6. 远端治理
+用户授权新建可用普通测试账号后，已通过 8088 正常登录并使用原 `deepseek-flash` 模型继续。先导三个独立任务复现两次日期正则被本地安全前缀校验拒绝，导致整项字段提示不可用；不能倒推旧只有类名的 ValueError 同因。现已将提取提示与受支持协议对齐，并保存失败阶段及本地固定拒绝原因；第三方异常正文不落盘，旧冻结记录和 `error_type` 兼容，用户接受决定权不变。
 
-- GitHub repository Ruleset
-  [`main-required-ci-single-maintainer`](https://github.com/Eclipseic1848/Mangrove_ai/rules/21624053)
-  （ID `21624053`）为 active，仅命中 `refs/heads/main`，`bypass_actors=[]` 且当前用户不可绕过。
-- Ruleset 强制 PR、讨论解决、strict `backend-fast` / `frontend-build` / `secret-scan`（GitHub
-  Actions Integration ID `15368`）和 `non_fast_forward`。仓库只有一个 collaborator，经用户
-  明确确认采用单维护者模式：审批数为 0，`require_last_push_approval=false`。
-- 临时 [PR #78](https://github.com/Eclipseic1848/Mangrove_ai/pull/78) 未合并：运行
-  [33040744184](https://github.com/Eclipseic1848/Mangrove_ai/actions/runs/33040744184) 中
-  `backend-fast` 失败且 PR 为 `BLOCKED`；修复后的运行
-  [33040840714](https://github.com/Eclipseic1848/Mangrove_ai/actions/runs/33040840714) 三项全绿，
-  PR 为 `CLEAN/MERGEABLE`。PR、远端/本地分支和临时 worktree 已安全清理，`main` 未含探针。
-- #59 已关闭。未来实际加入第二位维护者时，应另开权限变更把审批数提升为 1 并重跑测试 PR；
-  在此之前不得声称已有独立人工审批。
+相关工程回归 **148 passed**，Standards / Spec 代码复审通过。原语料新建单次定向 **64 例中 59 通过（92.2%）**，剩余 4 份正文事实表述错误、1 个 Provider `RemoteProtocolError` 回执未知且未重发。37 个旧确定未发送任务本次 36 通过，13 个旧正文失败本次 9 通过，6 个旧格式失败和 8 个通过对照全部通过；合计 51 改善、0 个原通过回退。63 份初稿结构通过，35 份正文完整来源对照中 31 份三轴通过；规则提取 63 ready、1 个多工作表空表头项仍 unverified。不能称全任务或提取 100% 成功。
 
-## 7. 下一路线与版本门
+该批为有意选择的有限子集，不是新的全量成功率或随机对照实验；旧 360 例 285 通过、更早同标准 304 通过及旧 19 个未知均保持，不拼接先导结果。4 并发约 16.54 分钟，单例中位 57.75 秒、P95 90.87 秒；5 个执行代码哈希未变，69 个来源与 110 个产物哈希核对。合成来源使用隔离任务库，不发真实邮件、不注册真实调度、不正式发布。已知 Token 2,139,606，64 条用量记录仍 unknown；用量未知与任务结果未知分开记录。
 
-### P0 退出结果
+本地报告与两文件代码差分见 `logs/quality-followup-20260926/REPORT.md`、`code-changes.patch`，逐例证据、失败、复核及汇总同目录保留。工单 [#220](https://github.com/Eclipseic1848/Mangrove_ai/issues/220) 已记录最终证据并 CLOSED/COMPLETED；无提交、推送、生产迁移或手动重启。随后用户新增运营趋势悬停和小时/天/周/月/年粒度需求，作为独立增量处理，不混入这批代码身份或效果结论。
 
-1. #54～#58 均已关闭；#56～#58 由 PR #76 合入 `main@453e9008`，合并后 CI
-   33039608828 三项全绿。#57 副本演练本身不等于生产迁移；后续生产迁移有单独授权和恢复点，
-   但仍不等于 Secret/key 轮换。
-2. #59 已按用户确认的单维护者模式完成 Ruleset 与不合并测试 PR 验收并关闭。
-3. #60 已同步 `README.md`、`CONTRIBUTING.md`、`AGENTS.md`、`CONTEXT.md`、`SECURITY.md`、
-   本台账和 `handoff.md`；`CODE_OF_CONDUCT.md`、MIT `LICENSE`、GitHub About 已检查且无需变化。
-4. P0 退出只表示“可持续迭代的产品基线”，不自动产生 Tag、Release、部署或普通用户能力开放。
+## 2.0f UI/UX 审查整改（2026-09-26，UX-01—UX-11 已完成）
 
-现场复核时远端无 Tag/Release；本地 `v0.0.4` 仅为历史语义。本轮没有版本号决定、Tag、Release
-或部署；这些动作以后仍需重新现场核验和独立授权，不得从 P0 完成自动推断。
+用户已授权按前端审查报告逐项修复并优化。已完成页面加载/渲染失败的局部恢复、自动化创建的键盘操作、矮屏注册滚动、删除确认、列表/诊断读取失败与真实空状态分离、历史分页与服务端筛选、共享结构化 API 错误处理、连接编辑读取失败的关闭/重试、表单标签与时间说明关联、路由标题，以及手机示例折叠。复用已有控件与依赖，不重构整站设计系统；用户决定接受初稿或继续的边界不变。
 
-### P1 与 P2
+最终相关界面按用例去重 **179/179 通过**：主批 177 项中 176 通过、1 项教程计时失败；修正测试时钟后补验 4/4 通过，其中该失败复验 1 项、资源 404 与渲染异常新增 2 项、503 场景与主批重叠 1 项。另有后端 **4 passed / 32 deselected**、共享 API 错误 **6 passed**；类型检查、生产构建与 Standards/Spec 最终复审通过。原失败、夹具修正原因和复验记录保留，不把多次运行简单相加。
 
-- P1-01：匿名网页首片已完成 `Source → TaskRevision → Delivery` 工程闭环；HTTP、数据库和认证
-  来源继续作为独立纵切片，未上线历史兼容负担按 ADR-0036 退出。
-- P1-02：深化 Semantic Workspace 生命周期模块，收窄路由、持久化和执行接缝，不做全量重写。
-- P1-03：生产可观测性、SLO、认证、TLS/CSP 与远程多人使用安全。
-- P1-04：在受众、配额、成本、外发、审计和回滚齐备后，分批开放已验证平台能力给普通用户。
-- P1-05：组件测试、包体预算、性能与无障碍治理。
-- P2 仅在真实条件满足时启动：目标 Linux/GPU 服务器验收、远程 MCP/Registry/SecretRef、
-  多媒体、多节点、对象存储/PostgreSQL 或新增正式输出格式。
+Browser 插件已恢复并实际完成生产构建页面复验，覆盖手机/桌面与明暗主题、历史第 101 条及回收站、失败恢复、删除确认、字段名称、配置重试和搜索校验。全部业务数据为合成数据；真实读屏、手机软键盘、弱网性能、真实模型效果及全量历史任务不在本轮验收范围。构建仍有较大分块警告，未据此声称加载性能达标。
 
-P1-01 已完成并关闭。下一步应从 P1-02～P1-05 或 HTTP/数据库/认证来源中选择一个明确纵切片，
-重新规格化后再实现；不得把本次工程验证自动扩大为整个 P1、真实用户验收或发布完成。
+21 个代码/测试文件有本轮增量，另更新交接与本台账；原 WIP 保留。验证构建已更新本机 `frontend/dist`，8088 全部 99 个构建文件 HTTP 字节与构建匹配，旧资源保留，分页参数已在运行接口生效。既有 dev_reload 自动重载，无手动重启；本轮临时 Vite、合成服务和 Browser 标签已清理。没有依赖安装、生产库迁移、新模型调用、Git 提交/推送或 GitHub 变更，未操作 V2。
 
-## 8. 历史证据索引
+本地报告、逐项状态、双轴记录、差分、资源回执与完整性核对见 `logs/ux-fixes-20260926/`；永久回归在 `frontend/e2e/ux-resilience.spec.ts`、`frontend/tests/api-errors.test.cjs`、`tests/test_workspace_history_pagination.py` 及相关既有测试中。旧 #209/#217 的历史缺口与用户结束追溯的决定不变。
 
-### 当前 P1
+## 2.0e 全工程审查整改（2026-09-26，R1–R9 与 O1/O2 已完成）
 
-- P1-01 规格：`docs/plans/2026-08-27-p1-01-anonymous-web-source-unified-workbench-spec.md`
-- Runtime 决策：`docs/adr/0035-unified-data-workbench-and-coremind-runtime-adapter.md`
-- 未上线迁移边界：`docs/adr/0036-single-workspace-with-verified-runtime-inheritance.md`
-- CoreMind 0.7.1：`docs/plans/2026-08-27-p1-coremind-agentkernel-prototype-report.md`、PR #107。
-- 工程收口：PR #110、CI run `33925622082`、已关闭 Issues #98/#83/#81。
-- Agent-Reach：`docs/research/2026-08-31-agent-reach-mangrove-assessment.md`
+用户已授权按 `logs/full-project-review-20260926/REPORT.md` 逐项实施。两项 High（上传解析前鉴权/实际正文限额、数据库主机白名单配置接线）及七项 Medium 均已修复；两项 Low 优化也已完成。具体为事务内账号等级/状态复核、规则更新后候选重验、后台生命周期成对清理、三类 SQLite Repository 显式关闭、兼容 Schema 请求竞态、迁移测试终点与前端回归夹具，以及发现表数提前截断、路由懒加载。34 个代码/测试文件有本轮增量；另更新交接与本台账，原 WIP 保留。
 
-### 历史 P0
+最终相关后端按用例去重 **340 passed / 2 skipped**，最终单批前端 **103 passed**；跳过分别为 Windows 符号链接权限和真实 Pi Docker 集成默认开关。类型检查、隔离生产构建与 Standards/Spec 最终双轴均通过。复核发现的畸形上传 500、SQLite opcode 误作时间两项增量缺陷已有永久红例及修复；原失败记录保留。本轮不是整仓 Python 全套、历史任务重放、真实模型效果或业务验收。
 
-- 路线图与 DoD：`docs/plans/2026-08-23-post-issues-productization-roadmap.md`
-- P0-01/Candidate：`docs/plans/2026-08-23-p0-01-vnext-default-user-delivery-spec.md`、
-  `docs/plans/2026-08-26-legacy-candidate-rebaseline-live-execution-report.md`
-- #55：`docs/plans/2026-08-26-p0-04a-minimum-ci-implementation-report.md`
-- #56：`docs/plans/2026-08-26-p0-05-explicit-database-migrations-spec.md`、
-  `docs/plans/2026-08-26-p0-05-migration-tool-research.md`
-- #57：`docs/plans/2026-08-26-p0-02-secretref-unification-spec.md`、
-  `docs/plans/2026-08-26-p0-02-secretref-unification-implementation-report.md`
-- #58：`docs/plans/2026-08-26-p0-03-dependency-security-evidence.md`
-- #59：Ruleset `21624053`、PR #78、CI 33040744184 / 33040840714、已关闭 Issue #59。
-- #60：本文件、根目录 `handoff.md`、公共入口文档和 GitHub Issue #60。
+入口 JS 从 1,064,565 降至 378,722 字节（缩小 64.4%），不代表完整首屏耗时；工作台约 526 KB chunk 警告保留。验证后的构建已更新本机 `frontend/dist`，先资源后入口并保留旧资源；8088 健康、入口与全部 99 个构建文件实际响应核对通过。源码由既有 dev_reload 自动重载，没有手动重启；本轮隔离 Vite 已停止。
 
-### 历史能力与不可变决策
+报告、逐项状态、去重统计、双轴证据、本轮差分与资源回执均在 `logs/review-remediation-20260926/`。当前核验规则身份可用；没有新增正式业务 Attempt、模型调用、生产数据库迁移、依赖安装、Git 提交/推送或 GitHub 变更，未操作 V2。用户接受初稿的决定权不变，旧 #209/#217 历史缺口与结束追溯决定保留。共享 Python 环境原有依赖冲突尚未处理，不自动扩展成安装或发布任务。
 
-- 领域与当前工程边界：`CONTEXT.md`、`AGENTS.md`
-- Candidate 重验：`docs/adr/0033-candidate-reverification-and-verifier-ruleset.md`、
-  `docs/adr/0034-historical-reverification-authority.md`
-- vNext 默认切换：`docs/adr/0030-direct-vnext-default-cutover.md`、
-  `docs/plans/2026-08-23-g3-vnext-cutover-execution-report.md`
-- G1：`docs/plans/2026-08-20-g1-generalization-execution-report.md`
-- G5 本机门：`docs/plans/2026-08-23-g5-local-prerequisite-execution-report.md`
-- AC-07 总规格与生命周期：`docs/plans/2026-08-06-agentic-capability-ac07-spec.md`、
-  `docs/adr/0029-capability-validation-lifecycle-and-platform-publication.md`
+## 2.0d 剩余问题逐单整改（2026-09-26，总单及10个子项已关闭、历史缺口保留）
 
-状态改变时先更新本文件，再同步精简 `handoff.md`。不要把滚动状态复制进 README、CONTEXT、ADR
-或历史执行报告；文档自身未来 merge SHA 与 Issue 关闭状态必须从 GitHub 现场读取，不能用静态
-占位符制造看似精确但一合并就过期的事实。
+用户已授权创建和管理 GitHub Issue 并逐项修复。总单 [#209](https://github.com/Eclipseic1848/Mangrove_ai/issues/209)及10个子项均已关闭；#217按用户明确确认结束历史追溯，保留所有差异与未验证记录。本轮增量与逐单证据保存在 `logs/issue-remediation-20260926/`。既有 WIP 保留，Issue 关闭不等于 Git 提交、合并或发行。
+
+| Issue | 当前状态 |
+|---|---|
+| #210 Windows 热重载原生退出崩溃 | CLOSED/COMPLETED；共享入口在原生导入前登记 Python SIGBREAK 处理器，启动/运行退出回归通过，既有重载已生效 |
+| #211 前缀要求漏提取与非法 Schema | CLOSED/COMPLETED；安全字面前缀编译与 CSV 逗号列名修复，完整批次 195/200，未知与非法输出保留 |
+| #212 八类示例实际初稿失败 | CLOSED/COMPLETED；一次完整360例285通过、75未通过；同标准旧基线304通过，未证明总体提升。34改善/53回退、全部失败及未知保留；共享提示、评测器修复、最终双轴通过 |
+| #213 Provider 发送前失败与发送后未知 | CLOSED/COMPLETED；原生发送阶段分类，候选连接/正文运输故障停止自动改稿，旧未知不改写 |
+| #214 Token 历史统计管理员页面 | CLOSED/COMPLETED；真实管理员页面 9 项状态与 SQL 一致、首份实际 CSV 对齐，昨日刷新/重进/F5保留 |
+| #215 表格内容与复杂文档有界核对 | CLOSED/COMPLETED；最终36/36判定一致、88项工程回归通过，用户接受或继续的决定权不变 |
+| #216 正式规则版本化与源码快照 | CLOSED/COMPLETED；30文件快照已获明确授权并本机提交6615fb5；真实规则身份、2份隔离正式Attempt正反例、76项提交后回归及最终双轴通过；未推送或发行 |
+| #217 历史六项差异与十一项缺材料 | CLOSED/COMPLETED；用户明确同意结束本次追溯并保留缺口。补料清单漏报已修复，22项相关回归与双轴审查通过；26项逐项仍9/6/11，不计作全历史通过 |
+| #218 关联遥测关闭测试随机失败 | CLOSED/COMPLETED；固定合法退避上界，等待匹配 5 秒导出期限；生产关闭期限未改 |
+| #219 多地址连接仅尝试首个IP | CLOSED/COMPLETED；184项工程回归与双轴复审通过；已获授权精确提交7文件为07e1559，新正式Ruleset身份及提交后76项回归通过，其他234个WIP在提交时哈希保持 |
+
+#210 / #218 共享最终组合回归 **15 passed**（退出 9 项、生命周期 6 项，不重复累加）。旧入口捕获相同 `0xc0000005`；最终夹具自然加载真实业务依赖，3 次运行退出为 0，1 次启动中断为 `0xc000013a`，均执行 Python 清理。运行退出还验证 ASGI 收尾、SQLite 提交、无残留 journal 与 Proactor 子进程。最初扩展回归的 1 项遥测时序失败、固定退避红例与中间夹具失败均留证。两票 Standards/Spec 均通过；8088 健康及入口 200。详见 `issue210/closure.md`、`issue218/closure.md`、`issue218/combined-green.xml`。应用源码与审查稿仅行尾字节差异，规范化内容一致；最终测试针对已应用源码。
+
+#211 最终真实结构提取 200 个需求中 **195 通过（97.5%）**；355 个有效正例无误报，492/505 反例检出，余下 13 个所属需求未核验。4 次调用结果未知（2 ConnectError、2 TimeoutError），1 个不支持的复杂正则安全拒绝；未重发。首版完整批次 199/200、9 个旧失败回归全过，全部批次分开保留。139 项相关工程回归通过，双轴复核通过。只表示结构解释与提示能力，不代表初稿生成成功率，详见 `issue211/report.md`。
+
+#213 最终受控网络覆盖四协议六故障，146 项相关 API/授权/网络通过；提前响应修复后故障集 30 通过，候选异常接缝最终 67 通过（分组有重叠）。原生阶段不足时仍记未知，连接/响应体故障不再触发自动改稿，取消与 Grant 撤销保留。双轴通过，详见 `issue213/report.md`。
+
+#214 已复用用户真实 Chrome 管理员会话核验，昨日/近7天/自定义历史、刷新与重进共9项与只读SQL一致，CSV实际下载对齐。无日期历史2243次/77,334,727 Token均披露；未自然跨日、未抓原始JSON，四条切换中间400与第二次下载取消保留。双轴通过，详见 `issue214/report.md`。#217早期复核为9一致/6 Manifest差异/11缺料，68个输入哈希未变；原调查记录见 `issue217/report.md`，最终用户确认收尾见本节下方。
+
+#215 最终内容模型核验 **36/36判定符合预期**（6正例、30反例），88项相关回归通过，双轴审查通过。前两批34/36、35/36分开保留；3个反例理由错误归因仍披露，不代表理由逐句准确。详见 `issue215/report.md`。#212的60例隔离试验48通过/12失败，使用14份同模型辅助判分与27份Codex离线复核；两个辅助判分未知批次保留，未重发。
+
+#212最终单批360例 **285/360（79.2%）**，同标准重核旧基线 **304/360（84.4%）**；原始308/360历史报告不覆盖。34改善、53回退，其中42个回退为调用异常、11个为格式/语义问题；没有证明总体成功率提升。75个未通过为37未发送、19结果未知、13仅报告语义、6产物格式（1份同时语义失败）。304份完成初稿结构298通过；181份可复核正文中167份三轴通过，条件比例不能替代360分母。原新360语料相同，全部来源/产物哈希核对，200/181份正文使用同标准；辅助5个未知判分批次保留。最终评测器43 passed，主写作接缝222 passed/1既有Docker门跳过，双轴通过。按该票原“共享修复、完整复验、剩余失败披露”范围关闭，不表示全部业务问题已解决。详见 `issue212/report.md` 和 `failure-analysis.md`。#217与#209现已按用户确认结束追溯并关闭，历史缺口与原始评测结果保留。
+
+#219 是旧失败分析后新增的具体共享接缝问题，证据在 `logs/connection-followup-20260926/`。真实回环证明首地址拒绝时可使用已校验的备用地址，正文仍只发送一次。初审发现的Grant/来源撤销窗口、TCP/TLS预算问题及自查连接清理均已补红例修复；最终85+99项去重184通过，两轴复审无剩余必修。当前域名两个地址的6次只读TCP/TLS连接均成功，不能据此证明它是旧56个运行失败的根因；未重发旧未知操作。用户明确同意后，7个跟踪文件本机提交为07e15590987b9eb9fc051e06a798414c5f3b52de；新规则身份02c0db0a2ab49071f6a6bf56b2084595946f0bfc21b8e10e994d644e3de37483与提交绑定、重复解析一致，提交后76项规则/服务/兼容/Provider接口回归通过。唯一额外一行图片接线位于原有未跟踪WIP，仍保留在工作区。8088健康与入口200；只读聚合未发现已通过但未发布且受新规则发布门影响的当前候选。详见 `closure.md`。总单与10个子项现均已关闭，#217历史缺口按用户确认保留。
+
+#216的30文件核验/关联执行快照已提交6615fb5，#219的7文件已按新授权提交07e1559；后续邮件评测器、其他原有WIP及状态文档仍未提交，不能仅用HEAD重建完整V3。本轮没有推送、PR、生产迁移或发行。原轮次交付见 `logs/issue-remediation-20260926/report.md`，#219新增收尾见上文。
+
+#217最新跟进：用户要求完成#217和#209后，确认旧补料工具仅报告第一个缺失项，已最小修复为一次列出所有未登记的必需快照；3个任务各缺records/tables/documents，4个任务缺documents，共13个快照登记缺口，不能写成11份成功产物丢失。另4个无可用历史结果基准的任务原状态为3个FAILED、1个SPEC_DRAFT，仍保留原分母和未验证。红例2项失败、最终相关回归22通过，真实离线重放逐项仍9/6/11；104个历史文件哈希与26条任务记录未变。原6份Manifest差异与旧缺口未恢复。限定三文件改动、补料清单与#209六部分汇总见 `logs/issue-remediation-20260926/issue217/followup/`。用户随后明确回复“同意”，接受保留9/6/11并结束追溯；#217与#209已CLOSED/COMPLETED，原“缺料保持开放”的本轮结束条件已按此确认调整。批准、关闭回执与最终摘要见同目录 `closure.md`，不代表资料已恢复或历史全部通过。本次没有改产品源码、模型提示或接受门，也没有新提交、模型调用或服务重启。
+
+## 2.0c 表头检查与前缀盲点验证（2026-09-26）
+
+新 CSV/XLSX 初稿从冻结用户原话提取表头提示，复用既有 `TableOutputContract` 和表头读取器。
+只核对明确列名、排他性和顺序；允许附加列时不强加唯一性。派生检查仍是 Run 内提示，
+不修改 TaskRevision、不新增接受拦截，接受后保留同一文件及 gaps；旧会话和未知记录不补发请求。
+
+新增明确前缀、紧凑格式前缀、CSV、XLSX 四组各 40 个设计用例；一键评测同时统计误报、漏报、
+不可用与未知。保留提示版本的 120 个提取全部可用，最终本地检查对 220 个正例无误报、335 个反例全识别。
+其中 CSV/XLSX 各 40 个需求、80 个正例与 125 个反例。4 个真实 Pi 表格任务全部通过独立记录比对、
+表头提示与初稿暂停，耗时 33.776–40.028 秒；仍非正式交付或用户页面验收。
+
+旧示例提取回归 47 项中 46 可用，1 个 Provider `ConnectError` 结果未知且未重发；
+269 个结构反例识别 242 个，仍有 27 个旧调度句式前缀漏检。追加提示试验 14 项仍漏 7 个前缀，
+另 40 个紧凑句式有 3 个非法 Schema；试验无稳定收益，已撤回追加语句，原证据保留。
+这些批次不能相加冒充新任务成功率，原 360 例初稿基线仍为 308/360。
+
+最终相关工程回归 **128 passed**。历史 26 项逐项状态与来源哈希不变，仍为 9 匹配/6 原差异/11 缺材料。
+双轴审查发现的重复表头过度限制已修正，正反例预期同步；提取模型回执复用，未为重判分追加模型调用。
+报告、限定补丁与失败清单见 `logs/output-check-coverage-20260926/`，扩展入口见
+`docs/agents/workspace-example-evaluation.md`。无依赖安装、迁移、Git 提交/推送或 V2 改动。
+
+用户随后报告 Python 弹窗：Windows 事件显示本轮三次源码热重载时旧后端发生
+`python313.dll / 0xc0000005` 退出崩溃，新进程已接管，8088 健康与工作台入口 200；
+原生层根因未定，不能把自动恢复称为已修复。详见 `logs/output-check-coverage-20260926/reload-crash.md`。
+Token 管理员 UI 仍无既有获授权页面可验收；正式 VerifierRuleset 版本化门仍未绕过。
+
+## 2.0b 任务质量与提取稳定性（2026-09-26，上轮证据）
+
+Conductor 回执复用调度解析器统一前缀/空白，保留执行时刻；这不修饰 Pi 生成的任意 JSON。
+候选语义核验与重试补充预算内完整冻结文本，SHA256 与预算同时核对；富文档、超限或缺失材料仅标部分。
+PDF/DOCX/XLSX 不因正文解析成功就宣称原文完整。用户仍可接受初稿，核验问题不新增接受拦截。
+
+辅助 JSON 提取沿冻结 DeepSeek 连接使用非思考 JSON，约束同文件唯一检查、条件前提、可空类型、数量和前缀；
+不改变主业务模型设置。未知回执保留不重发，后续记录安全 `cause_type`，评测保存提示摘要、用量与耗时。
+最终 69 项提取全部可用且未误拒正确答案，中位 3.881 秒、最长 7.089 秒；不能据此称检查覆盖完整。
+独立答案生成 441 个结构反例识别 435 个，仍漏 6 个前缀约束；前批 64 项中的 1 个 Provider 未知保持未知。
+真实报告验证 8 项符合预期（问题拒绝、正确与修正版通过），合成 Manifest、未版本化工程证据，非正式 Attempt 或初稿写作提升。
+
+工程回归去重 328 通过；历史 26 项仍为 9 匹配/6 原差异/11 缺材料，逐项与来源哈希不变。
+Standards/Spec 发现的富文档完整性误标已修复复核；无新依赖、迁移、Git 提交/推送或 V2 改动。
+8088 当前可用，但 Token 管理员 UI 缺既有获授权页面，跨日/刷新仍未验收。正式 VerifierRuleset 门未绕过。
+限定补丁、逐批结果、剩余风险和复现命令见 `logs/task-quality-optimization-20260926/report.md`；原 360 例基线不覆盖。
+
+## 2.0a 衍生检查与总预算（2026-09-26，上轮证据）
+
+JSON 新初稿沿冻结模型单次解释明确结构要求，宿主保存派生检查，用于现有问题提示与接受 gaps；
+不修改 TaskRevision，不阻断用户接受，不把解释当成用户已确认的新契约。未知/损坏占位不重发，旧会话不补发。
+将 Schema 追加给写稿模型的试验已撤回：旧失败中仍有 cron 前缀问题，新闻对照存在来源矛盾，不能证明非回归。
+最终保留方案只检测和提示，不宣称提升初稿写作准确率。CSV/XLSX 的自然语言解释仍未覆盖。
+
+Conductor 新增明确总预算，未设置时保持旧序列化摘要；识别后计入此前耗时，后续超时保留已完成采集器数据，
+恢复沿用原起点。规划尚未返回时不能提前得知自然语言上限；取消不等于远端调用已终止。
+相关最终回归 251 通过；历史 26 项仍为 9 匹配、6 原差异、11 缺材料。Standards/Spec 发现已修复并复核。
+真实运行与提示试验分批保存，逐例结论及有限范围通过率见 `logs/remaining-optimization-20260926/final-evidence.json`，
+不替代 360 例原始基线。Token 数据工程证据仍有效，管理员页面因 8088 停止与缺会话未验收。
+VerifierRuleset 既有未提交语义变化门未绕过；无提交、推送、迁移、V2 操作或主服务重启。
+限定 patch、报告和复现入口：`logs/remaining-optimization-20260926/report.md`。
+
+## 2.0 冻结表格契约自动发布检查
+
+继续评测整改时复现自动发布未复核已冻结表格结构的问题，已在 Publisher 提交前复用既有列检查。
+用户明确要求提示问题但由用户决定：初稿展示冻结表格结构差异，接受后写入 gaps；
+OwnerAcceptance 不新增结构拦截、确认步骤或模型调用。
+四种表格表示的 20 个组合及原发布测试共 32 项通过；相关 Python 回归去重 106 通过、1 项被既有
+VerifierRuleset 未提交语义变化门阻断，未绕过。历史 26 项仍为 9 匹配 / 6 原差异 / 11 缺材料。
+没有新的真实模型批次；自然语言字段契约形成和初稿准确性仍未解决。旧 committing 与正式交付按原规则恢复。
+浏览器 2 项和前端构建通过。结束时 8088 无监听，未重启，主入口资源核对未完成。
+限定补丁和报告在 `logs/output-contract-optimization-20260926/`；未提交、推送或迁移。
+
+## 2.1 示例评测后续优化（本轮结束，仍有未解决项）
+
+用户已同意继续处理来源规划、来源质量、初稿字段遵循与报告溯源。证据目录：
+`logs/collection-optimization-20260925T214522Z/`。
+
+- 共享规划入口对错误专用来源最多纠正一次；显式 URL 丢失、替换、与专用查询流程冲突时停止。排除/示例链接存在歧义时保守澄清，不能把字面出现等同来源授权。
+- Checker 接收真实原件、日期与冻结来源范围，要求逐来源核对；空来源、缺报告、核对失败或上下文不完整不能判通过。明确站点越界由本地检查拒绝。
+- Pi 初稿产物重读与来源自查提示试验未保留：60 个定向复跑 35 通过 / 25 失败，31 个旧失败转好，但 8 个通过对照中有 4 个失败；单轮不能归因，无法证明稳定非回归，已撤回本轮提示增量。初稿字段契约与自由文本溯源仍未解决，不能用该试验替代最终版本通过率。
+- 真实新浪工作台示例已使用 article 采集器，因首页缺新闻正文而明确未通过；来源路由修复不等于采集任务完成。冻结三份旧报告复审均未通过，包括此前 82 分的新闻报告。
+- 历史节点重放仍为 9 匹配 / 6 原有差异 / 11 缺材料，26 项结论逐项相同。相关工程回归去重 248 通过 / 1 因 Windows 符号链接权限跳过；原 3 个失败及复核记录保留，未执行整仓测试。Standards/Spec 发现已修复复核。
+- 来源质检真实模型对照 6 项符合预期：三份旧问题报告拒绝；明确历史公告与导航提取正常通过；无来源支持的满意度/因果结论拒绝。不是任意来源均可成功采集的证明。
+- Token 历史查询、独立 SQL 与 CSV 生成复核一致；普通账号实际查询/导出 403。管理员真实页面验收仍待登录态，见 `logs/token-usage-live-followup-20260925/report.md`。
+
+## 2.2 工作台示例泛化评测与共享修复（上一轮完成）
+
+用户确认以工作台四大类八个示例验证实际能力，并要求并行修复 Token 历史统计显示。
+本轮已探索入口、合同、注册、执行和结果返回；已重放 26 个历史清洗任务并记录改前改后对照。
+已执行 360 个独特合成输入：前四类各 50 个，报销、订单、定时、邮件各 40 个。
+整体初稿 308/360 通过（85.6%），结构检查 336/360，200 份报告语义复核 172/200。
+52 项未通过为 15 个 cron 前缀、9 个网页字段名、28 个报告来源支持问题；没有未知或未执行项。
+前四类使用冻结来源，不代表实时采集；真实 HTTP 示例中四项采集均未达业务目标，文件两项初稿核对通过，
+定时仅验证落库后暂停、邮件仅验证缺地址澄清。不能据此声明正式交付或外部邮件送达。
+
+已实施共享站点过滤、cron 星期日解析和无时区历史用量披露；未复现 Token 历史按天删除。
+210 项综合回归与最终 30 项评测器回归重叠 22 项，去重 218 项通过；原历史 9 项通过保持 9/9，
+6 项既有差异、11 项缺输入仍保留，不能宣称全历史 100%。Standards/Spec 已复核本轮发现修复。
+完整报告、专属 patch、失败清单和逐例哈希在本地 `logs/system-validation-20260925T174504Z/`，
+以 `report.md`、`workspace-final/report.json` 为本轮最终证据；原批次旧判分保留，不作最终成绩。
+评测方法和复现命令见 [workspace-example-evaluation.md](../agents/workspace-example-evaluation.md)。
+未改 V2、默认 Runtime 或生产 Schema，未提交、推送或创建发行。
+
+## 3. 当前未完成边界
+
+1. #208 已在 8088 提供，用户尚未反馈刷新后的实际报告效果；字体替换可能影响排版。
+2. #216 已授权提交限定核验快照并通过两份隔离正式 Attempt；这不等于完整 V3 发布或真实业务验收。用户接受初稿仍不等于系统语义 QA 通过，旧未知记录和旧 Manifest 不回填。
+3. 原主服务有间歇 Provider 结果未知；独立 Relay 一次成功不足以证明根因消失。只按新故障证据定点诊断，不重发原未知操作。
+4. Pi 与 CoreMind 未做同题同条件对照，不能依据不同测试数量排名。当前建议保持 Pi，不自动切 CoreMind。
+5. 华苏公网、目标 Linux/多人容量、恢复和完整用户旅程尚未验收；本次 v1.0.0 发行不替代这些目标环境验收。
+6. 示例实测仍存在已给 URL 却误入小红书采集、来源体裁/时效不足和输出合同未严格遵循。后续优先复用已有规划与验证接缝修复，不能用冻结来源成绩代替在线采集能力。
+
+## 4. 总体 Roadmap 和版本门
+
+| 阶段 | 当前状态与下一门 |
+|---|---|
+| P0 | 迁移、SecretRef、依赖分组、CI/分支治理已有历史收口，不重复执行 |
+| P1-01 | 匿名网页、Harness/AgentKernel 首片已有工程收口，不等于完整 P1 |
+| P1 / R0—R5 | 文件/网页/混合来源、复用、对话、预览、模板/记忆/自动任务等已有实现；#113 地图仍 OPEN，旧“下一票”不是当前命令 |
+| R4 原扫码路线 | #138 旧计划取消；已有手填 Cookie 和本轮恢复改进不等于通用扫码登录已完成 |
+| R6 | #143/#144/#145 现场均 CLOSED/NOT_PLANNED；多人运维、完整黄金任务和退役不能记为已验收，也不自动重启旧计划 |
+| V3 神州与系统整改 | 现有平台增量；#193—#208 原范围已完成，后续按用户实际使用反馈修复，保护原功能 |
+| v1.0.0 发行 / 后续部署 | 用户已确定 V3 完整源码基线与 v1.0.0；按 §2.0k 完成 PR、CI 和 Release。旧 main 数据库转换、目标公司 Linux 与业务验收单独进行 |
+| P2 | #146 音视频、#147 外部程序只读读取本人结果均 OPEN，仅后期占位，不自动开工 |
+
+V3 相对 V2 只增加客户场景并补齐通用能力；目标为本机及华苏公网、不超过 10 人、无截止日期。增加类型需贯通现有契约、注册、规划、执行和验证，不是只加枚举。
+
+## 5. 稳定能力与资料入口
+
+- 产品与入口：[README](../../README.md)；领域：[CONTEXT](../../CONTEXT.md)；工程边界：[AGENTS](../../AGENTS.md)。
+- 神州范围：[确认规格](../plans/2026-09-21-shenzhou-xhs-scope.md)；通用化：[执行记录](../plans/2026-09-24-evidence-collection-implementation.md)。阶段状态只作历史，不覆盖本台账。
+- 初稿决定：[ADR-0047](../adr/0047-owner-controlled-draft-verification.md)。唯一 Publisher、正式 output_id、文件完整性/QA 不可跳过；业务采纳与系统语义核验分开。
+- 能力治理 #9—#17 的 admin_gray 真实纵切面已完成；不等于普通用户市场或远程 MCP/Registry 开放。历史 G1—G4 不等于目标 Linux/GPU 部署。
+- 历史规格、ADR 和证据保留；旧报告的过期“下一步”不作为当前命令。完整旧台账已备份到系统临时目录 `mangrove-v3-handoff-closeout-20260925`，仅供追溯。

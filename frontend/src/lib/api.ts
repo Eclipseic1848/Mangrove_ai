@@ -213,11 +213,21 @@ export async function readAuthenticatedBlob(response: Response) {
 
 async function handle(res: Response) {
   if (!res.ok) {
-    let detail = `${res.status}`;
+    let detail = `请求未完成（HTTP ${res.status}），请核对输入或稍后重试。`;
     if (res.headers.get("content-type")?.includes("application/json")) {
       try {
         const j = await readAuthenticatedJson(res);
-        detail = j.detail || JSON.stringify(j);
+        const value: unknown = j?.detail ?? j;
+        if (typeof value === "string" && value.trim()) detail = value;
+        else {
+          // 只提取服务端错误说明，不回显校验响应中的原始输入或密钥。
+          const messages = (Array.isArray(value) ? value : [value]).flatMap(item => {
+            if (!item || typeof item !== "object") return [];
+            const message = item.msg ?? item.message;
+            return typeof message === "string" && message.trim() ? [message] : [];
+          });
+          if (messages.length) detail = messages.join("；");
+        }
       } catch {
         /* 保留状态码，避免用 JSON 解析异常覆盖真正的 HTTP 错误。 */
       }
@@ -245,17 +255,19 @@ export const api = {
     path: string,
     body?: unknown,
     headers: Record<string, string> = {},
+    signal?: AbortSignal,
   ) =>
     authenticatedFetch(path, {
       method: "POST",
+      signal,
       headers: authHeaders(headers),
       body: body ? JSON.stringify(body) : undefined,
     }).then(handle),
-  patch: (path: string, body?: unknown) =>
-    authenticatedFetch(path, { method: "PATCH", headers: authHeaders(), body: body ? JSON.stringify(body) : undefined }).then(handle),
+  patch: (path: string, body?: unknown, signal?: AbortSignal) =>
+    authenticatedFetch(path, { method: "PATCH", signal, headers: authHeaders(), body: body ? JSON.stringify(body) : undefined }).then(handle),
   put: (path: string, body?: unknown) =>
     authenticatedFetch(path, { method: "PUT", headers: authHeaders(), body: body ? JSON.stringify(body) : undefined }).then(handle),
-  del: (path: string) => authenticatedFetch(path, { method: "DELETE", headers: authHeaders() }).then(handle),
+  del: (path: string, signal?: AbortSignal) => authenticatedFetch(path, { method: "DELETE", signal, headers: authHeaders() }).then(handle),
 };
 
 /** 下载产出文件（带鉴权），触发浏览器保存。 */
@@ -283,13 +295,17 @@ export async function downloadFile(url: string, filename: string, signal?: Abort
 }
 
 // ---------- SSE 聊天流 ----------
+export type ChatProgress = { node: string; label: string; status: "started" | "completed" | "waiting" | "warning" | "failed"; summary: string; sequence: number; sources?: Array<{ url: string; title: string; status: "requested" | "received" }> };
 export interface ChatEvents {
+  onProgress?: (d: ChatProgress) => void;
   onMeta?: (d: { conv_id: string }) => void;
   onNode?: (d: { node: string; label: string; view?: any }) => void;
   onResult?: (d: any) => void;
-  onError?: (d: { message: string }) => void;
+  onError?: (d: { message: string; code?: "stream_interrupted" }) => void;
   onDone?: () => void;
 }
+
+export class ChatConnectionInterrupted extends Error {}
 
 /**
  * 发起聊天并解析 SSE 流（POST + fetch 流式读取，统一 Cookie 鉴权）。
@@ -298,11 +314,12 @@ export interface ChatEvents {
 export function streamChat(
   body: { conv_id?: string | null; content: string; provider?: string; model?: string; mode?: string },
   events: ChatEvents,
+  response?: Response,
 ): () => void {
   const controller = new AbortController();
   const generation = getAuthGeneration();
   let finished = false;
-  const finish = (error?: { message: string }) => {
+  const finish = (error?: { message: string; code?: "stream_interrupted" }) => {
     if (finished) return;
     // 先冻结终态，避免重复 done、取消或迟到事件再次修改调用者状态。
     finished = true;
@@ -328,13 +345,16 @@ export function streamChat(
         controller.abort();
         try {
           const current = await revalidateStreamSession(generation);
-          finish({ message: current ? "会话有效，本次聊天连接已结束，请查看结果后再继续。" : SESSION_EXPIRED });
+          finish(current
+            ? { message: "实时进度连接已中断，任务结果尚待确认，请勿重复提交。", code: "stream_interrupted" }
+            : { message: SESSION_EXPIRED });
         } catch (error) {
           finish({ message: error instanceof Error ? error.message : SESSION_EXPIRED });
         }
       }
       else if (event === "meta") events.onMeta?.(parsed);
       else if (event === "node") events.onNode?.(parsed);
+      else if (event === "progress") events.onProgress?.(parsed);
       else if (event === "result") events.onResult?.(parsed);
       else if (event === "error") {
         finish({
@@ -346,7 +366,7 @@ export function streamChat(
     };
 
     try {
-      const res = await authenticatedFetch("/api/chat/stream", {
+      const res = response ?? await authenticatedFetch("/api/chat/stream", {
         method: "POST",
         headers: authHeaders({ Accept: "text/event-stream" }),
         body: JSON.stringify(body),

@@ -26,7 +26,7 @@ def test_evaluation_rejects_unbounded_timeout_before_journal(tmp_path, timeout):
 
 @pytest.mark.parametrize("provider_name,official,model", [
     ("deepseek", "https://api.deepseek.com", "deepseek-v4-pro"),
-    ("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3.8-max-0902"),
+    ("qwen", "https://dashscope.aliyuncs.com/compatible-mode/v1", "qwen3.8-max"),
 ])
 @pytest.mark.parametrize("variant", ["exact", "http", "host", "path"])
 def test_explicit_cloud_preparation_is_exact_and_never_sends(tmp_path, variant, provider_name, official, model):
@@ -122,7 +122,7 @@ def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_ex
         rounds=1, concurrency=1, provider=provider_name,
         timeout_seconds=300, disable_thinking=disable_thinking,
         base_url={"deepseek": "https://api.deepseek.com", "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1", "local": "http://127.0.0.1:9/v1"}[provider_name],
-        model={"deepseek": "deepseek-v4-pro", "qwen": "qwen3.8-max-0902", "local": "synthetic-local"}[provider_name],
+        model={"deepseek": "deepseek-v4-pro", "qwen": "qwen3.8-max", "local": "synthetic-local"}[provider_name],
         output=tmp_path / "transport.json", execute=True,
     )
     requests = []
@@ -258,9 +258,9 @@ def test_generated_questions_require_explicit_single_decision(questions):
 @pytest.mark.parametrize("value", [None, True, 0, "false"])
 def test_disabled_thinking_guard_rejects_non_false(value):
     endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-    request = httpx.Request("POST", endpoint, json={"model": "qwen3.8-max-0902", "max_tokens": 131072, "enable_thinking": value})
+    request = httpx.Request("POST", endpoint, json={"model": "qwen3.8-max", "max_tokens": 131072, "enable_thinking": value})
     with pytest.raises(ValueError):
-        check_progressive_request(request, endpoint=endpoint, model="qwen3.8-max-0902", sent=0, max_calls=24, disable_thinking=True)
+        check_progressive_request(request, endpoint=endpoint, model="qwen3.8-max", sent=0, max_calls=24, disable_thinking=True)
 
 
 def test_non_qwen_cannot_disable_thinking_before_journal(tmp_path):
@@ -276,9 +276,9 @@ def test_non_qwen_cannot_disable_thinking_before_journal(tmp_path):
 
 def test_default_thinking_guard_requires_absent_parameter():
     endpoint = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
-    request = httpx.Request("POST", endpoint, json={"model": "qwen3.8-max-0902", "max_tokens": 131072, "enable_thinking": False})
+    request = httpx.Request("POST", endpoint, json={"model": "qwen3.8-max", "max_tokens": 131072, "enable_thinking": False})
     with pytest.raises(ValueError):
-        check_progressive_request(request, endpoint=endpoint, model="qwen3.8-max-0902", sent=0, max_calls=24)
+        check_progressive_request(request, endpoint=endpoint, model="qwen3.8-max", sent=0, max_calls=24)
 
 
 def test_legacy_mode_rejects_disable_thinking():

@@ -9,7 +9,8 @@ from tests.database_migration_helpers import migrated_webui_database
 @pytest.fixture
 def accounts(tmp_path):
     store = WebUIStore(str(migrated_webui_database(tmp_path / "account-store.db")))
-    owners = [store.create_user(name, "synthetic-hash", pending=False)["user_id"] for name in ("synthetic-a", "synthetic-b")]
+    owners = [store.create_user(name, "synthetic-hash", pending=False, role=role)["user_id"]
+              for name, role in (("synthetic-a", "user"), ("synthetic-b", "admin"))]
     with store._conn() as conn:
         frozen = [execution.capture_authorization(conn, owner) for owner in owners]
     return store, frozen

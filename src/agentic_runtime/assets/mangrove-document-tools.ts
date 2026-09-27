@@ -1,6 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 type ToolConfig = {
   relayBaseUrl: string;
@@ -14,7 +15,7 @@ type ToolConfig = {
 };
 
 const config = JSON.parse(
-  readFileSync("/root/.pi/agent/document-tools.json", "utf8"),
+  readFileSync(join(process.env.PI_CODING_AGENT_DIR || "/root/.pi/agent", "document-tools.json"), "utf8"),
 ) as ToolConfig;
 
 async function relay(operation: string, payload: unknown) {
@@ -66,7 +67,7 @@ export default function mangroveDocumentTools(pi: ExtensionAPI) {
   pi.registerTool({
     name: "inspect_source",
     label: "检查来源结构",
-    description: "检查一个获准来源的页数、页型和可用能力，不读取整份高质量 OCR。首次调用使用 goal.json source_scope 中的 /workspace/input/... 路径；返回的 source_id 是后续文档工具使用的规范标识。",
+    description: "仅检查获准PDF或图片的页数、页型和可用能力，不读取整份高质量OCR。使用goal.json sources中reader=document_tools的source_id；JSON、Excel、CSV使用文件或表格工具，不能传给本工具。",
     parameters: Type.Object({ source_id: Type.String() }),
     async execute(_toolCallId, params) {
       return result(await relay("inspect_source", params));
@@ -80,7 +81,7 @@ export default function mangroveDocumentTools(pi: ExtensionAPI) {
     parameters: Type.Object({
       authorized_scope: Type.Object({
         source_ids: Type.Array(Type.String()),
-        unit_ids: Type.Optional(Type.Array(Type.String())),
+        unit_ids: Type.Optional(Type.Array(Type.String(), { description: "仅当用户明确限制页码或内容单元时填写。它是整个任务的检索边界，不是首批读取页面；查找文件中的第 N 个对象时省略，使用 discover_content 的 unit_ids 或 next_unit_ids 分批读取。" })),
       }),
       result_cardinality: Type.Union([
         Type.Literal("first"),

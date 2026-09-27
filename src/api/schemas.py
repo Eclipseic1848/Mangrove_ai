@@ -1,9 +1,9 @@
 """网关请求/响应的 pydantic 模型。"""
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import List, Optional, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 # ---------- 鉴权 ----------
@@ -61,6 +61,7 @@ class ConversationOut(BaseModel):
 
 
 class MessageOut(BaseModel):
+    id: int
     role: str
     content: str
     created_at: str
@@ -73,12 +74,21 @@ class RenameIn(BaseModel):
 
 
 # ---------- 聊天 ----------
+class ChatHistoryMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=8000)
+
+
 class ChatIn(BaseModel):
     conv_id: Optional[str] = None  # 不传则新建会话
     content: str
     provider: Optional[str] = None
     model: Optional[str] = None
     mode: Optional[str] = None  # data_prep | legacy_analysis；None 时按 settings.data_prep_mode_enabled
+    model_connection_id: Optional[str] = None
+    model_connection_version: Optional[str] = None
+    external_api_confirmed: bool = False
+    history: List[ChatHistoryMessage] = Field(default_factory=list, max_length=16)
 
 
 # ---------- HITL 确认 ----------
@@ -104,6 +114,8 @@ class ManualTaskIn(BaseModel):
     prompt: str  # 交给 Conductor 的 user_input
     provider: Optional[str] = None
     model: Optional[str] = None
+    model_connection_id: Optional[str] = None
+    external_api_confirmed: bool = False
     trigger: TriggerIn
     start_date: Optional[str] = None  # 生效区间起（ISO 日期），留空始终生效
     end_date: Optional[str] = None    # 生效区间止（ISO 日期）
@@ -111,6 +123,8 @@ class ManualTaskIn(BaseModel):
 
 
 class TaskPatchIn(BaseModel):
+    model_connection_id: Optional[str] = None
+    external_api_confirmed: bool = False
     status: Optional[str] = None  # "active" | "paused"：仅传它表示纯粹的暂停/恢复
     name: Optional[str] = None
     prompt: Optional[str] = None

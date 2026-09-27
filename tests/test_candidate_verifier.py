@@ -356,6 +356,99 @@ def test_semantic_decision_normalizes_single_missing_requirement() -> None:
     assert decision.missing_requirements == ["缺少完整小计证据"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("case", ["valid", "missing", "malformed", "unadopted", "risk_failed",
+    "unquoted", "unknown", "duplicate", "task_failed", "retry_missing", "wrong_owner",
+    "wrong_task", "wrong_revision", "context_changed", "not_included", "metadata_quote", "outside_preview"])
+async def test_lesson_effect_requires_specific_grounded_assessment(tmp_path: Path, case: str) -> None:
+    from src.conversation_steering.models import CompiledContext, ContextCompositionItem
+
+    source = tmp_path / "contract.pdf"
+    _write_pdf(source)
+    output = tmp_path / "output"
+    output.mkdir()
+    candidate_text = "name,fee\nAlice,100\n"
+    if case == "outside_preview":
+        candidate_text += " " * 25000 + "隐藏的结果"
+    (output / "service-fees.csv").write_text(candidate_text, encoding="utf-8")
+    _write_manifest(output, quote="Service Fee Details - Alice - 100")
+    reference = "lesson:fee-check:" + "a" * 64
+    advice = "逐人核对费用，不要把金额误写到其他人名下。"
+    content = "[lesson]\n" + advice
+    # 在校验器输入边界构造已冻结上下文，不依赖其他在制功能的编译器改动。
+    context = CompiledContext(context_id="test-context", owner_id="user-a", task_id="task-a", revision=1,
+        content=content, char_count=len(content), estimated_tokens=len(content),
+        summary_sha256="sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        composition=(ContextCompositionItem(category="lesson", source_ref=reference, char_count=len(advice), protected=False),))
+    no_lessons = case in {"wrong_owner", "wrong_task", "wrong_revision", "context_changed", "not_included"}
+    if case == "wrong_owner":
+        context = context.model_copy(update={"owner_id": "user-b"})
+    elif case == "wrong_task":
+        context = context.model_copy(update={"task_id": "task-b"})
+    elif case == "wrong_revision":
+        context = context.model_copy(update={"revision": 2})
+    elif case == "context_changed":
+        context = context.model_copy(update={"content": context.content + "伪造"})
+    elif case == "not_included":
+        context = None
+    request = _request(tmp_path, source).model_copy(update={"compiled_context": context})
+    assessment = {"source_ref": reference, "adopted": True,
+        "risk_passed": True, "candidate_quote": "Alice", "source_quote": "Alice - 100",
+        "reason": "输出的人名及费用与来源对应，未出现串人。"}
+    assessments = [assessment]
+    if case == "missing":
+        assessments = []
+    elif case == "malformed":
+        assessments = [{"source_ref": reference}]
+    elif case == "unadopted":
+        assessment["adopted"] = False
+    elif case == "risk_failed":
+        assessment["risk_passed"] = False
+    elif case == "unquoted":
+        assessment["candidate_quote"] = "不存在的结果"
+    elif case == "unknown":
+        assessment["source_ref"] = "lesson:unknown:" + "b" * 64
+    elif case == "duplicate":
+        assessments = [assessment, assessment]
+    elif case == "metadata_quote":
+        assessment["candidate_quote"] = "service-fees.csv"
+        assessment["source_quote"] = "contract.pdf"
+    elif case == "outside_preview":
+        assessment["candidate_quote"] = "隐藏的结果"
+
+    class LessonJudge:
+        async def judge(self, **payload):
+            if no_lessons:
+                assert "lessons" not in payload
+            else:
+                assert payload["lessons"] == ({"source_ref": reference,
+                    "advice": "逐人核对费用，不要把金额误写到其他人名下。"},)
+            return SemanticDecision.model_validate({
+                "passed": case != "task_failed", "contains_unrequested_content": False, "reason": "独立结论",
+                "lesson_assessments": assessments,
+            })
+
+    verifier = CandidateVerifier(semantic_judge=LessonJudge())
+    candidates = inspect_candidates(output, ("csv",))
+    report = await verifier.verify(
+        request=request, candidates=candidates,
+        manifest_path=output / "candidate-manifest.json",
+    )
+    assert report.status is (VerificationStatus.FAILED if case == "task_failed" else VerificationStatus.PASSED)
+    if case == "retry_missing":
+        assessments = []
+        # 兼容历史报告携带附加检查的情况，重验不得继承旧教训结论。
+        report = report.model_copy(update={"status": VerificationStatus.INCONCLUSIVE})
+        report = await verifier.retry_semantic_verification(request=request, candidates=candidates,
+            manifest_path=output / "candidate-manifest.json", previous_report=report)
+    effects = [item for item in report.checks if item.code.startswith("lesson_effect:")]
+    if case == "valid":
+        assert len(effects) == 1 and effects[0].passed
+        assert "Alice - 100" in effects[0].summary
+    else:
+        assert effects == []
+
+
 def test_semantic_judge_allows_one_bounded_structured_output_retry() -> None:
     assert _SEMANTIC_JUDGE_MAX_RETRIES == 1
 
@@ -504,11 +597,14 @@ async def test_scanned_pdf_uses_authoritative_reader_for_upload_id_manifest(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("with_lesson", [False, True])
 async def test_external_verifier_uses_separate_grant_and_records_usage(
     tmp_path: Path,
+    with_lesson: bool,
 ) -> None:
     provider_secret = "verifier-provider-secret-9911"
     seen: dict[str, object] = {}
+    lesson_ref = "lesson:fee-check:" + "a" * 64
 
     def provider(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.read())
@@ -536,6 +632,9 @@ async def test_external_verifier_uses_separate_grant_and_records_usage(
                                     "contains_unrequested_content": False,
                                     "reason": "候选只包含目标数据",
                                     "missing_requirements": [],
+                                    **({"lesson_assessments": [{"source_ref": lesson_ref,
+                                        "adopted": True, "risk_passed": True, "candidate_quote": "Alice,100",
+                                        "source_quote": "Alice,100", "reason": "按人核对金额一致"}]} if with_lesson else {}),
                                 },
                                 ensure_ascii=False,
                             ),
@@ -606,6 +705,17 @@ async def test_external_verifier_uses_separate_grant_and_records_usage(
     )
     from src.account_execution import execution_context
     from tests.account_execution_helpers import seed_execution_owner
+    if with_lesson:
+        from src.conversation_steering.models import CompiledContext, ContextCompositionItem
+        advice = "按人核对金额"
+        content = "[lesson]\n" + advice
+        context = CompiledContext(context_id="test-external-context", owner_id=request.user_id,
+            task_id=request.task_id, revision=request.revision, content=content,
+            char_count=len(content), estimated_tokens=len(content),
+            summary_sha256="sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest(),
+            composition=(ContextCompositionItem(category="lesson", source_ref=lesson_ref,
+                char_count=len(advice), protected=False),))
+        request = request.model_copy(update={"compiled_context": context})
     authorization = seed_execution_owner(tmp_path / "webui.db", "user-a")
     with execution_context(authorization):
         report = await CandidateVerifier(
@@ -631,6 +741,9 @@ async def test_external_verifier_uses_separate_grant_and_records_usage(
     assert "只输出一份服务费用 CSV" in outbound
     assert "Alice,100" in outbound
     assert provider_secret not in outbound
+    assert ("lesson_assessments" in outbound) is with_lesson
+    assert (lesson_ref in outbound) is with_lesson
+    assert any(item.code == "lesson_effect:" + lesson_ref and item.passed for item in report.checks) is with_lesson
     assert broker.list_usage(
         "user-a",
         task_id=request.task_id,

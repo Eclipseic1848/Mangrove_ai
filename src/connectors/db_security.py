@@ -59,7 +59,11 @@ def validate_db_host(
     - allowlist 非空时仅放行清单内主机
     """
     _resolver = resolver or default_resolver
-    _allowlist = allowlist or set()
+    # 生产方言省略参数时必须使用部署配置，显式传入的集合仍按调用方约定处理。
+    _allowlist = (
+        {item.strip() for item in settings.data_prep_db_host_allowlist.split(",") if item.strip()}
+        if allowlist is None else allowlist
+    )
     _allowed_ports = allowed_ports or _parse_ports(settings.data_prep_db_allowed_ports)
 
     if _allowlist and host not in _allowlist:

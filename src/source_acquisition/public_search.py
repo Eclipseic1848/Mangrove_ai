@@ -28,7 +28,7 @@ class PublicSearchClient:
         try:
             async with asyncio.timeout(20):
                 target = await asyncio.to_thread(self.guard.validate, 'https://html.duckduckgo.com/html/')
-                transport = PinnedAsyncHTTPTransport(target=target, transport=self.transport)
+                transport = PinnedAsyncHTTPTransport(target=target, transport=self.transport, check_active=_check_read_authorization)
                 async with cleanup._client(transport, dict(trust_env=False, follow_redirects=False, timeout=10)) as client:
                     terms = query + (' (' + ' OR '.join('site:' + domain for domain in domains) + ')' if domains else '')
                     data = {'q': terms, 'kl': 'wt-wt'}

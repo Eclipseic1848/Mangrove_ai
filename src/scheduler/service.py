@@ -11,16 +11,18 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import platform
-import uuid
+from contextlib import nullcontext
+from uuid import uuid4
+from pathlib import Path
 from datetime import datetime
 from typing import Any, Dict, Optional
 
 from .cron import Schedule, compute_next_run
 from .store import ScheduleStore
 from src import account_execution as execution
+from src.timezone import now as beijing_now, wall_time
 
 logger = logging.getLogger(__name__)
 
@@ -45,9 +47,18 @@ class SchedulerService:
         self._task: Optional[asyncio.Task] = None
         self._stop = asyncio.Event()
         # 正在执行的任务 id 集合：防到点触发与手动「立即执行」撞车并发重跑同一任务
-        self._running_ids: set = set()
+        self._running_ids: dict[str, int] = {}
+        self._workers: set[asyncio.Task] = set()
+        self.last_poll_at: str | None = None
 
     # ---- 生命周期 ----
+    @property
+    def polling(self) -> bool:
+        return bool(self._task and not self._task.done())
+
+    def is_running(self, task_id: str, run_id: int | None = None) -> bool:
+        return task_id in self._running_ids and (run_id is None or self._running_ids[task_id] == run_id)
+
     def start(self) -> None:
         """启动后台轮询（幂等）。需在已有事件循环中调用。"""
         if self._task and not self._task.done():
@@ -59,6 +70,10 @@ class SchedulerService:
     async def stop(self) -> None:
         """停止后台轮询。"""
         self._stop.set()
+        for worker in list(self._workers):
+            worker.cancel()
+        if self._workers:
+            await asyncio.gather(*self._workers, return_exceptions=True)
         if self._task:
             self._task.cancel()
             try:
@@ -73,8 +88,8 @@ class SchedulerService:
         while not self._stop.is_set():
             try:
                 await self.tick()
-            except Exception as exc:
-                logger.error("调度器轮询失败，下一轮继续 error_type=%s", type(exc).__name__)
+            except Exception:
+                logger.exception("调度器轮询出错（已忽略，继续下一轮）")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self.poll_interval)
             except asyncio.TimeoutError:
@@ -82,18 +97,13 @@ class SchedulerService:
 
     async def tick(self, now: Optional[datetime] = None) -> int:
         """执行一轮：跑完所有到点任务，返回本轮执行的任务数。"""
-        now = now or datetime.now()
-        from .workspace import reconcile_pending, resume_occurrence
-        for occurrence in reconcile_pending(self.store):
-            await resume_occurrence(self, occurrence, now)
+        now = wall_time(now)
+        self.last_poll_at = beijing_now().isoformat()
         due = self.store.due_tasks(now=now)
+        count = 0
         for task in due:
-            await self._run_one(
-                task,
-                now,
-                keep_next_run=bool(task.get("_credential_resume_manual")),
-            )
-        return len(due)
+            count += int(await self._run_one(task, now))
+        return count
 
     async def _run_one(
         self, task: Dict[str, Any], now: datetime, *, keep_next_run: bool = False
@@ -106,30 +116,40 @@ class SchedulerService:
             logger.info("定时任务已在执行中，本次触发跳过 task_id=%s", task_id)
             return False
         try:
-            # 恢复的手动原次由持久收据授权，不能依赖已结束的 HTTP 请求上下文。
-            request_claim = keep_next_run and not task.get("_credential_resume_task_id")
-            auth, task = self.store.claim_execution(
-                task_id, expected_task=task, manual=request_claim,
-            )
+            auth, task = self.store.claim_execution(task_id, expected_task=task, manual=keep_next_run)
         except execution.ExecutionDenied:
-            if request_claim:
+            if keep_next_run:
                 raise
             return False
-        self._running_ids.add(task_id)
+        self._begin_claimed(auth, task)
+        await self._execute_claimed(auth, task, now, keep_next_run=keep_next_run)
+        return True
+
+    def _begin_claimed(self, auth, task):
+        from src.api.auth import get_store
+        try:
+            with execution.execution_context(auth):
+                task['_run_id'] = self.store.begin_run(task)
+        except Exception:
+            # 尚未启动任何工作者，明确释放领取；不能留下虚假的执行中状态。
+            web = get_store()
+            try:
+                web.set_account_execution_state(auth, 'schedule', task['task_id'], 'idle')
+            except execution.ExecutionDenied:
+                web.confirm_account_execution_stopped(auth.owner_user_id, 'schedule', task['task_id'], auth.generation)
+            raise
+        self._running_ids[task['task_id']] = task['_run_id']
+
+    async def _execute_claimed(self, auth, task, now, *, keep_next_run):
         try:
             with execution.execution_context(auth):
                 await self._run_one_body(task, now, keep_next_run=keep_next_run)
         finally:
-            self._running_ids.discard(task_id)
-        return True
+            self._running_ids.pop(task['task_id'], None)
 
     async def _run_one_body(
         self, task: Dict[str, Any], now: datetime, *, keep_next_run: bool
     ) -> None:
-        if task.get("_workspace_occurrence"):
-            from .workspace import execute_occurrence
-            await execute_occurrence(self,task,now,keep_next_run)
-            return
         task_id = task["task_id"]
         # 计算下次执行：cron/interval 续算下一匹配（受 start_date/end_date 生效区间钳制）；
         # once 无后续；keep_next_run（立即执行）不重算，沿用原定计划
@@ -154,20 +174,23 @@ class SchedulerService:
         except (ValueError, TypeError):
             pass
 
+        def _mark(*, success: bool, result: str = "", error: str = "") -> None:
+            if keep_next_run:
+                self.store.mark_run_keep_schedule(task_id, success=success, result=result, error=error)
+            else:
+                self.store.mark_run(task_id, success=success, result=result, error=error, next_run_at=next_run)
+
         from src.api.auth import get_store
 
         web = get_store()
         auth = execution.current_authorization()
         returned = False
-        discarded_after_return = False
-        paused_for_credentials = False
-        execution_task_id = self._execution_task_id(task, keep_next_run)
 
         def record_unknown_stop(message: str) -> None:
             try:
                 # 仍获授权时保留失败可见性，但不推进下一次计划；未知停止不自动重跑。
                 self.store.mark_run_keep_schedule(task_id, success=False, error=message)
-                self.store.add_run(task_id, success=False, summary=message)
+                self.store.finish_run(task_id, task['_run_id'], success=False, summary=message, state='unknown')
             except execution.ExecutionDenied:
                 pass
 
@@ -175,76 +198,43 @@ class SchedulerService:
             # 超时保护：单个卡死的任务不冻住整个调度循环（连带其它定时任务）
             from src.config.settings import settings
 
-            result, ok, summary = await asyncio.wait_for(
-                self._invoke_runner(task, execution_task_id=execution_task_id),
-                timeout=settings.scheduler_task_timeout_seconds,
-            )
+            from src.llm.provider import _usage_ctx
+            usage = {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'calls': 0}
+            token = _usage_ctx.set(usage)
             try:
-                web.require_account_execution(auth, "schedule", task_id)
-            except execution.ExecutionDenied:
-                # Runner 已明确返回；账号代际变化只丢弃正文，不冒充停止未知。
-                discarded_after_return = True
-                raise
-            summary = (late_note + summary)[:500]
-            credential_key = self._credential_failure_key(result)
-            if credential_key:
-                # 返回了确定失效事实，先持久暂停收据；失败时按停止未知关闭，绝不自动重跑。
-                returned = False
-                self.store.pause_for_credentials(
-                    task_id,
-                    credential_key=credential_key,
-                    execution_task_id=execution_task_id,
-                    summary=summary,
-                    manual=keep_next_run,
-                )
-                paused_for_credentials = True
-                return
-            outputs = (result.get("outputs") or {}) if isinstance(result, dict) else {}
-            # 结果、历史与恢复收据同事务；任一步失败都不能放开下一次执行。
-            self.store.finish_run(
-                task_id,
-                success=ok,
-                result=summary if ok else "",
-                error="" if ok else summary,
-                next_run_at=next_run,
-                keep_schedule=keep_next_run,
-                summary=summary,
-                report_path=str(outputs.get("report_md") or ""),
-                json_path=str(outputs.get("json") or ""),
-                credential_execution_task_id=(
-                    execution_task_id if task.get("_credential_resume_task_id") else None
-                ),
-            )
+                result = await asyncio.wait_for(self._invoke_runner(task), timeout=settings.scheduler_task_timeout_seconds)
+            finally:
+                _usage_ctx.reset(token)
             returned = True
-            # 结果正文只保存在Owner任务历史，运行日志不得复制正文。
-            logger.info("定时任务%s task_id=%s next=%s",
-                        "完成" if ok else "失败（流程内错误）", task_id, next_run)
+            web.require_account_execution(auth, "schedule", task_id)
+            ok, summary = self._assess(result)
+            summary = late_note + summary
+            _mark(success=ok, result=summary if ok else "", error="" if ok else summary)
+            # 执行历史：每次一行，周期任务的多份报告靠它在前端按次查看/下载
+            outputs = (result.get("outputs") or {}) if isinstance(result, dict) else {}
+            self.store.finish_run(task_id, task['_run_id'], success=ok, summary=summary,
+                                  outputs=outputs, notification=result.get('notification') if isinstance(result, dict) else None, usage=usage)
+            logger.info("定时任务%s task_id=%s next=%s %s",
+                        "完成" if ok else "失败（流程内错误）", task_id, next_run, summary[:120])
         except execution.ExecutionDenied:
             # 已返回的执行可以确认停止；安全点抛错尚不能证明子工作者静默。
             # 两者均丢弃旧代正文，且不阻断其它账号的调度。
-            pass
+            self.store.close_stopped_run(task_id, task['_run_id'], auth.owner_user_id, returned=returned)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             # 取消等待不证明底层线程停止；保留失败状态，禁止下一轮重复启动。
             logger.warning("定时任务停止状态待确认 task_id=%s", task_id)
             record_unknown_stop("执行超时或等待被取消，停止状态待确认")
             if asyncio.current_task().cancelling():
                 raise
-        except Exception as exc:
-            # 异常可能含Provider正文或凭据，仅记录错误类别。
-            logger.error("定时任务执行失败，停止状态待确认 task_id=%s error_type=%s", task_id, type(exc).__name__)
+        except Exception:
+            logger.exception("定时任务执行失败，停止状态待确认 task_id=%s", task_id)
             record_unknown_stop("执行失败，停止状态待确认")
         finally:
-            if paused_for_credentials:
-                pass
-            elif returned:
+            if returned:
                 try:
                     web.set_account_execution_state(auth, "schedule", task_id, "idle")
                 except execution.ExecutionDenied:
                     web.confirm_account_execution_stopped(auth.owner_user_id, "schedule", task_id, auth.generation)
-            elif discarded_after_return:
-                web.confirm_account_execution_stopped(
-                    auth.owner_user_id, "schedule", task_id, auth.generation,
-                )
             else:
                 web.confirm_account_execution_stopped(auth.owner_user_id, "schedule", task_id, auth.generation, cleanup_failed=True)
 
@@ -252,7 +242,7 @@ class SchedulerService:
         # 无 await 期间持 SQL 锁；执行中的任务到安全点后提交自己的停止证明。
         return self.store.reconcile_account_execution(owner, before_generation)
 
-    async def run_task_now(self, task_id: str, request_key: str | None = None) -> str:
+    async def run_task_now(self, task_id: str, *, background: bool = False):
         """手动「立即执行一次」，不影响原定 next_run_at/status。
 
         返回 "started"（已开始执行）| "not_found"（任务不存在）| "running"（正在执行中，跳过）。
@@ -262,40 +252,18 @@ class SchedulerService:
             return "not_found"
         if task_id in self._running_ids:
             return "running"
-        if task.get("source")=="workspace":task["_manual_request_key"]=request_key
-        await self._run_one(task, datetime.now(), keep_next_run=True)
+        if background:
+            # 请求返回前领取持久授权和执行编号，页面断开不会取消后台任务。
+            auth, task = self.store.claim_execution(task_id, expected_task=task, manual=True)
+            self._begin_claimed(auth, task)
+            worker = asyncio.create_task(self._execute_claimed(auth, task, wall_time(), keep_next_run=True))
+            self._workers.add(worker)
+            worker.add_done_callback(self._workers.discard)
+            return {'run_id': task['_run_id'], 'state': 'running'}
+        await self._run_one(task, wall_time(), keep_next_run=True)
         return "started"
 
-    @staticmethod
-    def _execution_task_id(task: Dict[str, Any], manual: bool) -> str:
-        if task.get("_credential_resume_task_id"):
-            return str(task["_credential_resume_task_id"])
-        occurrence = task.get("_manual_request_key") if manual else task.get("next_run_at")
-        if not occurrence:
-            occurrence = uuid.uuid4().hex
-        value = f"{task['task_id']}\0{occurrence}".encode("utf-8")
-        return "scheduler_" + hashlib.sha256(value).hexdigest()[:32]
-
-    @staticmethod
-    def _credential_failure_key(result: Dict[str, Any]) -> str | None:
-        if not isinstance(result, dict):
-            return None
-        for attempt in result.get("collector_attempts") or ():
-            if (
-                isinstance(attempt, dict)
-                and not attempt.get("success")
-                and attempt.get("failure_kind") == "auth_invalid"
-                and isinstance(attempt.get("credential_key"), str)
-            ):
-                return attempt["credential_key"]
-        return None
-
-    async def _invoke_runner(
-        self,
-        task: Dict[str, Any],
-        *,
-        execution_task_id: str | None = None,
-    ) -> tuple[Dict[str, Any], bool, str]:
+    async def _invoke_runner(self, task: Dict[str, Any]) -> Dict[str, Any]:
         from src.api.auth import get_store
         from src.config.runtime_config import USER_KEYS
         from src.config.user_ctx import user_memories_context, user_overrides_context
@@ -315,7 +283,17 @@ class SchedulerService:
             # 身份或本人上下文无法加载时停止，且不把底层凭证错误写入任务历史。
             raise RuntimeError("定时任务无法加载有效的本人执行上下文") from None
 
-        with user_overrides_context(overrides), user_memories_context(memories):
+        from src.model_connections.conductor import conductor_connection
+        connection = nullcontext()
+        run_id = "schedule_" + uuid4().hex
+        if task.get("model_connection_id"):
+            # 冻结版本失效时停止，不偷偷换成平台默认模型。
+            connection = conductor_connection(
+                owner_id=owner, connection_id=task["model_connection_id"],
+                connection_version=task["model_connection_version"], model=task["model"],
+                task_id=task["task_id"], run_id=run_id,
+            )
+        with user_overrides_context(overrides), user_memories_context(memories), connection:
             runner = self._runner
             if runner is None:
                 # 有效 Owner 确认后才装载执行器；注入的执行器也遵守同一授权边界。
@@ -329,12 +307,20 @@ class SchedulerService:
                 session_id=f"scheduler:{task['task_id']}",
                 approved_db_write=False,
                 ignore_schedule=True,
-                task_id=execution_task_id,
             )
-            ok, summary = self._assess(result)
-            from src.config.runtime_config import redact_sensitive_text
-
-            return result, ok, redact_sensitive_text(summary)[:500]
+            if isinstance(result, dict) and not result.get("error") and not result.get("needs_clarification"):
+                from src.notifications import auto_conductor
+                outputs = result.get("outputs") or {}
+                delivery = {"task_id": result.get("task_id"), "reply": result.get("reply", ""), "files": [
+                    {"url": f"/api/downloads/{result.get('task_id')}/{Path(outputs[key]).name}"}
+                    for key in ("report_md", "json") if outputs.get(key)
+                ]}
+                await auto_conductor(store, owner, run_id, task["user_input"], result, delivery,
+                                     provider=task.get("provider"), model=task.get("model"))
+                if delivery.get("notification"):
+                    result["notification"] = delivery["notification"]
+                    result["reply"] = delivery["reply"]
+            return result
 
     @staticmethod
     def _assess(result: Dict[str, Any]) -> tuple[bool, str]:
@@ -358,6 +344,9 @@ class SchedulerService:
         if outputs.get("json"):
             parts.append(f"json={outputs['json']}")
         if parts:
+            if result.get("notification"):
+                # 列表会截断摘要，发送状态放在路径之前，避免失败提示被长路径遮掉。
+                parts.insert(0, "发送结果：" + result["notification"]["message"])
             return True, "; ".join(parts)[:500]
         if result.get("reply"):
             return True, str(result["reply"])[:200]

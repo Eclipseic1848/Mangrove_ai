@@ -45,6 +45,7 @@ def test_disabled_does_not_scan():
 
 def test_run_one_scan_records_all_keys():
     store = _tmp_store()
+    store.config_set_many("global", {key: "synthetic-cookie" for key in cr._COOKIE_HEALTH_KEYS})
     scanner = CookieHealthScanner()
 
     call_count = {"n": 0}
@@ -52,12 +53,13 @@ def test_run_one_scan_records_all_keys():
     async def fake_verify_target(key):
         call_count["n"] += 1
         if key == "jd_cookie":
-            raise RuntimeError("京东 登录状态已失效，请重新导出 Cookie")
+            raise cr.CookieProbeError("京东 登录状态已失效，请重新导出 Cookie", reason="login_required", status="invalid")
         return f"{key} 有效"
 
     async def run():
         # _run_one_scan 内部延迟导入 config_routes，这里直接 patch 模块级函数
-        with patch.object(cr, "get_store", return_value=store), \
+        with patch.object(settings, "cookie_health_scan_enabled", True), \
+             patch.object(cr, "get_store", return_value=store), \
              patch.object(cr, "_verify_target", side_effect=fake_verify_target):
             # 缩短相邻项等待，测试跑快点
             scanner._sleep = lambda seconds: asyncio.sleep(0)
@@ -73,6 +75,7 @@ def test_run_one_scan_records_all_keys():
 
 def test_scheduled_failure_redacts_secret_before_persisting():
     store = _tmp_store()
+    store.config_set_many("global", {key: "synthetic-cookie" for key in cr._COOKIE_HEALTH_KEYS})
     scanner = CookieHealthScanner()
     synthetic_secret = "scheduled-cookie-secret-7788"
 
@@ -80,7 +83,8 @@ def test_scheduled_failure_redacts_secret_before_persisting():
         raise RuntimeError(f"验证失败：{synthetic_secret}")
 
     async def run():
-        with patch.object(cr, "get_store", return_value=store), \
+        with patch.object(settings, "cookie_health_scan_enabled", True), \
+             patch.object(cr, "get_store", return_value=store), \
              patch.object(cr, "_verify_target", side_effect=fail_with_secret), \
              patch.object(
                  cr.rc,
@@ -91,7 +95,9 @@ def test_scheduled_failure_redacts_secret_before_persisting():
             await scanner._run_one_scan()
 
     asyncio.run(run())
-    for health in store.cookie_health_all().values():
+    all_health = store.cookie_health_all()
+    assert len(all_health) == len(cr._COOKIE_HEALTH_KEYS)
+    for health in all_health.values():
         assert synthetic_secret not in health["message"]
         assert "***" in health["message"]
 

@@ -11,6 +11,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from decimal import Decimal
+from time import monotonic
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 from sqlalchemy import (
@@ -118,27 +119,21 @@ class SqliteDialect(DbDialect):
     def apply_statement_timeout(self, conn, seconds: int) -> None:
         if seconds <= 0:
             return
-        import sqlite3 as _sqlite3
-
-        # progress_handler 按 opcode 计数而非秒，在 Windows 上行为不可预测
-        # 在此仅设置单语句超时（MySQL/PG 可精确控制），sqlite 留日志告警
-        logger.debug("sqlite progress_handler 已设 (n=%d)，Windows 上按操作码计数，非精确秒数", seconds)
-        def _kill():
-            raise _sqlite3.OperationalError("语句执行超时")
-        try:
-            conn.connection.connection.set_progress_handler(_kill, seconds * 1000)
-        except Exception:
-            logger.debug("无法设置 sqlite progress_handler（Windows 运行时库差异）")
+        deadline = monotonic() + seconds
+        # opcode 只决定检查频率；以单调时钟判定期限，不能把大表直接误判为超时。
+        conn.connection.driver_connection.set_progress_handler(lambda: int(monotonic() >= deadline), 1000)
 
     def introspect(self, engine: Engine, schema: Optional[str] = None) -> SchemaInfo:
         insp = inspect(engine)
         tables = []
-        for tname in insp.get_table_names():
+        # 在读取列、主键和行数之前截断，限额也必须约束探查成本。
+        for tname in insp.get_table_names()[:settings.data_prep_db_max_discovery_tables]:
             cols = insp.get_columns(tname)
             pk = list((insp.get_pk_constraint(tname) or {}).get("constrained_columns") or [])
             count = 0
             try:
                 with engine.connect() as conn:
+                    self.apply_statement_timeout(conn, settings.data_prep_db_query_timeout_seconds)
                     row = conn.exec_driver_sql(f"SELECT COUNT(*) FROM [{tname}]").fetchone()
                     if row:
                         count = row[0]
@@ -185,12 +180,16 @@ class MysqlDialect(DbDialect):
         schemas = [db] if db else insp.get_schema_names()
         tables = []
         for s in schemas:
-            for tname in insp.get_table_names(schema=s):
+            remaining = settings.data_prep_db_max_discovery_tables - len(tables)
+            if remaining <= 0:
+                break
+            for tname in insp.get_table_names(schema=s)[:remaining]:
                 cols = insp.get_columns(tname, schema=s)
                 pk = list((insp.get_pk_constraint(tname, schema=s) or {}).get("constrained_columns") or [])
                 count = 0
                 try:
                     with engine.connect() as conn:
+                        self.apply_statement_timeout(conn, settings.data_prep_db_query_timeout_seconds)
                         row = conn.exec_driver_sql(f"SELECT COUNT(*) FROM `{s}`.`{tname}`").fetchone()
                         if row:
                             count = row[0]
@@ -247,23 +246,14 @@ class PostgresqlDialect(DbDialect):
     def introspect(self, engine: Engine, schema: Optional[str] = None) -> SchemaInfo:
         insp = inspect(engine)
         sch = schema or "public"
-        with engine.connect() as conn:
-            readable = set(conn.execute(text(
-                "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema=:schema AND table_type='BASE TABLE' "
-                "AND has_table_privilege("
-                "quote_ident(table_schema)||'.'||quote_ident(table_name), 'SELECT')"
-            ), {"schema": sch}).scalars())
         tables = []
-        for tname in insp.get_table_names(schema=sch):
-            # 目录信息也属于来源边界；无 SELECT 权限的表名不能向用户泄漏。
-            if tname not in readable:
-                continue
+        for tname in insp.get_table_names(schema=sch)[:settings.data_prep_db_max_discovery_tables]:
             cols = insp.get_columns(tname, schema=sch)
             pk = list((insp.get_pk_constraint(tname, schema=sch) or {}).get("constrained_columns") or [])
             count = 0
             try:
                 with engine.connect() as conn:
+                    self.apply_statement_timeout(conn, settings.data_prep_db_query_timeout_seconds)
                     row = conn.exec_driver_sql(f'SELECT COUNT(*) FROM "{sch}"."{tname}"').fetchone()
                     if row:
                         count = row[0]
@@ -323,11 +313,7 @@ def apply_statement_timeout(conn, dialect: str, seconds: int) -> None:
 def introspect_schema(engine: Engine, schema: Optional[str] = None) -> SchemaInfo:
     dialect = engine.url.get_backend_name()
     d = get_dialect(dialect)
-    info = d.introspect(engine, schema)
-    if info.tables and len(info.tables) > settings.data_prep_db_max_discovery_tables:
-        logger.warning("introspection 发现 %d 张表，截断至 %d", len(info.tables), settings.data_prep_db_max_discovery_tables)
-        info.tables = info.tables[:settings.data_prep_db_max_discovery_tables]
-    return info
+    return d.introspect(engine, schema)
 
 
 def build_keyset_query(
@@ -413,30 +399,6 @@ def build_keyset_query(
 def classify_error(exc: Exception, dialect: str) -> str:
     """把驱动异常分类为 'fatal' 或 'retryable'。"""
     return get_dialect(dialect).classify_error(exc)
-
-
-def classify_source_error(exc: Exception, dialect: str) -> Optional[str]:
-    """只把驱动明确标识的鉴权/权限失败投影为公开错误码。"""
-    original = getattr(exc, "orig", exc)
-    if dialect == "mysql":
-        args = getattr(original, "args", ())
-        code = args[0] if args and isinstance(args[0], int) else None
-        if code == 1045:
-            return "authorization_expired"
-        if code in {1044, 1142, 1143, 1227}:
-            return "permission_denied"
-    elif dialect == "postgresql":
-        code = getattr(original, "pgcode", None)
-        if code in {"28000", "28P01"}:
-            return "authorization_expired"
-        if code == "42501":
-            return "permission_denied"
-        message = str(original).lower()
-        if "password authentication failed" in message:
-            return "authorization_expired"
-        if "permission denied" in message:
-            return "permission_denied"
-    return None
 
 
 def normalize_value(v: Any) -> Any:

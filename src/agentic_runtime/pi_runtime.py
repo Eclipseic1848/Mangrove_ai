@@ -20,6 +20,8 @@ import uuid
 from filelock import FileLock, Timeout as FileLockTimeout
 
 from src.config.settings import settings
+from src.utils.docker_user import docker_user_args
+from src.api.execution import execution_to_thread
 from src.services.upload_store import IMAGE_EXTENSIONS
 from src.candidate_verification import CandidateVerificationService
 from src.capability_catalog.models import PublicCapabilityDescriptor
@@ -34,7 +36,8 @@ from src.model_connections.catalog import runtime_context_window
 
 CapabilityMountResolverFn = Callable[[str, str, int], tuple[Path, ...]]
 
-from .candidate_qa import inspect_candidates
+from .candidate_qa import inspect_candidates, verify_frozen_copies
+from .verification_progress import VerificationProgress
 from .candidate_verifier import (
     BrokerSemanticJudge,
     CandidateVerifier,
@@ -100,6 +103,19 @@ _CAPABILITY_KIND_LABELS = {
 
 class PiRuntimeError(RuntimeError):
     """Pi Runtime 无法形成候选结果。"""
+
+    def __init__(self, message: str, *, error_code: str = "PI_RUNTIME_FAILED", stage: str = "execute"):
+        super().__init__(message)
+        self.error_code = error_code
+        self.stage = stage
+
+
+class _DraftReviewPause(Exception):
+    """完整初稿已冻结，结束本轮执行以等待所有者决定。"""
+
+
+class PiVerificationStalled(PiRuntimeError):
+    """证据补救无进展，保留初稿并等待用户决定。"""
 
 
 class _MainCreateRejected(PiRuntimeError):
@@ -365,6 +381,12 @@ def build_docker_command(
         "--add-host",
         "host.docker.internal:host-gateway",
     ]
+    user_args = docker_user_args()
+    config_target = "/workspace/config" if user_args else "/root/.pi/agent"
+    if user_args:
+        # 同 UID 写出的 0600 候选/会话可由宿主读取；配置不再依赖 root 私有目录。
+        command.extend((*user_args, "--env", "HOME=/workspace/work",
+                        "--env", f"PI_CODING_AGENT_DIR={config_target}"))
     if network_name:
         command.extend(("--network", network_name))
     if egress_proxy_url:
@@ -432,7 +454,7 @@ def build_docker_command(
             "--mount",
             mount(session_dir, "/workspace/session"),
             "--mount",
-            mount(config_dir, "/root/.pi/agent"),
+            mount(config_dir, config_target),
             "--workdir",
             "/workspace/work",
             image,
@@ -453,7 +475,7 @@ def build_docker_command(
             "--session-dir",
             "/workspace/session",
             "--append-system-prompt",
-            "/root/.pi/agent/mangrove-system.md",
+            f"{config_target}/mangrove-system.md",
         )
     )
     if session_file:
@@ -488,8 +510,10 @@ class PiRuntime:
         state_store: AgenticRuntimeRepository | None = None,
         configure_as_default_document_broker: bool = True,
         source_read_context=None,
+        draft_review_required: Callable[[PiRuntimeRequest], bool] | None = None,
     ) -> None:
         self._source_read_context = source_read_context
+        self._draft_review_required = draft_review_required
         self.image = image or settings.pi_runtime_image
         self.execution_root = Path(
             execution_root or settings.semantic_execution_root
@@ -658,7 +682,7 @@ class PiRuntime:
         if grant is not None:
             pi_api = _PI_API_BY_FORMAT.get(grant.api_format)
             if pi_api is None:
-                raise PiRuntimeError("所选连接协议不受当前 Pi Runtime 支持")
+                raise PiRuntimeError("所选连接协议不受当前 Pi Runtime 支持", error_code="MODEL_PROTOCOL_UNSUPPORTED")
             return (
                 grant.model,
                 self._resolved_relay_base_url(),
@@ -1094,7 +1118,6 @@ class PiRuntime:
             raise PiRuntimeError(
                 f"权限档位 {request.permission_profile.value} 尚未配置授权范围"
             )
-        await self._assert_image()
         run_id = run_id or f"pi_run_{uuid.uuid4().hex[:16]}"
         if not re.fullmatch(r"pi_(?:run|validation)_[a-z0-9]{16}", run_id):
             raise PiRuntimeError("Pi Run 身份格式无效")
@@ -1132,6 +1155,20 @@ class PiRuntime:
             trace_dir,
         ):
             path.mkdir(parents=True, exist_ok=False)
+
+        if request.expected_sha256_by_format:
+            from .draft_snapshot import copy_source_draft
+            source_names = self._read_frozen_sources(request, input_dir)
+            draft = await execution_to_thread(copy_source_draft, root, request, source_names, run_id)
+            await on_event(RuntimeEvent(event_type="runtime.preparing", summary="已按冻结来源登记原样初稿，无需模型复制",
+                details={"run_id": run_id, "_checkpoint": {"run_id": run_id, "workspace_root": str(root),
+                         "container_name": None, "session_file": None}}))
+            await on_event(RuntimeEvent(event_type="draft.ready", summary="初稿已生成，等待你确认",
+                details={"draft_id": draft["draft_id"], "formal_delivery": False}))
+            return PiRuntimeResult(status=RuntimeStatus.NEEDS_INPUT, run_id=run_id, workspace_root=root,
+                summary="初稿已生成，等待你确认或选择继续核对", clarification={"draft_review_id": draft["draft_id"]})
+
+        await self._assert_image()
 
         container_name = self._container_name(
             request.task_id, request.revision, run_id
@@ -1385,7 +1422,13 @@ class PiRuntime:
             checkpoint.run_id,
             reason="run_resumed",
         )
-        if session_path is None:
+        from .draft_snapshot import host_copy_pending
+        host_copy = session_path is None and host_copy_pending(root, owner_id=request.user_id,
+            task_id=request.task_id, revision=request.revision, run_id=checkpoint.run_id)
+        if session_path is None and not host_copy:
+            if (self._draft_review_required is not None or request.expected_sha256_by_format) and any((root / "drafts").glob("*/_draft")):
+                # 初稿决定只授权原运行；会话丢失不能悄悄升级为从头执行。
+                raise PiRuntimeError("初稿的原执行会话已丢失，不能继续核对；可接受初稿或明确创建新版本")
             await on_event(
                 RuntimeEvent(
                     event_type="runtime.replay_required",
@@ -1395,12 +1438,18 @@ class PiRuntime:
             )
             return await self.start(request, on_event=on_event)
 
+        if host_copy and self._draft_review_required and self._draft_review_required(request):
+            # 宿主复制没有会话不是继续授权；仍须等待同一初稿的显式决定。
+            marker = json.loads((root / "host-state" / "host-copy-pending.json").read_text(encoding="utf-8"))
+            return PiRuntimeResult(status=RuntimeStatus.NEEDS_INPUT, run_id=checkpoint.run_id, workspace_root=root,
+                summary="初稿等待你确认或选择继续核对", clarification={"draft_review_id": marker["draft_id"]})
+
         container_name = expected_container
         run_key = (request.user_id, request.task_id, request.revision)
         container_session = (
             "/workspace/session/"
             + session_path.relative_to(session_dir).as_posix()
-        )
+        ) if session_path is not None else None
         resume_token = uuid.uuid4().hex[:8]
         try:
             grant = self._issue_agent_grant(
@@ -1541,13 +1590,15 @@ class PiRuntime:
                             "run_id": checkpoint.run_id,
                             "workspace_root": str(root),
                             "container_name": container_name,
-                            "session_file": str(
-                                session_path.relative_to(root)
-                            ),
+                            "session_file": str(session_path.relative_to(root)) if session_path is not None else None,
                         },
                     },
                 )
             )
+            if host_copy:
+                # 启动模型前消费宿主检查点；以后若 Pi 会话丢失，不能再借此从头执行。
+                marker = root / "host-state" / "host-copy-pending.json"
+                marker.rename(marker.with_name("host-copy-consumed.json"))
             return await self._execute_run(
                 request,
                 run_id=checkpoint.run_id,
@@ -1635,11 +1686,48 @@ class PiRuntime:
         validated_candidates = None
         validated_verification = None
         validated_coverage = None
+        candidate_progress = VerificationProgress()
+        draft_file_state = None
+        review_required = bool(self._draft_review_required and self._draft_review_required(request))
+        review_draft_id = None
+
+        async def capture_draft(*, settled: bool = False) -> None:
+            nonlocal draft_file_state, review_draft_id
+            from .draft_snapshot import freeze_draft
+
+            # 文件可打开不代表已写完；显式交稿或宿主已有冻结初稿才暂停，恢复不能越过决定门。
+            if review_required and not settled and not (root / "work" / "draft-ready").is_file() and not any((root / "drafts").glob("*/_draft")):
+                return
+            state = tuple(sorted((p.name, p.stat().st_size, p.stat().st_mtime_ns)
+                                 for p in output_dir.iterdir() if p.is_file() and p.name != "candidate-manifest.json"))
+            if not state or state == draft_file_state:
+                return
+            draft_file_state = state
+            try:
+                draft = await execution_to_thread(
+                    freeze_draft, root, owner_id=request.user_id, task_id=request.task_id,
+                    revision=request.revision, run_id=run_id, formats=request.requested_output_formats,
+                    expected_sha256_by_format=request.expected_sha256_by_format,
+                )
+            except PermissionError:
+                # 账号撤权不能当成半成品而继续执行。
+                raise
+            except (ValueError, OSError):
+                # 工具刚写完的文件可能尚未组成完整结果；不得登记半份初稿。
+                return
+            await on_event(RuntimeEvent(
+                event_type="draft.ready", summary="初稿已生成，正在暂停以等待你确认" if review_required else "初稿已生成，可查看；后台继续验证",
+                details={"draft_id": draft["draft_id"], "formal_delivery": False},
+            ))
+            if review_required:
+                review_draft_id = draft["draft_id"]
+                raise _DraftReviewPause
 
         async def verify_candidates(
             current_candidates: tuple[CandidateArtifact, ...],
             current_coverage=None,
         ) -> VerificationReport:
+            verify_frozen_copies(current_candidates, request.expected_sha256_by_format)
             if self._candidate_verification is None:
                 raise PiRuntimeError("CandidateVerification Module 尚未绑定")
             attempt = await self._candidate_verification.verify_initial_current(
@@ -1658,6 +1746,9 @@ class PiRuntime:
 
         async def check_settled_output() -> str | None:
             nonlocal validated_candidates, validated_verification, validated_coverage
+            if review_required:
+                # Agent 自行结束也是交稿信号；漏写标记不能绕过所有者决定门。
+                await capture_draft(settled=True)
             if self._document_clarification(request) is not None:
                 return None
             issue = _output_contract_issue(
@@ -1720,12 +1811,44 @@ class PiRuntime:
                 for check in current_verification.checks
                 if not check.passed
             ]
+            if not candidate_progress.observe(gaps=failed_summaries or ["验证未通过"], evidence={
+                "passed_checks": [check.code for check in current_verification.checks if check.passed],
+                "evidence_count": current_verification.evidence_count,
+            }):
+                raise PiVerificationStalled("连续两轮验证没有进展，已停止重复补救；请查看初稿及待核验事项")
             return (
                 "独立验证未通过："
                 + "；".join(failed_summaries[:3])
             )
 
         try:
+            # 恢复时先检查已写出的初稿，防止服务重启越过用户决定门。
+            if review_required:
+                await capture_draft()
+                writing_checks = []
+                # 只为新初稿形成衍生检查；旧会话恢复不追加模型请求或改写用户目标。
+                if {"json", "csv", "xlsx"}.intersection(request.requested_output_formats) and (root / "work" / "goal.json").is_file():
+                    from .output_requirements import freeze_output_requirements, infer_output_requirements, read_output_requirements
+                    requirements = read_output_requirements(root, owner_id=request.user_id,
+                        task_id=request.task_id, revision=request.revision, run_id=run_id)
+                    if requirements is not None or not any(session_dir.rglob("*.jsonl")):
+                        requirements = await freeze_output_requirements(root, request, run_id,
+                            lambda: infer_output_requirements(request, run_id, self._broker()))
+                        await on_event(RuntimeEvent(event_type="runtime.output_requirements",
+                            summary="已从用户原话提取输出检查项" if requirements["status"] == "ready" else "输出要求结构化提取未完成，初稿将提示待核对",
+                            details={"status": requirements["status"], "check_count": len(requirements["checks"])}))
+                        if requirements["status"] == "ready":
+                            writing_checks = requirements["checks"]
+                initial_prompt = (initial_prompt or "读取 /workspace/work/goal.json 和其中冻结的来源，完成用户要求的初稿。") + (
+                    "\n本轮先交付初稿给用户查看：完成全部目标文件的实际内容后，写入 /workspace/work/draft-ready，"
+                    "然后停止，不执行后续补证、propose_completion 或核对。不可在占位文件、空壳或仅表头时写此标记。"
+                    "标记只表示初稿已写完，不表示准确性验证通过；用户选择继续核对后才恢复剩余检查。"
+                )
+                # 复用已冻结检查作为写作提示，不增加模型请求或用户接受门。
+                if writing_checks:
+                    initial_prompt += "\n以下是从用户原话提取的格式提示；原话优先，不扩大要求。写文件时逐字使用所需字段名和格式：\n" + json.dumps(writing_checks, ensure_ascii=False)
+                initial_prompt += ("\n初稿中的事实须有来源依据，推断与建议须明确标注；不要声称做过未实际执行的采集、处理或验证。"
+                    "因用户范围排除的资料仍已提供，不能写成缺失；资料没有说明的评分尺度不能自行假定。")
             final_text = await self._run_rpc(
                 request,
                 command=command,
@@ -1735,6 +1858,7 @@ class PiRuntime:
                 on_event=on_event,
                 settled_check=check_settled_output,
                 initial_prompt=initial_prompt,
+                capture_draft=capture_draft,
             )
             clarification = self._document_clarification(request)
             if clarification is not None:
@@ -1814,6 +1938,13 @@ class PiRuntime:
                 verification=verification,
                 candidate_coverage=candidate_coverage,
             )
+        except _DraftReviewPause:
+            session_files = sorted(session_dir.rglob("*.jsonl"))
+            return PiRuntimeResult(status=RuntimeStatus.NEEDS_INPUT, run_id=run_id,
+                workspace_root=root, container_name=container_name,
+                session_file=str(session_files[-1].relative_to(root)) if session_files else None,
+                summary="初稿已生成，等待你确认或选择继续核对",
+                clarification={"draft_review_id": review_draft_id})
         except asyncio.CancelledError:
             await self.cancel(
                 request.user_id,
@@ -1943,11 +2074,12 @@ class PiRuntime:
             raise PiRuntimeError(
                 "Pi Runtime 镜像尚未构建。请先执行 "
                 f"docker build -t {self.image} docker/pi-runtime"
-                + (f"；Docker 返回：{detail[:300]}" if detail else "")
+                + (f"；Docker 返回：{detail[:300]}" if detail else ""),
+                error_code="RUNTIME_IMAGE_UNAVAILABLE",
             )
         digest = stdout.decode("utf-8", errors="strict").strip().lower()
         if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) is None:
-            raise PiRuntimeError("Pi Runtime 镜像未返回有效的 sha256 内容摘要")
+            raise PiRuntimeError("Pi Runtime 镜像未返回有效的 sha256 内容摘要", error_code="RUNTIME_IMAGE_INVALID")
         return f"oci-image-ref={self.image};content-digest={digest}"
 
     def _read_frozen_sources(self,request,input_dir,*,resume=False):
@@ -1968,7 +2100,7 @@ class PiRuntime:
             destination = input_dir / name
             shutil.copyfile(source.host_path, destination)
             if _file_sha256(destination) != source.sha256:
-                raise PiRuntimeError(f"来源复制后哈希不一致：{name}")
+                raise PiRuntimeError(f"来源复制后哈希不一致：{name}", error_code="SOURCE_INTEGRITY_FAILED", stage="inspect")
         return names
 
     @staticmethod
@@ -2003,7 +2135,7 @@ class PiRuntime:
                 or copied.is_symlink()
                 or _file_sha256(copied) != source.sha256
             ):
-                raise PiRuntimeError(f"恢复来源已缺失或发生变化：{name}")
+                raise PiRuntimeError(f"恢复来源已缺失或发生变化：{name}", error_code="SOURCE_INTEGRITY_FAILED", stage="inspect")
 
     @staticmethod
     def _resolve_session_file(
@@ -2097,7 +2229,12 @@ class PiRuntime:
         # Provider 是否收到请求无法由 Pi SDK 判断，关闭其内部重试，交给平台和用户决策。
         (config_dir / "settings.json").write_text(
             json.dumps(
-                {"retry": {"enabled": False}},
+                {
+                    "retry": {"enabled": False, "provider": {"maxRetries": 0}},
+                    "cacheWarming": "off",
+                    "enableInstallTelemetry": False,
+                    "enableAnalytics": False,
+                },
                 ensure_ascii=False,
                 indent=2,
             ),
@@ -2198,7 +2335,17 @@ Mangrove 只会在不挂载用户来源的独立依赖获取阶段处理已批�
 先调用 inspect_source 观察结构，
 再调用 freeze_coverage 冻结你对范围、结果数量、完整性和停止条件的理解。之后按目标自主
 选择 discover_content 和 read_evidence；发现结果只能用于召回，最终结果必须来自
-read_evidence 返回的权威证据。你认为完成时必须调用 propose_completion；若完成门返回
+read_evidence 返回的权威证据。
+freeze_coverage 的 authorized_scope 是整个任务的允许检索范围，不是首批读取页面。
+用户未明确限制页码时只填写 source_ids，省略 authorized_scope.unit_ids；不得把预览页、
+首批页面或猜测的目标页冻结为全部范围。分批读取通过 discover_content 的 unit_ids 或
+next_unit_ids 控制，不通过缩小授权范围控制。用户明确限定的页面仍须严格保留，不能扩大。
+对于第 N 份对象，默认发现只返回一小批页面；按 next_unit_ids 继续，不要默认扫描全文。
+第 N 份不等于第 N 页，必须证明前序对象和跨页边界。复用已返回的证据引用，
+只补读缺失页面；不要通过 sleep 等待服务恢复，也不要换 needs 名称重复请求相同读取。
+如果当前回合要求先交初稿，先写完目标文件和 /workspace/work/draft-ready 后停止，
+不得提前进行后续补证、propose_completion 或核对；用户批准恢复核对后再执行下述完成门。
+在完整验证阶段，你认为完成时必须调用 propose_completion；若完成门返回
 replan_required，应根据结构化缺口继续读取或修正结果，不能自行宣称完成。
 propose_completion 的 evidence_refs、boundary_evidence_refs 和
 required_field_evidence 都只能填写 read_evidence 返回的 evidence_ref，不能填写字段值或
@@ -2258,6 +2405,11 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
             "source_scope": [
                 f"/workspace/input/{name}" for name in source_names
             ],
+            "sources": [{"source_id": source.upload_id, "path": f"/workspace/input/{name}",
+                         "media_type": source.media_type,
+                         "reader": "document_tools" if document_grant is not None and Path(source.original_name).suffix.lower() in IMAGE_EXTENSIONS | {".pdf"} else "local_file_tools"}
+                        for source, name in zip(request.sources, source_names, strict=True)],
+            "source_reading_policy": "inspect_source只接受reader=document_tools的PDF/图片来源，使用其source_id。JSON/Excel/CSV使用只读文件或表格工具；不向文档工具反复提交不支持的文件。",
             "output_directory": "/workspace/output",
             "output_formats": list(request.requested_output_formats),
             "delivery_spec": {
@@ -2288,6 +2440,7 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
         on_event: EventSink,
         settled_check: SettledCheck,
         initial_prompt: str | None = None,
+        capture_draft: Callable[[], Awaitable[None]] | None = None,
     ) -> str:
         directory = self._lifecycle_dir((request.user_id, request.task_id, request.revision))
         journal = directory / "resources.json"
@@ -2345,6 +2498,8 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
         trace_path = trace_dir / "rpc-events.jsonl"
         settled = False
         repair_attempts = 0
+        document_failures = 0
+        verification_progress = VerificationProgress()
         final_text: list[str] = []
         try:
             async with asyncio.timeout(self.timeout_seconds):
@@ -2370,6 +2525,8 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
                             + "\n"
                         )
                         trace.flush()
+                        if event.get("type") == "tool_execution_end" and capture_draft is not None:
+                            await capture_draft()
                         message = event.get("message")
                         if (
                             isinstance(message, dict)
@@ -2418,6 +2575,32 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
                         safe_event = self._translate_event(event)
                         if safe_event is not None:
                             await on_event(safe_event)
+                            if safe_event.details.get("tool") == "propose_completion" and safe_event.event_type == "tool.failed":
+                                result = event.get("result")
+                                details = result.get("details") or {} if isinstance(result, dict) else {}
+                                decision = details.get("decision") or {}
+                                coverage = details.get("coverage") or {}
+                                evidence = {key: coverage.get(key) for key in (
+                                    "observed_unit_ids", "authoritatively_read_unit_ids", "low_quality_units",
+                                    "unknown_units", "evidence_bindings", "parser_versions",
+                                )}
+                                if not verification_progress.observe(
+                                    gaps=decision.get("gaps") or ["缺少明确的通过结论"], evidence=evidence,
+                                ):
+                                    raise PiVerificationStalled("连续两轮验证没有进展，已停止重复补救；请查看初稿及待核验事项")
+                            if safe_event.details.get("tool") in {
+                                "inspect_source", "discover_content", "read_evidence",
+                            } and safe_event.event_type in {"tool.completed", "tool.failed"}:
+                                # Shell 成功不代表文档服务恢复，不能重置连续失败预算。
+                                if safe_event.details.get("error_code") == "DOCUMENT_SCOPE_DENIED":
+                                    raise PiRuntimeError("本次规划的文档读取范围不足，后续页面被拒绝读取；请重新执行以重新规划范围", error_code="DOCUMENT_SCOPE_DENIED", stage="inspect")
+                                document_failures = document_failures + 1 if safe_event.event_type == "tool.failed" else 0
+                                if document_failures >= 3:
+                                    raise PiRuntimeError(
+                                        "文档读取连续失败 3 次，已停止无效重试；"
+                                        "请检查来源或解析服务后重新执行",
+                                        error_code="SOURCE_READ_FAILED", stage="inspect",
+                                    )
                         delta = event.get("assistantMessageEvent") or {}
                         if delta.get("type") == "text_delta":
                             final_text.append(str(delta.get("delta") or ""))
@@ -2558,16 +2741,30 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
         if event_type == "tool_execution_end":
             tool_name = str(event.get("toolName") or "tool")
             failed = bool(event.get("isError"))
+            result = event.get("result")
+            details = result.get("details") if isinstance(result, dict) else None
+            # 只映射固定范围错误，不把原始工具正文或宿主信息暴露给页面。
+            scope_denied = failed and tool_name in {"discover_content", "read_evidence"} and isinstance(result, dict) and any(
+                isinstance(part, dict) and "内容单元超出冻结的获准范围" in str(part.get("text", ""))
+                for part in (result.get("content") or [])
+            )
+            if tool_name == "discover_content" and isinstance(details, dict):
+                # 逐页解析失败可能以正常工具响应返回；整批无有效发现仍须计入失败预算。
+                failed = failed or bool(details.get("unknown_units") and not details.get("observed_unit_ids"))
+            if tool_name == "propose_completion":
+                decision = details.get("decision") if isinstance(details, dict) else None
+                # 工具成功返回不等于覆盖验证通过；缺少明确通过结论也不能显示完成。
+                failed = failed or not (isinstance(decision, dict) and decision.get("passed") is True)
             return RuntimeEvent(
                 event_type=(
                     "tool.failed" if failed else "tool.completed"
                 ),
                 summary=(
-                    f"{tool_name} 执行失败，Pi 将根据结果调整"
+                    "本次规划的文档读取范围不足，后续页面被拒绝读取" if scope_denied else f"{tool_name} 执行失败，Pi 将根据结果调整"
                     if failed
                     else f"{tool_name} 已完成"
                 ),
-                details={"tool": tool_name, "failed": failed},
+                details={"tool": tool_name, "failed": failed, **({"error_code": "DOCUMENT_SCOPE_DENIED"} if scope_denied else {})},
             )
         if event_type == "compaction_start":
             return RuntimeEvent(

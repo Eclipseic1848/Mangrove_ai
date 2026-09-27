@@ -7,6 +7,19 @@ from src.api.routes import models
 from src.config.user_ctx import get_user_override
 
 
+def test_model_list_does_not_advertise_unconfigured_presets(monkeypatch):
+    from types import SimpleNamespace
+    from src.llm import provider
+
+    instance = object.__new__(provider.MultiModelProvider)
+    instance._profiles = {"local": SimpleNamespace(model="local-current"), "qwen": SimpleNamespace(model="configured-cloud")}
+    monkeypatch.setattr(instance, "available_providers", lambda: ["local", "qwen"])
+    monkeypatch.setattr(provider, "LOCAL_MODELS", {"local-extra": "http://example.invalid/v1"})
+    assert instance.list_models() == {"local": ["local-current", "local-extra"], "qwen": ["configured-cloud"]}
+    monkeypatch.setattr(instance, "available_providers", lambda: [])
+    assert instance.list_models() == {}
+
+
 class _Store:
     def config_all(self, user_id: str):
         assert user_id == "user-a"

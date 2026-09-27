@@ -1,5 +1,6 @@
 """模型连接产品 Interface。"""
 from __future__ import annotations
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -79,9 +80,56 @@ class ManagedDiscoveryIn(BaseModel):
 
 
 def get_connection_broker() -> ConnectionBroker:
-    """FastAPI 依赖 Seam，测试注入真实 Broker + 假 Provider Transport。"""
-
+    """测试可注入带合成 Provider 的 Broker。"""
     return get_default_broker()
+
+
+class ConfigurationTestIn(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=100)
+    expected_version: str = Field(min_length=1, max_length=100)
+    display_name: str = Field(min_length=1, max_length=80)
+    base_url: str = Field(min_length=1, max_length=500)
+    model: str = Field(min_length=1, max_length=200)
+    models: list[str] = Field(min_length=1, max_length=8)
+    api_key: str | None = Field(default=None, max_length=4096)
+    thinking: Literal["default", "on", "off"] = "default"
+    confirm_endpoint_change: bool = False
+
+
+class ConfigurationApplyIn(BaseModel):
+    operation_id: str = Field(min_length=1, max_length=100)
+
+
+@router.get("/{connection_id}/configuration")
+def get_configuration(connection_id: str, user=Depends(get_current_user), broker: ConnectionBroker = Depends(get_connection_broker)):
+    try:
+        return broker.configuration(connection_id, user["user_id"], is_admin_role(user.get("role")))
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/{connection_id}/configuration/test")
+async def test_configuration(connection_id: str, body: ConfigurationTestIn, user=Depends(get_current_user), broker: ConnectionBroker = Depends(get_connection_broker)):
+    try:
+        return await broker.test_configuration(connection_id, user["user_id"], is_admin_role(user.get("role")), body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/{connection_id}/configuration/apply")
+def apply_configuration(connection_id: str, body: ConfigurationApplyIn, user=Depends(get_current_user), broker: ConnectionBroker = Depends(get_connection_broker)):
+    try:
+        return broker.apply_configuration(connection_id, user["user_id"], is_admin_role(user.get("role")), body.operation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/{connection_id}/configuration/operations/{operation_id}")
+def configuration_operation(connection_id: str, operation_id: str, user=Depends(get_current_user), broker: ConnectionBroker = Depends(get_connection_broker)):
+    try:
+        return broker.configuration_operation(connection_id, user["user_id"], is_admin_role(user.get("role")), operation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/presets")
@@ -111,7 +159,16 @@ def get_default_model_preference(
     user=Depends(get_current_user),
     broker: ConnectionBroker = Depends(get_connection_broker),
 ):
-    return {"preference": broker.get_usage_preference(user["user_id"])}
+    return {"preference": broker.get_usage_preference(user["user_id"], allow_local=is_admin_role(user.get("role")))}
+
+
+@router.delete("/preferences/default")
+def clear_default_model_preference(
+    user=Depends(get_current_user),
+    broker: ConnectionBroker = Depends(get_connection_broker),
+):
+    broker.clear_usage_preference(user["user_id"])
+    return {"preference": None}
 
 
 @router.put("/preferences/default")
@@ -125,6 +182,7 @@ def set_default_model_preference(
             user["user_id"],
             body.connection_id,
             body.model_id,
+            allow_local=is_admin_role(user.get("role")),
         )
     except ConnectionError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -452,10 +510,10 @@ def delete_model_connection(
 ):
     """个人连接只允许 Owner 删除，平台连接只允许管理权限删除。"""
 
-    if not broker.delete_connection(
-        connection_id,
-        user["user_id"],
-        can_manage=is_admin_role(user.get("role")),
-    ):
+    try:
+        deleted = broker.delete_connection(connection_id, user["user_id"], can_manage=is_admin_role(user.get("role")))
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if not deleted:
         raise HTTPException(status_code=404, detail="连接不存在")
     return {"ok": True}

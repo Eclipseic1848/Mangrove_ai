@@ -220,11 +220,13 @@ class SteeringRequest(BaseModel):
     idempotency_key: str | None = Field(default=None, max_length=200)
     current_status: str
     status_summary: str = ""
-    current_goal: str = ""
+    current_goal: str = Field(default="", max_length=120_000)
     selection_reason: str = ""
+    memory_context: str = Field(default="", max_length=6500)
     event_summaries: tuple[str, ...] = ()
     source_findings: tuple[dict[str, Any], ...] = Field(default=(), max_length=20)
     relevant_turns: tuple[RawUserTurn, ...] = Field(default=(), max_length=16)
+    recent_messages: tuple[dict[str, str], ...] = Field(default=(), max_length=16)
     prior_delta: ContextDelta | None = None
     clarification_question: str | None = None
     clarification_round_id: str | None = None
@@ -248,7 +250,7 @@ class SteeringRequest(BaseModel):
             or self.prior_delta.source_turn_ids != identities
         ):
             raise ValueError("上一轮语义与真实相关回合身份不一致")
-        context = self.model_dump(mode="json", include={"relevant_turns", "prior_delta", "source_findings", "clarification_question"})
+        context = self.model_dump(mode="json", include={"relevant_turns", "prior_delta", "source_findings", "clarification_question", "recent_messages"})
         if len(json.dumps(context, ensure_ascii=False).encode("utf-8")) > 65536:
             raise ValueError("澄清上下文超过读取预算")
         return self
@@ -294,6 +296,7 @@ class ContextCompileRequest(BaseModel):
     run_summary: str = ""
     procedure_summaries: tuple[str, ...] = ()
     task_template_summaries: tuple[ReferencedContextSummary, ...] = ()
+    lesson_summaries: tuple[ReferencedContextSummary, ...] = ()
     owner_memory_summaries: tuple[ReferencedContextSummary, ...] = ()
     relevant_turns: tuple[RawUserTurn, ...] = ()
     evidence_snippets: tuple[str, ...] = ()

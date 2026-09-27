@@ -71,3 +71,45 @@ def test_pdf_source_rejects_page_limit():
     oversized.write(buffer)
     with pytest.raises(ValueError, match="1000"):
         validate_pdf_source(buffer.getvalue())
+
+
+def test_preview_and_render_do_not_enter_pdfium_concurrently(monkeypatch):
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+    import pypdfium2 as pdfium
+    from src.parsers.pdf_render import validate_pdf_source
+
+    raw = _make_pdf_bytes(["Concurrent preview"])
+    original = pdfium.PdfDocument
+    entered = threading.Lock()
+
+    class CheckedDocument(original):
+        def __init__(self, *args, **kwargs):
+            # 在进入原生库前检测重叠，红测不得让不安全并发导致进程崩溃。
+            assert entered.acquire(blocking=False), "PDFium 被并发调用"
+            self.probe_acquired = True
+            try:
+                time.sleep(0.02)
+                super().__init__(*args, **kwargs)
+            except BaseException:
+                self.probe_acquired = False
+                entered.release()
+                raise
+
+        def close(self):
+            try:
+                return super().close()
+            finally:
+                if getattr(self, 'probe_acquired', False):
+                    self.probe_acquired = False
+                    entered.release()
+
+    monkeypatch.setattr(pdfium, 'PdfDocument', CheckedDocument)
+    def read(index):
+        if index % 2:
+            assert validate_pdf_source(raw) == 1
+        else:
+            assert render_pdf_page_png(raw, page_number=1, dpi=72).startswith(b'\x89PNG')
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        list(executor.map(read, range(12)))

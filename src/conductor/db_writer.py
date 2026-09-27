@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime
+from src.timezone import now as beijing_now
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -72,7 +73,7 @@ def write_items(
     """写入数据，返回写入条数。按 settings.db_backend 选择 sqlite / mysql。"""
     if not items:
         return 0
-    now = datetime.now().isoformat(timespec="seconds")
+    now = beijing_now().isoformat(timespec="seconds")
     rows = []
     for item in items:
         values = {

@@ -12,9 +12,11 @@ Conductor 编排图（LangGraph）。
 from __future__ import annotations
 
 import logging
+import asyncio
 import time
 import uuid
 from datetime import datetime
+from src.timezone import now as beijing_now
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from langgraph.graph import END, START, StateGraph
@@ -33,6 +35,7 @@ from .nodes import (
     video_enrich_node,
 )
 from .node_views import build_node_view
+from .progress import LABELS, emit_progress, completed_summary
 from .state import ConductorState
 from .targets import is_direct_video_manifest
 
@@ -62,6 +65,8 @@ def _route_after_planner(state: ConductorState) -> str:
 
 
 def _route_after_collect(state: ConductorState) -> str:
+    if state.get("evidence_collection") or state.get("bank_collection"):
+        return "output"
     if is_direct_video_manifest(state.get("target_manifest") or []):
         return "video_enrich"
     return "clean" if state.get("raw_dataset") else "end"
@@ -118,7 +123,7 @@ def _node_summary(name: str, result: Dict[str, Any], state: ConductorState) -> s
         s = f"{q.get('score')}分/{'过' if q.get('passed') else '未过'}"
         return s + "→重跑分析" if r.get("checker_feedback") else s
     if name == "output":
-        return "已产出"
+        return "已保留诊断，任务未完成" if r.get("error") else "已产出"
     if name == "schedule":
         return "已识别定时任务"
     return ""
@@ -129,12 +134,47 @@ def _traced(name: str, fn: Callable[[ConductorState], Awaitable[Dict[str, Any]]]
     async def wrapper(state: ConductorState) -> Dict[str, Any]:
         from src.api.execution import execution_checkpoint
         execution_checkpoint()
+        if state.get("budget_exhausted"):
+            return {}
         t0 = time.perf_counter()
-        result = await fn(state) or {}
+        emit_progress(name, "started", f"正在{LABELS.get(name, '处理任务')}…")
+        spec = state.get("task_spec")
+        budget = getattr(spec, "time_budget_seconds", None)
+        started = state.get("execution_started_at") or time.time()
+        remaining = budget - (time.time() - started) if budget is not None else None
+        result = None
+        timeout = asyncio.timeout(max(0, remaining)) if remaining is not None else None
+        if remaining is not None and remaining <= 0:
+            result = {"budget_exhausted": True}
+        elif timeout is not None:
+            partial_result = {}
+            try:
+                async with timeout:
+                    try:
+                        result = await fn(state) or {}
+                    except asyncio.CancelledError as exc:
+                        from .nodes.collect import CollectionInterrupted
+                        if isinstance(exc, CollectionInterrupted):
+                            partial_result = exc.partial_result
+                        raise
+            except TimeoutError:
+                if not timeout.expired():
+                    raise
+                result = {**partial_result, "budget_exhausted": True}
+        else:
+            result = await fn(state) or {}
+        # 规划前尚不知道自然语言预算；识别后立即计入入口以来的全部已耗时间。
+        planned_budget = getattr(result.get("task_spec"), "time_budget_seconds", budget)
+        if result.get("budget_exhausted") or (planned_budget is not None and time.time() - started >= planned_budget):
+            message = "已达到本次任务的总耗时上限，停止后续步骤；已完成数据保留，在途外部请求可能结果未知，不自动重发。"
+            result.update(budget_exhausted=True, error=message, reply=message, checker_feedback=None)
+        from src.llm.provider import verify_bound_model
+        verify_bound_model()
         execution_checkpoint()
+        emit_progress(name, "failed" if result.get("error") else "waiting" if result.get("needs_clarification") else "completed", completed_summary(name, result))
         ms = round((time.perf_counter() - t0) * 1000)
         entry = {"node": name, "ms": ms, "summary": _node_summary(name, result, state)}
-        return {**result, "trace": [entry]}
+        return {**result, "execution_started_at": started, "trace": [entry]}
     return wrapper
 
 
@@ -165,7 +205,7 @@ def build_graph(checkpointer=None):
     g.add_edge("target_resolve", "router")
     g.add_edge("schedule", END)
     g.add_edge("router", "collect")
-    g.add_conditional_edges("collect", _route_after_collect, {"video_enrich": "video_enrich", "clean": "clean", "end": END})
+    g.add_conditional_edges("collect", _route_after_collect, {"video_enrich": "video_enrich", "clean": "clean", "output": "output", "end": END})
     g.add_conditional_edges("video_enrich", _route_after_video_enrich, {"clean": "clean", "checker": "checker"})
     g.add_edge("clean", "analyze")
     g.add_edge("analyze", "checker")
@@ -239,7 +279,12 @@ def _build_init(
 ) -> ConductorState:
     # task_id 传入则复用（断点续跑同一任务）；否则新建并加 6 位随机后缀，
     # 同一秒并发的多个任务不会共用 downloads/<task_id>/ 目录（并行不踩踏）。
-    tid = task_id or (datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6])
+    tid = task_id or (beijing_now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6])
+    import hashlib
+    import json
+    from src.memory._library_scope import execution_owner
+    from src.llm.provider import _bound_chat_identity
+    binding = hashlib.sha256(json.dumps([execution_owner(), _bound_chat_identity.get()], ensure_ascii=False).encode("utf-8")).hexdigest()
     return {
         "user_input": user_input,
         "messages": messages or [{"role": "user", "content": user_input}],
@@ -247,9 +292,23 @@ def _build_init(
         "model": model,
         "session_id": session_id,
         "task_id": tid,
+        "execution_binding": binding,
+        "execution_started_at": time.time(),
         "approved_db_write": approved_db_write,
         "ignore_schedule": ignore_schedule,
     }
+
+
+async def _collection_checkpoint_input(graph, init, config):
+    saved = (await graph.aget_state(config)).values
+    spec = saved.get("task_spec") if saved else None
+    if not spec or not (getattr(spec, "bank_benefits", None) or getattr(spec, "evidence_collection", None)):
+        return init
+    # 同 task_id 的采集恢复不能重新规划，否则冻结日期和范围改变，长节点进度无法复用。
+    keys = ("execution_binding", "user_input", "provider", "model", "session_id", "approved_db_write", "ignore_schedule")
+    if any(saved.get(key) != init.get(key) for key in keys):
+        raise ValueError("采集检查点与当前身份、模型或任务输入不一致，拒绝恢复")
+    return None
 
 
 async def _ainvoke(init: ConductorState) -> Dict[str, Any]:
@@ -259,7 +318,8 @@ async def _ainvoke(init: ConductorState) -> Dict[str, Any]:
     if _settings.checkpoint_enabled:
         graph = await _get_checkpoint_graph()
         config = {"configurable": {"thread_id": init["task_id"]}}
-        return dict(await graph.ainvoke(init, config=config))
+        value = await _collection_checkpoint_input(graph, init, config)
+        return dict(await graph.ainvoke(value, config=config))
     return dict(await get_graph().ainvoke(init))
 
 
@@ -312,11 +372,32 @@ async def astream_conductor(
     if _settings.checkpoint_enabled:
         graph = await _get_checkpoint_graph()
         config = {"configurable": {"thread_id": init["task_id"]}}
-        stream = graph.astream(init, config=config, stream_mode=["updates", "values"])
+        value = await _collection_checkpoint_input(graph, init, config)
+        stream = graph.astream(value, config=config, stream_mode=["updates", "values", "custom"])
     else:
-        stream = get_graph().astream(init, stream_mode=["updates", "values"])
+        stream = get_graph().astream(init, stream_mode=["updates", "values", "custom"])
+    async for event in _stream_events(stream):
+        yield event
+
+
+async def astream_collection_recovery(state):
+    # 仅重进原采集与快照节点；恢复不得重新理解或规划用户的冻结范围。
+    graph = StateGraph(ConductorState)
+    graph.add_node("collect", _traced("collect", collect_node))
+    graph.add_node("output", _traced("output", output_node))
+    graph.add_edge(START, "collect")
+    graph.add_edge("collect", "output")
+    graph.add_edge("output", END)
+    stream = graph.compile().astream(state, stream_mode=["updates", "values", "custom"])
+    async for event in _stream_events(stream):
+        yield event
+
+
+async def _stream_events(stream):
     final_state: Dict[str, Any] = {}
     async for mode, chunk in stream:
+        if mode == "custom" and isinstance(chunk, dict):
+            yield ("progress", chunk)
         if mode == "values":
             final_state = chunk if isinstance(chunk, dict) else final_state
         elif mode == "updates" and isinstance(chunk, dict):

@@ -666,3 +666,23 @@ def test_frozen_corpora_and_forward_migration_dry_run() -> None:
         "conversation_revision_decisions",
         "conversation_steering_results",
     } <= created
+
+
+@pytest.mark.parametrize("questions", [(), ("采用哪种统计口径？",)])
+def test_no_change_turn_is_not_a_pending_business_draft(tmp_path, questions):
+    repository = SqliteSteeringRepository(str(tmp_path / "steering.db"))
+
+    class Rewrite:
+        async def rewrite(self, turn, request):
+            return ContextDelta(delta_id="empty-" + turn.turn_id, owner_id=turn.owner_id,
+                task_id=turn.task_id, inherited_revision=turn.revision,
+                source_turn_ids=(turn.turn_id,), intent=TurnIntent.NORMALIZATION,
+                confidence=DeltaConfidence.HIGH, normalized_text="仅讨论已有结果",
+                open_questions=questions)
+
+    service = ConversationSteering(repository, Rewrite())
+    result = asyncio.run(service.handle_turn(SteeringRequest(owner_id="owner", task_id="task",
+        revision=1, current_status="completed", current_goal="保留全部数据", text="仅讨论，不修改任务")))
+    pending = repository.latest_business_result("owner", "task", 1)
+    assert (pending == result) if questions else pending is None
+    assert repository.get_result_for_turn("owner", result.turn_id) == result

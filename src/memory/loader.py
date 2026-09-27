@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import logging
+import hashlib
+import re
 import threading
 from pathlib import Path
 from typing import Any, Dict
@@ -33,7 +35,7 @@ _skills_cache = MtimeCache()
 
 
 # ---- 记忆：用户偏好 ----
-def load_preferences() -> str:
+def load_preferences(*, strict: bool = False) -> str:
     """读取用户偏好记忆全文，mtime 缓存加速；不存在或失败返回空串。"""
     f = MEMORY_DIR / _PREF_FILE
     cached = _preferences_cache.get(f)
@@ -43,14 +45,74 @@ def load_preferences() -> str:
         result = f.read_text(encoding="utf-8").strip() if f.exists() else ""
     except Exception:
         logger.warning("读取用户偏好失败", exc_info=True)
-        result = ""
+        if strict:
+            raise
+        return ""
     _preferences_cache.set(f, result)
     return result
 
 
-def preferences_context() -> str:
+def preferences_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def replace_preferences(text: str, expected_digest: str) -> bool:
+    """管理员纠正全局规范；旧页面不能覆盖其他管理员的新版本。"""
+    with _preferences_lock:
+        _preferences_cache.invalidate()
+        current = load_preferences(strict=True)
+        if preferences_digest(current) != expected_digest:
+            return False
+        atomic_write(MEMORY_DIR / _PREF_FILE, text.strip())
+        _preferences_cache.invalidate()
+        return True
+
+
+def select_preferences(items, objective: str, *, text_of=str, budget: int = 6000, global_scope: bool = False):
+    """先安全检查再有界筛选，整条保留或跳过，不把截断句子当成完整偏好。"""
+    from src.task_context import _safe_summary, _validate_context_advice
+    def terms(text):
+        words = set(re.findall(r"[a-z0-9]{2,}", text.lower()))
+        for phrase in re.findall(r"[\u4e00-\u9fff]+", text):
+            words.update(phrase[index:index + 2] for index in range(len(phrase) - 1))
+        return words - {"希望", "需要", "帮我", "请帮", "使用", "内容", "任务", "进行", "一个"}
+    objective_terms = terms(objective)
+    ranked = []
+    for item in items:
+        text = text_of(item).strip()
+        if not text or text.startswith("#") or len(text) > 4000:
+            continue
+        try:
+            _validate_context_advice(text)
+        except ValueError:
+            continue
+        score = len(objective_terms & terms(text))
+        general = bool(re.match(r"^(默认|所有任务|所有报告|总是|一律|请用中文|使用中文)", text))
+        if not global_scope and objective and not score and not general:
+            continue
+        ranked.append((score, item, _safe_summary(text, limit=4000)))
+    selected = []
+    for _, item, safe_text in sorted(ranked, key=lambda entry: entry[0], reverse=True):
+        if len(selected) >= 12 or len(safe_text) > budget:
+            continue
+        selected.append(safe_text if isinstance(item, str) else item)
+        budget -= len(safe_text)
+    return tuple(selected)
+
+
+def conversation_memory_context(personal, global_text: str, objective: str) -> str:
+    """对话沿用同一脱敏与预算门；个人偏好和共享偏好分层，不当作新指令。"""
+    own = select_preferences(personal, objective, budget=4000)
+    shared = select_preferences(global_text.splitlines(), objective, budget=2000, global_scope=True)
+    return '\n'.join((
+        '个人偏好：\n' + '\n'.join(own) if own else '',
+        '共享偏好：\n' + '\n'.join(shared) if shared else '',
+    )).strip()
+
+
+def preferences_context(objective: str = "") -> str:
     """构造注入意图提示词的偏好上下文（无偏好则空串）。"""
-    pref = load_preferences()
+    pref = "\n".join(select_preferences(load_preferences().splitlines(), objective, budget=2000, global_scope=True))
     if not pref:
         return ""
     return (
@@ -60,15 +122,15 @@ def preferences_context() -> str:
     )
 
 
-def personal_context() -> str:
+def personal_context(objective: str = "") -> str:
     """构造注入意图提示词的个人记忆上下文（当前用户自己写的，按用户隔离，见 src/config/user_ctx.py）。
-    无个人记忆则返回空串。最多注入最近 20 条，防止长期堆积挤占 intent prompt。"""
+    无相关个人记忆则返回空串。按相关性和字符预算选取完整条目，避免挤占意图上下文。"""
     from src.config.user_ctx import get_user_memories
 
     items = get_user_memories()
     if not items:
         return ""
-    capped = items[:20]
+    capped = select_preferences(items, objective)
     lines = "\n".join(f"- {t}" for t in capped)
     return (
         "\n\n# 我的偏好（当前用户的个人记忆）\n"
@@ -88,6 +150,8 @@ def add_preference(text: str) -> bool:
         content = f.read_text(encoding="utf-8") if f.exists() else (
             "# 记忆：用户偏好与任务模板\n\n" + _PREF_SECTION + "\n"
         )
+        if any(line.strip().removeprefix("- ").strip() == text for line in content.splitlines()):
+            return True
         line = f"- {text}\n"
         if _PREF_SECTION in content:
             idx = content.index(_PREF_SECTION)

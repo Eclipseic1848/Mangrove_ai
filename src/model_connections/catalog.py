@@ -81,7 +81,7 @@ class ProviderPreset:
             "models": list(self.models),
             "model_catalog": [{
                 **item.public_dict(), "source_url": self.source_url or self.help_url,
-                "verified_on": "2026-09-07",
+                "verified_on": self.version[:10],
                 "release_status": "experimental" if item.model_id.endswith("-exp") else "current",
             } for item in self.model_catalog],
             "help_url": self.help_url,
@@ -89,7 +89,7 @@ class ProviderPreset:
             "region_note": self.region_note,
             "regions": [{"id": key, "label": label, "workspace_required": "{workspace}" in url}
                         for key, label, url in self.regions],
-            "catalog_stale": (date.today() - date(2026, 9, 7)).days > 30,
+            "catalog_stale": (date.today() - date.fromisoformat(self.version[:10])).days > 30,
         }
 
 
@@ -111,7 +111,7 @@ def _model(
 
 
 _CATALOG_VERSION = "2026-09-07.1"
-_DEEPSEEK_CATALOG_VERSION = "2026-09-08.1"
+_DEEPSEEK_CATALOG_VERSION = "2026-09-15.1"
 
 _PRESETS = (
     ProviderPreset(
@@ -121,11 +121,11 @@ _PRESETS = (
         description="适合中文、推理和通用 Agent 任务",
         base_url="https://api.deepseek.com",
         api_format="openai_chat_completions",
-        recommended_model="deepseek-v4-flash",
+        recommended_model="deepseek-flash",
         model_catalog=(
             _model(
-                "deepseek-v4-flash",
-                "DeepSeek V4 Flash（0731 正式版）",
+                "deepseek-flash",
+                "DeepSeek V4.1 Flash",
                 "balanced",
                 context_window=1_000_000,
                 max_output_tokens=384_000,
@@ -137,22 +137,21 @@ _PRESETS = (
                 context_window=1_000_000,
                 max_output_tokens=384_000,
             ),
-            _model("deepseek-v4-flash-vision-exp", "DeepSeek V4 Flash Vision（实验版）", "vision"),
         ),
         help_url="https://api-docs.deepseek.com/",
+        source_url="https://api-docs.deepseek.com/quick_start/pricing/",
         key_url="https://platform.deepseek.com/api_keys",
     ),
     ProviderPreset(
         preset_id="qwen",
-        version="2026-09-08.1",
+        version="2026-09-15.1",
         display_name="阿里百炼 Qwen",
         description="中国站默认入口，兼顾中文、工具调用和成本",
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         api_format="openai_responses",
         recommended_model="qwen3.8-flash",
         model_catalog=(
-            _model("qwen3.8-27b", "Qwen 3.8 27B", "balanced", context_window=1_000_000, max_output_tokens=131_072),
-            _model("qwen3.8-max-0902", "Qwen 3.8 Max（0902）", "quality", context_window=1_000_000, max_output_tokens=131_072),
+            _model("qwen3.8-max", "Qwen 3.8 Max", "quality", context_window=1_000_000, max_output_tokens=131_072),
             _model("qwen3.8-flash", "Qwen 3.8 Flash", "efficiency", context_window=1_000_000, max_output_tokens=131_072),
         ),
         help_url="https://help.aliyun.com/zh/model-studio/first-api-call-to-qwen",

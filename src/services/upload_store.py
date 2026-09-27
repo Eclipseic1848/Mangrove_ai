@@ -32,6 +32,10 @@ _EXT_MIME: dict[str, str] = {
     ".json": "application/json",
     ".jsonl": "application/x-ndjson",
     ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".doc": "application/msword",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
     ".parquet": "application/vnd.apache.parquet",
     ".txt": "text/plain",
     ".html": "text/html",
@@ -70,7 +74,8 @@ def inspect_uploaded_image(data: bytes | Path) -> dict[str, int]:
             with Image.open(source(), formats=("PNG", "JPEG", "WEBP")) as image:
                 image.load()
                 result["image_orientation"] = int(image.getexif().get(274, 1))
-                if result["image_orientation"] not in range(1, 9):
+                # 部分来源保留 0 表示方向未知；原值传给 OCR，未知方向不得声称坐标已映射。
+                if result["image_orientation"] not in range(0, 9):
                     raise ValueError("图片方向元数据无效")
             return result
     except (OSError, SyntaxError, Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
@@ -81,6 +86,7 @@ _ZIP_FAMILY = {
     "application/zip",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
 
 
@@ -93,7 +99,7 @@ def _magic_matches(detected_mime: Optional[str], expected_mime: Optional[str], e
     if detected_mime == expected_mime:
         return True
     # zip 容器族互认（xlsx/docx/zip 共享 zip 容器）
-    if detected_mime in _ZIP_FAMILY and ext.lower() in {".xlsx", ".docx", ".zip"}:
+    if detected_mime in _ZIP_FAMILY and ext.lower() in {".xlsx", ".docx", ".pptx", ".zip"}:
         return True
     return False
 

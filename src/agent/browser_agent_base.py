@@ -23,6 +23,7 @@ from langgraph.graph import StateGraph
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_core.messages import HumanMessage, AIMessage
 from datetime import datetime
+from src.timezone import now as beijing_now
 
 from src.config.settings import LOG_TIMESTAMP_FORMAT
 from src.services import get_llm_provider
@@ -342,7 +343,7 @@ class BrowserUseAgent:
     
     def _initialize_nodes(self):
         """初始化节点实现（依赖注入，避免 Agent ↔ NodeManager 循环引用）"""
-        now = datetime.now()
+        now = beijing_now()
         time_str = now.strftime(LOG_TIMESTAMP_FORMAT)
         self.nodes = BrowserNodeManager(
             llm=self.llm,

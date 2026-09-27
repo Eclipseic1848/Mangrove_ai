@@ -43,7 +43,7 @@ def _fresh_store(tmp_dir: str):
     )
     store = ScheduleStore(str(database))
     service = SchedulerService(store, poll_interval=1.0, runner=AsyncMock(wraps=_stub_runner))
-    with scheduler_owner(Path(tmp_dir) / "api-users.db") as owner, patch.dict(USER, owner, clear=True), patch.object(services_module, "_store", store), patch.object(services_module, "_service", service):
+    with scheduler_owner(Path(tmp_dir) / "api-users.db") as owner, patch.dict(USER, {**owner, 'role': 'admin'}, clear=True), patch('src.llm.provider.list_models', return_value={'local': ['synthetic']}), patch.object(services_module, "_store", store), patch.object(services_module, "_service", service):
         yield store
 
 
@@ -55,6 +55,7 @@ def test_create_manual_task_cron():
     with tempfile.TemporaryDirectory() as d, _fresh_store(d):
         body = ManualTaskIn(
             name="行业新闻早报", prompt="采集AI行业新闻并汇总",
+            model='synthetic', model_connection_id='__local__',
             trigger=TriggerIn(type="cron", cron_expr="30 8 * * *"),
         )
         res = tasks_routes.create_manual_task(body, user=USER)
@@ -68,6 +69,7 @@ def test_create_manual_task_interval():
     with tempfile.TemporaryDirectory() as d, _fresh_store(d):
         body = ManualTaskIn(
             name="每2小时监控", prompt="每2小时抓一次新闻",
+            model='synthetic', model_connection_id='__local__',
             trigger=TriggerIn(type="interval", interval_seconds=7200),
         )
         res = tasks_routes.create_manual_task(body, user=USER)
@@ -80,6 +82,7 @@ def test_create_manual_task_once():
         future = (datetime.now() + timedelta(days=1)).isoformat(timespec="minutes")
         body = ManualTaskIn(
             name="单次采集", prompt="采集一次某主题",
+            model='synthetic', model_connection_id='__local__',
             trigger=TriggerIn(type="once", run_at=future),
         )
         res = tasks_routes.create_manual_task(body, user=USER)
@@ -91,6 +94,7 @@ def test_create_manual_task_from_template_marks_source_template():
     with tempfile.TemporaryDirectory() as d, _fresh_store(d):
         body = ManualTaskIn(
             name="每日竞品口碑日报", prompt="采集汽车之家上小米SU7的最新评论并输出口碑分析",
+            model='synthetic', model_connection_id='__local__',
             trigger=TriggerIn(type="cron", cron_expr="0 9 * * *"),
             template_id="daily_voc_report",
         )
@@ -102,6 +106,7 @@ def test_create_manual_task_from_template_marks_source_template():
 def test_create_manual_task_past_once_rejected():
     with tempfile.TemporaryDirectory() as d, _fresh_store(d):
         body = ManualTaskIn(name="过期任务", prompt="x",
+                             model='synthetic', model_connection_id='__local__',
                              trigger=TriggerIn(type="once", run_at="2000-01-01T00:00"))
         try:
             tasks_routes.create_manual_task(body, user=USER)
@@ -216,7 +221,14 @@ def test_run_now_started():
         tid = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime.now() + timedelta(days=1), owner_user_id=owner["user_id"])
-        res = asyncio.run(tasks_routes.run_task_now_endpoint(tid, user=owner))
+        async def run_and_wait():
+            response = await tasks_routes.run_task_now_endpoint(tid, user=owner)
+            for _ in range(100):
+                if store.get_run(tid, response['run_id'])['state'] != 'running':
+                    break
+                await asyncio.sleep(0.01)
+            return response
+        res = asyncio.run(run_and_wait())
         assert services_module.get_scheduler_service()._runner.await_count == 1
         assert res["ok"] is True
         assert store.get(tid)["run_count"] == 1
@@ -240,7 +252,7 @@ def test_run_now_running_conflict():
         tid = store.add(user_input="x", provider=None, model=None, trigger_type="cron",
                          cron_expr="0 8 * * *", run_at=None,
                          next_run_at=datetime.now() + timedelta(days=1), owner_user_id=USER["user_id"])
-        services_module.get_scheduler_service()._running_ids.add(tid)
+        services_module.get_scheduler_service()._running_ids[tid] = 1
         try:
             asyncio.run(tasks_routes.run_task_now_endpoint(tid, user=USER))
         except Exception as e:

@@ -21,6 +21,9 @@ class LibraryShareIn(BaseModel):
 def library_entry(entry: dict, user: dict) -> dict:
     fields = ("slug", "title", "keywords", "body", "data_type", "status", "uses", "quality_avg", "occurrences", "helped_avoid", "created_at", "scope", "content_digest")
     result = {key: entry[key] for key in fields if key in entry}
+    if "verified_uses" in entry:
+        # 只投影已校验的统计，不公开产生经验的任务或交付标识。
+        result["verified_uses"] = int(entry.get("verified_uses") or 0)
     own = entry.get("owner_id") == user["user_id"]
     result["is_owner"] = own
     result["can_delete"] = own or (entry.get("scope") == "platform" and is_admin_role(user.get("role")))

@@ -15,18 +15,23 @@ MediaCrawler 多数平台需先按其文档完成登录/cookie 配置，本采�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import signal
+import subprocess
 import sys
-import time
 from pathlib import Path
+from tempfile import TemporaryDirectory, TemporaryFile
+from http.cookies import SimpleCookie
+from filelock import FileLock, Timeout as LockTimeout
 
 from src.config.settings import settings
 from src.conductor.task_spec import AnalysisType, DataType, TaskSpec
 
 from src.conductor.targets import content_id_from_url
-from .base import BaseCollector, CollectedItem, CollectFailureKind, CollectResult
+from .base import BaseCollector, CollectedItem, CollectResult
 from .registry import register
 
 logger = logging.getLogger(__name__)
@@ -69,26 +74,46 @@ _PLATFORM_CN = {"dy": "抖音", "xhs": "小红书", "wb": "微博", "bili": "B�
                 "ks": "快手", "zhihu": "知乎", "tieba": "贴吧"}
 
 
-def _diagnose_mc_failure(platform: str, output: str) -> tuple[str, CollectFailureKind]:
+def _diagnose_mc_failure(platform: str, output: str) -> dict:
     """把 MediaCrawler 子进程原始报错翻译成用户可操作的一句话，避免把整段 traceback 抛给用户。"""
     cn = _PLATFORM_CN.get(platform, platform)
     env_name = (_COOKIE_ATTR.get(platform) or "").upper()  # 如 mc_cookie_xhs -> MC_COOKIE_XHS
     text = output or ""
-    # 登录流程常把环境故障也写成“登录失败”；只有明确的登录态证据才判 Cookie 失效。
+    # 验证码和限流不等于过期，不能引导用户通过换凭证或换 IP 绕过验证。
     if "CAPTCHA" in text or "Verifytype" in text or "验证码" in text:
-        return f"{cn}触发验证码风控，建议开启代理IP池换 IP 或稍后重试", CollectFailureKind.RISK_CONTROL
+        return {"reason": "challenge_required", "next_action": "complete_platform_challenge", "message": f"{cn}触发验证码，请通过平台正常登录完成验证后重新验证采集凭证"}
     if "IPBlock" in text or "IP_ERROR" in text or "访问频次" in text:
-        return f"{cn}访问频次过高被限制，建议开启代理IP池或降低采集频率", CollectFailureKind.RISK_CONTROL
-    if any(marker in text for marker in ("net::ERR_", "ConnectionError", "ConnectTimeout", "ReadTimeout", "ProxyError", "连接失败", "网络错误")):
-        return f"{cn}采集网络异常，请检查网络、VPN 或代理后重试", CollectFailureKind.NETWORK
-    if "登录已过期" in text or "Login state result: False" in text:
+        return {"reason": "rate_limited", "next_action": "wait_for_rate_limit", "message": f"{cn}访问频次过高被限制，请降低采集频率并等待限制解除"}
+    # 注入前匿名会话 False、普通登录失败均不能证明所选凭证过期。
+    if "登录已过期" in text:
         tip = f"{cn}登录已过期"
         if env_name:
-            tip += f"，请在当前任务 Owner 的采集账号设置中更新 {env_name}"
-        return tip, CollectFailureKind.AUTH_INVALID
-    # 兜底：只取最后一行非空信息，不吐整段 traceback
-    last = next((ln.strip() for ln in reversed(text.splitlines()) if ln.strip()), "")
-    return (f"{cn}采集失败：{last[:120]}" if last else f"{cn}采集失败"), CollectFailureKind.UNKNOWN
+            tip += f"，请在采集账号设置中更新正在使用的 Cookie；个人配置优先，无个人配置时使用平台配置"
+        return {"reason": "login_required", "next_action": "reauthenticate_selected_account", "message": tip}
+    # 第三方异常可能带完整请求或凭证，不能直接透传到会话和交付。
+    return {"reason": "collection_failed", "next_action": "inspect_collection_service", "message": f"{cn}采集失败，请核对登录状态与采集服务配置"}
+
+
+def _operation_evidence(spec: TaskSpec, result: CollectResult) -> dict:
+    """只描述本次操作事实，不能用成功采集推断登录身份或未来权限。"""
+    primary = "detail" if spec.urls else "search"
+    failure = result.coverage.get("failure") or {}
+    evidence = {primary: {
+        "status": ("partial" if result.coverage.get("collector_timeout") else "succeeded") if result.success else "unknown",
+        "reason": failure.get("reason", "operation_completed" if result.success else "operation_unconfirmed"),
+        "next_action": failure.get("next_action", "none" if result.success else "inspect_collection_service"),
+    }}
+    if spec.include_comments or spec.analysis_type == AnalysisType.VOC or spec.data_type == DataType.COMMENT:
+        coverage = [item.metadata.get("comment_coverage") or {} for item in result.items]
+        complete = result.success and bool(coverage) and all(item.get("truncated") is False for item in coverage)
+        partial = any(item.get("truncated") is True for item in coverage) or any(
+            item.metadata.get("comments") or item.metadata.get("kind") == "comment" for item in result.items)
+        evidence["comments"] = {
+            "status": "succeeded" if complete else "partial" if partial else "unknown",
+            "reason": "operation_completed" if complete else failure.get("reason", "comment_coverage_incomplete"),
+            "next_action": "none" if complete else failure.get("next_action", "review_coverage"),
+        }
+    return evidence
 
 
 def _proxy_env() -> dict:
@@ -117,15 +142,6 @@ def _proxy_env() -> dict:
     if settings.mc_wandou_app_key:
         env["WANDOU_APP_KEY"] = settings.mc_wandou_app_key
     return env
-
-
-def _cdp_env() -> dict:
-    """CDP 模式：让 MediaCrawler 连接本机真实安装的 Chrome/Edge 采集，而非 Playwright 自带的
-    裸 Chromium。真实浏览器指纹能显著降低抖音/B站这类设备指纹风控较重的平台误判登录态失效的概率。
-    """
-    if not settings.mc_enable_cdp_mode:
-        return {}
-    return {"MC_ENABLE_CDP_MODE": "true"}
 
 
 def _build_cmd(python_exe: str, platform: str, keywords: str, want_comments: bool, cookie: str,
@@ -247,32 +263,99 @@ class SocialMediaCollector(BaseCollector):
     tier = 0  # 社媒专用，命中即最优先
 
     def is_available(self) -> bool:
-        path = settings.mediacrawler_path
+        from src.config.cookie_probe_binding import current_probe_environment
+        frozen = current_probe_environment()
+        path = frozen["collector_path"] if frozen else settings.mediacrawler_path
         return bool(path) and Path(path).expanduser().is_dir()
 
     def matches(self, spec: TaskSpec) -> bool:
         return bool(_resolve_platform(spec))
 
-    async def collect(self, spec: TaskSpec) -> CollectResult:
+    async def verify_cookie(self, spec: TaskSpec) -> CollectResult:
+        from src.config.cookie_probe_binding import capture_probe_environment, current_probe_environment, probe_environment_context
+        from src.config.cookie_identity import record_identity, identity_verification
+        from src.config.user_ctx import frozen_effective_values
+        key = _COOKIE_ATTR.get(_resolve_platform(spec))
+        if not key:
+            return await self.collect(spec, identity_probe=True)
+        environment = current_probe_environment() or capture_probe_environment()
+        with frozen_effective_values([key]) as values, probe_environment_context(environment), identity_verification(key, values[key], environment):
+            result = await self.collect(spec, identity_probe=True)
+            try:
+                record_identity(key, values[key], environment, result.authentication if result.success else {})
+            except OSError:
+                # 身份缓存写失败不能改变原验证结论；后续恢复仍会因缺证据拒绝。
+                logger.warning("采集账号证明未能保存")
+            return result
+
+    async def collect(self, spec: TaskSpec, *, identity_probe: bool = False) -> CollectResult:
+        platform = _resolve_platform(spec)
+        cookie = _platform_cookie(platform)
+        parsed = SimpleCookie()
+        try:
+            parsed.load(cookie)
+        except Exception:
+            pass
+        identity = parsed["web_session"].value if platform == "xhs" and "web_session" in parsed else ";".join(sorted(cookie.split(";")))
+        key = hashlib.sha256((platform + "\0" + identity).encode("utf-8")).hexdigest()
+        lock_dir = Path(settings.webui_db_path).resolve().parent / ".collector-locks"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        lock = FileLock(lock_dir / (key + ".lock"), thread_local=False)
+        deadline = asyncio.get_running_loop().time() + 10 * settings.collect_timeout_mediacrawler_seconds
+        # 本实例按凭证串行；文件锁兼容多进程，不将凭证或 Owner 明文写入文件名。
+        while True:
+            from src.api.execution import execution_checkpoint
+            execution_checkpoint()
+            try:
+                lock.acquire(timeout=0)
+                break
+            except LockTimeout:
+                if asyncio.get_running_loop().time() >= deadline:
+                    return CollectResult(False, self.name, message="共享采集凭证排队超时，请稍后重试")
+                await asyncio.sleep(0.05)
+        try:
+            execution_checkpoint()
+            # 验证、不同 Owner 和并发任务不能共享按日期追加的结果文件。
+            with TemporaryDirectory(prefix="mangrove-mc-") as run_dir:
+                if identity_probe:
+                    return await self._collect(spec, Path(run_dir), cookie, identity_probe=True)
+                result = await self._collect(spec, Path(run_dir), cookie)
+                result.coverage["operations"] = _operation_evidence(spec, result)
+                from src.config.user_ctx import get_user_override
+                result.coverage["connection"] = {"platform": platform, "source":
+                    "unconfigured" if not cookie else "personal" if get_user_override(_COOKIE_ATTR.get(platform, "")) is not None else "platform"}
+                return result
+        finally:
+            lock.release()
+
+    async def _collect(self, spec: TaskSpec, run_dir: Path, cookie: str, *, identity_probe: bool = False) -> CollectResult:
         if not self.is_available():
             return CollectResult(False, self.name, message="MediaCrawler 未配置（MEDIACRAWLER_PATH）")
         platform = _resolve_platform(spec)
+        if identity_probe and not cookie:
+            return CollectResult(False, self.name, message="未配置 Cookie，无法验证账号身份")
         direct_urls = list(spec.urls or [])
         if not platform:
             return CollectResult(False, self.name, message="未识别到 MediaCrawler 支持的平台")
+        if spec.include_comments and platform != "xhs":
+            return CollectResult(False, self.name, message="附带评论目前仅支持小红书")
+        xhs_options = platform == "xhs" and (spec.include_comments or spec.xhs_sort or spec.xhs_note_type)
+        if xhs_options and not cookie:
+            return CollectResult(False, self.name, message="小红书专属采集需要配置个人或平台 Cookie")
         if not direct_urls and not spec.keywords:
             return CollectResult(False, self.name, message="社媒采集需要关键词")
 
-        mc_dir = Path(settings.mediacrawler_path).expanduser()
-        python_exe = settings.mediacrawler_python or sys.executable
+        from src.config.cookie_probe_binding import current_probe_environment
+        frozen = current_probe_environment()
+        mc_dir = Path(frozen["collector_path"] if frozen else settings.mediacrawler_path).expanduser()
+        python_exe = frozen["python"] if frozen else settings.mediacrawler_python or sys.executable
         keywords = ",".join(spec.keywords)
         # VOC/评论类任务：槽点在评论里，自动请求抓取评论
         want_comments = (
-            spec.analysis_type == AnalysisType.VOC or spec.data_type == DataType.COMMENT
+            spec.include_comments or spec.analysis_type == AnalysisType.VOC or spec.data_type == DataType.COMMENT
         )
 
         # 以子进程运行 MediaCrawler 搜索，结果存 JSON
-        cookie = _platform_cookie(platform)
         # 帖子数：尊重 max_items，但封顶到 collector_max_items，防止设过大拖垮浏览器采集
         max_notes = max(1, min(spec.max_items, settings.collector_max_items))
 
@@ -292,96 +375,149 @@ class SocialMediaCollector(BaseCollector):
             )
 
         cmd = (_build_detail_cmd(python_exe, platform, direct_urls, want_comments, cookie, max_notes) if direct_urls else _build_cmd(python_exe, platform, keywords, want_comments, cookie, max_notes))
+        if "--cookies" in cmd:
+            index = cmd.index("--cookies")
+            del cmd[index:index + 2]
+        credential_input = json.dumps(cookie, ensure_ascii=False).encode("utf-8")
+        if len(credential_input) > 131072:
+            return CollectResult(False, self.name, message="采集凭证超过读取上限")
+        cmd[1:2] = [str(Path(__file__).resolve().parents[2] / "scripts" / "mediacrawler_isolated.py"),
+                    "identity" if identity_probe else "xhs" if platform == "xhs" else "default"]
+        cmd += ["--save_data_path", str(run_dir)]
+        if platform == "xhs" and not direct_urls:
+            cmd += ["--start", str(spec.xhs_search_page)]
+        if spec.include_comments:
+            cmd += ["--get_sub_comment", "yes", "--max_comments_count_singlenotes", str(spec.comment_limit)]
         # 日志不打印 cookie 明文，避免泄露登录态
-        safe_cmd = [("***" if i and cmd[i - 1] == "--cookies" else a) for i, a in enumerate(cmd)]
+        safe_cmd = [("***" if i and cmd[i - 1] in {"--cookies", "--specified_id"} else a) for i, a in enumerate(cmd)]
         logger.info("调用 MediaCrawler: %s (cwd=%s, 登录=%s)",
                     " ".join(safe_cmd), mc_dir, "cookie" if cookie else "扫码/会话")
-        run_start = time.time()
         # 把“动态采集间隔区间”以环境变量注入子进程，供 MediaCrawler 的 config 读取，
         # 实现每次 sleep 在 [min, max] 间随机、模拟真人节奏规避频次风控。
-        env = os.environ.copy()
+        from src.config.secret_refs import RUNTIME_CONFIG_SECRET_KEYS
+        cookie_env_keys = {key.upper() for key in RUNTIME_CONFIG_SECRET_KEYS if "cookie" in key} | {"COOKIES"}
+        # 部署可能直接以环境变量提供凭证，不能让它们再次流入子进程或浏览器。
+        env = dict(frozen["environment"]) if frozen else {key: value for key, value in os.environ.items() if key.upper() not in cookie_env_keys}
         # Windows 默认代码页可能是 cp1252，execjs 向 Node.js 写入含中文的签名脚本时会崩溃。
         env["PYTHONUTF8"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
-        env["MC_CRAWL_MIN_SLEEP_SEC"] = str(settings.mc_crawl_min_sleep_sec)
-        env["MC_CRAWL_MAX_SLEEP_SEC"] = str(settings.mc_crawl_max_sleep_sec)
+        # 显式清空未选的参数，不能继承宿主另一任务的检索范围。
+        env["MANGROVE_XHS_TIMEOUT_SECONDS"] = str(frozen["timeout"] if frozen else settings.collect_timeout_mediacrawler_seconds)
+        env["MANGROVE_XHS_SORT"] = spec.xhs_sort or ""
+        env["MANGROVE_XHS_NOTE_TYPE"] = spec.xhs_note_type or ""
+        env["MC_CRAWL_MIN_SLEEP_SEC"] = str(frozen["sleep_min"] if frozen else settings.mc_crawl_min_sleep_sec)
+        env["MC_CRAWL_MAX_SLEEP_SEC"] = str(frozen["sleep_max"] if frozen else settings.mc_crawl_max_sleep_sec)
         # 代理IP池（启用时）：反国内社媒风控，优于服务端挂境外 VPN
-        proxy_env = _proxy_env()
+        proxy_env = {} if frozen else _proxy_env()
         env.update(proxy_env)
         if proxy_env:
             logger.info("MediaCrawler 启用代理IP池：provider=%s", settings.mc_ip_proxy_provider)
-        # CDP 模式（反检测）：连接本机真实浏览器，降低抖音/B站等平台的风控识别率
-        cdp_env = _cdp_env()
-        env.update(cdp_env)
-        if cdp_env:
-            logger.info("MediaCrawler 启用 CDP 模式（连接本机真实浏览器）")
+        # 独立入口统一禁用共享 CDP，不把宿主浏览器会话当作当前凭证的验证结果。
+        env["MC_ENABLE_CDP_MODE"] = "false"
+        timed_out = False
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                cwd=str(mc_dir),
-                env=env,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            # 超时读 settings（与 collect 节点外层一致），避免内层写死后改 .env 不生效
-            mc_timeout = settings.collect_timeout_mediacrawler_seconds
-            try:
-                stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=mc_timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
-                return CollectResult(False, self.name, message=f"MediaCrawler 运行超时（{mc_timeout:.0f}s）")
+            # 文件承接输出，避免子进程继承 PIPE 或输出缓冲满时阻塞超时回收。
+            with TemporaryFile(mode="w+b") as process_output:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(mc_dir),
+                    env=env,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=process_output,
+                    stderr=asyncio.subprocess.STDOUT,
+                    **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}),
+                )
+                mc_timeout = frozen["timeout"] if frozen else settings.collect_timeout_mediacrawler_seconds
+                try:
+                    await asyncio.wait_for(proc.communicate(input=credential_input), timeout=mc_timeout)
+                except asyncio.TimeoutError:
+                    if not (xhs_options and spec.include_comments):
+                        return CollectResult(False, self.name, message=f"MediaCrawler 运行超时（{mc_timeout:.0f}s）")
+                    # 先回收本次进程树，再只读取当前目录中完整且来源匹配的记录。
+                    timed_out = True
+                finally:
+                    # 只回收本次创建的进程树，且回收有界；不触碰共享浏览器或未知进程。
+                    if proc.returncode is None:
+                        try:
+                            if os.name == "nt":
+                                await asyncio.to_thread(
+                                    subprocess.run, ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    timeout=5, creationflags=subprocess.CREATE_NO_WINDOW,
+                                )
+                            else:
+                                os.killpg(proc.pid, signal.SIGKILL)
+                        finally:
+                            if proc.returncode is None:
+                                proc.kill()
+                            await asyncio.wait_for(proc.wait(), timeout=5)
+                process_output.seek(0)
+                stdout = process_output.read()
         except Exception as e:
             # 部分异常（如某些 OSError）str() 为空，只报错误类型看不出原因；
             # 完整堆栈记日志备查，用户看到的消息至少带上异常类型名。
             logger.exception("MediaCrawler 子进程启动失败")
             return CollectResult(False, self.name, message=f"MediaCrawler 启动失败: {type(e).__name__}: {e}")
 
-        if proc.returncode != 0:
+        if proc.returncode != 0 and not timed_out:
             text = (stdout or b"").decode("utf-8", "ignore")
             # 翻译成用户可操作的一句话（登录过期/风控/频次…），并记录原始尾部到日志备查
-            logger.warning("MediaCrawler 退出码 %s，原始尾部：%s", proc.returncode, text[-500:])
+            logger.warning("MediaCrawler 退出码 %s，平台：%s", proc.returncode, platform)
             fallback = await direct_fallback()
             if fallback:
                 return fallback
-            message, failure_kind = _diagnose_mc_failure(platform, text)
-            return CollectResult(
-                False,
-                self.name,
-                message=message,
-                failure_kind=failure_kind,
-                credential_key=_COOKIE_ATTR.get(platform) if failure_kind is CollectFailureKind.AUTH_INVALID else None,
-            )
+            failure = _diagnose_mc_failure(platform, text)
+            return CollectResult(False, self.name, message=failure.pop("message"), coverage={"failure": failure})
 
-        # 只读本次运行后新生成的 JSON（按 mtime 过滤，避免读到历史旧数据）
-        data_dir = mc_dir / "data"
-        all_json = list(data_dir.rglob("*.json")) if data_dir.exists() else []
-        fresh = [p for p in all_json if p.stat().st_mtime >= run_start - 5]
-        fresh.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        if identity_probe:
+            identity_path = run_dir / "identity.json"
+            try:
+                if not identity_path.is_file() or identity_path.stat().st_size > 4096:
+                    raise ValueError("缺少有界身份探测结果")
+                authentication = json.loads(identity_path.read_text(encoding="utf-8"))
+                if not isinstance(authentication, dict) or authentication.get("status") not in {"valid", "invalid", "unknown"}:
+                    raise ValueError("身份探测结果无效")
+            except (ValueError, OSError):
+                authentication = {"status": "unknown", "reason": "identity_probe_failed"}
+            return CollectResult(authentication["status"] == "valid", self.name, authentication=authentication)
+
+        # 只读本次调用、当前平台的产物；共享历史文件的修改时间不能证明数据归属。
+        data_dir = run_dir / {"dy": "douyin", "wb": "weibo", "ks": "kuaishou"}.get(platform, platform) / "json"
         records: list = []
-        for jf in fresh[:20]:
+        for jf in sorted(data_dir.glob("*.json")):
             try:
                 _flatten_records(json.loads(jf.read_text(encoding="utf-8")), records)
             except Exception:
                 continue
         expected_ids = {content_id_from_url(u) for u in direct_urls if content_id_from_url(u)}
         direct_limit = min(len(direct_urls), spec.max_items) if direct_urls else spec.max_items
+        search_coverage_path = run_dir / "search_coverage.json"
+        search_coverage = json.loads(search_coverage_path.read_text(encoding="utf-8")) if search_coverage_path.is_file() else {}
 
+        if not records and timed_out:
+            return CollectResult(False, self.name, message=f"MediaCrawler 运行超时（{mc_timeout:.0f}s），未取得可保留数据")
         if not records:
+            pages = search_coverage.get("pages") or []
+            if pages and all(page.get("item_count") == 0 and page.get("has_more") is False for page in pages):
+                return CollectResult(True, self.name, message="本次检索未返回更多内容", coverage=search_coverage)
             fallback = await direct_fallback()
             if fallback:
                 return fallback
-            return CollectResult(
-                False,
-                self.name,
-                message="MediaCrawler 未产出可解析结果",
-                failure_kind=CollectFailureKind.NO_DATA,
-            )
+            return CollectResult(False, self.name, message="MediaCrawler 未产出可解析结果")
 
         # 区分评论与帖子；VOC 优先用评论（无评论则回退帖子）
         comments = [r for r in records if r.get("comment_id")]
         contents = [r for r in records if not r.get("comment_id")]
-        use_comments = want_comments and bool(comments)
+        if not direct_urls:
+            expected_keywords = {word.strip() for word in keywords.split(",") if word.strip()}
+            # 搜索来源缺失或串词时失败关闭，不能把别的任务结果交给分析器。
+            if not contents or any(str(r.get("source_keyword") or "").strip() not in expected_keywords for r in contents):
+                return CollectResult(False, self.name, message="采集结果的搜索词与本次任务不一致或缺失，已拒绝使用")
+        # 附带评论不改变帖子的结果粒度；原有纯评论任务仍返回评论。
+        use_comments = want_comments and bool(comments) and not spec.include_comments
         chosen = comments if use_comments else (contents or records)
+        coverage_path = run_dir / "comment_coverage.json"
+        coverage = json.loads(coverage_path.read_text(encoding="utf-8")) if coverage_path.is_file() else {}
 
         items: list[CollectedItem] = []
         for rec in chosen[: direct_limit]:
@@ -390,25 +526,49 @@ class SocialMediaCollector(BaseCollector):
             if direct_urls and (not canonical_url or not content_id or (expected_ids and content_id not in expected_ids)):
                 continue
             requested_url = direct_urls[0] if direct_urls else ""
+            public_fields = {}
+            if platform == "xhs":
+                from ._xhs import public_note_fields, public_note_url
+
+                canonical_url = public_note_url(str(canonical_url))
+                requested_url = public_note_url(str(requested_url))
+                if not rec.get("comment_id"):
+                    public_fields = public_note_fields(rec, comments if spec.include_comments else [])
+                    if spec.include_comments:
+                        public_fields["comment_coverage"] = coverage.get(content_id, {
+                            "status": "partial" if timed_out else "unknown", "truncated": True,
+                            "reasons": ["collector_timeout" if timed_out else "coverage_not_reported"],
+                        })
             media_url = rec.get("video_download_url") or rec.get("video_url") or ""
+            if platform == "xhs":
+                media_url = public_note_url(str(media_url))
             content = rec.get("content") or rec.get("desc") or rec.get("title") or ""
+            access_handle = None
+            if platform == "xhs" and spec._collection_task_id:
+                from .source_access import seal_access, xhs_access_url
+                access_url = xhs_access_url(rec)
+                if access_url:
+                    access_handle = seal_access(spec._collection_task_id, content_id, access_url)
             items.append(
                 CollectedItem(
+                    access_handle=access_handle,
                     url=canonical_url,
                     title=rec.get("title") or rec.get("nickname") or "",
                     content=str(content),
                     metadata={
+                        **public_fields,
                         "engine": self.name,
                         "platform": platform,
                         "kind": "comment" if rec.get("comment_id") else "post",
                         "collection_mode": "direct" if direct_urls else "discovery",
+                        "source_keyword": rec.get("source_keyword") or "",
                         "requested_url": requested_url,
                         "canonical_url": canonical_url,
                         "content_id": content_id,
                         "identity_verified": bool(direct_urls and canonical_url and content_id) or not direct_urls,
                         "media_url": media_url,
                         "raw_record": {
-                            k: rec.get(k)
+                            k: (public_note_url(str(rec[k])) if platform == "xhs" and k in {"video_download_url", "video_url"} else rec.get(k))
                             for k in ("aweme_id", "note_id", "video_id", "video_download_url", "video_url")
                             if rec.get(k)
                         },
@@ -419,14 +579,14 @@ class SocialMediaCollector(BaseCollector):
             fallback = await direct_fallback()
             if fallback:
                 return fallback
-            return CollectResult(
-                False,
-                self.name,
-                message="MediaCrawler 未返回与目标链接一致的内容",
-                failure_kind=CollectFailureKind.NO_DATA,
-            )
+            return CollectResult(False, self.name, message="MediaCrawler 未返回与目标链接一致的内容")
         kind = "评论" if use_comments else "帖子"
-        return CollectResult(True, self.name, items=items, message=f"采集 {len(items)} 条社媒{kind}数据")
+        partial_comments = sum(bool(item.metadata.get("comment_coverage", {}).get("truncated")) for item in items)
+        message = f"采集 {len(items)} 条社媒{kind}数据"
+        if timed_out or partial_comments:
+            search_coverage.update(partial=True, collector_timeout=timed_out, incomplete_comment_notes=partial_comments)
+            message += ("；采集超时，已保留有效数据" if timed_out else "") + f"；{partial_comments} 篇评论未采全，详见覆盖说明"
+        return CollectResult(True, self.name, items=items, message=message, coverage=search_coverage)
 
 
 register(SocialMediaCollector())

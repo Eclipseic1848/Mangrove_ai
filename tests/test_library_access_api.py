@@ -43,6 +43,65 @@ def test_library_api_reads_only_own_content_for_every_role(library_api, kind, ro
     assert "私有标题-legacy" not in response.text
 
 
+def test_workspace_method_exposes_verified_usage_without_private_source(library_api):
+    client, _, root = library_api
+    path = root / "TEMPLATES_DIR" / "a.md"
+    path.write_text("---\n" + yaml.safe_dump({
+        "owner_id": "owner-a", "scope": "owner", "title": "表格方法",
+        "data_type": "workspace_table", "uses": 3, "verified_uses": "2",
+        "source_task_id": "不得公开的来源", "keywords": ["订单"],
+    }, allow_unicode=True) + "---\n核对原始单位\n", encoding="utf-8")
+    response = client.get("/api/templates")
+    assert response.status_code == 200
+    entry = response.json()["templates"][0]
+    assert entry["verified_uses"] == 2
+    assert "source_task_id" not in entry
+    assert "不得公开的来源" not in response.text
+
+
+@pytest.mark.parametrize("kind,field", [("templates", "uses"), ("templates", "verified_uses"), ("templates", "quality_avg"), ("lessons", "occurrences"), ("lessons", "helped_avoid")])
+@pytest.mark.parametrize("value", ["not-a-number", float("nan"), float("inf"), -1])
+def test_malformed_library_statistics_do_not_break_other_entries(library_api, kind, field, value):
+    client, _, root = library_api
+    directory = root / ("TEMPLATES_DIR" if kind == "templates" else "LESSONS_DIR")
+    path = directory / "broken.md"
+    raw = "---\n" + yaml.safe_dump({
+        "owner_id": "owner-a", "scope": "owner", "title": "异常条目",
+        "keywords": ["异常"], field: value,
+    }, allow_unicode=True) + "---\n不得因此导致整个库不可用\n"
+    path.write_text(raw, encoding="utf-8")
+    response = client.get(f"/api/{kind}")
+    assert response.status_code == 200
+    assert [entry["slug"] for entry in response.json()[kind]] == ["a"]
+    assert path.read_text(encoding="utf-8") == raw
+    if kind == "templates":
+        from src.conductor.task_spec import TaskSpec
+        recalled = templates.match_template(
+            TaskSpec(intent="私有关键词-a", keywords=["私有关键词-a"], data_type="article"),
+            owner_id="owner-a",
+        )
+        assert recalled["slug"] == "a"
+    else:
+        recalled, _ = lessons.find_active_lessons(
+            "article", ["私有关键词-a"], "私有关键词-a", owner_id="owner-a",
+        )
+        assert [entry["slug"] for entry in recalled] == ["a"]
+
+
+@pytest.mark.parametrize("kind", ["templates", "lessons"])
+@pytest.mark.parametrize("metadata", ["- 非对象元数据", "owner_id: owner-a\nscope: owner\nkeywords: 7"])
+def test_malformed_library_metadata_does_not_break_listing(library_api, kind, metadata):
+    client, _, root = library_api
+    directory = root / ("TEMPLATES_DIR" if kind == "templates" else "LESSONS_DIR")
+    path = directory / "broken.md"
+    raw = f"---\n{metadata}\n---\n异常格式\n"
+    path.write_text(raw, encoding="utf-8")
+    response = client.get(f"/api/{kind}")
+    assert response.status_code == 200
+    assert [entry["slug"] for entry in response.json()[kind]] == ["a"]
+    assert path.read_text(encoding="utf-8") == raw
+
+
 @pytest.mark.parametrize("kind", ["templates", "lessons"])
 def test_only_owner_confirmed_copy_is_shared_and_can_be_withdrawn(library_api, kind):
     client, actor, root = library_api
@@ -70,18 +129,22 @@ def test_only_owner_confirmed_copy_is_shared_and_can_be_withdrawn(library_api, k
     assert [e["slug"] for e in client.get(f"/api/{kind}").json()[kind]] == ["a"]
 
 
-def test_scan_log_does_not_publish_legacy_private_details(monkeypatch):
+@pytest.mark.parametrize("role,expected", [("user", 403), ("admin", 200), ("super_admin", 200)])
+def test_scan_log_does_not_publish_legacy_private_details(monkeypatch, role, expected):
     from src.api.routes import library_dedup_routes
     from types import SimpleNamespace
 
     row = {"id": 1, "ran_at": "2026-09-07", "templates_scanned": 2, "templates_merged": 1, "lessons_scanned": 0, "lessons_merged": 0, "stale_drafts_deleted": 0, "details": '[{"title":"私有历史标题","body":"秘密"}]'}
     monkeypatch.setattr(library_dedup_routes, "get_store", lambda: SimpleNamespace(library_dedup_scan_log_recent=lambda **kw: [row]))
     app = FastAPI()
-    app.dependency_overrides[get_current_user] = lambda: {"user_id": "admin", "role": "admin"}
+    app.dependency_overrides[get_current_user] = lambda: {"user_id": "actor", "role": role}
     app.include_router(library_dedup_routes.router)
     with TestClient(app) as client:
         response = client.get("/api/library-dedup-log")
-    assert response.status_code == 200
+    assert response.status_code == expected
+    if expected == 403:
+        assert "私有历史标题" not in response.text
+        return
     assert response.json()["log"][0]["templates_scanned"] == 2
     assert "私有历史标题" not in response.text
     assert "details" not in response.json()["log"][0]

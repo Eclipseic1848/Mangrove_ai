@@ -21,6 +21,7 @@ import logging
 import time
 import uuid
 from datetime import datetime
+from src.timezone import now as beijing_now
 from operator import add
 from pathlib import Path
 from typing import Annotated, Any, AsyncIterator, Dict, Iterator, List, Optional, Tuple, TypedDict
@@ -799,7 +800,7 @@ async def astream_data_prep(
     依次产出 ("node", {"node": name, "view": 摘要}) 表示某节点完成，
     最后产出 ("final", 最终状态字典)。
     """
-    tid = task_id or (datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6])
+    tid = task_id or (beijing_now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6])
     init: DataPrepState = {
         "task_id": tid,
         "user_input": user_input,

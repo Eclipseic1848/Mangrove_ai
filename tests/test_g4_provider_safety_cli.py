@@ -6,10 +6,10 @@ from src.account_execution import ExecutionAuthorization, execution_context
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
-import ipaddress
 import json
 from pathlib import Path
 import shutil
+import socket
 import sqlite3
 import subprocess
 import ssl
@@ -3558,6 +3558,7 @@ def test_g4_assessment_combines_independent_provider_batches(
 
 
 def test_provider_relay_pins_validated_ip_and_preserves_tls_identity(tmp_path):
+    from src.model_connections.catalog import PRESETS_BY_ID
     observed: dict[str, object] = {}
 
     def provider(request: httpx.Request) -> httpx.Response:
@@ -3593,7 +3594,7 @@ def test_provider_relay_pins_validated_ip_and_preserves_tls_identity(tmp_path):
             owner_user_id="user-a",
             preset_id="deepseek",
             api_key="deepseek-secret-for-test",
-            model="deepseek-v4-flash",
+            model=PRESETS_BY_ID["deepseek"].recommended_model,
         )
         binding = broker.freeze_connection(
             "user-a",
@@ -3633,6 +3634,7 @@ def test_provider_relay_pins_validated_ip_and_preserves_tls_identity(tmp_path):
 
 
 def test_provider_relay_does_not_follow_redirect_or_repeat_dns(tmp_path):
+    from src.model_connections.catalog import PRESETS_BY_ID
     calls = []
     resolver_calls = []
 
@@ -3668,7 +3670,7 @@ def test_provider_relay_does_not_follow_redirect_or_repeat_dns(tmp_path):
             owner_user_id="user-a",
             preset_id="deepseek",
             api_key="deepseek-secret-for-test",
-            model="deepseek-v4-flash",
+            model=PRESETS_BY_ID["deepseek"].recommended_model,
         )
         binding = broker.freeze_connection(
             "user-a",
@@ -3795,11 +3797,15 @@ def _certificate_material(
 
 
 @pytest.mark.parametrize(
-    ("certificate_name", "expired", "should_pass"),
+    ("certificate_name", "expired", "should_pass", "fallback"),
     [
-        ("provider.test", False, True),
-        ("wrong-host.test", False, False),
-        ("provider.test", True, False),
+        # 保留资格脚本引用的原三个 node ID，再补备用地址同样不得绕过证书校验。
+        pytest.param("provider.test", False, True, False, id="provider.test-False-True"),
+        pytest.param("wrong-host.test", False, False, False, id="wrong-host.test-False-False"),
+        pytest.param("provider.test", True, False, False, id="provider.test-True-False"),
+        pytest.param("provider.test", False, True, True, id="fallback-valid"),
+        pytest.param("wrong-host.test", False, False, True, id="fallback-wrong-host"),
+        pytest.param("provider.test", True, False, True, id="fallback-expired"),
     ],
 )
 def test_pinned_transport_enforces_original_tls_identity_and_lifetime(
@@ -3807,6 +3813,7 @@ def test_pinned_transport_enforces_original_tls_identity_and_lifetime(
     certificate_name,
     expired,
     should_pass,
+    fallback,
 ):
     async def scenario() -> None:
         ca_path, cert_path, key_path = _certificate_material(
@@ -3836,13 +3843,15 @@ def test_pinned_transport_enforces_original_tls_identity_and_lifetime(
             ssl=server_context,
         )
         port = server.sockets[0].getsockname()[1]
+        refused = socket.socket()
+        refused.bind(("127.0.0.2", port))
         client_context = ssl.create_default_context(cafile=str(ca_path))
         target = ValidatedTarget(
             url=f"https://provider.test:{port}/v1/check",
             scheme="https",
             host="provider.test",
             port=port,
-            ips=(str(ipaddress.ip_address("127.0.0.1")),),
+            ips=(("127.0.0.2", "127.0.0.1") if fallback else ("127.0.0.1",)),
         )
         transport = PinnedAsyncHTTPTransport(
             target=target,
@@ -3857,6 +3866,7 @@ def test_pinned_transport_enforces_original_tls_identity_and_lifetime(
                     with pytest.raises(httpx.ConnectError):
                         await client.get(target.url)
         finally:
+            refused.close()
             server.close()
             await server.wait_closed()
 

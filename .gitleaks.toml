@@ -1,6 +1,14 @@
 title = "Mangrove Gitleaks configuration"
 minVersion = "8.30.1"
 
+[[allowlists]]
+description = "已核实的删除幂等索引结构摘要，不是密钥；只匹配该字段的当前完整哈希"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''^src/database_migrations/schema_manifest\.json$''']
+regexes = ['''^\s*"index:ix_deletion_owner_key"\s*:\s*"febde8c09bf60d887f0e9de7a36189137ab6d6d5953feb2c9c831ff0717973e8"\s*,?\s*$''']
+
 [extend]
 useDefault = true
 

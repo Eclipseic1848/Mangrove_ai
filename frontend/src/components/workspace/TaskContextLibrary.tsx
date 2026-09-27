@@ -2,24 +2,22 @@ import { useEffect, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { api, ApiError } from "@/lib/api";
 import { getTaskContextOptions, type TaskTemplateOption, type OwnerMemoryOption } from "@/lib/semanticWorkspaceApi";
+import { PersonalMemoryPanel } from "@/components/memory/PersonalMemoryPanel";
 
 const field = "mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-ring";
 const button = "rounded-lg border px-3 py-2 text-sm hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
 type Draft = Omit<TaskTemplateOption, "summary_sha256">;
-type ManagedMemory = { id: number; text: string };
 const blank = (): Draft => ({ template_id: crypto.randomUUID(), version: 1, title: "", purpose: "general", source: "owner_created", goal_contract_draft: "", method_draft: "", delivery_spec_draft: {} });
 
 // 原位管理不卸载任务输入；此组件复用版本表与个人记忆API，不执行任务。
 export function TaskContextLibrary({ open, onClose, onChanged, taskMode = false }: { open: boolean; onClose: () => void; onChanged: () => void; taskMode?: boolean }) {
   const [options, setOptions] = useState<{ templates: TaskTemplateOption[]; memories: OwnerMemoryOption[] }>({ templates: [], memories: [] });
-  const [managedMemories, setManagedMemories] = useState<ManagedMemory[]>([]);
   const [draft, setDraft] = useState<Draft>(blank);
   const baseline = useRef(JSON.stringify(draft));
   const replaceDraft = (next: Draft) => { baseline.current = JSON.stringify(next); setDraft(next); };
   const [confirmClose, setConfirmClose] = useState(false);
   const continueEditing = useRef<HTMLButtonElement>(null);
-  const [memory, setMemory] = useState("");
-  const [memoryEdit, setMemoryEdit] = useState<ManagedMemory | null>(null);
+  const [memoryState, setMemoryState] = useState({ dirty: false, busy: false });
   const [busy, setBusy] = useState(false);
   const inFlight = useRef(false);
   const generation = useRef(0);
@@ -30,13 +28,9 @@ export function TaskContextLibrary({ open, onClose, onChanged, taskMode = false 
   const refresh = async () => {
     const epoch = ++generation.current;
     try {
-      const [result, memoryResult] = await Promise.all([
-        getTaskContextOptions("web_research"),
-        api.get("/api/memory"),
-      ]);
+      const result = await getTaskContextOptions("web_research");
       if (epoch === generation.current) {
         setOptions(result);
-        setManagedMemories(memoryResult.personal ?? []);
       }
     }
     catch (reason) { if (epoch === generation.current) setError(reason instanceof Error ? reason.message : "选项读取失败"); }
@@ -55,22 +49,10 @@ export function TaskContextLibrary({ open, onClose, onChanged, taskMode = false 
     try { await api.post("/api/semantic-workspace/context-templates", payload); setUnknown(null); replaceDraft(blank()); }
     catch (reason) { if (reason instanceof ApiError && [404, 409, 422].includes(reason.status)) setUnknown(null); throw reason; }
   });
-  const saveMemory = () => run(async () => {
-    if (memoryEdit) {
-      await api.patch(`/api/memory/self/${memoryEdit.id}`, {
-        text: memory.trim(),
-        expected_text: memoryEdit.text,
-      });
-    } else {
-      await api.post("/api/memory/self", { text: memory.trim() });
-    }
-    setMemory("");
-    setMemoryEdit(null);
-  });
   const requestClose = () => {
     // 在途尚未返回；未知结果允许显式放弃本地编辑，但不能谎称撤销服务端保存。
-    if (inFlight.current) { setError("保存尚未确认，请先核对原操作再离开。"); return; }
-    if (unknown || JSON.stringify(draft) !== baseline.current || memory.trim()) setConfirmClose(true);
+    if (inFlight.current || memoryState.busy) { setError("保存尚未确认，请先核对原操作再离开。"); return; }
+    if (unknown || JSON.stringify(draft) !== baseline.current || memoryState.dirty) setConfirmClose(true);
     else onClose();
   };
   return <Dialog.Root open={open} onOpenChange={value => { if (!value) requestClose(); }}><Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-50 bg-black/40" />
@@ -94,9 +76,8 @@ export function TaskContextLibrary({ open, onClose, onChanged, taskMode = false 
         </fieldset>
         <div className="flex flex-wrap gap-2"><button type="button" className={button} disabled={busy || !draft.title.trim() || !draft.goal_contract_draft.trim()} onClick={() => void save()}>{unknown ? "确认原版本保存" : "保存新版本"}</button><button type="button" className={button} disabled={busy || Boolean(unknown)} onClick={() => { replaceDraft(blank()); setError(""); }}>取消编辑</button></div>
       </section>
-      <section className="mt-5 space-y-3 border-t pt-4" aria-label="本人记忆"><h3 className="font-medium">本人记忆</h3><p className="text-xs text-muted-foreground">只在任务中明确选择后应用；管理不会自动应用全部记忆。</p>
-        {managedMemories.map(item => <div key={item.id} className="flex items-start gap-3 text-sm"><p className="min-w-0 flex-1 break-words">{item.text}</p><button type="button" className={button} disabled={busy} onClick={() => { setMemoryEdit(item); setMemory(item.text); }}>纠正记忆 {item.id}</button><button type="button" className={button} disabled={busy} onClick={() => void run(async () => { await api.del(`/api/memory/self/${item.id}`); if (memoryEdit?.id === item.id) { setMemory(""); setMemoryEdit(null); } })}>删除记忆 {item.id}</button></div>)}
-        <label className="block text-sm">{memoryEdit ? "纠正个人偏好" : "新增个人偏好"}<textarea className={field} value={memory} maxLength={4000} disabled={busy} onChange={event => setMemory(event.target.value)} /></label><div className="flex flex-wrap gap-2"><button type="button" className={button} disabled={busy || !memory.trim()} onClick={() => void saveMemory()}>{memoryEdit ? "保存纠正" : "保存个人记忆"}</button>{memoryEdit && <button type="button" className={button} disabled={busy} onClick={() => { setMemory(""); setMemoryEdit(null); }}>取消纠正</button>}</div>
+      <section className="mt-5 space-y-3 border-t pt-4" aria-label="本人记忆"><h3 className="font-medium">我的记忆</h3><p className="text-xs text-muted-foreground">新任务会参考相关偏好，当前明确要求优先；不会应用全部记忆。</p>
+        {open && <PersonalMemoryPanel onStateChange={setMemoryState} onChanged={() => { onChanged(); void refresh(); }} />}
       </section>
     </Dialog.Content></Dialog.Portal>
     <Dialog.Root open={confirmClose} onOpenChange={setConfirmClose}><Dialog.Portal>
@@ -104,7 +85,7 @@ export function TaskContextLibrary({ open, onClose, onChanged, taskMode = false 
       <Dialog.Content role="alertdialog" className="fixed left-1/2 top-1/2 z-[60] w-[calc(100%_-_1.5rem)] max-w-sm -translate-x-1/2 -translate-y-1/2 space-y-4 rounded-xl border bg-background p-4 shadow-xl" onOpenAutoFocus={event => { event.preventDefault(); continueEditing.current?.focus(); }}>
         <Dialog.Title className="font-semibold">离开未保存编辑</Dialog.Title>
         <Dialog.Description className="text-sm text-muted-foreground">{unknown ? "服务端可能已经保存。放弃仅清除本地待确认编辑，不会撤销服务端保存；可继续确认原版本，或返回后重新查看目录。" : "模板或个人记忆有未保存内容。继续编辑，或明确放弃这些内容后返回；任务资料不受影响。"}</Dialog.Description>
-        <div className="flex flex-wrap gap-2"><button ref={continueEditing} type="button" className={button} onClick={() => setConfirmClose(false)}>继续编辑</button><button type="button" className={button} onClick={() => { replaceDraft(blank()); setMemory(""); setMemoryEdit(null); setUnknown(null); setError(""); setConfirmClose(false); onClose(); }}>{unknown ? "放弃本地待确认编辑并返回" : "放弃未保存内容并返回"}</button></div>
+        <div className="flex flex-wrap gap-2"><button ref={continueEditing} type="button" className={button} onClick={() => setConfirmClose(false)}>继续编辑</button><button type="button" className={button} onClick={() => { replaceDraft(blank()); setMemoryState({ dirty: false, busy: false }); setUnknown(null); setError(""); setConfirmClose(false); onClose(); }}>{unknown ? "放弃本地待确认编辑并返回" : "放弃未保存内容并返回"}</button></div>
       </Dialog.Content>
     </Dialog.Portal></Dialog.Root>
     </Dialog.Root>;

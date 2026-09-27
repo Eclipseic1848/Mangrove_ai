@@ -31,3 +31,9 @@ def start_scheduler() -> None:
     if not settings.scheduler_enabled:
         return
     get_scheduler_service().start()
+
+
+async def stop_scheduler() -> None:
+    """关闭已创建的调度器，包括未开启轮询但运行过手动任务的实例。"""
+    if _service is not None:
+        await _service.stop()

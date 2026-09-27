@@ -63,7 +63,7 @@ export function Login() {
   };
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-background">
+    <div className="flex min-h-dvh w-full bg-background">
       {/* 左侧品牌 / 介绍面板（窄屏隐藏）：深色主题整体压暗，与右侧同步翻转 */}
       <div className="relative hidden w-[52%] flex-col justify-between overflow-hidden bg-gradient-to-br from-primary/95 via-primary to-[hsl(184_75%_22%)] p-12 text-white dark:from-[hsl(185_45%_15%)] dark:via-[hsl(190_50%_11%)] dark:to-[hsl(200_45%_8%)] lg:flex">
         <div className="pointer-events-none absolute inset-0">
@@ -115,7 +115,7 @@ export function Login() {
       </div>
 
       {/* 右侧登录 */}
-      <div className="relative flex flex-1 items-center justify-center px-6">
+      <div className="relative flex min-h-dvh min-w-0 flex-1 items-center justify-center px-6 pb-8 pt-28">
         {/* 顶部：出品方 LOGO（左，按主题变色，无边框）+ 主题切换（右） */}
         <img
           src="/howso-logo-full.png"

@@ -1,0 +1,90 @@
+{
+  "version": "2026-09-20-cn",
+  "unit": "1M tokens",
+  "paths": {
+    "api.deepseek.com": [
+      "",
+      "/v1",
+      "/anthropic"
+    ],
+    "dashscope.aliyuncs.com": [
+      "/compatible-mode/v1"
+    ],
+    "open.bigmodel.cn": [
+      "/api/paas/v4"
+    ]
+  },
+  "usd_to_cny": "7.0",
+  "exchange_note": "人民币按官网中国区原价估算，不由美元报价换算；美元仅按示例汇率1 USD = 7 CNY折算展示，非实时汇率。",
+  "notice": "参考价格，仅供估算，实际以官方账单为准。采用已核实的官网中国区标准按量人民币价格；无适用中国区报价不估价，本地模型无需计价。不含缓存、批量、峰谷折扣、税费及额外服务费用。",
+  "models": [
+    {
+      "model": "deepseek-flash",
+      "host": "api.deepseek.com",
+      "currency": "CNY",
+      "input": "2.00",
+      "output": "8.00",
+      "note": "中国区人民币高峰、缓存未命中参考价；不计算空闲时段和缓存折扣，非实际账单。核验：2026-09-20。",
+      "source": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/"
+    },
+    {
+      "model": "deepseek-v4-pro",
+      "host": "api.deepseek.com",
+      "currency": "CNY",
+      "input": "9.00",
+      "output": "27.00",
+      "note": "中国区人民币高峰、缓存未命中参考价；不计算空闲时段和缓存折扣，非实际账单。核验：2026-09-20。",
+      "source": "https://api-docs.deepseek.com/zh-cn/quick_start/pricing/"
+    },
+    {
+      "model": "qwen3.8-max",
+      "host": "dashscope.aliyuncs.com",
+      "currency": "CNY",
+      "input": "12.00",
+      "output": "36.00",
+      "max_input": 1000000,
+      "note": "中国·北京标准按量原价，不含缓存、批量及限时优惠；非北京端点不套价。核验：2026-09-20。",
+      "source": "https://help.aliyun.com/zh/model-studio/qwen3-8-max"
+    },
+    {
+      "model": "qwen3.8-flash",
+      "host": "dashscope.aliyuncs.com",
+      "currency": "CNY",
+      "input": "0.80",
+      "output": "2.70",
+      "max_input": 1000000,
+      "note": "中国·北京标准按量原价，不含缓存、批量及限时优惠；非北京端点不套价。核验：2026-09-20。",
+      "source": "https://help.aliyun.com/zh/model-studio/qwen3-8-flash"
+    },
+    {
+      "model": "glm-5.2",
+      "host": "open.bigmodel.cn",
+      "currency": "CNY",
+      "input": "8.00",
+      "output": "28.00",
+      "max_input": 1000000,
+      "note": "中国站标准按量原价，不含缓存命中优惠、缓存存储及工具附加费。核验：2026-09-20。",
+      "source": "https://docs.bigmodel.cn/cn/guide/start/pricing"
+    },
+    {
+      "model": "glm-5.3",
+      "host": "open.bigmodel.cn",
+      "currency": "CNY",
+      "input": "8.00",
+      "output": "28.00",
+      "max_input": 1000000,
+      "note": "中国站标准按量原价，不含缓存命中优惠、缓存存储及工具附加费。核验：2026-09-20。",
+      "source": "https://docs.bigmodel.cn/cn/guide/start/pricing"
+    },
+    {
+      "model": "glm-5.3-flash",
+      "host": "open.bigmodel.cn",
+      "currency": "CNY",
+      "input": "0.80",
+      "output": "2.80",
+      "max_input": 1000000,
+      "note": "中国站标准按量原价，不含缓存命中优惠、缓存存储及工具附加费。核验：2026-09-20。",
+      "source": "https://docs.bigmodel.cn/cn/guide/start/pricing"
+    }
+  ]
+}

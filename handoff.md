@@ -1,183 +1,176 @@
-# Mangrove 零上下文交接
+# Mangrove V3 零上下文交接
 
-> 状态：`P1_01_ENGINEERING_COMPLETE / REMEDIATION_IN_PROGRESS`
->
-> 最后核验：2026-09-12
->
-> 公开仓库：`Eclipseic1848/Mangrove_ai`
+> 最新发布授权（2026-09-27）：用户明确要求更新并推送 GitHub、发布 v1.0.0、同步 README 等。当前工作为独立工作区中的发行准备，使用 PR #191 保留双方历史并同步完整 V3 基线。原运行工作树和旧评测改动保留；精确进度以 PR、CI 和 Release 回执为准，详见状态台账 §2.0k。下方历史“无推送/PR/Release 授权”仅描述当时，不能覆盖本次授权。公司服务器、真实数据迁移和可选服务的待办不因发行而自动完成。
 
-本文件写给完全没有上下文的新会话。先读 `AGENTS.md`、`docs/status/current.md`、`CONTEXT.md`，
-再现场读取 GitHub、Git 与运行态。历史计划是证据，不是当前状态。
 
-## 0. 当前接手位置：#141/#186 本地验收通过；#138 保持暂停
+> 最新部署交付（2026-09-27）：用户已明确授权“先完整本机 Git 提交，再从该版本制作部署包”。本文件所属部署快照提交包含当前 V3 产品源码、测试、配置和迁移；精确 SHA 以交付目录的 `RELEASE-MANIFEST.md` 为准。详尽 IT 手册见 `docs/deployment/linux-migration-it-guide.md`，验证及待办统一见状态台账 `2.0j`。源码包只保留当前提交的 Git 对象，保留原 SHA，不附带已删除的旧历史样本。无推送/PR/Release 授权；业务数据与密钥须等正式停写窗口，未授权停止当前平台。不要按下方历史段落中的旧“无新提交授权”重复询问。
 
-#139 已完成、合并并关闭。真实 GitHub HTTPS、MySQL 8.0 和 PostgreSQL 16 均通过隔离工程验证；两名 Owner 使用不同只读账号、表和数据，重复水位经安全断点续读完整，跨 Owner 连接/快照与数据库权限隔离，DDL/DML 和公开 SQL 输入拒绝，密码未进入响应或产物。生产连接、生产迁移、部署和发布均未执行。
+> 最新增量（2026-09-27）：#222 全平台固定界面时间文案已清理，8088 已加载，工单已关闭；验证与边界见 `docs/status/current.md` §2.0i。时间计算与调度规则不变，无新提交推送。
 
-#138 仍为 `PAUSED_BY_USER`，普通“继续”不能解除。#140 已关闭；#141 与 #186 已完成本地工程和用户验收，PR #187 已合并，PR #183 与 Issue 最终状态须现场查询 GitHub。真实站点、生产 Cookie/Secret、生产数据库、部署和目标服务器仍是独立人工门。
+> 最新工作（2026-09-27）：#220 输出提取协议修复及真实 64 例定向复验已完成并关闭，准确结果与剩余失败见 `docs/status/current.md` §2.0g；新普通测试账号已经创建，不再询问旧账号路径。用户追加的运营趋势悬停、小时/天/周/月/年（默认天）已实现并验证，8088 已加载，证据见台账 §2.0h 与 `logs/ops-trend-20260927/`，#221 已记录结果并关闭，本轮临时服务与 Browser 标签已清理。无新提交推送，不重发旧未知，不重开 #209/#217。
 
-沿用现有 checkout；保留其他任务与用户改动，仅精确暂存本票文件。工作树中的规划文档、冻结评测数据及本机脚本可能有独立工作，不能清理或整体提交。
-主会话使用 GPT-5.6-Sol high；需要委派时固定使用 GPT-5.6-Sol medium，实际档位须核会话记录。
-Git 权限按当前用户授权及 AGENTS.md 执行；真实秘密、生产迁移/恢复、发布与不可逆操作保留独立门。
+> 最新 UI/UX 整改（2026-09-26）：已按用户认可的前端审查报告完成 UX-01—UX-11，准确状态与验证范围见 `docs/status/current.md` §2.0f；报告、测试汇总、双轴复审和本轮独立差分在 `logs/ux-fixes-20260926/`。8088 已加载验证后的构建，旧静态资源保留；本轮测试服务与 Browser 标签已清理，无需重复重跑或重启。没有新提交或远端操作；原 WIP、用户接受初稿的决定权及历史缺口保留。
 
-下面是 2026-09-04 的历史交接记录，不是当前 Issues 或服务状态。
+> 最新整改（2026-09-26）：已按全工程审查报告完成 R1–R9 与 O1/O2。最终状态、验证统计和限制统一见 `docs/status/current.md` §2.0e；本轮报告与独立差分在 `logs/review-remediation-20260926/REPORT.md`、`changes.patch`。34 个代码/测试文件在原有 WIP 上最小修改，另更新两份状态文档；没有新提交授权或远端动作。8088 已加载本轮构建，旧静态资源保留；不要重复重跑或重启服务。接受初稿仍由用户决定；此前历史缺口与关闭决定保持。
 
-## 1. 历史工作目标（2026-09-04）
+> 最新接手（2026-09-26）：用户明确同意保留历史差异与未验证记录、结束本次追溯，#217 和 #209 已 CLOSED/COMPLETED。关闭回执、确认记录和最终汇总见 `logs/issue-remediation-20260926/issue217/followup/closure.md`。不要重复询问是否结束追溯，也不要自动重开或扫描旧备份。历史结果仍为 9/6/11，资料未恢复；缺失清单漏报修复通过 22 项回归与双轴审查。没有新提交、产品源码改动或服务重启。先前输出要求错误诊断仅完成只读调查，未创建新 Issue 或修改该模块。
 
-本轮目标是自主完成 GitHub 当时剩余的 Issues，执行相称验证、PR/CI/受保护合并与关闭，然后清理
-过期产物并留下零上下文交接。该目标已完成：2026-09-04 现场查询 Open Issues 为 0。
+> #219交接（2026-09-26）：#219已获用户明确授权，精确7文件本机提交07e1559完成；184项工程回归、双轴复审、新规则身份与提交后76项回归通过，Issue已关闭。收尾见 `logs/connection-followup-20260926/closure.md`。提交时其他234个WIP哈希保持；原有未跟踪图片模块的一行接线仍留在工作区，没有推送或重启服务。#212完整评测与旧未知保留，不声称已解释旧56个运行失败。#216与#219两次限定提交授权都已执行，不扩大为新授权。准确状态见台账 §2.0d；用户决定接受或继续的边界不变。
 
-这不是“整个 P1 已完成”。完成的是 P1 决策地图与 P1-01 匿名网页首个纵切片；P1-02～P1-05、
-HTTP/数据库/认证来源、真实用户验收与发布仍是后续路线。
+> 最新增量（2026-09-26）：已接入 CSV/XLSX 自然语言表头提示，复用既有读取器；用户接受或继续的决定权不变。
+> 当前验证结果与前缀漏检见 `logs/output-check-coverage-20260926/report.md`、状态台账 §2.0c；派生规则检查不等于初稿业务成功率。无稳定收益的追加提示试验已撤回，未知调用不重发。
+> 8088 当前运行 V3，健康、入口与静态资源只读核对通过；既有 dev_reload 自动重载，无手动重启。Token 管理员页面已于 #214 完成真实验收。
+> 上轮用户报告的 Python 弹窗已在 #210 修复：Windows 默认 SIGBREAK 原生终止与已加载 DuckDB 的清理冲突，入口提前登记 Python 中断处理器。既有热重载已载入修复，启动中与运行中真实进程回归通过；旧 `reload-crash.md` 保留为故障发现证据。
 
-## 2. 已完成什么
+> 上轮增量：已补自动发布对已冻结表格结构的检查。用户明确“提示问题，由用户决定接受或继续，不替用户拦截”；初稿显示结构问题，接受后保留 gaps，原接受行为不变。见 `logs/output-contract-optimization-20260926/report.md` 和状态台账 §2.0。该轮结束时 8088 无监听，未重启；自然语言契约形成仍未完成，不把此修复称为模型泛化提升。
 
-### GitHub 收口
+> 更新：2026-09-25（UTC-07；业务界面使用 Asia/Shanghai）。
+> 本轮已结束：保留来源规划与质检根因修复；Pi 提示试验未通过非回归要求，已撤回，仅保留证据。`logs/collection-optimization-20260925T214522Z/report.md` 记录最终改动、60 项试验及未解决项。Token 管理员页面验收仍待真实管理员会话。没有提交、推送或创建新工单。
+> **先确认目录是 `mangrove_platform_V3`。桌面会话默认 cwd 可能仍是 V2，不得因此操作 V2。**
 
-- #83～#98 已全部关闭；父票 #81 已在全部决策子票完成后关闭。
-- CoreMind 0.7.1 薄 Adapter：PR #107 合入
-  `main@12170eebf1d2f4bad5c86c2a6c38d0bef0a4f998`，关闭 #97。
-- 锁定 CoreMind 身份：源码 `75b706a20ca4cdddef71cbcc0dd90b8b424ddd99`；wheel
-  `3fa5301c444da2e3bdaca51bd4800b1bdbcb6dc68e3abef4b39197bde3625e74`；Worker
-  `ba4590a68841e520dcd3a91e206ca9e346d10fd9a23b3ed4c560f59707cfa71e`；Protocol 2.0 fingerprint
-  `sha256:94c8e093979be73a13ecc1090167454567d0602a70b065ceffeed4cb1eca4ce3`。完整身份见 PR #107。
-- P1-01 工程收口：PR #110 合入
-  `main@5adeacf3aecbd55bd5fe771a35d25a4caa195af3`，关闭 #98；随后以证据评论关闭 #83 与 #81。
-- PR #110 minimum-ci run `33925622082`：`backend-fast`、`frontend-build`、`secret-scan` 全绿。
+## 1. 我们在做什么
 
-### 产品与工程结果
+Mangrove 是自然语言驱动的统一数据任务平台：理解目标与资料、获取来源、处理分析、生成可核对初稿、由用户决定继续验证或接受、形成可追溯正式交付。
 
-- `/data-prep` 保持统一数据工作台：文件/来源、自然语言任务、预览、任务修订、追问、模板/记忆、
-  Candidate、正式 Delivery、预览与下载能力继续沿同一生命周期工作。
-- 受控匿名网页可幂等形成唯一正式 Delivery；Publisher 重启只恢复发布，不重复抓取、模型调用或
-  Delivery；Owner B 无法读取、恢复、取消、重试、验证、发布、预览、下载或复用 Owner A 的事实。
-- CoreMind 通过 `AgentKernel` 薄 Adapter 接入；Mangrove 继续拥有 Owner、TaskRevision、模型选择、
-  外发确认、Verifier、Publisher 和正式 Delivery 权威。
-- 工作记录默认折叠，展示时间、实际行动、工具、模型、Token 与 unknown，不展示逐字思维链、
-  Cookie、Secret、系统 Prompt、宿主路径或原始大日志。
-- 启动前数据库迁移预检会只读检查 WebUI/Scheduler schema；落后时给出受源 SHA 保护的显式命令并
-  失败关闭。`start_all.bat` 继续是本机忽略文件，不进入 Git。
-- 已保留 Agent-Reach 调研。结论是吸收渠道目录、后端路由、真实体检与修复处方；具体开源工具按
-  精确版本逐个进入现有 Capability/Source 边界，不整包安装，不自动启用 OpenCLI 或
-  xiaohongshu-mcp。
+用户首先要求将 V2 完整复制为 V3，专门承接神州客户，避免改坏 V2。随后要求从“采集小红书中信银行权益”抽象通用能力，修复参数、登录态、采集恢复、多轮追问、来源复用和输出体验，不能针对一个 case 写死。
 
-### 验证证据
+本轮完成系统诊断与分单整改、Pi/CoreMind 候选验证、Pi 实际默认升级，最后修复用户发现的 Word 预览。当前状态与证据的唯一台账是 [docs/status/current.md](docs/status/current.md)；本文件负责让新会话知道如何接手。
 
-- Issue #98 后端组合：`235 passed, 1 skipped`。
-- 后端固定种子全量：`2352 passed, 13 skipped, 1 deselected`。唯一 deselect 是其他任务正在修改的
-  G1 freeze 自校验；未覆盖或重建该资产。
-- 前端正式构建：exit 0；完整 Playwright：`77 passed`，其中统一数据工作台 40 项并含明暗主题 axe。
-- 固定 Pi/CoreMind 0.7.1 golden：`1 passed`，覆盖运行中取消、无迟到事件与资源清理。
-- UTF-8：1249 个文件通过；`git diff --check` 通过。
-- Standards + Spec 双轴终审：无问题。
-- `start_all.bat --no-pause`：exit 0。最后复核时 8088、5173、8080、3002、1200 均监听；8088
-  与 5173 返回 HTTP 200；`/api/health` 返回 `{"ok":true,"service":"mangrove-webui"}`。
+### 用户硬要求
 
-精确根命令保留在 `docs/status/current.md` 第 0.1 节。本轮结论是 `ENGINEERING_VERIFIED`，不是
-真实外部网页/Provider 用户验收、生产资格或发布证明。
+- 原来正常工作的功能不能改坏。V3 是增量演进，不推翻重写。
+- 已授权的必要工作持续做完，不每个小步骤都停下来问“继续吗”。
+- 不擅自扩大验收范围或标准；有必要新增范围，先解释并由用户决定。
+- 区分工程测试、真实模型、真实来源、用户验收、正式交付和发行，不互相冒充。
+- 中文简洁沟通；先看真实链路，在共享层修根因，不按银行名或某份数据打补丁。
 
-### 清理结果
+## 2. 新会话开工顺序
 
-已确认并移入 Windows 回收站：
+1. 确认 V3 工作目录；读本文件、`docs/status/current.md`、`CONTEXT.md`、`AGENTS.md`，再读本次问题对应规格。
+2. 只读核对分支、工作树、所需配置和当前运行。现有大量 WIP，禁止整仓 reset/clean/stash、切分支或覆盖文件。
+3. #209总单与#210—#219十个子项均已按各自确认范围关闭。#217按用户明确决定结束本次历史追溯，旧差异和缺口保留；关闭回执及汇总见 `logs/issue-remediation-20260926/issue217/followup/`。不重复请求确认或重跑未变更测试，不自动重开、重扫旧位置；将来有新备份或具体失败再按用户范围处理。#219收尾见 `logs/connection-followup-20260926/closure.md`，#212完整结果仍保留。360例原始基线与新完整批次均保留，调用未知不重发；后续质量修复须针对具体证据，不反复堆提示。用户决定接受或继续，平台不新增内容/结构拦截。Word预览仍保留历史反馈入口。
+4. 若用户提出新问题，说明最小改动，完成原授权范围内修复、相关回归和 Standards/Spec 双轴审查，记录并关闭实际完成的 Issue。
+5. 不自动进入 CoreMind 默认切换、性能对照、旧 R6、P2、部署或发布。这些不是 #208 之后的必做动作。
 
-- `.scratch/**`：旧 P0/P1 草稿、临时数据库副本、CI/PR 载荷与可抛弃原型；
-- `test-results/**`：旧 Playwright 失败上下文；
-- `frontend/premium-audit.json`：旧审计生成物。
+## 3. 当前现场与版本
 
-共约 118 MB，可从回收站恢复。没有删除源代码、测试、ADR、规格、正式执行证据、生产数据库、
-备份或他人未提交改动。
+| 项目 | 当前事实 |
+|---|---|
+| 副本 | `mangrove_platform_V3`；兄弟 V2 不改。V2/V3 交替启动，保留原入口，不建设双版本并行部署 |
+| 分支 / HEAD | 运行工作树保持 `codex/issue-140-universal-context` / `880c306`；发行在 `codex/release-v1.0.0` 独立工作区准备，精确提交以标签和随包清单为准。10 个旧 G1 评测身份 JSON 本机变化单独保留 |
+| 远端 | origin=`https://github.com/Eclipseic1848/Mangrove_ai.git`；通过 PR #191 同步 V3 发行基线，原 main=`ec4cf05`，不可据此认为旧 main 数据库可直接升级 |
+| 页面 | 当前 8088 运行 V3；健康、`/data-prep` 和构建资源只读核对通过，非管理员浏览器验收；5173/4173 为开发/测试 |
+| 新任务运行时 | **Pi 0.87.1**，配置 `agent_kernel_primary_adapter=pi-runtime` |
+| 历史运行时 | 本机保留 Pi 0.80.10；用户已明确目标服务器只部署 Pi 0.87.1，部署包不含旧镜像，不把新程序伪装成旧版本续跑 |
+| CoreMind | **未启用**；主适配器保留 0.7.1 身份，1.0.1 仅独立候选通过，均不是当前默认运行框架 |
+| 模型 | 本轮真实调用 `deepseek-flash`（用户称 DeepSeek V4.1 Flash）。模型、Pi/CoreMind、Mangrove 是不同层 |
+| 数据库 | 本次只读实查 WebUI=`webui_0023`，Scheduler=`scheduler_0004`。0022→0023 已授权备份迁移，不重做 |
+| GitHub | #193—#219 均 CLOSED/COMPLETED；#217/#209按用户确认结束追溯并保留历史缺口，关闭不表示全部业务通过。另有#113、#146、#147未纳入本轮；旧#143—#145为NOT_PLANNED，不能算完成 |
+| 发行 | 用户已授权 v1.0.0 推送、合并与 Release；实际完成回执见 GitHub PR #191、CI 和 v1.0.0 Release。目标公司服务器未验收 |
 
-## 3. 当前卡在哪
+本机启动/停止脚本和 `.env` 属本地配置；进程身份必须现场核对。`dev_reload.py` 可能因 src 改动自动重载，不使用旧 PID 或旧端口列表操作。
 
-没有阻塞，也没有未完成的 GitHub Issue。
+## 4. 已完成的任务
 
-以下事项故意不在本轮完成：
+准确数量与证据入口见状态台账，此处给任务导航：
 
-- Issue #98 没有调用真实外部网页或真实 Provider，没有新增生产迁移或用户验收；
-- 没有部署、Tag、GitHub Release、npm/PyPI 或其他真实外部发布；
-- 没有处置历史备份、轮换 Key/Secret 或改变权限；
-- 仍有 Dependabot PR #27、#77、#104、#108、#109，尚未逐项做依赖与安全评估。
+1. **V3 神州场景与通用采集**：沿用工作台、账号、个人/平台 Cookie、模型、初稿和交付。银行领域规则传入共享发现/筛选/评论/图片/抽取/预算/恢复流程。query 优先，不能只因“私银”就强套权益筛选。上次 V2 1681 个基线文件核验未变。
+2. **#194—#204 系统整改**：历史审计与重放清单、参数传递保真、来源身份/操作能力/未知故障分层、隔离浏览器、同账号换证恢复、多轮焦点及回答/复用/补采、能力矩阵、500 个离线合同泛化用例。原历史失败和缺输入保留，不声称全业务 100% 成功。
+3. **#205 / #206**：热更新正常退出保护；图像读取和 OCR 预算分离；修复 MediaCrawler 将小预算提升到至少 20 篇导致超时的共享接缝。
+4. **Pi #202 / #207**：候选门与默认切换分别验收，现为 0.87.1，旧 0.80.10 与冻结恢复保留。正式配置关闭 Provider 自动重试、预热、遥测；新旧适配器共用文档授权 Broker 与候选验证服务。
+5. **CoreMind #203**：公开 1.0.1 精确制品和上游资格、49 项 SDK/Worker 契约、真实 deepseek-flash 工具执行及四项核验通过。SDK/宿主/数据库均独立，未切主服务。期间修复嵌套工具 Schema、写前校验和 Pi 旧 Adapter 绑定兼容，相关 68 项通过、1 项旧 SDK 默认开关跳过。
+6. **Word 预览 #208**：Word/PPT 正式输出默认原版式翻页、缩放、展开；“结果条目与追问”保留原搜索、证据与逐条追问。无需重生成报告，下载原文件不变。正式接口 4 项、原上传 Office 5 项、相关 E2E 8 项通过；末次 2 项复验与前组重叠；构建、双轴、8088 资源核对通过。测试为合成文件，尚未查看用户面试报告本体或收到刷新后的反馈。
+7. **工作台示例评测（最新）**：按八个实际示例补齐生成器、真实 Pi 执行、真实 HTTP 入口及独立产物/语义判分；三处共享修复和 Token 子任务完成。最终统计只维护在状态台账，详细失败与范围见本轮报告。
 
-这些是后续工作或人工门，不是本轮失败。
+### 最近修复的代码入口
 
-## 4. 接手后怎么开始
+- `src/collectors/search_collector.py`、`src/scheduler/cron.py`、`src/operations_usage.py`：来源约束、星期日解析和无时区历史用量披露。
+- `scripts/evaluate_workspace_examples.py`、`docs/agents/workspace-example-evaluation.md`：一键评测、证据汇总和新增类型指南；本轮 patch 单列保存在报告目录，勿将整仓 WIP 当作本轮 diff。
+- `frontend/src/components/workspace/ResultPreview.tsx`：正式输出的原版式/条目视图切换。
+- `frontend/src/components/workspace/OfficeFilePreview.tsx`：共用授权读取、PDF 翻页/缩放；接受上传 ID 或正式输出 URL。
+- `src/api/routes/semantic_deliveries.py`：新增 `/api/semantic-deliveries/outputs/{output_id}/office-preview`，沿用 Owner、发布质量、SHA256 与源读取保护。
+- `src/services/office_preview.py`：复用原有断网、只读 Docker 转换；已存在 `mangrove/office-preview:local` 镜像，不需新装依赖。
+- `tests/test_delivery_office_preview.py`、`frontend/e2e/workspace-canvas.spec.ts`：相关永久回归。
 
-没有需要自动继续的在制 Issue。新会话先运行只读检查：
+## 5. 当前卡点与下一步
 
-```powershell
-git status --short
-git fetch origin main
-git rev-parse origin/main
-gh issue list --repo Eclipseic1848/Mangrove_ai --state open --limit 100
-gh pr list --repo Eclipseic1848/Mangrove_ai --state open --limit 100
-```
+**原 #193—#208、#209总单及十个子项均已按确认范围收口，未解决的能力缺口仍保留。** #217历史追溯已获用户确认结束；以后有新原始材料可再处理。质量、调用稳定性按后续具体证据继续处理，不通过重跑挑最好结果，不从工单关闭推断所有业务问题消除。其余既有边界如下：
 
-然后由用户选择下一条明确纵切片或依赖 PR 分诊。不要凭本文件自动进入新阶段、安装工具、迁移数据
-或发布版本。
-
-## 5. 必须保护的本地状态
-
-下列未提交改动属于用户或其他任务，不得暂存、覆盖、恢复、清理或据此重建：
-
-- `docker/phase4b/entrypoint.sh`；
-- `evals/generalization-g1-independent*/freeze.json`；
-- `evals/generalization-g1-independent*/heldout_manifest.json`；
-- `evals/generalization-g1-independent*/self-check-report.json`；
-- `evals/generalization-g1/fixtures.json`。
-
-本机 CoreMind checkout 由专属任务持有；Mangrove 任务不得编辑、测试、切分支、提交、推送、回滚、
-清理或 stash。任何 Git 提交都使用精确文件 allowlist。
-
-## 6. 总体 Roadmap
-
-| 阶段 | 状态 | 目标与边界 |
+| 边界 | 下一步 | 禁止的捷径 |
 |---|---|---|
-| P0 | 已完成 | 可持续迭代基线、显式迁移、SecretRef、依赖安全、CI 与主分支保护 |
-| P1-01 | 已完成工程闭环 | 匿名网页统一工作台、部分结果语义、工作记录、CoreMind Adapter |
-| 后续来源纵切片 | 未规格化 | HTTP、数据库、认证网页分别进入同一 Source→TaskRevision→Delivery 生命周期 |
-| P1-02 | 未实现 | 深化统一任务生命周期，逐项迁入仍有价值的旧工作区能力，不做全量重写 |
-| P1-03 | 未实现 | 认证、可观测性、SLO、TLS/CSP 与远程多人运行 |
-| P1-04 | 未实现 | 配额、成本、外发、审计、回滚齐备后分批开放平台能力 |
-| P1-05 | 未实现 | 组件测试、包体预算、性能与无障碍治理 |
-| P2 | 未启动 | Linux/GPU、远程 MCP/Registry、多媒体、多节点、对象存储/PostgreSQL；须有真实需求和环境 |
+| 实际 Word 报告效果未验收 | 用户刷新后若异常，按具体 output_id 查 API、转换和渲染，必要时检查获准的那份报告 | 不重跑报告，不无审计读取他人正文 |
+| 正式规则版本化已完成 | #216 已提交限定核验快照、形成两份隔离正式 Attempt，最终双轴通过并关闭 | 不把隔离合成任务当完整V3产品发行或用户验收 |
+| 主服务间歇 Provider 结果未知 | 有新受影响任务时查脱敏异常类型、发送状态与原回执 | 不反复新建同题碰运气，不重发旧未知操作 |
+| 历史缺输入/差异 | 继续保留逐例清单，用户要复原时才确定缺什么资料 | 不编造 100% 成功，不变更原验收分母 |
+| CoreMind 是否替换 Pi 未决 | 当前建议保持 Pi；若用户要对比，再确定同模型/来源/工具/预算的对照范围 | 不依据测试条数或功能名多就切换 |
+| 华苏公网/多人生产未验 | 用户确认环境与范围后做目标容量、安全、恢复及用户旅程验证 | 不把本机健康或候选资格当生产验收 |
 
-小红书等认证来源的既定产品语义：只有明确 Cookie 失效时才暂停原计划与任务；当前 Owner 实际
-更换本人 Cookie 并显式继续后，才沿原身份恢复。管理员可配置全局兜底，但本人配置优先且不同
-Owner 不共享。网络、VPN、WAF 或验证码只能标记“登录状态未知”，不能误报失效或自动重放。
-#138 扫码路线继续暂停；真实账号、条款、外发和费用仍须用户确认。
+## 6. 整个项目 Roadmap 与版本计划
 
-## 7. 版本计划
+完整状态只维护在 `docs/status/current.md` 第 4 节。供接手理解的阶段顺序：
 
-- 远端当前没有 Tag 或 GitHub Release；本地历史版本语义不是公开版本。
-- P1-01 完成是工程里程碑，不自动产生版本或发布。
-- 下一版本号应在后续 P1 范围、真实验收与发布清单冻结后决定。
-- Tag、GitHub Release、npm/PyPI、部署及其他外部发布始终是人工门。
-- P1-01 收口已检查 README、Code of Conduct、Contributing、MIT License、Security 与 GitHub
-  About；现有内容仍准确，无需为了制造差异而改写。
+- **已有底座**：P0 工程基线、P1-01 首片；统一任务、来源冻结、Owner、模型连接、AgentKernel、证据、QA、Publisher 和恢复继续保留。
+- **当前主线**：统一数据工作台 + V3 神州增量；本轮整改收尾后继续用户实际使用反馈，不另造执行体系。
+- **本次发行与后续部署**：按已授权 V3 基线发布 v1.0.0，完成 PR/CI/制品校验；旧 main 数据库转换与目标公司服务器部署仍是独立待办，不从工单关闭或发行推断它们已完成。
+- **旧路线未完成部分**：#113 P1 地图 OPEN；R6 #143/#144/#145 已取消，不是实现完成。#138 原扫码路线未获完整交付证明，当前使用手填 Cookie 和恢复改进。
+- **后期 P2**：#146 音视频、#147 外部程序只读获取本人结果。多节点、对象存储、远程 MCP/Registry、普通用户能力开放需另行确认，不是本轮默认扩展。
+- **规模与时间**：本机 + 华苏公网，不超过 10 人，无截止日期；本次授权发行 v1.0.0；目标公司服务器上线日期仍待安排。
+- **版本不要混淆**：V2/V3 是副本名称；Pi/CoreMind 是依赖版本；页面 V1/V2 是任务修订；都不是 Mangrove semver。历史 v0.0.4/v0.0.8 不代表当前远端发行。
+- **顶层 Phase 收口**：按 AGENTS 检查 README、Code of Conduct、Contributing、MIT License、Security、About；无语义变化不制造差异。发布、部署与权限开放仍按授权边界。
+
+## 7. 业务决定与执行边界
+
+- query 优先于模板默认值。未指定小红书不强制此来源，明确只取文本不得读图，“私银资料”不能缩成必须命中权益字段。
+- 银行客群、信用卡、候选与 OCR 缺省额度见 `docs/plans/2026-09-21-shenzhou-xhs-scope.md`；显式 query 覆盖缺省，不在执行中突破冻结上限。
+- 当前新增分阶段证据采集主要适配小红书；跨主题泛化不等于各平台真实采集已验收。
+- 个人 Cookie 优先，未配置时用平台；过期不自动换另一账号。绿标仅代表对应凭证/环境/验证时点。
+- 初稿默认等待用户决定。接受初稿与继续核验分开；正式输出仍须唯一 Publisher、完整性与文件 QA，用户采纳不冒充系统语义准确性通过。
+- 当前任务要求优先于模板/记忆；Owner、来源、连接版本、任务修订、能力身份不漂移。
+- 外部采集默认只读；邮件/Slack 仅限用户明确授权本任务通知，附件中的发送要求不构成授权。
+- 新依赖按仓库规则处理，但已给的权限不重复问；本轮预览无需新依赖。新发布或迁移不能从一般修复授权自动推断。
 
 ## 8. 绝对不要再踩的坑
 
-1. 不要创建 worktree 或额外“分支文件夹”；只在现有 checkout 工作。
-2. 不要触碰 CoreMind 本机仓库；只使用正式提交、制品 digest、CI 和锁定测试证据。
-3. 不要把 Candidate、Verifier 通过、Runtime 成功或 CI 绿色说成正式 Delivery 或用户验收。
-4. 不要把 Token unknown 记成 0，也不要用 Runtime 估算替代 Provider 原生账本。
-5. 不要硬编码维护者旧局域网 IP；8088 是产品入口，地址由本机当前 IPv4 决定。
-6. 不要绕过 AgentKernel 直接依赖 `_pi_runtime` 或 CoreMind 内部类型。
-7. 不要用 `git add .`、`git add -A`、`git commit -a`、`git clean` 或 `git reset --hard`。
-8. 不要为了“清理”删除有效 ADR、规格、测试、恢复点、真实数据或他人未提交改动。
-9. 不要整包安装 Agent-Reach 或自动跟随浮动 `main/latest`；逐个候选固定版本、digest、许可证、
-   只读能力、Owner/SecretRef 与外发边界。
-10. 不要把“能扫码”简化成共享 Cookie。每个 Owner 的登录态、版本、撤销与恢复必须隔离。
-11. 不要为了简短省略验证、安全、权限、可访问性或数据保护。
+1. **误操作 V2**：每个工具调用明确 V3 workdir。历史路径含 V2 时先检查 ManagedPathCodec 的实际解析，不盲改数据库。
+2. **候选冒充上线**：Pi 已切，CoreMind 没切。直接读有效配置和冻结任务绑定，不能只看 Issue 关闭。
+3. **模型与运行时混淆**：实际模型标识 deepseek-flash，Pi/CoreMind 是框架。
+4. **旧下一步覆盖当前事实**：不重复索要已更新 Cookie、不重做 0023 迁移、不再等待已发布的 CoreMind 修正版。
+5. **无限扩大验收**：按原工单条件关闭；新增门先交用户决定。未验边界如实保留，不偷偷改判定。
+6. **用测试数量冒充业务结果**：500 个合同用例未执行真实业务；历史缺输入不是通过；不同组和补验存在重叠。CoreMind 独立核验无正式 Attempt。
+7. **未知结果自动重试**：timeout/502 不证明没发送；网络异常不证明 Cookie 过期。不静默切模型或账号，不重发旧未知操作。
+8. **热更新中断在线运行**：改 src 会触发重载；先查真实活动任务，不凭旧 PID 重启/杀进程。
+9. **浏览器登录态混用**：Chrome 的 Cookie 不会自动进隔离 Chromium；核对实际选择与注入，不借共享 CDP 绕隔离。
+10. **预览错文档**：任务/修订/output_id/哈希必须绑定；切换文件清旧画面。段落索引不等于 Word 阅读；build 后核对 8088 的实际资源。
+11. **先写后验工具参数**：嵌套 Schema 明确必需字段，在写前校验。权限测试失败先核夹具 Owner/运行绑定，不放宽产品门。
+12. **打印秘密**：不输出 `.env`、Settings repr、Cookie、Token、账号凭据。公共 Issue 不放本机路径或客户正文。
+13. **整仓回滚或擅自发布**：禁止 reset --hard、clean、git add .，不为发布改坏本机。用户本次已授权 v1.0.0 推送、合并与发布，PR #191 仍必须通过保护规则，不强推或绕过 CI。
+14. **恢复旧库丢新记录**：保全新数据及程序/数据库匹配，不改迁移 hash 绕门，不恢复旧配置偷偷开启巡检。
+15. **清理文档时删除证据**：只删失效叙述，不删源码、测试、冻结评测、原件、失败记录、密钥或备份。独立 Agent-Reach/OpenCLI 等任务的等待边界不因这里完成而解除。
 
-## 9. 权威证据
+## 9. 文件、证据和复现
 
-- 当前状态：`docs/status/current.md`
-- 领域语义：`CONTEXT.md`
-- P1-01 规格：`docs/plans/2026-08-27-p1-01-anonymous-web-source-unified-workbench-spec.md`
-- Runtime 决策：`docs/adr/0035-unified-data-workbench-and-coremind-runtime-adapter.md`
-- 单一工作台边界：`docs/adr/0036-single-workspace-with-verified-runtime-inheritance.md`
-- CoreMind 原型：`docs/plans/2026-08-27-p1-coremind-agentkernel-prototype-report.md`
-- Agent-Reach：`docs/research/2026-08-31-agent-reach-mangrove-assessment.md`
-- 远端实现：PR #107、PR #110、CI run `33925622082`。
+- 状态：`docs/status/current.md`；类型扩展：`docs/agents/task-capability-matrix.md`、`docs/agents/task-generalization.md`。
+- 最新本地证据：`logs/system-evaluation-20260925/` 下对应 `issue194/198/200/203/206-closure.md`、`pi-cutover-closure.md`。早期 `report.md` 是实施前诊断，不是当前待办。
+- Pi 真实调用：`pi-default-live-73a57f58/report.json`；CoreMind：`coremind-1.0.1-live-dea1d7b5/report.json`；旧失败索引：`coremind-1.0.1-live-index.json`。
+- 迁移恢复点：`health-binding-live-backup/`、`health-binding-live-migration.json`；Pi 备份：`pi-cutover-backup/`。不能原样覆盖旧 `.env`，默认回退时仍需保留新旧历史镜像。
+- #208 改前文件、截图和工单说明：系统临时目录 `mangrove-result-preview-fix/`；可能被系统清理，永久测试仍在源码树，GitHub #208 有收尾记录。
+- 本次整理前全文和工作树清单：系统临时目录 `mangrove-v3-handoff-closeout-20260925/`，仅恢复追溯，不是当前指令。
 
-GitHub Issue、PR、CI、默认分支 SHA、依赖告警与服务状态都是易变事实，接手时必须现场重取。
+只有后续变更需要时才运行相应验证，不因接手重复调用付费模型：
+
+```powershell
+# V3 根目录；使用本机已配置的 Python 3.13
+python -X utf8 -m pytest tests/test_delivery_office_preview.py tests/test_upload_office_preview.py -q
+python -X utf8 -m scripts.evaluate_task_generalization --output logs/task-generalization
+# 以下在 frontend 目录
+npm run build
+node node_modules/@playwright/test/cli.js test e2e/workspace-canvas.spec.ts --grep 'Word 正式结果' --workers=1 --reporter=line
+```
+
+Browser 插件已恢复，本轮 UI/UX 页面复验使用该插件，自动回归使用工程已有 Playwright/Chrome。两者均使用合成接口；后台另有此前的真实隔离 Office 转换证据，不能宣称已经查看用户面试报告或完成真实模型业务验收。
+
+## 10. 本次会话清理
+
+已重写本交接和当前状态台账，移除复制进来的 V2 停工指令、旧 PID、过期审批、重复流水和相互冲突的版本/工单状态。历史规格、ADR、代码、测试、运行数据、失败证据、备份均保留。本次文档整理没有重启、调用模型、迁移、提交推送或修改 V2。
+
+**给新会话：先读当前事实，再处理用户正在遇到的问题。最近修复已完成，不拿旧阻塞重复索要输入，也不自动扩展到发布或迁移。**

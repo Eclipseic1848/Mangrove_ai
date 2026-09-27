@@ -2,6 +2,8 @@
 """PublishIntent 与通用正式 Delivery 的 SQLite 仓库。"""
 from __future__ import annotations
 
+from contextlib import closing
+
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -78,7 +80,7 @@ class DeliveryPublishingRepository:
 
     def abort_revoked_intent(self, command: PublishCommand) -> bool:
         """仅收口已失效且无正式交付的意图；候选与rename证据不在此删除。"""
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             conn.execute('BEGIN IMMEDIATE')
             intent = conn.execute('SELECT * FROM delivery_publish_intents WHERE publication_key=? AND command_hash=?', (command.publication_key, command.frozen_hash())).fetchone()
             if intent is None or intent['status'] == 'published' or conn.execute('SELECT 1 FROM formal_delivery_runs WHERE publication_key=?', (command.publication_key,)).fetchone() is not None:
@@ -93,7 +95,7 @@ class DeliveryPublishingRepository:
 
 
     def account_pending_intents(self, owner_id: str, task_id: str, generation: int) -> list[dict]:
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             rows = conn.execute(
                 "SELECT publication_key,execution_generation FROM delivery_publish_intents "
                 "WHERE owner_id=? AND task_id=? AND execution_generation<=? AND status IN ('staging','committing')",
@@ -103,7 +105,7 @@ class DeliveryPublishingRepository:
 
     def abort_account_intent(self, owner_id: str, task_id: str, publication_key: str, generation: int) -> bool:
         """调用方持发布锁；旧账号代数已失效且无正式行才能收口，文件证据原样保留。"""
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             conn.execute('BEGIN IMMEDIATE')
             intent = conn.execute(
                 'SELECT * FROM delivery_publish_intents WHERE owner_id=? AND task_id=? AND publication_key=? AND execution_generation=?',
@@ -132,7 +134,7 @@ class DeliveryPublishingRepository:
     ) -> dict[str, Any]:
         now = _now()
         command_hash = command.frozen_hash()
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             conn.execute('BEGIN IMMEDIATE')
             current = conn.execute('SELECT * FROM delivery_publish_intents WHERE publication_key=?', (command.publication_key,)).fetchone()
             if current is not None and current['command_hash'] != command_hash:
@@ -184,7 +186,7 @@ class DeliveryPublishingRepository:
         return dict(row)
 
     def get_intent(self, publication_key: str) -> dict[str, Any] | None:
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             row = conn.execute(
                 "SELECT * FROM delivery_publish_intents WHERE publication_key=?",
                 (publication_key,),
@@ -200,7 +202,7 @@ class DeliveryPublishingRepository:
         manifest: DeliveryManifest | None = None,
         error: dict[str, Any] | None = None,
     ) -> None:
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             cursor = conn.execute(
                 """
                 UPDATE delivery_publish_intents
@@ -230,15 +232,23 @@ class DeliveryPublishingRepository:
     ) -> None:
         """在同一数据库写事务内冻结显式发布的最后业务 CAS。"""
 
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
             intent = conn.execute('SELECT * FROM delivery_publish_intents WHERE publication_key=?', (command.publication_key,)).fetchone()
             if intent is None:
                 raise KeyError('发布意图不存在')
             self._require_publish(conn, command, intent)
-            if command.verification_attempt_id is not None:
+            if command.owner_acceptance is not None:
+                acceptance_revision = conn.execute(
+                    "SELECT source_contract_json FROM semantic_workspace_revisions WHERE user_id=? AND task_id=? AND revision=?",
+                    (command.owner_id, command.task_id, command.task_revision),
+                ).fetchone()
+                frozen = json.loads(acceptance_revision[0] or "{}") if acceptance_revision else {}
+                if frozen.get("owner_acceptance") != command.owner_acceptance.model_dump(mode="json"):
+                    raise ValueError("用户接受记录与冻结修订不一致")
+            if command.verification_attempt_id is not None or command.owner_acceptance is not None:
                 task = conn.execute(
-                    "SELECT active_revision, cancel_requested "
+                    "SELECT active_revision, cancel_requested, cancel_generation, deleted_at "
                     "FROM semantic_workspace_tasks "
                     "WHERE user_id=? AND task_id=?",
                     (command.owner_id, command.task_id),
@@ -250,6 +260,10 @@ class DeliveryPublishingRepository:
                     raise ValueError("活动版本已变化")
                 if bool(task["cancel_requested"]):
                     raise ValueError("任务已取消")
+                if command.owner_acceptance is not None and (
+                    task["deleted_at"] or task["cancel_generation"] != command.owner_acceptance.cancel_generation
+                ):
+                    raise ValueError("任务已取消或删除")
 
                 routing_table = conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' "
@@ -263,6 +277,7 @@ class DeliveryPublishingRepository:
                     if routing is None or bool(routing["p0_blocked"]):
                         raise ValueError("P0 发布门已阻断")
 
+            if command.verification_attempt_id is not None:
                 attempt = conn.execute(
                     "SELECT status, report_hash, candidate_set_hash "
                     "FROM candidate_verification_attempts "
@@ -331,7 +346,7 @@ class DeliveryPublishingRepository:
     ) -> DeliveryManifest:
         payload = manifest.model_dump(mode="json")
         now = _now()
-        with _LOCK, self._conn() as conn:
+        with _LOCK, closing(self._conn()) as conn, conn:
             conn.execute('BEGIN IMMEDIATE')
             existing = conn.execute(
                 "SELECT manifest_json FROM formal_delivery_runs "
@@ -417,7 +432,7 @@ class DeliveryPublishingRepository:
         owner_id: str,
         delivery_id: str,
     ) -> dict[str, Any] | None:
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             row = conn.execute(
                 "SELECT manifest_json FROM formal_delivery_runs "
                 "WHERE owner_id=? AND delivery_id=? AND status='succeeded'",
@@ -434,7 +449,7 @@ class DeliveryPublishingRepository:
         owner_id: str,
         run_id: str,
     ) -> dict[str, Any] | None:
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             row = conn.execute(
                 "SELECT manifest_json FROM formal_delivery_runs "
                 "WHERE owner_id=? AND run_id=? AND status='succeeded' "
@@ -452,7 +467,7 @@ class DeliveryPublishingRepository:
         owner_id: str,
         output_id: str,
     ) -> dict[str, Any] | None:
-        with self._conn() as conn:
+        with closing(self._conn()) as conn, conn:
             row = conn.execute(
                 "SELECT * FROM formal_delivery_outputs "
                 "WHERE owner_id=? AND output_id=?",

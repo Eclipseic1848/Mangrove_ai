@@ -19,10 +19,12 @@ from src.api.auth import get_execution_user
 
 import asyncio
 import json
+import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from src.conductor.context import compress_history
@@ -57,6 +59,8 @@ _NODE_LABELS = {
 
 # 产出 state 键 -> (下载文件名, mime)
 _FILE_MAP = {
+    "xlsx": ("data.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+    "evidence_zip": ("evidence.zip", "application/zip"),
     "report_md": ("report.md", "text/markdown"),
     "json": ("data.json", "application/json"),
     "trace_file": ("trace.json", "application/json"),
@@ -81,6 +85,7 @@ def _resolve_model(provider: Optional[str], model: Optional[str]) -> tuple[Optio
 def _build_result(
     user_id: str, conv_id: str, state: Dict[str, Any], reply: str,
     provider: Optional[str], model: Optional[str], user_input: str,
+    *, model_connection_id: Optional[str] = None, model_connection_version: Optional[str] = None,
 ) -> Dict[str, Any]:
     """把最终 state 整理成前端可直接渲染的结构，并把 HITL 待确认动作暂存到服务端。"""
     task_id = state.get("task_id") or ""
@@ -97,22 +102,30 @@ def _build_result(
         return {"conv_id": conv_id, "task_id": task_id, "kind": "error",
                 "reply": f"❌ {state.get('error')}"}
 
-    # 定时任务：暂存待确认
+    # 定时任务：复用一次性动作领取后直接创建。
     if state.get("schedule_request"):
         pending_store.put(user_id, task_id, {"schedule": {
             "schedule": state["schedule_request"], "user_input": user_input,
             "provider": provider, "model": model,
+            "model_connection_id": model_connection_id,
+            "model_connection_version": model_connection_version,
             "intent": getattr(spec, "intent", "") if spec else "",
         }})
-        return {"conv_id": conv_id, "task_id": task_id, "kind": "schedule",
-                "reply": state.get("reply") or "已识别为定时任务，确认后创建。",
-                "schedule": str(state["schedule_request"])}
+        from .tasks import create_task
+        from ..schemas import ScheduleIn
+        # 用户原话中的明确执行要求即为创建授权，复用已有的一次性动作领取与校验。
+        receipt = create_task(ScheduleIn(task_id=task_id), user={"user_id": user_id})
+        return {"conv_id": conv_id, "task_id": task_id, "kind": "schedule_created",
+                "reply": f"已创建定时任务，下次执行：{receipt['next_run_at']}（服务器时间）。可在「自动化任务」查看、暂停或修改。",
+                "scheduled_task_id": receipt["task_id"], "next_run_at": receipt["next_run_at"]}
 
     # 正常产出
     outputs = state.get("outputs", {}) or {}
     files: List[Dict[str, str]] = []
     for key, (fname, mime) in _FILE_MAP.items():
         if outputs.get(key):
+            if state.get("collection_output_attempt"):
+                fname = Path(outputs[key]).name
             # 下载按磁盘 downloads/<task_id>/<fname> 解析（重载会话/重启后仍可下载）
             files.append({"name": fname, "url": f"/api/downloads/{task_id}/{fname}", "mime": mime})
 
@@ -131,13 +144,17 @@ def _build_result(
             "data_type": spec.data_type.value if spec else "generic",
             "keywords": list(getattr(spec, "keywords", []) or []) if spec else [],
             "analysis": analysis, "provider": provider, "model": model,
+            "model_connection_id": model_connection_id, "model_connection_version": model_connection_version,
         }
         actions.append("template")
     if pending:
         pending_store.put(user_id, task_id, pending)
 
+    outcome = state.get("collection_outcome") or {}
+    result_kind = "output" if not outcome or outcome.get("ready_for_review") else "notice" if outcome.get("status") == "empty" else "error"
     return {
-        "conv_id": conv_id, "task_id": task_id, "kind": "output",
+        "conv_id": conv_id, "task_id": task_id, "kind": result_kind,
+        "collection_outcome": outcome or None,
         "reply": reply, "analysis": analysis,
         "files": files, "actions": actions,
         "grade": state.get("grade"),
@@ -146,6 +163,70 @@ def _build_result(
         "collector": state.get("collector_used") or state.get("collector"),
         "item_count": len(state.get("cleaned_dataset", []) or []),
     }
+
+
+async def _create_bank_review(state, body, user, provider, model, request=None, *, connection_version=None):
+    """当前 Owner 的采集快照进入既有初稿门，不伪造网页来源或发布记录。"""
+    from src.api.execution import execution_checkpoint
+    from src.config.settings import settings
+    from src.data_prep.artifact_store import ArtifactStore
+    from src.services.upload_store import UploadStore
+    from .semantic_workspace import RuntimeVersion, WorkspaceTaskCreateIn, create_task
+    from src.conductor.collection_results import collection_outcome
+
+    execution_checkpoint()
+    snapshot = state.get("evidence_collection") or state.get("bank_collection") or {}
+    if not collection_outcome(snapshot)["ready_for_review"]:
+        raise ValueError("采集未满足业务初稿条件，诊断快照不进入初稿工作台")
+    artifacts = ArtifactStore()
+    task_id = state["task_id"]
+    root = artifacts.task_dir(task_id).resolve()
+    uploads = UploadStore(settings.data_prep_upload_root, max_bytes=settings.data_prep_max_upload_bytes)
+    saved = artifacts.read_json_if_exists(task_id, "workspace-import.json")
+    if saved is not None and saved.get("owner_id") != user["user_id"]:
+        raise PermissionError("采集快照归属不一致")
+    if saved is None:
+        items = []
+        files = [(Path(state.get("outputs", {}).get("json") or root / "data.json"), "采集快照.json", "application/json"),
+                 (Path(state.get("outputs", {}).get("xlsx") or root / "data.xlsx"), "采集快照.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")]
+        seen = set()
+        for note in snapshot["candidates"]:
+            for image in note.get("images") or []:
+                ref = image.get("artifact_path")
+                if ref and ref not in seen:
+                    source = artifacts.resolve_path(ref)
+                    if source.is_symlink() or not source.resolve().is_relative_to(root):
+                        raise ValueError("图片证据越过采集任务目录")
+                    files.append((source, source.name, image["media_type"]))
+                    seen.add(ref)
+        for source, name, media_type in files:
+            if source.is_symlink() or not source.resolve().is_relative_to(root):
+                raise ValueError("采集快照越过任务目录")
+            execution_checkpoint()
+            item = uploads.save_bytes(user["user_id"], name, source.read_bytes(), media_type=media_type,
+                                      verify_magic=media_type != "application/json")
+            items.append({"upload_id": item.upload_id, "sha256": item.sha256, "name": name})
+        saved = {"owner_id": user["user_id"], "files": items}
+        artifacts.write_json(task_id, "workspace-import.json", saved)
+    for item in saved["files"]:
+        resolved = uploads.resolve(user["user_id"], item["upload_id"])
+        if resolved.sha256 != item["sha256"]:
+            raise ValueError("采集输入已变化")
+    objective = (
+        body.content + "\n\n输入是本次采集的冻结观察快照，未知、失败项和覆盖缺口仍以快照为准，"
+        "与同名XLSX来自同一份数据。将这两个文件逐字节复制为JSON、XLSX初稿，保持文件SHA256；"
+        "不要重新采集、重写正文、重新抽取、补造字段或生成分析报告。图片输入供复核，保留来源关联。"
+        "不足目标、排除原因和未知值必须保留。生成可下载初稿后等待用户核对，未经用户确认不得正式发布。"
+    )
+    payload = WorkspaceTaskCreateIn(objective_text=objective,
+        upload_ids=tuple(item["upload_id"] for item in saved["files"]), output_formats=("json", "xlsx"),
+        source_copy_upload_ids=tuple(item["upload_id"] for item in saved["files"][:2]),
+        runtime_version=RuntimeVersion.PI, provider=provider or "local", model=model,
+        model_connection_id=body.model_connection_id, model_connection_model=model if body.model_connection_id else None,
+        model_connection_version=connection_version,
+        external_api_confirmed=body.external_api_confirmed)
+    execution_checkpoint()
+    return await create_task(payload, idempotency_key="bank-review:" + task_id, user=user, request=request)
 
 
 # data_prep 产出的数据文件格式 -> mime
@@ -215,28 +296,106 @@ def _build_data_prep_result(
 
 @router.post("/stream", openapi_extra={"x-mangrove-task-control": True})
 async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution_user)):
+    return await _chat_stream(body, request, user)
+
+
+def _load_owned_recovery(user, task_id):
+    from src.conductor.collection_recovery import load_recovery
+    try:
+        recovery = load_recovery(user["user_id"], task_id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    state = recovery["state"]
+    conv = get_store().get_conversation(state["session_id"])
+    if not conv or conv["user_id"] != user["user_id"]:
+        raise HTTPException(404, "会话不存在或无权访问")
+    connection = recovery["saved"]["binding_fields"].get("connection")
+    if connection and (len(connection) != 7 or connection[0] != user["user_id"]
+                       or connection[4] != state["session_id"] or connection[3] != state["model"]):
+        raise HTTPException(409, "原模型连接身份不完整，不能恢复")
+    return recovery
+
+
+@router.get("/collections/{task_id}/recovery")
+async def collection_recovery_status(task_id: str, user=Depends(get_current_user)):
+    recovery = _load_owned_recovery(user, task_id)
+    return {"task_id": task_id, "conv_id": recovery["state"]["session_id"],
+            "message": "请先在登录态设置验证当前账号；恢复将沿用原任务和模型，仅继续可安全执行的未完成步骤。"}
+
+
+class CollectionResumeIn(BaseModel):
+    request_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    external_api_confirmed: bool = False
+
+
+@router.post("/collections/{task_id}/resume", openapi_extra={"x-mangrove-task-control": True})
+async def resume_collection(task_id: str, body: CollectionResumeIn, request: Request,
+                            user=Depends(get_execution_user)):
+    recovery = _load_owned_recovery(user, task_id)
+    if any(item.get("attempt_id") == body.request_id for item in recovery["saved"].get("recovery_attempts", [])):
+        raise HTTPException(409, "该恢复请求已采用，请查看任务状态，不会重复执行")
+    recovery["attempt_id"] = body.request_id
+    state = recovery["state"]
+    connection = recovery["saved"]["binding_fields"].get("connection")
+    original = ChatIn(conv_id=state["session_id"], content=state["user_input"],
+                      provider=state["provider"], model=state["model"], mode="legacy_analysis",
+                      model_connection_id=connection[1] if connection else None,
+                      model_connection_version=connection[2] if connection else None,
+                      external_api_confirmed=body.external_api_confirmed)
+    return await _chat_stream(original, request, user, recovery)
+
+
+async def _chat_stream(body, request, user, recovery=None):
     store = get_store()
     user_id = user["user_id"]
+    binding = None
+    if body.model_connection_id:
+        from src.model_connections import get_default_broker, GrantError
+        if not body.external_api_confirmed:
+            raise HTTPException(422, "请确认使用所选模型处理本次任务")
+        if not body.model:
+            raise HTTPException(422, "请选择本次任务使用的模型")
+        try:
+            broker = get_default_broker()
+            binding = broker.freeze_connection(user_id, body.model_connection_id)
+            if body.model_connection_version and body.model_connection_version != binding.connection_version:
+                raise HTTPException(409, "模型连接已变化，请重新选择后发送")
+        except GrantError:
+            raise HTTPException(404, "模型连接不存在或无权访问") from None
 
     # 解析/新建会话（校验归属）
     conv_id = body.conv_id
     if conv_id:
         conv = store.get_conversation(conv_id)
         if not conv or conv["user_id"] != user_id:
-            conv_id = None
+            raise HTTPException(404, "会话不存在或无权访问")
+        active = _RUNNING.get(f"{user_id}:{conv_id}")
+        if active and not active.done() and active is not asyncio.current_task():
+            raise HTTPException(409, "当前会话仍在执行，请等待完成或停止后再发送")
     if not conv_id:
         title = body.content.strip()[:24] or "新会话"
         conv = store.create_conversation(user_id, title)
         conv_id = conv["conv_id"]
 
-    provider, model = _resolve_model(body.provider, body.model)
+    provider, model = ("bound", body.model) if binding else _resolve_model(body.provider, body.model)
 
     # 载入历史 + 追加本轮用户消息（持久化）
-    history = [{"role": m["role"], "content": m["content"]} for m in store.list_messages(conv_id)]
+    saved_history = store.list_messages(conv_id)
+    from src.notifications import pending_user_text
+    notification_text = pending_user_text(saved_history, body.content)
+    history = [{"role": m["role"], "content": m["content"]} for m in saved_history]
+    if not history:
+        history = [message.model_dump() for message in body.history]
     history.append({"role": "user", "content": body.content})
-    run_id = store.start_chat_execution(user_id, conv_id, body.content)
+    from src.config.settings import settings as _settings
+    mode = body.mode or ("data_prep" if _settings.data_prep_mode_enabled else "legacy_analysis")
+    collection_task_id = recovery["task_id"] if recovery else ("c_" + uuid.uuid4().hex if mode == "legacy_analysis" else None)
+    run_id = store.start_chat_execution(user_id, conv_id, "恢复原采集任务" if recovery else body.content, task_id=collection_task_id)
 
     queue: asyncio.Queue = asyncio.Queue()
+    progress: list[dict] = []
+    _PROGRESS[f"{user_id}:{conv_id}"] = progress
+    initial_usage = dict(_usage_ctx.get() or {})
 
     async def pipeline():
         """真正跑流水线的后台任务：事件写队列；结果无论 SSE 连接是否还在都会落库。"""
@@ -248,16 +407,19 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
             set_user_overrides({k: v for k, v in (store.config_all(user_id) or {}).items() if k in USER_KEYS})
             set_user_memories([m["text"] for m in store.memory_list(user_id)])
 
-            usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
+            usage = initial_usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
             _usage_tok = _usage_ctx.set(usage)
-            hist = await compress_history(history, provider=provider, model=model)
+            hist = [] if recovery else await compress_history(history, provider=provider, model=model)
             # 模式选择：body.mode 优先，否则按全局开关（6B 默认 data_prep，可回退 legacy_analysis）
             from src.config.settings import settings as _settings
             mode = body.mode or ("data_prep" if _settings.data_prep_mode_enabled else "legacy_analysis")
 
             state: Dict[str, Any] = {}
             seen: set[str] = set()
-            if mode == "data_prep":
+            if recovery:
+                from src.conductor.graph import astream_collection_recovery
+                stream = astream_collection_recovery(recovery["state"])
+            elif mode == "data_prep":
                 from src.data_prep.graph import astream_data_prep
                 stream = astream_data_prep(
                     user_input=body.content, messages=hist,
@@ -265,11 +427,15 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
                 )
             else:
                 stream = astream_conductor(
-                    user_input=body.content, messages=hist,
-                    provider=provider, model=model, session_id=conv_id,
+                    user_input=notification_text, messages=hist,
+                    provider=provider, model=model, session_id=conv_id, task_id=collection_task_id,
                 )
             async for kind, payload in stream:
-                if kind == "node":
+                if kind == "progress":
+                    item = {**payload, "sequence": len(progress) + 1}
+                    progress.append(item)
+                    queue.put_nowait({"event": "progress", "data": json.dumps(item, ensure_ascii=False)})
+                elif kind == "node":
                     node_name = payload.get("node") if isinstance(payload, dict) else payload
                     view = payload.get("view") if isinstance(payload, dict) else None
                     label = _NODE_LABELS.get(node_name)
@@ -289,7 +455,26 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
                 if state.get("inferred_quantity") and not state.get("needs_clarification"):
                     n = state["inferred_quantity"]
                     reply += f"\n\n> 💡 本次将采集约 {n} 条数据（系统默认，可随时告知调整数量）。"
-                result = _build_result(user_id, conv_id, state, reply, provider, model, body.content)
+                result = _build_result(user_id, conv_id, state, reply, provider, model, notification_text,
+                                       model_connection_id=body.model_connection_id,
+                                       model_connection_version=binding.connection_version if binding else None)
+                from src.conductor.collection_results import collection_outcome
+                snapshot = state.get("evidence_collection") or state.get("bank_collection")
+                if snapshot and state.get("outputs") and collection_outcome(snapshot)["ready_for_review"]:
+                    try:
+                        review = await _create_bank_review(state, body, user, provider, model, request,
+                                                          connection_version=binding.connection_version if binding else None)
+                    except (HTTPException, ValueError, OSError):
+                        result["reply"] += "\n\n采集快照已保留，初稿工作台创建未成功；请检查当前执行环境和模型连接后重试。"
+                    else:
+                        result["semantic_task_id"] = review["task_id"]
+                        result["reply"] += f"\n\n[进入初稿工作台核对](/data-prep?task={review['task_id']})。初稿生成后等待你确认。"
+            if result.get('kind') == 'clarification':
+                result['notification_user_text'] = notification_text
+            if result.get("kind") == "output" and not (state.get("bank_collection") or state.get("evidence_collection")):
+                from src.notifications import auto_conductor
+                await auto_conductor(store, user_id, 'chat:' + run_id, notification_text,
+                                     state, result, provider=provider, model=model)
             result["token_usage"] = dict(usage) if usage["calls"] else None
             # 持久化助手回复（澄清/错误/回执都记入历史，保证多轮上下文连续）
             assistant_text = result.get("reply") or reply
@@ -299,9 +484,13 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
             # 不持久化一次性 HITL 动作(actions/schedule)，它们依赖服务端暂存，重载后不可再确认。
             persist_meta = {
                 k: result.get(k)
-                for k in ("files", "grade", "collector", "item_count", "data_type", "template_status", "kind", "token_usage", "record_counts", "quality")
+                for k in ("files", "grade", "collector", "item_count", "data_type", "template_status", "kind", "token_usage", "record_counts", "quality", "notification", "notification_user_text", "scheduled_task_id", "next_run_at", "collection_outcome")
                 if result.get(k) not in (None, [], "")
             }
+            persist_meta["work_progress"] = progress
+            persist_meta["chat_run_id"] = run_id
+            persist_meta["model_connection_id"] = body.model_connection_id
+            persist_meta["model_id"] = model
             # 记录本轮实际用的模型（供反馈管理页展示"用了什么模型"）
             if provider or model:
                 persist_meta["model"] = f"{provider}/{model}" if (provider and model) else (model or provider)
@@ -311,9 +500,12 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
                 meta=persist_meta or None,
             )
             result["message_id"] = msg_id
+            saved_messages = store.list_messages(conv_id)
+            result["created_at"] = next(m["created_at"] for m in saved_messages if m["id"] == msg_id)
+            result["user_created_at"] = next(m["created_at"] for m in reversed(saved_messages) if m["role"] == "user")
             queue.put_nowait({"event": "result", "data": json.dumps(result, ensure_ascii=False, default=str)})
         except asyncio.CancelledError:
-            store.add_message(conv_id, "assistant", "❌ 用户已取消任务")
+            store.add_message(conv_id, "assistant", "❌ 用户已取消任务", meta={"kind": "cancelled", "work_progress": progress})
             queue.put_nowait({"event": "result", "data": json.dumps({
                 "conv_id": conv_id, "kind": "cancelled",
                 "reply": "❌ 用户已取消任务",
@@ -324,7 +516,7 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
             raise
         except Exception as e:  # noqa: BLE001
             try:
-                store.add_message(conv_id, "assistant", f"❌ 任务执行失败：{e}")
+                store.add_message(conv_id, "assistant", f"❌ 任务执行失败：{e}", meta={"kind": "error", "work_progress": progress})
             except Exception:
                 pass
             queue.put_nowait({"event": "error", "data": json.dumps({"message": str(e)}, ensure_ascii=False)})
@@ -334,6 +526,7 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
                 _usage_ctx.reset(_usage_tok)
             queue.put_nowait({"event": "done", "data": "{}"})
             _RUNNING.pop(task_key, None)
+            _PROGRESS.pop(task_key, None)
 
     task_key = f"{user_id}:{conv_id}"
     from src.account_execution import ExecutionDenied
@@ -343,11 +536,28 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
         try:
             async with running_execution(store, "chat", run_id):
                 execution_checkpoint(required=True)
-                await pipeline()
+                async def execute():
+                    if recovery:
+                        from src.conductor.collection_recovery import recovery_request
+                        with recovery_request(recovery["saved"]["binding"], recovery["attempt_id"]):
+                            await pipeline()
+                    else:
+                        await pipeline()
+                if binding:
+                    from src.model_connections.conductor import conductor_connection
+                    frozen = recovery["saved"]["binding_fields"].get("connection") if recovery else None
+                    with conductor_connection(owner_id=user_id, connection_id=body.model_connection_id,
+                                              connection_version=binding.connection_version, model=body.model,
+                                              task_id=frozen[4] if frozen else conv_id, run_id=frozen[5] if frozen else run_id,
+                                              revision=frozen[6] if frozen else 1):
+                        await execute()
+                else:
+                    await execute()
         except ExecutionDenied:
             queue.put_nowait({"event": "error", "data": json.dumps({"message": "账号执行已暂停"}, ensure_ascii=False)})
             queue.put_nowait({"event": "done", "data": "{}"})
             _RUNNING.pop(task_key, None)
+            _PROGRESS.pop(task_key, None)
         except (Exception, asyncio.CancelledError):
             # 原流水线已发送失败/取消回执；运行资源的未知状态由持久绑定继续保留。
             pass
@@ -360,7 +570,7 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
         if not platform_session_valid(request):
             yield {"event": "auth-expired", "data": json.dumps({"message": "登录已失效，请重新登录"}, ensure_ascii=False)}
             return
-        yield {"event": "meta", "data": json.dumps({"conv_id": conv_id}, ensure_ascii=False)}
+        yield {"event": "meta", "data": json.dumps({"conv_id": conv_id, "task_id": collection_task_id}, ensure_ascii=False)}
         while True:
             # 空闲时也复核撤销；只结束读取，不取消已经开始的后台流水线。
             if not platform_session_valid(request):
@@ -382,6 +592,17 @@ async def chat_stream(body: ChatIn, request: Request, user=Depends(get_execution
 
 # 正在后台执行的会话任务注册表："user_id:conv_id" -> asyncio.Task（done 后自清）
 _RUNNING: Dict[str, asyncio.Task] = {}
+_PROGRESS: Dict[str, list[dict]] = {}
+
+
+@router.get("/history")
+def chat_history(user=Depends(get_current_user)):
+    items = get_store().list_chat_history(user["user_id"])
+    for item in items:
+        task = _RUNNING.get(f"{user['user_id']}:{item['conv_id']}")
+        if task and not task.done():
+            item["status"] = "running"
+    return items
 
 
 @router.get("/running/{conv_id}")
@@ -392,7 +613,7 @@ def chat_running(conv_id: str, user=Depends(get_current_user)):
     if not conv or conv["user_id"] != user["user_id"]:
         raise HTTPException(status_code=404, detail="会话不存在")
     task = _RUNNING.get(f"{user['user_id']}:{conv_id}")
-    return {"running": bool(task and not task.done())}
+    return {"running": bool(task and not task.done()), "progress": _PROGRESS.get(f"{user['user_id']}:{conv_id}", [])}
 
 
 @router.post("/{conv_id}/cancel")
@@ -410,8 +631,8 @@ class FeedbackIn(BaseModel):
     message_id: int
     conv_id: str
     rating: str  # 'up' | 'down'
-    reasons: Optional[List[str]] = None
-    comment: Optional[str] = None
+    reasons: Optional[List[str]] = Field(default=None, max_length=7)
+    comment: Optional[str] = Field(default=None, max_length=5000)
 
 
 @router.post("/feedback")
@@ -421,6 +642,9 @@ def submit_feedback(body: FeedbackIn, user=Depends(get_execution_user)):
     user_id = user["user_id"]
     if body.rating not in ("up", "down"):
         raise HTTPException(status_code=400, detail="rating 必须为 up/down")
+    from src.api.feedback_audit import REASONS
+    if any(reason not in REASONS for reason in body.reasons or []):
+        raise HTTPException(422, '反馈原因无效')
     conv = store.get_conversation(body.conv_id)
     if not conv or conv["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="会话不存在")

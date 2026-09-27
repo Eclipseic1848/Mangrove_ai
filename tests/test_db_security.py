@@ -76,6 +76,23 @@ class TestValidateDbHost:
 # ---------------- sqlite 路径安全 ----------------
 
 
+@pytest.mark.parametrize("dialect_name", ["mysql", "postgresql"])
+def test_production_dialect_enforces_configured_host_allowlist(monkeypatch, dialect_name):
+    """验证生产方言接线；创建引擎不连接真实数据库。"""
+    from src.config.settings import settings
+    from src.connectors.db_dialects import DbCredentials, get_dialect
+
+    monkeypatch.setattr(settings, "data_prep_db_host_allowlist", " 127.0.0.1, 10.0.0.5 ")
+    dialect = get_dialect(dialect_name)
+    with pytest.raises(ValueError, match="主机.*白名单"):
+        dialect.make_engine(DbCredentials(dialect=dialect_name, host="127.0.0.2"))
+    engine = dialect.make_engine(DbCredentials(dialect=dialect_name, host="127.0.0.1"))
+    try:
+        assert engine.url.host == "127.0.0.1"
+    finally:
+        engine.dispose()
+
+
 class TestSqlitePath:
     def test_simple_relpath(self):
         p = validate_sqlite_path("orders.db")

@@ -552,6 +552,7 @@
         "artifact_ids": {
           "default": [],
           "items": {
+            "minLength": 1,
             "type": "string"
           },
           "title": "Artifact Ids",
@@ -560,6 +561,7 @@
         "source_ids": {
           "default": [],
           "items": {
+            "minLength": 1,
             "type": "string"
           },
           "title": "Source Ids",
@@ -580,9 +582,13 @@
         "pages": {
           "additionalProperties": {
             "items": {
+              "minimum": 1,
               "type": "integer"
             },
             "type": "array"
+          },
+          "propertyNames": {
+            "minLength": 1
           },
           "title": "Pages",
           "type": "object"

@@ -2,7 +2,7 @@
 """匿名网页快照进入统一任务、验证和正式 Delivery 的纵切面。"""
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import io
@@ -574,6 +574,17 @@ def test_source_refresh_intent_serializes_concurrent_and_explicit_recovery(
         attempt_id="source_attempt_web_delivery",
         snapshot_id=snapshot_id,
         resume_unknown=True,
+    )
+    assert recovered is False
+    # 无时区旧记录不能推断超时；明确带时区且超过租约后才允许用户恢复。
+    with sqlite3.connect(settings.webui_db_path) as connection:
+        connection.execute(
+            "UPDATE source_refresh_intents SET updated_at=? WHERE owner_id=? AND task_id=? AND idempotency_key=?",
+            ((datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat(), "user-a", task_id, "concurrent-refresh"),
+        )
+    _, recovered = store.claim_source_refresh_intent(
+        "user-a", task_id, "concurrent-refresh", request_hash="b" * 64, expected_revision=1,
+        attempt_id="source_attempt_web_delivery", snapshot_id=snapshot_id, resume_unknown=True,
     )
     assert recovered is True
     with sqlite3.connect(settings.webui_db_path) as connection:

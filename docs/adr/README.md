@@ -43,6 +43,15 @@
 | [0036](0036-single-workspace-with-verified-runtime-inheritance.md) | 单一工作台继承已验证 Runtime 与 Harness 能力 | 已采纳；部分取代 0018/0019/0035 的 Legacy 兼容要求 | 2026-08-30 |
 | [0037](0037-private-multi-user-auth-observability-and-slo.md) | 私有多人部署的认证、可观测性与 P1 服务目标 | 已采纳 | 2026-08-30 |
 | [0038](0038-confirmed-open-source-tool-installation-and-reuse.md) | 开源工具采用确认安装与持久复用 | 已采纳；产品层简化 0026/0029 的能力晋级呈现 | 2026-08-30 |
+| [0039](0039-read-only-data-lifecycle-and-reusable-source-deletion.md) | 只读数据生命周期与关联资料清理 | 已采纳 | 2026-09-04 |
+| [0040](0040-owner-confirmed-library-sharing.md) | 经验库共享由所有者确认 | 已采纳 | 2026-09-07 |
+| [0041](0041-selected-model-onboarding-and-local-discovery.md) | 所选模型引导与本地发现 | 已采纳 | 2026-09-07 |
+| [0042](0042-owner-accepted-draft-publication.md) | 初稿展示与用户接受交付 | 已采纳；默认自动核对由 0047 取代 | 2026-09-14 |
+| [0043](0043-versioned-model-configuration-editor.md) | 版本化模型配置编辑器 | 已采纳 | 2026-09-15 |
+| [0044](0044-owner-authorized-result-notifications.md) | 所有者明确授权的结果通知 | 已采纳 | 2026-09-16 |
+| [0045](0045-natural-language-collection-schedules.md) | 自然语言采集计划 | 已采纳 | 2026-09-17 |
+| [0046](0046-beijing-time-and-legacy-schedules.md) | 北京时间与历史计划兼容 | 已采纳 | 未单独记录 |
+| [0047](0047-owner-controlled-draft-verification.md) | 初稿后由用户决定是否继续核对 | 已采纳 | 2026-09-20 |
 
 ## 产品决策汇总（plan 第 3 节 + 本次确认）
 
@@ -74,3 +83,4 @@
 | 新平台收口 | 不迁移未上线历史资产；单一任务生命周期继承 CoreMind、Pi/coding-agent、Harness 的已验证能力 | 0036 |
 | P1 远程多人运行 | 单组织私有部署；设备会话可撤销；最小内容日志；99.5% 月可用性与 2 秒交互目标 | 0037 |
 | 开源工具获取与复用 | 缺失时发现、确认后安装；个人或平台范围持久复用；只统计模型 Token 与可选官方参考费用 | 0038 |
+| 分阶段采集与原样初稿 | 通用筛选与按需深读、冻结恢复；宿主复制暂停，显式继续后在同 Run 首次调用模型 | 0048 |

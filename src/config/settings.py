@@ -348,15 +348,19 @@ class Settings(BaseSettings):
         ),
     )
     pi_runtime_image: str = Field(
-        default="mangrove/pi-coding-agent:0.80.10",
+        default="mangrove/pi-coding-agent:0.87.1-v1.0.0",
         description="任务级 Pi Runtime 固定镜像",
+    )
+    pi_runtime_resume_images: list[str] = Field(
+        default_factory=list,
+        description="仅供历史冻结任务继续执行的保留镜像；仍核验原内容摘要",
     )
     pi_capability_host_enabled: bool = Field(
         default=False,
         description="是否灰度启用任务级原生能力 Sidecar；关闭时现有 Pi 路径零变化",
     )
     pi_capability_host_image: str = Field(
-        default="mangrove/pi-coding-agent:0.80.10",
+        default="mangrove/pi-coding-agent:0.87.1-v1.0.0",
         description="Capability Host 固定镜像",
     )
     pi_runtime_egress_image: str = Field(
@@ -430,10 +434,6 @@ class Settings(BaseSettings):
     data_prep_http_private_host_allowlist: str = Field(
         default="",
         description="允许 HTTP API 访问的私网主机名/IP，逗号分隔；loopback 等硬黑名单仍拒绝",
-    )
-    data_prep_http_proxy_fake_ip_host_allowlist: str = Field(
-        default="",
-        description="允许透明代理 Fake-IP 的精确 HTTPS 主机名，逗号分隔；仅放行 198.18.0.0/15",
     )
     # 扫描/混合 PDF 坐标型 OCR（Phase 4A）。当前本机开发环境使用 MinerU 3.4.4 HTTP 服务；
     # 数字 PDF 不调用该服务，服务失败时保留 ocr_required，不伪造解析成功。
@@ -571,8 +571,8 @@ class Settings(BaseSettings):
     mysql_password: str = Field(default="", description="MySQL 密码（放 .env）")
     mysql_database: str = Field(default="mangrove", description="MySQL 数据库名")
 
-    # 历史连接配置保留，不迁移凭据；外部只读门不允许开启邮件投递。
-    smtp_enabled: bool = Field(default=True, description="历史邮件开关，仅保留配置，不授权发送")
+    # 配置启用不等于发送授权；每次外发必须来自用户明确指令。
+    smtp_enabled: bool = Field(default=True, description="启用已授权的邮件通知")
     smtp_host: str = Field(default="", description="SMTP 服务器地址，如 smtp.qq.com / smtp.gmail.com")
     smtp_port: int = Field(default=465, description="SMTP 端口：SSL 用 465，STARTTLS 用 587")
     smtp_user: str = Field(default="", description="SMTP 登录账号（通常即发件邮箱）")
@@ -580,9 +580,10 @@ class Settings(BaseSettings):
     smtp_from: str = Field(default="", description="发件人地址，留空则用 smtp_user")
     smtp_use_ssl: bool = Field(default=True, description="True 用 SSL(465)；False 用 STARTTLS(587)")
 
-    # 历史 Webhook 不清除；配置值不能越过外部只读投递门。
-    slack_enabled: bool = Field(default=True, description="历史 Slack 开关，仅保留配置，不授权投递")
+    slack_enabled: bool = Field(default=True, description="启用已授权的 Slack 通知")
     slack_webhook_url: str = Field(default="", description="Slack Incoming Webhook URL（放 .env）；空则不用")
+    slack_bot_token: str = Field(default="", description="Slack Bot Token，用于正文及文件发送")
+    slack_channel_id: str = Field(default="", description="Slack 目标频道 ID")
 
     # Agent 配置
     agent_max_iterations: int = Field(default=50, description="Agent 最大迭代次数")
@@ -705,3 +706,4 @@ def resolve_vision_model_api_settings() -> Dict[str, Any]:
         "timeout": s.llm_timeout,
         "max_tokens": s.llm_max_tokens,
     }
+

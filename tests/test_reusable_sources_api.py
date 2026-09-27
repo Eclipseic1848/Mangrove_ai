@@ -22,6 +22,23 @@ def canvas(tmp_path,monkeypatch):
 
 
 
+def test_history_releases_listing_read_lock_before_output_verification(canvas, monkeypatch):
+    import sqlite3
+    from src.config.settings import settings
+    from src.source_acquisition import reuse
+    client, _, _, task, _ = canvas
+    original = reuse.verified_output_metadata
+    def verify(owner, identity):
+        # 模拟核验期间其他任务提交元数据；列表不得持有跨连接读锁。
+        with sqlite3.connect(settings.webui_db_path, timeout=0.1) as connection:
+            connection.execute("UPDATE formal_delivery_outputs SET filename=filename WHERE output_id=?", (identity,))
+        return original(owner, identity)
+    monkeypatch.setattr(reuse, "verified_output_metadata", verify)
+    response = client.get("/api/semantic-workspace/reusable-sources")
+    assert response.status_code == 200
+    assert any(item.get("output_id") == task["delivery"]["outputs"][0]["output_id"] for item in response.json()["items"])
+
+
 def test_resolve_original_and_formal_output_without_new_task(canvas):
     client, _, _, task, upload = canvas
     output = task["delivery"]["outputs"][0]

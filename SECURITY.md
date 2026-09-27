@@ -18,8 +18,21 @@
 
 ## 支持范围
 
-Mangrove 目前处于公开开发阶段，尚未发布稳定生产版本。安全修复优先作用于默认分支
-`main`；路线图版本名不代表已有同名 Tag 或 Release，历史分支和本机实验版本不保证单独维护。
+当前发行基线为 `v1.0.0`。安全修复优先作用于默认分支 `main`，需要更新发行版时发布新的补丁版本；
+不修改已经发布的标签或替换同名制品。旧开发快照和本机实验版本不保证单独维护。
+版本发布不代表已完成部署环境的生产安全验收，部署者仍需完成本环境的验证与运维交接。
+
+## v1.0.0 的依赖处理范围
+
+发布前将主服务 AnyIO 升至 4.14.2、pypdf 升至 6.16.1、采集分组 Protego 升至 0.6.2。
+对应公开公告为 [AnyIO TLS 域名校验](https://github.com/agronholm/anyio/security/advisories/GHSA-82r6-8w77-94w6)、
+[pypdf 资源消耗](https://github.com/py-pdf/pypdf/security/advisories/GHSA-23w6-3w8w-8484) 和
+[Protego robots 规则匹配](https://github.com/advisories/GHSA-wjmf-p669-5m5p)。
+随包 Pi 镜像也使用 pypdf 6.16.1；新构建标签 `0.87.1-v1.0.0` 不覆盖原机的旧冻结镜像。
+
+GitHub 仍有前端构建依赖、离线 promptfoo 评测依赖及 React Router 告警。本版不把评测依赖安装进
+主服务；前端采用客户端渲染，登录返回地址已有站内校验，但不据此关闭全部路由告警。
+后续升级须验证具体调用路径，版本发布不表示仓库或所有镜像已经取得“零漏洞”结论。
 
 ## 私密报告漏洞
 

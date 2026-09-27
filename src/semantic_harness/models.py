@@ -10,7 +10,7 @@ from enum import Enum
 import hashlib
 import json
 import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Annotated, Any, Dict, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -157,10 +157,11 @@ class ObjectiveSpec(ContractModel):
 
 
 class SourceScope(ContractModel):
-    artifact_ids: Tuple[str, ...] = ()
-    source_ids: Tuple[str, ...] = ()
+    artifact_ids: Tuple[Annotated[str, Field(min_length=1)], ...] = ()
+    source_ids: Tuple[Annotated[str, Field(min_length=1)], ...] = ()
     table_scope: Optional[str] = None
-    pages: Dict[str, Tuple[int, ...]] = Field(default_factory=dict)
+    # 页码是来源身份的一部分；不能把无效页码当成合法的空结果。
+    pages: Dict[Annotated[str, Field(min_length=1)], Tuple[Annotated[int, Field(ge=1, strict=True)], ...]] = Field(default_factory=dict)
     section_patterns: Tuple[str, ...] = ()
     time_ranges: Tuple[str, ...] = ()
     whole_document: bool = False

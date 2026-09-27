@@ -20,6 +20,7 @@ import json
 import logging
 import threading
 from datetime import datetime
+from src.timezone import now as beijing_now
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -70,7 +71,7 @@ def _load_templates_from_disk() -> List[Dict]:
         if parsed is None:
             continue  # 无 frontmatter（如 README.md）跳过
         meta, body = parsed
-        if not body or not valid_entry({**meta, "body": body}):
+        if not isinstance(meta, dict) or not body or not valid_entry({**meta, "body": body}):
             continue
         kws = meta.get("keywords") or []
         if isinstance(kws, str):
@@ -109,10 +110,23 @@ def _candidates(spec: TaskSpec, *, owner_id: str | None = None) -> List[Dict]:
 
 def _match_keyword(spec: TaskSpec, *, owner_id: str | None = None) -> Optional[Dict]:
     """关键词匹配：至少一个关键词出现在 intent/keywords，取命中数最多者；都不命中返回 None。"""
-    haystack = ((spec.intent or "") + " " + " ".join(spec.keywords or [])).lower()
+    return match_template_keywords(
+        (spec.intent or "") + " " + " ".join(spec.keywords or []),
+        spec.data_type.value, owner_id=owner_id, include_untyped=True,
+    )
+
+
+def match_template_keywords(intent: str, data_type: str, *, owner_id: str | None = None,
+                            include_untyped: bool = False) -> Optional[Dict]:
+    """本地匹配共享给工作台；未授权额外网络调用时不请求 embedding 服务。"""
+    haystack = intent.lower()
     best: Optional[Dict] = None
     best_score = 0
-    for t in _candidates(spec, owner_id=owner_id):
+    for t in load_templates(owner_id=owner_id):
+        if t.get("status") == "retired" or not (
+            t["data_type"] == data_type or (include_untyped and not t["data_type"])
+        ):
+            continue
         score = sum(1 for k in t["keywords"] if k.lower() in haystack)
         if score > best_score:
             best, best_score = t, score
@@ -459,15 +473,26 @@ async def curate_template(
     return _fallback_decision(data_type, keywords, title, owner_id=owner_id)
 
 
-async def save_template(title: str, data_type: str, keywords: List[str], body: str, *, owner_id: str | None = None) -> Optional[str]:
+async def save_template(title: str, data_type: str, keywords: List[str], body: str, *, owner_id: str | None = None,
+                        local_dedup: bool = False) -> Optional[str]:
     """经 Curator 裁决后保存一个学到的模板，返回其 slug；Curator 判定"丢弃"时返回 None。
 
     Curator 裁决（LLM）在锁外；merge/new 分支在锁内重读+原子写，保护 read-modify-write。
     合并时 updates 统计（uses/quality_avg/status）保持不变，只更新 title/keywords/body。
     """
     from src.api.execution import execution_checkpoint
+    from src.llm.provider import verify_bound_model
     require_owner(owner_id)
-    decision = await curate_template(title, data_type, keywords, body, owner_id=owner_id)  # 锁外 LLM
+    if local_dedup:
+        # 确认入口只授权原模型提炼，不额外向向量、重排或裁决服务发送正文。
+        # ponytail: 关键词去重不识别同义模板；语义去重需先明确辅助服务授权。
+        duplicate = find_duplicate(data_type, keywords, owner_id=owner_id)
+        decision = ({"decision": "reuse", "slug": duplicate["slug"], "source_digest": duplicate["content_digest"]}
+                    if duplicate else {"decision": "new"})
+    else:
+        decision = await curate_template(title, data_type, keywords, body, owner_id=owner_id)  # 锁外 LLM
+    # 裁决器可能吞掉模型异常并给出降级决定；绑定连接失败必须在任何写入前停止。
+    verify_bound_model()
     # 平台待确认动作可能在裁决期间被停用；独立库调用保持原行为。
     execution_checkpoint()
     kind = decision.get("decision")
@@ -532,7 +557,7 @@ async def save_template(title: str, data_type: str, keywords: List[str], body: s
             "status": "draft",
             "uses": 0,
             "quality_avg": 0,
-            "created_at": datetime.now().isoformat(),
+            "created_at": beijing_now().isoformat(),
         }
         front = yaml.safe_dump(meta, allow_unicode=True, sort_keys=False).strip()
         execution_checkpoint()

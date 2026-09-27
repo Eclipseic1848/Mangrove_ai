@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from src.timezone import now as beijing_now
 import hashlib
 import ipaddress
 import json
@@ -73,6 +74,10 @@ class ProviderOutcomeUnknownError(ConnectionError):
     """请求可能已到 Provider，但无法确认是否形成可用响应。"""
 
 
+class ProviderNotSentError(ConnectionError):
+    """连接阶段失败且尚未开始发送 HTTP 请求；不代表允许自动重试。"""
+
+
 class ConnectionBroker:
     """产品代码使用模型连接的唯一 Interface。"""
 
@@ -109,21 +114,37 @@ class ConnectionBroker:
             expose_managed_key_hint=can_manage,
         )
 
-    def get_usage_preference(self, owner_user_id: str) -> dict[str, object] | None:
-        return self._repository.get_usage_preference(owner_user_id)
+    def get_usage_preference(self, owner_user_id: str, *, allow_local: bool = False) -> dict[str, object] | None:
+        preference = self._repository.get_usage_preference(owner_user_id)
+        if preference and preference["connection_id"] == "__local__":
+            from src.llm.provider import list_models
+            preference["available"] = allow_local and preference["model_id"] in list_models().get("local", [])
+        return preference
+
+    def clear_usage_preference(self, owner_user_id: str) -> None:
+        self._repository.clear_usage_preference(owner_user_id)
 
     def set_usage_preference(
         self,
         owner_user_id: str,
         connection_id: str,
         model_id: str,
+        *,
+        allow_local: bool = False,
     ) -> dict[str, object]:
+        if connection_id == "__local__":
+            from src.llm.provider import list_models
+            # 本地兼容通道仍仅对管理员开放，不能用偏好保存绕过权限与配置检查。
+            if not allow_local or model_id not in list_models().get("local", []):
+                raise ConnectionError("该本地模型未配置或你无权使用")
         try:
-            return self._repository.set_usage_preference(
+            self._repository.set_usage_preference(
                 owner_user_id,
                 connection_id,
                 model_id,
+                allow_local=allow_local,
             )
+            return self.get_usage_preference(owner_user_id, allow_local=allow_local) or {}
         except ValueError as exc:
             raise ConnectionError(str(exc)) from exc
 
@@ -279,7 +300,7 @@ class ConnectionBroker:
                     "model_id": model_id,
                     "status": state,
                     "enabled": state == "available",
-                    "verified_at": datetime.now().isoformat(timespec="seconds"),
+                    "verified_at": beijing_now().isoformat(timespec="seconds"),
                     "error_code": error,
                     "usage_status": "reported" if usage else "unknown",
                     "native_usage_json": json.dumps(usage, separators=(",", ":")),
@@ -605,6 +626,13 @@ class ConnectionBroker:
             if payload.get("model") != grant["model"]:
                 raise GrantError("请求模型与 Grant 冻结模型不一致")
         _validate_local_tool_request(payload, str(grant["api_format"]))
+        if grant.get("thinking") in ("on", "off"):
+            # 连接默认值不覆盖结构化抽取等调用方明确要求的运行选项。
+            options = payload.setdefault("chat_template_kwargs", {})
+            if not isinstance(options, dict):
+                raise GrantError("思考选项必须为对象")
+            options.setdefault("enable_thinking", grant["thinking"] == "on")
+            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
         endpoint = _provider_endpoint(grant, operation)
         allow_private = grant["locality"] == "managed_private"
@@ -641,6 +669,7 @@ class ConnectionBroker:
         client_kwargs["transport"] = PinnedAsyncHTTPTransport(
             target=target,
             transport=self._transport,
+            check_active=lambda: self._resolve_active_grant(grant_token),
         )
         client = httpx.AsyncClient(**client_kwargs)
         request = client.build_request(
@@ -649,6 +678,19 @@ class ConnectionBroker:
             headers=outbound_headers,
             content=body,
         )
+        phase, transport_error = "unknown", None
+
+        async def trace(event, info):
+            nonlocal phase, transport_error
+            # 只保留阶段和异常类型，info 中的请求、地址、凭据与正文绝不落日志。
+            if event in {"connection.connect_tcp.started", "connection.start_tls.started"} and phase != "sending":
+                phase = "connecting"
+            elif event.endswith(".send_request_headers.started"):
+                phase = "sending"
+            if event.endswith(".failed") and isinstance(info.get("exception"), BaseException):
+                transport_error = type(info["exception"]).__name__
+
+        request.extensions["trace"] = trace
         try:
             # DNS与请求构造期间可能停用；发送前重新读取持久撤销事实。
             self._resolve_active_grant(grant_token)
@@ -657,15 +699,20 @@ class ConnectionBroker:
             raise
         try:
             response = await client.send(request, stream=True)
+            # httpcore 可在写入失败后收到服务端的完整响应头；旧写错误不能污染最终结果。
+            transport_error = None
         except httpx.HTTPError as exc:
             await client.aclose()
-            self._record_unknown_usage(grant)
-            raise ProviderOutcomeUnknownError(
-                "Provider 连接失败，Relay 结果无法确认"
-            ) from exc
-        except BaseException:
+            # 无阶段证据的自定义 Transport 仍按未知处理；不能仅凭异常名断言未发送。
+            unsent = phase == "connecting" and isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+            self._record_unknown_usage(grant, relay_outcome="not_sent" if unsent else "unknown",
+                                       error_type=type(exc).__name__)
+            if unsent:
+                raise ProviderNotSentError("Provider 连接失败，请求尚未发送") from exc
+            raise ProviderOutcomeUnknownError("Provider 连接失败，Relay 结果无法确认") from exc
+        except BaseException as exc:
             await client.aclose()
-            self._record_unknown_usage(grant)
+            self._record_unknown_usage(grant, relay_outcome="unknown", error_type=type(exc).__name__)
             raise
         try:
             self._resolve_active_grant(grant_token)
@@ -684,6 +731,8 @@ class ConnectionBroker:
                 str(grant["api_format"]),
                 response_body,
             )
+            if transport_error:
+                usage["native"].update(relay_outcome="unknown", error_type=transport_error)
             self._repository.record_usage(
                 grant=grant,
                 status=usage["status"],
@@ -707,6 +756,9 @@ class ConnectionBroker:
     def _record_unknown_usage(
         self,
         grant: Mapping[str, object],
+        *,
+        relay_outcome: str | None = None,
+        error_type: str | None = None,
     ) -> None:
         self._repository.record_usage(
             grant=dict(grant),
@@ -714,7 +766,7 @@ class ConnectionBroker:
             input_tokens=None,
             output_tokens=None,
             total_tokens=None,
-            native_json="{}",
+            native_json=json.dumps({"relay_outcome": relay_outcome, "error_type": error_type}) if relay_outcome else "{}",
         )
 
     def _resolve_active_grant(
@@ -757,7 +809,7 @@ class ConnectionBroker:
             api_key=api_key,
             model=model,
         )
-        verified_at = datetime.now().isoformat(timespec="seconds")
+        verified_at = beijing_now().isoformat(timespec="seconds")
         return self._repository.upsert_personal(
             owner_user_id=owner_user_id,
             preset_id=preset.preset_id,
@@ -819,7 +871,7 @@ class ConnectionBroker:
                 model_results,
             )
         self._append_pending_models(preset, model_results)
-        verified_at = datetime.now().isoformat(timespec="seconds")
+        verified_at = beijing_now().isoformat(timespec="seconds")
         return self._repository.create_personal(
             owner_user_id=owner_user_id,
             preset_id=preset.preset_id,
@@ -860,7 +912,7 @@ class ConnectionBroker:
         for item in preset.model_catalog:
             if selected is not None and item.model_id not in selected:
                 continue
-            verified_at = datetime.now().isoformat(timespec="seconds")
+            verified_at = beijing_now().isoformat(timespec="seconds")
             try:
                 usage = await self._verify_preset_model(
                     preset=preset,
@@ -966,6 +1018,92 @@ class ConnectionBroker:
             "该 Provider 协议尚未接入连接验证",
         )
 
+    def configuration(self, connection_id: str, actor: str, can_manage: bool) -> dict:
+        record = self._repository.configuration(connection_id, actor, can_manage)
+        return {key: record[key] for key in ("connection_id", "display_name", "base_url", "model", "api_format", "locality", "thinking", "version", "key_hint", "superseded")} | {
+            "models": [item["model_id"] for item in record["models"]], "has_key": bool(record["ciphertext"]),
+        }
+
+    async def test_configuration(self, connection_id: str, actor: str, can_manage: bool, draft: dict) -> dict:
+        current = self._repository.configuration(connection_id, actor, can_manage)
+        operation_id = draft["operation_id"]
+        request_hash = hashlib.sha256(json.dumps(draft, sort_keys=True).encode("utf-8")).hexdigest()
+        def result(edit: dict) -> dict:
+            if edit["connection_id"] != connection_id or edit["request_hash"] != request_hash:
+                raise ConnectionError("操作标识已用于其他配置，请重新验证")
+            return {"state": edit["state"], "results": json.loads(edit["results_json"])}
+        existing = self._repository.configuration_edit(actor, operation_id)
+        if existing:
+            return result(existing)
+        if current["version"] != draft["expected_version"] or current["superseded"]:
+            raise ConnectionError("配置已变化，请重新加载")
+        endpoint = draft["base_url"].strip().rstrip("/")
+        parts = urlsplit(endpoint)
+        if parts.query or parts.fragment:
+            raise ConnectionError("地址不能包含查询参数或片段")
+        target = HttpSecurityGuard(allow_private=can_manage, loopback_host_allowlist=("localhost", "127.0.0.1", "::1") if can_manage else (), resolver=self._resolver).validate(endpoint)
+        flags = [ipaddress.ip_address(ip).is_private for ip in target.ips]
+        if any(flags) != all(flags):
+            raise ConnectionError("地址同时指向公网和私网")
+        private = all(flags)
+        if not private and target.scheme != "https":
+            raise ConnectionError("云端地址必须使用 HTTPS")
+        if endpoint != str(current["base_url"]).rstrip("/") and not draft.get("confirm_endpoint_change"):
+            raise ConnectionError("地址已改变，请确认向新地址发送验证请求和密钥")
+        secret = draft.get("api_key")
+        if secret is None or not secret.strip():
+            secret = self._vault.decrypt(current["ciphertext"]) if current["ciphertext"] else ""
+        else:
+            secret = secret.strip()
+        if not private and not secret:
+            raise ConnectionError("云端模型需要 API Key")
+        models = list(dict.fromkeys(item.strip() for item in draft["models"] if item.strip()))
+        model = draft["model"].strip()
+        if not models or model not in models or not draft["display_name"].strip():
+            raise ConnectionError("请填写名称，并在模型列表中指定首选模型")
+        thinking = draft.get("thinking", "default")
+        if thinking != "default" and not (private and current["api_format"] == "openai_chat_completions" and all("qwen" in item.lower() for item in models)):
+            raise ConnectionError("当前仅本地 Qwen Chat 接口支持显式思考开关，其他模型请选择默认")
+        config = {"display_name": draft["display_name"].strip(), "base_url": endpoint, "model": model, "models": models, "thinking": thinking, "locality": "managed_private" if private else "public_external", "key_hint": secret[-4:] if secret else ""}
+        if not self._repository.begin_configuration_edit(actor, operation_id, connection_id, current["version"], request_hash, config, self._vault.encrypt(secret) if secret else None):
+            return result(self._repository.configuration_edit(actor, operation_id))
+        results = []
+        try:
+            for model_id in models:
+                try:
+                    if thinking != "default":
+                        usage = await self._verify_openai_chat(base_url=endpoint, model=model_id, api_key=secret, allow_private=private, extra_body={"chat_template_kwargs": {"enable_thinking": thinking == "on"}})
+                    else:
+                        usage = await self._verify_custom_model(base_url=endpoint, api_format=current["api_format"], model=model_id, api_key=secret, allow_private=private)
+                    status = "available"
+                except ProviderVerificationError as exc:
+                    usage, status = {}, exc.code
+                results.append({"model_id": model_id, "display_name": model_id, "catalog_role": "custom", "catalog_version": current["preset_version"] or "custom", "status": status, "enabled": status == "available", "verified_at": beijing_now().isoformat(timespec="seconds"), "error_code": None if status == "available" else status, "usage_status": "reported" if usage else "unknown", "native_usage_json": json.dumps(usage)})
+                if status == "result_unknown":
+                    break
+            state = "verified" if all(item["status"] == "available" for item in results) else "failed"
+            if any(item["status"] == "result_unknown" for item in results):
+                state = "unknown"
+        except BaseException:
+            # 请求是否执行无法确认时不自动重试，避免重复计费。
+            self._repository.finish_configuration_test(actor, operation_id, "unknown", results)
+            raise
+        self._repository.finish_configuration_test(actor, operation_id, state, results)
+        return {"state": state, "results": results, "message": str(ConnectionValidationError("验证未通过，原配置未修改", results)) if state == "failed" else ""}
+
+    def apply_configuration(self, connection_id: str, actor: str, can_manage: bool, operation_id: str) -> dict:
+        self._repository.configuration(connection_id, actor, can_manage)
+        replacement = self._repository.apply_configuration_edit(actor, operation_id, connection_id, can_manage)
+        return {"connection_id": replacement, "state": "applied"}
+
+    def configuration_operation(self, connection_id: str, actor: str, can_manage: bool, operation_id: str) -> dict:
+        self._repository.configuration(connection_id, actor, can_manage)
+        edit = self._repository.configuration_edit(actor, operation_id)
+        if not edit or edit["connection_id"] != connection_id:
+            raise ConnectionError("尚未找到验证记录，请稍后核对；不要重复提交")
+        # 只读核对不会重发请求；进程中断留下的 testing 也明确表示结果未确认。
+        return {"state": "unknown" if edit["state"] == "testing" else edit["state"], "configuration": json.loads(edit["config_json"]), "results": json.loads(edit["results_json"]), "connection_id": edit["replacement_id"]}
+
     async def register_managed(
         self,
         *,
@@ -1049,7 +1187,7 @@ class ConnectionBroker:
                 "catalog_version": "custom-v1",
                 "status": status,
                 "enabled": status == "available",
-                "verified_at": datetime.now().isoformat(timespec="seconds"),
+                "verified_at": beijing_now().isoformat(timespec="seconds"),
                 "error_code": error_code,
                 "usage_status": "reported" if usage else "unknown",
                 "native_usage_json": json.dumps(usage, separators=(",", ":")),
@@ -1060,7 +1198,7 @@ class ConnectionBroker:
         ]
         if selected_model not in available:
             raise ConnectionValidationError("所选模型验证失败，连接未发布", results)
-        verified_at = datetime.now().isoformat(timespec="seconds")
+        verified_at = beijing_now().isoformat(timespec="seconds")
         return self._repository.create_managed(
             created_by=actor_user_id,
             display_name=name,
@@ -1252,7 +1390,7 @@ class ConnectionBroker:
             )
 
         self._append_pending_models(preset, results)
-        verified_at = datetime.now().isoformat(timespec="seconds")
+        verified_at = beijing_now().isoformat(timespec="seconds")
         return self._repository.create_managed(
             created_by=actor_user_id,
             display_name=name,
@@ -1275,6 +1413,7 @@ class ConnectionBroker:
         model: str,
         api_key: str,
         allow_private: bool,
+        extra_body: dict | None = None,
     ) -> dict[str, int | float]:
         """用无业务数据的极小 Chat Completions 请求验证连接。"""
 
@@ -1288,6 +1427,7 @@ class ConnectionBroker:
                 "messages": [{"role": "user", "content": "Reply with OK."}],
                 "max_tokens": 16,
                 "stream": False,
+                **(extra_body or {}),
             },
             allow_private=allow_private,
         )

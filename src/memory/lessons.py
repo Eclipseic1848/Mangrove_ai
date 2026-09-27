@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import datetime
+from src.timezone import now as beijing_now
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -80,7 +81,7 @@ def _load_lessons_from_disk() -> List[Dict]:
         if parsed is None:
             continue
         meta, body = parsed
-        if not body or not valid_entry({**meta, "body": body}):
+        if not isinstance(meta, dict) or not body or not valid_entry({**meta, "body": body}):
             continue
         kws = meta.get("keywords") or []
         if isinstance(kws, str):
@@ -267,6 +268,19 @@ def find_active_lessons(data_type: Optional[str], keywords: List[str], intent: s
     return top[:top_k], "semantic"
 
 
+def match_lesson_keywords(intent: str, data_type: str, *, owner_id: str) -> List[Dict]:
+    """工作台仅本地匹配明确适用类型，沿用本人试用及平台转正门。"""
+    candidates = []
+    for entry in load_lessons(owner_id=owner_id):
+        if entry["data_type"] != data_type or not _recallable(entry, owner_id):
+            continue
+        score = sum(1 for keyword in entry["keywords"] if keyword.lower() in intent.lower())
+        if score:
+            candidates.append((score, entry))
+    candidates.sort(key=lambda item: (item[0], _effectiveness(item[1])), reverse=True)
+    return [entry for _, entry in candidates[:3]]
+
+
 async def distill_lesson(
     intent: str,
     data_type: str,
@@ -390,7 +404,7 @@ async def record_failure(
                     while path.exists():
                         path = LESSONS_DIR / f"{slug}-{i}.md"
                         i += 1
-                    meta = _build_lesson_meta(fresh["title"], data_type, fresh["keywords"] or keywords, "draft", 1, created_at=datetime.now().isoformat(), owner_id=owner_id)
+                    meta = _build_lesson_meta(fresh["title"], data_type, fresh["keywords"] or keywords, "draft", 1, created_at=beijing_now().isoformat(), owner_id=owner_id)
                     atomic_write(path, f"---\n{meta}\n---\n{fresh['body'].strip()}\n")
                     _invalidate_and_rebuild_index()
                     logger.info("教训已被删除，降级新建：%s", path.stem)
@@ -413,7 +427,7 @@ async def record_failure(
             while path.exists():
                 path = LESSONS_DIR / f"{slug}-{i}.md"
                 i += 1
-            meta = _build_lesson_meta(fresh["title"], data_type, fresh["keywords"] or keywords, "draft", 1, created_at=datetime.now().isoformat(), owner_id=owner_id)
+            meta = _build_lesson_meta(fresh["title"], data_type, fresh["keywords"] or keywords, "draft", 1, created_at=beijing_now().isoformat(), owner_id=owner_id)
             atomic_write(path, f"---\n{meta}\n---\n{fresh['body'].strip()}\n")
             _invalidate_and_rebuild_index()
             logger.info("已沉淀新教训（草稿）：%s", path.stem)

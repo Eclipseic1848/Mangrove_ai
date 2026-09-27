@@ -221,3 +221,54 @@ def test_freeze_rejects_stale_preview_hash(tmp_path) -> None:
                 preview=preview,
                 expected_preview_sha256="sha256:" + "0" * 64,
             )
+
+
+def test_automatic_method_snapshot_is_stable_but_not_inherited_by_changed_goal(tmp_path, monkeypatch):
+    from src.memory import templates
+
+    service, repository, _ = _service(tmp_path)
+    directory = tmp_path / "templates"
+    directory.mkdir()
+    path = directory / "method.md"
+    path.write_text(
+        "---\nowner_id: user-a\nscope: owner\ntitle: 费用方法\n"
+        "data_type: workspace_document\nkeywords: [费用]\n---\n按原始证据逐项核对\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(templates, "TEMPLATES_DIR", directory)
+    preview = service.automatic_preview(owner_id="user-a", purpose="general", objective_text="汇总费用",
+        output_formats=("json",), data_type="workspace_document")
+    assert preview is not None
+    with sqlite3.connect(repository.database) as connection:
+        service.freeze(connection, owner_id="user-a", task_id="auto-task", revision=1,
+            preview=preview, expected_preview_sha256=preview.preview_sha256, require_current=True)
+    path.unlink()
+    kwargs = dict(owner_id="user-a", source_task_id="auto-task", source_revision=1,
+        target_task_id="auto-task", target_revision=2, output_formats=("json",))
+    carried = service.carry_forward(**kwargs, objective_text="汇总费用")
+    assert carried is not None and carried.automatically_selected
+    assert "按原始证据逐项核对" in carried.compiled_context.content
+    assert "保持当前任务目标" not in carried.compiled_context.content
+    assert service.carry_forward(**kwargs, objective_text="重新分析合同风险") is None
+    assert repository.get_frozen("user-a", "auto-task", 1).template.method_draft == "按原始证据逐项核对"
+
+
+@pytest.mark.parametrize("metadata,body", [
+    ("owner_id: user-b\nscope: owner", "核对费用"),
+    ("owner_id: user-a\nscope: owner\nstatus: retired", "核对费用"),
+    ("owner_id: user-a\nscope: owner\ndata_type: article", "核对费用"),
+    ("owner_id: user-a\nscope: owner", "api_key=synthetic-test-secret"),
+])
+def test_automatic_method_skips_inaccessible_incompatible_or_sensitive_entries(tmp_path, monkeypatch, metadata, body):
+    from src.memory import templates
+
+    service, _, _ = _service(tmp_path)
+    directory = tmp_path / "templates"
+    directory.mkdir()
+    (directory / "method.md").write_text(
+        "---\ntitle: 费用方法\ndata_type: workspace_document\nkeywords: [费用]\n"
+        + metadata + "\n---\n" + body + "\n", encoding="utf-8",
+    )
+    monkeypatch.setattr(templates, "TEMPLATES_DIR", directory)
+    assert service.automatic_preview(owner_id="user-a", purpose="general", objective_text="汇总费用",
+        output_formats=("json",), data_type="workspace_document") is None
