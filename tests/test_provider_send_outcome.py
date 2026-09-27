@@ -24,6 +24,153 @@ PROTOCOLS = {
 }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_reachable", [False, True])
+async def test_pinned_connection_uses_next_validated_address_before_sending(first_reachable):
+    from src.connectors.http_security import ValidatedTarget
+    from src.model_connections.pinned_transport import PinnedAsyncHTTPTransport
+
+    requests = []
+    finished = asyncio.Event()
+    async def provider(reader, writer):
+        try:
+            head = await reader.readuntil(b"\r\n\r\n")
+            length = next(int(line.split(b":", 1)[1]) for line in head.split(b"\r\n")
+                          if line.lower().startswith(b"content-length:"))
+            requests.append((head, await reader.readexactly(length)))
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+            await writer.drain()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+            finished.set()
+
+    server = await asyncio.start_server(provider, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    refused = socket.socket()
+    # 首地址只占端口不监听，次地址为真实服务；任何模型正文最多发送一次。
+    refused.bind(("127.0.0.2", port))
+    target = ValidatedTarget(url=f"http://provider.test:{port}/v1", scheme="http", host="provider.test",
+                             port=port, ips=(("127.0.0.1", "127.0.0.2") if first_reachable else ("127.0.0.2", "127.0.0.1")))
+    try:
+        # Windows 本机拒绝连接也可能等待约 2 秒；留足切换预算，预算耗尽另有确定性回归。
+        async with httpx.AsyncClient(transport=PinnedAsyncHTTPTransport(target=target), timeout=5) as client:
+            response = await client.post(target.url, content=b"synthetic-body")
+            assert response.status_code == 200 and response.text == "OK"
+        await asyncio.wait_for(finished.wait(), 2)
+        assert len(requests) == 1 and requests[0][1] == b"synthetic-body"
+        assert f"Host: provider.test:{port}".encode() in requests[0][0]
+    finally:
+        refused.close()
+        server.close()
+        await server.wait_closed()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage,fault,attempts", [
+    ("connect", "connect", 2), ("none", "connect", 1), ("send", "connect", 1),
+    ("connect", "protocol", 1), ("connect", "cancel", 1), ("connect", "http500", 1),
+])
+async def test_pinned_fallback_requires_unsent_connection_evidence(stage, fault, attempts):
+    from src.connectors.http_security import ValidatedTarget
+    from src.model_connections.pinned_transport import PinnedAsyncHTTPTransport
+
+    addresses, events = [], []
+    errors = {"connect": httpx.ConnectError, "protocol": httpx.RemoteProtocolError, "cancel": asyncio.CancelledError}
+    async def provider(request):
+        addresses.append(request.url.host)
+        assert request.headers["host"] == "provider.test" and request.extensions["sni_hostname"] == "provider.test"
+        if len(addresses) == 2:
+            return httpx.Response(200, content=b"OK")
+        if stage != "none":
+            await request.extensions["trace"]("connection.connect_tcp.started", {})
+        if stage == "send":
+            await request.extensions["trace"]("http11.send_request_headers.started", {})
+        if fault == "http500":
+            return httpx.Response(500)
+        raise errors[fault]("synthetic-failure")
+    async def original_trace(event, info):
+        events.append(event)
+    target = ValidatedTarget("http://provider.test/v1", "http", "provider.test", 80, ("192.0.2.1", "192.0.2.2"))
+    async with httpx.AsyncClient(transport=PinnedAsyncHTTPTransport(target=target, transport=httpx.MockTransport(provider))) as client:
+        if attempts == 2 or fault == "http500":
+            response = await client.post(target.url, extensions={"trace": original_trace})
+            assert response.status_code == (500 if fault == "http500" else 200)
+        else:
+            with pytest.raises(errors[fault]):
+                await client.post(target.url, extensions={"trace": original_trace})
+    assert len(addresses) == attempts
+    assert bool(events) is (stage != "none")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("elapsed,attempts", [(1.25, 2), (5.0, 1)])
+async def test_pinned_addresses_share_connect_budget(monkeypatch, elapsed, attempts):
+    from types import SimpleNamespace
+    from src.connectors.http_security import ValidatedTarget
+    from src.model_connections import pinned_transport
+
+    now, budgets = [0.0], []
+    monkeypatch.setattr(pinned_transport, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    async def provider(request):
+        budgets.append(request.extensions["timeout"]["connect"])
+        await request.extensions["trace"]("connection.connect_tcp.started", {})
+        now[0] += elapsed
+        raise httpx.ConnectError("synthetic-refused")
+    target = ValidatedTarget("http://provider.test/v1", "http", "provider.test", 80, ("192.0.2.1", "192.0.2.2"))
+    transport = pinned_transport.PinnedAsyncHTTPTransport(target=target, transport=httpx.MockTransport(provider))
+    async with httpx.AsyncClient(transport=transport, timeout=5.0) as client:
+        with pytest.raises(httpx.ConnectError):
+            await client.post(target.url)
+    assert budgets == ([5.0, 3.75] if attempts == 2 else [5.0])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["tls_timeout", "slow_response"])
+async def test_native_tcp_and_tls_share_deadline_but_response_does_not(mode):
+    import httpcore
+    from src.connectors.http_security import ValidatedTarget
+    from src.model_connections.pinned_transport import PinnedAsyncHTTPTransport
+
+    sent, stages, closed = [], [], []
+    class Stream(httpcore.AsyncMockStream):
+        async def start_tls(self, ssl_context, server_hostname=None, timeout=None):
+            stages.append("tls")
+            await asyncio.wait_for(asyncio.sleep(.55 if mode == "tls_timeout" else 0), timeout)
+            return self
+        async def write(self, buffer, timeout=None):
+            sent.append(buffer)
+            await super().write(buffer, timeout=timeout)
+        async def read(self, max_bytes, timeout=None):
+            if mode == "slow_response":
+                await asyncio.sleep(1.1)
+            return await super().read(max_bytes, timeout=timeout)
+        async def aclose(self):
+            closed.append(True)
+            await super().aclose()
+    class Backend(httpcore.AsyncMockBackend):
+        async def connect_tcp(self, host, port, timeout=None, **kwargs):
+            if host == "192.0.2.1":
+                await asyncio.sleep(.2 if mode == "tls_timeout" else 0)
+                raise httpcore.ConnectError("synthetic-refused")
+            await asyncio.wait_for(asyncio.sleep(.55 if mode == "tls_timeout" else 0), timeout)
+            return Stream([b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK"])
+
+    # 仅替换原生网络后端；HTTP阶段与请求发送仍由实际httpcore执行。
+    native = httpx.AsyncHTTPTransport()
+    native._pool._network_backend = Backend([])
+    target = ValidatedTarget("https://provider.test/v1", "https", "provider.test", 443, ("192.0.2.1", "192.0.2.2"))
+    async with httpx.AsyncClient(transport=PinnedAsyncHTTPTransport(target=target, transport=native),
+                                 timeout=httpx.Timeout(3, connect=1)) as client:
+        if mode == "tls_timeout":
+            with pytest.raises(httpx.ConnectTimeout):
+                await client.get(target.url)
+            assert not sent and closed
+        else:
+            assert (await client.get(target.url)).text == "OK"
+    assert stages == ["tls"]
+
+
 def prepare(tmp_path, endpoint, protocol):
     database = migrated_webui_database(tmp_path / "relay.db")
     owner = seed_execution_owner(database, "synthetic-owner")
@@ -39,6 +186,77 @@ def prepare(tmp_path, endpoint, protocol):
             connection_version=binding.connection_version, task_id="synthetic-task", revision=1,
             run_id="synthetic-run", purpose="context_rewrite")
     return database, broker, grant
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["revoke", "disable"])
+async def test_native_alternate_connect_cannot_send_after_grant_changes(tmp_path, action):
+    import httpcore
+    from src.model_connections import GrantError
+
+    database, broker, grant = prepare(tmp_path, "http://localhost:1/v1", "openai_chat_completions")
+    broker._resolver = lambda host: ["127.0.0.2", "127.0.0.1"]
+    sent = []
+    class Stream(httpcore.AsyncMockStream):
+        async def write(self, buffer, timeout=None):
+            sent.append(buffer)
+            await super().write(buffer, timeout=timeout)
+    class Backend(httpcore.AsyncMockBackend):
+        async def connect_tcp(self, host, port, timeout=None, **kwargs):
+            if host == "127.0.0.2":
+                raise httpcore.ConnectError("synthetic-refused")
+            if action == "revoke":
+                broker.revoke_grant(grant.grant_id, "synthetic-revocation")
+            else:
+                broker._repository.set_platform_enabled(grant.connection_id, enabled=False)
+            return Stream([b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"])
+    broker._transport = httpx.AsyncHTTPTransport()
+    broker._transport._pool._network_backend = Backend([])
+    with pytest.raises(GrantError):
+        await broker.relay(grant_token=grant.token, protocol_path="chat/completions", method="POST",
+                           headers={}, body=b'{"model":"fixture-model"}')
+    assert sent == []
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT request_count FROM model_provider_usage").fetchall() == [(1,)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["allowed", "revoke", "disable"])
+async def test_pinned_fallback_rechecks_grant_and_records_one_usage(tmp_path, action):
+    from src.model_connections import GrantError
+
+    database, broker, grant = prepare(tmp_path, "http://localhost:1/v1", "openai_chat_completions")
+    broker._resolver = lambda host: ["127.0.0.2", "127.0.0.1"]
+    attempted, sent = [], []
+    async def provider(request):
+        attempted.append(request.url.host)
+        await request.extensions["trace"]("connection.connect_tcp.started", {})
+        if len(attempted) == 1:
+            if action == "revoke":
+                broker.revoke_grant(grant.grant_id, "synthetic-revocation")
+            elif action == "disable":
+                broker._repository.set_platform_enabled(grant.connection_id, enabled=False)
+            raise httpx.ConnectError("synthetic-refused")
+        sent.append(request.content)
+        return httpx.Response(200, json={"usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3}})
+    broker._transport = httpx.MockTransport(provider)
+    body = b'{"model":"fixture-model"}'
+    async def invoke():
+        response = await broker.relay(grant_token=grant.token, protocol_path="chat/completions", method="POST",
+                                      headers={}, body=body)
+        try:
+            return b"".join([chunk async for chunk in response.iter_bytes()])
+        finally:
+            await response.aclose()
+    if action == "allowed":
+        assert json.loads(await invoke())["usage"]["total_tokens"] == 3
+    else:
+        with pytest.raises(GrantError):
+            await invoke()
+    assert attempted == ["127.0.0.2", "127.0.0.1"] and sent == ([body] if action == "allowed" else [])
+    with sqlite3.connect(database) as connection:
+        rows = connection.execute("SELECT request_count, total_tokens FROM model_provider_usage").fetchall()
+    assert rows == [(1, 3 if action == "allowed" else None)]
 
 
 @pytest.mark.asyncio

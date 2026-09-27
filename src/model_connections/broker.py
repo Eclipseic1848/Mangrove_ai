@@ -669,6 +669,7 @@ class ConnectionBroker:
         client_kwargs["transport"] = PinnedAsyncHTTPTransport(
             target=target,
             transport=self._transport,
+            check_active=lambda: self._resolve_active_grant(grant_token),
         )
         client = httpx.AsyncClient(**client_kwargs)
         request = client.build_request(

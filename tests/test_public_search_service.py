@@ -9,6 +9,43 @@ from tests.test_source_acquisition import migrated_webui_database
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize('caller', ['search', 'page'])
+@pytest.mark.parametrize('revocation_phase', ['first_failed', 'alternate_connected'])
+async def test_alternate_address_cannot_send_after_source_authorization_revocation(caller, revocation_phase):
+    import asyncio
+    from src.source_acquisition.service import _execution_check
+
+    revoked, attempted, sent = False, [], []
+    def check():
+        if revoked:
+            raise asyncio.CancelledError()
+    async def provider(request):
+        nonlocal revoked
+        attempted.append(request.url.host)
+        await request.extensions['trace']('connection.connect_tcp.started', {})
+        if len(attempted) == 1:
+            revoked = revocation_phase == 'first_failed'
+            raise httpx.ConnectError('synthetic-refused')
+        revoked = True
+        await request.extensions['trace']('http11.send_request_headers.started', {})
+        sent.append(request)
+        return httpx.Response(200, text='<html><body><div class="no-results">none</div></body></html>',
+                              headers={'content-type': 'text/html'})
+    guard = HttpSecurityGuard(resolver=lambda _: ['93.184.216.34', '93.184.216.35'])
+    transport = httpx.MockTransport(provider)
+    token = _execution_check.set(check)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            if caller == 'search':
+                await PublicSearchClient(security_guard=guard, transport=transport).search('synthetic-query')
+            else:
+                await AnonymousWebFetcher(security_guard=guard, transport=transport).fetch('https://source.test/page')
+    finally:
+        _execution_check.reset(token)
+    assert sent == []
+
+
+@pytest.mark.asyncio
 async def test_query_reads_two_cross_site_candidates_into_snapshot(tmp_path):
     requests = []
     def handler(request):

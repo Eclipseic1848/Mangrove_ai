@@ -1009,6 +1009,7 @@ class AnonymousWebFetcher:
                 transport = PinnedAsyncHTTPTransport(
                     target=target,
                     transport=self._transport,
+                    check_active=_check_read_authorization,
                 )
                 async with self._client(transport, kwargs) as client:
                     # Transport 连接已校验 IP，并保留逻辑 URL 的 Host 与 TLS SNI。
