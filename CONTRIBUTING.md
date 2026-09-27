@@ -49,8 +49,7 @@ Set-Location ..
 首次请求不得执行 DDL 或数据回填。
 
 公开仓库使用 `py -3.13 -X utf8 scripts/dev_reload.py` 启动后端；构建后的产品入口是
-`8088`，`5173` 仅用于前端开发。维护者本机的一键启停脚本不随仓库发布。可选外部采集器
-按 `external/README.md` 准备。
+`8088`，`5173` 仅用于前端开发。可选外部采集器按 `external/README.md` 准备。
 
 ## 变更原则
 
@@ -69,9 +68,8 @@ dry-run；前端使用 `npm ci`、TypeScript 检查和生产构建；Gitleaks �
 服务、不占用端口、不读取生产数据库、不调用外部模型，也不使用生产 Secret。缓存只加速下载，
 锁文件、checksum 和测试结果仍是正确性来源。
 
-`main` 的 repository Ruleset 强制 PR、讨论解决、三项 strict minimum-ci 和禁止强推，且无
-bypass。当前只有一名维护者，审批数经明确决策设为 0；贡献者不得把它描述为已有独立人工
-review。第二位维护者加入后，审批数提升与验收必须作为单独的权限变更处理。
+`main` 要求通过 Pull Request 合并、解决讨论，并通过三项 strict minimum-ci 检查。
+规则禁止强推，不设置绕过账号；当前要求的审批数为 0。
 
 本地快速门：
 
