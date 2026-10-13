@@ -79,7 +79,7 @@ langgraph-checkpoint==4.1.1
 # 断点续跑后端必须与 LangGraph/checkpoint 作为同一兼容簇升级，不得单独降级。
 langgraph-checkpoint-sqlite==3.1.1
 langgraph-prebuilt==1.1.0
-langgraph-sdk==0.4.3
+langgraph-sdk==0.4.4
 langsmith==0.8.18
 Lazify==0.4.0
 literalai==0.1.201
