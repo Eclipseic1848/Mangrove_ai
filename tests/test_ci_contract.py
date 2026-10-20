@@ -365,12 +365,15 @@ def test_cookie_probe_fixture_exception_rejects_other_inputs() -> None:
              if "with user_overrides_context({key:" in line]
     assert len(lines) == 1
     fixture = lines[0]
-    assert pattern.search(fixture)
+    assert pattern.fullmatch(fixture)
+    assert pattern.fullmatch("\n" + fixture)
     for changed in (fixture.replace("synthetic_123", "different-value"),
                     fixture.replace("{key:", '{"other_key":'),
                     fixture.replace("user_overrides_context", "other_context"),
-                    "prefix" + fixture, fixture + ' "api_key": "synthetic-key"'):
-        assert not pattern.search(changed)
+                    "prefix" + fixture, fixture + ' "api_key": "synthetic-key"',
+                    "\n\n" + fixture, "\r" + fixture, fixture + "\n",
+                    "   " + fixture.lstrip()):
+        assert not pattern.fullmatch(changed)
     assert re.search(rule["paths"][0], path)
     for other in ("tests/test_cookie_health_contract.py", "src/test_cookie_probe_feedback.py",
                   path + ".bak", "other/" + path):

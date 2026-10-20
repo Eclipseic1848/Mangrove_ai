@@ -58,4 +58,5 @@ targetRules = ["generic-api-key"]
 condition = "AND"
 regexTarget = "line"
 paths = ['''^tests/test_cookie_probe_feedback\.py$''']
-regexes = ['''^    with user_overrides_context\(\{key: "_m_h5_tk=synthetic_123"\}\):$''']
+# Gitleaks 的 line 保留前置换行；只兼容该边界字符，固定正文和缩进仍须完全一致。
+regexes = ['''^\n?    with user_overrides_context\(\{key: "_m_h5_tk=synthetic_123"\}\):$''']
