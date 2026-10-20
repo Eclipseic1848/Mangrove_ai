@@ -51,3 +51,11 @@ condition = "AND"
 regexTarget = "line"
 paths = ['''^src/database_migrations/schema_manifest\.json$''']
 regexes = ['''^\s*"(?:feedback_content_access|trigger:feedback_content_access_no_(?:delete|replace|update))"\s*:\s*"[0-9a-f]{64}"\s*,?\s*$''']
+
+[[allowlists]]
+description = "离线登录重定向测试的固定合成输入；仅豁免精确文件中的完整夹具行"
+targetRules = ["generic-api-key"]
+condition = "AND"
+regexTarget = "line"
+paths = ['''^tests/test_cookie_probe_feedback\.py$''']
+regexes = ['''^    with user_overrides_context\(\{key: "_m_h5_tk=synthetic_123"\}\):$''']
