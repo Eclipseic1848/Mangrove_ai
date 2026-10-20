@@ -53,6 +53,7 @@ from src.data_prep.document_models import (
     ReviewTask,
     TaskGoal,
 )
+from src.parsers.archive import ArchiveBudget
 from src.parsers.registry import get_parser_registry
 from src.services.document_extraction import (
     EvidenceBoundExtractor,
@@ -1011,6 +1012,8 @@ async def execute_document_extraction(
         rejects: List[Dict[str, Any]] = []
         try:
             registry = get_parser_registry()
+            # 全部上传共用本次展开额度，不能按压缩包重置；原上传总量仍由前置门校验。
+            archive_budget = ArchiveBudget(settings.data_prep_max_task_bytes)
             for upload_id, item in zip(
                 task_spec.get("upload_ids") or [],
                 upload_items,
@@ -1031,6 +1034,7 @@ async def execute_document_extraction(
                     raw_bytes,
                     registry=registry,
                     store=artifact_store,
+                    budget=archive_budget,
                 )
                 artifact_ids.extend(ingested.artifact_ids)
                 raw_artifacts.extend(ingested.raw_artifacts)

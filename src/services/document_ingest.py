@@ -10,7 +10,7 @@ from src.config.settings import settings
 from src.data_prep.artifact_store import ArtifactStore
 from src.data_prep.document_models import DocumentElement
 from src.data_prep.models import RawArtifact
-from src.parsers.archive import ArchiveParser
+from src.parsers.archive import ArchiveBudget, ArchiveParser
 from src.parsers.registry import ParserRegistry
 
 
@@ -35,9 +35,13 @@ def ingest_document_artifact(
     store: ArtifactStore,
     depth: int = 0,
     result: DocumentIngestResult | None = None,
+    budget: ArchiveBudget | None = None,
 ) -> DocumentIngestResult:
     """递归展开 ZIP；只把受支持文档成员送入文档解析链。"""
     output = result or DocumentIngestResult()
+    # 内层 ZIP 必须沿用本次展开额度，不能重新获得完整任务上限。
+    if budget is None:
+        budget = ArchiveBudget(settings.data_prep_max_task_bytes)
     output.raw_artifacts.append(artifact)
     ext = Path(artifact.uri.replace("\\", "/")).suffix.lstrip(".").lower()
     parser = registry.select(media_type=artifact.media_type, extension=ext)
@@ -58,6 +62,7 @@ def ingest_document_artifact(
             raw_bytes,
             task_id=artifact.task_id,
             store=store,
+            budget=budget,
         )
         output.rejects.extend(expanded.rejects)
         for child in expanded.children:
@@ -77,6 +82,7 @@ def ingest_document_artifact(
                 store=store,
                 depth=depth + 1,
                 result=output,
+                budget=budget,
             )
         return output
 
