@@ -793,6 +793,12 @@ class WebUIStore:
             # 仅重试同一停用操作的核对；不推进代数、不恢复任何业务绑定。
             conn.execute("UPDATE account_execution_holds SET status='pending',reconciliation_complete=0,error_code=NULL,updated_at=? WHERE operation_id=?", (time.time(), operation_id))
 
+    def check_readiness(self) -> None:
+        """有界读取接单必需表，不加载用户或任务正文。"""
+        with self._conn() as conn:
+            conn.execute("SELECT 1 FROM users LIMIT 1").fetchone()
+            conn.execute("SELECT 1 FROM semantic_workspace_tasks LIMIT 1").fetchone()
+
     def count_users(self) -> int:
         with self._conn() as conn:
             return conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]

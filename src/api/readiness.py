@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass
@@ -26,11 +28,17 @@ class ReadinessReport:
     checks: tuple[ReadinessCheck, ...]
 
 
+_READINESS_CACHE_SECONDS = 5.0
+_resource_cache_lock = threading.Lock()
+_resource_cache: tuple[
+    tuple[WebUIStore, Path, Path, Path], float, tuple[ReadinessCheck, ...]
+] | None = None
+
+
 def _check_database(store: WebUIStore) -> ReadinessCheck:
     try:
         # 只读两个接单必需表，不返回用户或队列内容。
-        store.count_users()
-        store.list_pending_semantic_workspace_tasks()
+        store.check_readiness()
     except Exception:
         return ReadinessCheck("CORE-DB-001", "failed", "database_unavailable")
     return ReadinessCheck("CORE-DB-001", "passed", "database_readable")
@@ -76,6 +84,31 @@ def _check_writable_root(
     return ReadinessCheck(check_id, "passed", f"{summary_prefix}_writable")
 
 
+def _cached_resource_checks(
+    store: WebUIStore,
+    upload_root: Path,
+    execution_root: Path,
+    artifact_root: Path,
+) -> tuple[ReadinessCheck, ...]:
+    global _resource_cache
+    key = (store, upload_root, execution_root, artifact_root)
+    # 同锁复查过期时间，避免并发探针重复查询和 fsync；单槽避免按路径无限增长。
+    with _resource_cache_lock:
+        if _resource_cache is not None:
+            cached_key, expires_at, checks = _resource_cache
+            if cached_key == key and time.monotonic() < expires_at:
+                return checks
+        checks = (
+            _check_database(store),
+            _check_writable_root("CORE-UPLOAD-001", upload_root, "upload_root"),
+            _check_writable_root("CORE-EXEC-001", execution_root, "execution_root"),
+            _check_writable_root("CORE-ARTIFACT-001", artifact_root, "artifact_root"),
+        )
+        # 成功和失败均从刷新完成起复用五秒；过期必须重测，不能退回旧成功结果。
+        _resource_cache = (key, time.monotonic() + _READINESS_CACHE_SECONDS, checks)
+        return checks
+
+
 def collect_workspace_readiness(
     *,
     store: WebUIStore,
@@ -86,13 +119,12 @@ def collect_workspace_readiness(
 ) -> ReadinessReport:
     """收集低敏核心就绪结果，不检查模型或运行真实任务。"""
 
+    resources = _cached_resource_checks(store, upload_root, execution_root, artifact_root)
     checks = (
         ReadinessCheck("CORE-API-001", "passed", "api_responding"),
-        _check_database(store),
+        resources[0],
         _check_workers(manager),
-        _check_writable_root("CORE-UPLOAD-001", upload_root, "upload_root"),
-        _check_writable_root("CORE-EXEC-001", execution_root, "execution_root"),
-        _check_writable_root("CORE-ARTIFACT-001", artifact_root, "artifact_root"),
+        *resources[1:],
     )
     return ReadinessReport(
         ready=all(check.status == "passed" for check in checks),

@@ -161,6 +161,7 @@ def readiness():
     return JSONResponse(
         status_code=200 if report.ready else 503,
         content=asdict(report),
+        headers={"Cache-Control": "no-store"},
     )
 
 
