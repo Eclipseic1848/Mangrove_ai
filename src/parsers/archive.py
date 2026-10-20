@@ -24,6 +24,7 @@ from src.data_prep.models import RawArtifact
 from .registry import Parser
 
 logger = logging.getLogger(__name__)
+_READ_CHUNK_BYTES = 64 * 1024
 
 # 扩展名 -> media_type（子成员路由用）
 _EXT_MEDIA: Dict[str, str] = {
@@ -48,6 +49,13 @@ class ArchiveResult:
 
     children: List[RawArtifact] = field(default_factory=list)
     rejects: List[Dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class ArchiveBudget:
+    """同次任务中所有 ZIP 层级共用的剩余展开额度。"""
+
+    remaining_bytes: int
 
 
 class ArchiveParser(Parser):
@@ -91,6 +99,7 @@ class ArchiveParser(Parser):
         *,
         task_id: str,
         store: Any,
+        budget: Optional[ArchiveBudget] = None,
     ) -> ArchiveResult:
         """安全展开 ZIP，子成员写为 RawArtifact。"""
         try:
@@ -114,6 +123,7 @@ class ArchiveParser(Parser):
         children: List[RawArtifact] = []
         rejects: List[Dict[str, Any]] = []
         total_uncompressed = 0
+        budget = budget if budget is not None else ArchiveBudget(self.max_total_bytes)
 
         for info in infos:
             member_name = info.filename
@@ -137,8 +147,41 @@ class ArchiveParser(Parser):
                     })
                     continue
 
+            # 这两种方法的标准库解码路径支持输出限额，避免内部先无界解压再截断。
+            if info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+                rejects.append({
+                    "artifact_id": artifact.artifact_id,
+                    "reason": "zip_compression_unsupported",
+                    "member": member_name,
+                })
+                continue
+
+            remaining = min(self.max_total_bytes - total_uncompressed, budget.remaining_bytes)
+            if info.file_size > remaining:
+                rejects.append({
+                    "artifact_id": artifact.artifact_id,
+                    "reason": "zip_total_exceeded",
+                    "member": member_name,
+                })
+                break
+
+            chunks = []
+            exceeded = False
             try:
-                content = zf.read(info)
+                with zf.open(info) as member:
+                    while True:
+                        remaining = min(self.max_total_bytes - total_uncompressed, budget.remaining_bytes)
+                        # 最多多读一个字节判断越界，禁止整成员分配后再检查。
+                        chunk = member.read(min(_READ_CHUNK_BYTES, remaining + 1))
+                        if not chunk:
+                            break
+                        total_uncompressed += len(chunk)
+                        # 已返回的解压字节即使随后 CRC 失败也不能退回额度。
+                        budget.remaining_bytes = max(0, budget.remaining_bytes - len(chunk))
+                        if len(chunk) > remaining:
+                            exceeded = True
+                            break
+                        chunks.append(chunk)
             except Exception as e:  # noqa: BLE001
                 rejects.append({
                     "artifact_id": artifact.artifact_id,
@@ -147,8 +190,7 @@ class ArchiveParser(Parser):
                 })
                 continue
 
-            total_uncompressed += len(content)
-            if total_uncompressed > self.max_total_bytes:
+            if exceeded:
                 rejects.append({
                     "artifact_id": artifact.artifact_id,
                     "reason": "zip_total_exceeded",
@@ -156,6 +198,7 @@ class ArchiveParser(Parser):
                 })
                 break
 
+            content = b"".join(chunks)
             ext = Path(member_name).suffix.lstrip(".").lower() or "bin"
             child = store.write_raw(
                 task_id=task_id,

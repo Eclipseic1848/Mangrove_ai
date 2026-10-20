@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import io
+import json
 from pathlib import Path
+import zipfile
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import pytest
 
 import src.api.auth as auth_mod
 import src.data_prep.artifact_store as as_mod
@@ -818,6 +821,88 @@ def test_document_draft_rejects_total_size_over_task_limit(
 
     assert response.status_code == 413
     assert "单任务文件总大小" in response.json()["detail"]
+
+
+@pytest.mark.parametrize("exceeds_limit", [True, False], ids=["over-limit", "at-limit"])
+def test_document_upload_zips_share_expansion_budget(tmp_path: Path, monkeypatch, exceeds_limit):
+    from docx import Document
+
+    client = _make_client(tmp_path, monkeypatch)
+    documents = []
+    archives = []
+    for label in ("first", "second"):
+        document = Document()
+        document.add_paragraph(f"合同来源：{label}")
+        document_buffer = io.BytesIO()
+        document.save(document_buffer)
+        content = document_buffer.getvalue()
+        documents.append(content)
+        archive_buffer = io.BytesIO()
+        with zipfile.ZipFile(archive_buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(f"{label}.docx", content)
+        archives.append(archive_buffer.getvalue())
+    limit = sum(map(len, documents)) - int(exceeds_limit)
+    # 上传原件仍在原总量门内；只有两份不同正文的累计展开量触发新门。
+    assert sum(map(len, archives)) < limit
+    monkeypatch.setattr(settings, "data_prep_max_task_bytes", limit)
+    upload_ids = [
+        _upload(client, content, f"{label}.zip", "application/zip")
+        for label, content in zip(("first", "second"), archives)
+    ]
+
+    class FakeIntentProvider:
+        def __init__(self, **kwargs):
+            pass
+
+        def draft(self, intent):
+            return IntentSpecDraft(objective="提取合同来源", fields=[
+                IntentFieldDraft(name="合同来源", description="保留原文证据"),
+            ])
+
+    class FakeCandidateProvider:
+        def __init__(self, **kwargs):
+            pass
+
+        def extract(self, spec, elements):
+            element = next(item for item in elements if item.text)
+            return [FieldCandidate(
+                field_name="合同来源", value=element.text, quote=element.text,
+                element_ids=[element.element_id], confidence=0.99,
+            )]
+
+    monkeypatch.setattr(data_tasks, "InstructorQwenIntentProvider", FakeIntentProvider)
+    monkeypatch.setattr(data_tasks, "InstructorQwenCandidateProvider", FakeCandidateProvider)
+    created = client.post(
+        "/api/data-tasks/document-drafts",
+        json={"upload_ids": upload_ids, "intent": "提取合同来源"},
+    )
+    assert created.status_code == 200, created.text
+    task_id = created.json()["task_id"]
+    ready = client.put(
+        f"/api/data-tasks/{task_id}/extraction-spec", json=created.json()["extraction_spec"],
+    )
+    assert ready.status_code == 200, ready.text
+
+    response = client.post(f"/api/data-tasks/{task_id}/extract")
+
+    assert response.status_code == 200, response.text
+    expected_count = 1 if exceeds_limit else 2
+    task = client.get(f"/api/data-tasks/{task_id}").json()
+    assert task["record_counts"]["parse_rejects"] == int(exceeds_limit)
+    members = [item for item in response.json()["artifacts"] if item["original_name"].startswith("zip://")]
+    assert [item["upload_id"] for item in members] == upload_ids[:expected_count]
+    if exceeds_limit:
+        assert task["quality"]["overall"] == "warn"
+        rejects = json.loads((tmp_path / "downloads" / task_id / "extraction/parse_rejects.json").read_text(encoding="utf-8"))
+        assert rejects[0]["reason"] == "zip_total_exceeded"
+    manifest = client.get(f"/api/data-tasks/{task_id}/manifest").json()
+    raw = [item for item in manifest["artifacts"] if item["kind"] == "raw"]
+    assert len(raw) == 2 + expected_count
+    assert sorted((tmp_path / "downloads" / item["path"]).read_bytes() for item in raw) == sorted(
+        [*archives, *documents[:expected_count]],
+    )
+    for upload_id, content in zip(upload_ids, archives):
+        assert client.get(f"/api/data-sources/uploads/{upload_id}/content").content == content
 
 
 def test_document_review_decision_updates_result_and_audit(tmp_path: Path, monkeypatch):
