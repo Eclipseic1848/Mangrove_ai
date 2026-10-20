@@ -125,7 +125,7 @@ IT 不需要理解 Agent 内部实现，也不应自行编辑冻结任务、迁�
 | 停用窗口 | 尚未确认；正式停止原平台前约定 |
 | 正式部署 Git 分支 / 40 位提交 SHA | 按 `RELEASE-MANIFEST.md` 填写 |
 | 数据备份时间 / 文件数 / 总字节数 | 由开发填 |
-| 原数据库版本与迁移内容核对结果 | 本版要求 WebUI `webui_0023`、Scheduler `scheduler_0004`；导出前检查实际版本与摘要 |
+| 原数据库版本与迁移内容核对结果 | 本版要求 WebUI `webui_0023`、Scheduler `scheduler_0005`；导出前检查实际版本与摘要 |
 | Pi 镜像标签及 Image ID | 服务器仅 `0.87.1`；清点旧冻结引用并确定未结束任务的处置，不要求安装旧版 |
 | 模型访问方式、出站网络与预算负责人 | 由项目负责人/开发填写，不在本表放 Key |
 | 必须启用的采集服务 | 逐项填写 MediaCrawler、Firecrawl、SearXNG、RSSHub 等实际使用项 |
@@ -1627,6 +1627,141 @@ sudo rm /var/lib/nginx/mangrove/maintenance
 | Linux 已开始承接真实业务后再切回 Windows | 不能直接启动旧库；先处理 Linux 新增数据和任务状态 |
 
 本手册不提供“复制旧数据库覆盖当前库”的一键回退命令。回退要保留数据，且原机、新机只能有一个正式写入方。
+
+### 18.3 #244：单实例排空、候选核验与原子切换
+
+本节是受控更新规范，不是生产激活或用户验收记录。当前允许执行的步骤与阻塞以
+`docs/status/current.md` 及本次获准工单为准；有 `cleanup_failed`、来源读取仍在执行、
+停止待确认、未收口资源账本、状态未知或回执过期时，均禁止激活。不得改库把这些状态
+强制标成终态，不得为排空自动重发任务、清理未知容器或替换密钥。
+
+#### 候选代码、运行环境与真实业务路径
+
+先在独立候选目录准备已审核的精确提交、前端构建和对应依赖；不在现行代码树内
+`git pull`，不更新在用 venv，不让候选实例连接生产库或启动后台领取。依赖安装和迁移
+演练分别在获准的独立环境与数据库副本完成，不从本节推定安装或迁移授权。
+
+推荐布局的含义如下；实际绝对目录和服务名必须由运维现场核对后填写：
+
+```text
+<部署根>/releases/<完整提交SHA>/     候选源码、对应运行环境、frontend/dist
+<部署根>/current -> releases/<SHA>  只切换此入口链接，不移动现役目录
+<原应用真实目录>/                   完整保留原代码、旧前端、环境和回退资料
+<现役真实持久根>/                   数据库、配套key、上传、执行、下载等保持原路径
+<受限证据目录>/                     跟踪路径文件、三份清单、差异账、服务与备份回执
+```
+
+候选主树保持审核提交的内容。旧树中 docs、evals、tests、额外脚本及其他 dirty 差异随
+旧应用完整保全并记录摘要，不覆盖到候选；`src/` 差异也必须逐项审查，不能因目录名就
+当作必须沿用的生产补丁。旧 Git HEAD 只说明提交基点，不能证明 dirty 现役源码的完整身份。
+
+现役 `.env`、Vault 配套 key、数据库运行时覆盖及镜像身份单独受限保全。不要用仓库默认
+镜像 tag 代替服务器已核验的镜像或覆盖现役 `.env`；候选须解析到同一获准镜像身份。
+所有相对数据目录、外部工具路径和已冻结执行根都须按实际配置逐项核对，绑定原真实持久根；
+不批量改历史任务路径，也不只复制数据库而遗漏同目录 key。源码中的只读 README 可保留，
+不把业务目录加入公开源码清单。
+
+`Path(__file__).resolve()`、模块导入和静态资源挂载会在进程内固定实际源码根。
+替换 `current` 不会让旧进程加载新代码；必须受控停止后重启。systemd 的
+`WorkingDirectory`、`ExecStart` 解释器、Python 包路径及环境文件须共同指向已核对布局。
+现役入口若是真实目录，不能直接用链接覆盖它；首次引入 `current` 需要独立审核服务配置，
+并保留原入口。虚拟环境按最终位置建立，不移动已安装环境而破坏其解释器路径。
+
+#### 三份清单与旧前端资源
+
+以下命令只核验显式路径，不执行构建、安装、Git 操作或网络调用。先填写并核对变量，
+在候选源码根执行；`ARTIFACT_PYTHON` 必须是已核验的解释器。证据目录不在候选树内，
+输出文件必须不存在，防止覆盖原始证据。
+
+```bash
+git -C "$CANDIDATE_ROOT" ls-files -z > "$EVIDENCE_DIR/tracked-paths.nul"
+"$ARTIFACT_PYTHON" -m src.services.deployment_artifacts source \
+  --root "$CANDIDATE_ROOT" --tracked-paths "$EVIDENCE_DIR/tracked-paths.nul" \
+  --commit "$CANDIDATE_SHA" --output "$EVIDENCE_DIR/source.json"
+"$ARTIFACT_PYTHON" -m src.services.deployment_artifacts native \
+  --root "$CANDIDATE_ROOT/frontend/dist" --output "$EVIDENCE_DIR/frontend-native.json"
+"$ARTIFACT_PYTHON" -m src.services.deployment_artifacts retain \
+  --candidate-dist "$CANDIDATE_ROOT/frontend/dist" --previous-dist "$PREVIOUS_DIST" \
+  --native-manifest "$EVIDENCE_DIR/frontend-native.json" \
+  --previous-commit "$PREVIOUS_COMMIT" --previous-source-digest "$PREVIOUS_SOURCE_DIGEST" \
+  --previous-dirty "$PREVIOUS_DIRTY" --output "$EVIDENCE_DIR/frontend-served.json"
+"$ARTIFACT_PYTHON" -m src.services.deployment_artifacts verify \
+  --root "$CANDIDATE_ROOT" --manifest "$EVIDENCE_DIR/source.json"
+"$ARTIFACT_PYTHON" -m src.services.deployment_artifacts verify \
+  --root "$CANDIDATE_ROOT/frontend/dist" --manifest "$EVIDENCE_DIR/frontend-served.json"
+```
+
+`CANDIDATE_SHA` 与 `PREVIOUS_COMMIT` 为完整提交 SHA；`PREVIOUS_SOURCE_DIGEST` 为旧现役
+源码实际字节的 SHA-256 清单摘要，范围与 dirty 差异另有证据，不能直接填旧 HEAD 的摘要。
+`PREVIOUS_DIRTY` 只能填 `true` 或 `false`。源码命令仅覆盖传入的 tracked 路径，
+不证明未跟踪文件不存在；运维另行核验 HEAD、clean 状态与精确路径全集。Secret、业务数据、
+`.git`、依赖目录及构建产物不能混进源码集，遇到受保护路径会拒绝而非静默省略。
+
+三份清单职责分别是：源码实际内容、保留前原生新构建、保留后实际服务资源并集。
+保留操作先检查所有旧 `assets/` 的路径、链接和同名冲突，再复制真实字节；包含 `.mjs`、
+字体及嵌套文件，不按文件名 hash 长度筛选。旧首页不覆盖新首页；同名异内容、目录冲突和
+dist 外链接直接失败。目录链接不支持，根内文件链接会记录原类型，复制后明确记为普通文件。
+服务并集不能反过来作为原生构建证据，保留后也不能再用原生清单核验整个并集目录。
+保留失败的候选禁止激活；回到已核验候选重新准备，不忽略错误继续切换。
+
+构建产物只构建一次后交付，激活前比较本地交付包、GitHub 对应审核提交及服务器候选的
+源码身份，并比较原生构建与实际服务并集的逐文件 SHA。提交相同不能代替字节核对；
+换行或平台差异须明确解释。旧资源保留使已打开页面可继续取得旧懒加载文件，不能据此承诺
+任意旧 API 协议仍兼容。所有旧资源继续保留到单独批准的退役，不在本次切换时清理。
+
+#### 已接入维护门的更新顺序
+
+下列控制命令在已审核候选工具目录内执行，并使用与现役应用一致的服务账号。
+`STATE_DIR` 必须是现役 WebUI 数据库所在目录下的 `.deployment-control` 真实目录；
+由该账号持有、其他账号不可写，不用链接重定向。`SERVICE_NAME`、当前主 PID 与预期
+源码真实根从实际 systemd 配置和进程核对，不采用示例值或上次更新的 PID。
+
+1. 调用 `request` 创建唯一维护请求，保存返回的 `request_id`。draining 暂停新写入与新领取，
+   已在制任务及其受原鉴权约束的内部 Relay 正常收尾，不启动第二个应用实例。
+   普通 API 读取也登记活动租约；工作台 SSE 在维护开始后只结束订阅，不取消后台任务。
+2. 用同一请求 ID 查询 `status`，绑定 systemd 主 PID、预期真实源码根、进程 nonce 和
+   不超过 10 秒的新鲜回执。只在 `quiet=true`、活动总数为 0、活动项和 blockers 为空、
+   error 为空时推进；等待过程中继续观察真实执行与资源状态，不强停在制任务。
+3. 调用 `seal` 后，等待该进程生成**同一请求的新 sealed quiet 回执**；旧 draining 回执
+   不能代替封口证明。sealed 不再接受 Relay、登录等 continuation；除廉价 health/readiness
+   外，API 读写均暂时返回 503，避免下载生成、审计与限流记录在封口后继续写入。
+4. 在 sealed 状态完成第 17 章一致性备份并核验回执，保全旧代码/前端、持久数据、密钥、
+   环境、镜像和 systemd/Nginx 配置。备份与原生/并集清单留在受限证据目录。
+5. 受控停止服务，确认 systemd inactive、主 PID 为 0、旧进程与项目自有资源均已收口；
+   不因停止超时而跳过核对，不同时运行旧新调度器。
+6. 记录原链接目标，在同一文件系统中预建新链接并原子替换 `current`。核对实际链接目标和
+   候选三份清单；不删改原应用或业务根，不把跨文件系统复制当原子激活。
+7. 保留维护文件，启动**一个**新实例；先核新 PID、真实源码根、新进程 nonce 与新的
+   sealed quiet 回执。`/api/health` 应为 200；维护中 `/api/readiness` 的 503 是预期，
+   不能把它改成成功码。核三份清单和新旧静态资源；sealed 期间暂不读取业务 API，
+   登录、角色、历史与写入旅程均在恢复接单后验收，不能提前宣称已完成。
+8. 负责人允许后对新 PID/根与新鲜 sealed quiet 回执调用 `resume`，确认维护已解除和
+   readiness 为 200。在获准窗口完成管理员/普通用户新登录、历史附件/下载及代表旅程，
+   核对权限隔离、来源与镜像身份；真实模型/采集仍须各自授权。失败立即重新 request，
+   保全现场并按第 18.2 节决定回退，不自动重发或丢弃新写入数据。
+
+控制命令的参数示例：
+
+```bash
+"$CONTROL_PYTHON" scripts/deployment_control.py request --state-dir "$STATE_DIR"
+"$CONTROL_PYTHON" scripts/deployment_control.py status --state-dir "$STATE_DIR" \
+  --request-id "$REQUEST_ID" --pid "$MAIN_PID" --runtime-root "$RUNTIME_ROOT"
+"$CONTROL_PYTHON" scripts/deployment_control.py seal --state-dir "$STATE_DIR" \
+  --request-id "$REQUEST_ID" --pid "$MAIN_PID" --runtime-root "$RUNTIME_ROOT"
+# 切换启动后，重新取得新主 PID 和新源码真实根，再核 status，最后才 resume。
+"$CONTROL_PYTHON" scripts/deployment_control.py resume --state-dir "$STATE_DIR" \
+  --request-id "$REQUEST_ID" --pid "$NEW_MAIN_PID" --runtime-root "$NEW_RUNTIME_ROOT"
+```
+
+`cancel` 只允许撤销尚处 draining 的更新请求，不取消业务任务、不修复资源账本；
+sealed 后不能用 cancel 绕过版本核验。`resume` 只恢复接单，不代表生产验收通过。
+HTTP 维护响应保持 503；不通过 Nginx 限流改成 429，也不开放内部 Relay 到公网。
+
+**首次接入的特殊门：** 尚未运行本票维护门的旧进程不会读取新 `request`，即使磁盘中已有
+工具代码也不能排空旧进程。没有其有效新鲜回执时必须停止标准流程，由负责人单独批准
+bootstrap 窗口与接单隔离方案；先确认旧任务、自动领取和未知资源已安全收口，才可受控
+停止并首次启动带门实例。有任何在制、`cleanup_failed` 或停止待确认时保持阻断，
+不能用强杀、改库、伪造回执或直接替换目录完成 bootstrap。
 
 ---
 

@@ -3158,6 +3158,8 @@ def stream_task(
     revision: Annotated[int | None, Query(ge=1)] = None,
     user=Depends(get_current_user),
 ):
+    from src.services.deployment_drain import get_deployment_gate
+
     user_id = user["user_id"]
     _task_or_404(user_id, task_id)
     audience = (
@@ -3178,6 +3180,9 @@ def stream_task(
         sent_messages: set[str] = set()
         last_status = ""
         while True:
+            # 只结束页面订阅，不取消 Run；队列在排空期间不领取，不能让 SSE 永久占住读租约。
+            if get_deployment_gate().is_draining():
+                return
             if not platform_session_valid(request):
                 yield {"event": "auth-expired", "data": json.dumps({"message": "登录已失效，请重新登录"}, ensure_ascii=False)}
                 return

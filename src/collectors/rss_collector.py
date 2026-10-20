@@ -5,7 +5,7 @@ RSS / 站点地图订阅采集器（Tier 12）。
 的周期性增量采集——比整站递归爬取轻量得多，且对目标站零负担。
 
 支持的格式：
-- RSS 2.0 / Atom feed（优先 feedparser 库，回退正则提取 <link>）
+- RSS 2.0 / Atom feed（优先 feedparser 库，回退标准库 XML 解析）
 - sitemap.xml / sitemap index（正则提取 <loc>）
 
 安装（可选）：pip install feedparser
@@ -62,7 +62,7 @@ def _looks_like_feed(url: str) -> bool:
 
 
 def _extract_urls_from_feed(xml_text: str) -> List[str]:
-    """从 RSS/Atom feed XML 中提取文章链接。优先 feedparser，回退正则。"""
+    """从 RSS/Atom feed XML 中提取文章链接。优先 feedparser，回退标准库。"""
     urls: List[str] = []
     if _FEEDPARSER_OK:
         try:
@@ -74,10 +74,21 @@ def _extract_urls_from_feed(xml_text: str) -> List[str]:
             if urls:
                 return _dedup(urls)
         except Exception:
-            logger.debug("feedparser 解析失败，回退正则", exc_info=True)
-    # 正则回退：<link> 标签
-    for m in _LINK_RE.finditer(xml_text):
-        urls.append(m.group(1))
+            logger.debug("feedparser 解析失败，回退标准库", exc_info=True)
+    try:
+        root = ElementTree.fromstring(xml_text)
+    except ElementTree.ParseError:
+        # 保留旧行为，兼容不规范但仍有明确正文链接的 RSS。
+        return _dedup([m.group(1) for m in _LINK_RE.finditer(xml_text)])
+    for entry in root.iter():
+        if entry.tag.rsplit("}", 1)[-1] not in {"item", "entry"}:
+            continue
+        for link in entry:
+            if link.tag.rsplit("}", 1)[-1] != "link" or link.get("rel", "alternate") != "alternate":
+                continue
+            url = (link.get("href") or link.text or "").strip()
+            if url.lower().startswith(("http://", "https://")):
+                urls.append(url)
     return _dedup(urls)
 
 

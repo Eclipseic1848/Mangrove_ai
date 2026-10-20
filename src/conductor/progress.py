@@ -58,6 +58,13 @@ def emit_progress(node: str, status: str, summary: str, *, sources=None, candida
 
 def completed_summary(name: str, result: dict) -> str:
     if result.get("error"):
+        snapshot = result.get("evidence_collection") or result.get("bank_collection")
+        if name == "collect" and snapshot:
+            # 由受控状态生成提示，不能直接把异常或第三方日志写进执行过程。
+            from .collection_results import collection_outcome
+            message = collection_outcome(snapshot)["message"]
+            if result["error"] == message:
+                return message
         return "本阶段未完成，请查看任务提示。"
     if result.get("needs_clarification"):
         return "需要补充信息，请查看智能体的问题。"

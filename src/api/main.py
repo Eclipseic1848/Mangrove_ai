@@ -82,6 +82,22 @@ async def lifespan(app: FastAPI):
             raise
     try:
         async with AsyncExitStack() as cleanup:
+            from src.services.deployment_drain import get_deployment_gate
+            from src.services.deployment_runtime import publish_drain_report
+
+            drain_stopping = asyncio.Event()
+            drain_reporter = asyncio.create_task(publish_drain_report(
+                get_deployment_gate(), webui_db=Path(settings.webui_db_path),
+                scheduler_db=Path(settings.scheduler_db_path),
+                execution_root=Path(settings.semantic_execution_root), runtime_root=PROJECT_ROOT,
+                stopping=drain_stopping,
+            ), name="deployment-drain-report")
+
+            async def stop_drain_reporter():
+                drain_stopping.set()
+                await drain_reporter
+
+            cleanup.push_async_callback(stop_drain_reporter)
             # 启动前登记清理，部分启动失败或某个 stop 抛错也不能遗漏其他服务。
             cleanup.push_async_callback(stop_scheduler)
             start_scheduler()
@@ -115,8 +131,10 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Mangrove Web UI Gateway", version=__version__, lifespan=lifespan)
 
+from src.api.deployment_middleware import DeploymentAdmissionMiddleware
 from src.api.operations_middleware import OperationsMiddleware
 app.add_middleware(OperationsMiddleware)
+app.add_middleware(DeploymentAdmissionMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -147,6 +165,16 @@ def health():
 
 @app.get("/api/readiness")
 def readiness():
+    from src.services.deployment_drain import get_deployment_gate
+
+    if get_deployment_gate().is_draining():
+        return JSONResponse(
+            status_code=503,
+            content={"ready": False, "checks": [{
+                "check_id": "CORE-DEPLOY-001", "status": "failed", "summary": "deployment_maintenance",
+            }]},
+            headers={"Cache-Control": "no-store"},
+        )
     from src.api.auth import get_store
     from src.api.readiness import collect_workspace_readiness
     from src.api.semantic_workspace_runtime import get_semantic_workspace_manager

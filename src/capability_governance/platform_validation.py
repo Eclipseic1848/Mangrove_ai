@@ -13,6 +13,7 @@ from filelock import Timeout as FileLockTimeout
 
 from src.account_execution import ExecutionDenied
 from src.api.execution import execution_to_thread
+from src.services.deployment_drain import get_deployment_gate
 from .sqlite_repository import validation_checkpoint
 
 from .models import (
@@ -178,6 +179,9 @@ class PlatformValidationManager:
 
     def run_once(self) -> None:
         for run in self._repository.list_platform_validation_runs():
+            lease = get_deployment_gate().try_acquire("platform-validation")
+            if lease is None:
+                continue
             context = getattr(self._repository, 'validation_execution', None)
             try:
                 with context(run) if context else nullcontext():
@@ -192,6 +196,8 @@ class PlatformValidationManager:
                                 self._repository.confirm_validation_stopped(run, cleanup_failed=not self._known_quiet)
             except (ExecutionDenied, FileLockTimeout):
                 continue
+            finally:
+                lease.release()
 
     def _run_one(self, run: PlatformValidationRun) -> None:
         # 外部步骤（Trivy/Syft/探针/签名）必须独占；Lease 到期由下一轮接管。

@@ -57,9 +57,12 @@ class LLMProvider:
                 base_url=settings.llm_base_url,
                 api_key=settings.llm_api_key,
                 temperature=settings.llm_temperature,
-                max_tokens=settings.llm_max_tokens,
+                max_tokens=settings.local_max_tokens,
                 timeout=settings.llm_timeout,
             )
+            # 浏览器调用同一本地模型，需使用其预算与思考开关，避免思考截断后得到空正文。
+            if settings.local_enable_thinking is not None and "qwen3" in settings.llm_model_name.lower():
+                kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": settings.local_enable_thinking}}
             kwargs["http_client"] = httpx.Client(trust_env=not _is_lan(settings.llm_base_url), timeout=settings.llm_timeout,
                 event_hooks={"request": [execution_http_checkpoint], "response": [execution_http_checkpoint]})
             kwargs["http_async_client"] = httpx.AsyncClient(trust_env=not _is_lan(settings.llm_base_url), timeout=settings.llm_timeout,

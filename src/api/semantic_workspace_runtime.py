@@ -92,6 +92,7 @@ from src.observability.workspace_telemetry import (
     workspace_task_span,
 )
 from src.services.managed_paths import ManagedPathCodec
+from src.services.deployment_drain import get_deployment_gate
 from src.source_acquisition import SourceAcquisitionRepository
 from src.task_context import TaskContextRepository
 from src.services.upload_store import UploadStore
@@ -1205,17 +1206,25 @@ class SemanticWorkspaceManager:
     ) -> None:
         if (owner_id, attempt_id) in self._reverification_task_context.values():
             return
-        worker = asyncio.create_task(
-            self._execute_candidate_reverification(
-                owner_id=owner_id,
-                attempt_id=attempt_id,
-                verifier_factory=verifier_factory,
-            ),
-            name=f"candidate-reverification-{attempt_id}",
-        )
+        lease = get_deployment_gate().try_acquire("candidate-reverification")
+        if lease is None:
+            return
+        try:
+            worker = asyncio.create_task(
+                self._execute_candidate_reverification(
+                    owner_id=owner_id,
+                    attempt_id=attempt_id,
+                    verifier_factory=verifier_factory,
+                ),
+                name=f"candidate-reverification-{attempt_id}",
+            )
+        except BaseException:
+            lease.release()
+            raise
         self._reverification_tasks.add(worker)
         self._reverification_task_context[worker] = (owner_id, attempt_id)
         worker.add_done_callback(self._candidate_reverification_done)
+        worker.add_done_callback(lambda _task: lease.release())
 
     def _candidate_reverification_done(self, task: asyncio.Task[None]) -> None:
         self._reverification_tasks.discard(task)
@@ -1417,7 +1426,6 @@ class SemanticWorkspaceManager:
             for index in range(2)
         ]
         store = get_store()
-        store.purge_expired_semantic_workspace_tasks()
         self._maintenance = asyncio.create_task(
             self._maintenance_loop(),
             name="semantic-workspace-maintenance",
@@ -1425,32 +1433,37 @@ class SemanticWorkspaceManager:
         self._learning_worker = asyncio.create_task(
             self._learning_loop(), name="semantic-workspace-learning",
         )
-        try:
-            module = self._candidate_verification_module()
-        except RuntimeError as exc:
-            # 显式迁移前不创建表；没有 CandidateVerification Schema 时只跳过恢复。
-            _LOGGER.info("候选重验恢复尚不可用：%s", exc)
-        else:
-            self._recover_interrupted_candidate_reverifications(module)
-            self._resume_requested_candidate_reverifications(module)
-        # 恢复必须由 Web 服务进程接管，确保 Runtime 与文档 Relay 共享同一 Grant 域。
-        for task in store.list_pending_semantic_workspace_tasks():
-            if task["status"] == "cancelling":
-                # 异步维护循环确认执行静默和资源清理，不在启动时推断终态。
-                continue
+        # 封存后连恢复元数据也不改写，避免新进程启动越过备份和激活窗口。
+        with get_deployment_gate().admission("workspace-maintenance", continuation=True) as admitted:
+            if not admitted:
+                return
+            store.purge_expired_semantic_workspace_tasks()
             try:
-                authorization = self._workspace_authorization(task["user_id"], task["task_id"])
-                store.require_account_execution(authorization, "workspace", task["task_id"])
-            except ExecutionDenied:
+                module = self._candidate_verification_module()
+            except RuntimeError as exc:
+                # 显式迁移前不创建表；没有 CandidateVerification Schema 时只跳过恢复。
+                _LOGGER.info("候选重验恢复尚不可用：%s", exc)
+            else:
+                self._recover_interrupted_candidate_reverifications(module)
+                self._resume_requested_candidate_reverifications(module)
+            # 恢复必须由 Web 服务进程接管，确保 Runtime 与文档 Relay 共享同一 Grant 域。
+            for task in store.list_pending_semantic_workspace_tasks():
+                if task["status"] == "cancelling":
+                    # 异步维护循环确认执行静默和资源清理，不在启动时推断终态。
+                    continue
+                try:
+                    authorization = self._workspace_authorization(task["user_id"], task["task_id"])
+                    store.require_account_execution(authorization, "workspace", task["task_id"])
+                except ExecutionDenied:
+                    self.enqueue(task["user_id"], task["task_id"])
+                    continue
+                with execution_context(authorization):
+                    store.update_semantic_workspace_task(
+                        task["user_id"],
+                        task["task_id"],
+                        status="queued",
+                    )
                 self.enqueue(task["user_id"], task["task_id"])
-                continue
-            with execution_context(authorization):
-                store.update_semantic_workspace_task(
-                    task["user_id"],
-                    task["task_id"],
-                    status="queued",
-                )
-            self.enqueue(task["user_id"], task["task_id"])
 
     def workers_ready(self) -> bool:
         """两个工作器都已启动且未退出时，进程才可以继续接单。"""
@@ -1500,9 +1513,16 @@ class SemanticWorkspaceManager:
             await asyncio.sleep(REVERIFICATION_RECOVERY_POLL_SECONDS)
             try:
                 from src.memory.workspace_learning import pending_template_uses, pending_lesson_failures, distill_failed_lesson
-                pending_learning = await asyncio.to_thread(pending_template_uses, settings.webui_db_path)
-                pending_learning += await asyncio.to_thread(pending_lesson_failures, settings.webui_db_path)
+                # 扫描会补写和轮转回执；封存后不写库，取消等待也须先等线程收口。
+                with get_deployment_gate().admission("workspace-maintenance", continuation=True) as admitted:
+                    if not admitted:
+                        continue
+                    pending_learning = await execution_to_thread(pending_template_uses, settings.webui_db_path)
+                    pending_learning += await execution_to_thread(pending_lesson_failures, settings.webui_db_path)
                 for learning in pending_learning:
+                    lease = get_deployment_gate().try_acquire("workspace-learning")
+                    if lease is None:
+                        break
                     try:
                         owner_id, task_id = learning["owner_id"], learning["task_id"]
                         task = get_store().get_semantic_workspace_task(owner_id, task_id)
@@ -1528,6 +1548,8 @@ class SemanticWorkspaceManager:
                         continue
                     except Exception:
                         _LOGGER.warning("方法统计补记暂时失败，下一轮重试", exc_info=True)
+                    finally:
+                        lease.release()
             except Exception:
                 _LOGGER.warning("学习回执恢复检查失败", exc_info=True)
 
@@ -1543,8 +1565,10 @@ class SemanticWorkspaceManager:
                 module = None
             if module is not None:
                 try:
-                    self._recover_interrupted_candidate_reverifications(module)
-                    self._resume_requested_candidate_reverifications(module)
+                    with get_deployment_gate().admission("workspace-maintenance", continuation=True) as admitted:
+                        if admitted:
+                            self._recover_interrupted_candidate_reverifications(module)
+                            self._resume_requested_candidate_reverifications(module)
                 except Exception:
                     # 单轮意外失败不得杀死维护任务；下一轮继续接管。
                     _LOGGER.exception("候选重验维护轮次失败，下一轮将重试")
@@ -1557,8 +1581,10 @@ class SemanticWorkspaceManager:
                     if pending["status"] == "cancelling":
                         # 维护只恢复已存在的停止意图，不能制造新的用户取消代数。
                         # 沿用任务冻结身份进行清理，不借用维护线程的空授权。
-                        with execution_context(self._workspace_authorization(pending["user_id"], pending["task_id"])):
-                            await self.cancel(pending["user_id"], pending["task_id"], for_revision=True)
+                        with get_deployment_gate().admission("workspace-cleanup", continuation=True) as admitted:
+                            if admitted:
+                                with execution_context(self._workspace_authorization(pending["user_id"], pending["task_id"])):
+                                    await self.cancel(pending["user_id"], pending["task_id"], for_revision=True)
                         continue
                     if self._delivery_retry_after.get(
                         pending["task_id"], 0.0
@@ -1569,7 +1595,10 @@ class SemanticWorkspaceManager:
                 _LOGGER.exception("工作台非终态任务接管失败，下一轮将重试")
             if time.monotonic() - last_purge >= WORKSPACE_PURGE_INTERVAL_SECONDS:
                 try:
-                    get_store().purge_expired_semantic_workspace_tasks()
+                    with get_deployment_gate().admission("workspace-maintenance", continuation=True) as admitted:
+                        if not admitted:
+                            continue
+                        get_store().purge_expired_semantic_workspace_tasks()
                 except Exception:
                     _LOGGER.exception("工作台到期清理暂时失败，下一轮将重试")
                 else:
@@ -1796,6 +1825,8 @@ class SemanticWorkspaceManager:
         return execution.result()
 
     def enqueue(self, user_id: str, task_id: str) -> None:
+        if get_deployment_gate().is_draining():
+            return
         active = self._active.get(task_id)
         if active is not None and active.done():
             self._active.pop(task_id, None)
@@ -2336,6 +2367,12 @@ class SemanticWorkspaceManager:
 
     async def _launch_job(self, user_id: str, task_id: str) -> None:
         """取得重任务令牌后再启动，避免任务越过并发限制。"""
+        # 出队后可能仍在等待重任务令牌；必须在真实启动处重新封门并持有到收尾。
+        with get_deployment_gate().admission("workspace") as admitted:
+            if admitted:
+                await self._launch_admitted_job(user_id, task_id)
+
+    async def _launch_admitted_job(self, user_id: str, task_id: str) -> None:
         task = get_store().get_semantic_workspace_task(user_id, task_id)
         if (
             task is None

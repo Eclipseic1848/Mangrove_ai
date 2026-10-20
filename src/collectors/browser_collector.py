@@ -84,14 +84,19 @@ class BrowserCollector(BaseCollector):
         items: list[CollectedItem] = []
         agent = None
         try:
+            from src.agent.types.state_types import BrowserAgentContext
+
             agent = BrowserAgent(verbose=False)
             for url in urls:
                 # 与其它采集器一致：同域名最小间隔控速，逐页之间留出真人式停顿
                 await get_rate_limiter().acquire(url)
                 try:
-                    result = await agent.run_async(_TASK_TMPL.format(url=url))
+                    # 独立会话避免清空或覆盖其他采集任务的截图。
+                    result = await agent.run_async(_TASK_TMPL.format(url=url), context=BrowserAgentContext())
                 except Exception as e:
                     logger.warning("browser 采集失败 %s: %s", url, e)
+                    continue
+                if isinstance(result, dict) and result.get("success") is False:
                     continue
                 text = _extract_answer(result).strip()
                 if text:

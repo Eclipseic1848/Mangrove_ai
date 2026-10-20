@@ -126,6 +126,16 @@ def _diagnose_mc_failure(platform: str, output: str) -> dict:
         if env_name:
             tip += f"，请在采集账号设置中更新正在使用的 Cookie；个人配置优先，无个人配置时使用平台配置"
         return {"reason": "login_required", "next_action": "reauthenticate_selected_account", "message": tip}
+    # 只匹配明确的组件错误；用户提示和日志都不带第三方原文中的路径、请求或凭据。
+    lower = text.casefold()
+    if "modulenotfounderror:" in lower or "host system is missing dependencies" in lower:
+        return {"reason": "collector_dependency_missing", "next_action": "install_collection_dependencies", "message": f"{cn}采集环境缺少运行依赖，请联系管理员补齐采集组件"}
+    if "executable doesn't exist" in lower or "chromium distribution 'chrome' is not found" in lower:
+        return {"reason": "collector_browser_missing", "next_action": "install_collection_browser", "message": f"{cn}采集所需浏览器未安装或版本不匹配，请联系管理员安装匹配的浏览器"}
+    if "missing x server" in lower or "without having a xserver running" in lower:
+        return {"reason": "collector_display_unavailable", "next_action": "configure_collection_headless", "message": f"{cn}采集浏览器需要桌面环境，请联系管理员将服务器采集配置为无头模式"}
+    if any(marker in lower for marker in ("net::err_name_not_resolved", "net::err_connection_refused", "net::err_connection_timed_out", "net::err_proxy_connection_failed")):
+        return {"reason": "collector_network_error", "next_action": "check_collection_network", "message": f"{cn}采集网络连接失败，请检查服务器网络、DNS 和代理配置；不能据此判断 Cookie 过期"}
     # 第三方异常可能带完整请求或凭证，不能直接透传到会话和交付。
     return {"reason": "collection_failed", "next_action": "inspect_collection_service", "message": f"{cn}采集失败，请核对登录状态与采集服务配置"}
 

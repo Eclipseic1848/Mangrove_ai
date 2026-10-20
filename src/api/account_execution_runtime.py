@@ -77,6 +77,13 @@ class AccountExecutionManager:
         return True
 
     async def run_once(self):
+        from src.services.deployment_drain import get_deployment_gate
+
+        with get_deployment_gate().admission("account_cleanup", continuation=True) as admitted:
+            if admitted:
+                await self._run_admitted_once()
+
+    async def _run_admitted_once(self):
         with self.store._conn() as conn:
             operations = [dict(row) for row in conn.execute("SELECT * FROM account_execution_holds WHERE status='pending' ORDER BY created_at,generation")]
         for operation in operations:

@@ -589,7 +589,16 @@ async def _chat_stream(body, request, user, recovery=None, *, task_context=None)
             # 原流水线已发送失败/取消回执；运行资源的未知状态由持久绑定继续保留。
             pass
 
+    from src.services.deployment_drain import get_deployment_gate
+
+    lease = get_deployment_gate().try_acquire(
+        "chat", continuation=bool(getattr(request.state, "deployment_admitted", False))
+    )
+    if lease is None:
+        raise HTTPException(503, "服务正在更新，请稍后重试", headers={"Retry-After": "5"})
     bg = asyncio.create_task(authorized_pipeline())
+    # SSE 断开后流水线仍在运行；即使任务在首次调度前取消也须释放计数。
+    bg.add_done_callback(lambda _task: lease.release())
     _RUNNING[task_key] = bg
 
     async def event_gen():

@@ -90,6 +90,9 @@ def _loopback(value: str | None) -> bool:
 def secure_cookie(request: Request) -> bool:
     if request.url.scheme == "https":
         return True
+    # HTTP 仅由部署者显式开启；同源校验和 Owner 隔离仍按原规则执行。
+    if request.url.scheme == "http" and settings.webui_allow_insecure_http:
+        return False
     # 仅真实连接来源与 Host 都是环回的 HTTP 开发环境可不使用 Secure。
     if request.url.scheme == "http" and _loopback(request.url.hostname) and request.client and _loopback(request.client.host):
         return False
