@@ -53,12 +53,15 @@ async def _payload(request: Request) -> dict[str, object]:
             status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail="文档工具请求体超过限制",
         )
-    body = await request.body()
-    if len(body) > _MAX_REQUEST_BYTES:
-        raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
-            detail="文档工具请求体超过限制",
-        )
+    body = bytearray()
+    async for chunk in request.stream():
+        # 长度头可能缺失或伪小，必须在缓冲前计数，超限后不再接收后续分块。
+        if len(body) + len(chunk) > _MAX_REQUEST_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail="文档工具请求体超过限制",
+            )
+        body.extend(chunk)
     try:
         payload = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
