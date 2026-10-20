@@ -4,6 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 import asyncio
+import json
 
 import pytest
 from fastapi import FastAPI
@@ -501,6 +502,125 @@ def _relay_headers(grant: DocumentToolGrant) -> dict[str, str]:
         "X-Mangrove-Run-ID": grant.run_id,
         "X-Mangrove-Purpose": grant.purpose,
     }
+
+
+@pytest.fixture
+def chunked_document_relay(tmp_path):
+    class CountingAdapter(InspectAdapter):
+        calls = 0
+
+        async def inspect(self, *args, **kwargs):
+            self.calls += 1
+            return await super().inspect(*args, **kwargs)
+
+    class CountingBroker(DocumentToolBroker):
+        calls = 0
+
+        async def call(self, **kwargs):
+            self.calls += 1
+            return await super().call(**kwargs)
+
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"fixture")
+    retriever = CountingAdapter()
+    broker = CountingBroker(retriever=retriever)
+    grant = broker.issue_grant(
+        owner_user_id="user-a", task_id="task-a", revision=1, run_id="run-a",
+        sources=(SourceInput(upload_id="upload-a", original_name="source.pdf",
+                             host_path=source, sha256="a" * 64, media_type="application/pdf"),),
+    )
+    app = FastAPI()
+    app.include_router(document_tool_routes.router)
+    app.dependency_overrides[document_tool_routes.get_document_tool_broker] = lambda: broker
+    return app, _relay_headers(grant), broker, retriever
+
+
+async def _send_relay_frames(app, headers, chunks):
+    received = 0
+    sent = []
+
+    async def receive():
+        nonlocal received
+        assert received < len(chunks), "Relay 不应继续读取已结束的 ASGI 请求"
+        chunk = chunks[received]
+        received += 1
+        return {"type": "http.request", "body": chunk, "more_body": received < len(chunks)}
+
+    async def send(message):
+        sent.append(message)
+
+    await app({
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
+        "method": "POST", "scheme": "http", "path": "/internal/document-tools/inspect_source",
+        "raw_path": b"/internal/document-tools/inspect_source", "root_path": "", "query_string": b"",
+        "headers": [(name.lower().encode("ascii"), value.encode("ascii")) for name, value in headers.items()],
+        "client": ("127.0.0.1", 12345), "server": ("testserver", 80),
+    }, receive, send)
+    status_code = next(item["status"] for item in sent if item["type"] == "http.response.start")
+    body = b"".join(item.get("body", b"") for item in sent if item["type"] == "http.response.body")
+    return status_code, json.loads(body), received
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("length_header", [None, "small", "actual"])
+async def test_document_relay_stops_receiving_when_actual_body_exceeds_limit(chunked_document_relay, length_header):
+    app, headers, broker, retriever = chunked_document_relay
+    chunks = [b"x" * (1024 * 1024), b"x", b"must-not-be-read"]
+    if length_header is not None:
+        headers["Content-Length"] = "1" if length_header == "small" else str(sum(map(len, chunks)))
+
+    status_code, body, received = await _send_relay_frames(app, headers, chunks)
+
+    assert status_code == 413
+    assert body == {"detail": "文档工具请求体超过限制"}
+    # 声明超限在 receive 前拒绝；其余情形只读到首次实际越界帧。
+    assert received == (0 if length_header == "actual" else 2)
+    assert broker.calls == 0
+    assert retriever.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_document_relay_rejects_oversized_declared_length_without_receiving(chunked_document_relay):
+    app, headers, broker, retriever = chunked_document_relay
+    headers["Content-Length"] = str(1024 * 1024 + 1)
+
+    status_code, _, received = await _send_relay_frames(app, headers, [b'{}'])
+
+    assert status_code == 413
+    assert received == 0
+    assert broker.calls == 0
+    assert retriever.calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("length_header", [None, "small", "actual"])
+async def test_document_relay_accepts_json_at_actual_byte_limit(chunked_document_relay, length_header):
+    app, headers, broker, retriever = chunked_document_relay
+    payload = b'{"source_id":"upload-a"}'
+    body = payload + b" " * (1024 * 1024 - len(payload))
+    if length_header is not None:
+        headers["Content-Length"] = "1" if length_header == "small" else str(len(body))
+
+    status_code, response, received = await _send_relay_frames(app, headers, [body[:64], body[64:524288], body[524288:]])
+
+    assert status_code == 200
+    assert response["source_id"] == "upload-a" and response["unit_count"] == 3
+    assert received == 3
+    assert broker.calls == 1
+    assert retriever.calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body", [b"{", b"[]", b"\xff"], ids=["bad-json", "non-object", "non-utf8"])
+async def test_document_relay_invalid_json_stays_unprocessable(chunked_document_relay, body):
+    app, headers, broker, retriever = chunked_document_relay
+
+    status_code, _, received = await _send_relay_frames(app, headers, [body])
+
+    assert status_code == 422
+    assert received == 1
+    assert broker.calls == 0
+    assert retriever.calls == 0
 
 
 def test_document_retrieval_failure_is_typed_and_does_not_leak_path(tmp_path):
