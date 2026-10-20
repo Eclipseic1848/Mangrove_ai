@@ -16,20 +16,25 @@ def test_migration_preserves_legacy_values_and_replays(tmp_path):
         command.upgrade(_alembic_config(conn), 'scheduler_0003')
     engine.dispose()
     conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
     try:
         conn.execute("INSERT INTO scheduled_tasks (task_id,user_input,trigger_type,status,created_at,next_run_at) VALUES ('legacy','保留原任务','cron','active','2026-09-01T09:00:00','2026-09-02T09:00:00')")
         conn.commit()
-        before = conn.execute('SELECT * FROM scheduled_tasks').fetchone()
+        before = dict(conn.execute('SELECT * FROM scheduled_tasks').fetchone())
     finally:
         conn.close()
     target = DatabaseTarget(profile='scheduler', path=path)
     apply_migrations(target, tmp_path / 'backup')
     apply_migrations(target, tmp_path / 'backup-replay')
     conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
     try:
-        after = conn.execute('SELECT * FROM scheduled_tasks').fetchone()
-        assert after[:-1] == before
-        assert after[-1] is None
+        after = dict(conn.execute('SELECT * FROM scheduled_tasks').fetchone())
+        # 新迁移只追加可空列，按旧列名验证原值保真，不依赖列数或顺序。
+        assert {key: after[key] for key in before} == before
+        assert set(after) - set(before) == {'time_zone', 'task_context_json'}
+        assert after['time_zone'] is None
+        assert after['task_context_json'] is None
     finally:
         conn.close()
 

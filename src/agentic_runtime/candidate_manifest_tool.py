@@ -248,6 +248,16 @@ def mark_result_search_complete(*, output_dir: Path) -> None:
         payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise ManifestToolError("请先使用 init 初始化候选清单") from exc
+    registered = {
+        (ref.get("source"), ref.get("locator"), ref.get("quote"))
+        for artifact in payload.get("artifacts") or []
+        for ref in artifact.get("evidence") or []
+    }
+    # 构建期间允许先登记结果；结束清单前必须满足验证器已有的精确证据绑定。
+    for item in (*payload.get("result_items", []), *payload.get("qualified_omissions", [])):
+        for ref in item.get("evidence") or []:
+            if (ref.get("source"), ref.get("locator"), ref.get("quote")) not in registered:
+                raise ManifestToolError("结果项证据未登记到候选文件，请先用 add-evidence 登记完全相同的 source、locator、quote")
     payload["result_search_complete"] = True
     _write_atomic(manifest_path, payload)
 

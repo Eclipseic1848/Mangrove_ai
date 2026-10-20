@@ -44,7 +44,7 @@ def _client(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    role: str = "admin",
+    role: str = "super_admin",
 ) -> TestClient:
     from src.agentic_runtime.pi_runtime import PiRuntime
     import src.api.auth as auth_mod

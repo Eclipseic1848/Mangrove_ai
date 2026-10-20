@@ -28,15 +28,15 @@ export const COOKIE_KEY_ORDER = [
 
 const COOKIE_LOGIN_LINKS: Record<string, { label: string; url: string }> = {
   mc_cookie_xhs: { label: "小红书网页版", url: "https://www.xiaohongshu.com" },
-  mc_cookie_wb: { label: "微博网页版", url: "https://weibo.com" },
+  mc_cookie_wb: { label: "微博移动网页版", url: "https://m.weibo.cn" },
   mc_cookie_dy: { label: "抖音网页版", url: "https://www.douyin.com" },
   mc_cookie_bili: { label: "B站", url: "https://www.bilibili.com" },
   mc_cookie_zhihu: { label: "知乎", url: "https://www.zhihu.com" },
-  mc_cookie_ks: { label: "快手网页版", url: "https://www.kuaishou.com" },
+  mc_cookie_ks: { label: "快手视频网页版", url: "https://www.kuaishou.com" },
   mc_cookie_tieba: { label: "百度贴吧", url: "https://tieba.baidu.com" },
   jd_cookie: { label: "京东", url: "https://www.jd.com" },
   tb_cookie: { label: "淘宝", url: "https://www.taobao.com" },
-  pdd_cookie: { label: "拼多多", url: "https://www.pinduoduo.com" },
+  pdd_cookie: { label: "拼多多网页版", url: "https://mobile.yangkeduo.com" },
 };
 
 const COOKIE_LABELS: Record<string, string> = {
@@ -51,8 +51,11 @@ function cookieSteps(key: string): GuideStep[] {
   return [
     { text: "用浏览器打开该平台网页版，登录你自己的账号", link: COOKIE_LOGIN_LINKS[key] },
     { text: "按 F12 打开浏览器开发者工具，切换到「网络 / Network」面板，刷新一次页面" },
-    { text: "任选一条请求，在右侧「标头 / Headers」里找到 Cookie 字段，复制完整内容" },
-    { text: "粘贴到本页对应输入框保存" },
+    { text: "选择该平台业务域名下、能确认本人已登录的账号或资料请求；不要复制第三方图片、广告或 CDN 请求" },
+    ...(key === "mc_cookie_ks" ? [{ text: "快手：从 www.kuaishou.com 已登录的视频业务请求导出完整 Cookie；身份检查与视频采集使用同一业务域。平台明确返回未登录时需重新认证；访问限制或接口异常会显示待确认" }] : []),
+    ...(key === "tb_cookie" ? [{ text: "淘宝/天猫：从已登录的淘宝业务请求中复制包含 _m_h5_tk 的完整 Cookie，不要手工拼装字段或从登录页、静态资源请求中复制" }] : []),
+    { text: "在「请求标头 / Request Headers」中复制 Cookie 字段的完整值（name=value; name2=value2），不包含“Cookie:”字样；不要使用 document.cookie 或响应中的 Set-Cookie" },
+    { text: "粘贴到本页对应输入框保存。验证和采集由当前服务器执行，可能受平台对网络或设备的限制；尚未确认不等于凭证失效" },
   ];
 }
 

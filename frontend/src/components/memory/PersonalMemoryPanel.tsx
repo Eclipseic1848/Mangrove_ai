@@ -1,28 +1,38 @@
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Plus, Search, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Pagination } from "@/components/ui/pagination";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { beijingTime } from "@/lib/beijingTime";
 import { formatRelativeTime } from "@/lib/utils";
 import { MemoryConfirm, MemoryTextarea } from "./MemoryControls";
 
 type Memory = { id: number; text: string; created_at?: string };
-export function PersonalMemoryPanel({ refreshKey = 0, onChanged, onStateChange }: {
-  refreshKey?: number; onChanged?: () => void; onStateChange?: (state: { dirty: boolean; busy: boolean }) => void;
+export function PersonalMemoryPanel({ onChanged, onStateChange }: {
+  onChanged?: () => void; onStateChange?: (state: { dirty: boolean; busy: boolean }) => void;
 }) {
   const id = useId();
-  const [rows, setRows] = useState<Memory[]>([]);
-  const [total, setTotal] = useState(0);
+  const { user } = useAuth();
+  const queryClient = useQueryClient();
+  const memoryPrefix = ["memory", user?.user_id, user?.role];
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
   const [search, setSearch] = useState("");
   const [query, setQuery] = useState("");
   const [composing, setComposing] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [loaded, setLoaded] = useState(false);
-  const [loadError, setLoadError] = useState(false);
+  const memory = useQuery<{ personal?: Memory[]; total?: number; page?: number }>({
+    queryKey: [...memoryPrefix, page, pageSize, query],
+    queryFn: () => api.get(`/api/memory?${new URLSearchParams({ page: String(page), page_size: String(pageSize), q: query })}`, { signal: AbortSignal.timeout(15000) }),
+    staleTime: 15000, retry: false,
+  });
+  const rows = memory.data?.personal ?? [];
+  const total = memory.data?.total ?? rows.length;
+  const loading = memory.isFetching;
+  const loaded = memory.data !== undefined;
+  const loadError = memory.isError;
   const [text, setText] = useState("");
   const [editing, setEditing] = useState<Memory | null>(null);
   const [editText, setEditText] = useState("");
@@ -32,7 +42,6 @@ export function PersonalMemoryPanel({ refreshKey = 0, onChanged, onStateChange }
   const [saved, setSaved] = useState<Memory | null>(null);
   const [deleting, setDeleting] = useState<Memory | null>(null);
   const [discard, setDiscard] = useState<(() => void) | null>(null);
-  const sequence = useRef(0);
   const flight = useRef(false);
   const searchRef = useRef<HTMLInputElement>(null);
   const editor = useRef<HTMLDivElement>(null);
@@ -49,22 +58,10 @@ export function PersonalMemoryPanel({ refreshKey = 0, onChanged, onStateChange }
     const timer = window.setTimeout(() => { setQuery(search); setPage(1); }, search ? 300 : 0);
     return () => window.clearTimeout(timer);
   }, [search, query, composing]);
-  const load = useCallback(async () => {
-    const current = ++sequence.current;
-    setLoading(true);
-    setLoadError(false);
-    try {
-      const data = await api.get(`/api/memory?${new URLSearchParams({ page: String(page), page_size: String(pageSize), q: query })}`, { signal: AbortSignal.timeout(15000) });
-      if (current !== sequence.current) return;
-      setRows(data.personal ?? []); setTotal(data.total ?? data.personal?.length ?? 0);
-      if (data.page) setPage(data.page);
-      setLoaded(true);
-    } catch { if (current === sequence.current) setLoadError(true); }
-    finally { if (current === sequence.current) setLoading(false); }
-  }, [page, pageSize, query]);
+  const load = () => memory.refetch();
   const latestLoad = useRef(load);
   latestLoad.current = load;
-  useEffect(() => { void load(); return () => { sequence.current++; }; }, [load, refreshKey]);
+  useEffect(() => { if (memory.data?.page) setPage(memory.data.page); }, [memory.data?.page]);
   useEffect(() => { editor.current?.querySelector("textarea")?.focus(); }, [editing?.id]);
   const changeEditor = (next: Memory | null) => {
     const apply = () => { setEditing(next); setEditText(next?.text ?? ""); setError(""); };
@@ -72,7 +69,7 @@ export function PersonalMemoryPanel({ refreshKey = 0, onChanged, onStateChange }
     else apply();
   };
   const mutate = async (kind: "add" | "edit" | "delete") => {
-    if (flight.current) return;
+    if (flight.current || loadError) return;
     const value = (kind === "add" ? text : editText).trim();
     if (kind !== "delete" && (!value || value.length > 4000)) return;
     if (kind === "edit" && !editing || kind === "delete" && !deleting) return;
@@ -92,6 +89,7 @@ export function PersonalMemoryPanel({ refreshKey = 0, onChanged, onStateChange }
         setNotice("已保存，后续相关任务会参考这条记忆。");
       }
       onChanged?.();
+      await queryClient.invalidateQueries({ queryKey: memoryPrefix, refetchType: "none" });
       // 保存期间允许继续搜索，回读必须使用此刻的筛选，不得复活提交时的旧页。
       await latestLoad.current();
     } catch (reason) { setError(reason instanceof Error ? reason.message : "操作未完成，请核对后重试，输入已保留。"); }
@@ -103,7 +101,7 @@ export function PersonalMemoryPanel({ refreshKey = 0, onChanged, onStateChange }
     <div className="space-y-2">
       <label htmlFor={`${id}-add`} className="block text-sm font-medium">添加个人记忆</label>
       <MemoryTextarea id={`${id}-add`} value={text} maxLength={4000} disabled={busy} placeholder="例如：报告先写结论，再列关键数据" onChange={event => setText(event.target.value)} />
-      <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">{text.length > 3600 ? `${text.length} / 4000 字` : "一次记录一条偏好，便于后续查找和修改。"}</span><Button disabled={busy || !text.trim()} onClick={() => void mutate("add")}><Plus />记住</Button></div>
+      <div className="flex items-center justify-between gap-3"><span className="text-xs text-muted-foreground">{text.length > 3600 ? `${text.length} / 4000 字` : "一次记录一条偏好，便于后续查找和修改。"}</span><Button disabled={busy || loadError || !text.trim()} onClick={() => void mutate("add")}><Plus />记住</Button></div>
     </div>
     {notice && <div role="status" className="rounded-md border bg-muted/40 p-3 text-sm">{notice}
       {saved && !rows.some(row => row.id === saved.id || row.text === saved.text) && <div className="mt-2"><span>当前列表未显示新保存的记忆。</span><Button variant="link" size="sm" onClick={() => { setSearch(saved.text.slice(0, 200)); setQuery(saved.text.slice(0, 200)); setPage(1); }}>查看已保存记忆</Button></div>}
@@ -125,11 +123,11 @@ export function PersonalMemoryPanel({ refreshKey = 0, onChanged, onStateChange }
           <label htmlFor={`${id}-edit`} className="text-sm font-medium">编辑内容</label>
           <MemoryTextarea id={`${id}-edit`} value={editText} maxLength={4000} disabled={busy} onChange={event => setEditText(event.target.value)} />
           {editText.length > 3600 && <p className="text-xs text-muted-foreground">{editText.length} / 4000 字{editText.length > 4000 ? "，请精简后保存" : ""}</p>}
-          <div className="flex gap-2"><Button disabled={busy || !editText.trim() || editText.length > 4000} onClick={() => void mutate("edit")}>保存修改</Button><Button variant="outline" disabled={busy} onClick={() => changeEditor(null)}>取消编辑</Button></div>
+          <div className="flex gap-2"><Button disabled={busy || loadError || !editText.trim() || editText.length > 4000} onClick={() => void mutate("edit")}>保存修改</Button><Button variant="outline" disabled={busy} onClick={() => changeEditor(null)}>取消编辑</Button></div>
         </div> : <>
           <p className="whitespace-pre-wrap break-words text-sm leading-6 [overflow-wrap:anywhere]">{row.text}</p>
           <div className="mt-2 flex flex-wrap items-center justify-between gap-2"><span className="text-xs text-muted-foreground" title={row.created_at ? beijingTime(row.created_at) : undefined}>{row.created_at ? formatRelativeTime(row.created_at) : ""}</span>
-            <div className="flex gap-1"><Button variant="outline" size="sm" disabled={busy} aria-label={`编辑记忆：${row.text.slice(0, 40)}`} onClick={() => changeEditor(row)}>编辑</Button><Button variant="ghost" size="sm" disabled={busy} aria-label={`删除记忆：${row.text.slice(0, 40)}`} onClick={() => { setError(""); setDeleting(row); }}><Trash2 />删除</Button></div>
+            <div className="flex gap-1"><Button variant="outline" size="sm" disabled={busy || loadError} aria-label={`编辑记忆：${row.text.slice(0, 40)}`} onClick={() => changeEditor(row)}>编辑</Button><Button variant="ghost" size="sm" disabled={busy || loadError} aria-label={`删除记忆：${row.text.slice(0, 40)}`} onClick={() => { setError(""); setDeleting(row); }}><Trash2 />删除</Button></div>
           </div>
         </>}
       </article>)}

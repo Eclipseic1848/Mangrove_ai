@@ -28,6 +28,8 @@ export async function sendDraftTurn(payload: {
   request_id: string; text: string; history: DraftChatMessage[]; model: string;
   model_connection_id: string | null; external_api_confirmed: boolean;
   conv_id?: string;
+  context_purpose?: string; context_selection?: TaskContextSelection;
+  context_preview_sha256?: string; output_formats?: string[];
 }, signal: AbortSignal, events: ChatEvents = {}): Promise<{ reply: string; output_formats: string[]; files?: DraftChatMessage["files"]; conv_id?: string; message_id?: number; created_at?: string; user_created_at?: string; token_usage?: DraftChatMessage["token_usage"] }> {
   const response = await authenticatedFetch(`${BASE}/draft/turns`, {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload), signal,

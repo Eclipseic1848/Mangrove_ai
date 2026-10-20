@@ -83,6 +83,7 @@ class Settings(BaseSettings):
     # MediaCrawler 社媒采集：克隆到该路径并配好后才可用。许可证为非商业，商业化前需替换。
     mediacrawler_path: str = Field(default="", description="MediaCrawler 仓库本地路径，如 external/MediaCrawler")
     mediacrawler_python: str = Field(default="", description="运行 MediaCrawler 的 Python 解释器，留空用当前解释器")
+    mediacrawler_python_ks: str = Field(default="", description="快手专用 MediaCrawler Python 解释器，留空沿用默认解释器")
     # 京东电商评论采集（期4）：京东已对免登录请求全面风控，免登录多返回验证页/系统繁忙。
     # 填入浏览器登录后的京东 Cookie（整段 Cookie 头）即可让搜索/评论接口正常返回；留空则走免登录尽力而为。
     jd_cookie: str = Field(default="", description="京东 Cookie（登录态，放 .env）；空则免登录尽力而为")
@@ -106,6 +107,7 @@ class Settings(BaseSettings):
     # 间隔建议给到天级别，不建议按小时跑。
     cookie_health_scan_enabled: bool = Field(default=False, description="是否启用 Cookie 健康定时巡检")
     cookie_health_scan_interval_hours: int = Field(default=24, description="巡检间隔（小时），默认每天一次")
+    cookie_health_maintenance_file: str = Field(default="", description="维护标记文件，存在或无法确认时暂停 Cookie 巡检")
     # MediaCrawler 代理IP池（反风控，国内住宅/机房代理；优于服务端挂境外 VPN，且不影响本地服务）：
     # 启动子进程时把开关注入 base_config（经 MC_* 环境变量），凭证按 MediaCrawler 约定的环境变量名注入。
     # provider=static 用 mc_static_proxy_url（隧道/固定代理，最通用）；kuaidaili/wandouhttp 用各自凭证。
@@ -192,7 +194,7 @@ class Settings(BaseSettings):
     # 免密钥的 DuckDuckGo 易被反爬(202)；为可靠的"站定向检索"建议配 Tavily（为 AI 代理设计，
     # 有免费额度，直接返回链接+正文，可 include_domains 限定到指定站）。留空则退回 DDG 尽力而为。
     # auto 优先级：AnySearch(配了Key最先,内联正文) → SearXNG(自托管免费) → ddgs(免费) → Tavily(兜底，省额度)
-    search_provider: str = Field(default="auto", description="搜索后端：auto | anysearch | searxng | ddgs | tavily")
+    search_provider: str = Field(default="auto", description="搜索后端：auto | anysearch | searxng | ddgs | tavily | deepseek")
     # SearXNG 自托管元搜索（免费无限、开源）。见 docker/searxng/。留空则不用。
     searxng_base_url: str = Field(default="", description="SearXNG 地址，如 http://localhost:8080")
     tavily_api_key: str = Field(default="", description="Tavily API Key（放 .env）；空则不用 Tavily")
@@ -607,6 +609,7 @@ class Settings(BaseSettings):
     jwt_expire_hours: int = Field(default=168, description="历史兼容配置；平台访问凭证固定最长30分钟，登录会话绝对期限7天")
     # 私有实例默认由管理员开通账号；首次管理员只走本机显式初始化。
     webui_allow_register: bool = Field(default=False, description="是否允许前端自助注册账号")
+    webui_allow_insecure_http: bool = Field(default=False, description="允许通过 HTTP 登录；仅由部署配置开启，HTTP 不加密传输")
     # 前端开发服务器源（Vite dev 默认 5173），用于 CORS 放行；生产由网关同源托管时可忽略。
     webui_cors_origins: str = Field(default="http://localhost:5173,http://127.0.0.1:5173", description="允许的前端源，逗号分隔")
     

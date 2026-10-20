@@ -13,6 +13,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from src.conductor.task_spec import TaskSpec
 from src.conversation_steering import (
     CompiledContext,
     ContextCompileRequest,
@@ -429,6 +430,60 @@ class TaskContextService:
         return {"templates": self._repository.list_templates(owner_id, purpose),
                 "memories": self._repository.list_memories(owner_id, purpose)}
 
+    def conversation_preview(self, *, owner_id: str, objective_text: str,
+                             purpose: str = "general", output_formats: tuple[str, ...] = (),
+                             selection: TaskContextSelection | None = None,
+                             matching_text: str | None = None) -> TaskContextPreview:
+        """对话只自动召回相关本人偏好；方法模板须显式选用，不默认套报告结构。"""
+        from src.memory._library_scope import require_owner
+        from src.memory.loader import select_preferences
+
+        require_owner(owner_id)
+        automatic = selection is None
+        if selection is None:
+            memories = select_preferences(self._repository.list_memories(owner_id, purpose),
+                matching_text if matching_text is not None else objective_text,
+                text_of=lambda item: item.summary, budget=6000)
+            selection = TaskContextSelection(memories=tuple(
+                MemorySelection(memory_id=item.memory_id) for item in memories))
+        return self.preview(owner_id=owner_id, purpose=purpose, objective_text=objective_text,
+            output_formats=output_formats, selection=selection, allow_omission=automatic)
+
+    def legacy_method_preview(self, snapshot: TaskContextPreview, spec: TaskSpec) -> TaskContextPreview:
+        """在运行快照上补适用分析方法；本人记忆、平台规范和显式模板不回读。"""
+        from src.memory._library_scope import require_owner
+        from src.memory.templates import match_template
+
+        require_owner(snapshot.owner_id)
+        # 已选方法继续使用冻结版本；分析重跑也不能被后来编辑的模板替换。
+        if snapshot.template is not None:
+            return snapshot
+        entry = match_template(spec, owner_id=snapshot.owner_id)
+        if entry is None or _SECRET_PATTERN.search(entry["body"]):
+            return snapshot
+        try:
+            template = self._repository._legacy_template(entry)
+            _validate_context_advice(template.goal_contract_draft + "\n" + template.method_draft)
+        except ValueError:
+            return snapshot
+        proposed = ProposedContextChanges(method=template.method_draft or None)
+        compiled = _compile_task_context(owner_id=snapshot.owner_id,
+            task_id=snapshot.compiled_context.task_id, revision=snapshot.compiled_context.revision,
+            objective_text=snapshot.objective_text, template=template, memories=snapshot.memories,
+            automatically_selected=True, lessons=snapshot.lessons, global_preferences=snapshot.global_preferences)
+        memory_refs = {item.source_ref for item in snapshot.compiled_context.composition if item.source_ref.startswith("memory:")}
+        # 自动方法不能挤掉原已采用的本人记忆；预算不足时沿用原快照。
+        if memory_refs - {item.source_ref for item in compiled.composition}:
+            return snapshot
+        return snapshot.model_copy(update={"template": template, "automatically_selected": True,
+            "proposed_changes": proposed, "compiled_context": compiled,
+            "preview_sha256": _preview_sha256(owner_id=snapshot.owner_id, purpose=snapshot.purpose,
+                objective_text=snapshot.objective_text, output_formats=snapshot.output_formats,
+                template=template, memories=snapshot.memories, proposed_changes=proposed,
+                compiled_context=compiled, automatically_selected=True, lessons=snapshot.lessons,
+                global_preferences=snapshot.global_preferences,
+                global_preferences_sha256=snapshot.global_preferences_sha256)})
+
     def automatic_preview(self, *, owner_id: str, purpose: str, objective_text: str,
                           output_formats: tuple[str, ...], data_type: str,
                           matching_text: str | None = None,
@@ -471,11 +526,12 @@ class TaskContextService:
             preview = confirmed_preview or self.preview(
                 owner_id=owner_id, purpose=purpose, objective_text=objective_text,
                 output_formats=output_formats, selection=selection,
+                allow_omission=True,
             )
         except (KeyError, ValueError):
             preview = self.preview(owner_id=owner_id, purpose=purpose, objective_text=objective_text,
                 output_formats=output_formats, selection=TaskContextSelection(
-                    memories=tuple(MemorySelection(memory_id=item.memory_id) for item in automatic_memories)))
+                    memories=tuple(MemorySelection(memory_id=item.memory_id) for item in automatic_memories)), allow_omission=True)
         global_preferences = preview.global_preferences
         global_digest = preview.global_preferences_sha256
         if not frozen_lessons and not automatic_memories and not global_preferences and (confirmed_preview is not None or preview.template is None):
@@ -490,6 +546,15 @@ class TaskContextService:
             lessons=frozen_lessons,
             global_preferences=global_preferences,
         )
+        original_refs = {item.source_ref for item in preview.compiled_context.composition if item.source_ref.startswith(("memory:", "template:"))}
+        if original_refs - {item.source_ref for item in compiled.composition}:
+            # 自动教训不能挤掉已采用的上下文；重编时仍保留完整的当前执行目标。
+            frozen_lessons = ()
+            compiled = _compile_task_context(owner_id=owner_id, task_id="draft", revision=1,
+                objective_text=objective_text, template=preview.template, memories=preview.memories,
+                automatically_selected=automatic, global_preferences=global_preferences)
+            if original_refs - {item.source_ref for item in compiled.composition}:
+                raise ValueError("当前目标与所选上下文过长，请精简目标或记忆后重新检查")
         return preview.model_copy(update={
             # 用户原话负责匹配/确认；完整执行目标负责冻结和来源刷新继承。
             "objective_text": objective_text,
@@ -504,7 +569,8 @@ class TaskContextService:
         })
 
     def preview(self, *, owner_id: str, purpose: str, objective_text: str,
-                output_formats: tuple[str, ...], selection: TaskContextSelection) -> TaskContextPreview:
+                output_formats: tuple[str, ...], selection: TaskContextSelection,
+                allow_omission: bool = False) -> TaskContextPreview:
         template = None
         if selection.template is not None:
             template = self._repository.get_template(owner_id, selection.template)
@@ -549,6 +615,12 @@ class TaskContextService:
             memories=frozen_memories,
             global_preferences=global_preferences,
         )
+        # 显式选择须完整进入模型，不能把预算省略伪装成已采用全部建议。
+        selected_refs = {f"memory:{item.memory_id}:{item.summary_sha256}" for item in frozen_memories}
+        if template is not None:
+            selected_refs.add(f"template:{template.template_id}@{template.version}:{template.summary_sha256}")
+        if not allow_omission and selected_refs - {item.source_ref for item in compiled.composition}:
+            raise ValueError("所选上下文过长，请精简模板或减少记忆后重新检查")
         return TaskContextPreview(owner_id=owner_id, purpose=purpose,
             objective_text=objective_text, output_formats=output_formats,
             template=template, memories=frozen_memories, proposed_changes=proposed,

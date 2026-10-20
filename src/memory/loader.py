@@ -155,6 +155,9 @@ def add_preference(text: str) -> bool:
         line = f"- {text}\n"
         if _PREF_SECTION in content:
             idx = content.index(_PREF_SECTION)
+            # 编辑会移除尾部空白，标题位于文件末尾时先补换行。
+            if "\n" not in content[idx:]:
+                content += "\n"
             insert_at = content.index("\n", idx) + 1
             content = content[:insert_at] + line + content[insert_at:]
         else:

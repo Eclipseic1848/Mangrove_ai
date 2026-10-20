@@ -9,7 +9,7 @@ import hashlib
 import ipaddress
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shutil
 import subprocess
@@ -23,6 +23,7 @@ from src.config.settings import settings
 from src.utils.docker_user import docker_user_args
 from src.api.execution import execution_to_thread
 from src.services.upload_store import IMAGE_EXTENSIONS
+from src.services.managed_paths import ManagedPathCodec
 from src.candidate_verification import CandidateVerificationService
 from src.capability_catalog.models import PublicCapabilityDescriptor
 from src.capability_adapters import load_runtime_manifests
@@ -69,6 +70,7 @@ from .models import (
     PiRuntimeResult,
     RuntimeEvent,
     RuntimeStatus,
+    RuntimeVersion,
     VerificationReport,
     VerificationStatus,
 )
@@ -2035,7 +2037,8 @@ class PiRuntime:
             if operation is None and not (directory / "resources.json").exists() and not (directory / "cleaned").exists() and not any(run_key in leases for leases in (self._containers, self._egress_leases, self._capability_host_leases)):
                 persisted = self._state_store.get(*run_key)
                 if persisted is not None and persisted.get("run_id"):
-                    raise PiRuntimeError("旧 Run 缺少可验证资源账本，清理需要确认")
+                    if not await self._migrated_run_resources_absent(run_key, persisted):
+                        raise PiRuntimeError("旧 Run 缺少可验证资源账本，清理需要确认")
             self._restore_resources(run_key)
             await self._cleanup_resources(run_key)
         finally:
@@ -2051,6 +2054,87 @@ class PiRuntime:
                 finally:
                     if lock is not None:
                         lock.release()
+
+    async def _migrated_run_resources_absent(self, key, persisted) -> bool:
+        """迁移旧 Run 只核对本机资源为空，不访问或证明旧宿主机已清理。"""
+        if persisted.get("status") not in {RuntimeStatus.FAILED, RuntimeStatus.CANCELLED, RuntimeStatus.CANDIDATE_READY} or persisted.get("runtime_version") != RuntimeVersion.PI:
+            return False
+        user, task, revision = key
+        if (persisted.get("user_id"), persisted.get("task_id"), persisted.get("revision")) != key:
+            return False
+        run_id = persisted.get("run_id")
+        if not isinstance(run_id, str) or not re.fullmatch(r"pi_(?:run|validation)_[a-z0-9]{16}", run_id):
+            return False
+        raw = persisted.get("workspace_root")
+        if not isinstance(raw, str) or not (raw.startswith("/") or PureWindowsPath(raw).is_absolute()):
+            return False
+        base = self.execution_root.absolute()
+        root = base / "agentic-vnext" / hashlib.sha256(user.encode("utf-8")).hexdigest()[:16] / task / f"r{revision}" / run_id
+        name = self._container_name(task, revision, run_id)
+        # 同机丢失账本仍失败关闭；只有冻结锚点可精确映射的异地旧绝对路径可兼容。
+        if Path(raw) == root or persisted.get("container_name") != name:
+            return False
+        try:
+            codec = ManagedPathCodec(base, legacy_anchor=("data", "semantic-executions"))
+            if codec.decode(raw) != root or not root.is_dir():
+                return False
+        except ValueError:
+            return False
+        host_identity = hashlib.sha256(f"{user}:{task}:{revision}:{run_id}".encode("utf-8")).hexdigest()[:12]
+        host_root = self._capability_host.execution_root if self._capability_host is not None else base / "capability-hosts"
+        host_directory = host_root / host_identity
+        if self._capability_host is not None:
+            host_lease = self._capability_host.cleanup_lease(user, task, revision, run_id)
+            if host_lease.runtime_dir != host_directory:
+                return False
+            host_name = host_lease.container_name
+        else:
+            # 配置关闭仍需核对历史 Host；名称算法与 CapabilityHost.cleanup_lease 保持一致。
+            safe_task = re.sub(r"[^a-z0-9-]", "-", task.casefold())[-16:]
+            host_name = f"mangrove-cap-host-{safe_task}-{host_identity}"[:63]
+        if (self._lifecycle_dir(key) / "resources.tmp").exists():
+            return False
+        for directory in (root, host_directory):
+            for path in (directory, *directory.parents):
+                if path.is_symlink() or getattr(path, "is_junction", lambda: False)():
+                    return False
+            try:
+                directory.stat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return False
+            if not directory.is_dir():
+                return False
+            errors = []
+            for current, directories, files in os.walk(directory, followlinks=False, onerror=errors.append):
+                for entry in (*directories, *files):
+                    path = Path(current) / entry
+                    if entry in {".creating", ".creating-main"} or path.is_symlink() or getattr(path, "is_junction", lambda: False)():
+                        return False
+            if errors:
+                return False
+        identity = resource_owner_identity(user, task, revision, run_id)
+        targets = [("container", name), ("container", host_name)]
+        for phase in EgressPhase:
+            lease = SmokescreenEgressController.lease_for(
+                policy=EgressPolicy(phase, (), (), False), user_id=user, task_id=task,
+                revision=revision, run_id=run_id, policy_dir=root / "trace" / "egress-business",
+            )
+            targets.extend((("container", lease.proxy_container_name), ("network", lease.network_name)))
+        try:
+            for kind, resource_name in targets:
+                if await owned_resource_id(_run_docker, kind, resource_name, identity) is not None:
+                    return False
+            # 完整 Owner/Run 标签还覆盖被改名的资源，不能只凭预测名称不存在就放行。
+            for kind in ("container", "network"):
+                command = ("docker", kind, "ls", *(("--all",) if kind == "container" else ()), "--filter", f"label=mangrove.owner-run={identity}", "--format", "{{.ID}}")
+                result = await asyncio.wait_for(_run_docker(command), timeout=30)
+                if result.returncode or result.stdout.strip() or result.stderr.strip():
+                    return False
+        except Exception:
+            return False
+        return True
 
     async def _assert_image(self) -> None:
         await self.resolve_runtime_artifact()
@@ -2305,13 +2389,36 @@ class PiRuntime:
                 Path(__file__).with_name("assets") / "mangrove-capability-host.ts",
                 extensions_dir / "mangrove-capability-host.ts",
             )
+            # 工具用途来自冻结清单；只传说明，不把入口路径或凭证交给模型。
+            capability_purposes = {
+                item.manifest.name: item.manifest.purpose
+                for item in mounted_capabilities
+            }
+            for item in mounted_capabilities:
+                reuse_path = item.root / "mangrove-reuse.json"
+                if not reuse_path.is_file():
+                    continue
+                from src.semantic_harness.models import CapabilityManifest
+
+                if reuse_path.stat().st_size > 64 * 1024:
+                    raise PiRuntimeError("公共能力接口声明超过 64 KiB")
+                public = json.loads(reuse_path.read_text(encoding="utf-8"))
+                contract = CapabilityManifest.model_validate_json(public["reuse_contract"])
+                # 目录 ID 与工具运行名可不同；制品身份由冻结挂载绑定，这里复核运行版本。
+                if contract.version != item.manifest.version:
+                    raise PiRuntimeError("公共能力接口声明与冻结运行身份不一致")
+                # 平台 purpose 已脱敏；用途和参数从同一冻结制品的公共接口补齐。
+                capability_purposes[item.manifest.name] += "\n公共接口：" + json.dumps({
+                    "operations": contract.operations, "accepts": contract.accepts, "produces": contract.produces,
+                    "arguments_schema": contract.parameters_schema,
+                }, ensure_ascii=False)
             (config_dir / "capability-host.json").write_text(
                 json.dumps(
                     {
                         "relayUrl": capability_host_lease.relay_url,
                         "relayToken": capability_host_lease.relay_token,
                         "capabilities": [
-                            {"name": name, "kind": kind}
+                            {"name": name, "kind": kind, "purpose": capability_purposes[name]}
                             for name, kind in capability_host_lease.capability_kinds
                         ],
                     },
@@ -2372,6 +2479,8 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
 `python /workspace/work/candidate_manifest_tool.py add-result --result-id "稳定结果ID" --label "用户可读名称" --source "原文件名" --locator "page:17" --quote "直接支持该项的原文"`
 如果已经确认某个合格对象被候选遗漏，必须登记它并让当前 Run 修复，不能交给用户降低目标：
 `python /workspace/work/candidate_manifest_tool.py add-omission --result-id "遗漏对象ID" --label "遗漏对象名称" --source "原文件名" --locator "page:17" --quote "证明它合格的原文"`
+调用 complete-results 前，确保 add-result 和 add-omission 中每条 source、locator、quote 已用 add-evidence 登记到对应候选文件，
+三者逐字一致；整段证据不能替代其中一行的登记。不要拼接不相邻的数据行，分别登记原始短证据。
 检查完获准范围内的结果候选后必须执行：
 `python /workspace/work/candidate_manifest_tool.py complete-results`
 验证器指出某条 locator 不精确时，可用
@@ -2390,6 +2499,8 @@ result_count；只有要求返回全部对象时才用 all。若范围或数量�
 表格数据，不要把多个段落拼接成一句，不要在 quote 中概括、编号或改写；需要覆盖
 多个结论时，分别增加多条短证据。
 """
+        if executable_capabilities:
+            system_prompt += "\n本任务已选用本地专业工具；用途符合当前目标时，优先调用已选用工具，避免重复编写处理脚本。\n"
         (config_dir / "mangrove-system.md").write_text(
             system_prompt, encoding="utf-8"
         )

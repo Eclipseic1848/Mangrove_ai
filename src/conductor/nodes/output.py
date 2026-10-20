@@ -95,11 +95,35 @@ async def output_node(state: ConductorState) -> Dict[str, Any]:
     spec = state["task_spec"]
     if state.get("evidence_collection") or state.get("bank_collection"):
         from ..bank_benefits_export import export_snapshot
+        from ..collection_results import collection_report_requested, collection_report_ready
         from src.api.execution import execution_to_thread
-        return await execution_to_thread(export_snapshot, state)
+        snapshot_result = await execution_to_thread(export_snapshot, state)
+        if not collection_report_requested(state):
+            return snapshot_result
+        if not collection_report_ready(state) or not state.get("analysis"):
+            message = "未生成分析报告：完整独立笔记数量或分析结果尚未满足要求；原始资料和已有证据保留。"
+            return {**snapshot_result, "error": message, "reply": snapshot_result["reply"] + "\n" + message}
+        quality = state.get("quality") or {}
+        passed = quality.get("passed") is True and quality.get("review_complete") is True
+        report_state = {**state, "quality": {**quality, "passed": passed}}
+        suffix = Path(snapshot_result["outputs"]["json"]).stem.removeprefix("data")
+        report_path = Path(snapshot_result["outputs"]["json"]).with_name(f"report{suffix}.md")
+        report_text = _assemble_report(spec, report_state)
+        report_path.write_text(report_text, encoding="utf-8")
+        message = (f"已取得 {len(state['cleaned_dataset'])} 篇完整独立笔记并生成分析报告；报告质量核验通过。"
+            if passed else "报告未通过完整质量核验，不能视为任务完成；已有资料和报告保留供核对。")
+        # 只扩展报告产物，不重写原始 JSON，也不据报告生成触发入库或外发。
+        return {**snapshot_result, "outputs": {**snapshot_result["outputs"], "report_md": str(report_path), "report_text": report_text},
+                "reply": message + "\n原始资料与下载保留，报告尚待你核对，尚非正式交付。",
+                "error": None if passed else message, "grade": _assemble_grade(report_state)}
     task_id = state.get("task_id") or beijing_now().strftime("%Y%m%d_%H%M%S")
     out_dir: Path = PROJECT_ROOT / "downloads" / task_id
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if spec.project_collection:
+        from ..project_export import export_projects
+        from src.api.execution import execution_to_thread
+        return await execution_to_thread(export_projects, state, out_dir)
 
     data = state.get("cleaned_dataset", [])
     outputs: Dict[str, Any] = {}
@@ -110,6 +134,13 @@ async def output_node(state: ConductorState) -> Dict[str, Any]:
         json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     outputs["json"] = str(json_path)
+
+    if OutputFormat.XLSX in spec.outputs:
+        from ..project_export import write_workbook
+        from src.api.execution import execution_to_thread
+        xlsx_path = out_dir / "data.xlsx"
+        await execution_to_thread(write_workbook, xlsx_path, [("采集资料", data, {"title": "标题", "url": "链接", "content": "正文"})])
+        outputs["xlsx"] = str(xlsx_path)
 
     evidence_bundles = state.get("evidence_bundles") or []
     if evidence_bundles:

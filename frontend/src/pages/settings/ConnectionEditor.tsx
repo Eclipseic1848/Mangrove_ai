@@ -1,3 +1,4 @@
+import { randomId } from "@/lib/randomId";
 import { useEffect, useId, useState } from "react";
 import { api, ApiError, getSessionState } from "@/lib/api";
 import { Button } from "@/components/ui/button";
@@ -57,7 +58,7 @@ export function ConnectionEditor({ connectionId, onSaved }: { connectionId: stri
       } catch (error) { setMessage(error instanceof Error ? error.message : "无法核对验证记录"); }
       return;
     }
-    const operationId = state === "failed" ? crypto.randomUUID() : operation || crypto.randomUUID();
+    const operationId = state === "failed" ? randomId() : operation || randomId();
     sessionStorage.setItem(pendingKey, operationId);
     setOperation(operationId); setState("testing"); setMessage("正在验证，不会修改当前配置…");
     try {

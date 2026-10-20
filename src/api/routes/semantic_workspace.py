@@ -50,7 +50,7 @@ from src.agentic_runtime.models import (
     RuntimeVersion,
 )
 from src.agentic_runtime.repository import AgenticRuntimeRepository
-from src.api.auth import access_identity, get_current_user, get_store, is_admin_role, platform_session_valid, require_csrf
+from src.api.auth import access_identity, get_current_user, get_store, is_admin_role, platform_session_valid, require_csrf, require_super_admin
 from src.api.catalog_actor import catalog_actor_from_user
 from src.api.semantic_workspace_runtime import (
     get_semantic_workspace_manager,
@@ -87,7 +87,7 @@ from src.conversation_steering import (
     StructuredProgressEvent,
     build_context_rewriter,
 )
-from src.model_connections import GrantError, get_default_broker
+from src.model_connections import ConnectionError as ModelConnectionError, GrantError, get_default_broker
 from src.conversation_steering.models import FrozenResultContext, ResultSelection, RawUserTurn
 from src.conversation_steering.repository import ResultContextConflict
 from src.delivery_publishing.models import TableOutputContract
@@ -218,11 +218,7 @@ def _capability_catalog() -> CapabilityCatalog:
 
 
 def _require_capability_gray(user: dict[str, Any]) -> None:
-    if not is_admin_role(user.get("role")):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="任务级能力灰度只对管理员和超级管理员开放",
-        )
+    require_super_admin(user)
     if not settings.pi_capability_host_enabled:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -313,6 +309,20 @@ def _check_freeze_gate(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="能力当前不可用于新任务选择",
             )
+
+
+def _require_capability_inheritance(user: dict[str, Any], task_id: str, revision: int) -> None:
+    """创建新执行前复核工具权限，拒绝时不能取消原任务或保存新决策。"""
+    if user.get("role") == "super_admin":
+        return
+    from src.api.semantic_workspace_runtime import _capability_selections_table_exists
+
+    if _capability_selections_table_exists():
+        selection = _capability_catalog().resolve_selection(
+            catalog_actor_from_user(user), task_id=task_id, revision=revision,
+        )
+        if selection and selection.pack_refs:
+            require_super_admin(user)
 
 
 def _inherit_capability_selection(
@@ -1610,6 +1620,7 @@ def get_task_capabilities(
     revision: int = Query(default=1, ge=1),
     user=Depends(get_current_user),
 ):
+    require_super_admin(user)
     _task_or_404(user["user_id"], task_id)
     resolver = DefaultCapabilityMounts(
         db_path=settings.webui_db_path,
@@ -2175,9 +2186,20 @@ class DraftChatIn(BaseModel):
     model_connection_id: str | None = Field(default=None, max_length=120)
     external_api_confirmed: bool = False
     conv_id: str | None = Field(default=None, max_length=120)
+    context_purpose: str = Field(default="general", min_length=1, max_length=80)
+    context_selection: TaskContextSelection | None = None
+    context_preview_sha256: str | None = Field(default=None, pattern=r"^sha256:[0-9a-f]{64}$")
+    output_formats: tuple[str, ...] = Field(default=("markdown",), min_length=1, max_length=10)
+
+    @field_validator("output_formats")
+    @classmethod
+    def valid_formats(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return WorkspaceContextPreviewIn.valid_context_formats(value)
 
     @model_validator(mode="after")
     def bounded_context(self):
+        if bool(self.context_selection) != bool(self.context_preview_sha256):
+            raise ValueError("所选记忆与模板必须先检查上下文草案")
         if len(self.text) + len(json.dumps([item.model_dump() for item in self.history], ensure_ascii=False)) > 16000:
             raise ValueError("本次对话过长，请概括需求后清空对话再发送；不会静默丢弃早先要求")
         return self
@@ -2204,12 +2226,20 @@ async def draft_chat(payload: DraftChatIn, request: Request, user=Depends(get_ex
         history = [{"role": m["role"], "content": m["content"]} for m in store.list_messages(payload.conv_id)]
         if len(json.dumps(history, ensure_ascii=False)) > 120000:
             raise HTTPException(422, "当前会话过长，请新建任务并引用需要的报告；不会静默截断历史")
-    from src.memory.loader import conversation_memory_context, load_preferences
     try:
-        memory_context = conversation_memory_context(
-            [item['text'] for item in store.memory_list(user['user_id']) if item['purpose'] == 'general'],
-            load_preferences(strict=True), '\n'.join([item['content'] for item in history[-4:] if item['role'] == 'user'] + [payload.text]),
+        context_preview = _task_context_service().conversation_preview(
+            owner_id=user['user_id'], purpose=payload.context_purpose,
+            objective_text=payload.text, matching_text='\n'.join(
+                [item['content'] for item in history[-4:] if item['role'] == 'user'] + [payload.text]),
+            output_formats=payload.output_formats, selection=payload.context_selection,
         )
+        if payload.context_selection and context_preview.preview_sha256 != payload.context_preview_sha256:
+            raise HTTPException(409, "上下文已变化，请重新检查草案后发送")
+        memory_context = context_preview.compiled_context.content
+    except KeyError:
+        raise HTTPException(404, "所选模板或记忆不存在或无权访问") from None
+    except ValueError as error:
+        raise HTTPException(422, str(error)) from None
     except (OSError, UnicodeError):
         raise HTTPException(503, "记忆暂时无法读取，请稍后重试") from None
     binding = None
@@ -2217,11 +2247,16 @@ async def draft_chat(payload: DraftChatIn, request: Request, user=Depends(get_ex
         if not payload.external_api_confirmed:
             raise HTTPException(422, "请确认将本次对话发送到所选模型")
         try:
-            binding = get_default_broker().freeze_connection(user["user_id"], payload.model_connection_id)
+            binding = get_default_broker().freeze_connection_for_new_task(user["user_id"], payload.model_connection_id, model_id=payload.model)
         except GrantError:
-            raise HTTPException(404, "模型连接不存在或无权访问") from None
+            raise HTTPException(404, "模型连接不存在、已停用或无权访问，请重新选择") from None
+        except ModelConnectionError:
+            raise HTTPException(422, "所选模型已不可用，请重新选择；不会自动替换模型") from None
     elif not is_admin_role(user.get("role")):
         raise HTTPException(403, "请选择自己的连接或管理员发布的连接")
+    else:
+        from .models import require_available_legacy_model
+        require_available_legacy_model("local", payload.model)
 
     # 复用持久发送占位但不创建业务任务；草稿命名空间隔离任务创建键，未知响应不自动重发。
     draft_id = "draft_" + hashlib.sha256(f'{user["user_id"]}:{payload.request_id}'.encode("utf-8")).hexdigest()[:32]
@@ -2272,16 +2307,16 @@ async def draft_chat(payload: DraftChatIn, request: Request, user=Depends(get_ex
             # 分流标记不能盖过问答意图或尚待授予的权限，矛盾草案不得触发采集。
             if getattr(result, "intent", None) != "new_task" or getattr(result, "permission_delta", ()):
                 raise HTTPException(422, "采集提议与追问意图或权限不一致，未启动任务，请明确本次处理范围")
-            from src.api.routes.chat import chat_stream
+            from src.api.routes.chat import _chat_stream
             from src.api.schemas import ChatIn
             # 复用已存在的采集/分析执行入口；传递原话和所选连接，不让模型摘要替代用户授权。
-            return await chat_stream(ChatIn(
+            return await _chat_stream(ChatIn(
                 conv_id=payload.conv_id, content=payload.text, history=[] if payload.conv_id else history,
                 provider="local" if not binding else None, model=payload.model,
                 model_connection_id=payload.model_connection_id,
                 model_connection_version=binding.connection_version if binding else None,
                 external_api_confirmed=payload.external_api_confirmed, mode="legacy_analysis",
-            ), request, user)
+            ), request, user, task_context=context_preview.model_dump(mode="json"))
         if not result.direct_answer or not result.direct_answer.strip() or len(result.direct_answer) > 8000:
             raise ValueError("模型没有返回回复")
         conv_id = payload.conv_id or store.create_conversation(user["user_id"], payload.text[:24])["conv_id"]
@@ -2300,6 +2335,7 @@ async def draft_chat(payload: DraftChatIn, request: Request, user=Depends(get_ex
             "token_usage": token_usage, "model_id": payload.model,
             "model_connection_id": payload.model_connection_id,
             "model": payload.model,
+            "task_context": context_preview.model_dump(mode="json"),
         })
         saved_messages = store.list_messages(conv_id)
         created_at = next(m["created_at"] for m in saved_messages if m["id"] == message_id)
@@ -2355,6 +2391,9 @@ async def create_task(
 
 
 async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *, mark_claim_started):
+    # 必须在路由降级清理参数之前校验，避免显式工具请求被悄悄放行。
+    if payload.capability_pack_refs or payload.capability_need is not None or payload.validation_target is not None:
+        require_super_admin(user)
     user_id = user["user_id"]
     user_objective = payload.objective_text
     idempotency_payload = payload.model_dump(
@@ -2558,9 +2597,10 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
                 detail="任务模型必须与已验证连接冻结的模型一致",
                 )
             try:
-                connection_binding = broker.freeze_connection(
+                connection_binding = broker.freeze_connection_for_new_task(
                     user_id,
                     payload.model_connection_id,
+                    model_id=payload.model_connection_model,
                 )
                 # 比较实际冻结值，避免采集期间换端点后沿用旧外发确认。
                 if payload.model_connection_version and payload.model_connection_version != connection_binding.connection_version:
@@ -2570,6 +2610,8 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="模型连接不存在或无权访问",
                 ) from exc
+            except ModelConnectionError:
+                raise HTTPException(422, "所选模型已不可用，请重新选择；不会自动替换模型") from None
         elif not is_admin_role(user.get("role")):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -2716,18 +2758,19 @@ async def _create_task(payload: WorkspaceTaskCreateIn, idempotency_key, user, *,
                 + "请按文字要求输出，或修改当前要求。"
             ),
         )
-    if payload.runtime_version is RuntimeVersion.PI:
-        from src.task_context import workspace_method_type
-        method_type = workspace_method_type(has_web=bool(source_snapshots), file_suffixes=input_suffixes)
-        try:
-            # 在认领幂等键之前读取，规范不可用不能留下无法重试的创建占位。
-            context_preview = _task_context_service().automatic_preview(
-                owner_id=user_id, purpose=payload.context_purpose,
-                objective_text=payload.objective_text, matching_text=user_objective,
-                output_formats=payload.output_formats, data_type=method_type, confirmed_preview=context_preview,
-            )
-        except (OSError, UnicodeError) as exc:
-            raise HTTPException(status_code=503, detail="记忆暂时无法读取，请稍后重试") from exc
+    from src.task_context import workspace_method_type
+    method_type = workspace_method_type(has_web=bool(source_snapshots), file_suffixes=input_suffixes)
+    try:
+        # 在认领幂等键之前读取，规范不可用不能留下无法重试的创建占位。
+        context_preview = _task_context_service().automatic_preview(
+            owner_id=user_id, purpose=payload.context_purpose,
+            objective_text=payload.objective_text, matching_text=user_objective,
+            output_formats=payload.output_formats, data_type=method_type, confirmed_preview=context_preview,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (OSError, UnicodeError) as exc:
+        raise HTTPException(status_code=503, detail="记忆暂时无法读取，请稍后重试") from exc
     repository = _runtime_repository()
     claimed_key = None
     if idempotency_key is not None:
@@ -3017,8 +3060,10 @@ def list_tasks(
         offset=offset,
         task_filter=task_filter,
     )
+    # 一页共用一次结构核验，避免历史条数成倍放大整库检查；不跨请求缓存。
+    repository = _runtime_repository() if tasks else None
     for task in tasks:
-        runtime = _runtime_repository().get(
+        runtime = repository.get(
             user["user_id"],
             task["task_id"],
             task["active_revision"],
@@ -3431,6 +3476,8 @@ async def _apply_confirmed_steering_revision(
     if int(task["active_revision"]) != decision.base_revision:
         raise HTTPException(status_code=409, detail="活动版本已变化，请重新确认修改")
 
+    _require_capability_inheritance(user, task_id, decision.base_revision)
+
     previous_runtime = _revision_runtime_context(
         user_id,
         task_id,
@@ -3697,6 +3744,7 @@ async def decide_steering_revision(
         raise HTTPException(409, "当前没有继续运行的原子步骤，请选择立即停止并按补充重新开始，或创建独立任务")
     if int(task["active_revision"]) != proposal.base_revision:
         raise HTTPException(status_code=409, detail="活动版本已变化，请重新确认修改")
+    _require_capability_inheritance(user, task_id, proposal.base_revision)
     previous_runtime = _revision_runtime_context(
         user_id,
         task_id,
@@ -3712,6 +3760,20 @@ async def decide_steering_revision(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="新版本或独立任务的数据外发范围必须再次确认",
         )
+    new_task_connection_binding = None
+    if (payload.mode is RevisionSwitchMode.NEW_TASK and previous_runtime
+        and previous_runtime["runtime_version"] is RuntimeVersion.PI and previous_runtime["model_connection_id"]):
+        # 先拒绝退役型号，避免失败请求覆盖原来的等待或修订决定。
+        try:
+            new_task_connection_binding = get_default_broker().freeze_connection_for_new_task(
+                user_id, previous_runtime["model_connection_id"], model_id=previous_runtime["model_connection_model"],
+            )
+        except GrantError:
+            raise HTTPException(404, "模型连接不存在或无权访问") from None
+        except ModelConnectionError:
+            raise HTTPException(422, "原模型已不可用，请选择当前可用模型创建任务") from None
+        if new_task_connection_binding.connection_version != previous_runtime["model_connection_version"]:
+            raise HTTPException(409, "冻结的模型连接版本已变化，请重新确认")
     service = ConversationSteering(_steering_repository(), None)
     try:
         decision = repository.replace_waiting_decision(
@@ -3769,29 +3831,7 @@ async def decide_steering_revision(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="表格输出契约只能由 Pi Runtime 执行",
             )
-        connection_binding = None
-        if (
-            selected_runtime is RuntimeVersion.PI
-            and previous_runtime
-            and previous_runtime["model_connection_id"]
-        ):
-            if not payload.external_api_confirmed:
-                raise HTTPException(
-                    status_code=422,
-                    detail="独立任务的数据外发范围必须单独确认",
-                )
-            try:
-                connection_binding = get_default_broker().freeze_connection(
-                    user_id,
-                    previous_runtime["model_connection_id"],
-                )
-            except GrantError as exc:
-                raise HTTPException(
-                    status_code=404,
-                    detail="模型连接不存在或无权访问",
-                ) from exc
-        if connection_binding and connection_binding.connection_version != previous_runtime["model_connection_version"]:
-            raise HTTPException(409, "冻结的模型连接版本已变化，请重新确认")
+        connection_binding = new_task_connection_binding
         # 新任务的格式、权限与外发确认通过后才冻结 Runtime 分配。
         runtime_config = RuntimeTaskConfig(
             user_id=user_id,
@@ -4272,7 +4312,7 @@ async def create_revision(
     try:
         return await _create_revision(task_id, payload, user, request_receipt={"key_sha256": key_hash, "request_sha256": request_hash}, mark_execution_started=mark_execution_started)
     except HTTPException as exc:
-        if not execution_started and exc.status_code in {404, 409, 422}:
+        if not execution_started and exc.status_code in {403, 404, 409, 422}:
             # 只释放可证明尚无取消、准备或提交副作用的拒绝；未知仍保留占位。
             _runtime_repository().release_idempotency(user_id, "source-revision:" + key_hash, task_id=task_id)
             exc.headers = {**(exc.headers or {}), "X-Mangrove-Revision-Outcome": "rejected"}
@@ -4293,6 +4333,7 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
             status_code=status.HTTP_409_CONFLICT,
             detail="活动版本已变化，请查看最新结果后再决定是否重新执行",
         )
+    _require_capability_inheritance(user, task_id, payload.expected_active_revision)
     current_revision = store.get_semantic_workspace_revision(user_id, task_id, payload.expected_active_revision)
     current_contract = store.get_source_contract(user_id, task_id, payload.expected_active_revision)
     current_refs = current_revision["source_refs"]
@@ -6560,14 +6601,19 @@ def storage_usage(user=Depends(get_current_user)):
             pass
     output_ids: set[str] = set()
     output_bytes = 0
+    delivery_repository = None
     for task in tasks:
         for revision in store.list_semantic_workspace_revisions(
             user_id, task["task_id"]
         ):
             if not revision["run_id"]:
                 continue
+            if delivery_repository is None:
+                from src.delivery_publishing.repository import DeliveryPublishingRepository
+                # 同次占用统计共用一次结构检查；下次请求仍从数据库重新核验。
+                delivery_repository = DeliveryPublishingRepository(store.db_path, semantic_paths=store.semantic_paths)
             delivery = store.latest_semantic_delivery(
-                user_id, revision["run_id"]
+                user_id, revision["run_id"], fallback_repository=delivery_repository
             )
             if not delivery:
                 continue

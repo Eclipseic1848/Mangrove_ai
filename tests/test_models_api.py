@@ -13,6 +13,7 @@ def test_model_list_does_not_advertise_unconfigured_presets(monkeypatch):
 
     instance = object.__new__(provider.MultiModelProvider)
     instance._profiles = {"local": SimpleNamespace(model="local-current"), "qwen": SimpleNamespace(model="configured-cloud")}
+    monkeypatch.setattr(instance, "resolve_model", lambda *args, **kwargs: None)
     monkeypatch.setattr(instance, "available_providers", lambda: ["local", "qwen"])
     monkeypatch.setattr(provider, "LOCAL_MODELS", {"local-extra": "http://example.invalid/v1"})
     assert instance.list_models() == {"local": ["local-current", "local-extra"], "qwen": ["configured-cloud"]}

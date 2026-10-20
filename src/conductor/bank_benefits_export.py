@@ -9,7 +9,8 @@ import zipfile
 import xlsxwriter
 
 from src.data_prep.artifact_store import ArtifactStore
-from .collection_results import collection_outcome, verified_image_bytes
+from .collection_results import candidate_review_details, collection_outcome, partial_evidence_records, verified_image_bytes
+from .progress import source_links
 
 
 def export_snapshot(state):
@@ -31,7 +32,7 @@ def export_snapshot(state):
         for image in note.get("images", []):
             verified_image_bytes(store, task_id, image)
     json_path = store.resolve_path(str(store.write_json(task_id, f"data{suffix}.json", snapshot)))
-    notes, benefits, audit, comments, images = [], [], [], [], []
+    notes, benefits, review_benefits, audit, comments, images = [], [], [], [], [], []
     for note in snapshot["candidates"]:
         meta = note.get("metadata") or {}
         assessment = note.get("assessment") or {}
@@ -48,6 +49,13 @@ def export_snapshot(state):
             audit.append(row)
             if note["status"] == "selected":
                 benefits.append(row)
+        if note["status"] == "review_required":
+            links = source_links([note], "review_required")
+            review_reason = candidate_review_details(note, snapshot.get("scope"))["reason"]
+            review_benefits.extend({**row, "note_id": note_id, "benefit_index": index,
+                "source_status": "review_required", "review_reason": review_reason,
+                "note_url": links[0]["url"] if links else None,
+                "partial_evidence": True} for index, row in enumerate(partial_evidence_records(note), 1))
         parent = {"note_id": note_id, "source_status": note["status"], "exclusion_reason": note.get("reason")}
         comments.extend({**comment, **parent} for comment in meta.get("comments") or [])
         images.extend({**image, **parent} for image in note.get("images") or [])
@@ -65,6 +73,7 @@ def export_snapshot(state):
         for title, rows, defaults in (
             ("笔记清单", notes, ["note_id", "status", "reason", "content"]),
             ("结构化明细" if state.get("evidence_collection") else "权益明细", benefits, ["note_id", "evidence", "missing_reasons"]),
+            ("待核对明细" if state.get("evidence_collection") else "待核对权益", review_benefits, ["note_id", "review_reason", "evidence", "missing_reasons"]),
             ("候选明细审计", audit, ["note_id", "source_status", "exclusion_reason", "evidence"]),
             ("评论", comments, ["note_id", "comment_id", "parent_comment_id", "content"]),
             ("图片识别", images, ["note_id", "image_index", "status", "reason", "text", "elements"]),

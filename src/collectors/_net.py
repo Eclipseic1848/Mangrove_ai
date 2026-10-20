@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import random
 import re
+import ssl
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional, TypeVar
 
@@ -208,13 +209,23 @@ def smart_client(url: str, **kwargs: Any) -> "httpx.AsyncClient":
     import httpx  # 局部导入，避免模块级硬依赖顺序问题
     kwargs.setdefault("follow_redirects", True)
     kwargs.setdefault("timeout", 30.0)
-    if is_overseas(url):
-        proxy = get_http_proxy()
-        if proxy:
-            return httpx.AsyncClient(proxy=proxy, trust_env=False, **kwargs)
-        return httpx.AsyncClient(trust_env=True, **kwargs)  # 读系统代理（VPN）
-    # 国内 / 本地 / 未知：强制直连，绕系统代理劫持
-    return httpx.AsyncClient(trust_env=False, **kwargs)
+    overseas = is_overseas(url)
+    proxy = get_http_proxy() if overseas else None
+    trust_env = overseas and not proxy
+    parsed = urlsplit(url)
+    if (
+        "verify" not in kwargs
+        and ssl.OPENSSL_VERSION_INFO[:2] >= (3, 5)
+        and parsed.scheme == "https"
+        and parsed.hostname in {"api.anysearch.com", "api.tavily.com"}
+    ):
+        # 仅收窄这两个 API 的新 OpenSSL 握手；保留 HTTPX 的 CA 来源和证书校验，失败直接停止。
+        context = httpx.create_ssl_context(verify=True, trust_env=trust_env)
+        context.set_ecdh_curve("X25519")
+        kwargs["verify"] = context
+    if proxy:
+        return httpx.AsyncClient(proxy=proxy, trust_env=trust_env, **kwargs)
+    return httpx.AsyncClient(trust_env=trust_env, **kwargs)
 
 
 async def probe_network() -> Dict[str, bool]:

@@ -25,6 +25,8 @@ def draft_api(tmp_path, monkeypatch):
     monkeypatch.setattr(auth, "_store", None)
     user = {"user_id": "owner-a", "role": "admin", "execution_generation": 0}
     calls = []
+    from src.api.routes import models as model_routes
+    monkeypatch.setattr(model_routes, "require_available_legacy_model", lambda *args: None)
 
     class Rewriter:
         async def rewrite(self, turn, request):
@@ -46,6 +48,33 @@ def draft_api(tmp_path, monkeypatch):
 
 def payload(**changes):
     return {"request_id": "draft-request-0001", "text": "你好", "model": "test-local", **changes}
+
+
+@pytest.mark.parametrize("failure", ["model_disabled", "connection_disabled", "deleted"])
+def test_unavailable_draft_model_is_rejected_before_claim_or_call(draft_api, monkeypatch, failure):
+    client, user, calls = draft_api
+    user["role"] = "user"
+    available = False
+
+    def freeze(owner, connection, *, model_id=None):
+        assert model_id == "chosen-model"
+        if not available:
+            if failure == "model_disabled":
+                raise routes.ModelConnectionError(failure)
+            raise GrantError(failure)
+        return SimpleNamespace(connection_version="version-1")
+
+    monkeypatch.setattr(routes, "get_default_broker", lambda: SimpleNamespace(freeze_connection_for_new_task=freeze))
+    body = payload(model="chosen-model", model_connection_id="chosen-connection", external_api_confirmed=True)
+    denied = client.post("/api/semantic-workspace/draft/turns", json=body)
+    assert denied.status_code == (422 if failure == "model_disabled" else 404)
+    assert calls == []
+    assert auth.get_store().list_conversations("owner-a") == []
+    # 校验失败发生在持久发送占位前；重新启用后相同发送标识可正常使用。
+    available = True
+    allowed = client.post("/api/semantic-workspace/draft/turns", json=body)
+    assert allowed.status_code == 200, allowed.text
+    assert len(calls) == 1
 
 
 def test_history_followup_uses_saved_session_and_exposes_feedback_identity(draft_api):
@@ -74,6 +103,31 @@ def test_history_followup_uses_saved_session_and_exposes_feedback_identity(draft
     assert client.post("/api/chat/stream", json={"conv_id": conv_id, "content": "继续"}).status_code == 404
     assert len(calls) == count
     assert not store.list_conversations("owner-b")
+
+
+def test_retired_import_is_rejected_before_draft_or_chat(draft_api, monkeypatch):
+    from src.api.routes import chat
+    from src.model_connections import ConnectionBroker
+    from src.model_connections.storage import ModelConnectionRepository
+    from src.model_connections.vault import FernetCredentialVault
+
+    client, _, calls = draft_api
+    monkeypatch.setattr(settings, "llm_model_name", "current-local")
+    monkeypatch.setattr(settings, "local_extra_models", "")
+    broker = ConnectionBroker(repository=ModelConnectionRepository(settings.webui_db_path), vault=FernetCredentialVault.generate())
+    connection = broker._repository.create_managed(created_by="owner-a", display_name="旧本地型号",
+        base_url="http://local.example/v1", model="removed-local", api_format="openai_chat_completions",
+        locality="managed_private", ciphertext=None, key_hint="", verified_at="2026-09-01T00:00:00",
+        preset_version="legacy_imported")
+    monkeypatch.setattr(routes, "get_default_broker", lambda: broker)
+    import src.model_connections as connections
+    monkeypatch.setattr(connections, "get_default_broker", lambda: broker)
+    client.app.include_router(chat.router)
+    binding = dict(model="removed-local", model_connection_id=connection["connection_id"], external_api_confirmed=True)
+    assert client.post("/api/semantic-workspace/draft/turns", json=payload(**binding)).status_code == 422
+    assert client.post("/api/chat/stream", json={"content": "你好", **binding}).status_code == 422
+    assert not calls
+    assert not auth.get_store().list_conversations("owner-a")
 
 
 def test_bound_usage_preserves_unknown_instead_of_zero():
@@ -129,7 +183,7 @@ def test_draft_rejects_unconfirmed_external_cross_owner_and_oversized_context(dr
     assert client.post("/api/semantic-workspace/draft/turns", json=external).status_code == 422
 
     class Broker:
-        def freeze_connection(self, owner, connection):
+        def freeze_connection_for_new_task(self, owner, connection, *, model_id=None):
             raise GrantError("private-internal-detail")
 
     monkeypatch.setattr(routes, "get_default_broker", lambda: Broker())
@@ -168,13 +222,15 @@ def test_collection_request_enters_existing_execution_stream(draft_api, monkeypa
                                    selection_delta={"workflow": "collection"}, open_questions=(),
                                    intent="new_task", permission_delta=())
 
-    async def execute(body, request, user):
+    async def execute(body, request, user, *, task_context):
+        assert task_context["owner_id"] == user["user_id"]
+        assert task_context["objective_text"] == body.content
         started.append((body, user))
         return Response('event: node\ndata: {"label":"采集数据"}\n\nevent: done\ndata: {}\n\n',
                         media_type="text/event-stream")
 
     monkeypatch.setattr(routes, "build_context_rewriter", lambda *a, **kw: CollectionIntent())
-    monkeypatch.setattr(chat, "chat_stream", execute)
+    monkeypatch.setattr(chat, "_chat_stream", execute)
     requirement = "在小红书获取中信私银相关信息，并输出分析报告"
     response = client.post("/api/semantic-workspace/draft/turns", json=payload(text=requirement))
     assert response.status_code == 200
@@ -305,6 +361,8 @@ def test_collection_runs_real_graph_with_selected_broker_and_saved_report(draft_
         assert restored[-1]["meta"]["files"] == result["files"]
         assert restored[-1]["meta"]["work_progress"] == progress
         assert restored[-1]["meta"]["token_usage"] == result["token_usage"]
+        assert restored[-1]["meta"]["task_context"]["owner_id"] == user["user_id"]
+        assert restored[-1]["meta"]["task_context"]["objective_text"] == body["text"]
         original_messages = auth.get_store().list_messages
         def legacy_messages(conv_id):
             rows = original_messages(conv_id)
@@ -399,8 +457,9 @@ def test_draft_external_protocol_freezes_and_revokes_connection(draft_api, monke
             observed["closed"] = True
 
     class Broker:
-        def freeze_connection(self, owner, connection):
+        def freeze_connection_for_new_task(self, owner, connection, *, model_id=None):
             assert (owner, connection) == ("owner-a", "selected-connection")
+            assert model_id == "model-b"
             return SimpleNamespace(connection_version="frozen-version")
 
         def issue_grant(self, **kwargs):
@@ -424,5 +483,9 @@ def test_draft_external_protocol_freezes_and_revokes_connection(draft_api, monke
     assert observed["grant"]["connection_version"] == "frozen-version"
     assert observed["grant"]["model_id"] == "model-b"
     assert observed["request"]["model"] == "model-b"
+    assert observed["request"]["response_format"] == {"type": "json_object"}
+    model_context = json.loads(observed["request"]["messages"][1]["content"])
+    assert model_context["current_model"] == {"model": "model-b"}
+    assert "当前使用的模型" in observed["request"]["messages"][0]["content"]
     assert "现在没有运行中的任务" in observed["request"]["messages"][0]["content"]
     assert observed["closed"] and observed["revoked"] == observed["grant"]["grant_id"]

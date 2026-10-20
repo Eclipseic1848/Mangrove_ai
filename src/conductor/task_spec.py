@@ -35,6 +35,7 @@ class OutputFormat(str, Enum):
     """产出形式（可多选）。"""
     REPORT_MD = "report_md"    # Markdown 分析报告
     JSON = "json"              # 结构化 JSON 数据
+    XLSX = "xlsx"              # Excel 工作簿
     DB = "db"                  # 入数据库（敏感动作，走 HITL 确认）
     EMAIL = "email"            # 邮件报告；宿主核对用户原文授权后发送
     SLACK = "slack"            # Slack 报告；宿主核对用户原文授权后发送
@@ -112,7 +113,7 @@ class BankBenefitsScope(CollectionScope):
     include_credit_card: bool = False
     raw_only: bool = False
     require_current_rules: bool = True
-    publication_from: date = Field(default_factory=lambda: beijing_now().date().replace(month=1, day=1))
+    publication_from: Optional[date] = None
     publication_to: date = Field(default_factory=lambda: beijing_now().date())
     frozen_at: datetime = Field(default_factory=beijing_now)
     target_count: int = Field(default=5, ge=1, le=20)
@@ -122,12 +123,42 @@ class BankBenefitsScope(CollectionScope):
 
     @model_validator(mode="after")
     def valid_scope(self):
-        if self.publication_from > self.publication_to:
+        if "publication_to" not in self.model_fields_set:
+            self.publication_to = self.frozen_at.date()
+        if self.publication_from and self.publication_from > self.publication_to:
             raise ValueError("发布时间起点不能晚于终点")
         if len({bank.name for bank in self.banks}) != len(self.banks):
             raise ValueError("银行列表不能重复")
         if any("," in bank.keyword for bank in self.banks):
             raise ValueError("每家银行须冻结单个检索词，不能用逗号隐式扩成多次搜索")
+        return self
+
+
+class ProjectCollectionScope(BaseModel):
+    """按独立项目计数，公告和网页数量不能替代项目数量。"""
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    target_count: int = Field(default=8, ge=1, le=200, strict=True)
+    queries: list[SearchQuery] = Field(default_factory=list, max_length=10)
+    topics: list[str] = Field(default_factory=list, max_length=20)
+    project_kinds: list[str] = Field(default_factory=list, max_length=20)
+    publication_from: Optional[date] = None
+    publication_to: Optional[date] = None
+    frozen_at: datetime = Field(default_factory=beijing_now)
+    candidate_limit: int = Field(default=80, ge=1, le=200, strict=True)
+    allow_shortfall: bool = Field(default=False, strict=True)
+    required_fields: list[str] = Field(default_factory=lambda: ["project_name", "owner", "region",
+        "construction_content", "amount", "amount_unit", "publication_date", "current_stage"], max_length=30)
+
+    @model_validator(mode="after")
+    def valid_scope(self):
+        if self.frozen_at.tzinfo is None:
+            raise ValueError("项目冻结时间必须带时区")
+        if self.publication_from and self.publication_to and self.publication_from > self.publication_to:
+            raise ValueError("发布时间起点不能晚于终点")
+        if self.target_count > self.candidate_limit:
+            raise ValueError("项目目标不能超过候选预算")
+        if any(not value.strip() for value in [*self.topics, *self.project_kinds, *self.required_fields]):
+            raise ValueError("项目主题和字段必须为非空文本")
         return self
 
 
@@ -154,11 +185,15 @@ class TaskSpec(BaseModel):
     xhs_note_type: Optional[Literal["image", "video", "all"]] = None
     bank_benefits: Optional[BankBenefitsScope] = None
     evidence_collection: Optional[EvidenceCollectionScope] = None
+    # 未启用时省略，避免改变旧任务与旧采集进度的冻结摘要。
+    project_collection: Optional[ProjectCollectionScope] = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def single_collection_profile(self):
-        if self.bank_benefits and self.evidence_collection:
+        if sum(scope is not None for scope in (self.bank_benefits, self.evidence_collection, self.project_collection)) > 1:
             raise ValueError("一次任务只能冻结一套领域抽取规则")
+        if self.project_collection:
+            self.max_items = self.project_collection.target_count
         return self
 
     time_range: Optional[str] = Field(
@@ -229,8 +264,6 @@ class TaskSpec(BaseModel):
                 if key in draft and draft[key] is not None and draft[key] != value:
                     raise ValueError("银行范围与顶层采集参数冲突" if scope_key == "bank_benefits" else "采集范围与顶层采集参数冲突")
                 draft[key] = value
-            if scope_key == "bank_benefits":
-                draft.setdefault("include_comments", True)
 
         def _enum(enum_cls, value, default):
             if value is None:
@@ -289,6 +322,8 @@ class TaskSpec(BaseModel):
                            if isinstance(draft.get("bank_benefits"), dict) else draft.get("bank_benefits")),
             evidence_collection=({**draft["evidence_collection"], "frozen_at": beijing_now()}
                                  if isinstance(draft.get("evidence_collection"), dict) else draft.get("evidence_collection")),
+            project_collection=({**draft["project_collection"], "frozen_at": beijing_now()}
+                                if isinstance(draft.get("project_collection"), dict) else draft.get("project_collection")),
             time_range=(draft.get("time_range") or None),
             max_items=max_items,
             time_budget_seconds=draft.get("time_budget_seconds"),

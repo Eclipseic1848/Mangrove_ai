@@ -157,7 +157,7 @@ def _parse_search_markdown(text: str, domain: str = "general") -> List[Collected
     return items
 
 
-async def _call_api(tool_name: str, arguments: Dict[str, Any], timeout: float = 30.0) -> Optional[str]:
+async def _call_api(tool_name: str, arguments: Dict[str, Any], timeout: float = 30.0, *, strict: bool = False) -> Optional[str]:
     """调用 AnySearch JSON-RPC API，返回提取后的 Markdown 文本或 None（失败时）。"""
     payload = _build_payload(tool_name, arguments)
 
@@ -166,15 +166,23 @@ async def _call_api(tool_name: str, arguments: Dict[str, Any], timeout: float = 
             return await client.post(_ANYSEARCH_ENDPOINT, json=payload, headers=_headers())
 
     try:
-        resp = await retry_async(_post)
+        # 项目发现的未知请求不能自动重发；普通调用保留原有重试兼容行为。
+        resp = await _post() if strict else await retry_async(_post)
         resp.raise_for_status()
         data = resp.json()
         # JSON-RPC 错误
         if "error" in data:
+            if strict:
+                raise ValueError("AnySearch 来源返回错误")
             logger.warning("AnySearch %s 返回错误: %s", tool_name, data["error"])
             return None
-        return _extract_mcp_text(data.get("result"))
+        text = _extract_mcp_text(data.get("result"))
+        if strict and not text:
+            raise ValueError("AnySearch 来源响应缺少结果")
+        return text
     except Exception as e:
+        if strict:
+            raise
         logger.warning("AnySearch %s 调用失败: %s", tool_name, e)
         return None
 
@@ -188,6 +196,7 @@ async def search(
     sub_domain: Optional[str] = None,
     sub_domain_params: Optional[Dict[str, str]] = None,
     max_results: int = 10,
+    strict: bool = False,
 ) -> List[CollectedItem]:
     """单次搜索（通用或垂直领域）。
 
@@ -211,11 +220,14 @@ async def search(
     if sub_domain_params:
         arguments["sub_domain_params"] = sub_domain_params
 
-    text = await _call_api("search", arguments)
+    text = await _call_api("search", arguments, **({"strict": True} if strict else {}))
     if not text:
         return []
 
     items = _parse_search_markdown(text, domain=domain or "general")
+    if strict and (any(not item.url.startswith(("https://", "http://")) for item in items)
+            or not items and not re.search(r"(?im)^## Search Results[^\n]*\(0 results\b|^\s*No (?:search )?results(?: found)?\.?\s*$", text)):
+        raise ValueError("AnySearch 来源响应格式未识别")
     logger.info("AnySearch search 返回 %d 条（query=%s, domain=%s）", len(items), query, domain or "general")
     return items
 

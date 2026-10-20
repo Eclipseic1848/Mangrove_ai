@@ -19,6 +19,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -28,7 +29,7 @@ from http.cookies import SimpleCookie
 from filelock import FileLock, Timeout as LockTimeout
 
 from src.config.settings import settings
-from src.conductor.task_spec import AnalysisType, DataType, TaskSpec
+from src.conductor.task_spec import DataType, TaskSpec
 
 from src.conductor.targets import content_id_from_url
 from .base import BaseCollector, CollectedItem, CollectResult
@@ -74,6 +75,41 @@ _PLATFORM_CN = {"dy": "抖音", "xhs": "小红书", "wb": "微博", "bili": "B�
                 "ks": "快手", "zhihu": "知乎", "tieba": "贴吧"}
 
 
+def _safe_mc_failure_hint(output: bytes, exit_code: int) -> dict:
+    """只保留封闭的解析线索，不证明根因或改变既有业务分类。"""
+    text = output.decode("utf-8", "replace")
+    allowed = {"RuntimeError", "ValueError", "TypeError", "KeyError", "OSError", "FileNotFoundError",
+        "PermissionError", "ModuleNotFoundError", "ImportError", "TimeoutError", "ConnectionError",
+        "ConnectError", "ConnectTimeout", "ReadTimeout", "HTTPStatusError", "RemoteProtocolError",
+        "DataFetchError", "RetryError"}
+    exceptions = {match.group(1) for match in re.finditer(r"(?m)^(?:[A-Za-z_]\w*\.)*([A-Za-z_]\w*):", text)
+        if match.group(1) in allowed}
+    statuses = {int(value) for value in re.findall(
+        r"\bHTTP (?:Request|Response):[^\r\n]*[\"']HTTP/\d(?:\.\d)? ([1-5]\d{2})(?: [^\"']*)?[\"'](?:\s|$)", text)}
+    statuses.update(int(value) for value in re.findall(
+        r"(?m)^(?:[A-Za-z_]\w*\.)*HTTPStatusError: (?:Client|Server) error ['\"]([45]\d{2})\b", text))
+    isolated_allowed = {"RuntimeError", "ValueError", "TypeError", "KeyError", "OSError", "FileNotFoundError",
+        "PermissionError", "ModuleNotFoundError", "ImportError", "TimeoutError", "ConnectionError",
+        "PlaywrightError", "PlaywrightTimeoutError", "PlaywrightTargetClosedError", "UnknownError"}
+    isolated_markers = re.findall(r"(?m)^MANGROVE_MC_EXCEPTION_TYPE:([^\r\n]*)\r?$", text)
+    # 重复或非法标记保持未知；只补脱敏线索，不能改变原业务分类或重发资格。
+    isolated_type = isolated_markers[0] if len(isolated_markers) == 1 and isolated_markers[0] in isolated_allowed else None
+    cause_allowed = {"builtin_runtime_error", "builtin_value_error", "builtin_type_error", "builtin_key_error",
+        "builtin_os_error", "builtin_file_not_found", "builtin_permission_error", "builtin_module_not_found",
+        "builtin_import_error", "builtin_timeout_error", "builtin_connection_error", "builtin_attribute_error",
+        "builtin_name_error", "builtin_index_error", "builtin_assertion_error", "json_decode_error", "playwright_error",
+        "playwright_timeout", "playwright_target_closed", "httpx_connect_error", "httpx_connect_timeout",
+        "httpx_read_timeout", "httpx_http_status", "httpx_remote_protocol", "xhs_data_fetch", "xhs_ip_block", "xhs_note_not_found"}
+    cause_markers = re.findall(r"(?m)^MANGROVE_MC_CAUSE_TYPE:([^\r\n]*)\r?$", text)
+    # 因果类型只是脱敏线索，重复或非法值不选择任意一个，更不改变分类和重发资格。
+    cause_type = cause_markers[0] if len(cause_markers) == 1 and cause_markers[0] in cause_allowed else None
+    # 多种线索保留未知；完整原文仅留下字节摘要，不能进入日志、会话或交付。
+    return {"exit_code": exit_code, "exception_type": next(iter(exceptions)) if len(exceptions) == 1 else None,
+        "http_status": next(iter(statuses)) if len(statuses) == 1 else None, "platform_code": None,
+        "stdout_sha256": hashlib.sha256(output).hexdigest(), "isolated_exception_type": isolated_type,
+        "isolated_cause_type": cause_type}
+
+
 def _diagnose_mc_failure(platform: str, output: str) -> dict:
     """把 MediaCrawler 子进程原始报错翻译成用户可操作的一句话，避免把整段 traceback 抛给用户。"""
     cn = _PLATFORM_CN.get(platform, platform)
@@ -103,7 +139,7 @@ def _operation_evidence(spec: TaskSpec, result: CollectResult) -> dict:
         "reason": failure.get("reason", "operation_completed" if result.success else "operation_unconfirmed"),
         "next_action": failure.get("next_action", "none" if result.success else "inspect_collection_service"),
     }}
-    if spec.include_comments or spec.analysis_type == AnalysisType.VOC or spec.data_type == DataType.COMMENT:
+    if spec.include_comments or spec.data_type == DataType.COMMENT:
         coverage = [item.metadata.get("comment_coverage") or {} for item in result.items]
         complete = result.success and bool(coverage) and all(item.get("truncated") is False for item in coverage)
         partial = any(item.get("truncated") is True for item in coverage) or any(
@@ -349,18 +385,27 @@ class SocialMediaCollector(BaseCollector):
         frozen = current_probe_environment()
         mc_dir = Path(frozen["collector_path"] if frozen else settings.mediacrawler_path).expanduser()
         python_exe = frozen["python"] if frozen else settings.mediacrawler_python or sys.executable
+        if platform == "ks":
+            if frozen and "python_overrides" in frozen:
+                overrides = frozen["python_overrides"]
+                override = overrides.get("ks") if isinstance(overrides, dict) else None
+                # 冻结值损坏时不能改用当前配置或默认解释器，避免复用另一环境的身份结论。
+                if not isinstance(override, str) or not override.strip():
+                    return CollectResult(False, self.name, message="冻结的快手解释器配置无效")
+                python_exe = override
+            elif not frozen:
+                python_exe = settings.mediacrawler_python_ks or python_exe
         keywords = ",".join(spec.keywords)
-        # VOC/评论类任务：槽点在评论里，自动请求抓取评论
-        want_comments = (
-            spec.include_comments or spec.analysis_type == AnalysisType.VOC or spec.data_type == DataType.COMMENT
-        )
+        # 分析方式不能改变冻结的采集对象；评论仅按明确类型或随帖附带要求获取。
+        want_comments = spec.include_comments or spec.data_type == DataType.COMMENT
 
         # 以子进程运行 MediaCrawler 搜索，结果存 JSON
         # 帖子数：尊重 max_items，但封顶到 collector_max_items，防止设过大拖垮浏览器采集
         max_notes = max(1, min(spec.max_items, settings.collector_max_items))
 
         async def direct_fallback() -> CollectResult | None:
-            if platform != 'dy' or not direct_urls:
+            # 视频描述备用来源不提供评论，不能替代明确的评论任务。
+            if platform != 'dy' or not direct_urls or spec.data_type == DataType.COMMENT:
                 return None
             fallback_items = await asyncio.to_thread(
                 _collect_douyin_with_ytdlp, direct_urls[:max_notes], cookie
@@ -461,12 +506,13 @@ class SocialMediaCollector(BaseCollector):
 
         if proc.returncode != 0 and not timed_out:
             text = (stdout or b"").decode("utf-8", "ignore")
-            # 翻译成用户可操作的一句话（登录过期/风控/频次…），并记录原始尾部到日志备查
-            logger.warning("MediaCrawler 退出码 %s，平台：%s", proc.returncode, platform)
+            failure = _diagnose_mc_failure(platform, text)
+            failure["diagnostic_hint"] = _safe_mc_failure_hint(stdout or b"", proc.returncode)
+            logger.warning("MediaCrawler 退出码 %s，平台：%s，原因：%s，诊断提示（仅解析线索）：%s",
+                           proc.returncode, platform, failure["reason"], json.dumps(failure["diagnostic_hint"], sort_keys=True))
             fallback = await direct_fallback()
             if fallback:
                 return fallback
-            failure = _diagnose_mc_failure(platform, text)
             return CollectResult(False, self.name, message=failure.pop("message"), coverage={"failure": failure})
 
         if identity_probe:
@@ -505,7 +551,7 @@ class SocialMediaCollector(BaseCollector):
                 return fallback
             return CollectResult(False, self.name, message="MediaCrawler 未产出可解析结果")
 
-        # 区分评论与帖子；VOC 优先用评论（无评论则回退帖子）
+        # 按冻结的采集对象区分评论与帖子，不能以另一类数据回填数量。
         comments = [r for r in records if r.get("comment_id")]
         contents = [r for r in records if not r.get("comment_id")]
         if not direct_urls:
@@ -513,9 +559,10 @@ class SocialMediaCollector(BaseCollector):
             # 搜索来源缺失或串词时失败关闭，不能把别的任务结果交给分析器。
             if not contents or any(str(r.get("source_keyword") or "").strip() not in expected_keywords for r in contents):
                 return CollectResult(False, self.name, message="采集结果的搜索词与本次任务不一致或缺失，已拒绝使用")
-        # 附带评论不改变帖子的结果粒度；原有纯评论任务仍返回评论。
-        use_comments = want_comments and bool(comments) and not spec.include_comments
-        chosen = comments if use_comments else (contents or records)
+        use_comments = spec.data_type == DataType.COMMENT
+        if use_comments and not comments:
+            return CollectResult(False, self.name, message="未取得目标评论，不能用帖子替代")
+        chosen = comments if use_comments else contents
         coverage_path = run_dir / "comment_coverage.json"
         coverage = json.loads(coverage_path.read_text(encoding="utf-8")) if coverage_path.is_file() else {}
 

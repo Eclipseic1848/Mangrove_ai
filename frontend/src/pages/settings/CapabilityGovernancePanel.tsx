@@ -1,3 +1,4 @@
+import { randomId } from "@/lib/randomId";
 import { useEffect, useRef, useState } from "react";
 import { Boxes, ChevronDown, Eye, Loader2, Play, ShieldCheck, X } from "lucide-react";
 import { api, getSessionState } from "@/lib/api";
@@ -391,7 +392,7 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
     closeAuditView();
     setAuditTarget(item);
     setAuditIdentity(identity);
-    setAuditIdempotencyKey(crypto.randomUUID());
+    setAuditIdempotencyKey(randomId());
     setError("");
   }
 
@@ -518,7 +519,7 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
           task_id: taskId,
           revision: Number(revision),
         },
-        { "Idempotency-Key": crypto.randomUUID() },
+        { "Idempotency-Key": randomId() },
       );
       setTarget(null);
       setFocusedRunId(createdRun.run_id);
@@ -636,7 +637,7 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                       onClick={() => {
                         setCandidateTarget(item);
                         setCandidateReason("");
-                        setCandidateIdempotencyKey(crypto.randomUUID());
+                        setCandidateIdempotencyKey(randomId());
                         setError("");
                       }}
                     >
@@ -817,7 +818,7 @@ export function CapabilityGovernancePanel({ ownerOnly = false }: { ownerOnly?: b
                       onClick={() => {
                         setPublishTarget(candidate);
                         setPublishReason("");
-                        setPublishIdempotencyKey(crypto.randomUUID());
+                        setPublishIdempotencyKey(randomId());
                         setError("");
                       }}
                     >

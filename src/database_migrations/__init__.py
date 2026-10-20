@@ -105,7 +105,7 @@ class RestoreVerification:
 
 _PROFILE_HEADS = {
     "webui": "webui_0023",
-    "scheduler": "scheduler_0004",
+    "scheduler": "scheduler_0005",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
 }
@@ -287,6 +287,7 @@ _PROFILE_REQUIRED_COLUMNS = {
     },
     "scheduler": {
         "scheduled_tasks": (
+            "task_context_json",
             "time_zone",
             "model_connection_id",
             "model_connection_version",
@@ -486,6 +487,8 @@ def _check_expressions(sql: str) -> tuple[str, ...]:
     return tuple(sorted(expressions))
 
 
+# 只缓存相同SQL的纯文本解析；版本、对象和PRAGMA仍逐次从数据库核验。
+@lru_cache(maxsize=2048)
 def _strip_sql_comments(sql: str) -> str:
     """只移除引号外注释，避免格式注释改变 Schema 语义摘要。"""
     result: list[str] = []
@@ -528,6 +531,7 @@ def _strip_sql_comments(sql: str) -> str:
     return "".join(result)
 
 
+@lru_cache(maxsize=4096)
 def _normalize_sql_fragment(fragment: str) -> str:
     """规范格式和关键字大小写，同时保留引号内字面量。"""
     fragment = _strip_sql_comments(fragment)

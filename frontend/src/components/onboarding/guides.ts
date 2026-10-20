@@ -1,7 +1,7 @@
 import { isAdminish } from "@/lib/auth";
 
 type GuideStep = { target: string; title: string; content: string; managerOnly?: boolean; superOnly?: boolean };
-type Guide = { title: string; managerOnly?: boolean; steps: GuideStep[] };
+type Guide = { title: string; managerOnly?: boolean; superOnly?: boolean; steps: GuideStep[] };
 const step = (target: string, title: string, content: string): GuideStep => ({ target, title, content });
 const header = "main header h1";
 
@@ -77,7 +77,7 @@ const guides: Record<string, Guide> = {
     step(header, "管理共享服务", "这里的配置可能影响多位用户。先确认服务用途和影响范围，再修改并保存。"),
     step('[data-guide="settings-content"]', "保存、测试与真实执行不同", "敏感值按页面提示维护；连接测试可能访问外部服务。巡检和通知开关可能引发真实操作，请谨慎开启。"),
   ] },
-  "settings.governance": { title: "扩展工具管理", managerOnly: true, steps: [
+  "settings.governance": { title: "扩展工具管理", superOnly: true, steps: [
     step(header, "管理扩展工具的可用范围", "查看工具状态、验证记录及开放范围。工具已安装不代表已经获准给所有人使用。"),
     step('[data-guide="settings-content"]', "先核验证据，再变更状态", "审核和治理操作有独立权限。查看他人业务内容需要说明原因并留痕，不会因为是管理员就自动获得正文访问权。"),
   ] },
@@ -122,6 +122,6 @@ for (const [key, [title, description]] of Object.entries(operations)) {
 
 export function getGuide(key: string, role: string): Guide | null {
   const guide = guides[key];
-  if (!["user", "admin", "super_admin"].includes(role) || !guide || (guide.managerOnly && !isAdminish(role))) return null;
+  if (!["user", "admin", "super_admin"].includes(role) || !guide || (guide.managerOnly && !isAdminish(role)) || (guide.superOnly && role !== "super_admin")) return null;
   return { ...guide, steps: guide.steps.filter(item => (!item.managerOnly || isAdminish(role)) && (!item.superOnly || role === "super_admin")) };
 }

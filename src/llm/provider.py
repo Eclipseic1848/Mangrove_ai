@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from src.timezone import now as beijing_now
 from typing import Any, Dict, List, Optional, Union
+from urllib.parse import urlsplit
 
 import httpx
 from langchain_core.language_models import BaseChatModel
@@ -31,12 +32,18 @@ from langchain_openai import ChatOpenAI
 from src.config import settings
 from src.api.execution import execution_http_checkpoint, execution_http_checkpoint_async
 
+
+class ModelUnavailableError(ValueError):
+    """已纳管的实际模型目标失效，不得回落到其他模型。"""
+
 # 请求级 LLM token 用量累积器：chat.py pipeline 进入时 set 一个 dict，
 # achat/chat 每次调用把 resp.usage_metadata 累加进去；未 set 时零开销跳过。
 _usage_ctx: contextvars.ContextVar[Optional[dict]] = contextvars.ContextVar("llm_usage", default=None)
 _bound_chat: contextvars.ContextVar[Any] = contextvars.ContextVar("bound_model_chat", default=None)
 _bound_chat_identity: contextvars.ContextVar[Any] = contextvars.ContextVar("bound_model_identity", default=None)
 _bound_chat_failure: contextvars.ContextVar[Optional[list[str]]] = contextvars.ContextVar("bound_model_failure", default=None)
+# 官方支持显式关闭思考；仅按已核型号发送，避免破坏自定义兼容服务。
+_DEEPSEEK_THINKING_MODELS = ("deepseek-flash", "deepseek-v4-pro")
 
 
 def verify_bound_model() -> None:
@@ -282,6 +289,10 @@ class MultiModelProvider:
             models: List[str] = []
             for m in [profile.model, *extra]:
                 if m and m not in models:
+                    try:
+                        self.resolve_model(name, model=m)
+                    except ModelUnavailableError:
+                        continue
                     models.append(m)
             out[name] = models
         return out
@@ -374,6 +385,11 @@ class MultiModelProvider:
         if name == "local" and requested in LOCAL_MODELS:
             base_url = LOCAL_MODELS[requested].rstrip("/")
 
+        # 目录、对话、计划任务和缓存客户端共用此入口；按实际目标核对，不能只按同名型号放行。
+        from src.model_connections import get_default_broker
+        if not user_key and not get_default_broker().legacy_model_available(base_url, real_model, api_key or ""):
+            raise ModelUnavailableError("所选模型已停用或删除，请重新选择；不会自动替换模型")
+
         return ResolvedModelConnection(
             provider=name,
             requested_model=requested,
@@ -414,16 +430,27 @@ class MultiModelProvider:
         model: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        thinking: Optional[bool] = None,
     ) -> str:
         """异步对话，返回纯文本内容。"""
         bound = _bound_chat.get()
         if bound is not None:
             # 工作台已冻结连接时，全部编排节点沿用该连接，禁止回退到全局模型。
-            return await bound(_inject_system_context(messages), **({"max_tokens": max_tokens} if max_tokens is not None else {}))
+            options = {"max_tokens": max_tokens} if max_tokens is not None else {}
+            if thinking is not None:
+                options["thinking"] = thinking
+            return await bound(_inject_system_context(messages), **options)
         chat_model = self.get_chat_model(
             provider, model=model, temperature=temperature, max_tokens=max_tokens
         )
-        resp = await chat_model.ainvoke(_to_lc_messages(_inject_system_context(messages)))
+        options = {}
+        if thinking is not None:
+            connection = self.resolve_model(provider, model=model)
+            if (connection.provider == "deepseek" and connection.model in _DEEPSEEK_THINKING_MODELS
+                    and urlsplit(connection.base_url).hostname == "api.deepseek.com"):
+                # 选项只用于本次调用，不修改缓存客户端或其他任务的默认思考行为。
+                options["extra_body"] = {**(connection.extra_body or {}), "thinking": {"type": "enabled" if thinking else "disabled"}}
+        resp = await chat_model.ainvoke(_to_lc_messages(_inject_system_context(messages)), **options)
         _collect_usage(resp)
         return resp.content if hasattr(resp, "content") else str(resp)
 

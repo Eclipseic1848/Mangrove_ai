@@ -1,9 +1,8 @@
 """
 RSSHub 采集器（Tier 5，轻量社媒/内容关键词采集）。
 
-RSSHub（开源 MIT）把大量无官方 RSS 的站点转成标准 RSS。对"微博/什么值得买搜关键词"
-这类需求，它比 mediacrawler 轻得多（无需 Cookie、无浏览器、反爬弱、对站友好），是
-search + mediacrawler 之外的第三条稳路。
+RSSHub 把大量无官方 RSS 的站点转成标准 RSS。浏览器和登录凭据要求因路由而异，
+配置了服务地址不代表所有路由都能采集；需在部署环境逐一验证。
 
 定位：mediacrawler(0) 之后、ecommerce(10) 之前——配了 mediacrawler 时社媒仍优先走它
 （能搜关键词、拿评论、更深），失败/未配时 RSSHub 作为轻量承接。
@@ -11,7 +10,7 @@ search + mediacrawler 之外的第三条稳路。
 仅当配置了 RSSHUB_BASE_URL、且平台命中下方关键词路由表、且是关键词发现型任务时接管。
 只收录**已在 RSSHub 源码核实存在**的关键词路由（微博/B站/百度/什么值得买；诚实匹配，表外不冒充）。
 新增路由：在 RSSHub 源码确认 `lib/routes/<站>/` 下有对应关键词路由文件后，加一行「平台名→模板」即可。
-自托管：docker run -d -p 1200:1200 diygod/rsshub，再在 .env 配 RSSHUB_BASE_URL=http://localhost:1200。
+自托管与路由配置见 docker/rsshub/README.md。
 """
 from __future__ import annotations
 
@@ -36,12 +35,12 @@ logger = logging.getLogger(__name__)
 # 平台名 → RSSHub 关键词路由模板（{kw} 为 URL 编码后的关键词）。
 # 仅收录**已在 RSSHub 源码核实存在**的关键词检索路由；表外平台不接管（诚实匹配）。
 # 核实来源：github.com/DIYgod/RSSHub/lib/routes/{weibo/keyword,bilibili/vsearch,baidu/search,smzdm/keyword}
-# 路由的 RSSHub 实例侧前置条件差异很大（2026-07-03 本地 diygod/rsshub 实测）：
-#   · 百度：✅ 开箱即用（无 cookie、无浏览器）——最省心，且是"全网搜索"覆盖面最广；
+# 路由的 RSSHub 实例侧前置条件差异很大：
+#   · 百度：依赖公开搜索页，返回安全验证页时无法取得 feed；
 #   · 什么值得买：需 RSSHub 侧配 SMZDM_COOKIE（否则 503 ConfigNotFoundError）；
 #   · 微博：需访客/登录 cookie（默认会 "Cooling down"，配 WEIBO cookie 更稳）；
 #   · B站 vsearch：需自带浏览器的镜像 `diygod/rsshub:chromium-bundled`（默认镜像报 browser 缺失）。
-# 采集器对以上失败均正确捕获并自动降级（百度实测端到端跑通 5 条正文）。
+# 采集失败交给后续引擎，不能把兜底结果计为该路由通过。
 _RSSHUB_KEYWORD_ROUTES = {
     # 微博关键词（/weibo/keyword/:keyword）——需 RSSHub 侧微博 cookie
     "微博": "/weibo/keyword/{kw}",
@@ -52,8 +51,7 @@ _RSSHUB_KEYWORD_ROUTES = {
     "哔哩哔哩": "/bilibili/vsearch/{kw}",
     "bilibili": "/bilibili/vsearch/{kw}",
     "bili": "/bilibili/vsearch/{kw}",
-    # 百度全网搜索（/baidu/search/:keyword）——✅ 开箱即用，用户点名"去百度搜X"时拿 RSSHub
-    # 结构化结果，比抓百度 HTML 更干净、覆盖面最广。
+    # 百度关键词搜索，能否返回结果取决于上游页面的可访问性。
     "百度": "/baidu/search/{kw}",
     "baidu": "/baidu/search/{kw}",
     # 什么值得买关键词好价（/smzdm/keyword/:keyword）——需 RSSHub 侧 SMZDM_COOKIE

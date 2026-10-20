@@ -82,8 +82,8 @@ def _plan(web, scheduler, entries):
             raise ValueError("历史计划或账号已缺失")
         paused = unavailable or user["execution_generation"] != 0 or user["disabled"] or user["pending"]
         current = dict(row)
-        # 显式迁移新增的空列不改变旧授权；任何实际连接值仍必须按计划变化拒绝。
-        for key in ("model_connection_id", "model_connection_version"):
+        # 仅兼容迁移新增的 NULL 列，不推断旧时区；任何实际值仍按计划变化拒绝。
+        for key in ("model_connection_id", "model_connection_version", "time_zone", "task_context_json"):
             if key not in old and current.get(key) is None:
                 current.pop(key, None)
         # 仅允许本回填的暂停写在半提交重试中不同；其它字段变化必须拒绝。

@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "name": "csv-group-summary",
+  "version": "1.0.0",
+  "kind": "python",
+  "purpose": "对 CSV 按指定列分组求和。arguments 只传一个 JSON 字符串，内容为 {\"csv\":\"完整 CSV 文本\",\"group_field\":\"分组列名\",\"value_field\":\"数值列名\"}。返回 groups、row_count；groups 的数值为精确十进制字符串。",
+  "entrypoint": {"program": "python", "arguments": ["table_summary.py"], "timeout_seconds": 30},
+  "healthcheck": {"program": "python", "arguments": ["table_summary.py", "--health"], "timeout_seconds": 10},
+  "permissions": ["process:child", "network:none"]
+}

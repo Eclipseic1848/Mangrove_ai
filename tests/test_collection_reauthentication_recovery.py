@@ -1,5 +1,7 @@
 """显式同账号恢复复用原进度；账号或环境不符时原文件不变。"""
 import asyncio
+from contextlib import nullcontext
+from contextvars import ContextVar
 import hashlib
 import json
 
@@ -10,6 +12,7 @@ from src.config.cookie_probe_binding import capture_probe_environment
 from src.collectors.base import CollectedItem, CollectResult
 from src.conductor import evidence_collection as flow
 from src.conductor.collection_recovery import progress_location, recovery_request
+from src.conductor.task_spec import TaskSpec
 from tests.test_evidence_collection_flow import spec_for
 
 
@@ -81,3 +84,106 @@ def test_explicit_identity_recovery_preserves_or_rejects_progress(tmp_path, monk
                 with pytest.raises(ValueError):
                     run()
                 assert calls == ["old-cookie", "new-cookie"]
+
+
+@pytest.mark.parametrize("kind", ["old_bank", "old_bank_v4", "missing_bank", "other_bank", "current_bank",
+    "previous_bank", "previous_bank_connection", "previous_bank_spec", "previous_bank_credential", "generic"])
+@pytest.mark.parametrize("explicit", [False, True])
+def test_changed_bank_rules_reject_old_progress_without_replaying_or_rewriting(monkeypatch, tmp_path, kind, explicit):
+    from src.conductor import bank_benefits
+    monkeypatch.setattr(flow.settings, "webui_db_path", str(tmp_path / "webui.db"))
+    monkeypatch.setattr(flow.settings, "semantic_execution_root", str(tmp_path / "execution"))
+    monkeypatch.setattr(flow.settings, "data_prep_artifact_root", str(tmp_path / "artifacts"))
+    monkeypatch.setattr(flow, "execution_owner", lambda: "owner")
+    bank = kind != "generic"
+    spec = TaskSpec(intent="采集光大银行私人银行权益", bank_benefits={
+        "source_evidence": "小红书", "banks": [{"name": "光大银行", "keyword": "光大银行私人银行权益"}],
+        "audience": "私人银行", "target_count": 2, "frozen_at": "2026-10-13T12:00:00+08:00"}) if bank else spec_for("设备维护", target_count=2)
+    scope = spec.bank_benefits if bank else spec.evidence_collection
+    text = "光大银行今年生日礼体验" if kind == "old_bank" else "光大银行私人银行客户可免费停车" if bank else "设备维护规则"
+    calls = []
+    async def collect(self, request):
+        calls.append("collect")
+        return CollectResult(True, "synthetic", items=[CollectedItem(content=text, metadata={
+            "note_id": "one", "note_type": "normal", "publish_time": "2026-09-01T00:00:00+08:00"})],
+            coverage={"pages": [{"has_more": False}]})
+    async def assess(*args):
+        calls.append("model")
+        return {"relevant": True, "tag_audience_mismatch": False, "benefits": [], "records": []}
+    async def forbidden(*args):
+        raise AssertionError("无图片不能调用OCR")
+    monkeypatch.setattr(flow.SocialMediaCollector, "collect", collect)
+    state = {"task_id": "version", "task_spec": spec, "user_input": spec.intent}
+    def run():
+        return asyncio.run(flow.collect_evidence(state, scope=scope, queries=scope.banks if bank else scope.queries,
+            assess=assess, exclude=bank_benefits._exclusion if bank else flow.exclude_topic,
+            read_images=forbidden, legacy=bank))
+    with user_ctx.user_overrides_context({"mc_cookie_xhs": "same-cookie"}):
+        cookie_identity.record_identity("mc_cookie_xhs", "same-cookie", capture_probe_environment(),
+            {"status": "valid", "account_ref_kind": "account_id", "account_ref": "a" * 64})
+        assert run()["collection_outcome"]["selected_count"] == 1
+        store, key = progress_location("owner", "version")
+        path = store.task_dir(key) / "progress.json"
+        saved = json.loads(path.read_bytes())
+        saved["groups"][0]["done"] = False
+        if kind in {"old_bank", "old_bank_v4"}:
+            # 合成旧版生日礼入选：未证明私人银行客群，禁止沿用旧资格或隐式重新判断。
+            saved["binding_fields"]["processing_version"] = "bank-benefits-collection-v4" if kind == "old_bank_v4" else "evidence-collection-v3"
+            if kind == "old_bank_v4":
+                # 旧版无效过期引用已降未知并丢失否定标记，不能沿用原入选状态。
+                saved["candidates"][0]["assessment"]["tag_stale"] = None
+                saved["candidates"][0]["assessment"].pop("invalid_negative_evidence", None)
+            else:
+                saved["candidates"][0]["assessment"]["tag_audience_mismatch"] = None
+        elif kind == "missing_bank":
+            saved["binding_fields"].pop("processing_version")
+        elif kind == "other_bank":
+            saved["binding_fields"]["processing_version"] = "bank-benefits-collection-v999"
+        elif kind.startswith("previous_bank"):
+            # 旧任务保留冻结的 v5 策略，升级调度不能改写其绑定摘要。
+            saved["binding_fields"]["processing_version"] = "bank-benefits-collection-v5"
+        saved["binding"] = hashlib.sha256(json.dumps(saved["binding_fields"], ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+        store.write_json(key, "progress.json", saved)
+        original = path.read_bytes()
+        raw_path = flow.ArtifactStore().resolve_path(saved["candidates"][0]["source_artifact"]["storage_path"])
+        raw_bytes = raw_path.read_bytes()
+        if kind == "previous_bank_connection":
+            monkeypatch.setattr(flow, "_bound_chat_identity", ContextVar("changed_frozen_connection",
+                default=("owner", "different-connection", 2, "cloud-model", "conversation", "run", 1)))
+        elif kind == "previous_bank_spec":
+            scope = scope.model_copy(update={"target_count": 3})
+            spec = spec.model_copy(update={"bank_benefits": scope})
+            state["task_spec"] = spec
+        current_cookie = "new-cookie" if kind == "previous_bank_credential" else "same-cookie"
+        if kind == "previous_bank_credential":
+            cookie_identity.record_identity("mc_cookie_xhs", current_cookie, capture_probe_environment(),
+                {"status": "valid", "account_ref_kind": "account_id", "account_ref": "a" * 64})
+        calls.clear()
+        with user_ctx.user_overrides_context({"mc_cookie_xhs": current_cookie}), recovery_request(saved["binding"], "b" * 32) if explicit else nullcontext():
+            if kind in {"old_bank", "old_bank_v4", "missing_bank", "other_bank"}:
+                with pytest.raises(ValueError, match="银行权益采集规则已变化"):
+                    run()
+                assert path.read_bytes() == original
+            elif kind in {"previous_bank_connection", "previous_bank_spec"} or (kind == "previous_bank_credential" and not explicit):
+                with pytest.raises(ValueError, match="恢复请求与冻结任务或进度不一致" if explicit else "拒绝复用"):
+                    run()
+                assert path.read_bytes() == original
+            else:
+                expected = "bank-benefits-collection-v5" if kind.startswith("previous_bank") else "bank-benefits-collection-v7" if bank else "evidence-collection-v3"
+                assert saved["binding_fields"]["processing_version"] == expected
+                result = run()
+                assert result["collection_outcome"]["selected_count"] == 1
+                updated = json.loads(path.read_bytes())
+                assert updated["binding_fields"]["processing_version"] == expected
+                if kind == "previous_bank_credential":
+                    assert updated["binding"] != saved["binding"]
+                    attempt, = updated["recovery_attempts"]
+                    assert attempt["from_binding"] == saved["binding"] and attempt["to_binding"] == updated["binding"]
+                    assert updated["binding_fields"]["credential_binding"] != saved["binding_fields"]["credential_binding"]
+                    assert {k: v for k, v in updated["binding_fields"].items() if k != "credential_binding"} == {
+                        k: v for k, v in saved["binding_fields"].items() if k != "credential_binding"}
+                else:
+                    assert updated["binding"] == saved["binding"]
+                    assert updated["binding_fields"] == saved["binding_fields"]
+        assert calls == []
+        assert raw_path.read_bytes() == raw_bytes

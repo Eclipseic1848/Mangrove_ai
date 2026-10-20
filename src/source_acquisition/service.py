@@ -719,6 +719,14 @@ class SourceAcquisitionRepository:
                 "WHERE owner_id=? AND snapshot_id=? ORDER BY failed_at, failure_id",
                 (owner_id, snapshot_id),
             ).fetchall()
+        result = self._snapshot_metadata(row)
+        result["artifacts"] = [dict(item) for item in artifacts]
+        result["failures"] = [dict(item) for item in failures]
+        return result
+
+    @staticmethod
+    def _snapshot_metadata(row: sqlite3.Row) -> dict[str, Any]:
+        """单份读取与批量列表共用覆盖判定，不读取原件或失败正文。"""
         result = dict(row)
         result["allowed_scope"] = json.loads(result.pop("allowed_scope_json"))
         coverage = json.loads(result.pop("coverage_json") or "{}")
@@ -756,8 +764,6 @@ class SourceAcquisitionRepository:
             "status": completeness_status,
             "required_valid_pages": required,
         }
-        result["artifacts"] = [dict(item) for item in artifacts]
-        result["failures"] = [dict(item) for item in failures]
         return result
 
     def get_artifact(

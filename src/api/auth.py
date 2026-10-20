@@ -242,6 +242,13 @@ def require_admin(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str,
     return user
 
 
+def require_super_admin(user: Dict[str, Any] = Depends(get_current_user)) -> Dict[str, Any]:
+    """扩展工具的产品入口仅向超级管理员开放，不改变普通管理权限。"""
+    if user.get("role") != "super_admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="需要超级管理员权限")
+    return user
+
+
 def require_execution_admin(user: Dict[str, Any] = Depends(get_execution_user)) -> Dict[str, Any]:
     return require_admin(user)
 

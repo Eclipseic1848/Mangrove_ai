@@ -75,3 +75,27 @@ def test_model_cannot_accept_source_outside_frozen_domain(monkeypatch):
         "analysis": "新闻总结", "cleaned_dataset": [{"url": "https://outside.example/news", "content": "新闻正文"}]}))
     assert result["quality"]["passed"] is False
     assert "allowed.example" in captured[-1]["content"]
+
+
+@pytest.mark.parametrize("mode", ["report_issue", "unusable", "missing_checks", "evidence_limit",
+                                 "report_limit", "already_rewritten"])
+def test_rewrite_only_when_available_evidence_can_support_report_repair(monkeypatch, mode):
+    async def judge(*args, **kwargs):
+        verdict = {"score": 40, "passed": False, "issues": ["报告字段需修正"], "summary": "未通过"}
+        if mode != "missing_checks":
+            verdict["source_checks"] = [{"source_id": 1, "usable": mode != "unusable", "reason": "已核对原件"}]
+        return json.dumps(verdict, ensure_ascii=False)
+
+    monkeypatch.setattr(checker, "achat", judge)
+    monkeypatch.setattr(settings, "checker_enabled", True)
+    monkeypatch.setattr(settings, "checker_rerun_enabled", True)
+    monkeypatch.setattr(settings, "template_learning_enabled", False)
+    monkeypatch.setattr(settings, "lesson_learning_enabled", False)
+    monkeypatch.setattr(settings, "analyze_max_blob_chars", 20 if mode == "evidence_limit" else 10000)
+    monkeypatch.setattr(settings, "checker_max_report_chars", 3 if mode == "report_limit" else 6000)
+    state = {"task_spec": TaskSpec(intent="整理公告"), "analysis": "有原件支撑，但报告字段需修正。",
+             "cleaned_dataset": [{"url": "https://evidence.example/notice", "content": "完整公告原件。"}],
+             "analyze_reruns": int(mode == "already_rewritten")}
+    result = asyncio.run(checker.checker_node(state))
+    assert result["quality"]["passed"] is False
+    assert bool(result.get("checker_feedback")) is (mode in ("report_issue", "report_limit"))

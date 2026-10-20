@@ -1,3 +1,4 @@
+import { randomId } from "@/lib/randomId";
 import { useEffect, useRef } from "react";
 import { useLocation } from "react-router-dom";
 import { api } from "@/lib/api";
@@ -13,7 +14,7 @@ export function OperationsActivity() {
   useEffect(() => {
     if (!user || !pages.has(pathname) || (!isAdminish(user.role) && ["/operations", "/admin", "/feedback"].includes(pathname))) return;
     const controller = new AbortController();
-    const eventId = crypto.randomUUID();
+    const eventId = randomId();
     let visited = false, inFlight = false;
     const source = previousPath.current ? "internal" : document.referrer ? (new URL(document.referrer).origin === location.origin ? "internal" : "external") : "direct";
     const tick = async () => {

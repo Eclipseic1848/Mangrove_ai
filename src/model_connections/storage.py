@@ -27,7 +27,7 @@ def _public_row(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
 ) -> dict[str, object]:
-    """连接公开摘要；刻意不选择 base_url、secret_id 或 ciphertext。"""
+    """连接公开摘要；不返回端点、secret_id 或密文。"""
 
     models = conn.execute(
         "SELECT model_id, display_name, catalog_role, catalog_version, "
@@ -43,19 +43,34 @@ def _public_row(
         newer_platform_models = {item[0] for item in conn.execute(
             "SELECT m.model_id FROM model_connections c JOIN model_connection_models m "
             "ON m.connection_id=c.connection_id WHERE c.owner_scope='platform_shared' "
-            "AND c.preset_id=? AND c.preset_version=? AND c.status='verified' "
-            "AND m.status='available' AND m.enabled=1",
+            "AND c.preset_id=? AND c.preset_version=? AND m.status IN ('available', 'disabled')",
             (preset.preset_id, preset.version),
         )}
+        # 新目录停用/删除不让旧导入重返新任务；冻结历史连接仍保留原验证状态。
+        prefix = f"current_preset:{preset.preset_id}:{preset.version}:"
+        retired = {item[0] for item in conn.execute(
+            "SELECT source_key FROM model_connection_imports WHERE source_scope='global' AND source_key LIKE ?",
+            (prefix + "%",))}
+        newer_platform_models.update(model for model in preset.models if prefix + model in retired)
     superseded = bool(conn.execute("SELECT 1 FROM model_configuration_versions WHERE previous_id=?", (row["connection_id"],)).fetchone())
     edited = bool(conn.execute("SELECT 1 FROM model_configuration_versions WHERE connection_id=?", (row["connection_id"],)).fetchone())
-    # 用户确认此历史导入型号不存在；仅退出当前目录，保留冻结记录及后来独立配置的同名模型。
+    # 旧导入跟随当前型号及端点退役；同名旧端点只留历史，独立新连接不受影响。
     incorrect_import = (
         row["owner_scope"] == "platform_shared"
         and row["locality"] in {"local", "managed_private"}
         and row["preset_version"] == "legacy_imported"
         and not edited
     )
+    configured_local_models: dict[str, str] = {}
+    imported_base_url = ""
+    if incorrect_import:
+        from src.config.settings import settings
+        from src.llm.provider import _parse_local_models
+        configured_local_models = {name.strip().casefold(): endpoint.rstrip("/")
+            for name, endpoint in _parse_local_models(settings.local_extra_models).items()}
+        if settings.llm_base_url and settings.llm_model_name:
+            configured_local_models.setdefault(settings.llm_model_name.strip().casefold(), settings.llm_base_url.rstrip("/"))
+        imported_base_url = conn.execute("SELECT base_url FROM model_connections WHERE connection_id=?", (row["connection_id"],)).fetchone()[0].rstrip("/")
     public_models = [
         {
             "model_id": item["model_id"],
@@ -70,7 +85,7 @@ def _public_row(
             "usage_status": item["usage_status"],
             # 旧模型保持可追溯和历史装载；新任务列表只采用当前预设型号，不改写验证状态。
             "current_catalog": (edited or preset is None or item["model_id"] in preset.models) and item["model_id"] not in newer_platform_models and not superseded
-                and not (incorrect_import and item["model_id"].strip().lower() == "qwen3.8-27b-fp8"),
+                and not (incorrect_import and configured_local_models.get(item["model_id"].strip().casefold()) != imported_base_url),
         }
         for item in models
     ]
@@ -714,6 +729,13 @@ class ModelConnectionRepository:
                     model_id,
                 ),
             )
+            if not enabled:
+                # 型号停用与授权撤销同事务；重新启用不能复活旧授权。
+                conn.execute(
+                    "UPDATE model_connection_grants SET revoked_at=?, revoke_reason='model_disabled' "
+                    "WHERE connection_id=? AND model=? AND revoked_at IS NULL",
+                    (now, connection_id, model_id),
+                )
             if not enabled and connection["model"] == model_id:
                 conn.execute(
                     "UPDATE model_connections "
@@ -780,6 +802,25 @@ class ModelConnectionRepository:
                 # 平台密钥不属于当前普通用户，连尾号也不应作为可见元数据泄露。
                 item["key_hint"] = ""
         return items
+
+    def legacy_model_targets(self, base_url: str, model: str) -> list[dict]:
+        """旧直连按实际端点与型号定位平台记录，密文仅交给 Broker 比对。"""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT c.*, s.ciphertext, m.status AS model_status, m.enabled "
+                "FROM model_connections c JOIN model_connection_models m ON m.connection_id=c.connection_id "
+                "LEFT JOIN model_connection_secrets s ON s.secret_id=c.secret_id "
+                "WHERE c.owner_scope='platform_shared' AND rtrim(c.base_url, '/')=? AND m.model_id=?",
+                (base_url.rstrip("/"), model),
+            ).fetchall()
+            return [{**dict(row), "current_catalog": next(item["current_catalog"]
+                for item in _public_row(conn, row)["models"] if item["model_id"] == model)} for row in rows]
+
+    def legacy_model_imports(self) -> list[dict]:
+        with self._conn() as conn:
+            return [dict(row) for row in conn.execute(
+                "SELECT source_key, source_fingerprint FROM model_connection_imports WHERE source_scope='global'"
+            )]
 
     def set_usage_preference(
         self,
@@ -1084,12 +1125,15 @@ class ModelConnectionRepository:
         actor_user_id: str,
         *,
         can_manage: bool,
+        expected_version: str | None = None,
+        deleted_fingerprints: tuple[str, ...] | list[str] = (),
     ) -> bool:
         """Owner 可删个人连接；管理权限可删平台连接，其他情况统一失败。"""
 
         with self._lock, self._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT owner_scope, owner_user_id, secret_id "
+                "SELECT owner_scope, owner_user_id, secret_id, preset_id, preset_version "
                 "FROM model_connections WHERE connection_id=?",
                 (connection_id,),
             ).fetchone()
@@ -1103,8 +1147,28 @@ class ModelConnectionRepository:
             )
             if not allowed:
                 return False
+            if expected_version is not None and self.configuration(connection_id, actor_user_id, can_manage)["version"] != expected_version:
+                raise ValueError("模型配置已变化，请刷新后删除")
             if conn.execute("SELECT 1 FROM model_configuration_versions WHERE connection_id=? OR previous_id=?", (connection_id, connection_id)).fetchone():
                 raise ValueError("此连接有历史配置版本，请停用而非删除，以保留任务追溯")
+            # 仅保留不可用的目标哈希，避免旧环境配置在删除后重新绕回；密文仍销毁。
+            if row["owner_scope"] == "platform_shared":
+                conn.executemany(
+                    "INSERT OR IGNORE INTO model_connection_imports "
+                    "(source_scope, source_key, source_fingerprint, connection_id, created_at) "
+                    "VALUES ('global', 'deleted_model_target', ?, ?, ?)",
+                    [(fingerprint, f"deleted_target_{fingerprint}", _now()) for fingerprint in deleted_fingerprints],
+                )
+                preset = PRESETS_BY_ID.get(row["preset_id"])
+                if preset and row["preset_version"] == preset.version:
+                    # 未验证/验证失败的型号没有接替旧目录，删除时也不能退役正常旧型号。
+                    for model in conn.execute("SELECT model_id FROM model_connection_models "
+                        "WHERE connection_id=? AND status IN ('available', 'disabled')", (connection_id,)):
+                        marker = f"current_preset:{preset.preset_id}:{preset.version}:{model[0]}"
+                        digest = hashlib.sha256(marker.encode("utf-8")).hexdigest()
+                        conn.execute("INSERT OR IGNORE INTO model_connection_imports "
+                            "(source_scope, source_key, source_fingerprint, connection_id, created_at) VALUES ('global', ?, ?, ?, ?)",
+                            (marker, digest, f"catalog_{digest}", _now()))
             conn.execute(
                 "UPDATE model_connection_grants "
                 "SET revoked_at=COALESCE(revoked_at, ?), "
@@ -1149,6 +1213,15 @@ class ModelConnectionRepository:
             if authorization.owner_user_id != owner_user_id:
                 raise execution.ExecutionDenied("Grant 发行上下文不属于 Owner")
             execution.require_authorized(conn, authorization)
+            # 在写锁内复查，与停用/撤销串行，不能在停用后插入漏撤销的旧授权。
+            active = conn.execute(
+                "SELECT 1 FROM model_connections c JOIN model_connection_models m ON m.connection_id=c.connection_id "
+                "WHERE c.connection_id=? AND c.status='verified' AND m.model_id=? AND m.status='available' AND m.enabled=1 "
+                "AND c.secret_id IS ? AND c.base_url=? AND c.api_format=? AND c.locality=?",
+                (connection["connection_id"], connection["model"], connection["secret_id"], connection["base_url"], connection["api_format"], connection["locality"]),
+            ).fetchone()
+            if active is None:
+                raise ValueError("模型连接或型号已变化")
             conn.execute(
                 """
                 INSERT INTO model_connection_grants (
@@ -1187,7 +1260,8 @@ class ModelConnectionRepository:
                 SELECT
                     g.*, c.status AS connection_status,
                     c.secret_id AS current_secret_id,
-                    s.ciphertext, COALESCE(v.thinking, 'default') AS thinking
+                    s.ciphertext, COALESCE(v.thinking, 'default') AS thinking,
+                    m.status AS model_status, m.enabled AS model_enabled
                 FROM model_connection_grants AS g
                 JOIN model_connections AS c
                     ON c.connection_id=g.connection_id
@@ -1197,6 +1271,8 @@ class ModelConnectionRepository:
                     ON s.secret_id=g.secret_id
                 LEFT JOIN model_configuration_versions AS v
                     ON v.connection_id=g.connection_id
+                LEFT JOIN model_connection_models AS m
+                    ON m.connection_id=g.connection_id AND m.model_id=g.model
                 WHERE g.token_hash=?
                 """,
                 (token_hash,),

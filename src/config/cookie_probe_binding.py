@@ -19,7 +19,7 @@ def capture_probe_environment():
     excluded = {key.upper() for key in RUNTIME_CONFIG_SECRET_KEYS if "cookie" in key} | {"COOKIES"}
     environment = {key: value for key, value in os.environ.items() if key.upper() not in excluded}
     environment.update(_proxy_env())
-    return {
+    result = {
         "node": platform.node(), "platform": platform.platform(),
         "python": settings.mediacrawler_python or sys.executable,
         "collector_path": str(Path(settings.mediacrawler_path).expanduser().resolve()) if settings.mediacrawler_path else "",
@@ -28,6 +28,9 @@ def capture_probe_environment():
         "sleep_min": settings.mc_crawl_min_sleep_sec,
         "sleep_max": settings.mc_crawl_max_sleep_sec,
     }
+    if settings.mediacrawler_python_ks:
+        result["python_overrides"] = {"ks": settings.mediacrawler_python_ks}
+    return result
 
 
 @contextmanager

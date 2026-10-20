@@ -63,8 +63,13 @@ _FILE_MAP = {
     "evidence_zip": ("evidence.zip", "application/zip"),
     "report_md": ("report.md", "text/markdown"),
     "json": ("data.json", "application/json"),
+    "sources_file": ("sources.json", "application/json"),
     "trace_file": ("trace.json", "application/json"),
 }
+_PERSISTED_RESULT_FIELDS = (
+    "files", "grade", "collector", "item_count", "data_type", "template_status", "kind", "token_usage",
+    "record_counts", "quality", "notification", "notification_user_text", "scheduled_task_id", "next_run_at", "collection_outcome",
+)
 
 
 def _resolve_model(provider: Optional[str], model: Optional[str]) -> tuple[Optional[str], Optional[str]]:
@@ -110,6 +115,7 @@ def _build_result(
             "model_connection_id": model_connection_id,
             "model_connection_version": model_connection_version,
             "intent": getattr(spec, "intent", "") if spec else "",
+            "task_context_preview": state.get("task_context_preview"),
         }})
         from .tasks import create_task
         from ..schemas import ScheduleIn
@@ -152,6 +158,17 @@ def _build_result(
 
     outcome = state.get("collection_outcome") or {}
     result_kind = "output" if not outcome or outcome.get("ready_for_review") else "notice" if outcome.get("status") == "empty" else "error"
+    from src.conductor.collection_results import collection_report_requested, collection_report_ready
+    report_requested = collection_report_requested(state)
+    project_requested = bool(state.get("project_result"))
+    if report_requested:
+        # 有采集快照不等于报告完成；必须使用同一任务的完整数量与最终核验结果。
+        result_kind = "output" if (collection_report_ready(state) and (state.get("quality") or {}).get("passed") is True
+            and (state.get("quality") or {}).get("review_complete") is True and analysis and outputs.get("report_md")) else "error"
+    if project_requested:
+        quality = state.get("quality") or {}
+        result_kind = "output" if (state["project_result"].get("projects") and quality.get("passed") is True
+            and quality.get("review_complete") is True and outputs.get("report_md")) else "error"
     return {
         "conv_id": conv_id, "task_id": task_id, "kind": result_kind,
         "collection_outcome": outcome or None,
@@ -162,6 +179,7 @@ def _build_result(
         "data_type": (spec.data_type.value if spec else None),
         "collector": state.get("collector_used") or state.get("collector"),
         "item_count": len(state.get("cleaned_dataset", []) or []),
+        **({"quality": state.get("quality")} if report_requested or project_requested else {}),
     }
 
 
@@ -345,23 +363,27 @@ async def resume_collection(task_id: str, body: CollectionResumeIn, request: Req
     return await _chat_stream(original, request, user, recovery)
 
 
-async def _chat_stream(body, request, user, recovery=None):
+async def _chat_stream(body, request, user, recovery=None, *, task_context=None):
     store = get_store()
     user_id = user["user_id"]
     binding = None
     if body.model_connection_id:
-        from src.model_connections import get_default_broker, GrantError
+        from src.model_connections import get_default_broker, GrantError, ConnectionError as ModelConnectionError
         if not body.external_api_confirmed:
             raise HTTPException(422, "请确认使用所选模型处理本次任务")
         if not body.model:
             raise HTTPException(422, "请选择本次任务使用的模型")
         try:
             broker = get_default_broker()
-            binding = broker.freeze_connection(user_id, body.model_connection_id)
+            # 恢复沿用历史冻结身份，新发送必须重新通过当前目录校验。
+            binding = (broker.freeze_connection(user_id, body.model_connection_id) if recovery else
+                broker.freeze_connection_for_new_task(user_id, body.model_connection_id, model_id=body.model))
             if body.model_connection_version and body.model_connection_version != binding.connection_version:
                 raise HTTPException(409, "模型连接已变化，请重新选择后发送")
         except GrantError:
             raise HTTPException(404, "模型连接不存在或无权访问") from None
+        except ModelConnectionError:
+            raise HTTPException(422, "所选模型已不可用，请重新选择；不会自动替换模型") from None
 
     # 解析/新建会话（校验归属）
     conv_id = body.conv_id
@@ -424,11 +446,13 @@ async def _chat_stream(body, request, user, recovery=None):
                 stream = astream_data_prep(
                     user_input=body.content, messages=hist,
                     provider=provider, model=model, session_id=conv_id,
+                    **({"task_context_preview": task_context} if task_context else {}),
                 )
             else:
                 stream = astream_conductor(
                     user_input=notification_text, messages=hist,
                     provider=provider, model=model, session_id=conv_id, task_id=collection_task_id,
+                    **({"task_context_preview": task_context} if task_context else {}),
                 )
             async for kind, payload in stream:
                 if kind == "progress":
@@ -458,9 +482,10 @@ async def _chat_stream(body, request, user, recovery=None):
                 result = _build_result(user_id, conv_id, state, reply, provider, model, notification_text,
                                        model_connection_id=body.model_connection_id,
                                        model_connection_version=binding.connection_version if binding else None)
-                from src.conductor.collection_results import collection_outcome
+                from src.conductor.collection_results import collection_outcome, collection_report_requested
                 snapshot = state.get("evidence_collection") or state.get("bank_collection")
-                if snapshot and state.get("outputs") and collection_outcome(snapshot)["ready_for_review"]:
+                if (snapshot and state.get("outputs") and collection_outcome(snapshot)["ready_for_review"]
+                        and not collection_report_requested(state)):
                     try:
                         review = await _create_bank_review(state, body, user, provider, model, request,
                                                           connection_version=binding.connection_version if binding else None)
@@ -484,13 +509,15 @@ async def _chat_stream(body, request, user, recovery=None):
             # 不持久化一次性 HITL 动作(actions/schedule)，它们依赖服务端暂存，重载后不可再确认。
             persist_meta = {
                 k: result.get(k)
-                for k in ("files", "grade", "collector", "item_count", "data_type", "template_status", "kind", "token_usage", "record_counts", "quality", "notification", "notification_user_text", "scheduled_task_id", "next_run_at", "collection_outcome")
+                for k in _PERSISTED_RESULT_FIELDS
                 if result.get(k) not in (None, [], "")
             }
             persist_meta["work_progress"] = progress
             persist_meta["chat_run_id"] = run_id
             persist_meta["model_connection_id"] = body.model_connection_id
             persist_meta["model_id"] = model
+            if state.get("task_context_preview"):
+                persist_meta["task_context"] = state["task_context_preview"]
             # 记录本轮实际用的模型（供反馈管理页展示"用了什么模型"）
             if provider or model:
                 persist_meta["model"] = f"{provider}/{model}" if (provider and model) else (model or provider)

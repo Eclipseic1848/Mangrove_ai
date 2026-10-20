@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useAuth, isAdminish } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
+import { ModelPicker } from "@/components/ModelPicker";
 import { taskModelChoices, type TaskModelConnection } from "@/lib/taskModelChoices";
 
 export function TaskModelSettings({ refreshToken = 0, onSaved }: { refreshToken?: number; onSaved?: () => void } = {}) {
@@ -64,15 +65,9 @@ export function TaskModelSettings({ refreshToken = 0, onSaved }: { refreshToken?
     <p className="mt-2 text-sm text-muted-foreground">用于新建任务；当前任务与历史任务保持原模型。任务中仍可临时切换。</p>
     <label htmlFor="task-default-model" className="mb-2 mt-4 block text-sm">默认任务模型</label>
     <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-      <select id="task-default-model" value={value} disabled={loading || saving} aria-describedby="task-model-help" aria-invalid={unavailable}
-        onChange={event => { edited.current = true; setValue(event.target.value); setMessage(""); }}
-        className="h-10 min-w-0 rounded-md border bg-background px-3 text-sm focus-visible:ring-2 focus-visible:ring-ring sm:flex-1">
-        <option value="">自动选择可用模型</option>
-        {unavailable && <option value={value} disabled>原默认模型已不可用，请重新选择</option>}
-        {Array.from(new Set(choices.map(item => item.group))).map(group => <optgroup key={group} label={group}>
-          {choices.filter(item => item.group === group).map(item => <option key={key(item.connectionId, item.model)} value={key(item.connectionId, item.model)}>{item.label}</option>)}
-        </optgroup>)}
-      </select>
+      <ModelPicker id="task-default-model" choices={choices} value={value} disabled={loading || saving} aria-describedby="task-model-help" aria-invalid={unavailable}
+        onValueChange={next => { edited.current = true; setValue(next); setMessage(""); }}
+        className="sm:flex-1" emptyLabel="自动选择可用模型" allowEmpty unavailableLabel="原默认模型已不可用，请重新选择" />
       <Button disabled={loading || saving || Boolean(error) || unavailable || value === saved} onClick={() => void save()}>{saving ? "正在保存…" : "保存默认模型"}</Button>
       {value !== saved && <Button variant="outline" disabled={saving} onClick={() => { edited.current = false; setValue(saved); setMessage(""); }}>取消修改</Button>}
     </div>

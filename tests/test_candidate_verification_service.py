@@ -331,6 +331,62 @@ def test_verifier_exception_closes_attempt_as_inconclusive(
     assert repository.get("owner-a", replayed.attempt_id) == replayed
 
 
+def test_initial_verification_holds_recovery_lease_until_completion(tmp_path: Path) -> None:
+    from filelock import FileLock, Timeout
+
+    service, repository, request, candidate, manifest, _ = _prepared_service(tmp_path)
+    database = tmp_path / "workspace.db"
+    run_id = "pi_run_0123456789abcdef"
+    checked = []
+
+    class SlowVerifier(_PassingVerifier):
+        async def verify(self, **kwargs):
+            running = service.list_running_reverifications()
+            assert len(running) == 1 and running[0].status is AttemptStatus.RUNNING
+            lease = FileLock(str(database.with_name(
+                f"{database.name}.candidate-reverification-{running[0].attempt_id}.lock")))
+            # 后台恢复使用同一路径；即使异步核验让出执行权，也不能取得活跃租约。
+            await asyncio.sleep(0)
+            with pytest.raises(Timeout):
+                lease.acquire(timeout=0)
+            checked.append(running[0].attempt_id)
+            return await super().verify(**kwargs)
+
+    finished = asyncio.run(service.verify_initial_current(
+        request=request, run_id=run_id, candidates=(candidate,), manifest_path=manifest,
+        verifier=SlowVerifier(), actor_id=request.user_id))
+    assert finished.status is AttemptStatus.PASSED
+    assert checked == [finished.attempt_id]
+    assert repository.get(request.user_id, finished.attempt_id) == finished
+    with FileLock(str(database.with_name(
+        f"{database.name}.candidate-reverification-{finished.attempt_id}.lock")), timeout=0):
+        assert service.list_running_reverifications() == ()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_initial_manifest_repair_creates_new_attempt_without_repeating_same_request(tmp_path: Path, legacy: bool) -> None:
+    service, repository, request, candidate, manifest, _ = _prepared_service(tmp_path)
+    verifier = _CountingPassingVerifier()
+    arguments = dict(request=request, run_id="pi_run_0123456789abcdef", candidates=(candidate,),
+                     manifest_path=manifest, verifier=verifier, actor_id="owner-a")
+    if legacy:
+        from src.candidate_verification.service import _candidate_set_hash, _request_contract_hashes
+        goal_hash, delivery_hash = _request_contract_hashes(request)
+        first = asyncio.run(service.verify_initial(**arguments, idempotency_key=f"initial:{arguments['run_id']}:{_candidate_set_hash((candidate,))}",
+            goal_contract_hash=goal_hash, delivery_spec_hash=delivery_hash))
+    else:
+        first = asyncio.run(service.verify_initial_current(**arguments))
+    assert asyncio.run(service.verify_initial_current(**arguments)) == first
+    manifest.write_text('{"artifacts":[],"evidence_repaired":true}', encoding="utf-8")
+    repaired = asyncio.run(service.verify_initial_current(**arguments))
+    repeated = asyncio.run(service.verify_initial_current(**arguments))
+    assert repaired.attempt_id != first.attempt_id
+    assert repaired.manifest_hash != first.manifest_hash
+    assert repeated == repaired
+    assert verifier.calls == 2
+    assert repository.get("owner-a", first.attempt_id) == first
+
+
 def test_cancellation_closes_attempt_without_fabricating_report(
     tmp_path: Path,
 ) -> None:

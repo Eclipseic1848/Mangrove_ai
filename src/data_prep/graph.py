@@ -52,6 +52,7 @@ from src.quality.validators import QualityAccumulator, validate as quality_valid
 
 # 复用现有意图理解（plan 10.2：不重写，适配输出新契约）
 from src.conductor.nodes.intent import intent_node
+from src.conductor.state import frozen_task_context
 
 from .output import export_dataset
 
@@ -67,6 +68,8 @@ class DataPrepState(TypedDict, total=False):
     provider: Optional[str]
     model: Optional[str]
     session_id: str
+    task_context_preview: Optional[Dict[str, Any]]  # 与 Conductor 共享冻结结构，不修改已确认清洗配方
+    task_context_purpose: str
 
     # ---- 意图 / 规划 ----
     understanding: Optional[Dict[str, Any]]       # intent_node 产出的松散理解
@@ -675,13 +678,28 @@ async def run_data_prep(
     spec: DataPrepTaskSpec,
     task_id: str,
     checkpoint: Optional[Checkpoint] = None,
+    *, task_context_preview: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """运行数据准备图。spec 预构建（CLI 或上层构造），task_id 隔离工作目录。
 
     有 spec -> 跳过 intent/prep_planner 直接 acquire（_route_after_start）。
     """
     spec.task_id = task_id
-    init: DataPrepState = {"task_id": task_id, "spec": spec}
+    init: DataPrepState = {"task_id": task_id, "spec": spec, "task_context_purpose": "data_processing"}
+    from src.memory._library_scope import execution_owner
+    from src.task_context import TaskContextRepository, TaskContextService
+    if task_context_preview is not None:
+        init["task_context_preview"] = task_context_preview
+        preview = frozen_task_context(init)
+    elif (owner := execution_owner()) is not None:
+        preview = TaskContextService(TaskContextRepository(settings.webui_db_path)).conversation_preview(
+            owner_id=owner, objective_text=spec.intent, purpose="data_processing",
+            output_formats=tuple(item.value for item in spec.outputs),
+        )
+    else:
+        preview = None
+    if preview is not None:
+        init["task_context_preview"] = preview.model_dump(mode="json")
     if checkpoint is not None:
         init["checkpoint"] = checkpoint
     return dict(await get_graph().ainvoke(init))
@@ -794,6 +812,7 @@ async def astream_data_prep(
     model: Optional[str] = None,
     session_id: str = "default",
     task_id: Optional[str] = None,
+    task_context_preview: Optional[Dict[str, Any]] = None,
 ) -> AsyncIterator[Tuple[str, Any]]:
     """流式运行数据准备图（chat API 用）。
 
@@ -808,6 +827,8 @@ async def astream_data_prep(
         "provider": provider,
         "model": model,
         "session_id": session_id,
+        "task_context_purpose": "web_research",
+        **({"task_context_preview": task_context_preview} if task_context_preview is not None else {}),
     }
     stream = get_graph().astream(init, stream_mode=["updates", "values"])
     final_state: Dict[str, Any] = {}

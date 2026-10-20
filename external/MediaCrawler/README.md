@@ -13,6 +13,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
   -File scripts/setup_external_dependencies.ps1 -Component MediaCrawler
 ```
 
+准备脚本会校验固定基线与受管 Cookie 同步补丁；只接受摘要匹配的原件或完整已应用状态，未知改动会停止。同步范围为小红书当前隔离子进程内的浏览器 Cookie、HTTP 请求及签名输入；不会自动覆盖平台保存的共享 Cookie，也不会跨任务持久化会话。
+
 随后按上游文档安装独立依赖：
 
 ```powershell

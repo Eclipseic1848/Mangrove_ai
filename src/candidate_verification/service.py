@@ -321,6 +321,12 @@ class CandidateVerificationService:
     ) -> VerificationAttempt:
         goal_hash, delivery_hash = _request_contract_hashes(request)
         candidate_hash = _candidate_set_hash(candidates)
+        manifest_hash = _sha256_bytes(manifest_path.read_bytes())
+        legacy_key = f"initial:{run_id}:{candidate_hash}"
+        legacy = self._repository.get_by_idempotency(request.user_id, legacy_key)
+        # 只修证据清单时产物 hash 不变，但已是新的验证输入；旧记录保持不可变。
+        # 未改清单的旧请求仍命中原幂等键，不能因升级重复执行未知模型调用。
+        idempotency_key = legacy_key if legacy and legacy.manifest_hash == manifest_hash else f"{legacy_key}:{manifest_hash}"
         return await self.verify_initial(
             request=request,
             run_id=run_id,
@@ -328,7 +334,7 @@ class CandidateVerificationService:
             manifest_path=manifest_path,
             verifier=verifier,
             actor_id=actor_id,
-            idempotency_key=f"initial:{run_id}:{candidate_hash}",
+            idempotency_key=idempotency_key,
             goal_contract_hash=goal_hash,
             delivery_spec_hash=delivery_hash,
         )
@@ -1708,51 +1714,52 @@ class CandidateVerificationService:
             f"{request.user_id}\x1f{idempotency_key}".encode("utf-8")
         )[:32]
         created_at = self._clock()
-        running = self._repository.create_and_start_if_p0_allowed(
-            VerificationAttempt(
-                attempt_id=attempt_id,
-                owner_id=request.user_id,
-                task_id=request.task_id,
-                revision=request.revision,
-                run_id=run_id,
-                previous_attempt_id=previous_attempt_id,
-                reason_code=reason,
-                candidate_set_hash=candidate_hash,
-                manifest_hash=manifest_hash,
-                goal_contract_hash=goal_contract_hash,
-                delivery_spec_hash=delivery_spec_hash,
-                verifier_ruleset_hash=ruleset.verifier_ruleset_hash,
-                verifier_code_commit=ruleset.verifier_code_commit,
-                verifier_source_hash=ruleset.verifier_source_hash,
-                verifier_execution_identity_hash=(
-                    ruleset.verifier_execution_identity_hash
+        with self._repository.execution_lease(attempt_id):
+            running = self._repository.create_and_start_if_p0_allowed(
+                VerificationAttempt(
+                    attempt_id=attempt_id,
+                    owner_id=request.user_id,
+                    task_id=request.task_id,
+                    revision=request.revision,
+                    run_id=run_id,
+                    previous_attempt_id=previous_attempt_id,
+                    reason_code=reason,
+                    candidate_set_hash=candidate_hash,
+                    manifest_hash=manifest_hash,
+                    goal_contract_hash=goal_contract_hash,
+                    delivery_spec_hash=delivery_spec_hash,
+                    verifier_ruleset_hash=ruleset.verifier_ruleset_hash,
+                    verifier_code_commit=ruleset.verifier_code_commit,
+                    verifier_source_hash=ruleset.verifier_source_hash,
+                    verifier_execution_identity_hash=(
+                        ruleset.verifier_execution_identity_hash
+                    ),
+                    verifier_ruleset_manifest_json=(
+                        ruleset.verifier_ruleset_manifest_json
+                    ),
+                    actor_id=actor_id,
+                    connection_id=request.model_connection_id,
+                    connection_version=request.model_connection_version,
+                    model_id=request.model_connection_model or request.model,
+                    egress_confirmed_at=(
+                        created_at if request.external_api_confirmed else None
+                    ),
+                    idempotency_key=idempotency_key,
+                    request_hash=request_hash,
+                    status=AttemptStatus.REQUESTED,
+                    created_at=created_at,
                 ),
-                verifier_ruleset_manifest_json=(
-                    ruleset.verifier_ruleset_manifest_json
-                ),
-                actor_id=actor_id,
-                connection_id=request.model_connection_id,
-                connection_version=request.model_connection_version,
-                model_id=request.model_connection_model or request.model,
-                egress_confirmed_at=(
-                    created_at if request.external_api_confirmed else None
-                ),
-                idempotency_key=idempotency_key,
-                request_hash=request_hash,
-                status=AttemptStatus.REQUESTED,
-                created_at=created_at,
-            ),
-            started_at=self._clock(),
-        )
-        if running.status is not AttemptStatus.RUNNING:
-            return running
-        return await self._complete_running(
-            running=running,
-            request=request,
-            candidates=candidates,
-            candidate_hash=candidate_hash,
-            operation=operation,
-        )
+                started_at=self._clock(),
+            )
+            if running.status is not AttemptStatus.RUNNING:
+                return running
+            return await self._complete_running(
+                running=running,
+                request=request,
+                candidates=candidates,
+                candidate_hash=candidate_hash,
+                operation=operation,
+            )
 
     async def _complete_running(
         self,

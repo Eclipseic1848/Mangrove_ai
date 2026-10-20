@@ -205,3 +205,12 @@ def test_result_item_cannot_reference_unverified_artifact_evidence(
 
     with pytest.raises(ValueError, match="未经过候选文件验证"):
         load_result_items(output / "candidate-manifest.json")
+
+    before = (output / "candidate-manifest.json").read_bytes()
+    with pytest.raises(ManifestToolError, match="add-evidence"):
+        mark_result_search_complete(output_dir=output)
+    assert (output / "candidate-manifest.json").read_bytes() == before
+    add_evidence(output_dir=output, filename="companies.json", source="directory.html",
+                 locator="company:乙公司", quote="乙公司")
+    mark_result_search_complete(output_dir=output)
+    assert load_result_items(output / "candidate-manifest.json")[0].result_id == "company-2"

@@ -8,6 +8,7 @@ import { useTheme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 import { OperationsActivity } from "@/components/OperationsActivity";
 import { Button } from "@/components/ui/button";
+import { preloadRoute } from "@/lib/routeLoaders";
 
 class PageErrorBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
   state = { failed: false };
@@ -79,7 +80,7 @@ function SidebarAccount({ collapsed }: { collapsed: boolean }) {
         <p className="break-words text-sm font-medium">{user?.display_name}</p>
         <p className="break-all text-xs text-muted-foreground">@{user?.username} · {roleLabel(user?.role)}</p>
       </div>
-      <Link to="/settings?section=personal" className="my-1 flex min-h-10 items-center gap-2 rounded-lg px-2 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><Settings aria-hidden="true" className="h-4 w-4" />账号设置</Link>
+      <Link to="/settings?section=personal" onPointerEnter={() => preloadRoute('/settings')} onFocus={() => preloadRoute('/settings')} onPointerDown={() => preloadRoute('/settings')} className="my-1 flex min-h-10 items-center gap-2 rounded-lg px-2 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><Settings aria-hidden="true" className="h-4 w-4" />账号设置</Link>
       <div className="border-t pt-1">
         <button type="button" title="退出登录" disabled={loggingOut} aria-busy={loggingOut}
           className="flex min-h-10 w-full cursor-pointer items-center gap-2 rounded-lg px-2 text-sm hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-wait disabled:opacity-60"
@@ -172,6 +173,7 @@ export function Layout() {
               {group.items.map(item => <Tooltip.Root key={item.to}>
                 <Tooltip.Trigger asChild>
                   <NavLink to={item.to} end={item.end} title={sidebarCollapsed ? item.label : undefined}
+                    onPointerEnter={() => preloadRoute(item.to)} onFocus={() => preloadRoute(item.to)} onPointerDown={() => preloadRoute(item.to)}
                     onClick={() => setMobileNavOpen(false)}
                     className={cn("nav-action nav-link relative flex min-h-11 items-center gap-3 rounded-lg px-3 text-sm font-medium", sidebarCollapsed && "md:justify-center md:px-0")}>
                     <item.icon aria-hidden="true" className="h-[18px] w-[18px] shrink-0" />

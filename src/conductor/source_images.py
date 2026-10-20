@@ -19,6 +19,8 @@ async def read_images(note, task_id, raw_only):
     store = ArtifactStore()
     parser = ImageParser(artifact_store=store) if not raw_only else None
     results = []
+    # 阶段取消也保留已完成的图片证据；缺失部分仍由采集层标为待核对。
+    note["images"] = results
     for index, url in enumerate(note["metadata"].get("image_urls") or [], 1):
         execution_checkpoint()
         row = {"image_index": index, "source_url": url, "status": "failed", "text": None,

@@ -1,6 +1,10 @@
 import { test, expect } from "@playwright/test";
 
-test.beforeEach(async ({ page }) => {
+test.beforeEach(async ({ page, context }) => {
+  // 用同一组安全断言检查 HTTP 备用锁，不复制刷新与 Owner 隔离用例。
+  if (process.env.MANGROVE_HTTP_SESSION_TEST === "1") {
+    await context.addInitScript(() => Object.defineProperty(navigator, "locks", { value: undefined, configurable: true }));
+  }
   await page.route("**/session-concurrency-harness", (route) => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>隔离会话测试</title>" }));
   await page.goto("/session-concurrency-harness");
 });

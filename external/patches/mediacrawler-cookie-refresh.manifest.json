@@ -1,0 +1,30 @@
+{
+  "schema": "mangrove-xhs-cookie-refresh-v1",
+  "line_endings": "preserve",
+  "patch_sha256": "17150177edae29306b948973a473460fb4c4b35f0e498ce4889c15a599670390",
+  "files": [
+    {
+      "path": "media_platform/xhs/client.py",
+      "before_sha256": "5ff8921c662e36611f3ab0ac50b25ba54d5a8e0032d579882d735874e17478c8",
+      "after_sha256": "193c99f951a1bce33ef6e6d023ba0cde4dcae26c970ae798cf96cc52b32767ed",
+      "before_raw_sha256": [
+        "1c133f74d403811c621d313980864efdfecc839b6f9d84a5b0787f627f9eb1ac",
+        "5ff8921c662e36611f3ab0ac50b25ba54d5a8e0032d579882d735874e17478c8"
+      ],
+      "after_raw_sha256": [
+        "193c99f951a1bce33ef6e6d023ba0cde4dcae26c970ae798cf96cc52b32767ed",
+        "5c6e0a67ab88226458c63abff2a3d1f59c72569aa74adfcd474b9240c82a28dd"
+      ]
+    },
+    {
+      "path": "media_platform/xhs/session_cookies.py",
+      "before_sha256": null,
+      "after_sha256": "0d67a4a64dadd7df8e7dbc3428030007354e83d1e10a0f2d63117f5cfe6a9500",
+      "before_raw_sha256": null,
+      "after_raw_sha256": [
+        "0d67a4a64dadd7df8e7dbc3428030007354e83d1e10a0f2d63117f5cfe6a9500",
+        "b897de4c36339095a1caf0a5243c9d4ddc11eae8411b97b09c819c719cd94c71"
+      ]
+    }
+  ]
+}

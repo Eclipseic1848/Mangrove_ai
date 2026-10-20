@@ -985,6 +985,17 @@ class WebUIStore:
                 status = "cancelled"
             elif kind == "error" or row["content"].startswith("❌ 任务执行失败"):
                 status = "failed"
+            elif status == "completed" and isinstance(meta.get("collection_outcome"), dict):
+                quality = meta.get("quality")
+                files = meta.get("files")
+                report_complete = (kind == "output" and isinstance(quality, dict)
+                    and quality.get("passed") is True and quality.get("review_complete") is True
+                    and meta["collection_outcome"].get("target_complete") is True
+                    and isinstance(files, list) and any(isinstance(file, dict)
+                        and file.get("mime") == "text/markdown" for file in files))
+                # 快照仍待核对；完整数量和逐篇核验通过的报告保留真实完成状态。
+                if not report_complete:
+                    status = "failed" if meta["collection_outcome"].get("status") == "failed" else "needs_input"
             items.append({"conv_id": row["conv_id"], "title": row["title"], "updated_at": row["updated_at"], "status": status})
             if include_activity_time:
                 items[-1]["completed_at"] = row["message_at"] if status == "completed" else None
@@ -3069,6 +3080,8 @@ class WebUIStore:
         self,
         user_id: str,
         run_id: str,
+        *,
+        fallback_repository=None,
     ) -> Optional[Dict[str, Any]]:
         with self._conn() as conn:
             row = conn.execute(
@@ -3081,10 +3094,11 @@ class WebUIStore:
                 DeliveryPublishingRepository,
             )
 
-            return DeliveryPublishingRepository(
+            repository = fallback_repository or DeliveryPublishingRepository(
                 self.db_path,
                 semantic_paths=self.semantic_paths,
-            ).latest_delivery(user_id, run_id)
+            )
+            return repository.latest_delivery(user_id, run_id)
         payload = json.loads(row["manifest_json"])
         payload.pop("user_id", None)
         return payload
@@ -4316,7 +4330,8 @@ class WebUIStore:
             ).fetchone()
             if owner is None:
                 return False
-            for table in ('task_revision_contexts','web_task_contracts','conversation_raw_turns','conversation_context_deltas','conversation_revision_proposals','conversation_revision_decisions','conversation_steering_results'):
+            # 仅解除已确认清理任务的刷新绑定，网页原件与其他任务的刷新事实保留。
+            for table in ('source_refresh_intents','task_revision_contexts','web_task_contracts','conversation_raw_turns','conversation_context_deltas','conversation_revision_proposals','conversation_revision_decisions','conversation_steering_results'):
                 conn.execute('DELETE FROM '+table+' WHERE owner_id=? AND task_id=?',(user_id,task_id))
             self._create_semantic_workspace_audit_tombstone(
                 conn,

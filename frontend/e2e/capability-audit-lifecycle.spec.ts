@@ -1,8 +1,16 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
+import { chooseModel } from "./model-picker";
 
 const actor = { user_id: "admin-a", username: "admin-a", display_name: "模拟管理员", role: "admin" };
 const pack = { pack_id: "audit-pack", version: "1.0.0", scope: "personal", maturity: "draft", lifecycle: "active", eligibility: "eligible", source: "governance_event", owner_id: "owner-a", digest: `sha256:${"a".repeat(64)}`, can_validate: false, promotion_gaps: ["validation_incomplete"] };
 const outcome = { status: "succeeded", content: "能力审计正文哨兵", truncated: false, failure_reason: null, event: { event_id: "cap-audit-1", result: "succeeded" } };
+
+test.beforeEach(async ({ page }) => {
+  // 本文件验证模型与能力流程；新手引导由独立用例验证，避免延迟遮罩打断操作。
+  await page.addInitScript(() => ["user", "admin", "super_admin"].forEach(role => {
+    localStorage.setItem(`onboarding_all_${JSON.stringify(["admin-a", role])}`, "skipped");
+  }));
+});
 
 test("任务默认模型只列已配置项，刷新保留修改，保存使用工作台偏好", async ({ page }) => {
   let preference: object | null = null;
@@ -25,13 +33,18 @@ test("任务默认模型只列已配置项，刷新保留修改，保存使用�
   await page.goto("/settings?section=personal");
   const select = page.getByRole("combobox", { name: "默认任务模型", exact: true });
   await expect(select).toBeVisible();
-  await expect(select.locator("option")).toHaveText(["自动选择可用模型", "Qwen3.8-27B-FP8", "Qwen3-30B-A3B"]);
+  await select.click();
+  const menu = page.getByRole("listbox", { name: "可用模型", exact: true });
+  await expect(menu.getByRole("option")).toHaveCount(3);
+  await expect(menu.getByRole("option")).toContainText(["自动选择可用模型", "Qwen3.8-27B-FP8", "Qwen3-30B-A3B"]);
+  await select.press("Escape");
   await expect(page.getByText("旧对话流程默认模型", { exact: true })).toHaveCount(0);
   const save = page.getByRole("button", { name: "保存默认模型", exact: true });
   await expect(save).toBeDisabled();
-  await select.selectOption({ label: "Qwen3.8-27B-FP8" });
+  await chooseModel(select, { label: "Qwen3.8-27B-FP8" });
   await page.getByRole("button", { name: "刷新模型列表", exact: true }).click();
-  await expect(select.locator("option:checked")).toHaveText("Qwen3.8-27B-FP8");
+  await expect(select).toContainText("Qwen3.8-27B-FP8");
+  await expect(select).toHaveAttribute("value", JSON.stringify(["__local__", "Qwen3.8-27B-FP8"]));
   await save.click();
   await expect(page.getByText("已保存，仅对新任务生效。", { exact: true })).toBeVisible();
   expect(preference).toEqual({ connection_id: "__local__", model_id: "Qwen3.8-27B-FP8" });
@@ -45,7 +58,8 @@ test("窄屏设置过滤云模型、失效默认需重选，退出可取消", as
   let writes = 0;
   await page.route("**/api/**", route => {
     const path = new URL(route.request().url()).pathname;
-    if (route.request().method() !== "GET") writes++;
+    // 访问遥测不是配置或账号变更，不计入取消操作的副作用。
+    if (route.request().method() !== "GET" && path !== "/api/operations/visits") writes++;
     if (path === "/api/auth/me") return route.fulfill({ json: { ...actor, role: "user" } });
     if (path === "/api/models") return route.fulfill({ json: { options: [{ provider: "local", model: "管理员本地模型" }] } });
     if (path === "/api/model-connections") return route.fulfill({ json: { items: [{
@@ -58,8 +72,12 @@ test("窄屏设置过滤云模型、失效默认需重选，退出可取消", as
     return route.fulfill({ status: 404, json: {} });
   });
   await page.goto("/settings");
-  const select = page.getByLabel("默认任务模型", { exact: true });
-  await expect(select.locator("option")).toHaveText(["自动选择可用模型", "原默认模型已不可用，请重新选择", "共享模型 · 可用云模型"]);
+  const select = page.getByRole("combobox", { name: "默认任务模型", exact: true });
+  await select.click();
+  const menu = page.getByRole("listbox", { name: "可用模型", exact: true });
+  await expect(menu.getByRole("option")).toHaveCount(3);
+  await expect(menu.getByRole("option")).toContainText(["自动选择可用模型", "原默认模型已不可用，请重新选择", "共享模型 · 可用云模型"]);
+  await select.press("Escape");
   await expect(page.getByRole("button", { name: "保存默认模型" })).toBeDisabled();
   await expect(page.getByLabel("当前密码", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "修改密码", exact: true }).click();
@@ -73,7 +91,7 @@ test("窄屏设置过滤云模型、失效默认需重选，退出可取消", as
   await page.screenshot({ path: testInfo.outputPath("settings-mobile.png"), fullPage: true });
 });
 
-test("模型仅分本地与云端，云端按供应商组织且保存原连接身份", async ({ page }, testInfo) => {
+test("任务默认模型按来源和本地云端分组，保存原连接身份", async ({ page }, testInfo) => {
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
   let saved: unknown;
@@ -92,12 +110,14 @@ test("模型仅分本地与云端，云端按供应商组织且保存原连接�
     return route.fulfill({ status: 404, json: {} });
   });
   await page.goto("/settings");
-  const select = page.getByLabel("默认任务模型", { exact: true });
-  await expect(select.locator("optgroup")).toHaveCount(2);
-  await expect(select.locator("optgroup").nth(0)).toHaveAttribute("label", "本地模型");
-  await expect(select.locator("optgroup").nth(1)).toHaveAttribute("label", "云端模型");
-  await expect(select.locator('optgroup[label="云端模型"] option')).toHaveText(["阿里百炼 · Qwen 3.8 Max"]);
-  await select.selectOption({ label: "阿里百炼 · Qwen 3.8 Max" });
+  const select = page.getByRole("combobox", { name: "默认任务模型", exact: true });
+  await select.click();
+  const menu = page.getByRole("listbox", { name: "可用模型", exact: true });
+  await expect(menu.getByRole("group")).toHaveCount(2);
+  await expect(menu.getByRole("group").nth(0)).toHaveAttribute("aria-label", "平台提供 · 本地模型");
+  await expect(menu.getByRole("group").nth(1)).toHaveAttribute("aria-label", "平台提供 · 云端模型");
+  await expect(menu.getByRole("group", { name: "平台提供 · 云端模型", exact: true }).locator("[data-model-label]")).toHaveText(["阿里百炼 · Qwen 3.8 Max"]);
+  await chooseModel(select, { label: "阿里百炼 · Qwen 3.8 Max" });
   await page.getByRole("button", { name: "保存默认模型", exact: true }).click();
   await expect.poll(() => saved).toEqual({ connection_id: "cloud", model_id: "qwen3.8-max" });
   await expect(page.getByLabel("当前密码", { exact: true })).toHaveCount(0);
@@ -127,19 +147,20 @@ test("平台本地模型去重且保留已有默认连接", async ({ page }) => 
     return route.fulfill({ status: 404, json: {} });
   });
   await page.goto("/settings");
-  const picker = page.getByLabel("默认任务模型", { exact: true });
-  await expect(picker.locator("optgroup option")).toHaveText(["Qwen3.8-27B-FP8", "Qwen3.6-35B-A3B"]);
-  await expect(picker).toHaveValue(JSON.stringify(["imported", "Qwen3.6-35B-A3B"]));
-  await picker.selectOption({ label: "Qwen3.8-27B-FP8" });
+  const picker = page.getByRole("combobox", { name: "默认任务模型", exact: true });
+  await picker.click();
+  await expect(page.getByRole("listbox").locator("[data-model-label]")).toHaveText(["Qwen3.8-27B-FP8", "Qwen3.6-35B-A3B"]);
+  await expect(picker).toHaveAttribute("value", JSON.stringify(["imported", "Qwen3.6-35B-A3B"]));
+  await chooseModel(picker, { label: "Qwen3.8-27B-FP8" });
   await page.getByRole("button", { name: "保存默认模型", exact: true }).click();
   await expect(page.getByText("已保存，仅对新任务生效。", { exact: true })).toBeVisible();
-  await picker.selectOption({ label: "Qwen3.6-35B-A3B" });
-  const unsaved = await picker.inputValue();
+  await chooseModel(picker, { label: "Qwen3.6-35B-A3B" });
+  const unsaved = JSON.stringify(["imported", "Qwen3.6-35B-A3B"]);
   await page.getByRole("button", { name: "刷新模型列表", exact: true }).click();
-  await expect(picker).toHaveValue(unsaved);
+  await expect(picker).toHaveAttribute("value", unsaved);
   await expect(page.getByRole("button", { name: "保存默认模型", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "取消修改", exact: true }).click();
-  await expect(picker).toHaveValue(JSON.stringify(["__local__", "Qwen3.8-27B-FP8"]));
+  await expect(picker).toHaveAttribute("value", JSON.stringify(["__local__", "Qwen3.8-27B-FP8"]));
 });
 
 test("平台配置跳转唯一模型管理入口，旧模型编辑不再展示", async ({ page }, testInfo) => {
@@ -149,7 +170,7 @@ test("平台配置跳转唯一模型管理入口，旧模型编辑不再展示",
   page.on("pageerror", error => errors.push(error.message));
   await page.route("**/api/**", route => {
     const path = new URL(route.request().url()).pathname;
-    if (route.request().method() !== "GET") writes++;
+    if (route.request().method() !== "GET" && path !== "/api/operations/visits") writes++;
     if (path === "/api/auth/me") return route.fulfill({ json: actor });
     if (path === "/api/config") return route.fulfill({ json: { groups: [{ key: "llm_local", label: "本地模型配置", items: [] }] } });
     if (path === "/api/config/models") return route.fulfill({ json: { models: { local: ["Qwen3.6-35B-A3B"] }, default_provider: "local", available_providers: ["local"] } });
@@ -180,7 +201,9 @@ test("平台配置跳转唯一模型管理入口，旧模型编辑不再展示",
   expect(writes).toBe(0); expect(errors).toEqual([]);
 });
 
-test("同名云模型可区分个人与平台连接", async ({ page }) => {
+for (const width of [1600, 390]) test(`同名默认模型按来源分区并保留连接身份：${width}`, async ({ page }, testInfo) => {
+  await page.setViewportSize({ width, height: 1000 });
+  let saved: unknown;
   await page.route("**/api/**", route => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/auth/me") return route.fulfill({ json: actor });
@@ -189,15 +212,43 @@ test("同名云模型可区分个人与平台连接", async ({ page }) => {
       connection_id: scope, owner_scope: scope, preset_id: "deepseek", display_name: "DeepSeek", status: "verified", model: "deepseek-flash",
       models: [{ model_id: "deepseek-flash", display_name: "DeepSeek V4.1 Flash", enabled: true, status: "available" }],
     })) } });
-    if (path === "/api/model-connections/preferences/default") return route.fulfill({ json: { preference: null } });
+    if (path === "/api/model-connections/preferences/default") {
+      if (route.request().method() === "PUT") { saved = route.request().postDataJSON(); return route.fulfill({ json: saved }); }
+      return route.fulfill({ json: { preference: null } });
+    }
     return route.fulfill({ status: 404, json: {} });
   });
   await page.goto("/settings");
-  const options = page.getByLabel("默认任务模型", { exact: true }).locator("optgroup option");
-  await expect(options).toHaveText(["DeepSeek · DeepSeek V4.1 Flash · 我的", "DeepSeek · DeepSeek V4.1 Flash · 平台"]);
+  const select = page.getByRole("combobox", { name: "默认任务模型", exact: true });
+  await select.click();
+  const menu = page.getByRole("listbox", { name: "可用模型", exact: true });
+  await expect(menu.getByRole("group").nth(0)).toHaveAttribute("aria-label", "平台提供 · 云端模型");
+  await expect(menu.getByRole("group").nth(1)).toHaveAttribute("aria-label", "我的连接 · 云端模型");
+  await expect(menu.locator("[data-model-label]")).toHaveText(["DeepSeek · DeepSeek V4.1 Flash", "DeepSeek · DeepSeek V4.1 Flash"]);
+  await expect(menu.getByTestId("model-option-source")).toHaveText(["平台", "我的"]);
+  const colors = await menu.getByTestId("model-option-source").evaluateAll(elements => elements.map(element => getComputedStyle(element).backgroundColor));
+  expect(colors[0]).not.toBe(colors[1]);
+  expect(colors).not.toContain("rgba(0, 0, 0, 0)");
+  await chooseModel(select, JSON.stringify(["platform_shared", "deepseek-flash"]));
+  await expect(page.getByTestId("model-picker-source")).toHaveText("平台");
+  await select.focus();
+  await select.press("End");
+  await select.press("Enter");
+  await expect(select).toHaveAttribute("value", JSON.stringify(["user_personal", "deepseek-flash"]));
+  await expect(page.getByTestId("model-picker-source")).toHaveText("我的");
+  await page.getByRole("button", { name: "保存默认模型", exact: true }).click();
+  await expect.poll(() => saved).toEqual({ connection_id: "user_personal", model_id: "deepseek-flash" });
+  await chooseModel(select, JSON.stringify(["platform_shared", "deepseek-flash"]));
+  await page.getByRole("button", { name: "保存默认模型", exact: true }).click();
+  await expect.poll(() => saved).toEqual({ connection_id: "platform_shared", model_id: "deepseek-flash" });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.getByRole("heading", { name: "任务默认模型", exact: true }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath("model-source-default.png") });
 });
 
-for (const role of ["user", "admin", "super_admin"]) test(`工具验证仅保留在管理入口：${role}`, async ({ page }) => {
+for (const role of ["user", "admin", "super_admin"]) test(`扩展工具仅超级管理员可见：${role}`, async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
   let governanceReads = 0;
   await page.route("**/api/**", route => {
     const path = new URL(route.request().url()).pathname;
@@ -214,7 +265,8 @@ for (const role of ["user", "admin", "super_admin"]) test(`工具验证仅保留
   await expect(page.getByRole("heading", { name: "我的能力验证", exact: true })).toHaveCount(0);
   expect(governanceReads).toBe(0);
   await page.goto("/settings?section=governance");
-  if (role === "user") {
+  if (role !== "super_admin") {
+    await expect(page.getByText("外观", { exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "扩展工具管理", exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "扩展工具管理", exact: true })).toHaveCount(0);
     expect(governanceReads).toBe(0);
@@ -222,8 +274,10 @@ for (const role of ["user", "admin", "super_admin"]) test(`工具验证仅保留
     await expect(page.getByRole("heading", { name: "扩展工具管理", exact: true })).toBeVisible();
     await expect(page.getByRole("button", { name: "发起验证", exact: true })).toBeVisible();
   }
+  expect(errors).toEqual([]);
+  await page.screenshot({ path: testInfo.outputPath(`extension-access-${role}.png`), fullPage: true });
 });
-async function setup(page: Page, post: (route: Route) => Promise<void>, identity = actor) {
+async function setup(page: Page, post: (route: Route) => Promise<void>, identity = { ...actor, role: "super_admin" }) {
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/auth/me") return route.fulfill({ json: identity });
@@ -309,9 +363,9 @@ test("能力读取失败有事件号但不显示正文或未知原始异常", as
   await expect(page.getByRole("dialog")).toHaveCount(0);
 });
 
-for (const change of [{ user_id: "admin-b", role: "admin" }, { user_id: "admin-a", role: "super_admin" }, { user_id: "admin-a", role: "user" }]) {
+for (const change of [{ user_id: "admin-b", role: "super_admin" }, { user_id: "admin-a", role: "admin" }, { user_id: "admin-a", role: "user" }]) {
   test(`能力审计身份变化${change.user_id}/${change.role}迟到失效`, async ({ page }) => {
-    const identity = { ...actor };
+    const identity = { ...actor, role: "super_admin" };
     let pending: Route | undefined;
     await setup(page, async (route) => { pending = route; }, identity);
     await page.getByLabel("查看原因").fill("核对能力身份变化");

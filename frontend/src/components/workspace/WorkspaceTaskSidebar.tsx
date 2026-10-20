@@ -92,6 +92,7 @@ export function WorkspaceTaskSidebar({
   recycleBin,
   storage,
   loading,
+  initialLoading,
   error,
   lastReadAt,
   onRetry,
@@ -99,6 +100,7 @@ export function WorkspaceTaskSidebar({
   loadingMore,
   onLoadMore,
   onSelect,
+  onRemove,
   onFilter,
   onNew,
   onToggleRecycleBin,
@@ -109,6 +111,7 @@ export function WorkspaceTaskSidebar({
   recycleBin: boolean;
   storage?: WorkspaceStorage;
   loading?: boolean;
+  initialLoading?: boolean;
   error?: string;
   lastReadAt?: number;
   onRetry: () => void;
@@ -116,6 +119,7 @@ export function WorkspaceTaskSidebar({
   loadingMore?: boolean;
   onLoadMore: () => void;
   onSelect: (taskId: string) => void;
+  onRemove: (task: Pick<WorkspaceTask, "task_id" | "title" | "status">) => void;
   onFilter: (filter: "all" | "active" | "needs_input" | "completed") => void;
   onNew: () => void;
   onToggleRecycleBin: () => void;
@@ -175,24 +179,27 @@ export function WorkspaceTaskSidebar({
           {Boolean(lastReadAt) && <p>最近成功读取：{beijingTime(new Date(lastReadAt!).toISOString())}</p>}
           <button type="button" onClick={onRetry} className="rounded-md border px-3 py-2 hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring">重试读取列表</button>
         </div>}
-        {loading && !tasks.length && <p role="status" className="p-3 text-xs text-muted-foreground">正在读取任务列表…</p>}
-        {filtered.length ? (
+        {loading && !error && (initialLoading || !tasks.length) && <p role="status" className="p-3 text-xs text-muted-foreground">正在读取任务列表…</p>}
+        {initialLoading && !error ? null : filtered.length ? (
           <div className="space-y-1">
             {filtered.map((task) => {
               const meta = STATUS[task.status];
               const Icon = meta.icon;
+              const conversation = task.task_id.startsWith("conversation:");
+              const removingBlocked = conversation && ["queued", "running", "cancelling", "pausing"].includes(task.status);
               return (
-                <button
+                <div
                   key={task.task_id}
-                  type="button"
-                  onClick={() => onSelect(task.task_id)}
+                  role="group"
+                  aria-label={task.title}
                   className={cn(
-                    "w-full rounded-xl border border-transparent px-3 py-3 text-left transition-colors",
+                    "flex items-center rounded-xl border border-transparent transition-colors",
                     activeTaskId === task.task_id
                       ? "border-border bg-background shadow-sm"
                       : "hover:bg-muted",
                   )}
                 >
+                  <button type="button" onClick={() => onSelect(task.task_id)} className="min-w-0 flex-1 rounded-xl px-3 py-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                   <div className="flex items-start gap-2">
                     <Icon
                       className={cn(
@@ -210,7 +217,11 @@ export function WorkspaceTaskSidebar({
                       </div>
                     </div>
                   </div>
-                </button>
+                  </button>
+                  {!recycleBin && <button type="button" aria-label={conversation ? "删除历史记录" : "移入回收站"} title={removingBlocked ? "请先停止执行，再删除历史记录" : `${conversation ? "删除历史记录" : "移入回收站"}：${task.title}`} disabled={removingBlocked} onClick={() => onRemove(task)} className="mr-1 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-destructive/10 hover:text-destructive focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40">
+                    <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
+                  </button>}
+                </div>
               );
             })}
           </div>
@@ -220,7 +231,7 @@ export function WorkspaceTaskSidebar({
             {recycleBin ? "回收站为空" : "当前筛选下没有任务"}
           </div>
         )}
-        {hasMore && <button type="button" disabled={loadingMore} onClick={onLoadMore} className="mt-3 w-full rounded-lg border px-3 py-2 text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">{loadingMore ? "正在加载…" : "加载更早任务"}</button>}
+        {!initialLoading && hasMore && <button type="button" disabled={loadingMore} onClick={onLoadMore} className="mt-3 w-full rounded-lg border px-3 py-2 text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">{loadingMore ? "正在加载…" : "加载更早任务"}</button>}
       </div>
 
       <div className="border-t p-3">

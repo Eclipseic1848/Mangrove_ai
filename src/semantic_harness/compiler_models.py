@@ -7,6 +7,7 @@ from enum import Enum
 from typing import Dict, Optional, Tuple
 
 from pydantic import Field, field_validator, model_validator
+from src.conversation_steering.models import CompiledContext
 
 from .models import (
     Ambiguity,
@@ -69,6 +70,7 @@ class CompileRequest(ContractModel):
     prior_plan: Optional[SemanticTaskPlan] = None
     clarification: Optional[ClarificationResolution] = None
     source_findings: Tuple[dict[str, object], ...] = Field(default=(), max_length=20)
+    compiled_context: Optional[CompiledContext] = None
 
     @field_validator("provider")
     @classmethod
@@ -77,6 +79,8 @@ class CompileRequest(ContractModel):
 
     @model_validator(mode="after")
     def validate_scope(self) -> "CompileRequest":
+        if self.compiled_context is not None and self.compiled_context.task_id != self.task_id:
+            raise ValueError("编译上下文必须属于当前任务")
         if any(not item for item in (*self.artifact_ids, *self.source_ids)):
             raise ValueError("来源 ID 不得为空")
         if len(self.artifact_ids) != len(set(self.artifact_ids)):

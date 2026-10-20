@@ -74,6 +74,24 @@ def test_global_preferences_correction_is_admin_only_and_compare_and_swap(env):
     assert client.get("/api/memory").json()["preferences"] == ""
 
 
+def test_global_preferences_can_append_after_saving_only_the_section_heading(env):
+    client, actor, _ = env
+    actor["role"] = "admin"
+    original = client.get("/api/memory").json()
+    assert client.patch("/api/memory", json={
+        "text": "## 用户偏好\n", "expected_digest": original["preferences_digest"],
+    }).status_code == 200
+    assert client.get("/api/memory").json()["preferences"] == "## 用户偏好"
+    for _ in range(2):
+        assert client.post("/api/memory", json={"text": "报告列出来源"}).status_code == 200
+    current = client.get("/api/memory").json()
+    assert current["preferences"] == "## 用户偏好\n- 报告列出来源"
+    assert current["preferences_digest"] != original["preferences_digest"]
+    actor["role"] = "user"
+    assert client.post("/api/memory", json={"text": "未经授权的规范"}).status_code == 403
+    assert client.get("/api/memory").json()["preferences"] == current["preferences"]
+
+
 def test_new_workspace_automatically_freezes_relevant_personal_and_global_preferences(env):
     from src.task_context import TaskContextRepository, TaskContextService
     client, actor, store = env

@@ -1,3 +1,4 @@
+import { randomId } from "@/lib/randomId";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { PageGuide } from "@/components/onboarding/PageGuide";
 import { ThumbsUp, ThumbsDown, Download, RefreshCw, Filter, MessageSquare, MessagesSquare, BarChart3, Trash2, Clock } from "lucide-react";
@@ -251,7 +252,7 @@ function FeedbackPage({ actorId, actorRole }: { actorId: string; actorRole: stri
       const response = await authenticatedFetch(`/api/feedback/${auditTarget.id}/audit-content`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reason, idempotency_key: crypto.randomUUID() }),
+        body: JSON.stringify({ reason, idempotency_key: randomId() }),
       });
       if (!current() || generation !== auditGeneration.current) return;
       // 失败事件只有服务端提交后才返回；没有事件号不能声称已留痕。
@@ -289,7 +290,7 @@ function FeedbackPage({ actorId, actorRole }: { actorId: string; actorRole: stri
       await api.patch(`/api/feedback/${auditTarget.id}`, { admin_note: resolveNote.trim() || null, ...(status ? { status } : {}) });
       if (!current() || generation !== auditGeneration.current) return;
       // 保存后重新核对内容，后续处理使用最新备注的审计证据。
-      const saved: AuditContent = await api.post(`/api/feedback/${auditTarget.id}/audit-content`, { reason: auditReason, idempotency_key: crypto.randomUUID() });
+      const saved: AuditContent = await api.post(`/api/feedback/${auditTarget.id}/audit-content`, { reason: auditReason, idempotency_key: randomId() });
       if (current() && generation === auditGeneration.current) {
         setAuditContent(saved);
         setResolveNote(saved.content.admin_note || "");

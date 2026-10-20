@@ -1,3 +1,4 @@
+import { randomId } from "@/lib/randomId";
 import { useEffect, useRef, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { api, ApiError } from "@/lib/api";
@@ -7,7 +8,7 @@ import { PersonalMemoryPanel } from "@/components/memory/PersonalMemoryPanel";
 const field = "mt-1 w-full rounded-lg border bg-background px-3 py-2 text-sm focus-visible:ring-2 focus-visible:ring-ring";
 const button = "rounded-lg border px-3 py-2 text-sm hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
 type Draft = Omit<TaskTemplateOption, "summary_sha256">;
-const blank = (): Draft => ({ template_id: crypto.randomUUID(), version: 1, title: "", purpose: "general", source: "owner_created", goal_contract_draft: "", method_draft: "", delivery_spec_draft: {} });
+const blank = (): Draft => ({ template_id: randomId(), version: 1, title: "", purpose: "general", source: "owner_created", goal_contract_draft: "", method_draft: "", delivery_spec_draft: {} });
 
 // 原位管理不卸载任务输入；此组件复用版本表与个人记忆API，不执行任务。
 export function TaskContextLibrary({ open, onClose, onChanged, taskMode = false }: { open: boolean; onClose: () => void; onChanged: () => void; taskMode?: boolean }) {

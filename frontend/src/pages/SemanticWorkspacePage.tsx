@@ -41,6 +41,7 @@ import { Markdown } from "@/components/Markdown";
 import { WorkspaceTaskSidebar } from "@/components/workspace/WorkspaceTaskSidebar";
 import { WorkspaceExamples } from "@/components/workspace/WorkspaceExamples";
 import { CollectionHistory } from "@/components/workspace/CollectionHistory";
+import { CollectionResultPreview, hasCollectionPreview, type CollectionFile } from "@/components/workspace/CollectionResultFiles";
 import {
   answerWorkspaceTask,
   cancelWorkspaceTask,
@@ -79,6 +80,8 @@ import type {
   ResultSelection,
   PublicResultContext,
 } from "@/types/semanticWorkspace";
+
+const collectionFileBaseKey = (files: CollectionFile[]) => JSON.stringify(files.map(file => ({ name: file.name, url: file.url.replace(/\?revision=[1-9]\d{0,8}$/, "") })));
 
 type ModelOption = { provider: string; model: string; label: string };
 type ModelsResponse = {
@@ -531,11 +534,18 @@ export function SemanticWorkspacePage() {
   >("all");
   const [recycleBin, setRecycleBin] = useState(false);
   const [deletionTarget, setDeletionTarget] = useState<{ task_id: string; title: string } | null>(null);
+  const [historyRemovalTarget, setHistoryRemovalTarget] = useState<Pick<WorkspaceTask, "task_id" | "title" | "status"> | null>(null);
+  const [historyRemovalBusy, setHistoryRemovalBusy] = useState(false);
+  const [historyRemovalError, setHistoryRemovalError] = useState("");
+  const historyRemovalFlight = useRef(false);
+  const historyRemovalTrigger = useRef<HTMLElement | null>(null);
+  const historyRemovalCancel = useRef<HTMLButtonElement>(null);
+  useEffect(() => { setHistoryRemovalTarget(null); setHistoryRemovalError(""); }, [user?.user_id]);
   const newTask = !selectedTaskId && !selectedConversationId && !recycleBin;
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [inspectorExpanded, setInspectorExpanded] = useState(false);
   const fullInspector = narrow || inspectorExpanded;
-  const [inspectorKind, setInspectorKind] = useState<"source" | "result" | "draft">("source");
+  const [inspectorKind, setInspectorKind] = useState<"source" | "result" | "draft" | "collection">("source");
   const [previewDraft, setPreviewDraft] = useState<{ identity: string; draft: Draft } | null>(null);
   const openedDraft = useRef("");
   const [draftActionsTarget, setDraftActionsTarget] = useState<HTMLDivElement | null>(null);
@@ -586,10 +596,14 @@ export function SemanticWorkspacePage() {
   const models = useQuery<ModelsResponse>({
     queryKey: ["models"],
     queryFn: () => api.get("/api/models"),
+    refetchOnWindowFocus: true,
+    refetchInterval: 15_000,
   });
   const modelConnections = useQuery<ModelConnectionsResponse>({
     queryKey: ["model-connections"],
     queryFn: () => api.get("/api/model-connections"),
+    refetchOnWindowFocus: true,
+    refetchInterval: 15_000,
   });
   const modelPreference = useQuery<{
     preference: {
@@ -605,12 +619,13 @@ export function SemanticWorkspacePage() {
     (connection) => connection.status === "verified",
   );
   const canUseLocalPiRuntime = isAdminish(user?.role);
+  const canUseCapabilities = user?.role === "super_admin";
   const canUsePiRuntime = Boolean(models.data?.pi_runtime_enabled)
     && (canUseLocalPiRuntime || verifiedModelConnections.length > 0);
   const grayCapabilities = useQuery<{ enabled: boolean; items: GrayCapability[] }>({
-    queryKey: ["semantic-workspace-gray-capabilities"],
+    queryKey: ["semantic-workspace-gray-capabilities", user?.user_id, user?.role],
     queryFn: listGrayCapabilities,
-    enabled: canUseLocalPiRuntime
+    enabled: canUseCapabilities
       && Boolean(models.data?.pi_capability_host_enabled),
   });
   const storage = useQuery({
@@ -735,6 +750,31 @@ export function SemanticWorkspacePage() {
     task?.delivery?.delivery_id,
   ]);
   canvasIdentityRef.current = resultIdentity;
+  const collectionIdentity = JSON.stringify([user?.user_id, selectedConversationId, newTask ? composerEpoch : null, selectedTaskId, task?.viewing_revision]);
+  const collectionIdentityRef = useRef(collectionIdentity);
+  collectionIdentityRef.current = collectionIdentity;
+  const [collectionPreview, setCollectionPreview] = useState<{ identity: string; key: string; files: CollectionFile[] } | null>(null);
+  const collectionFiles = collectionPreview?.identity === collectionIdentity ? collectionPreview.files : [];
+  const collectionFileIdentity = collectionFileBaseKey(collectionFiles);
+  const handleCollectionFilesChange = useCallback((files: CollectionFile[]) => {
+    // 回调绑定当前账号与会话，导航后的迟到结果不能占用新任务的预览。
+    if (collectionIdentityRef.current !== collectionIdentity) return;
+    const key = JSON.stringify(files);
+    setCollectionPreview(current => {
+      if (current?.identity === collectionIdentity && current.key === key) return current;
+      return { identity: collectionIdentity, key, files };
+    });
+    if (hasCollectionPreview(files) && collectionFileBaseKey(files) !== collectionFileIdentity) {
+      setInspectorKind("collection"); setInspectorOpen(true); setInspectorExpanded(false);
+    }
+  }, [collectionIdentity, collectionFileIdentity]);
+  const uploadsIdentity = useRef(collectionIdentity);
+  if (uploadsIdentity.current !== collectionIdentity) {
+    uploadsIdentity.current = collectionIdentity;
+    previewedDraft.current = [];
+    setDraftUploads([]); setSelectedUploadId(null);
+    if (inspectorKind === "collection") setInspectorOpen(false);
+  }
   const showDraft = useCallback((draft: Draft, open = false) => {
     setPreviewDraft({ identity: resultIdentity, draft });
     const firstDraft = openedDraft.current !== resultIdentity;
@@ -835,11 +875,11 @@ export function SemanticWorkspacePage() {
 
 
   const handleDraftUploadsChange = useCallback((uploads: UploadItem[]) => {
+    if (collectionIdentityRef.current !== collectionIdentity) return;
     setDraftUploads(uploads);
     if (!uploads.length) {
       previewedDraft.current = [];
       setSelectedUploadId(null);
-      setInspectorOpen(false);
       return;
     }
     const added = uploads.find(upload => !previewedDraft.current.includes(upload.upload_id));
@@ -855,7 +895,7 @@ export function SemanticWorkspacePage() {
         ? current
         : uploads[0].upload_id,
     );
-  }, [narrow]);
+  }, [narrow, collectionIdentity]);
 
   const submitNew = async (payload: SourceTaskPayload, draftScope = "new") => {
     const epoch = composerEpochRef.current;
@@ -926,12 +966,18 @@ export function SemanticWorkspacePage() {
           recycleBin={recycleBin}
           storage={storage.data}
           loading={tasks.isLoading || (!recycleBin && collectionHistory.isLoading)}
+          initialLoading={(!tasks.isFetched && tasks.isLoading)
+            || (!recycleBin && !collectionHistory.isFetched && collectionHistory.isLoading)}
           error={[tasks.isError && "任务列表", !recycleBin && collectionHistory.isError && "采集历史"].filter(Boolean).join("、")}
           lastReadAt={Math.max(tasks.dataUpdatedAt, recycleBin ? 0 : collectionHistory.dataUpdatedAt)}
           onRetry={() => { void tasks.refetch(); if (!recycleBin) void collectionHistory.refetch(); }}
           hasMore={tasks.hasNextPage}
           loadingMore={tasks.isFetching}
           onLoadMore={() => { if (!tasks.isFetching) void tasks.fetchNextPage(); }}
+          onRemove={item => {
+            historyRemovalTrigger.current = document.activeElement as HTMLElement;
+            setHistoryRemovalError(""); setHistoryRemovalTarget(item);
+          }}
           onSelect={(taskId) => {
             if (narrow) setNavigationOpen(false);
             if (taskId.startsWith("conversation:")) {
@@ -983,6 +1029,32 @@ export function SemanticWorkspacePage() {
           />
   );
 
+  const removeHistory = async () => {
+    if (!historyRemovalTarget || historyRemovalFlight.current) return;
+    const target = historyRemovalTarget;
+    const owner = user?.user_id;
+    const conversation = target.task_id.startsWith("conversation:");
+    const id = conversation ? target.task_id.slice("conversation:".length) : target.task_id;
+    historyRemovalFlight.current = true; setHistoryRemovalBusy(true); setHistoryRemovalError("");
+    try {
+      if (conversation) await api.del(`/api/conversations/${encodeURIComponent(id)}`);
+      else await recycleWorkspaceTask(id);
+      if (accountResumeOwner.current !== owner) return;
+      // 列表操作可能迟到，只清空当前仍选中的原目标，不打断另一任务。
+      if (selectionParams.current.get(conversation ? "conversation" : "task") === id) setSelectedTaskId(null);
+      setHistoryRemovalTarget(null);
+      void Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-tasks"] }),
+        queryClient.invalidateQueries({ queryKey: ["semantic-workspace-storage"] }),
+        queryClient.invalidateQueries({ queryKey: ["collection-history"] }),
+      ]);
+      if (conversation) queryClient.removeQueries({ queryKey: ["collection-history-detail", owner, id] });
+      toast.success(conversation ? "历史记录已删除，独立任务和文件保留" : "任务已移入回收站");
+    } catch (reason) {
+      if (accountResumeOwner.current === owner) setHistoryRemovalError(reason instanceof ApiError ? reason.message : "操作结果尚未确认，请刷新列表核对；不会自动重复提交。");
+    } finally { historyRemovalFlight.current = false; setHistoryRemovalBusy(false); }
+  };
+
   const closeInspector = () => {
     setInspectorOpen(false);
     setInspectorExpanded(false);
@@ -1008,6 +1080,23 @@ export function SemanticWorkspacePage() {
 
   return (
     <div className="flex h-full min-h-0 flex-col">
+      <AlertDialog.Root open={Boolean(historyRemovalTarget)} onOpenChange={open => { if (!open && !historyRemovalFlight.current) setHistoryRemovalTarget(null); }}>
+        <AlertDialog.Portal>
+          <AlertDialog.Overlay className="fixed inset-0 z-50 bg-black/40" />
+          <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-[min(90vw,440px)] -translate-x-1/2 -translate-y-1/2 rounded-2xl border bg-background p-6 shadow-2xl" onOpenAutoFocus={event => { event.preventDefault(); historyRemovalCancel.current?.focus(); }} onCloseAutoFocus={event => { event.preventDefault(); if (historyRemovalTrigger.current?.isConnected) historyRemovalTrigger.current.focus(); else document.getElementById("task-list-toggle")?.focus(); }}>
+            <AlertDialog.Title className="font-semibold">{historyRemovalTarget?.task_id.startsWith("conversation:") ? "删除这条历史记录？" : "将这个任务移入回收站？"}</AlertDialog.Title>
+            <AlertDialog.Description className="mt-2 break-words text-sm leading-6 text-muted-foreground">
+              {historyRemovalTarget?.title}<br />
+              {historyRemovalTarget?.task_id.startsWith("conversation:") ? "只永久删除此历史会话，无法恢复；独立初稿任务、结果和下载文件保留。" : "任务记录会从当前列表移除，可在回收站恢复；若仍在执行，会先请求停止。此操作不会清理原件和结果。"}
+            </AlertDialog.Description>
+            {historyRemovalError && <p role="alert" className="mt-3 text-sm text-destructive">{historyRemovalError}</p>}
+            <div className="mt-5 flex flex-wrap justify-end gap-2">
+              <AlertDialog.Cancel ref={historyRemovalCancel} disabled={historyRemovalBusy} className="rounded-lg border px-3 py-2 text-sm hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">取消</AlertDialog.Cancel>
+              <button type="button" disabled={historyRemovalBusy} onClick={() => void removeHistory()} className="rounded-lg bg-destructive px-3 py-2 text-sm font-medium text-destructive-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">{historyRemovalBusy ? "正在处理…" : historyRemovalTarget?.task_id.startsWith("conversation:") ? "确认删除历史记录" : "确认移入回收站"}</button>
+            </div>
+          </AlertDialog.Content>
+        </AlertDialog.Portal>
+      </AlertDialog.Root>
       <header className="flex shrink-0 flex-wrap items-center justify-between gap-2 border-b bg-background px-7 py-4">
         <div>
           <h1 className="text-lg font-semibold tracking-tight">任务工作台</h1>
@@ -1036,6 +1125,7 @@ export function SemanticWorkspacePage() {
             </button>
           ) : null}
           {task?.delivery && !newTask && <button type="button" className="rounded-lg border px-3 py-2 text-xs hover:bg-muted" onClick={() => { setInspectorKind("result"); setInspectorOpen(true); }}>查看结果</button>}
+          {hasCollectionPreview(collectionFiles) && <button type="button" className="rounded-lg border px-3 py-2 text-xs hover:bg-muted" onClick={() => { setInspectorKind("collection"); setInspectorOpen(true); }}>查看资料</button>}
         </div>
       </header>
 
@@ -1072,16 +1162,17 @@ export function SemanticWorkspacePage() {
         ) : navigationOpen && taskNavigation}
 
         <div className="min-w-0 flex-1">
-          {selectedConversationId ? <CollectionHistory key={`${user?.user_id}:${selectedConversationId}`} convId={selectedConversationId}
-            composerProps={{ modelOptions: models.data?.options, defaultModel: models.data?.default,
-              allowPiRuntime: Boolean(models.data?.pi_runtime_enabled), allowLocalPiRuntime: canUseLocalPiRuntime,
-              modelConnections: verifiedModelConnections,
-              defaultConnectionId: modelPreference.data?.preference?.connection_id ?? null,
-              defaultConnectionModel: modelPreference.data?.preference?.model_id ?? null,
-              grayCapabilities: grayCapabilities.data?.items ?? [], onSubmit: payload => submitNew(payload, `conversation_${selectedConversationId}`) }} /> : newTask ? (
+          {selectedConversationId || newTask ? (
             <Group orientation="horizontal" className="h-full min-h-0" defaultLayout={{ draft: 58, preview: 42 }}>
-              <Panel id="draft" minSize="0px" className={cn("min-w-0", fullInspector && inspectorOpen && draftUploads.length > 0 && "hidden")}>
-              <div className="h-full overflow-y-auto">
+              <Panel id="draft" minSize="0px" className={cn("min-w-0", fullInspector && inspectorOpen && (inspectorKind === "collection" ? hasCollectionPreview(collectionFiles) : draftUploads.length > 0) && "hidden")}>
+              {selectedConversationId ? <CollectionHistory key={`${user?.user_id}:${selectedConversationId}`} convId={selectedConversationId} onCollectionFilesChange={handleCollectionFilesChange}
+                composerProps={{ modelOptions: models.data?.options, defaultModel: models.data?.default,
+                  allowPiRuntime: Boolean(models.data?.pi_runtime_enabled), allowLocalPiRuntime: canUseLocalPiRuntime,
+                  modelConnections: verifiedModelConnections,
+                  defaultConnectionId: modelPreference.data?.preference?.connection_id ?? null,
+                  defaultConnectionModel: modelPreference.data?.preference?.model_id ?? null,
+                  onUploadsChange: handleDraftUploadsChange,
+                  allowCapabilities: canUseCapabilities, grayCapabilities: canUseCapabilities ? grayCapabilities.data?.items ?? [] : [], onSubmit: payload => submitNew(payload, `conversation_${selectedConversationId}`) }} /> : <div className="h-full overflow-y-auto">
                 <div
                   className={cn(
                     "mx-auto flex min-h-full max-w-5xl flex-col",
@@ -1133,8 +1224,10 @@ export function SemanticWorkspacePage() {
                     defaultConnectionModel={
                       modelPreference.data?.preference?.model_id ?? null
                     }
-                    grayCapabilities={grayCapabilities.data?.items ?? []}
+                    allowCapabilities={canUseCapabilities}
+                    grayCapabilities={canUseCapabilities ? grayCapabilities.data?.items ?? [] : []}
                     onUploadsChange={handleDraftUploadsChange}
+                    onCollectionFilesChange={handleCollectionFilesChange}
                     onSubmit={submitNew}
                     />
                     </div>
@@ -1142,13 +1235,14 @@ export function SemanticWorkspacePage() {
                 </div>
 
                 </div>
-              </div>
+              </div>}
               </Panel>
-              {inspectorOpen && draftUploads.length > 0 && (
+              {inspectorOpen && (inspectorKind === "collection" ? hasCollectionPreview(collectionFiles) : draftUploads.length > 0) && (
                 <>
                 {!fullInspector && <Separator aria-label="调整文件预览宽度" className="w-1 bg-border focus-visible:bg-primary" />}
                 <Panel id="preview" minSize={fullInspector ? "100%" : "280px"} maxSize={fullInspector ? "100%" : "70%"} className="h-full border-l bg-background">
-                  <SourcePreviewPanel
+                  {inspectorKind === "collection" ? <CollectionResultPreview key={`${collectionIdentity}:${collectionFileIdentity}`} files={collectionFiles} ownerId={user?.user_id ?? "current"} onClose={closeInspector}
+                    expanded={inspectorExpanded} onToggleExpand={narrow ? undefined : () => setInspectorExpanded(value => !value)} /> : <SourcePreviewPanel
                     key={selectedUploadId}
                     uploads={draftUploads}
                     selectedUploadId={selectedUploadId}
@@ -1160,7 +1254,7 @@ export function SemanticWorkspacePage() {
                     onClose={closeInspector}
                     expanded={inspectorExpanded}
                     onToggleExpand={narrow ? undefined : () => setInspectorExpanded(value => !value)}
-                  />
+                  />}
                 </Panel>
                 </>
               )}
@@ -1689,7 +1783,7 @@ export function SemanticWorkspacePage() {
                             })()}
                             {sourceEditorIdentity === resultIdentity && <div className="mt-3">
                               <p className="mb-3 text-xs text-muted-foreground">确认后创建新版本。使用原任务模型与上下文；上方旧版本来源保持冻结。</p>
-                              <WorkspaceSourceComposer key={`${resultIdentity}:sources`} ownerId={user?.user_id ?? "current"} draftScope={`${task.task_id}_${viewingRevision}`} compact unified preserveContext modelLocked
+                              <WorkspaceSourceComposer key={`${resultIdentity}:sources`} ownerId={user?.user_id ?? "current"} draftScope={`${task.task_id}_${viewingRevision}`} compact unified preserveContext modelLocked onCollectionFilesChange={handleCollectionFilesChange}
                                 initialPrompt="保持原要求，使用当前选择的全部资料" initialFormats={task.output_formats}
                                 initialUploads={task.uploads ?? []} initialSources={taskWebSources.flatMap(source => source.snapshot ? [source.snapshot] : [])} initialUnavailableSourceIds={taskWebSources.filter(source => !source.snapshot).map(source => source.source_snapshot_id)} initialReusableSources={task.reusable_sources ?? []}
                                 modelOptions={models.data?.options} defaultModel={{ provider: task.provider, model: task.model || "", label: "任务冻结模型" }}
@@ -1854,7 +1948,8 @@ export function SemanticWorkspacePage() {
                     maxSize={fullInspector ? "100%" : "65%"}
                     className="bg-background"
                   >
-                    {inspectorKind === "draft" && previewDraft?.identity === resultIdentity && task.status !== "completed" ? (
+                    {inspectorKind === "collection" && hasCollectionPreview(collectionFiles) ? <CollectionResultPreview key={`${collectionIdentity}:${collectionFileIdentity}`} files={collectionFiles} ownerId={user?.user_id ?? "current"} onClose={closeInspector}
+                      expanded={inspectorExpanded} onToggleExpand={narrow ? undefined : () => setInspectorExpanded(value => !value)} /> : inspectorKind === "draft" && previewDraft?.identity === resultIdentity && task.status !== "completed" ? (
                       <DraftPreview key={resultIdentity} draft={previewDraft.draft} onClose={closeInspector} actionsRef={setDraftActionsTarget}
                         expanded={inspectorExpanded} onToggleExpand={narrow ? undefined : () => setInspectorExpanded(value => !value)}
                         viewState={canvasView.draft ?? initialDraftView}

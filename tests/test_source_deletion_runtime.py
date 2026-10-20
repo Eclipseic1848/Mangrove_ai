@@ -276,3 +276,99 @@ def test_completed_other_operation_stop_receipt_is_reused_per_exact_run(canvas,r
     result=asyncio.run(deletion.continue_operation('user-a',op['operation_id'],Manager()))
     assert result['state']==('completed' if accepted else 'incomplete'),result
     assert seen==([2] if accepted else [1])
+
+
+@pytest.mark.parametrize('locator', ['anchored_relative','managed','old_windows','old_posix'])
+def test_migrated_runtime_locator_cleans_only_exact_local_run(canvas,locator):
+    from src.config.settings import settings
+    from src.source_acquisition.deletion import _cleanup_runtime_copies
+    _,_,task_id,_,upload=canvas
+    root=Path(settings.semantic_execution_root).resolve()
+    relative=Path('agentic-vnext')/hashlib.sha256(b'user-a').hexdigest()[:16]/task_id/'r1'/'migrated-run'
+    copied=root/relative
+    copied.mkdir(parents=True);(copied/'input.txt').write_text('服务器运行副本',encoding='utf-8')
+    independent=root/'unrelated-run';independent.mkdir();(independent/'input.txt').write_text('其他任务资料',encoding='utf-8')
+    values={
+        'anchored_relative':'data\\semantic-executions\\'+str(relative).replace('/','\\'),
+        'managed':'managed:v1/'+relative.as_posix(),
+        'old_windows':'Z:\\old-host\\data\\semantic-executions\\'+str(relative).replace('/','\\'),
+        'old_posix':'/srv/old-host/data/semantic-executions/'+relative.as_posix(),
+    }
+    with sqlite3.connect(settings.webui_db_path) as connection:
+        connection.execute("UPDATE agentic_runtime_runs SET status='cancelled',run_id='migrated-run',workspace_root=?,request_json=? WHERE user_id='user-a' AND task_id=? AND revision=1",(values[locator],'{"copied":"body"}',task_id))
+    retained=_cleanup_runtime_copies('user-a',{task_id:{1}})
+    assert not copied.exists()
+    assert (independent/'input.txt').read_text(encoding='utf-8')=='其他任务资料'
+    assert Path(upload.storage_path).is_file()
+    assert retained==([{'task_id':task_id,'revision':1,'run_id':'migrated-run'}] if locator.startswith('old_') else [])
+
+
+@pytest.mark.parametrize('tail', ['other-owner/{task}/r1/migrated-run','{owner}/other-task/r1/migrated-run','{owner}/{task}/r1/other-run','{owner}/{task}/r1/../r1/migrated-run'])
+def test_migrated_runtime_locator_rejects_changed_identity_and_parent_segments(canvas,tail):
+    from src.config.settings import settings
+    from src.source_acquisition.deletion import _cleanup_runtime_copies
+    _,_,task_id,_,_=canvas
+    root=Path(settings.semantic_execution_root).resolve()
+    copied=root/'agentic-vnext'/hashlib.sha256(b'user-a').hexdigest()[:16]/task_id/'r1'/'migrated-run'
+    copied.mkdir(parents=True);(copied/'input.txt').write_text('不可误删的副本',encoding='utf-8')
+    raw='Z:\\old-host\\data\\semantic-executions\\agentic-vnext\\'+tail.format(owner=hashlib.sha256(b'user-a').hexdigest()[:16],task=task_id).replace('/','\\')
+    with sqlite3.connect(settings.webui_db_path) as connection:
+        connection.execute("UPDATE agentic_runtime_runs SET status='cancelled',run_id='migrated-run',workspace_root=?,request_json=? WHERE user_id='user-a' AND task_id=? AND revision=1",(raw,'{"copied":"body"}',task_id))
+    with pytest.raises(ValueError,match='unsafe_runtime_path'):
+        _cleanup_runtime_copies('user-a',{task_id:{1}})
+    assert (copied/'input.txt').is_file()
+    with sqlite3.connect(settings.webui_db_path) as connection:
+        assert connection.execute('SELECT request_json FROM agentic_runtime_runs WHERE user_id=? AND task_id=? AND revision=1',('user-a',task_id)).fetchone()[0]=='{"copied":"body"}'
+
+
+def test_migrated_runtime_missing_local_copy_is_reported_without_foreign_access(canvas):
+    import asyncio
+    from src.config.settings import settings
+    from src.api.auth import get_store
+    from src.source_acquisition import deletion
+    _,_,task_id,_,_=canvas
+    relative=Path('agentic-vnext')/hashlib.sha256(b'user-a').hexdigest()[:16]/task_id/'r1'/'migrated-run'
+    raw='Z:\\old-host\\data\\semantic-executions\\'+str(relative).replace('/','\\')
+    with sqlite3.connect(settings.webui_db_path) as connection:
+        connection.execute("UPDATE agentic_runtime_runs SET status='cancelled',run_id='migrated-run',workspace_root=? WHERE user_id='user-a' AND task_id=? AND revision=1",(raw,task_id))
+    store=get_store();store.soft_delete_semantic_workspace_task('user-a',task_id)
+    plan=deletion.deletion_plan('user-a',task_id)
+    operation=deletion.begin_operation('user-a',task_id,plan['plan_token'],'keep_shared','foreign-runtime')
+    class Manager:
+        async def cancel(self,*args): pass
+        async def _confirm_runtime_stopped(self,*args,**kwargs): return True
+    result=asyncio.run(deletion.continue_operation('user-a',operation['operation_id'],Manager()))
+    assert result['state']=='completed',result
+    assert '旧主机' in result['message'] and '未访问或删除' in result['message']
+    assert raw not in str(result)
+    assert store.get_semantic_workspace_task('user-a',task_id) is None
+    assert deletion.get_operation('user-a',operation['operation_id'])['message']==result['message']
+
+
+@pytest.mark.parametrize('raw', ['Z:\\old-host\\unknown-root\\run',r'\\server\share\data\semantic-executions\run','managed:v1/C:/outside','unidentified-run'])
+def test_runtime_unknown_nonempty_locator_remains_rejected(canvas,raw):
+    from src.config.settings import settings
+    from src.source_acquisition.deletion import _cleanup_runtime_copies
+    _,_,task_id,_,upload=canvas
+    with sqlite3.connect(settings.webui_db_path) as connection:
+        connection.execute("UPDATE agentic_runtime_runs SET workspace_root=?,request_json=? WHERE user_id='user-a' AND task_id=? AND revision=1",(raw,'{"copied":"body"}',task_id))
+    with pytest.raises(ValueError,match='unsafe_runtime_path'):
+        _cleanup_runtime_copies('user-a',{task_id:{1}})
+    assert Path(upload.storage_path).is_file()
+
+
+def test_migrated_runtime_alias_cannot_hide_changed_identity(canvas):
+    from src.config.settings import settings
+    from src.source_acquisition.deletion import _cleanup_runtime_copies
+    _,_,task_id,_,_=canvas
+    root=Path(settings.semantic_execution_root).resolve()
+    copied=root/'agentic-vnext'/hashlib.sha256(b'user-a').hexdigest()[:16]/task_id/'r1'/'migrated-run'
+    copied.mkdir(parents=True);(copied/'input.txt').write_text('不可经别名删除',encoding='utf-8')
+    alias=root/'alias'
+    try: alias.symlink_to(copied,target_is_directory=True)
+    except OSError as error: pytest.skip('当前环境不能创建目录软链接：'+str(error))
+    with sqlite3.connect(settings.webui_db_path) as connection:
+        connection.execute("UPDATE agentic_runtime_runs SET run_id='migrated-run',workspace_root='managed:v1/alias' WHERE user_id='user-a' AND task_id=? AND revision=1",(task_id,))
+    with pytest.raises(ValueError,match='unsafe_runtime_path'):
+        _cleanup_runtime_copies('user-a',{task_id:{1}})
+    assert (copied/'input.txt').is_file()

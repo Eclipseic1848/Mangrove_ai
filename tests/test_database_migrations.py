@@ -1,4 +1,5 @@
 from pathlib import Path
+from contextlib import closing
 import hashlib
 import json
 import os
@@ -643,6 +644,45 @@ def test_scheduler_store_requires_and_uses_explicit_migration(
     assert store.get(task_id)["user_input"] == "每天汇总"
 
 
+def test_scheduler_context_migration_preserves_old_plan_and_verified_backup(tmp_path: Path) -> None:
+    database = tmp_path / "scheduler.db"
+    target = DatabaseTarget(profile="scheduler", path=database)
+    engine = database_migrations.create_engine(database_migrations.URL.create("sqlite", database=str(database)))
+    try:
+        with engine.begin() as connection:
+            database_migrations.command.upgrade(database_migrations._alembic_config(connection), "scheduler_0004")
+    finally:
+        engine.dispose()
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        connection.execute("INSERT INTO scheduled_tasks(task_id,user_input,owner_user_id,trigger_type,status,created_at,time_zone) VALUES ('synthetic-plan','合成旧请求','synthetic-owner','once','paused','2026-01-01','Asia/Shanghai')")
+        old = dict(connection.execute("SELECT * FROM scheduled_tasks").fetchone())
+    original = database.read_bytes()
+    with pytest.raises(SchemaNotCurrentError):
+        ScheduleStore(str(database))
+    assert database.read_bytes() == original
+    plan = plan_database(target)
+    assert plan.source_revision == "scheduler_0004" and plan.pending_revisions == ("scheduler_0005",)
+    receipt = apply_migrations(target, tmp_path / "scheduler-before.db")
+    assert receipt.applied_revisions == ("scheduler_0005",)
+    with closing(sqlite3.connect(receipt.backup_path)) as backup_connection:
+        backup_connection.row_factory = sqlite3.Row
+        assert dict(backup_connection.execute("SELECT * FROM scheduled_tasks").fetchone()) == old
+        assert backup_connection.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "scheduler_0004"
+        assert "task_context_json" not in {row[1] for row in backup_connection.execute("PRAGMA table_info(scheduled_tasks)")}
+    with sqlite3.connect(database) as connection:
+        connection.row_factory = sqlite3.Row
+        current = dict(connection.execute("SELECT * FROM scheduled_tasks").fetchone())
+        assert current.pop("task_context_json") is None and current == old
+    migrated = database.read_bytes()
+    replay = apply_migrations(target, tmp_path / "scheduler-replay-before.db")
+    assert replay.applied_revisions == () and database.read_bytes() == migrated
+    restored = tmp_path / "scheduler-restored.db"
+    shutil.copyfile(receipt.backup_path, restored)
+    verification = verify_restored_copy(receipt.receipt_path, restored)
+    assert verification.schema_state == "legacy" and restored.read_bytes() == receipt.backup_path.read_bytes()
+
+
 def test_legacy_app_writer_requires_explicit_sqlite_migration(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -992,6 +1032,27 @@ def test_current_revision_freezes_complete_column_definition_semantics(
 
     assert status.state == "drift"
     assert "object:collected_items" in status.gaps
+
+
+def test_repeated_sql_normalization_does_not_repeat_parsing(monkeypatch) -> None:
+    normalize = database_migrations._normalize_sql_fragment
+    if hasattr(normalize, "cache_clear"):
+        normalize.cache_clear()
+    strip = database_migrations._strip_sql_comments
+    calls = []
+
+    def counted(sql):
+        calls.append(sql)
+        return strip(sql)
+
+    monkeypatch.setattr(database_migrations, "_strip_sql_comments", counted)
+    fragment = "CHECK (value > 1234567 AND label != 'a -- b')"
+    first = normalize(fragment)
+    assert normalize(fragment) == first
+    assert calls == [fragment]
+    changed = fragment.replace("1234567", "1234568")
+    assert normalize(changed) != first
+    assert calls == [fragment, changed]
 
 
 def test_table_contract_distinguishes_generated_column_expressions() -> None:

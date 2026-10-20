@@ -1,0 +1,10 @@
+services:
+  rsshub:
+    build: .
+    image: mangrove/rsshub:ec6cbe12-browser
+    container_name: mangrove-rsshub
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:1200:1200"
+    env_file:
+      - .env

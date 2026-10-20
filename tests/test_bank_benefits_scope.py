@@ -30,7 +30,7 @@ def test_bank_defaults_are_per_bank_and_skip_generic_analysis(monkeypatch):
     assert spec.bank_benefits.ocr_limit == 20
     assert spec.max_items == 10
     assert spec.analysis_type == AnalysisType.NONE
-    assert spec.include_comments and spec.xhs_note_type == "image"
+    assert not spec.include_comments and spec.xhs_note_type == "image"
     assert spec.xhs_sort == "general"
     assert not out["needs_clarification"]
 

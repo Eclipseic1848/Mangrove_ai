@@ -12,6 +12,8 @@ from typing import Any, Dict, List
 
 from src.conductor.task_spec import TaskSpec
 
+from ._common import is_challenge_page
+
 
 @dataclass
 class CollectedItem:
@@ -21,6 +23,12 @@ class CollectedItem:
     content: str = ""                       # 正文（Markdown 或纯文本）
     metadata: Dict[str, Any] = field(default_factory=dict)
     access_handle: str | None = field(default=None, repr=False)  # 仅适配器解密，不进入公开字段
+
+    @property
+    def is_error_page(self) -> bool:
+        """复用短验证页边界；空正文的视频清单不属于错误页。"""
+        status = self.metadata.get("status_code", self.metadata.get("status"))
+        return (isinstance(status, int) and status >= 400) or is_challenge_page(self.content or "")
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -40,6 +48,15 @@ class CollectResult:
     message: str = ""
     coverage: Dict[str, Any] = field(default_factory=dict)
     authentication: Dict[str, Any] = field(default_factory=dict)
+
+    def discard_error_pages(self) -> None:
+        """在路由认定成功前排除错误/验证页，避免截断后续反爬升级。"""
+        usable = [item for item in self.items if not item.is_error_page]
+        if len(usable) != len(self.items):
+            self.items = usable
+            self.message = f"已排除错误或验证页，保留 {len(usable)} 条可用资料"
+            if not usable:
+                self.success = False
 
     @property
     def has_data(self) -> bool:

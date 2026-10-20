@@ -92,4 +92,12 @@ def load_recovery(owner, task_id):
     request = saved.get("request") or {}
     if not request.get("session_id"):
         raise ValueError("原任务缺少冻结会话，不能恢复")
+    context = request.get("task_context_preview")
+    context_digest = fields.get("task_context_sha256")
+    if context is not None or context_digest is not None:
+        from src.task_context import TaskContextPreview
+        if context is None or hashlib.sha256(json.dumps(context, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest() != context_digest:
+            raise ValueError("冻结上下文与采集进度不一致，不能恢复")
+        if TaskContextPreview.model_validate(context).owner_id != owner:
+            raise ValueError("冻结上下文与任务 Owner 不一致，不能恢复")
     return {"task_id": task_id, "saved": saved, "state": {**request, "task_id": task_id, "task_spec": spec}}

@@ -30,7 +30,7 @@ def test_topics_share_discovery_screen_extraction_and_export(topic, tmp_path, mo
     async def model(messages, **kwargs):
         payload = json.loads(messages[-1]["content"])
         relevant = "会员领券" in payload["sources"]["note"]
-        calls.append(("screen" if kwargs["max_tokens"] == 8192 else "extract", relevant))
+        calls.append(("screen" if kwargs["max_tokens"] == 4096 else "extract", relevant))
         return json.dumps({"relevant": relevant, "records": [{"name": "领券", "condition": "会员", "evidence": {
             "name": {"source_id": "note", "quote": "会员领券"}, "condition": {"source_id": "note", "quote": "会员领券"}}}]})
     monkeypatch.setattr(flow.SocialMediaCollector, "collect", collect)
@@ -222,7 +222,7 @@ def test_time_conditions_remain_distinct_and_publication_is_in_model_context(mon
     text = "活动期1月至3月，报名期1月，券可使用至6月"
     async def model(messages, **kwargs):
         sources = json.loads(messages[-1]["content"])["sources"]
-        assert "2025-12-01" in sources["metadata"]
+        assert "2025-12-01" in "".join(row["text"] for row in sources["metadata"])
         fields = {"activity_period": "1月至3月", "registration_period": "1月", "usage_period": "至6月",
                   "valid_from": "1月", "valid_to": "6月"}
         return json.dumps({"relevant": True, "benefits": [{**fields,
@@ -288,7 +288,7 @@ def test_truncation_preserves_candidate_without_retries(stage, tmp_path, monkeyp
             "note_id": "one", "note_type": "normal", "image_urls": []})],
             coverage={"pages": [{"has_more": False}]})
     async def model(messages, **kwargs):
-        actual = "screen" if kwargs["max_tokens"] == 8192 else "extract"
+        actual = "screen" if kwargs["max_tokens"] == 4096 else "extract"
         calls.append(actual)
         if actual == stage:
             raise ModelOutputTruncatedError("模型输出截断")
@@ -304,12 +304,12 @@ def test_truncation_preserves_candidate_without_retries(stage, tmp_path, monkeyp
 
 
 @pytest.mark.parametrize("failure,model,expected", [
-    ("truncated", "deepseek-flash", [8192, 65536, 131072]),
-    ("invalid", "deepseek-flash", [8192, 65536]),
-    ("always_truncated", "deepseek-flash", [8192, 65536, 131072]),
-    ("timeout", "deepseek-flash", [8192, 65536]),
-    ("truncated", "unknown-model", [8192, 65536]),
-    ("truncated", "small-model", [8192, 65536]),
+    ("truncated", "deepseek-flash", [4096, 65536, 131072]),
+    ("invalid", "deepseek-flash", [4096, 65536]),
+    ("always_truncated", "deepseek-flash", [4096, 65536, 131072]),
+    ("timeout", "deepseek-flash", [4096, 65536]),
+    ("truncated", "unknown-model", [4096, 65536]),
+    ("truncated", "small-model", [4096, 65536]),
 ])
 def test_extract_retries_only_known_truncation_with_larger_supported_budget(failure, model, expected, tmp_path, monkeypatch):
     from src.conductor.nodes.collect import collect_node
@@ -335,8 +335,10 @@ def test_extract_retries_only_known_truncation_with_larger_supported_budget(fail
     monkeypatch.setattr(flow.settings, "data_prep_artifact_root", str(tmp_path))
     result = asyncio.run(collect_node({"task_id": "budget-retry", "task_spec": spec_for("会员权益"), "model": model}))
     assert calls == expected
+    if failure == "timeout":
+        assert result["evidence_collection"]["candidates"][0]["reason"] == "extract_outcome_unknown"
     note = result["evidence_collection"]["candidates"][0]
-    assert note["status"] == ("selected" if failure == "truncated" and len(expected) == 3 else "unprocessed" if failure == "timeout" else "review_required")
+    assert note["status"] == ("selected" if failure == "truncated" and len(expected) == 3 else "review_required")
 
 
 @pytest.mark.parametrize("raw_only", [False, True])

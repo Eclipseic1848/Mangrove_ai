@@ -1,6 +1,6 @@
-/// <reference types="vite/client" />
 import { PageGuide } from "@/components/onboarding/PageGuide";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Brain, Plus, RefreshCw, Users } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
@@ -9,13 +9,7 @@ import { PersonalMemoryPanel } from "@/components/memory/PersonalMemoryPanel";
 import { MemoryConfirm, MemoryTextarea } from "@/components/memory/MemoryControls";
 import { api } from "@/lib/api";
 import { useAuth, isAdminish } from "@/lib/auth";
-
-// 必须早于 BrowserRouter 注册：其同步路由更新会卸载页面并移除页面内的监听。
-// 只有记忆页挂载时设置处理器，其他页面的导航不受影响。
-let memoryPop: ((event: PopStateEvent) => void) | null = null;
-const dispatchMemoryPop = (event: PopStateEvent) => memoryPop?.(event);
-window.addEventListener("popstate", dispatchMemoryPop, true);
-if (import.meta.hot) import.meta.hot.dispose(() => window.removeEventListener("popstate", dispatchMemoryPop, true));
+import { guardMemoryHistory } from "@/lib/routeLoaders";
 
 export function Memory() {
   const { user } = useAuth();
@@ -29,13 +23,20 @@ function MemoryContent() {
   const navigate = useNavigate();
   const isAdmin = isAdminish(user?.role);
   const [tab, setTab] = useState<"personal" | "global">("personal");
-  const [refresh, setRefresh] = useState(0);
+  const queryClient = useQueryClient();
+  const memoryPrefix = ["memory", user?.user_id, user?.role];
+  // 接口同时返回全局与个人字段；父子默认查询共用完整响应，不能缓存为跨账号全局数据。
+  const memory = useQuery<{ preferences?: string; preferences_digest?: string }>({
+    queryKey: [...memoryPrefix, 1, 10, ""],
+    queryFn: () => api.get("/api/memory?page=1&page_size=10&q=", { signal: AbortSignal.timeout(15000) }),
+    staleTime: 15000, retry: false,
+  });
   const [personalState, setPersonalState] = useState({ dirty: false, busy: false });
-  const [pref, setPref] = useState("");
-  const [digest, setDigest] = useState("");
-  const [loaded, setLoaded] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [loadError, setLoadError] = useState(false);
+  const pref = memory.data?.preferences ?? "";
+  const digest = memory.data?.preferences_digest ?? "";
+  const loaded = memory.data !== undefined;
+  const loading = memory.isFetching;
+  const loadError = memory.isError;
   const [text, setText] = useState("");
   const [edit, setEdit] = useState<{ original: string; text: string; digest: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -45,7 +46,6 @@ function MemoryContent() {
   const [destination, setDestination] = useState<string | number | null>(null);
   const [restoringHistory, setRestoringHistory] = useState(false);
   const historyGuard = useRef({ blocked: false, index: window.history.state?.idx as number | undefined, restoring: false, allowed: false });
-  const sequence = useRef(0);
   const flight = useRef(false);
   const globalEditor = useRef<HTMLDivElement>(null);
   const dirty = personalState.dirty || Boolean(text.trim() || edit && edit.text !== edit.original);
@@ -67,20 +67,9 @@ function MemoryContent() {
       guard.restoring = true; setRestoringHistory(true);
       window.history.go(-delta);
     };
-    memoryPop = pop;
-    return () => { if (memoryPop === pop) memoryPop = null; };
+    return guardMemoryHistory(pop);
   }, []);
-  const load = useCallback(async () => {
-    const current = ++sequence.current;
-    setLoading(true); setLoadError(false);
-    try {
-      const result = await api.get("/api/memory?page=1&page_size=10", { signal: AbortSignal.timeout(15000) });
-      if (current !== sequence.current) return;
-      setPref(result.preferences ?? ""); setDigest(result.preferences_digest ?? ""); setLoaded(true);
-    } catch { if (current === sequence.current) setLoadError(true); }
-    finally { if (current === sequence.current) setLoading(false); }
-  }, []);
-  useEffect(() => { void load(); return () => { sequence.current++; }; }, [load, refresh]);
+  const load = () => memory.refetch();
   useEffect(() => { if (edit) globalEditor.current?.querySelector("textarea")?.focus(); }, [Boolean(edit)]);
   useEffect(() => {
     if (!dirty && !inFlight) return;
@@ -97,21 +86,21 @@ function MemoryContent() {
     return () => { document.removeEventListener("click", click, true); window.removeEventListener("beforeunload", unload); };
   }, [dirty, inFlight]);
   const save = async (replace: boolean) => {
-    if (flight.current || !isAdmin || replace && !edit || !replace && !text.trim()) return;
+    if (flight.current || loading || loadError || !isAdmin || replace && !edit || !replace && !text.trim()) return;
     flight.current = true; setBusy(true); setError(""); setNotice("");
     try {
       if (replace) await api.patch("/api/memory", { text: edit!.text, expected_digest: edit!.digest });
       else await api.post("/api/memory", { text: text.trim() });
       setEdit(null); if (!replace) setText(""); setConfirm(null);
       setNotice("已保存全局记忆，所有用户的后续相关任务会参考这些偏好。");
-      await load();
+      await queryClient.invalidateQueries({ queryKey: memoryPrefix });
     } catch (reason) { setConfirm(null); setError(reason instanceof Error ? reason.message : "保存未完成，输入已保留，请核对后重试。"); }
     finally { flight.current = false; setBusy(false); }
   };
   return <>
     <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-7 py-4">
       <div><h1 className="text-lg font-semibold tracking-tight">记忆</h1><p className="text-sm text-muted-foreground">记住常用偏好，减少重复说明</p></div>
-      <div className="flex flex-wrap gap-2"><PageGuide page={`memory.${tab}`} ready={!loading} /><Button variant="outline" size="sm" disabled={inFlight || loading} onClick={() => setRefresh(value => value + 1)}><RefreshCw className="size-4" />刷新</Button></div>
+      <div className="flex flex-wrap gap-2"><PageGuide page={`memory.${tab}`} ready={!loading} /><Button variant="outline" size="sm" disabled={inFlight || loading} onClick={() => void queryClient.invalidateQueries({ queryKey: memoryPrefix })}><RefreshCw className="size-4" />刷新</Button></div>
     </header>
     <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-7 sm:py-6">
       <div className="mx-auto max-w-4xl space-y-4">
@@ -130,7 +119,7 @@ function MemoryContent() {
           <div className="mt-3 space-y-2 leading-6 text-muted-foreground"><p>新任务会参考相关记忆，不会应用全部记忆；本次明确提出的要求优先。</p><p>你也可以在工作台独立发送“记住：完整偏好”或“忘记：完整记忆”。删除和修改只影响后续任务，不改写已创建的任务。</p><p>请勿在记忆中保存密码、密钥等敏感信息。</p></div>
         </details>
         <div id="memory-personal-panel" role="tabpanel" aria-labelledby="memory-personal-tab" hidden={tab !== "personal"}>
-          <div className="rounded-xl border bg-card p-4 sm:p-5"><h2 className="text-base font-semibold">我的记忆</h2><p className="mb-5 mt-1 text-sm text-muted-foreground">仅用于你发起的后续任务；本次明确提出的要求优先。</p><PersonalMemoryPanel refreshKey={refresh} onStateChange={setPersonalState} /></div>
+          <div className="rounded-xl border bg-card p-4 sm:p-5"><h2 className="text-base font-semibold">我的记忆</h2><p className="mb-5 mt-1 text-sm text-muted-foreground">仅用于你发起的后续任务；本次明确提出的要求优先。</p><PersonalMemoryPanel onStateChange={setPersonalState} /></div>
         </div>
         <div id="memory-global-panel" role="tabpanel" aria-labelledby="memory-global-tab" hidden={tab !== "global"}>
           <section aria-labelledby="global-memory-title" className="rounded-xl border bg-card p-4 sm:p-5">
@@ -142,10 +131,10 @@ function MemoryContent() {
             {loadError && <div role="alert" className="mb-3 flex flex-wrap items-center gap-2 text-sm text-destructive"><span>{loaded ? "更新失败，当前显示上次读取的全局记忆。" : "全局记忆加载失败，请重试。"}</span><Button variant="outline" size="sm" onClick={() => void load()}>重试</Button></div>}
             {notice && <p role="status" className="mb-4 rounded-md border bg-muted/40 p-3 text-sm">{notice}</p>}
             {error && <p role="alert" className="mb-3 text-sm text-destructive">{error}</p>}
-            {isAdmin && !edit && <div className="mb-5 space-y-2 rounded-lg bg-muted/30 p-3"><label htmlFor="global-memory-input" className="block text-sm font-medium">添加全局记忆</label><MemoryTextarea id="global-memory-input" value={text} maxLength={4000} disabled={busy || !loaded || loadError} onChange={event => setText(event.target.value)} placeholder="例如：所有报告都标明数据来源" /><div className="flex justify-end"><Button disabled={busy || !loaded || loadError || !text.trim()} onClick={() => void save(false)}><Plus />添加</Button></div></div>}
+            {isAdmin && !edit && <div className="mb-5 space-y-2 rounded-lg bg-muted/30 p-3"><label htmlFor="global-memory-input" className="block text-sm font-medium">添加全局记忆</label><MemoryTextarea id="global-memory-input" value={text} maxLength={4000} disabled={busy || !loaded || loadError} onChange={event => setText(event.target.value)} placeholder="例如：所有报告都标明数据来源" /><div className="flex justify-end"><Button disabled={busy || loading || !loaded || loadError || !text.trim()} onClick={() => void save(false)}><Plus />添加</Button></div></div>}
             {isAdmin && edit ? <div ref={globalEditor} className="space-y-3"><label htmlFor="global-memory-editor" className="block text-sm font-medium">全局记忆内容</label><MemoryTextarea id="global-memory-editor" value={edit.text} maxLength={40000} disabled={busy} onChange={event => setEdit({ ...edit, text: event.target.value })} /><p className="text-xs text-muted-foreground">可使用普通文字或 Markdown。保存后影响所有用户的后续任务，已有任务不变。</p>
               <details className="rounded-md border p-3"><summary className="cursor-pointer text-sm">预览修改后的内容</summary><div className="mt-3"><Markdown safeResources>{edit.text || "暂无内容"}</Markdown></div></details>
-              <div className="flex flex-wrap gap-2"><Button disabled={busy || edit.text.length > 40000 || edit.text === edit.original} onClick={() => setConfirm("save")}>保存全局记忆</Button><Button variant="outline" disabled={busy} onClick={() => { if (edit.text !== edit.original) setConfirm("discard"); else setEdit(null); }}>取消编辑</Button></div>
+              <div className="flex flex-wrap gap-2"><Button disabled={busy || loading || loadError || edit.text.length > 40000 || edit.text === edit.original} onClick={() => setConfirm("save")}>保存全局记忆</Button><Button variant="outline" disabled={busy} onClick={() => { if (edit.text !== edit.original) setConfirm("discard"); else setEdit(null); }}>取消编辑</Button></div>
             </div> : loaded && (pref ? <Markdown safeResources>{pref}</Markdown> : <p className="py-8 text-center text-sm text-muted-foreground">{isAdmin ? "添加一条大家共用的偏好，减少重复说明。" : "还没有全局记忆，管理员添加后可在这里查看。"}</p>)}
           </section>
         </div>

@@ -262,3 +262,66 @@ def test_public_timeout_keeps_schedule_and_records_failure(owner_stores, monkeyp
     assert history[0]["success"] == 0 and "超时" in history[0]["summary"]
     after = schedules.get(task_id)
     assert (after["status"], after["next_run_at"]) == (before["status"], before["next_run_at"])
+
+
+@pytest.mark.parametrize("saved_provider", ["deepseek", "bound"])
+def test_frozen_cloud_schedule_uses_full_context_without_reusing_artifact_identity(owner_stores, monkeypatch, saved_provider):
+    from src.conductor.collection_results import analysis_context_capacity
+    from src.conductor.graph import _build_init
+    from src.llm.provider import _bound_chat_identity
+    import src.model_connections as connections
+    from src.model_connections import broker as broker_module, conductor
+    from src.model_connections.broker import ConnectionBroker
+    from src.model_connections.storage import ModelConnectionRepository
+    from src.model_connections.vault import FernetCredentialVault
+
+    web, schedules, owners = owner_stores
+    owner = owners[0]
+    repository = ModelConnectionRepository(web.db_path)
+    connection = repository.create_managed(created_by=owner, display_name="合成官方调度连接",
+        base_url="https://api.deepseek.com", model="deepseek-flash", api_format="openai_chat_completions",
+        locality="public_external", ciphertext=None, key_hint="", verified_at="2026-10-17", preset_id="deepseek")
+    broker = ConnectionBroker(repository=repository, vault=FernetCredentialVault.generate())
+    for module in (connections, broker_module, conductor):
+        monkeypatch.setattr(module, "get_default_broker", lambda: broker)
+    binding = broker.freeze_connection(owner, connection["connection_id"])
+    planned = datetime(2099, 1, 1)
+    with execution_context(web.capture_account_execution(owner)):
+        task_id = schedules.add(user_input="汇总三条合成公告", provider=saved_provider, model=binding.model,
+            trigger_type="cron", cron_expr="0 9 * * *", run_at=None, next_run_at=planned,
+            owner_user_id=owner, model_connection_id=binding.connection_id,
+            model_connection_version=binding.connection_version)
+    before = schedules.get(task_id)
+    observations = []
+
+    async def runner(user_input, **kwargs):
+        state = _build_init(user_input, None, kwargs["provider"], kwargs["model"], kwargs["session_id"],
+                            kwargs["approved_db_write"], kwargs["ignore_schedule"])
+        identity = _bound_chat_identity.get()
+        observations.append((state, identity, analysis_context_capacity(state)))
+        # 完整运行摘要不能被其他 Owner、连接版本或运行身份复用。
+        for axis in (0, 2, 5):
+            changed = list(identity)
+            changed[axis] += "-changed"
+            token = _bound_chat_identity.set(tuple(changed))
+            try:
+                assert analysis_context_capacity(state) == 0
+            finally:
+                _bound_chat_identity.reset(token)
+        return {"error": "合成任务已结束，未执行模型或采集"}
+
+    service = SchedulerService(schedules, runner=runner)
+    with execution_context(web.capture_account_execution(owner)):
+        assert asyncio.run(service.run_task_now(task_id)) == "started"
+        assert asyncio.run(service.run_task_now(task_id)) == "started"
+    assert len(observations) == 2
+    assert all(capacity == 1000000 for _, _, capacity in observations)
+    assert all(state["provider"] == "bound" and state["session_id"] == f"scheduler:{task_id}"
+               and identity[4] == task_id for state, identity, _ in observations)
+    assert observations[0][0]["task_id"] != observations[1][0]["task_id"]
+    assert observations[0][1][5] != observations[1][1][5]
+    after = schedules.get(task_id)
+    assert (after["provider"], after["next_run_at"], after["status"]) == (
+        before["provider"], before["next_run_at"], before["status"])
+    assert len(schedules.list_runs(task_id)) == 2
+    assert web.account_execution_binding(owner, "schedule", task_id)["state"] == "idle"

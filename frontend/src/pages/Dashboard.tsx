@@ -3,7 +3,7 @@ import { PageGuide } from "@/components/onboarding/PageGuide";
 import { beijingTime } from "@/lib/beijingTime";
 import { Link, useSearchParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { SiOpenai } from "@icons-pack/react-simple-icons";
+import { OptionalBrandImage, ProviderLogo, PROVIDERS } from "@/components/ProviderLogo";
 import { Activity, ArrowRight, BookOpen, CalendarClock, CheckCircle2, CircleDot, Cpu, Globe, Mail, Plus, RefreshCw, Search, Server, Slack, TriangleAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Pagination } from "@/components/ui/pagination";
@@ -25,12 +25,6 @@ type ServiceSummary = {
 };
 type Connection = TaskModelConnection & { has_key?: boolean };
 type Preset = { preset_id: string; display_name: string };
-const PROVIDERS: Record<string, { label: string; file?: string }> = {
-  deepseek: { label: "DeepSeek", file: "deepseek.png" }, qwen: { label: "通义千问", file: "qwen.png" },
-  openai: { label: "OpenAI" }, anthropic: { label: "Claude", file: "claude-color.png" },
-  gemini: { label: "Gemini", file: "gemini-color.png" }, kimi: { label: "Kimi", file: "kimi-color.png" },
-  zhipu: { label: "智谱", file: "zhipu-color.png" }, xai: { label: "Grok", file: "grok.png" },
-};
 const PLATFORMS: Record<string, string> = { xiaohongshu: "小红书", weibo: "微博", douyin: "抖音", bilibili: "B站", zhihu: "知乎", kuaishou: "快手", tieba: "贴吧", jd: "京东", taobao: "淘宝", pdd: "拼多多" };
 const STATUS: Record<string, string> = { running: "执行中", queued: "排队中", pausing: "正在暂停", paused: "已暂停", needs_input: "需要确认", candidate_ready: "待验证", cancelling: "正在停止", cancelled: "已停止", failed: "失败", completed: "已完成" };
 const FILTERS: Record<Filter, string> = { all: "全部任务", active: "进行中", attention: "待处理", completed: "近7天完成" };
@@ -99,7 +93,7 @@ export function Dashboard() {
     finally { setRefreshing(false); }
   }
   const connections = models.data?.connections ?? [];
-  const choices = taskModelChoices([], connections, false, undefined, undefined, true);
+  const choices = taskModelChoices([], connections, false);
   const localModels = new Set(choices.filter(choice => choice.group === "本地模型").map(choice => choice.model.toLowerCase()));
   const cloud = connections.filter(connection => !["local", "managed_private"].includes(connection.locality || "") && !(connection.models?.length && connection.models.every(model => model.current_catalog === false)));
   const providerList = (models.data?.presets ?? []).map(preset => {
@@ -145,13 +139,11 @@ export function Dashboard() {
         <section aria-labelledby="platform-services-title">
           <div className="mb-3 flex items-center justify-between"><h2 id="platform-services-title" className="font-semibold">平台服务</h2>{manager && <Link className={LINK} to="/settings?section=diagnostics">运行与诊断<ArrowRight className="h-3 w-3" /></Link>}</div>
           <div className="grid gap-4 min-[1280px]:grid-cols-3">
-            <ServiceCard title="模型与连接" icon={<Cpu className="h-5 w-5 text-primary" />} subtitle={models.data ? <>本地模型 · {localModels.size} 个已配置<br />云端供应商 · {providerList.filter(p => p.configured).length} 个已配置</> : "当前账号获准使用的模型"} footer={<><span>彩色已配 · 灰色未配</span><Link className={LINK} to="/settings?section=models">管理连接<ArrowRight className="h-3 w-3" /></Link></>}>
+            <ServiceCard title="模型与连接" icon={<Cpu className="h-5 w-5 text-primary" />} subtitle={models.data ? <>本地模型 · {localModels.size} 个可用<br />云端供应商 · {providerList.filter(p => p.configured).length} 个已配置</> : "当前账号获准使用的模型"} footer={<><span>彩色已配 · 灰色未配</span><Link className={LINK} to="/settings?section=models">管理连接<ArrowRight className="h-3 w-3" /></Link></>}>
               <LoadState label="模型列表" loading={models.isPending} error={models.isError} stale={!!models.data} retry={() => void models.refetch()} />
               {models.data && <div className="grid auto-rows-[52px] grid-cols-2 gap-x-2">
                 {(expandedProviders ? providerList : providerList.slice(0, 8)).map(provider => <div key={provider.preset_id} data-provider={provider.preset_id} title={`${provider.label || provider.display_name}：${provider.configured ? `已配置（${provider.scope}）；连接健康请查看验证记录` : "未配置 API Key"}`} className="my-1 flex min-w-0 items-center gap-2 rounded-lg border border-border bg-muted/20 px-2">
-                  <span className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-muted/60", provider.preset_id === "kimi" && "bg-slate-900")}>
-                    {provider.file ? <img src={`/overview-brands/${provider.file}`} alt="" className={cn("h-5 w-5 object-contain", provider.preset_id === "xai" && "dark:invert", !provider.configured && "grayscale opacity-45")} /> : provider.preset_id === "openai" ? <SiOpenai aria-hidden className={cn("h-5 w-5", !provider.configured && "text-muted-foreground")} /> : <Cpu className="h-5 w-5 text-muted-foreground" />}
-                  </span><span className="min-w-0"><span className={cn("block truncate text-sm", !provider.configured && "text-muted-foreground")}>{provider.label || provider.display_name}</span><span className="block truncate text-[11px] text-muted-foreground">{provider.configured ? provider.scope : "未配置"}</span></span>
+                  <ProviderLogo id={provider.preset_id} configured={provider.configured} /><span className="min-w-0"><span className={cn("block truncate text-sm", !provider.configured && "text-muted-foreground")}>{provider.label || provider.display_name}</span><span className="block truncate text-[11px] text-muted-foreground">{provider.configured ? provider.scope : "未配置"}</span></span>
                 </div>)}
               </div>}
               {(providerList.length > 8 || custom.length > 0) && <Button variant="link" size="sm" aria-expanded={expandedProviders} onClick={() => setExpandedProviders(value => !value)}>{expandedProviders ? "收起" : "更多连接"}</Button>}
@@ -163,7 +155,7 @@ export function Dashboard() {
                 const label = cookie.status === "valid" ? "有效" : cookie.status === "invalid" ? "失效" : "未检查";
                 return <div key={cookie.platform} tabIndex={0} aria-label={`${PLATFORMS[cookie.platform] || cookie.platform}：${label}，${dateLabel(cookie.checked_at)}`} title={`上次检查：${label} · ${dateLabel(cookie.checked_at)}`} className="flex min-w-0 items-center gap-1.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
                   <CircleDot aria-hidden className={cn("h-3 w-3 shrink-0", cookie.status === "valid" ? "text-emerald-600 dark:text-emerald-400" : cookie.status === "invalid" ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground")} />
-                  <img src={`/overview-brands/${cookie.platform}.png`} alt="" className={cn("h-5 w-5 shrink-0 rounded object-contain", cookie.status !== "valid" && "grayscale opacity-50")} /><span className="min-w-0"><span className="block truncate text-sm">{PLATFORMS[cookie.platform] || cookie.platform}</span><span className="block text-[11px] text-muted-foreground">{label}</span></span>
+                  <OptionalBrandImage src={`/overview-brands/${cookie.platform}.png`} className={cn("h-5 w-5 shrink-0 rounded object-contain", cookie.status !== "valid" && "grayscale opacity-50")} /><span className="min-w-0"><span className="block truncate text-sm">{PLATFORMS[cookie.platform] || cookie.platform}</span><span className="block text-[11px] text-muted-foreground">{label}</span></span>
                 </div>;
               })}</div>}
             </ServiceCard>

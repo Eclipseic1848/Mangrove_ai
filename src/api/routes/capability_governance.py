@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from src.api.auth import get_current_user, require_admin
+from src.api.auth import get_current_user, require_admin, require_super_admin
 from src.api.catalog_actor import catalog_actor_from_user
 from src.capability_catalog import (
     CapabilityCatalog,
@@ -28,11 +28,13 @@ from src.config.settings import settings
 router = APIRouter(
     prefix="/api/capability-governance",
     tags=["capability-governance"],
+    dependencies=[Depends(require_super_admin)],
 )
 
 admin_router = APIRouter(
     prefix="/api/capability-governance/admin",
     tags=["capability-governance"],
+    dependencies=[Depends(require_super_admin)],
 )
 
 

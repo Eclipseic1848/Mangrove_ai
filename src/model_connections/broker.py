@@ -8,6 +8,7 @@ from src.timezone import now as beijing_now
 import hashlib
 import ipaddress
 import json
+import re
 from pathlib import Path
 import secrets
 import uuid
@@ -119,6 +120,11 @@ class ConnectionBroker:
         if preference and preference["connection_id"] == "__local__":
             from src.llm.provider import list_models
             preference["available"] = allow_local and preference["model_id"] in list_models().get("local", [])
+        elif preference and preference["available"]:
+            try:
+                self.freeze_connection_for_new_task(owner_user_id, preference["connection_id"], model_id=preference["model_id"])
+            except (ConnectionError, GrantError):
+                preference["available"] = False
         return preference
 
     def clear_usage_preference(self, owner_user_id: str) -> None:
@@ -138,6 +144,8 @@ class ConnectionBroker:
             if not allow_local or model_id not in list_models().get("local", []):
                 raise ConnectionError("该本地模型未配置或你无权使用")
         try:
+            if connection_id != "__local__":
+                self.freeze_connection_for_new_task(owner_user_id, connection_id, model_id=model_id)
             self._repository.set_usage_preference(
                 owner_user_id,
                 connection_id,
@@ -145,7 +153,7 @@ class ConnectionBroker:
                 allow_local=allow_local,
             )
             return self.get_usage_preference(owner_user_id, allow_local=allow_local) or {}
-        except ValueError as exc:
+        except (ValueError, GrantError) as exc:
             raise ConnectionError(str(exc)) from exc
 
     def import_legacy_connection(
@@ -222,6 +230,32 @@ class ConnectionBroker:
             None,
         )
 
+    def verified_model_preset(
+        self, owner_user_id: str, connection_id: str, connection_version: str, model_id: str,
+    ) -> ProviderModelPreset | None:
+        """只返回冻结官方云连接的可信容量，不向编排器暴露端点或凭证。"""
+        connection = self._repository.get_authorized_internal(connection_id, owner_user_id)
+        if (connection is None or _connection_version(connection) != connection_version
+                or connection["locality"] != "public_external"
+                or not self._repository.connection_model_available(connection_id, model_id)):
+            return None
+        summary = self.get_connection(owner_user_id, connection_id)
+        preset = PRESETS_BY_ID.get(summary.get("preset_id")) if summary else None
+        if not preset or model_id not in preset.models:
+            return None
+        protocols = {preset.api_format}
+        if preset.preset_id in {"deepseek", "qwen"}:
+            protocols.update({"openai_chat_completions", "openai_responses"})
+        if connection["api_format"] not in protocols:
+            return None
+        endpoint = str(connection["base_url"]).rstrip("/")
+        # 同名自定义服务不能继承官方容量；地域地址只能匹配目录内的固定模板。
+        templates = [preset.base_url, *(url for _key, _label, url in preset.regions)]
+        if not any(re.fullmatch(re.escape(url.rstrip("/")).replace(
+                re.escape("{workspace}"), r"[a-zA-Z0-9][a-zA-Z0-9-]{0,62}"), endpoint) for url in templates):
+            return None
+        return preset.model_preset(model_id)
+
     def delete_connection(
         self,
         connection_id: str,
@@ -231,10 +265,19 @@ class ConnectionBroker:
     ) -> bool:
         """按 Owner/管理权限删除连接并清除对应在线密文。"""
 
+        try:
+            connection = self._repository.configuration(connection_id, actor_user_id, can_manage)
+        except ValueError:
+            return False
+        key = self._vault.decrypt(connection["ciphertext"]) if connection["ciphertext"] else ""
+        fingerprints = [_legacy_target_fingerprint(connection["base_url"], item["model_id"], key, connection["api_format"])
+            for item in connection["models"]] if connection["owner_scope"] == "platform_shared" else []
         return self._repository.delete_authorized(
             connection_id,
             actor_user_id,
             can_manage=can_manage,
+            expected_version=connection["version"],
+            deleted_fingerprints=fingerprints,
         )
 
     async def retry_models(
@@ -413,6 +456,8 @@ class ConnectionBroker:
         self,
         owner_user_id: str,
         connection_id: str,
+        *,
+        model_id: str | None = None,
     ) -> ConnectionBinding:
         """读取连接当前版本，供 TaskRevision 以非敏感引用冻结。"""
 
@@ -422,11 +467,48 @@ class ConnectionBroker:
         )
         if connection is None:
             raise GrantError("模型连接不存在或无权访问")
+        if model_id is not None and not self._repository.connection_model_available(connection_id, model_id):
+            raise ConnectionError("所选模型已不可用，请重新选择")
         return ConnectionBinding(
             connection_id=connection_id,
             connection_version=_connection_version(connection),
             model=str(connection["model"]),
         )
+
+    def freeze_connection_for_new_task(self, owner_user_id: str, connection_id: str, *, model_id: str | None = None) -> ConnectionBinding:
+        """新选型共用目录校验；历史任务恢复仍读取原冻结连接。"""
+        connection = self.get_connection(owner_user_id, connection_id)
+        if connection is None:
+            raise GrantError("模型连接不存在或无权访问")
+        selected_model = model_id or connection["default_model"]
+        if connection["status"] != "verified" or not any(
+            item["model_id"] == selected_model and item["status"] == "available"
+            and item["enabled"] and item.get("current_catalog") is not False
+            for item in connection.get("models", [])
+        ):
+            raise ConnectionError("所选模型已不可用，请重新选择；不会自动替换模型")
+        return self.freeze_connection(owner_user_id, connection_id, model_id=selected_model)
+
+    def legacy_model_available(self, base_url: str, model: str, api_key: str, api_format: str = "openai_chat_completions") -> bool:
+        """旧配置只与同端点、同凭据、同型号的管理状态关联。"""
+        matches = [row for row in self._repository.legacy_model_targets(base_url, model)
+            if row["api_format"] == api_format and (not row["ciphertext"] or self._vault.decrypt(row["ciphertext"]) == api_key)]
+        if matches:
+            return any(row["status"] == "verified" and row["model_status"] == "available" and row["enabled"] and row["current_catalog"] for row in matches)
+        # 无鉴权服务忽略客户端的占位 Key（例如本地默认 local），不借此绕过启停。
+        targets = {_legacy_target_fingerprint(base_url, model, key, api_format) for key in (api_key, "")}
+        for record in self._repository.legacy_model_imports():
+            if record["source_key"] == "deleted_model_target":
+                if record["source_fingerprint"] in targets:
+                    return False
+            else:
+                # 兼容此前已删除的导入记录；原导入哈希使用未经去尾斜杠的地址。
+                for endpoint in (base_url.rstrip("/"), base_url.rstrip("/") + "/"):
+                    for key in (api_key, ""):
+                        fingerprint = hashlib.sha256("\0".join(["global", record["source_key"], endpoint, api_format, model, key]).encode("utf-8")).hexdigest()
+                        if fingerprint == record["source_fingerprint"]:
+                            return False
+        return True
 
     def issue_grant(
         self,
@@ -477,17 +559,20 @@ class ConnectionBroker:
         if not resolved_grant_id.startswith("grant_") or len(resolved_grant_id) > 160:
             raise GrantError("Grant 身份格式无效")
         token = secrets.token_urlsafe(32)
-        self._repository.create_grant(
-            grant_id=resolved_grant_id,
-            token_hash=_token_hash(token),
-            owner_user_id=owner_user_id,
-            task_id=task_id,
-            revision=revision,
-            run_id=run_id,
-            connection=connection,
-            purpose=purpose,
-            expires_at=expires_at.isoformat(),
-        )
+        try:
+            self._repository.create_grant(
+                grant_id=resolved_grant_id,
+                token_hash=_token_hash(token),
+                owner_user_id=owner_user_id,
+                task_id=task_id,
+                revision=revision,
+                run_id=run_id,
+                connection=connection,
+                purpose=purpose,
+                expires_at=expires_at.isoformat(),
+            )
+        except ValueError:
+            raise GrantError("模型连接或型号已变化，请重新选择") from None
         return AccessGrant(
             grant_id=resolved_grant_id,
             token=token,
@@ -788,6 +873,9 @@ class ConnectionBroker:
             raise GrantError("模型连接 Grant 已过期")
         if grant["connection_status"] != "verified":
             raise GrantError("模型连接已停用")
+        # 发送与流式检查都核对型号，覆盖签发与停用并发产生的旧授权。
+        if grant["model_status"] != "available" or not grant["model_enabled"]:
+            raise GrantError("所选模型已停用或删除")
         if grant["secret_id"] != grant["current_secret_id"]:
             raise GrantError("模型连接版本已轮换")
         if grant["secret_id"] is not None and not grant["ciphertext"]:
@@ -1625,6 +1713,10 @@ def get_default_broker() -> ConnectionBroker:
             provider_timeout_seconds=settings.pi_runtime_timeout_seconds,
         )
     return _default_broker
+
+
+def _legacy_target_fingerprint(base_url: str, model: str, api_key: str, api_format: str) -> str:
+    return hashlib.sha256("\0".join([base_url.rstrip("/"), api_format, model, api_key]).encode("utf-8")).hexdigest()
 
 
 def _token_hash(token: str) -> str:

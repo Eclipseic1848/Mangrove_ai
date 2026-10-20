@@ -127,7 +127,10 @@ def _public_operation(row):
     plan=json.loads(row['plan_json'])
     with closing(_connection()) as connection:
         completed=[r[0] for r in connection.execute("SELECT source_key FROM source_deletions WHERE owner_id=? AND operation_id=? AND state='deleted' ORDER BY source_key",(row['owner_id'],row['operation_id']))]
-    return dict(operation_id=row['operation_id'],task_id=row['task_id'],state=row['state'],completed_source_keys=completed,retained_source_keys=[x['source_key'] for x in plan['objects'] if x['disposition']=='keep_shared'],affected_tasks=plan['affected_tasks'],error_code=row['error_code'],message=row['error_code'])
+    message=row['error_code']
+    if not message and plan.get('external_runtime_runs'):
+        message='本次仅清理服务器上的任务和资料；旧主机的运行副本未访问或删除。'
+    return dict(operation_id=row['operation_id'],task_id=row['task_id'],state=row['state'],completed_source_keys=completed,retained_source_keys=[x['source_key'] for x in plan['objects'] if x['disposition']=='keep_shared'],affected_tasks=plan['affected_tasks'],error_code=row['error_code'],message=message)
 
 
 def get_operation(owner_id,operation_id):
@@ -262,9 +265,11 @@ def _remove_object(owner_id,item):
 
 
 def _cleanup_runtime_copies(owner_id,task_ids):
-    from pathlib import Path
+    from pathlib import Path,PureWindowsPath
+    from src.services.managed_paths import ManagedPathCodec
     import shutil
     root=Path(settings.semantic_execution_root).resolve()
+    external_runtime_runs=[]
     with closing(_connection()) as connection:
         for task_id in task_ids:
             selected=task_ids[task_id] if isinstance(task_ids,dict) else None
@@ -288,13 +293,37 @@ def _cleanup_runtime_copies(owner_id,task_ids):
             if selected is not None: rows=[row for row in rows if row['revision'] in selected]
             for row in rows:
                 if row['workspace_root']:
-                    path=Path(row['workspace_root']).resolve()
+                    raw=row['workspace_root'];path=Path(raw)
+                    external=False
+                    if not path.is_absolute() or not path.is_relative_to(root):
+                        codec=ManagedPathCodec(root,legacy_anchor=('data','semantic-executions'))
+                        normalized=raw.replace('\\','/')
+                        if normalized.startswith('data/semantic-executions/'):
+                            normalized=normalized[len('data/semantic-executions/'):]
+                        try:
+                            decoded=codec.decode(normalized)
+                            external=normalized.startswith('/') or PureWindowsPath(normalized).is_absolute()
+                            if external:
+                                relative=codec._legacy_relative(normalized,windows=PureWindowsPath(normalized).is_absolute())
+                            else:
+                                relative=normalized.removeprefix(codec.PREFIX)
+                            path=root/relative
+                            if decoded!=path: raise ValueError('unsafe_runtime_path')
+                        except ValueError as error:
+                            raise ValueError('unsafe_runtime_path') from error
                     owner=hashlib.sha256(owner_id.encode()).hexdigest()[:16]
                     expected=[root/family/owner/task_id/('r'+str(row['revision']))/str(row['run_id']) for family in ('agentic-vnext','coremind-runs/coremind')]
-                    if path not in expected or path==root or not path.is_relative_to(root) or Path(row['workspace_root']).is_symlink():
+                    if path not in expected or path==root or path.resolve()!=path or not path.is_relative_to(root):
                         raise ValueError('unsafe_runtime_path')
+                    cursor=path
+                    while cursor!=root:
+                        if cursor.is_symlink() or getattr(cursor,'is_junction',lambda:False)(): raise ValueError('unsafe_runtime_path')
+                        cursor=cursor.parent
                     # 正式Publisher在独立publications目录；只删精确已停止Run副本。
                     if path.exists(): shutil.rmtree(path)
+                    # 冻结锚点只定位本机副本，不能把旧宿主机也记成已物理清理。
+                    if external:
+                        external_runtime_runs.append(dict(task_id=task_id,revision=row['revision'],run_id=row['run_id']))
                 connection.execute("UPDATE agentic_runtime_runs SET request_json=NULL,candidates_json='[]',verification_json=NULL,failure_json=NULL WHERE user_id=? AND task_id=? AND revision=?",(owner_id,task_id,row['revision']))
             for runtime_row in rows:
                 connection.execute('DELETE FROM agentic_runtime_events WHERE user_id=? AND task_id=? AND revision=?',(owner_id,task_id,runtime_row['revision']))
@@ -323,6 +352,7 @@ def _cleanup_runtime_copies(owner_id,task_ids):
                     connection.execute("UPDATE semantic_harness_attempts SET tool_result_json=NULL,verification_json=NULL,repair_decision_json=NULL WHERE user_id=? AND run_id=?",(owner_id,revision['run_id']))
                     connection.execute('DELETE FROM semantic_harness_events WHERE user_id=? AND run_id=?',(owner_id,revision['run_id']))
         connection.commit()
+    return external_runtime_runs
 
 
 async def _continue_operation(owner_id,operation_id,manager):
@@ -380,7 +410,12 @@ async def _continue_operation(owner_id,operation_id,manager):
             _set_state(owner_id,operation_id,'cleaning')
             token=_cleanup_operation.set(operation_id)
             try:
-                _cleanup_runtime_copies(owner_id,task_ids)
+                external=_cleanup_runtime_copies(owner_id,task_ids)
+                if external:
+                    retained=plan.setdefault('external_runtime_runs',[])
+                    retained.extend(item for item in external if item not in retained)
+                    with closing(_connection()) as connection:
+                        connection.execute('UPDATE source_deletion_operations SET plan_json=?,updated_at=? WHERE owner_id=? AND operation_id=?',(_json(plan),_now(),owner_id,operation_id));connection.commit()
                 for item in targets:
                     if item['source_key'] not in get_operation(owner_id,operation_id)['completed_source_keys']:
                         _remove_object(owner_id,item)
@@ -407,6 +442,8 @@ def _reconfirm_operation(owner_id,operation_id,token,policy):
         if plan['plan_token']!=token or not plan['can_execute']: raise ValueError('confirmation_changed')
         minimal=dict(task_id=current['task_id'],shared_policy=policy,objects=[{k:v for k,v in x.items() if k not in {'label','acquired_at','time_kind','media_type','size_bytes'}} for x in plan['objects']],affected_tasks=plan['affected_tasks'])
         minimal['stopped_tasks']=prior.get('stopped_tasks',[])
+        if prior.get('external_runtime_runs'):
+            minimal['external_runtime_runs']=prior['external_runtime_runs']
         with closing(_connection()) as connection:
             connection.execute('BEGIN IMMEDIATE')
             for item in minimal['objects']:

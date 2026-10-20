@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { PageGuide } from "@/components/onboarding/PageGuide";
 import { Link, useSearchParams } from "react-router-dom";
 import {
@@ -43,12 +43,13 @@ const SETTINGS_SECTIONS: Array<{
   description: string;
   icon: typeof UserRound;
   managerOnly?: boolean;
+  superOnly?: boolean;
 }> = [
   { key: "personal", label: "我的设置", description: "外观与个人任务默认项", icon: UserRound },
   { key: "models", label: "模型与连接", description: "个人 Key 与可用共享连接", icon: Cpu },
   { key: "credentials", label: "采集账号", description: "只作用于自己的平台登录凭证", icon: KeyRound },
   { key: "platform", label: "平台配置", description: "共享服务、采集与通知", icon: SlidersHorizontal, managerOnly: true },
-  { key: "governance", label: "扩展工具管理", description: "查看工具状态、验证与开放范围", icon: ShieldCheck, managerOnly: true },
+  { key: "governance", label: "扩展工具管理", description: "查看工具状态、验证与开放范围", icon: ShieldCheck, superOnly: true },
   { key: "diagnostics", label: "运行与诊断", description: "连接器、路由和采集引擎状态", icon: Activity, managerOnly: true },
 ];
 
@@ -74,7 +75,7 @@ function DomainHealthPanel() {
     setReleasing(domain);
     try {
       await api.del(`/api/config/domain-health/${encodeURIComponent(domain)}`);
-      toast.success(`${domain} 已释放，下次任务重新按 tier 正常路由`);
+      toast.success(`${domain} 已解除临时调整`);
       load();
     } catch (e: any) {
       toast.error(e.message || "释放失败");
@@ -92,8 +93,7 @@ function DomainHealthPanel() {
           <ShieldAlert className="h-4 w-4 text-primary" /> 反爬自动增补
         </CardTitle>
         <p className="text-xs text-muted-foreground">
-          非隐身引擎（article/site_crawler/firecrawl/crawl4ai/simple_http）近期持续失败的域名会被临时短路，优先走
-          Camoufox；30 分钟无新失败自动解除，确认是误判可在此立即释放。
+          同一域名近期多次采集失败时，系统会临时优先尝试反爬引擎；记录保留 30 分钟，过期后恢复常规顺序。误判可手动解除。
         </p>
       </CardHeader>
       <CardContent className="space-y-2">
@@ -104,7 +104,7 @@ function DomainHealthPanel() {
         {loading && !loaded ? (
           <p className="py-3 text-center text-sm text-muted-foreground">加载中…</p>
         ) : domains.length === 0 ? (loadError ? null :
-          <p className="py-3 text-center text-sm text-muted-foreground">当前没有被短路的域名</p>
+          <p className="py-3 text-center text-sm text-muted-foreground">当前没有临时调整的域名</p>
         ) : (
           domains.map(([domain, stat]) => (
             <div
@@ -212,7 +212,7 @@ function SettingsContent() {
   const [searchParams, setSearchParams] = useSearchParams();
   const manager = isAdminish(user?.role);
   const requestedSection = searchParams.get("section") as SettingsSection | null;
-  const allowedSections = SETTINGS_SECTIONS.filter((item) => !item.managerOnly || manager);
+  const allowedSections = SETTINGS_SECTIONS.filter((item) => (!item.managerOnly || manager) && (!item.superOnly || user?.role === "super_admin"));
   const section = allowedSections.some((item) => item.key === requestedSection)
     ? requestedSection!
     : "personal";
@@ -233,12 +233,12 @@ function SettingsContent() {
     setSearchParams(params, { replace: true });
   };
 
-  const load = () => {
+  const load = useCallback(() => {
     setOverviewLoading(true);
     api.get("/api/overview").then(value => { setOv(value); setOverviewError(false); })
       .catch(() => setOverviewError(true)).finally(() => setOverviewLoading(false));
-  };
-  useEffect(load, []);
+  }, []);
+  useEffect(() => { if (section === "diagnostics" && manager) load(); }, [section, manager, load]);
 
   const runTest = async (target: string) => {
     setTesting(target);
@@ -347,10 +347,11 @@ function SettingsContent() {
             {section === "models" && <ModelConnectionsPanel isManager={manager} initialScope={searchParams.get("scope") === "personal" ? "personal" : "platform"} />}
             {section === "credentials" && <SelfConfigCenter />}
             {section === "platform" && manager && <AdminConfigCenter />}
-            {section === "governance" && manager && <CapabilityGovernancePanel />}
+            {section === "governance" && user?.role === "super_admin" && <CapabilityGovernancePanel />}
 
             {section === "diagnostics" && manager && (
               <>
+                {overviewLoading && <p role="status" className="text-sm text-muted-foreground">正在读取运行状态…</p>}
                 {overviewError && <div role="alert" className="flex flex-wrap items-center gap-2 text-sm text-red-700 dark:text-red-300">
                   <span>{ov ? "配置状态更新失败，当前显示上次读取的数据。" : "配置状态读取失败，请重试。"}</span>
                   <Button variant="outline" size="sm" disabled={overviewLoading} onClick={load}>重试读取配置</Button>

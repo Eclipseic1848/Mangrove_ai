@@ -96,7 +96,11 @@ def test_old_catalog_models_remain_frozen_but_are_not_new_task_choices(tmp_path)
 
 
 @pytest.mark.parametrize("role", ["user", "admin", "super_admin"])
-def test_incorrect_imported_local_model_is_not_current_but_history_remains(tmp_path, role):
+def test_incorrect_imported_local_model_is_not_current_but_history_remains(tmp_path, monkeypatch, role):
+    monkeypatch.setattr(settings, "llm_model_name", "Qwen3.6-35B-A3B")
+    monkeypatch.setattr(settings, "llm_base_url", "http://local.example/v1")
+    monkeypatch.setattr(settings, "local_extra_models",
+        "Qwen3.8-27B@http://local.example/v1,Qwen3.5-35B-A3B@http://local.example/v1")
     repository = ModelConnectionRepository(str(migrated_webui_database(tmp_path / "local-catalog.db")))
     broker = ConnectionBroker(repository=repository, vault=FernetCredentialVault.generate())
     saved = []
@@ -108,7 +112,7 @@ def test_incorrect_imported_local_model_is_not_current_but_history_remains(tmp_p
     _, client = _client(user_id="admin-a" if role != "user" else "user-a", role=role, broker=broker)
     items = client.get("/api/model-connections").json()["items"]
     current = {model["model_id"] for item in items for model in item["models"] if model["current_catalog"]}
-    assert current == {"Qwen3.8-27B", "Qwen3.6-35B-A3B", "Qwen3.5-35B-A3B", "Qwen3-30B-A3B"}
+    assert current == {"Qwen3.8-27B", "Qwen3.6-35B-A3B", "Qwen3.5-35B-A3B"}
     assert broker.freeze_connection("user-a", saved[0]["connection_id"]).model == "Qwen3.8-27B-FP8"
     # 只退役错误的历史导入条目，不禁止未来独立配置同名真实模型。
     added = repository.create_managed(created_by="admin-a", display_name="独立模型",
@@ -118,13 +122,15 @@ def test_incorrect_imported_local_model_is_not_current_but_history_remains(tmp_p
     assert next(item for item in items if item["connection_id"] == added["connection_id"])["models"][0]["current_catalog"] is True
 
 
-def test_local_default_preference_requires_admin_and_current_configuration(tmp_path):
+def test_local_default_preference_requires_admin_and_current_configuration(tmp_path, monkeypatch):
     broker = ConnectionBroker(
         repository=ModelConnectionRepository(str(migrated_webui_database(tmp_path / "webui.db"))),
         vault=FernetCredentialVault.generate(),
     )
     app, client = _client(broker=broker)
     app.dependency_overrides[get_current_user] = lambda: {"user_id": "admin-a", "role": "admin"}
+    import src.model_connections as connection_module
+    monkeypatch.setattr(connection_module, "get_default_broker", lambda: broker)
     body = {"connection_id": "__local__", "model_id": settings.llm_model_name}
     assert client.put("/api/model-connections/preferences/default", json=body).status_code == 200
     assert client.get("/api/model-connections/preferences/default").json()["preference"]["model_id"] == settings.llm_model_name
@@ -807,6 +813,41 @@ async def test_only_manager_controls_platform_models_and_disabling_revokes_grant
     ).json()
     connection_id = saved["connection_id"]
 
+    # 非默认型号停用也必须撤销已有授权，不能只检查整个连接的状态。
+    binding = broker.freeze_connection("member-a", connection_id)
+    with execution_context(ExecutionAuthorization("member-a", 0)):
+        pro_grant = broker.issue_grant(
+            owner_user_id="member-a", connection_id=connection_id,
+            connection_version=binding.connection_version, model_id="deepseek-v4-pro",
+            task_id="task-pro", revision=1, run_id="run-pro", purpose="agent_inference",
+        )
+        default_grant = broker.issue_grant(
+            owner_user_id="member-a", connection_id=connection_id,
+            connection_version=binding.connection_version, model_id="deepseek-flash",
+            task_id="task-flash", revision=1, run_id="run-flash", purpose="agent_inference",
+        )
+    disabled_model = admin.patch(
+        f"/api/model-connections/{connection_id}/models/deepseek-v4-pro",
+        json={"enabled": False},
+    )
+    assert disabled_model.status_code == 200
+    assert disabled_model.json()["status"] == "verified"
+    with pytest.raises(GrantError, match="撤销|停用"):
+        await broker.relay(
+            grant_token=pro_grant.token, protocol_path="/chat/completions", method="POST",
+            headers={"content-type": "application/json"},
+            body=json.dumps({"model": pro_grant.model, "messages": []}).encode(),
+        )
+    result = await broker.relay(
+        grant_token=default_grant.token, protocol_path="/chat/completions", method="POST",
+        headers={"content-type": "application/json"},
+        body=json.dumps({"model": default_grant.model, "messages": []}).encode(),
+    )
+    assert result.status_code == 200
+    admin.patch(f"/api/model-connections/{connection_id}/models/deepseek-v4-pro", json={"enabled": True})
+    with pytest.raises(GrantError, match="撤销"):
+        broker._resolve_active_grant(pro_grant.token)
+
     denied_retry = member.post(
         f"/api/model-connections/{connection_id}/models/retry",
         json={"model_ids": ["deepseek-v4-pro"]},
@@ -1324,7 +1365,12 @@ def test_legacy_user_key_import_is_idempotent_and_never_calls_provider(
     assert "legacy-personal-secret-7788" not in ciphertext
 
 
-def test_imported_lan_connection_without_key_can_be_verified(tmp_path):
+def test_imported_lan_connection_without_key_can_be_verified(tmp_path, monkeypatch):
+    from src.config.settings import settings
+    monkeypatch.setattr(settings, "llm_base_url", "http://192.168.50.10:6012/v1")
+    monkeypatch.setattr(settings, "llm_model_name", "Qwen3.6-35B-A3B")
+    monkeypatch.setattr(settings, "local_extra_models", "")
+
     def provider(request: httpx.Request) -> httpx.Response:
         assert request.headers.get("authorization") is None
         assert request.url.path.endswith("/chat/completions")
@@ -1363,6 +1409,14 @@ def test_imported_lan_connection_without_key_can_be_verified(tmp_path):
 
     assert verified["status"] == "verified"
     assert verified["models"][0]["status"] == "available"
+    assert broker.legacy_model_available("http://192.168.50.10:6012/v1", "Qwen3.6-35B-A3B", "")
+    connection_id = str(imported["connection_id"])
+    broker.set_model_enabled(owner_user_id="admin-a", connection_id=connection_id, can_manage=True,
+        model_id="Qwen3.6-35B-A3B", enabled=False)
+    assert not broker.legacy_model_available("http://192.168.50.10:6012/v1", "Qwen3.6-35B-A3B", "")
+    broker.delete_connection(connection_id, "admin-a", can_manage=True)
+    # 原环境变量仍在，但已删除的导入不能重新变成不受管理的直连选项。
+    assert not broker.legacy_model_available("http://192.168.50.10:6012/v1", "Qwen3.6-35B-A3B", "")
     with sqlite3.connect(tmp_path / "webui.db") as conn:
         assert conn.execute(
             "SELECT COUNT(*) FROM model_connection_secrets"

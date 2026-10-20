@@ -65,8 +65,11 @@ def _route_after_planner(state: ConductorState) -> str:
 
 
 def _route_after_collect(state: ConductorState) -> str:
+    if state.get("project_result"):
+        return "clean" if state.get("raw_dataset") else "output"
     if state.get("evidence_collection") or state.get("bank_collection"):
-        return "output"
+        from .collection_results import collection_report_ready
+        return "analyze" if collection_report_ready(state) else "output"
     if is_direct_video_manifest(state.get("target_manifest") or []):
         return "video_enrich"
     return "clean" if state.get("raw_dataset") else "end"
@@ -205,7 +208,7 @@ def build_graph(checkpointer=None):
     g.add_edge("target_resolve", "router")
     g.add_edge("schedule", END)
     g.add_edge("router", "collect")
-    g.add_conditional_edges("collect", _route_after_collect, {"video_enrich": "video_enrich", "clean": "clean", "output": "output", "end": END})
+    g.add_conditional_edges("collect", _route_after_collect, {"video_enrich": "video_enrich", "clean": "clean", "analyze": "analyze", "output": "output", "end": END})
     g.add_conditional_edges("video_enrich", _route_after_video_enrich, {"clean": "clean", "checker": "checker"})
     g.add_edge("clean", "analyze")
     g.add_edge("analyze", "checker")
@@ -276,6 +279,7 @@ def _build_init(
     approved_db_write: bool,
     ignore_schedule: bool,
     task_id: Optional[str] = None,
+    task_context_preview: Optional[Dict[str, Any]] = None,
 ) -> ConductorState:
     # task_id 传入则复用（断点续跑同一任务）；否则新建并加 6 位随机后缀，
     # 同一秒并发的多个任务不会共用 downloads/<task_id>/ 目录（并行不踩踏）。
@@ -284,6 +288,7 @@ def _build_init(
     import json
     from src.memory._library_scope import execution_owner
     from src.llm.provider import _bound_chat_identity
+    from copy import deepcopy
     binding = hashlib.sha256(json.dumps([execution_owner(), _bound_chat_identity.get()], ensure_ascii=False).encode("utf-8")).hexdigest()
     return {
         "user_input": user_input,
@@ -296,6 +301,8 @@ def _build_init(
         "execution_started_at": time.time(),
         "approved_db_write": approved_db_write,
         "ignore_schedule": ignore_schedule,
+        "task_context_purpose": "web_research",
+        **({"task_context_preview": deepcopy(task_context_preview)} if task_context_preview is not None else {}),
     }
 
 
@@ -308,6 +315,8 @@ async def _collection_checkpoint_input(graph, init, config):
     keys = ("execution_binding", "user_input", "provider", "model", "session_id", "approved_db_write", "ignore_schedule")
     if any(saved.get(key) != init.get(key) for key in keys):
         raise ValueError("采集检查点与当前身份、模型或任务输入不一致，拒绝恢复")
+    if init.get("task_context_preview") is not None and init["task_context_preview"] != saved.get("task_context_preview"):
+        raise ValueError("采集检查点与本次选择的冻结上下文不一致，拒绝恢复")
     return None
 
 
@@ -333,6 +342,7 @@ async def run_conductor(
     approved_db_write: bool = False,
     ignore_schedule: bool = False,
     task_id: Optional[str] = None,
+    task_context_preview: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """运行一轮 Conductor，返回最终状态字典。
 
@@ -341,7 +351,7 @@ async def run_conductor(
     """
     init = _build_init(
         user_input, messages, provider, model, session_id, approved_db_write,
-        ignore_schedule, task_id,
+        ignore_schedule, task_id, task_context_preview,
     )
     return await _ainvoke(init)
 
@@ -356,6 +366,7 @@ async def astream_conductor(
     approved_db_write: bool = False,
     ignore_schedule: bool = False,
     task_id: Optional[str] = None,
+    task_context_preview: Optional[Dict[str, Any]] = None,
 ) -> AsyncIterator[Tuple[str, Any]]:
     """流式运行 Conductor：
 
@@ -365,7 +376,7 @@ async def astream_conductor(
     """
     init = _build_init(
         user_input, messages, provider, model, session_id, approved_db_write,
-        ignore_schedule, task_id,
+        ignore_schedule, task_id, task_context_preview,
     )
     from src.config.settings import settings as _settings
 

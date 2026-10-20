@@ -922,6 +922,8 @@ def test_runtime_rollout_only_changes_new_tasks_and_p0_restores_legacy(
             headers={"Idempotency-Key": "g3-p0-retry"},
         )
         assert blocked.status_code == 409, blocked.text
+        app_user = {"user_id": "user-a", "execution_generation": 0, "role": "super_admin"}
+        client.app.dependency_overrides[get_current_user] = lambda: app_user
         legacy = client.post(
             "/api/semantic-workspace/tasks",
             json={
@@ -4184,11 +4186,11 @@ def test_create_pi_task_is_idempotent_for_same_http_key(
     assert "幂等键" in conflict.json()["detail"]
 
 
-def test_admin_can_freeze_visible_capability_when_creating_pi_task(
+def test_super_admin_can_freeze_visible_capability_when_creating_pi_task(
     tmp_path,
     monkeypatch,
 ) -> None:
-    """管理员选择必须通过 API 冻结到 revision，不能只停留在前端状态。"""
+    """超级管理员选择必须通过 API 冻结到 revision，不能只停留在前端状态。"""
 
     from src.capability_catalog import SqliteCapabilityCatalogRepository
     from src.conversation_steering import (
@@ -4201,7 +4203,7 @@ def test_admin_can_freeze_visible_capability_when_creating_pi_task(
     client = _client(
         tmp_path,
         monkeypatch,
-        role="admin",
+        role="super_admin",
         pi_runtime=FakePiRuntime(),
     )
     digest = "sha256:" + "a" * 64
@@ -4295,7 +4297,7 @@ def test_admin_can_freeze_visible_capability_when_creating_pi_task(
     assert inherited.json()["items"] == selected.json()["items"]
 
 
-def test_capability_gray_selection_is_admin_only_and_fails_closed(
+def test_capability_gray_selection_is_super_admin_only_and_fails_closed(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -4306,7 +4308,7 @@ def test_capability_gray_selection_is_admin_only_and_fails_closed(
     assert response.status_code == 403
 
     monkeypatch.setattr(settings, "pi_capability_host_enabled", False)
-    admin = _client(tmp_path / "disabled", monkeypatch, role="admin")
+    admin = _client(tmp_path / "disabled", monkeypatch, role="super_admin")
     with admin:
         disabled = admin.get("/api/semantic-workspace/capabilities")
     assert disabled.status_code == 409
@@ -4330,3 +4332,32 @@ def test_runtime_control_wait_does_not_publish_business_clarification(tmp_path, 
         response = client.post(f"/api/semantic-workspace/tasks/{task['task_id']}/answer", json={"answer":"继续", "expected_revision":1,"question_round_id":question["round_id"]}, headers={"Idempotency-Key":"control-answer"})
         assert response.status_code == 409
         assert runtime.start_calls == 1 and not runtime.resume_calls
+
+
+@pytest.mark.parametrize("selection", ["explicit", "connection_default", "saved_default"])
+def test_retired_import_is_rejected_before_new_workspace_task(tmp_path, monkeypatch, selection):
+    client = _client(tmp_path, monkeypatch, role="user", routing_mode=RolloutMode.VNEXT_DEFAULT)
+    queued = []
+    monkeypatch.setattr(runtime_mod._manager, "enqueue", lambda *args: queued.append(args))
+    document, _ = _uploads(tmp_path)
+    monkeypatch.setattr(settings, "llm_model_name", "removed-local")
+    monkeypatch.setattr(settings, "llm_base_url", "http://local.example/v1")
+    monkeypatch.setattr(settings, "local_extra_models", "")
+    broker = ConnectionBroker(repository=ModelConnectionRepository(settings.webui_db_path), vault=FernetCredentialVault.generate())
+    connection = broker._repository.create_managed(created_by="admin-a", display_name="旧本地型号",
+        base_url="http://local.example/v1", model="removed-local", api_format="openai_chat_completions",
+        locality="managed_private", ciphertext=None, key_hint="", verified_at="2026-09-01T00:00:00",
+        preset_version="legacy_imported")
+    broker.set_usage_preference("user-a", connection["connection_id"], "removed-local")
+    monkeypatch.setattr(settings, "llm_model_name", "current-local")
+    monkeypatch.setattr(broker_mod, "_default_broker", broker)
+    body = {"objective_text": "提取合成附件并输出 JSON", "upload_ids": [document], "output_formats": ["json"],
+        "runtime_version": "pi", "external_api_confirmed": True}
+    if selection != "saved_default":
+        body["model_connection_id"] = connection["connection_id"]
+    if selection == "explicit":
+        body["model_connection_model"] = "removed-local"
+    with client:
+        rejected = client.post("/api/semantic-workspace/tasks", json=body)
+        assert rejected.status_code == (409 if selection == "saved_default" else 422), rejected.text
+    assert not queued

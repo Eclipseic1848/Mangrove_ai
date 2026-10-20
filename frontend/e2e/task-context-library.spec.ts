@@ -7,7 +7,8 @@ test.beforeEach(async ({ page }) => {
   await page.route("**/api/**", async route => {
     const url = route.request().url(), body = route.request().postDataJSON();
     let result: any = {};
-    if (url.includes("context-options")) result = { templates, memories };
+    if (new URL(url).pathname === "/api/auth/me") result = { user_id: "owner-a", username: "owner-a", display_name: "工程账号", role: "admin" };
+    else if (url.includes("context-options")) result = { templates, memories };
     else if (url.endsWith("context-preview")) result = { template: body.selection.template ? templates[0] : null, memories: body.selection.memories.length ? memories : [], proposed_changes: { goal_contract: templates[0]?.goal_contract_draft, method: templates[0]?.method_draft }, preview_sha256: "sha256:" + "c".repeat(64) };
     else if (url.endsWith("context-templates")) { result = { ...body.draft, summary_sha256: "sha256:" + "d".repeat(64) }; templates = [...templates.filter(item => item.template_id !== result.template_id), result]; }
     else if (url.includes("context-templates/") && route.request().method() === "DELETE") { templates = []; result = { retired: true }; }
@@ -32,30 +33,30 @@ test("纯文件任务无需手动模板配置即可提交原始要求", async ({
   expect(payload.taskContext).toBeUndefined();
 });
 
-for (const mode of ["web", "mixed"]) test(`${mode}显式应用相同模板记忆与目标输出`, async ({ page }) => {
+for (const mode of ["web", "mixed"]) test(`${mode}保留网页目标而不提交手动模板记忆`, async ({ page }) => {
   await page.goto(`/e2e/fixtures/task-context/index.html?mode=${mode}`);
-  const select = page.getByLabel("任务模板（可选）"); await expect(select).toBeVisible();
-  await select.selectOption(JSON.stringify(["summary", 1])); await page.getByText("个人记忆（可选）", { exact: true }).click(); await page.getByLabel("不补造缺失值", { exact: true }).check();
+  await expect(page.getByLabel("任务模板（可选）")).toHaveCount(0);
+  await expect(page.getByText("个人记忆（可选）", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "管理任务模板与记忆" })).toHaveCount(0);
   const submit = page.getByRole("button", { name: mode === "file" ? "开始执行" : "启动任务", exact: true }); await expect(submit).toBeDisabled();
   await page.getByRole("button", { name: "检查上下文草案", exact: true }).click(); await expect(page.getByText("已检查，可以启动")).toBeVisible();
   await submit.click(); await expect.poll(() => page.evaluate(() => Boolean((window as any).submitted))).toBe(true);
   const payload = await page.evaluate(() => (window as any).submitted);
-  expect(payload.prompt).toBe("按证据汇总费用，不猜测缺失值"); expect(payload.formats).toEqual(["json"]); expect(payload.taskContext.context_selection).toEqual({ template: { template_id: "summary", version: 1 }, memories: [{ memory_id: 1 }] });
+  expect(payload.prompt).toBe("按证据汇总费用，不猜测缺失值"); expect(payload.formats).toEqual(["json"]); expect(payload.taskContext).toBeUndefined();
   expect(payload.uploads.length).toBe(mode === "web" ? 0 : 1); expect(payload.sourceSnapshotIds).toEqual(mode === "file" ? [] : ["snapshot-a"]); if (mode === "file") expect(payload.sourceGoal).toBeUndefined(); else expect(payload.sourceGoal.quantity_requirement).toBe("当前已成功读取页面中有证据的内容");
 });
-test("原位创建编辑取消返回保留输入附件，版本变化不自动应用", async ({ page }) => {
-  await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed"); await page.getByLabel("任务模板（可选）").selectOption(JSON.stringify(["summary", 1]));
+test("库中创建编辑取消返回保留任务输入附件", async ({ page }) => {
+  await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed&library=1");
   await page.getByRole("button", { name: "管理任务模板与记忆" }).click(); await page.getByRole("button", { name: "编辑 证据摘要", exact: true }).click();
   await page.getByRole("textbox", { name: "方法建议", exact: true }).fill("新方法"); await page.getByRole("button", { name: "保存新版本", exact: true }).click();
   await expect(page.getByRole("dialog").getByText("证据摘要 · V2", { exact: true })).toBeVisible(); await page.getByRole("button", { name: "返回原任务", exact: true }).click();
   await expect(page.getByRole("textbox", { name: "任务要求" })).toHaveValue("按证据汇总费用，不猜测缺失值"); await expect(page.getByText("原始附件.csv", { exact: true })).toBeVisible(); await expect(page.getByText("网页证据", { exact: true }).first()).toBeVisible();
-  await expect(page.getByRole("alert")).toContainText("不会自动换成新版");
-  await page.getByLabel("任务模板（可选）").selectOption(JSON.stringify(["summary", 2]));
+  await expect(page.getByLabel("任务模板（可选）")).toHaveCount(0);
   await page.getByRole("button", { name: "管理任务模板与记忆" }).click(); await page.getByLabel("模板名称").fill("取消的新模板"); await page.getByRole("button", { name: "取消编辑", exact: true }).click(); await expect(page.getByLabel("模板名称")).toHaveValue(""); await page.keyboard.press("Escape");
   await expect(page.getByRole("button", { name: "管理任务模板与记忆" })).toBeFocused();
 });
 test("创建模板与记忆，明确失败保留编辑草稿", async ({ page }) => {
-  await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed"); await page.getByRole("button", { name: "管理任务模板与记忆" }).click();
+  await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed&library=1"); await page.getByRole("button", { name: "管理任务模板与记忆" }).click();
   await page.getByLabel("模板名称").fill("新摘要模板"); await page.getByRole("textbox", { name: "目标建议", exact: true }).fill("核对本次资料");
   await page.route("**/context-templates", route => route.fulfill({ status: 422, json: { detail: "建议与当前用户选择冲突，请修改" } }));
   await page.getByRole("button", { name: "保存新版本", exact: true }).click(); await expect(page.getByRole("alert")).toContainText("当前用户选择冲突"); await expect(page.getByLabel("模板名称")).toHaveValue("新摘要模板");
@@ -66,7 +67,7 @@ test("创建模板与记忆，明确失败保留编辑草稿", async ({ page }) 
   await page.getByRole("button", { name: "删除记忆", exact: true }).click(); await expect(page.getByText("金额不四舍五入", { exact: true })).toHaveCount(0);
 });
 test("个人记忆可纠正并保留任务输入", async ({ page }) => {
-  await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed");
+  await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed&library=1");
   await page.getByRole("button", { name: "管理任务模板与记忆" }).click();
   await page.getByRole("button", { name: "编辑记忆：不补造缺失值", exact: true }).click();
   await page.getByRole("textbox", { name: "编辑内容", exact: true }).fill("只使用有来源的事实");
@@ -76,8 +77,8 @@ test("个人记忆可纠正并保留任务输入", async ({ page }) => {
   await expect(page.getByRole("textbox", { name: "任务要求" })).toHaveValue("按证据汇总费用，不猜测缺失值");
   await expect(page.getByText("原始附件.csv", { exact: true })).toBeVisible();
 });
-test("旧预览迟到不能确认新要求，失败可取消选择且保留附件", async ({ page }) => {
-  await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed"); await page.getByLabel("任务模板（可选）").selectOption(JSON.stringify(["summary", 1]));
+test("网页草案迟到不能确认新要求，失败重试保留附件", async ({ page }) => {
+  await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed");
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
   let entered = false;
@@ -87,13 +88,12 @@ test("旧预览迟到不能确认新要求，失败可取消选择且保留附�
   await expect(page.getByRole("button", { name: "检查上下文草案", exact: true })).toBeEnabled(); await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeDisabled();
   await page.unroute("**/context-preview"); await page.route("**/context-preview", route => route.fulfill({ status: 404, json: { detail: "模板已停用" } }));
   await page.getByRole("button", { name: "检查上下文草案", exact: true }).click(); await expect(page.getByRole("alert")).toContainText("模板已停用");
-  await page.getByLabel("任务模板（可选）").selectOption("");
   await page.unroute("**/context-preview");
   await page.getByRole("button", { name: "检查上下文草案", exact: true }).click();
   await expect(page.getByRole("button", { name: "启动任务", exact: true })).toBeEnabled(); await expect(page.getByText("原始附件.csv", { exact: true })).toBeVisible();
 });
 test("模板保存结果未知只允许原版本原内容重放", async ({ page }) => {
-  await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed"); await page.getByRole("button", { name: "管理任务模板与记忆" }).click();
+  await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed&library=1"); await page.getByRole("button", { name: "管理任务模板与记忆" }).click();
   await page.getByLabel("模板名称").fill("未知保存模板"); await page.getByRole("textbox", { name: "目标建议", exact: true }).fill("核对证据");
   const posts: any[] = [];
   await page.route("**/context-templates", async route => { posts.push(route.request().postDataJSON()); await route.fulfill({ status: 503, json: { detail: "保存结果未知" } }); });
@@ -102,7 +102,7 @@ test("模板保存结果未知只允许原版本原内容重放", async ({ page 
   await page.getByRole("button", { name: "返回原任务", exact: true }).click(); await expect(page.getByText("原始附件.csv", { exact: true })).toBeVisible();
 });
 for (const width of [390, 1440]) test(`${width}键盘和明暗焦点域`, async ({ page }) => {
-  await page.setViewportSize({ width, height: 850 }); await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed"); await page.getByRole("button", { name: "管理任务模板与记忆" }).click();
+  await page.setViewportSize({ width, height: 850 }); await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed&library=1"); await page.getByRole("button", { name: "管理任务模板与记忆" }).click();
   for (const dark of [false, true]) {
     await page.evaluate(value => document.documentElement.classList.toggle("dark", value), dark);
     for (let i = 0; i < 16; i++) { await page.keyboard.press("Tab"); expect(await page.evaluate(() => Boolean(document.activeElement?.closest('[role="dialog"]')))).toBe(true); }
@@ -121,28 +121,24 @@ test("旧修订仍明确沿用冻结上下文，不开放隐式更换模板", as
   await expect(page.getByText("网页证据", { exact: true }).first()).toBeVisible();
 });
 
-test("已选记忆失效后可明确移除，刷新不锁死原任务资料", async ({ page }) => {
+test("旧草稿显式选择失效不锁死自动任务，刷新保留资料", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("mangrove_workspace_draft_owner-a_new", JSON.stringify({ templateId: "removed-template", templateVersion: 1, memoryIds: [999] })));
   await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed");
-  await page.getByText("个人记忆（可选）", { exact: true }).click(); await page.getByLabel("不补造缺失值", { exact: true }).check();
-  await page.getByRole("button", { name: "管理任务模板与记忆" }).click();
-  await page.getByRole("button", { name: "删除记忆：不补造缺失值", exact: true }).click();
-  await page.getByRole("button", { name: "删除记忆", exact: true }).click();
-  await expect(page.getByRole("dialog").getByText("不补造缺失值", { exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: "返回原任务", exact: true }).click();
   await page.reload();
-  await expect(page.getByRole("alert")).toContainText("不可用");
-  await page.getByRole("button", { name: "移除已不可用的记忆 1", exact: true }).click();
+  await expect(page.getByLabel("任务模板（可选）")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "移除已不可用的记忆 999", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "检查上下文草案", exact: true }).click();
   await page.getByRole("button", { name: "启动任务", exact: true }).click();
-  await expect.poll(() => page.evaluate(() => (window as any).submitted?.taskContext.context_selection.memories)).toEqual([]);
+  await expect.poll(() => page.evaluate(() => Boolean((window as any).submitted))).toBe(true);
   const payload = await page.evaluate(() => (window as any).submitted);
+  expect(payload.taskContext).toBeUndefined();
   expect(payload.uploads.map((item: any) => item.upload_id)).toEqual(["upload-a"]);
   expect(payload.sourceSnapshotIds).toEqual(["snapshot-a"]); expect(payload.prompt).toBe("按证据汇总费用，不猜测缺失值");
 });
 
 test("未保存模板与记忆离开前确认，保留或明确放弃后返回任务", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 850 });
-  await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed"); await page.getByRole("button", { name: "管理任务模板与记忆" }).click();
+  await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed&library=1"); await page.getByRole("button", { name: "管理任务模板与记忆" }).click();
   await page.getByLabel("模板名称").fill("未保存草稿"); await page.getByRole("textbox", { name: "添加个人记忆", exact: true }).fill("未保存记忆");
   await page.getByRole("button", { name: "返回原任务", exact: true }).click();
   await expect(page.getByRole("alertdialog", { name: "离开未保存编辑" })).toBeVisible();
@@ -161,7 +157,7 @@ test("未保存模板与记忆离开前确认，保留或明确放弃后返回�
 });
 
 test("保存持续未知仍可明确放弃本地编辑返回，不能假称撤销", async ({ page }) => {
-  await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed"); await page.getByRole("button", { name: "管理任务模板与记忆" }).click();
+  await page.goto("/e2e/fixtures/task-context/index.html?mode=mixed&library=1"); await page.getByRole("button", { name: "管理任务模板与记忆" }).click();
   await page.getByLabel("模板名称").fill("未知保存模板"); await page.getByRole("textbox", { name: "目标建议", exact: true }).fill("按原始资料核对");
   const posts: any[] = [];
   await page.route("**/context-templates", route => { posts.push(route.request().postDataJSON()); return route.fulfill({ status: 503, json: { detail: "合成网络未知" } }); });

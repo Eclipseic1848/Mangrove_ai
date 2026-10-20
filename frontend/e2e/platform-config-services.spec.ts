@@ -242,6 +242,7 @@ for (const outcome of ["stop", "unknown", "leave"]) test(`批量 Cookie 检查�
 });
 
 async function mockPlatform(page: Page, role = "admin") {
+  await page.addInitScript(role => localStorage.setItem(`onboarding_all_${JSON.stringify(["audit", role])}`, "skipped"), role);
   const counts = { delete: 0, verify: 0, models: 0, save: 0 };
   const item = (key: string, label: string, value: string, extra = {}) => ({ key, label, value, secret: false, source: "override", default_value: "False", ...extra });
   const groups = [
@@ -285,6 +286,7 @@ for (const [status, label] of [
 
 test("服务一次编辑、密钥掩码、空值与重复提交保护", async ({ page }) => {
   const writes: unknown[] = [];
+  await page.addInitScript(() => localStorage.setItem(`onboarding_all_${JSON.stringify(["audit", "admin"])}`, "skipped"));
   await page.route("**/api/**", async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/auth/me") return route.fulfill({ json: { user_id: "audit", username: "audit", display_name: "合成管理员", role: "admin" } });
@@ -454,6 +456,7 @@ for (const scope of ["personal", "platform"]) for (const outcome of ["valid", "i
     requests.push(route.request().postDataJSON());
     await route.fulfill({ status: outcome === "unknown" ? 503 : 200, json: outcome === "unknown" ? { detail: "响应未知" } : {
       ok: outcome === "valid", saved: outcome === "valid", detail: "新凭证未通过身份验证，原配置未修改",
+      verification: { scope: "identity", status: outcome, reason: outcome === "valid" ? "authenticated" : "login_required" },
     } });
   });
   await page.goto(scope === "platform" ? "/settings?section=platform" : "/settings");
@@ -472,7 +475,11 @@ for (const scope of ["personal", "platform"]) for (const outcome of ["valid", "i
   await expect.poll(() => requests.length).toBe(1);
   expect(requests[0]).toEqual({ key: "mc_cookie_xhs", value: "synthetic-new-cookie", scope });
   if (outcome === "valid") await expect(dialog).toHaveCount(0);
-  else if (outcome === "invalid") await expect(scope === "platform" ? dialog : page.locator("[data-sonner-toast]")).toContainText("原配置未修改");
+  else if (outcome === "invalid") {
+    const failure = scope === "platform" ? dialog.getByRole("alert") : page.locator("[data-sonner-toast][data-type='error']");
+    await expect(failure).toContainText("服务器确认当前请求未登录");
+    await expect(failure).toContainText("原配置未修改");
+  }
   else {
     await expect(dialog.getByRole("button", { name: "验证并更新", exact: true })).toBeDisabled();
     await expect(dialog.getByRole("button", { name: "关闭并核对", exact: true })).toBeVisible();
@@ -481,4 +488,75 @@ for (const scope of ["personal", "platform"]) for (const outcome of ["valid", "i
   expect(counts.verify).toBe(0);
   expect(errors).toEqual([]);
   await page.screenshot({ path: testInfo.outputPath(`reauth-${scope}-${outcome}.png`) });
+});
+
+for (const scope of ["personal", "platform"]) for (const [reason, label] of [
+  ["identity_probe_unsupported", "暂不支持独立身份验证"],
+  ["network_error", "服务器网络请求未完成"],
+  ["challenge_required", "平台要求额外验证"],
+  ["__proto__", "尚未取得明确的登录身份"],
+  ["credential_scope_incomplete", "当前身份接口未确认所需的业务域会话"],
+]) test(`服务器身份未知 ${scope} ${reason} 不自动保存或误报失效`, async ({ page }) => {
+  await mockPlatform(page, scope === "platform" ? "admin" : "user");
+  const item = { key: "mc_cookie_dy", label: "抖音 Cookie", value: "····old", secret: true, set: true, source: "override", group: "cookies" };
+  await page.route("**/api/config", route => route.fulfill({ json: { groups: [{ key: "cookies", label: "共享账号", items: [item] }] } }));
+  await page.route("**/api/config/self", route => route.fulfill({ json: { items: [item] } }));
+  const updates: unknown[] = [];
+  const saves: unknown[] = [];
+  await page.route("**/api/config/reauthenticate", route => {
+    updates.push(route.request().postDataJSON());
+    return route.fulfill({ json: { ok: false, saved: false, detail: "private-cookie-response", verification: { scope: "identity", status: "unknown", reason } } });
+  });
+  await page.route(scope === "platform" ? "**/api/config/batch" : "**/api/config/self/mc_cookie_dy", route => {
+    saves.push(route.request().postDataJSON());
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.goto(scope === "platform" ? "/settings?section=platform" : "/settings");
+  await page.getByRole("button", { name: scope === "platform" ? "共享账号" : "采集账号", exact: true }).click();
+  await page.getByRole("button", { name: scope === "platform" ? "配置 抖音" : "修改", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog).toContainText("验证由服务器执行");
+  if (scope === "platform") await page.getByLabel("抖音 Cookie", { exact: true }).fill("synthetic-new-cookie");
+  else await page.getByPlaceholder("粘贴从浏览器导出的 Cookie").fill("synthetic-new-cookie");
+  await dialog.getByRole("button", { name: "验证并更新", exact: true }).click();
+  const feedback = scope === "platform" ? dialog.getByRole("status") : page.locator("[data-sonner-toast]");
+  await expect(feedback).toContainText(label);
+  await expect(feedback).toContainText("原配置未修改");
+  await expect(feedback).not.toContainText("private-cookie-response");
+  await expect(feedback).not.toContainText("凭证失效");
+  expect(updates).toEqual([{ key: item.key, value: "synthetic-new-cookie", scope }]);
+  expect(saves).toEqual([]);
+  await dialog.getByRole("button", { name: "保存配置", exact: true }).click();
+  await expect.poll(() => saves.length).toBe(1);
+  expect(saves[0]).toEqual(scope === "platform" ? { values: { mc_cookie_dy: "synthetic-new-cookie" } } : { value: "synthetic-new-cookie" });
+  await expect(dialog).toHaveCount(0);
+});
+
+test("个人手动保存 pending 与 503 禁止重复提交", async ({ page }) => {
+  await mockPlatform(page, "user");
+  await page.route("**/api/config/self", route => route.fulfill({ json: { items: [{ key: "mc_cookie_dy", label: "抖音 Cookie", value: "····old", secret: true, set: true, group: "cookies" }] } }));
+  const saves: unknown[] = [];
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  await page.route("**/api/config/self/mc_cookie_dy", async route => {
+    saves.push(route.request().postDataJSON());
+    await pending;
+    await route.fulfill({ status: 503, json: { detail: "合成保存结果未知" } });
+  });
+  await page.goto("/settings");
+  await page.getByRole("button", { name: "采集账号", exact: true }).click();
+  await page.getByRole("button", { name: "修改", exact: true }).click();
+  await page.getByPlaceholder("粘贴从浏览器导出的 Cookie").fill("synthetic-new-cookie");
+  const dialog = page.getByRole("dialog");
+  const save = dialog.getByRole("button", { name: "保存配置", exact: true });
+  await save.evaluate(element => { (element as HTMLButtonElement).click(); (element as HTMLButtonElement).click(); });
+  await expect.poll(() => saves.length).toBe(1);
+  await expect(save).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: /^(验证并更新|处理中…)$/ })).toBeDisabled();
+  release();
+  await expect(page.locator("[data-sonner-toast]")).toContainText("保存结果未知");
+  await expect(save).toBeDisabled();
+  await expect(dialog.getByRole("button", { name: "关闭并核对", exact: true })).toBeVisible();
+  await save.evaluate(element => (element as HTMLButtonElement).click());
+  expect(saves).toEqual([{ value: "synthetic-new-cookie" }]);
 });

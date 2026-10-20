@@ -1,12 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { EVENTS, Joyride, type Step } from "react-joyride";
 import {
-  SiAlibabacloud,
-  SiAnthropic,
-  SiGooglegemini,
-  SiOpenai,
-} from "@icons-pack/react-simple-icons";
-import {
   KeyRound,
   LifeBuoy,
   Loader2,
@@ -15,9 +9,11 @@ import {
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
+import { useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { ProviderLogo } from "@/components/ProviderLogo";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { api, ApiError } from "@/lib/api";
@@ -148,35 +144,6 @@ const MODEL_ROLE_HINTS: Record<string, string> = {
   vision: "适合图文相关需求；当前连接测试只验证文本，图像能力需另行验证。",
 };
 
-function ProviderMark({ id }: { id: string }) {
-  const icons: Record<string, typeof SiOpenai> = {
-    qwen: SiAlibabacloud,
-    openai: SiOpenai,
-    anthropic: SiAnthropic,
-    gemini: SiGooglegemini,
-  };
-  const Icon = icons[id];
-  const initials: Record<string, string> = {
-    deepseek: "DS",
-    qwen: "QW",
-    openai: "OA",
-    anthropic: "AN",
-    gemini: "GM",
-    kimi: "KM",
-    zhipu: "GL",
-  };
-  return (
-    <span
-      className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-foreground text-[11px] font-semibold text-background"
-      aria-hidden="true"
-    >
-      {Icon
-        ? <Icon size={18} title="" />
-        : initials[id] || id.slice(0, 2).toUpperCase()}
-    </span>
-  );
-}
-
 function suggestedPersonalName(
   preset: ProviderPreset,
   connections: ModelConnection[],
@@ -192,6 +159,7 @@ function suggestedPersonalName(
 }
 
 export function ModelConnectionsPanel({ isManager, initialScope = "platform" }: { isManager: boolean; initialScope?: "personal" | "platform" }) {
+  const queryClient = useQueryClient();
   const { theme } = useTheme();
   const [presets, setPresets] = useState<ProviderPreset[]>([]);
   const [connections, setConnections] = useState<ModelConnection[]>([]);
@@ -324,6 +292,11 @@ export function ModelConnectionsPanel({ isManager, initialScope = "platform" }: 
       const nextConnections = (connectionData.items || []) as ModelConnection[];
       setPresets(nextPresets);
       setConnections(nextConnections);
+      if (connectionResult.status === "fulfilled") {
+        queryClient.setQueryData(["model-connections"], connectionResult.value);
+        void queryClient.invalidateQueries({ queryKey: ["models"] });
+        void queryClient.invalidateQueries({ queryKey: ["model-connection-preference"] });
+      }
       setRefreshToken(current => current + 1);
       if (!selectedPresetId && nextPresets[0]) {
         setSelectedPresetId(nextPresets[0].preset_id);
@@ -804,7 +777,7 @@ export function ModelConnectionsPanel({ isManager, initialScope = "platform" }: 
             ) : (
               visibleConnections.map((connection) => (
                 <div key={connection.connection_id} className="flex flex-wrap items-center gap-3 rounded-xl border p-3">
-                  {scope === "personal" && <ProviderMark id={connection.preset_id || "managed"} />}
+                  {scope === "personal" && <ProviderLogo id={connection.preset_id || "managed"} className="h-9 w-9 rounded-xl" />}
                   <div className={cn("min-w-0", scope === "platform" ? "w-full" : "flex-1")}>
                     <div className="flex flex-wrap items-center gap-2">
                       <span className="font-medium">{connection.display_name}</span>

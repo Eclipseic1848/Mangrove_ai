@@ -302,7 +302,8 @@ class TestS4BusinessContent:
             content.content.encode("utf-8")
         ).hexdigest()
 
-    def test_reads_task_output(self, tmp_path) -> None:
+    @pytest.mark.parametrize("managed_path", [False, True])
+    def test_reads_task_output(self, tmp_path, managed_path) -> None:
         resolver, _, _ = _fixture(tmp_path)
         _seed_task(tmp_path / "webui.db")
         output_content = "col,sum\nsales,123\n".encode("utf-8")
@@ -314,12 +315,55 @@ class TestS4BusinessContent:
             output_id="out1", run_id="run-1", owner_id="owner-a",
             file_path=output_path, content=output_content,
         )
+        if managed_path:
+            with sqlite3.connect(tmp_path / "webui.db") as connection:
+                connection.execute(
+                    "UPDATE formal_delivery_outputs SET file_path=? WHERE output_id='out1'",
+                    ("managed:v1/deliveries/out1.csv",),
+                )
         content = resolver.read_business_content(
             _admin(), "workspace-validated-source", 2,
             "task_output", task_owner_id="owner-a",
         )
         assert content.status == "succeeded"
         assert "sales" in content.content
+
+    @pytest.mark.parametrize("stored_path", [
+        "managed:v1/../outside.txt", "managed:v1//outside.txt",
+    ])
+    def test_unsafe_managed_output_fails_typed(self, tmp_path, stored_path) -> None:
+        resolver, _, _ = _fixture(tmp_path)
+        _seed_task(tmp_path / "webui.db")
+        outside = tmp_path / "outside.txt"
+        outside.write_text("不可读取的文件", encoding="utf-8")
+        _seed_output(tmp_path / "webui.db", output_id="out1", run_id="run-1",
+            owner_id="owner-a", file_path=outside, content=outside.read_bytes())
+        with sqlite3.connect(tmp_path / "webui.db") as connection:
+            connection.execute("UPDATE formal_delivery_outputs SET file_path=?", (stored_path,))
+        content = resolver.read_business_content(_admin(), "workspace-validated-source", 2,
+            "task_output", task_owner_id="owner-a")
+        assert content.status == "failed"
+        assert content.failure_reason == "output_invalid"
+
+    def test_managed_output_symlink_fails_typed(self, tmp_path) -> None:
+        resolver, _, execution_root = _fixture(tmp_path)
+        _seed_task(tmp_path / "webui.db")
+        execution_root.mkdir()
+        target = execution_root / "actual.csv"
+        target.write_bytes(b"sales,123\n")
+        link = execution_root / "link.csv"
+        try:
+            link.symlink_to(target)
+        except OSError:
+            pytest.skip("当前环境不允许创建符号链接")
+        _seed_output(tmp_path / "webui.db", output_id="out1", run_id="run-1",
+            owner_id="owner-a", file_path=target, content=target.read_bytes())
+        with sqlite3.connect(tmp_path / "webui.db") as connection:
+            connection.execute("UPDATE formal_delivery_outputs SET file_path='managed:v1/link.csv'")
+        content = resolver.read_business_content(_admin(), "workspace-validated-source", 2,
+            "task_output", task_owner_id="owner-a")
+        assert content.status == "failed"
+        assert content.failure_reason == "output_invalid"
 
     def test_missing_prompt_task_fails_typed(self, tmp_path) -> None:
         resolver, _, _ = _fixture(tmp_path)

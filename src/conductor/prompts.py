@@ -101,6 +101,10 @@ CHECKER_SYSTEM = """你是报告质量审查员（与生成者相互独立）。
 打分规则：发现杜撰（将未发生/未确认的事件当作已发生事实）→ score ≤ 40，passed=false。
 数据与目标主题或指定平台不符、相关样本为零、或用户明确要求的数量未满足时，
 必须 passed=false、score ≤ 40。即使报告如实说明了失败且结构完整，也不能判定任务通过。
+独立项目任务仅有一项例外：project_collection.allow_shortfall=true 表示用户明确允许不足目标时如实说明；
+此时至少有1个独立项目且项目主题、日期、所有引用字段均有原文依据、报告准确披露数量和缺口时，
+可对已取得结果给出passed=true，但不能声称目标数量已达成、检索已穷尽或完整任务目标已完成。
+0个有效项目、主题不符、伪造字段或来源核验不完整仍必须passed=false、score≤40。
 采集条数上限本身不等于用户明确要求的最低数量，需结合任务目标判断。
 只输出一个 JSON 对象，不要任何额外文字：
 {
@@ -202,7 +206,7 @@ PLANNER_SYSTEM = """你是"全网数据采集分析"智能体的任务规划模�
   "login_strategy": "none|cookie|session",
   "analysis_type": "voc|summary|custom|none",
   "analysis_instruction": "对输出内容/结构的具体要求，没有则null",
-  "outputs": ["report_md","json","db"],
+  "outputs": ["report_md","json","xlsx","db"],
   "db_target": "内部结果库的逻辑归属，可为null",
   "email_to": null,
   "schedule": "cron@<分 时 日 月 周> 或 once@<ISO时间>，非定时为null",
@@ -243,16 +247,16 @@ PLANNER_SYSTEM += """
 
 小红书银行权益专属规则：
 - 字段层级必须严格区分：bank_benefits 内只放银行、客群、规则有效性、日期和目标数量。xhs_sort、xhs_note_type、include_comments、comment_limit、data_type、analysis_type、outputs 全部放在最外层，不得放入 bank_benefits。
-- 最小结构示例（日期省略时由系统补默认值）：{{"bank_benefits": {{"source_evidence": "小红书", "banks": [{{"name": "中信银行", "keyword": "中信银行权益"}}]}}, "xhs_sort": "general", "xhs_note_type": "image", "include_comments": true, "comment_limit": 20, "data_type": "post", "analysis_type": "none", "outputs": ["json"]}}。示例里的银行和关键词必须替换为用户实际要求。
+- 最小结构示例（未限制发布时间，不填写起点；评论仅按明确要求开启）：{{"bank_benefits": {{"source_evidence": "小红书", "banks": [{{"name": "中信银行", "keyword": "中信银行权益"}}]}}, "xhs_sort": "general", "xhs_note_type": "image", "include_comments": false, "data_type": "post", "analysis_type": "none", "outputs": ["json"]}}。示例里的银行和关键词必须替换为用户实际要求。
 - 仅当用户明确选择小红书且实际要银行权益时，增加 bank_benefits 对象。未指定来源、普通私银资料、否定或引用小红书时填 null，不能仅凭“银行/私银”触发。
 - source_evidence 必须逐字摘录本次用户指定的小红书平台名；banks 为 name、keyword 对象列表，每银行一个检索词，沿用用户原词与主题，不创造同义扩展词。
 - audience 未指定则 null（覆盖零售客群）；include_credit_card 默认 false，明确要信用卡时 true；raw_only 默认 false，明确仅原始内容时 true。
 - bank_benefits.include_images 缺省true；用户明确不要图片时填false，不下载也不识别图片，不能用raw_only或OCR额度代替。
 - require_current_rules 默认 true；明确研究过期、取消、缩水、历史变化或对比新旧规则时 false，保留过期标记和原文，不能把查询目标排除。
-- publication_from、publication_to 是 ISO 日期；用户给历史或相对范围时按本次北京时间解析。未给时省略，由系统冻结当年1月1日至本次日期。不要补造源帖日期。
+- publication_from、publication_to 是 ISO 日期；用户给历史或相对范围时按本次北京时间解析。未给时省略，系统不限制发布时间起点，终点冻结为本次日期。往年发布但仍有效的权益不能仅因年份排除；帖子日期不等于规则有效期，不要补造源帖日期。
 - target_count 默认每银行5篇，明确数量按原意填写（超过既有预算则需要澄清，不能偷偷扩额度）；不填写 initial_candidates、candidate_limit、ocr_limit、frozen_at。
 - xhs_sort 默认 general，明确最新则 time_descending；xhs_note_type 默认 image，明确视频则 video，明确不限则 all。
-- include_comments 默认 true，comment_limit 默认20；data_type=post、analysis_type=none、outputs=["json"]。此场景整理数据和证据，不生成分析报告。
+- include_comments 默认 false，仅用户明确要求评论时设为 true，comment_limit 默认20；不为权益抽取额外读取评论。data_type=post；默认不生成分析报告，analysis_type=none、outputs=["json"]。用户明确要求分析报告时，analysis_type=summary（有具体分析要求可为custom），outputs=["report_md", "json"]，保留银行权益范围；完整独立笔记达标后才分析和逐篇核验，不足时保留资料与缺口，不能宣称报告已完成。raw_only=true 时仍为analysis_type=none、outputs=["json"]，不增加分析报告。
 - 符合要求以用户query为准，不能额外要求每条必须含门槛/次数/积分等某个字段；用户要求优先于缺省范围。
 """
 
@@ -267,4 +271,15 @@ PLANNER_SYSTEM += """
 - target_count 默认每组5篇；明确数量按原意填写。strictness 默认 best_effort；用户要求必须取得指定数量时 strict。数量单位是笔记，不得把5篇等同5套不同活动；若用户要求另一计数单位而无法确定，先澄清。
 - 用户明确限制候选、图片或耗时时，必须写入 evidence_collection 的 candidate_limit（1至100）、ocr_limit（0至20）、time_budget_seconds（30至14400），不能只放进 intent/reasoning/extraction_instruction。initial_candidates 为首批候选量（1至20），不超过 candidate_limit；target_count 为最终笔记量，不是候选量。例如要1篇、最多查看5篇候选，应填写 target_count=1、candidate_limit=5、initial_candidates=5。只保留标题、正文、链接、发布时间等来源原始字段且不分析时 raw_only=true。省略额度沿用默认，不主动放大预算；限制无法满足时澄清，不忽略。
 - 日期只有用户明确限制时才填写 publication_from/publication_to，不给非银行主题附加当年限制。不填写 frozen_at 或自行增大候选/OCR/时间预算。
+"""
+
+PLANNER_SYSTEM += """
+
+独立项目发现与公告归并：
+- 仅用户明确要求独立项目数量、同一项目的多份公告归并时设置 project_collection；不能与bank_benefits、evidence_collection同时启用。
+- target_count是独立项目数，网页数或同项目的公告份数不能替代；queries每个name/keyword是独立检索，不把多个主题拼成一个长串。topics沿用用户原主题。
+- project_kinds仅用户明确限定项目类型时填写；“相关项目”不能自行收窄成仅招投标，建设、验收、实施等有事实依据的相关项目也可核对。data_type使用generic。
+- publication_from/to仅按用户时间范围冻结；candidate_limit默认80，不主动放大，不填写frozen_at。只从用户要求中冻结字段和来源，不杜撰项目金额或发布日期。
+- allow_shortfall仅用户明确要求“不足如实说明”等时为true。足数目标与资料核验状态分别记录，0项目仍为失败；不得用非项目页面凑数。
+- 用户要求Excel时outputs必须含xlsx，JSON含json，报告含report_md；analysis_instruction保留原始完整诉求，禁止把文件要求只写在文字指令而遗漏outputs。
 """

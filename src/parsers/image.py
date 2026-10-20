@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from filelock import FileLock
+from PIL import Image
 
 from src.data_prep.artifact_store import ArtifactStore
 from src.data_prep.document_evidence import stable_element_id
 from src.data_prep.document_models import BoundingBox, DocumentElement, ElementType
 from src.data_prep.models import RawArtifact, RecordEnvelope
-from src.services.document_parser_contracts import DocumentParserClient
+from src.services.document_parser_contracts import DocumentParserClient, DocumentParseResult
 from src.services.document_parser_factory import configured_document_parser_clients
 from src.services.upload_store import inspect_uploaded_image
 
@@ -41,6 +44,34 @@ class ImageParser(Parser):
         ]
         self.artifact_store = artifact_store or ArtifactStore()
 
+    def _load_image_result(
+        self, client: DocumentParserClient, artifact: RawArtifact, raw_bytes: bytes,
+    ) -> Tuple[DocumentParseResult, str]:
+        provider = getattr(client, "provider", "document_parser")
+        health = client.health()
+        if health.status.lower() != "healthy":
+            raise RuntimeError(f"健康状态异常: {health.status}")
+        identity = "|".join((artifact.sha256, provider, client.base_url, client.backend,
+                             health.version, "image-ocr-v2"))
+        cache_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+        safe_provider = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in provider)
+        relative = f"third_party/{safe_provider}/{artifact.artifact_id}-{cache_key}.json"
+        lock_path = self.artifact_store.resolve_path(f"{artifact.task_id}/{relative}.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        # 同任务同版本只认一份冻结响应；并发占用时失败关闭，不能重复识别后配上旧原文。
+        with FileLock(str(lock_path), timeout=0):
+            raw_response = self.artifact_store.read_json_if_exists(artifact.task_id, relative)
+            if raw_response is None:
+                # CDN 地址可无后缀，历史 MIME 可泛化；按已验证原件格式命名，不改 URI 和字节。
+                with Image.open(io.BytesIO(raw_bytes), formats=("PNG", "JPEG", "WEBP")) as image:
+                    extension = {"PNG": "png", "JPEG": "jpg", "WEBP": "webp"}[image.format]
+                result = client.parse_image(raw_bytes, filename=f"{artifact.artifact_id}.{extension}")
+                raw_ref = self.artifact_store.write_json_if_absent(artifact.task_id, relative, result.raw_response)
+            else:
+                result = client.parse_response(raw_response)
+                raw_ref = f"{artifact.task_id}/{relative}"
+        return result, raw_ref
+
     def parse(
         self,
         artifact: RawArtifact,
@@ -56,22 +87,8 @@ class ImageParser(Parser):
         for client in self.document_clients:
             provider = getattr(client, "provider", "document_parser")
             try:
-                health = client.health()
-                if health.status.lower() != "healthy":
-                    raise RuntimeError(f"健康状态异常: {health.status}")
-                result = client.parse_image(
-                    raw_bytes,
-                    filename=Path(artifact.uri).name or "image.png",
-                )
+                result, raw_ref = self._load_image_result(client, artifact, raw_bytes)
                 source_coordinates = dimensions["image_orientation"] == 1 and result.source_coordinates_verified
-                raw_ref = self.artifact_store.write_json_if_absent(
-                    artifact.task_id,
-                    (
-                        f"third_party/{provider}/"
-                        f"{artifact.artifact_id}-{artifact.sha256[:16]}.json"
-                    ),
-                    result.raw_response,
-                )
                 elements = []
                 texts = []
                 for order, block in enumerate(result.blocks):

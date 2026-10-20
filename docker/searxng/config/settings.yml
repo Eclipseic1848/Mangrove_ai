@@ -16,3 +16,10 @@ search:
     - json
   # 默认中文优先（也可在请求里指定 language）
   default_lang: "zh-CN"
+
+# 默认国外搜索源不可达时，保留可用的中文搜索入口。
+engines:
+  - name: 360search
+    disabled: false
+  - name: sogou
+    disabled: false

@@ -2,9 +2,34 @@
 from __future__ import annotations
 
 from html.parser import HTMLParser
+import shutil
+import sys
 from typing import List
 
 from src.conductor.task_spec import TaskSpec
+
+
+_CAPTCHA_SIGNALS = (
+    "验证码", "安全验证", "人机验证", "访问异常", "访问受限", "请开启JavaScript",
+    "请启用JavaScript", "系统繁忙", "拒绝访问", "Access Denied", "403 Forbidden",
+    "404 Not Found", "Just a moment", "Checking your browser", "点击继续访问",
+    "异常流量", "滑动验证",
+)
+_CAPTCHA_MAX_LEN = 400
+
+
+def is_challenge_page(text: str) -> bool:
+    """短验证页不算正文；保留长文提及验证码的既有判定边界。"""
+    return len(text) <= _CAPTCHA_MAX_LEN and any(signal in text for signal in _CAPTCHA_SIGNALS)
+
+
+def crawler_browser_config():
+    """无桌面的 Linux 复用已安装的 Chrome，避免缺少下载内核导致启动失败。"""
+    from crawl4ai import BrowserConfig
+
+    if sys.platform.startswith("linux") and shutil.which("google-chrome"):
+        return BrowserConfig(chrome_channel="chrome")
+    return BrowserConfig()
 
 
 def build_target_urls(spec: TaskSpec) -> List[str]:

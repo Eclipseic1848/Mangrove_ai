@@ -11,7 +11,7 @@ from tests.test_evidence_collection_flow import spec_for
 
 
 @pytest.mark.parametrize("streaming", [False, True])
-@pytest.mark.parametrize("changed", [None, "execution_binding", "user_input", "provider", "model", "session_id", "approved_db_write", "ignore_schedule"])
+@pytest.mark.parametrize("changed", [None, "execution_binding", "user_input", "provider", "model", "session_id", "approved_db_write", "ignore_schedule", "task_context_preview"])
 def test_collection_checkpoint_reconnect_preserves_spec_and_rejects_changed_identity(tmp_path, monkeypatch, streaming, changed):
     calls = Counter()
     spec = spec_for("设备维护规则")

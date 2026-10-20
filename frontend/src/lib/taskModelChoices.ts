@@ -18,7 +18,12 @@ export function taskModelChoices(
   includeUnavailable = false,
 ) {
   const choices = [
-    ...(allowLocal ? local.filter(item => item.provider === "local").map(item => ({ connectionId: "__local__", model: item.model, label: item.model, group: "本地模型", supplier: "", personal: false, connectionName: "平台直连" })) : []),
+    // 已纳管型号只通过连接选择；历史冻结直连仍按后端可用目录恢复。
+    ...(allowLocal ? local.filter(item => item.provider === "local" && (frozen?.connectionId === "__local__"
+      || !connections.some(connection => connection.owner_scope === "platform_shared"
+        && modelConnectionSource(connection).group === "本地模型"
+        && connection.models?.some(model => model.model_id === item.model))))
+      .map(item => ({ connectionId: "__local__", model: item.model, label: item.model, group: "本地模型", supplier: "", personal: false, connectionName: "平台直连" })) : []),
     // 管理清单仍展示异常型号；优先展示同型号可用连接，不改变任务选择器的默认规则。
     ...connections.filter(connection => includeUnavailable || connection.status === "verified").flatMap(connection =>
       // 目录退役只影响新选型，历史资料修订保留指定的冻结身份；权限与可用性检查不放宽。
@@ -42,14 +47,13 @@ export function taskModelChoices(
     if (seen.has(key)) return false;
     seen.add(key); return true;
   });
-  const hasPersonal = unique.some(item => item.personal);
   return unique.sort((a, b) => (a.group === b.group ? 0 : a.group === "本地模型" ? -1 : 1)
     || a.supplier.localeCompare(b.supplier, "zh-CN") || b.model.localeCompare(a.model, "en", { numeric: true, sensitivity: "base" }))
     .map(choice => {
       // ponytail: 当前选项规模很小；连接数上千后再改为分组索引。
       const duplicates = unique.filter(other => other.personal === choice.personal && other.group === choice.group && other.supplier === choice.supplier && other.model === choice.model);
       const sameName = duplicates.filter(other => other.connectionName === choice.connectionName).length > 1;
-      const suffix = `${hasPersonal ? choice.personal ? " · 我的" : " · 平台" : ""}${duplicates.length > 1 ? ` · ${choice.connectionName}${sameName ? ` · ${choice.connectionId}` : ""}` : ""}`;
+      const suffix = duplicates.length > 1 ? ` · ${choice.connectionName}${sameName ? ` · ${choice.connectionId}` : ""}` : "";
       return { ...choice, label: `${choice.supplier ? `${choice.supplier} · ` : ""}${choice.label}${suffix}` };
     });
 }

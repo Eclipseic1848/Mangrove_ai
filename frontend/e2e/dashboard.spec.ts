@@ -3,6 +3,54 @@ import AxeBuilder from "@axe-core/playwright";
 
 const presets = ["deepseek", "qwen", "openai", "anthropic", "gemini", "kimi", "zhipu", "xai"].map(preset_id => ({ preset_id, display_name: preset_id }));
 
+test("HTTP缺少原生UUID时登录后概览与工作台不白屏，访问编号仍有效", async ({ page }) => {
+  await mockOverview(page, "super_admin");
+  await page.addInitScript(() => Object.defineProperty(crypto, "randomUUID", { value: undefined, configurable: true }));
+  const errors: string[] = [];
+  const visits: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  await page.route("**/api/operations/visits", route => {
+    visits.push(route.request().postDataJSON().event_id);
+    return route.fulfill({ json: { ok: true } });
+  });
+  await page.route("**/api/operations/heartbeat", route => route.fulfill({ json: { ok: true } }));
+  await page.goto("/");
+  await expect(page.getByRole("heading", { name: "概览", exact: true })).toBeVisible();
+  await expect.poll(() => visits.length).toBeGreaterThanOrEqual(1);
+  await page.getByRole("navigation", { name: "工作空间" }).getByRole("link", { name: "任务工作台", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "任务工作台", exact: true })).toBeVisible();
+  await expect.poll(() => visits.length).toBeGreaterThanOrEqual(2);
+  for (const id of visits) expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  expect(new Set(visits).size).toBe(visits.length);
+  expect(errors).toEqual([]);
+});
+
+test("可选品牌资源存在时显示模型和平台 Logo 图片", async ({ page }) => {
+  await mockOverview(page, "super_admin");
+  await page.goto("/");
+  const logos = page.locator('img[src^="/overview-brands/"]');
+  await expect(logos).toHaveCount(17);
+  await expect.poll(() => logos.evaluateAll(images => images.every(image =>
+    (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0,
+  ))).toBe(true);
+});
+
+test("公开构建缺少品牌资源时保留通用图标和服务名称", async ({ page }) => {
+  await mockOverview(page, "super_admin");
+  const requested = new Set<string>();
+  await page.route("**/overview-brands/*.png", route => {
+    requested.add(new URL(route.request().url()).pathname);
+    return route.fulfill({ status: 404, body: "" });
+  });
+  await page.goto("/");
+  await expect.poll(() => requested.size).toBe(17);
+  await expect(page.locator('img[src^="/overview-brands/"]')).toHaveCount(0);
+  await expect(page.locator('[data-provider="anthropic"] .lucide-cpu')).toBeVisible();
+  await expect(page.locator('[data-provider="anthropic"]')).toContainText("Claude");
+  await expect(page.getByLabel(/^小红书：/).locator(".lucide-cpu")).toBeVisible();
+  await expect(page.getByLabel(/^小红书：/)).toContainText("小红书");
+});
+
 test("概览分页默认十条，支持四种条数及筛选复位", async ({ page }, testInfo) => {
   await mockOverview(page);
   const items = Array.from({ length: 123 }, (_, index) => ({ id: `paged-${index + 1}`, kind: "task", title: `分页任务 ${index + 1}`, status: "running", updated_at: "2026-09-16T10:00:00+08:00" }));
@@ -59,6 +107,15 @@ test("概览分页默认十条，支持四种条数及筛选复位", async ({ pa
   await list.screenshot({ path: testInfo.outputPath("overview-pagination-mobile.png") });
 });
 async function mockOverview(page: Page, role = "user") {
+  // 品牌图片不公开分发；合成资源验证有图场景，独立用例覆盖缺图降级。
+  await page.route("**/overview-brands/*.png", route => route.fulfill({
+    contentType: "image/png",
+    body: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jSugAAAAASUVORK5CYII=", "base64"),
+  }));
+  await page.addInitScript((currentRole) => {
+    // 本组验证概览交互；新手教程由独立用例覆盖。
+    localStorage.setItem(`onboarding_all_${JSON.stringify(["owner", currentRole])}`, "skipped");
+  }, role);
   await page.route("**/api/**", route => {
     const url = new URL(route.request().url());
     if (route.request().method() !== "GET") return route.fulfill({ status: 405, json: { detail: "审计禁止写操作" } });
@@ -87,6 +144,27 @@ async function mockOverview(page: Page, role = "user") {
 }
 
 for (const role of ["user", "admin", "super_admin"]) {
+  test(`${role} 概览仅统计可用本地型号，排除待验证、停用和退役并去重`, async ({ page }) => {
+    await mockOverview(page, role);
+    const names = ["Qwen3.8-27B", "Qwen3.6-35B-A3B", "Qwen3.5-35B-A3B"];
+    const local = (id: string, model: string, status = "verified", enabled = true, current = true) => ({
+      connection_id: id, owner_scope: "platform_shared", display_name: model, locality: "managed_private", model, status,
+      models: [{ model_id: model, display_name: model, status: enabled ? "available" : "disabled", enabled, current_catalog: current }],
+    });
+    await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [
+      ...names.map((name, index) => local(`available-${index}`, name)),
+      local("duplicate", names[0]),
+      local("pending", "Qwen3-30B-A3B", "pending_validation", false),
+      local("disabled", "disabled-local", "disabled", false),
+      local("retired", "retired-local", "verified", true, false),
+    ] } }));
+    await page.goto("/");
+    await expect(page.locator('[data-service-subtitle]').first()).toContainText("本地模型 · 3 个");
+    await expect(page.locator('[data-service-subtitle]').first()).toContainText("本地模型 · 3 个可用");
+  });
+}
+
+for (const role of ["user", "admin", "super_admin"]) {
   test(`${role} 概览显示真实分类、灰显未配供应商和定时计划`, async ({ page }, testInfo) => {
     await mockOverview(page, role);
     await page.setViewportSize({ width: 1440, height: 1000 });
@@ -100,7 +178,7 @@ for (const role of ["user", "admin", "super_admin"]) {
     await expect(pageHeader.locator("p")).toHaveCSS("font-size", "14px");
     await expect(pageHeader).toHaveCSS("padding-left", "28px");
     await expect(pageHeader).toHaveCSS("padding-top", "16px");
-    await expect(page.locator('[data-service-subtitle]').first()).toContainText("本地模型 · 4 个已配置");
+    await expect(page.locator('[data-service-subtitle]').first()).toContainText("本地模型 · 4 个可用");
     const claude = page.locator('[data-provider="anthropic"]');
     await expect(claude).toContainText("Claude");
     await expect(claude).toContainText("未配置");

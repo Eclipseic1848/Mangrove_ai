@@ -61,6 +61,12 @@ def parse_time_range(time_range: Optional[str]) -> Optional[RecencyWindow]:
     if not s:
         return None
 
+    # 只移除被明确否定的时长，不能越过条数或转折而吞掉其它正向期限。
+    duration = r"(?:最近|近)?\s*(?:\d+|[零一二两三四五六七八九十百千]+)\s*(?:天|日|周|星期|个?月|年)"
+    s = re.sub(r"(?:不另设|不设置|不设|不限制|不限)\s*"
+               rf"(?:{duration}(?:\s*(?:或|和|、|至|到|/|／)\s*{duration})*)?"
+               r"\s*(?:的\s*)?(?:(?:硬性?|固定)\s*)?时间窗(?:口)?", "", s)
+
     # 纯"最新/最近/近期/latest"且无具体数值 → 不设硬窗口，仅按时间倒序（避免误杀真正最新但非近几天的内容）
     if re.search(r"最新|最近期|近期|latest|recent|newest", s) and not re.search(r"\d|[一二两三四五六七八九十]", s):
         return RecencyWindow(days=None, label=None)

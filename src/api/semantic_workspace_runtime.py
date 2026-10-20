@@ -3312,6 +3312,12 @@ class SemanticWorkspaceManager:
             external_api_confirmed=task["external_api_confirmed"],
         )
         request = _compile_request(payload)
+        from src.task_context import TaskContextRepository
+        frozen_context = TaskContextRepository(settings.webui_db_path).get_frozen(
+            user_id, task_id, int(task["active_revision"]),
+        )
+        if frozen_context is not None:
+            request = request.model_copy(update={"compiled_context": frozen_context.compiled_context})
         question = task.get("question") or {}
         if (
             latest

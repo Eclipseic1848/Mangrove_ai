@@ -35,6 +35,11 @@ def verified_output_metadata(owner_id, output_id):
         raise PermissionError("正式输出不存在或无权访问")
     manifest = store.get_semantic_delivery(owner_id, record["delivery_id"])
     output = next((item for item in (manifest or {}).get("outputs", []) if item["output_id"] == output_id), None)
+    return _validate_output_metadata(record, manifest, output)
+
+
+def _validate_output_metadata(record, manifest, output):
+    """列表和实际读取共用发布证据门，批量读取不降低质量要求。"""
     qa = (output or {}).get("qa") or {}
     if not output or manifest.get("status") != "succeeded" or manifest.get("run_id") != record["run_id"] or qa.get("openable") is not True:
         raise ValueError("正式输出缺少发布质量证据")
@@ -129,29 +134,76 @@ def history(owner_id):
     # 列表仅读登记元数据；实际选择/预览/执行必须重新核字节，不授永久可读资格。
     import json
     values = {}
+    from src.source_acquisition.deletion import _cleanup_operation
     with closing(sqlite3.connect(settings.webui_db_path)) as connection:
         connection.row_factory=sqlite3.Row
-        # 先读完游标再跨连接核验，避免列表读锁阻塞其他任务提交；选择时仍重新核验来源。
-        for row in connection.execute("SELECT snapshot_id FROM source_snapshots WHERE owner_id=?",(owner_id,)).fetchall():
-            identity=row[0]
-            snapshot=SourceAcquisitionRepository(settings.webui_db_path).get_snapshot(owner_id,identity,include_preview=False)
-            if snapshot is None:
-                values['snapshot:'+identity]=dict(source_key='snapshot:'+identity,kind='snapshot',identity='original',label='已清理网页资料',source_snapshot_id=identity,acquired_at=None,time_kind='unknown',sha256=None,media_type=None,size_bytes=0,origin=dict(task_id=None,revision=None,run_id=None,delivery_id=None),availability='unavailable',reason_code='source_deleted',limitations=[])
-                continue
-            values["snapshot:"+identity]=dict(source_key="snapshot:"+identity,kind="snapshot",identity="original",label="网页资料",source_snapshot_id=identity,acquired_at=snapshot.get("created_at"),time_kind="acquired",sha256=None,media_type=None,size_bytes=sum(x["size_bytes"] for x in snapshot["artifacts"]),origin=dict(task_id=None,revision=None,run_id=None,delivery_id=None),availability="available",reason_code=None,limitations=["使用时重新核验"],attempt_id=snapshot.get("attempt_id"),allowed_scope=snapshot["allowed_scope"],coverage=snapshot["coverage"])
-            if not snapshot["valid_page_count"] or snapshot["coverage"]["status"]=="hard_insufficient":
-                values["snapshot:"+identity].update(availability="unavailable",reason_code="source_coverage_insufficient")
+        # 同一短读快照批量捕获登记；读完即释放列表锁，证据解析和字节复核不占锁。
+        connection.execute("BEGIN")
+        snapshots = connection.execute(
+            "SELECT s.*, COALESCE(a.size_bytes,0) AS artifact_size, "
+            "COALESCE(a.artifact_count,0) AS artifact_count, d.snapshot_id AS deleted_snapshot "
+            "FROM source_snapshots s LEFT JOIN "
+            "(SELECT snapshot_id,SUM(size_bytes) AS size_bytes,COUNT(*) AS artifact_count "
+            "FROM source_artifacts WHERE owner_id=? GROUP BY snapshot_id) a ON a.snapshot_id=s.snapshot_id "
+            "LEFT JOIN (SELECT DISTINCT snapshot_id FROM source_deletions "
+            "WHERE owner_id=? AND state='deleted') d ON d.snapshot_id=s.snapshot_id "
+            "WHERE s.owner_id=?", (owner_id,owner_id,owner_id),
+        ).fetchall()
+        deleted = {row["source_key"] for row in connection.execute(
+            "SELECT source_key,operation_id FROM source_deletions WHERE owner_id=?", (owner_id,),
+        ) if row["operation_id"] != _cleanup_operation.get()}
+        outputs = []
+        manifests = {}
         for table,column in (("formal_delivery_outputs","owner_id"),("semantic_delivery_outputs","user_id")):
-            for row in connection.execute(f"SELECT output_id,delivery_id,run_id,filename,media_type,size_bytes,sha256,created_at FROM {table} WHERE {column}=?",(owner_id,)).fetchall():
-                item=dict(row);identity=item.pop("output_id")
-                producer=connection.execute("SELECT task_id,task_revision FROM formal_delivery_runs WHERE owner_id=? AND delivery_id=?",(owner_id,item["delivery_id"])).fetchone()
-                values["delivery_output:"+identity]=dict(source_key="delivery_output:"+identity,kind="delivery_output",identity="derived",label=item["filename"],output_id=identity,acquired_at=item["created_at"],time_kind="generated",media_type=item["media_type"],size_bytes=item["size_bytes"],sha256=item["sha256"],origin=dict(task_id=producer[0] if producer else None,revision=producer[1] if producer else None,run_id=item["run_id"],delivery_id=item["delivery_id"]),availability="available",reason_code=None,limitations=["使用时重新核验"])
+            outputs.extend(connection.execute(
+                f"SELECT o.output_id,o.delivery_id,o.run_id,o.filename,o.media_type,"
+                f"o.size_bytes,o.sha256,o.created_at,o.file_path,o.qa_json,r.task_id,r.task_revision "
+                f"FROM {table} o LEFT JOIN formal_delivery_runs r "
+                f"ON r.owner_id=o.{column} AND r.delivery_id=o.delivery_id WHERE o.{column}=?", (owner_id,),
+            ).fetchall())
+        for table,column,condition in (("formal_delivery_runs","owner_id"," AND status='succeeded'"),("semantic_delivery_runs","user_id","")):
+            for row in connection.execute(f"SELECT delivery_id,manifest_json FROM {table} WHERE {column}=?{condition}",(owner_id,)):
+                manifests[row["delivery_id"]] = row["manifest_json"]
+    for row in snapshots:
+        identity=row["snapshot_id"]
+        if row["deleted_snapshot"] and not row["artifact_count"]:
+            values['snapshot:'+identity]=dict(source_key='snapshot:'+identity,kind='snapshot',identity='original',label='已清理网页资料',source_snapshot_id=identity,acquired_at=None,time_kind='unknown',sha256=None,media_type=None,size_bytes=0,origin=dict(task_id=None,revision=None,run_id=None,delivery_id=None),availability='unavailable',reason_code='source_deleted',limitations=[])
+            continue
+        snapshot=SourceAcquisitionRepository._snapshot_metadata(row)
+        values["snapshot:"+identity]=dict(source_key="snapshot:"+identity,kind="snapshot",identity="original",label="网页资料",source_snapshot_id=identity,acquired_at=snapshot.get("created_at"),time_kind="acquired",sha256=None,media_type=None,size_bytes=row["artifact_size"],origin=dict(task_id=None,revision=None,run_id=None,delivery_id=None),availability="available",reason_code=None,limitations=["使用时重新核验"],attempt_id=snapshot.get("attempt_id"),allowed_scope=snapshot["allowed_scope"],coverage=snapshot["coverage"])
+        if not snapshot["valid_page_count"] or snapshot["coverage"]["status"]=="hard_insufficient":
+            values["snapshot:"+identity].update(availability="unavailable",reason_code="source_coverage_insufficient")
+    evidence = {}
+    for identity, encoded in manifests.items():
+        try:
+            manifest = json.loads(encoded)
+            if not isinstance(manifest, dict):
+                raise TypeError("正式输出清单必须是对象")
+            by_output = {}
+            for output in manifest.get("outputs", []):
                 try:
-                    from src.source_acquisition.deletion import assert_sources_readable
-                    assert_sources_readable(owner_id,[dict(kind='delivery_output',output_id=identity)],connection=connection)
-                    verified_output_metadata(owner_id,identity)
-                except (PermissionError,ValueError,KeyError,TypeError):
-                    values["delivery_output:"+identity].update(availability="unavailable",reason_code="formal_evidence_invalid")
+                    output_id = output["output_id"]
+                except (KeyError,TypeError):
+                    # 沿用旧逐项查找的前缀语义：损坏的后续项不能推翻已先匹配的正常输出。
+                    break
+                if isinstance(output_id, str):
+                    by_output.setdefault(output_id, output)
+            evidence[identity] = (manifest, by_output)
+        except (ValueError,KeyError,TypeError):
+            evidence[identity] = (None, {})
+    store = _store() if outputs else None
+    for row in outputs:
+        item=dict(row);identity=item["output_id"]
+        values["delivery_output:"+identity]=dict(source_key="delivery_output:"+identity,kind="delivery_output",identity="derived",label=item["filename"],output_id=identity,acquired_at=item["created_at"],time_kind="generated",media_type=item["media_type"],size_bytes=item["size_bytes"],sha256=item["sha256"],origin=dict(task_id=item["task_id"],revision=item["task_revision"],run_id=item["run_id"],delivery_id=item["delivery_id"]),availability="available",reason_code=None,limitations=["使用时重新核验"])
+        try:
+            if "delivery_output:"+identity in deleted:
+                raise ValueError("source_deleted")
+            json.loads(item["qa_json"])
+            store._resolve_semantic_path(item["file_path"])
+            manifest, by_output = evidence.get(item["delivery_id"], (None, {}))
+            _validate_output_metadata(item, manifest, by_output.get(identity))
+        except (PermissionError,ValueError,KeyError,TypeError):
+            values["delivery_output:"+identity].update(availability="unavailable",reason_code="formal_evidence_invalid")
     store=uploads()
     for path in store._user_dir(owner_id,"objects").glob("*.meta"):
         try:
