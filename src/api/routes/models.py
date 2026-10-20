@@ -16,6 +16,15 @@ router = APIRouter(prefix="/api/models", tags=["models"])
 _PROVIDER_LABELS = {"local": "本地模型"}
 
 
+def require_available_legacy_model(provider: str, model: str | None):
+    from src.llm.provider import get_provider, ModelUnavailableError
+    try:
+        get_provider().resolve_model(provider, model=model)
+    except ModelUnavailableError:
+        from fastapi import HTTPException
+        raise HTTPException(422, "所选模型已不可用，请重新选择；不会自动替换模型") from None
+
+
 @router.get("")
 def get_models(user=Depends(get_current_user)):
     mine = get_store().config_all(user["user_id"]) or {}
@@ -51,7 +60,7 @@ def get_models(user=Depends(get_current_user)):
             "options": options,
             "available": available_providers(),
             "pi_runtime_enabled": settings.pi_runtime_enabled,
-            "pi_capability_host_enabled": settings.pi_capability_host_enabled,
+            "pi_capability_host_enabled": settings.pi_capability_host_enabled and user.get("role") == "super_admin",
             "default": default,
             "document_default": document_default,
             "document_default_source": (

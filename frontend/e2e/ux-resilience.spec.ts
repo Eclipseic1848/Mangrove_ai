@@ -8,6 +8,7 @@ async function mockApp(page: Page) {
   await page.route("**/api/**", route => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/auth/me") return route.fulfill({ json: { user_id: "ux-owner", username: "ux", display_name: "体验回归", role: "admin" } });
+    if (path === "/api/tasks/scheduler/status") return route.fulfill({ json: { enabled: true, running: true } });
     if (path === "/api/models") return route.fulfill({ json: { options: [], default: null } });
     if (path === "/api/model-connections") return route.fulfill({ json: { items: [] } });
     if (path === "/api/model-connections/preferences/default") return route.fulfill({ json: { preference: null } });
@@ -157,7 +158,7 @@ test("工作台加载第101条历史，筛选覆盖未加载页，回收站独�
   await sidebar.getByRole("button", { name: "待确认", exact: true }).click();
   await expect(sidebar.getByText("历史任务 1", { exact: true })).toBeVisible();
   await expect(sidebar.getByText("历史任务 101", { exact: true })).toBeHidden();
-  await sidebar.getByRole("button", { name: "回收站", exact: false }).click();
+  await sidebar.getByRole("button", { name: "回收站", exact: true }).click();
   await expect(sidebar.getByText("回收站合成记录", { exact: true })).toBeVisible();
   await expect(sidebar.getByText("历史任务 1", { exact: true })).toBeHidden();
 });
@@ -199,7 +200,7 @@ test("自动化表单可通过标签区分所有频率和起止日期", async ({
   await expect(dialog.getByLabel("提示词", { exact: true })).toHaveValue("汇总合成数据");
   await expect(dialog.getByRole("group", { name: "执行频率", exact: true })).toBeVisible();
   await expect(dialog.getByLabel("执行时间", { exact: true })).toBeVisible();
-  await expect(dialog.getByLabel("执行时间", { exact: true })).toHaveAccessibleDescription(/UTC\+8/);
+  await expect(dialog.getByLabel("执行时间", { exact: true })).toHaveAccessibleDescription("保存后按所选模型执行，不自动切换其他模型。");
   await dialog.getByLabel("开始日期", { exact: true }).fill("2026-10-01");
   await dialog.getByLabel("结束日期", { exact: true }).fill("2026-10-31");
   await dialog.getByRole("button", { name: "每月", exact: true }).click();
@@ -211,7 +212,7 @@ test("自动化表单可通过标签区分所有频率和起止日期", async ({
   await expect(dialog.getByLabel("间隔单位")).toBeVisible();
   await dialog.getByRole("button", { name: "单次", exact: true }).click();
   await expect(dialog.getByLabel("单次执行时间")).toBeVisible();
-  await expect(dialog.getByLabel("单次执行时间")).toHaveAccessibleDescription(/UTC\+8/);
+  await expect(dialog.getByLabel("单次执行时间")).toHaveAccessibleDescription("保存后按所选模型执行，不自动切换其他模型。");
 });
 
 test("键盘可选择空白和模板创建，关闭后返回添加入口", async ({ page }) => {
@@ -224,6 +225,7 @@ test("键盘可选择空白和模板创建，关闭后返回添加入口", async
   await expect(page.getByRole("button", { name: /空白创建/ })).toBeFocused();
   await page.keyboard.press("Enter");
   await expect(page.getByLabel("执行模型")).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "执行模型", exact: true })).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(add).toBeFocused();
   await page.keyboard.press("Enter");
@@ -279,12 +281,99 @@ test("自动化列表区分读取失败与空数据，刷新失败保留已有�
   await expect(page.getByText("每日报告", { exact: true })).toBeVisible();
 });
 
+for (const { slowSource, width } of [{ slowSource: "workspace", width: 1440 }, { slowSource: "chat", width: 1440 }, { slowSource: "workspace", width: 390 }]) test(`历史首次等待${slowSource}读取结束后统一显示，后台刷新保留列表（${width}）`, async ({ page }) => {
+  await mockApp(page);
+  await page.setViewportSize({ width, height: 900 });
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  let release!: () => void;
+  let block = true;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const requested = new Set<string>();
+  await page.route(/\/api\/(semantic-workspace\/tasks(?:\?.*)?|chat\/history)$/, async route => {
+    const workspace = new URL(route.request().url()).pathname.includes("semantic-workspace");
+    const source = workspace ? "workspace" : "chat";
+    requested.add(source);
+    if (source === slowSource && block) await gate;
+    return route.fulfill({ json: workspace
+      ? [{ task_id: "expense", title: "合成报销历史", status: "completed", updated_at: "2026-10-07T23:03:54+08:00" }]
+      : [{ conv_id: "collection", title: "合成采集历史", status: "completed", updated_at: "2026-10-07T23:04:00+08:00" }] });
+  });
+  await page.goto("/data-prep");
+  const toggle = page.getByRole("button", { name: "展开任务列表", exact: true });
+  if (width < 1024) await toggle.click();
+  const sidebar = page.getByRole("complementary", { name: "任务列表", exact: true });
+  await expect.poll(() => requested.size).toBe(2);
+  await expect(sidebar.getByRole("status")).toContainText("正在读取任务列表");
+  await expect(sidebar.getByText("合成报销历史", { exact: true })).toBeHidden();
+  await expect(sidebar.getByText("合成采集历史", { exact: true })).toBeHidden();
+  block = false;
+  release();
+  await expect(sidebar.getByText("合成报销历史", { exact: true })).toBeVisible();
+  await expect(sidebar.getByText("合成采集历史", { exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("status")).toBeHidden();
+  await page.screenshot({ path: test.info().outputPath("history-ready.png") });
+  let finishRefresh!: () => void;
+  const refreshing = new Promise<void>(resolve => { finishRefresh = resolve; });
+  let refreshStarted = false;
+  await page.route("**/api/semantic-workspace/tasks?*", async route => {
+    refreshStarted = true;
+    await refreshing;
+    return route.fulfill({ json: [{ task_id: "expense", title: "合成报销历史", status: "completed", updated_at: "2026-10-07T23:03:54+08:00" }] });
+  });
+  await expect.poll(() => refreshStarted, { timeout: 6000 }).toBe(true);
+  await expect(sidebar.getByText("合成报销历史", { exact: true })).toBeVisible();
+  await expect(sidebar.getByText("合成采集历史", { exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("status")).toBeHidden();
+  finishRefresh();
+  expect(errors).toEqual([]);
+});
+
+for (const failedSource of ["workspace", "chat"]) test(`历史${failedSource}读取失败时保留另一类记录并明确提示`, async ({ page }) => {
+  await mockApp(page);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.route(/\/api\/(semantic-workspace\/tasks(?:\?.*)?|chat\/history)$/, route => {
+    const workspace = new URL(route.request().url()).pathname.includes("semantic-workspace");
+    if ((workspace ? "workspace" : "chat") === failedSource) return route.fulfill({ status: 503, json: { detail: "合成历史读取失败" } });
+    return route.fulfill({ json: workspace
+      ? [{ task_id: "expense", title: "可读取的报销记录", status: "completed", updated_at: "2026-10-07T23:03:54+08:00" }]
+      : [{ conv_id: "collection", title: "可读取的采集记录", status: "completed", updated_at: "2026-10-07T23:04:00+08:00" }] });
+  });
+  await page.goto("/data-prep");
+  const sidebar = page.getByRole("complementary", { name: "任务列表", exact: true });
+  await expect(sidebar.getByRole("alert")).toContainText(`${failedSource === "workspace" ? "任务列表" : "采集历史"}读取失败`, { timeout: 15000 });
+  await expect(sidebar.getByText(failedSource === "workspace" ? "可读取的采集记录" : "可读取的报销记录", { exact: true })).toBeVisible();
+  await expect(sidebar.getByRole("status")).toBeHidden();
+  let finishRetry!: () => void;
+  const retrying = new Promise<void>(resolve => { finishRetry = resolve; });
+  let retryStarted = false;
+  await page.route(failedSource === "workspace" ? "**/api/semantic-workspace/tasks?*" : "**/api/chat/history", async route => {
+    retryStarted = true;
+    await retrying;
+    return route.fulfill({ status: 503, json: { detail: "合成历史重试失败" } });
+  });
+  try {
+    await expect.poll(() => retryStarted, { timeout: 6000 }).toBe(true);
+    await page.screenshot({ path: test.info().outputPath("history-retry-in-flight.png") });
+    await expect(sidebar.getByText(failedSource === "workspace" ? "可读取的采集记录" : "可读取的报销记录", { exact: true })).toBeVisible();
+    await expect(sidebar.getByRole("status")).toBeHidden();
+  } finally {
+    finishRetry();
+  }
+});
+
 test("工作台分别提示任务和采集历史失败，重试成功才显示真实空状态", async ({ page }) => {
   await mockApp(page);
   let failed = true;
-  await page.route(/\/api\/(semantic-workspace\/tasks(?:\?.*)?|chat\/history)$/, route => failed
-    ? route.fulfill({ status: 503, json: { detail: "合成读取失败" } })
-    : route.fulfill({ json: [] }));
+  let finishRetry!: () => void;
+  const retrying = new Promise<void>(resolve => { finishRetry = resolve; });
+  const retriedSources = new Set<string>();
+  await page.route(/\/api\/(semantic-workspace\/tasks(?:\?.*)?|chat\/history)$/, async route => {
+    if (failed) return route.fulfill({ status: 503, json: { detail: "合成读取失败" } });
+    retriedSources.add(new URL(route.request().url()).pathname);
+    await retrying;
+    return route.fulfill({ json: [] });
+  });
   await page.goto("/data-prep");
   const toggle = page.getByRole("button", { name: "展开任务列表", exact: true });
   if (await toggle.isVisible()) await toggle.click();
@@ -293,6 +382,14 @@ test("工作台分别提示任务和采集历史失败，重试成功才显示�
   await expect(sidebar.getByText("当前筛选下没有任务")).toBeHidden();
   failed = false;
   await sidebar.getByRole("button", { name: "重试读取列表" }).click();
+  try {
+    await expect.poll(() => retriedSources.size).toBe(2);
+    await page.screenshot({ path: test.info().outputPath("history-empty-retry-in-flight.png") });
+    await expect(sidebar.getByText("当前筛选下没有任务")).toBeHidden();
+    await expect(sidebar.getByRole("status")).toContainText("正在读取任务列表");
+  } finally {
+    finishRetry();
+  }
   await expect(sidebar.getByText("当前筛选下没有任务")).toBeVisible();
   await expect(sidebar.getByRole("alert")).toBeHidden();
 });
@@ -311,10 +408,10 @@ test("诊断读取失败显示未知并可分别重试", async ({ page }) => {
   await expect(page.getByText("域名状态读取失败，请重试。")).toBeVisible();
   await expect(page.getByText("已停用", { exact: true })).toBeHidden();
   await expect(page.getByText("未配", { exact: true })).toBeHidden();
-  await expect(page.getByText("当前没有被短路的域名")).toBeHidden();
+  await expect(page.getByText("当前没有临时调整的域名")).toBeHidden();
   failed = false;
   await page.getByRole("button", { name: "重试读取配置" }).click();
   await page.getByRole("button", { name: "重试读取域名状态" }).click();
   await expect(page.getByText("已启用", { exact: true })).toBeVisible();
-  await expect(page.getByText("当前没有被短路的域名")).toBeVisible();
+  await expect(page.getByText("当前没有临时调整的域名")).toBeVisible();
 });

@@ -159,8 +159,8 @@ function TemplateLibrary({ user }: { user: User }) {
       .finally(() => { if (mounted.current && epoch === loadEpoch.current.lessons) setLessonLoading(false); });
   };
   useEffect(() => {
-    loadLessons();
-  }, []);
+    if (tab === "lessons") loadLessons();
+  }, [tab]);
 
   const loadScanLog = () => {
     const epoch = ++loadEpoch.current.scan;
@@ -174,8 +174,8 @@ function TemplateLibrary({ user }: { user: User }) {
       .finally(() => { if (mounted.current && epoch === loadEpoch.current.scan) setScanLogLoading(false); });
   };
   useEffect(() => {
-    if (isAdmin) loadScanLog();
-  }, [isAdmin]);
+    if (isAdmin && tab === "scanLog") loadScanLog();
+  }, [isAdmin, tab]);
 
   const doDelete = async () => {
     if (!pendingDel) return;

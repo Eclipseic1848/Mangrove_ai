@@ -155,6 +155,7 @@ class ScheduleStore:
         end_date: Optional[str] = None,
         model_connection_id: Optional[str] = None,
         model_connection_version: Optional[str] = None,
+        task_context_preview: Optional[Dict[str, Any]] = None,
     ) -> str:
         """新增一条定时任务，返回 task_id。owner_user_id 用于 Web UI 多用户归属。
 
@@ -166,6 +167,13 @@ class ScheduleStore:
         auth = execution.current_authorization()
         if owner_user_id != auth.owner_user_id:
             raise execution.ExecutionDenied("计划所属账号不匹配")
+        context_json = None
+        if task_context_preview is not None:
+            from src.conductor.state import frozen_task_context
+
+            # 先核验已确认的本人快照，拒绝后不能留下计划或执行授权绑定。
+            preview = frozen_task_context({"task_context_preview": task_context_preview})
+            context_json = preview.model_dump_json()
         with get_store().account_execution_transaction(auth) as web_conn:
             execution.bind_execution(web_conn, auth, "schedule", task_id, state="idle", now=time.time())
             with self._lock, self._conn() as conn:
@@ -175,13 +183,13 @@ class ScheduleStore:
                        (task_id, user_input, owner_user_id, provider, model, trigger_type, run_at,
                         cron_expr, next_run_at, status, run_count, created_at,
                         name, source, interval_seconds, start_date, end_date,
-                        model_connection_id, model_connection_version, time_zone)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, ?, ?, 'Asia/Shanghai')""",
+                        model_connection_id, model_connection_version, time_zone, task_context_json)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, ?, ?, ?, ?, 'Asia/Shanghai', ?)""",
                     (
                         task_id, user_input, owner_user_id, provider, model, trigger_type,
                         _iso(run_at), cron_expr, _iso(next_run_at), _iso(beijing_now()),
                         name, source, interval_seconds, start_date, end_date,
-                        model_connection_id, model_connection_version,
+                        model_connection_id, model_connection_version, context_json,
                     ),
                 )
         return task_id

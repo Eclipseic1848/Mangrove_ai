@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import nullcontext
+from contextlib import closing, nullcontext
 import hashlib
 import json
 import logging
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import subprocess
 from typing import Callable, Protocol
 import uuid
@@ -17,14 +18,17 @@ from filelock import Timeout as FileLockTimeout
 
 from src.agentic_runtime.document_retrieval import DocumentRetrievalModule
 from src.agentic_runtime.document_tools import DocumentToolBroker
-from src.agentic_runtime.models import RuntimeStatus, VerificationStatus
+from src.agentic_runtime.models import RuntimeStatus, RuntimeTaskConfig, RuntimeVersion, VerificationStatus
+from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.agentic_runtime.pi_runtime import PiRuntime
 from src.capability_adapters import load_runtime_manifests
 from src.capability_catalog import CatalogActor
 from src.capability_host import CapabilityHost, CapabilityHostLease, CapabilityHostRequest
 from src.config.settings import settings
 from src.model_connections import get_default_broker
-from src.account_execution import ExecutionDenied, execution_context
+from src.account_execution import ExecutionDenied, current_authorization, execution_context
+from src.candidate_verification import CandidateVerificationService, CurrentVerifierRulesetResolver, SqliteCandidateVerificationRepository
+from src.database_migrations import DatabaseTarget, apply_migrations
 from src.api.execution import execution_to_thread
 
 from .models import (
@@ -235,6 +239,45 @@ class PiTaskReplayRunner:
         self.cleanup(run)
         replay_root.mkdir(parents=True, exist_ok=False)
         replay_request = request
+        if self._execution_authorizer is None:
+            raise ExecutionDenied("验证执行授权未配置")
+        self._execution_authorizer(run)
+        authorization = current_authorization()
+        if authorization.owner_user_id != run.owner_id:
+            raise ExecutionDenied("重放执行上下文不属于 Owner")
+        # 重放使用同一核验模块，但其 Run 和候选投影必须留在独立临时库，不能覆盖原业务任务。
+        database = replay_root / "state.db"
+        apply_migrations(DatabaseTarget("webui", database), replay_root / "before-migration.db")
+        with closing(sqlite3.connect(database)) as connection, connection:
+            connection.execute(
+                "INSERT INTO users(user_id,username,password_hash,created_at,role,execution_generation) VALUES (?,?,'replay-no-login',?,?,?)",
+                (run.owner_id, run.owner_id, run.created_at.isoformat(), run.actor_role, authorization.generation),
+            )
+        state_store = AgenticRuntimeRepository(database)
+        state_store.register(RuntimeTaskConfig(
+            user_id=request.user_id, task_id=request.task_id, revision=request.revision,
+            run_id=inner_run_id, runtime_version=RuntimeVersion.PI, permission_profile=request.permission_profile,
+            model_connection_id=request.model_connection_id,
+            model_connection_version=request.model_connection_version,
+            model_connection_model=request.model_connection_model,
+            external_api_confirmed=request.external_api_confirmed,
+        ))
+        from src.api.semantic_workspace_runtime import _CandidateVerificationBrokerAdapter
+        from src.runtime_routing import runtime_routing_is_p0_blocked
+
+        def blocked(_request):
+            # 临时库只镜像冻结授权；每次核验仍回到真实库检查账号和验证绑定。
+            self._execution_authorizer(run)
+            return runtime_routing_is_p0_blocked(settings.webui_db_path)
+
+        verification = CandidateVerificationService(
+            repository=SqliteCandidateVerificationRepository(database),
+            ruleset_resolver=CurrentVerifierRulesetResolver(Path(__file__).resolve().parents[2]),
+            p0_reader=blocked, broker_adapter=_CandidateVerificationBrokerAdapter(),
+            event_writer=lambda event, attempt: state_store.append_event(
+                request.user_id, request.task_id, request.revision, event_type=event,
+                summary="重放候选核验", details={"attempt_id": attempt.attempt_id, "status": attempt.status.value}),
+        )
         def authorize_document(authorization):
             if self._execution_authorizer is None:
                 raise ExecutionDenied("验证执行授权未配置")
@@ -242,6 +285,8 @@ class PiTaskReplayRunner:
                 self._execution_authorizer(run)
 
         runtime = PiRuntime(
+            candidate_verification=verification,
+            state_store=state_store,
             execution_root=replay_root,
             capability_mount_resolver=lambda *_args: tuple(mounts),
             capability_host=CapabilityHost(
@@ -249,6 +294,7 @@ class PiTaskReplayRunner:
                 execution_root=replay_root / "capability-hosts",
             ),
             document_tool_broker=DocumentToolBroker(
+                state_store=state_store,
                 retriever=DocumentRetrievalModule(),
                 ttl_seconds=settings.pi_runtime_timeout_seconds,
                 execution_authorizer=authorize_document,
@@ -260,7 +306,7 @@ class PiTaskReplayRunner:
 
         async def run_replay():
             async def collect_event(event) -> None:
-                if event.event_type == "tool.completed":
+                if event.event_type == "tool.completed" and not event.details.get("failed"):
                     tool = str(event.details.get("tool") or "")
                     if tool:
                         completed_tools.add(tool)
@@ -305,6 +351,7 @@ class PiTaskReplayRunner:
             }
             if not completed_tools.intersection(target_tools):
                 raise RuntimeError("真实任务重放未实际调用目标 digest 的能力")
+            self._execution_authorizer(run)
             return {
                 "cancelled": False,
                 "candidate_hashes": sorted(item.sha256 for item in result.candidates),

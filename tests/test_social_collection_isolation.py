@@ -16,6 +16,7 @@ from src.conductor.task_spec import TaskSpec
 def crawler(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "mediacrawler_path", str(tmp_path))
     monkeypatch.setattr(settings, "mediacrawler_python", sys.executable)
+    monkeypatch.setattr(settings, "mediacrawler_python_ks", "")
     monkeypatch.setattr(settings, "mc_enable_ip_proxy", False)
     monkeypatch.setattr(settings, "mc_enable_cdp_mode", False)
     monkeypatch.setattr(settings, "webui_db_path", str(tmp_path / "webui.db"))
@@ -29,6 +30,13 @@ def crawler(tmp_path, monkeypatch):
     (tmp_path / "tools").mkdir()
     (tmp_path / "tools/__init__.py").write_text("", encoding="utf-8")
     (tmp_path / "tools/async_file_writer.py").write_text("class AsyncFileWriter: pass\n", encoding="utf-8")
+    # 补齐快手入口实际依赖；完整 Cookie 解析由专项子进程测试覆盖。
+    (tmp_path / "tools/crawler_util.py").write_text(
+        "def convert_str_cookie_to_dict(cookie):\n"
+        "    return dict(field.strip().split('=') for field in cookie.split(';') if field.strip().count('=') == 1)\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "tools/utils.py").write_text("from .crawler_util import convert_str_cookie_to_dict\n", encoding="utf-8")
     (tmp_path / "config.py").write_text("SAVE_LOGIN_STATE = True\n", encoding="utf-8")
     (tmp_path / "main.py").write_text('''
 import argparse, json, os, subprocess, sys, time
@@ -97,15 +105,16 @@ asyncio.run(XiaoHongShuCrawler().search())
     assert "private-account" not in json.dumps(result.authentication)
 
 
-@pytest.mark.parametrize("platform", ["dy", "ks", "tieba", "zhihu"])
-def test_unsupported_identity_probe_does_not_start_crawler(crawler, platform):
-    (crawler / "main.py").write_text('raise AssertionError("不支持身份探针时不启动采集")', encoding="utf-8")
-    with user_overrides_context({f"mc_cookie_{platform}": "synthetic-cookie"}):
-        result = asyncio.run(SocialMediaCollector().verify_cookie(TaskSpec(
-            intent="验证", platforms=[platform], keywords=["验证"], max_items=1,
-        )))
-    assert result.authentication == {"status": "unknown", "reason": "identity_probe_unsupported"}
-    assert not result.success and not result.items
+def test_unsupported_identity_probe_does_not_import_crawler(tmp_path, monkeypatch):
+    from scripts import mediacrawler_identity
+
+    def forbidden(*args):
+        raise AssertionError("不支持身份探针时不导入采集器")
+
+    monkeypatch.setattr(mediacrawler_identity.importlib, "import_module", forbidden)
+    output = tmp_path / "identity.json"
+    assert not mediacrawler_identity.install_probe("unsupported", output)
+    assert json.loads(output.read_text(encoding="utf-8")) == {"status": "unknown", "reason": "identity_probe_unsupported"}
 
 
 def test_cookie_probe_results_are_not_reused_by_task(crawler):
@@ -190,6 +199,102 @@ def test_platform_store_directory_names(crawler, monkeypatch, platform):
     assert [item.title for item in result.items] == ["目标"]
 
 
+@pytest.mark.parametrize("platform", ["xhs", "dy", "wb", "ks", "bili", "zhihu", "tieba"])
+@pytest.mark.parametrize("identity_probe", [False, True])
+@pytest.mark.parametrize("binding", ["live", "frozen", "legacy"])
+def test_kuaishou_runtime_selection_preserves_other_platforms(crawler, monkeypatch, platform, identity_probe, binding):
+    from contextlib import nullcontext
+    from src.config.cookie_probe_binding import capture_probe_environment, probe_environment_context
+
+    monkeypatch.setattr(settings, "mediacrawler_python", "live-default")
+    monkeypatch.setattr(settings, "mediacrawler_python_ks", "live-ks")
+    frozen = capture_probe_environment()
+    frozen["python"] = "frozen-default"
+    if binding == "legacy":
+        frozen.pop("python_overrides", None)
+    else:
+        frozen["python_overrides"] = {"ks": "frozen-ks"}
+    observed = []
+
+    async def launch(*args, **kwargs):
+        observed.append(args[0])
+        run_dir = Path(args[args.index("--save_data_path") + 1])
+        if identity_probe:
+            (run_dir / "identity.json").write_text('{"status":"valid"}', encoding="utf-8")
+        else:
+            output = run_dir / {"dy": "douyin", "wb": "weibo", "ks": "kuaishou"}.get(platform, platform) / "json"
+            output.mkdir(parents=True)
+            (output / "contents.json").write_text(json.dumps([
+                {"note_id": "synthetic", "title": "目标", "source_keyword": "目标"}
+            ], ensure_ascii=False), encoding="utf-8")
+
+        class Process:
+            returncode = 0
+
+            async def communicate(self, input):
+                assert input == b'"synthetic-cookie"'
+
+        return Process()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", launch)
+    context = nullcontext() if binding == "live" else probe_environment_context(frozen)
+    with context, user_overrides_context({f"mc_cookie_{platform}": "synthetic-cookie"}):
+        result = asyncio.run(SocialMediaCollector().collect(TaskSpec(
+            intent="目标", platforms=[platform], keywords=["目标"], max_items=1,
+        ), identity_probe=identity_probe))
+    expected = "live-default" if binding == "live" else "frozen-default"
+    if platform == "ks" and binding != "legacy":
+        expected = "live-ks" if binding == "live" else "frozen-ks"
+    assert observed == [expected]
+    assert result.success, result.message
+
+
+@pytest.mark.parametrize("override", [None, [], {}, {"ks": ""}, {"ks": " "}, {"ks": 1}, {"ks": None}])
+@pytest.mark.parametrize("identity_probe", [False, True])
+def test_kuaishou_invalid_frozen_runtime_never_launches(crawler, monkeypatch, override, identity_probe):
+    from src.config.cookie_probe_binding import capture_probe_environment, probe_environment_context
+
+    monkeypatch.setattr(settings, "mediacrawler_python_ks", sys.executable)
+    frozen = capture_probe_environment()
+    frozen["python_overrides"] = override
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("无效冻结解释器不能启动或降级")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
+    with probe_environment_context(frozen), user_overrides_context({"mc_cookie_ks": "synthetic-cookie"}):
+        result = asyncio.run(SocialMediaCollector().collect(TaskSpec(
+            intent="目标", platforms=["ks"], keywords=["目标"], max_items=1,
+        ), identity_probe=identity_probe))
+    assert not result.success
+    assert "冻结的快手解释器配置无效" in result.message
+
+
+@pytest.mark.parametrize("identity_probe", [False, True])
+@pytest.mark.parametrize("binding", ["live", "frozen"])
+@pytest.mark.parametrize("entry", ["missing", "directory", "non-executable"])
+def test_kuaishou_missing_runtime_does_not_fall_back(crawler, monkeypatch, identity_probe, binding, entry):
+    from contextlib import nullcontext
+    from src.config.cookie_probe_binding import capture_probe_environment, probe_environment_context
+
+    candidate = crawler / "candidate-python.exe"
+    if entry == "directory":
+        candidate.mkdir()
+    elif entry == "non-executable":
+        candidate.write_text("合成的非可执行文件", encoding="utf-8")
+    monkeypatch.setattr(settings, "mediacrawler_python_ks", str(candidate))
+    frozen = capture_probe_environment()
+    if binding == "frozen":
+        monkeypatch.setattr(settings, "mediacrawler_python_ks", sys.executable)
+    context = probe_environment_context(frozen) if binding == "frozen" else nullcontext()
+    with context, user_overrides_context({"mc_cookie_ks": "synthetic-cookie"}):
+        result = asyncio.run(SocialMediaCollector().collect(TaskSpec(
+            intent="目标", platforms=["ks"], keywords=["目标"], max_items=1,
+        ), identity_probe=identity_probe))
+    assert not result.success
+    assert "启动失败" in result.message
+
+
 def test_detail_and_comment_collection_still_work(crawler):
     async def run():
         with user_overrides_context({"mc_cookie_xhs": "synthetic-cookie"}):
@@ -203,6 +308,81 @@ def test_detail_and_comment_collection_still_work(crawler):
         assert comments.success and comments.items[0].content == "合成评论正文。"
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("direct", [False, True], ids=["search", "detail"])
+@pytest.mark.parametrize("include_comments", [False, True])
+def test_voc_post_task_keeps_notes_as_result_unit(crawler, monkeypatch, direct, include_comments):
+    url = "https://www.xiaohongshu.com/explore/abcdef123456"
+    monkeypatch.setenv("SYNTHETIC_NOTE_FIELDS", json.dumps({
+        "note_id": "abcdef123456", "note_url": url, "time": 1767225600000,
+    }))
+    monkeypatch.setenv("SYNTHETIC_COMMENTS", json.dumps([
+        {"comment_id": f"comment-{index}", "note_id": "abcdef123456",
+         "note_url": url, "content": f"会员评论第{index}条。"}
+        for index in range(5)
+    ], ensure_ascii=False))
+    with user_overrides_context({"mc_cookie_xhs": "synthetic-cookie"}):
+        result = asyncio.run(SocialMediaCollector().collect(TaskSpec(
+            intent="采集5条平安银行手机银行会员页面并分析", platforms=["小红书"],
+            keywords=["平安银行手机银行会员"], urls=[url] if direct else [],
+            data_type="post", analysis_type="voc", max_items=5, include_comments=include_comments,
+        )))
+    assert result.success, result.message
+    assert len(result.items) == 1
+    item = result.items[0]
+    assert item.metadata["kind"] == "post"
+    assert item.url == url
+    assert item.content == "用于核对采集目标的合成正文。"
+    assert item.metadata["publish_time"] == "2026-01-01T00:00:00+00:00"
+    assert len(item.metadata["comments"]) == (5 if include_comments else 0)
+    assert ("comments" in result.coverage["operations"]) == include_comments
+
+
+@pytest.mark.parametrize("direct", [False, True], ids=["search", "detail"])
+@pytest.mark.parametrize("include_comments", [False, True])
+@pytest.mark.parametrize("has_comments", [False, True])
+def test_explicit_comment_task_never_uses_parent_post(crawler, monkeypatch, direct, include_comments, has_comments):
+    url = "https://www.xiaohongshu.com/explore/abcdef123456"
+    monkeypatch.setenv("SYNTHETIC_NOTE_FIELDS", json.dumps({"note_id": "abcdef123456", "note_url": url}))
+    comments = [{"comment_id": "comment-1", "note_id": "abcdef123456",
+                 "note_url": url, "content": "会员评论原文。"}] if has_comments else []
+    monkeypatch.setenv("SYNTHETIC_COMMENTS", json.dumps(comments, ensure_ascii=False))
+    with user_overrides_context({"mc_cookie_xhs": "synthetic-cookie"}):
+        result = asyncio.run(SocialMediaCollector().collect(TaskSpec(
+            intent="采集会员评论", platforms=["小红书"], keywords=["平安银行手机银行会员"],
+            urls=[url] if direct else [], data_type="comment", analysis_type="summary",
+            include_comments=include_comments, max_items=5,
+        )))
+    assert result.success == has_comments
+    if has_comments:
+        assert len(result.items) == 1
+        assert result.items[0].metadata["kind"] == "comment"
+        assert result.items[0].content == "会员评论原文。"
+    else:
+        assert result.items == []
+        assert "评论" in result.message
+
+
+@pytest.mark.parametrize("data_type", ["post", "comment"])
+def test_video_only_fallback_preserves_requested_object(crawler, monkeypatch, data_type):
+    import yt_dlp
+
+    url = "https://www.douyin.com/video/1234567890123456789"
+    (crawler / "main.py").write_text("raise RuntimeError('合成采集失败')", encoding="utf-8")
+    monkeypatch.setattr(yt_dlp.YoutubeDL, "extract_info", lambda self, requested_url, download: {
+        "id": "1234567890123456789", "webpage_url": requested_url,
+        "url": "https://example.com/synthetic.mp4", "description": "合成视频描述。",
+    })
+    with user_overrides_context({"mc_cookie_dy": "synthetic-cookie"}):
+        result = asyncio.run(SocialMediaCollector().collect(TaskSpec(
+            intent="读取指定数据", platforms=["抖音"], urls=[url], data_type=data_type,
+        )))
+    assert result.success == (data_type == "post")
+    if data_type == "post":
+        assert result.items[0].metadata["kind"] == "post"
+    else:
+        assert result.items == []
 
 
 @pytest.mark.parametrize("source_keyword", ["你好", ""])
@@ -363,7 +543,8 @@ assert result['items'] and result['has_more'] is True
             intent="权益", keywords=["中信权益"], platforms=["小红书"],
             xhs_search_page=3, xhs_sort="time_descending", xhs_note_type="image")))
     assert result.success
-    assert result.coverage["pages"] == [{"keyword": "中信权益", "page": 3, "item_count": 1, "has_more": False}]
+    assert result.coverage["pages"] == [{"keyword": "中信权益", "page": 3, "item_count": 1,
+                                         "accepted_count": 1, "has_more": False}]
 
 
 @pytest.mark.parametrize("failure, expected", [
@@ -441,6 +622,8 @@ def test_adapter_shares_remaining_time_between_notes(crawler, monkeypatch):
 import asyncio
 class XiaoHongShuClient:
     calls = []
+    async def get_note_by_keyword(self, **kwargs):
+        raise AssertionError("评论预算测试不应发起检索")
     async def get_note_comments(self, **kwargs):
         self.calls.append(kwargs['note_id'])
         return {'comments': [{'id': kwargs['note_id'], 'sub_comment_has_more': True}], 'has_more': False}

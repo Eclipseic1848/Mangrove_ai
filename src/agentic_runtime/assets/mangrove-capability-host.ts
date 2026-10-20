@@ -8,7 +8,7 @@ const config = JSON.parse(
 ) as {
   relayUrl: string;
   relayToken: string;
-  capabilities: { name: string; kind: string }[];
+  capabilities: { name: string; kind: string; purpose?: string }[];
 };
 
 function toolName(name: string): string {
@@ -28,7 +28,7 @@ export default function mangroveCapabilityHost(pi: ExtensionAPI) {
     pi.registerTool({
       name,
       label: capability.name,
-      description: "调用任务冻结的本地能力。能力运行在不挂载业务来源和模型凭证的隔离 Host 中。",
+      description: [capability.purpose, "调用任务冻结的本地能力。能力运行在不挂载业务来源和模型凭证的隔离 Host 中。"].filter(Boolean).join("\n"),
       parameters: mcp
         ? Type.Object({
             tool: Type.String(),

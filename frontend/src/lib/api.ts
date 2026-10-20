@@ -51,8 +51,46 @@ function cookieFetch(path: RequestInfo | URL, init: RequestInit = {}, owner?: st
   return transport(path, { ...init, headers, credentials: "same-origin" });
 }
 export async function withSessionLock<T>(operation: () => Promise<T>): Promise<T> {
-  if (!navigator.locks) throw new ApiError(401, "浏览器无法安全续期，请使用支持 Web Locks 的浏览器并通过 HTTPS 或 localhost 重新登录");
-  return navigator.locks.request("mangrove-platform-session", operation);
+  if (navigator.locks) return navigator.locks.request("mangrove-platform-session", operation);
+  // HTTP 下 Web Locks 不可用；IndexedDB 写事务仍能跨标签串行，关闭标签时自动释放。
+  return new Promise<T>((resolve, reject) => {
+    if (!globalThis.indexedDB) {
+      reject(new ApiError(503, "浏览器未开启本地存储，请允许本站使用存储后重试登录"));
+      return;
+    }
+    const opening = indexedDB.open("mangrove-session-lock", 1);
+    opening.onupgradeneeded = () => { opening.result.createObjectStore("session"); };
+    opening.onerror = () => reject(new ApiError(503, "无法使用浏览器存储，请检查本站存储权限后重试"));
+    opening.onsuccess = () => {
+      const db = opening.result;
+      const transaction = db.transaction("session", "readwrite");
+      const store = transaction.objectStore("session");
+      let started = false;
+      let finished = false;
+      let failed = false;
+      let value: T;
+      let failure: unknown;
+      transaction.onabort = () => {
+        db.close();
+        reject(new ApiError(503, "登录操作中断，请刷新页面后重试"));
+      };
+      transaction.oncomplete = () => { db.close(); failed ? reject(failure) : resolve(value); };
+      const keepAlive = () => {
+        store.get("lock").onsuccess = () => {
+          if (!started) {
+            started = true;
+            void Promise.resolve().then(operation).then(
+              result => { value = result; finished = true; },
+              error => { failure = error; failed = true; finished = true; },
+            );
+          }
+          // 等待网络响应期间保持事务活动，避免另一个标签重复消费刷新凭证。
+          if (!finished) keepAlive();
+        };
+      };
+      keepAlive();
+    };
+  });
 }
 const channel = typeof BroadcastChannel !== "undefined" ? new BroadcastChannel("mangrove-platform-session") : null;
 function broadcastSession() { channel?.postMessage("identity-changed"); }
@@ -295,7 +333,7 @@ export async function downloadFile(url: string, filename: string, signal?: Abort
 }
 
 // ---------- SSE 聊天流 ----------
-export type ChatProgress = { node: string; label: string; status: "started" | "completed" | "waiting" | "warning" | "failed"; summary: string; sequence: number; sources?: Array<{ url: string; title: string; status: "requested" | "received" }> };
+export type ChatProgress = { node: string; label: string; status: "started" | "completed" | "waiting" | "warning" | "failed"; summary: string; sequence: number; sources?: Array<{ url: string; title: string; status: "requested" | "received" }>; candidate_counts?: { found: number; excluded: number; review_required: number; unfinished: number; selected: number; target_count: number }; files?: Array<{ name: string; url: string }> };
 export interface ChatEvents {
   onProgress?: (d: ChatProgress) => void;
   onMeta?: (d: { conv_id: string }) => void;

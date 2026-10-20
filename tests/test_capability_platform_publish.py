@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+from pathlib import Path
 
 import pytest
 from tests.account_execution_helpers import seed_execution_owner
@@ -1107,6 +1108,35 @@ class TestS5ServiceCommands:
         assert published_pack.scope is ProcedureScope.PLATFORM
         assert published_pack.digest == platform_target.digest
         assert published_pack.maturity.value == "verified"
+
+    def test_publish_keeps_reuse_metadata_from_exact_platform_snapshot(self, tmp_path) -> None:
+        from src.capability_catalog.integrity import write_capability_integrity
+        from src.capability_catalog.reuse import validated_reuse_contract
+
+        repository, governance, personal, publisher, target = self._green_candidate_fixture()
+        template = Path(__file__).resolve().parents[1] / "examples/capabilities/csv-group-summary/reuse-contract.json"
+        contract = json.loads(template.read_text(encoding="utf-8"))
+        contract["capability_id"] = personal.pack_id
+        subject = tmp_path / "platform"
+        subject.mkdir()
+        metadata_path = subject / "mangrove-reuse.json"
+        metadata_path.write_text(json.dumps({"reuse_contract": json.dumps(contract), "license": "MIT",
+            "source_provenance": ["https://github.com/example/public-tool"]}), encoding="utf-8")
+        write_capability_integrity(subject, target.digest)
+        governance._platform_materialize = lambda frozen: subject
+        ref = CapabilityPackRef(pack_id=target.pack_id, version=target.version, digest=target.digest)
+        # 缓存篡改必须在目录或发布事件写入前拒绝。
+        metadata_path.write_text("{}", encoding="utf-8")
+        with pytest.raises(RuntimeError, match="完整性"):
+            governance.publish_platform(self._admin(), pack_ref=ref, reason="发布", idempotency_key="publish:one")
+        assert publisher.calls == []
+        metadata_path.write_text(json.dumps({"reuse_contract": json.dumps(contract), "license": "MIT",
+            "source_provenance": ["https://github.com/example/public-tool"]}), encoding="utf-8")
+        assert governance.publish_platform(self._admin(), pack_ref=ref, reason="发布", idempotency_key="publish:one").status == "published"
+        published = publisher.calls[0]
+        assert validated_reuse_contract(published).operations == ("group_sum",)
+        assert published.owner_id is None
+        assert "purpose" not in dict(published.manifest)
 
     def test_publish_idempotent(self) -> None:
         (

@@ -44,14 +44,16 @@ def source_links(items, status: str) -> list[dict]:
     return links
 
 
-def emit_progress(node: str, status: str, summary: str, *, sources=None):
+def emit_progress(node: str, status: str, summary: str, *, sources=None, candidate_counts=None, files=None):
     try:
         writer = get_stream_writer()
     except RuntimeError:
         # 单独调用节点时没有流式宿主，不影响原执行行为。
         return
     writer({"node": node, "status": status, "label": LABELS.get(node, "处理任务"), "summary": summary,
-            **({"sources": sources} if sources else {})})
+            **({"sources": sources} if sources else {}),
+            **({"candidate_counts": candidate_counts} if candidate_counts is not None else {}),
+            **({"files": files} if files else {})})
 
 
 def completed_summary(name: str, result: dict) -> str:

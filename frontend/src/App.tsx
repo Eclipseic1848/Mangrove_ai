@@ -3,17 +3,18 @@ import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { useAuth, isAdminish } from "@/lib/auth";
 import { Layout } from "@/components/Layout";
 import { Login } from "@/pages/Login";
+import { routeLoaders } from "@/lib/routeLoaders";
 
-const Dashboard = lazy(() => import("@/pages/Dashboard").then(module => ({ default: module.Dashboard })));
-const Chat = lazy(() => import("@/pages/Chat").then(module => ({ default: module.Chat })));
-const DataPrepPage = lazy(() => import("@/pages/DataPrepPage").then(module => ({ default: module.DataPrepPage })));
-const Tasks = lazy(() => import("@/pages/Tasks").then(module => ({ default: module.Tasks })));
-const Templates = lazy(() => import("@/pages/Templates").then(module => ({ default: module.Templates })));
-const Memory = lazy(() => import("@/pages/Memory").then(module => ({ default: module.Memory })));
-const Settings = lazy(() => import("@/pages/Settings").then(module => ({ default: module.Settings })));
-const Admin = lazy(() => import("@/pages/Admin").then(module => ({ default: module.Admin })));
-const Feedback = lazy(() => import("@/pages/Feedback").then(module => ({ default: module.Feedback })));
-const Operations = lazy(() => import("@/pages/Operations").then(module => ({ default: module.Operations })));
+const Dashboard = lazy(routeLoaders['/']);
+const Chat = lazy(routeLoaders['/chat']);
+const DataPrepPage = lazy(routeLoaders['/data-prep']);
+const Tasks = lazy(routeLoaders['/tasks']);
+const Templates = lazy(routeLoaders['/templates']);
+const Memory = lazy(routeLoaders['/memory']);
+const Settings = lazy(routeLoaders['/settings']);
+const Admin = lazy(routeLoaders['/admin']);
+const Feedback = lazy(routeLoaders['/feedback']);
+const Operations = lazy(routeLoaders['/operations']);
 
 function Protected({ children }: { children: React.ReactNode }) {
   const { user, loading } = useAuth();

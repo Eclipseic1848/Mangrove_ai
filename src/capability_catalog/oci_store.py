@@ -283,7 +283,19 @@ class OrasOciLayoutStore:
                     raise RuntimeError(
                         f"ORAS 物化冻结制品失败：{completed.stderr.strip()[:500]}"
                     )
-            self._expand_capability_archive(output)
+            declared_archives = ()
+            manifest_blob = self._layout_path / "blobs" / "sha256" / digest.removeprefix("sha256:")
+            if manifest_blob.is_file():
+                raw_manifest = manifest_blob.read_bytes()
+                if "sha256:" + hashlib.sha256(raw_manifest).hexdigest() != digest:
+                    raise RuntimeError("OCI manifest 内容与冻结 digest 不一致")
+                # 使用冻结层的类型和文件名，避免把任意 tar 猜成可执行能力。
+                layers = json.loads(raw_manifest).get("layers", ())
+                declared_archives = tuple(layer.get("annotations", {}).get("org.opencontainers.image.title", "")
+                    for layer in layers if layer.get("mediaType") == "application/vnd.mangrove.capability.tar")
+                if any(not isinstance(name, str) or not re.fullmatch(r"[^/\\\x00:]{1,200}", name) or name in {".", ".."} for name in declared_archives):
+                    raise RuntimeError("OCI 能力归档名称无效")
+            self._expand_capability_archive(output, declared_archives=declared_archives)
             for path in output.rglob("*"):
                 if output not in path.resolve().parents:
                     raise RuntimeError("OCI 制品解包路径越界")
@@ -293,14 +305,16 @@ class OrasOciLayoutStore:
             raise
 
     @staticmethod
-    def _expand_capability_archive(output: Path) -> None:
+    def _expand_capability_archive(output: Path, *, declared_archives: tuple[str, ...] = ()) -> None:
         """安全展开单层能力归档；普通单文件制品保持既有行为。"""
 
+        if declared_archives and (len(declared_archives) != 1 or not (output / declared_archives[0]).is_file()):
+            raise RuntimeError("声明的能力归档必须是唯一且存在的负载")
         archives = [
             path
             for path in output.iterdir()
             if path.is_file()
-            and path.name in {
+            and path.name in {*declared_archives,
                 "mangrove-capability.tar",
                 "mangrove-capability.tar.gz",
                 "mangrove-capability.tgz",

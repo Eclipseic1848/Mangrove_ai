@@ -156,7 +156,8 @@ def visit(body: Visit, request: Request, user=Depends(get_current_user)):
 def events(filters: ops.Filters, request: Request, user=Depends(get_current_user)):
     query_context(request, filters)
     with get_store()._conn() as conn:
-        conn.execute("BEGIN IMMEDIATE")
+        # 权限与查询共用读快照，不预占心跳和审计所需的写槽。
+        conn.execute("BEGIN")
         actor = ops.identity(conn, user)
         result = ops.query(conn, actor, filters)
         query_context(request, filters, len(result["items"]))
@@ -167,7 +168,7 @@ def events(filters: ops.Filters, request: Request, user=Depends(get_current_user
 def summary(filters: ops.Filters, request: Request, user=Depends(get_current_user)):
     query_context(request, filters)
     with get_store()._conn() as conn:
-        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("BEGIN")
         actor = ops.identity(conn, user)
         result = ops.summary(conn, actor, filters)
         return result

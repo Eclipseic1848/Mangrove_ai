@@ -5,16 +5,18 @@ Scrapling（BSD-3）通过浏览器指纹伪装的 HTTP 抓取（curl_cffi）应
 在 Crawl4AI 被封/取空后作为升级层；改版后元素自动重定位，"先抽取再喂 AI"省 token。
 
 - 默认用 Fetcher（HTTP，带指纹伪装，无需浏览器内核）。
-- 若安装了隐身浏览器内核（`scrapling install` 下载 camoufox），可进一步用 StealthyFetcher 过 Cloudflare；
+- 使用 StealthyFetcher 的隐身浏览器进一步读取动态页面；Linux 优先复用已安装的 Chrome。
   本采集器在该内核不可用时自动退回 Fetcher，不影响运行。
 - 未安装 scrapling 或其依赖时本采集器判定不可用，路由自动跳过。
 
-安装：pip install "scrapling[fetchers]"（过 Cloudflare 还需 `scrapling install`）
+安装：pip install "scrapling[fetchers]"；无 Chrome 的环境需另行准备浏览器内核。
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
+import sys
 from typing import Optional
 
 from src.config.settings import settings
@@ -36,14 +38,14 @@ except Exception:  # 未安装或依赖缺失
     _SCRAPLING_OK = False
 
 try:
-    from scrapling.fetchers import StealthyFetcher  # type: ignore  # 底层 Camoufox 隐身浏览器
+    from scrapling.fetchers import StealthyFetcher  # type: ignore  # 当前冻结版本使用隐身 Chrome
 
     _STEALTH_OK = True
 except Exception:
     StealthyFetcher = None  # type: ignore
     _STEALTH_OK = False
 
-# Camoufox 内核首次调用失败（多为未 `scrapling install`）后置真，后续不再尝试隐身兜底，避免反复拖慢
+# 只有明确缺浏览器内核才停用；单个来源超时不能永久影响其他正常来源。
 _stealth_broken = False
 
 
@@ -84,32 +86,39 @@ def _fetch_one(url: str) -> CollectedItem:
     )
 
 
-async def _fetch_stealth(url: str) -> Optional[CollectedItem]:
-    """用 StealthyFetcher（Camoufox 隐身浏览器）抓取，过知乎/汽车之家/Cloudflare 等强反爬站。
+def _usable_item(item: Optional[CollectedItem]) -> bool:
+    """错误响应和短验证页需升级或报失败，不能当作已获取的业务正文。"""
+    if item is None or not (item.content or "").strip():
+        return False
+    return not item.is_error_page
 
-    内核不可用（多为未 `scrapling install`）时置全局 _stealth_broken 并返回 None，后续不再尝试。
-    """
+
+async def _fetch_stealth(url: str) -> Optional[CollectedItem]:
+    """读取隐身浏览器正文；缺内核停用，来源临时失败只影响本次读取。"""
     global _stealth_broken
     if not _STEALTH_OK or _stealth_broken:
         return None
     try:
-        # async_fetch 启动 Camoufox 无头浏览器；network_idle 等页面稳定，headless 省资源
-        page = await StealthyFetcher.async_fetch(url, headless=True, network_idle=True)
+        # 复用服务器现有 Chrome，避免默认查找未下载的浏览器内核。
+        page = await StealthyFetcher.async_fetch(url, headless=True, network_idle=True,
+            real_chrome=sys.platform.startswith("linux") and bool(shutil.which("google-chrome")))
     except Exception as e:
-        _stealth_broken = True
+        if "Executable doesn't exist" in str(e):
+            _stealth_broken = True
         logger.warning(
-            "StealthyFetcher(Camoufox) 不可用，本次起停用隐身兜底（请先执行 `scrapling install` 下载内核）：%s", e
+            "隐身浏览器本次读取失败（缺内核=%s）：%s", _stealth_broken, e
         )
         return None
     text = _page_text(page)
     if not (text or "").strip():
         return None
-    return CollectedItem(
+    item = CollectedItem(
         url=url,
         title=_extract_title(page),
         content=text,
-        metadata={"engine": "scrapling", "via": "camoufox", "status": getattr(page, "status", None)},
+        metadata={"engine": "scrapling", "via": "stealth", "status": getattr(page, "status", None)},
     )
+    return item if _usable_item(item) else None
 
 
 class ScraplingCollector(BaseCollector):
@@ -142,18 +151,18 @@ class ScraplingCollector(BaseCollector):
                 item = await retry_async(lambda u=url: asyncio.to_thread(_fetch_one, u))
             except Exception as e:
                 logger.warning("scrapling Fetcher 抓取失败 %s: %s", url, e)
-            # Fetcher 取空/失败 且启用隐身兜底 → StealthyFetcher(Camoufox 隐身浏览器)重抓强反爬站
-            if (item is None or not (item.content or "").strip()) and settings.scrapling_stealth_enabled:
+            # 验证页也是未取得正文；启用时才尝试隐身读取，失败仍按失败返回。
+            if not _usable_item(item) and settings.scrapling_stealth_enabled:
                 stealth_item = await _fetch_stealth(url)
                 if stealth_item is not None:
                     item = stealth_item
                     stealth_used = True
-            if item is not None and (item.content or "").strip():
+            if _usable_item(item):
                 items.append(item)
 
         if not items:
             return CollectResult(False, self.name, message="scrapling 未取得内容")
-        via = "Fetcher+Camoufox 隐身兜底" if stealth_used else "Fetcher"
+        via = "Fetcher+隐身浏览器兜底" if stealth_used else "Fetcher"
         return CollectResult(True, self.name, items=items, message=f"采集 {len(items)} 个页面（{via}）")
 
 

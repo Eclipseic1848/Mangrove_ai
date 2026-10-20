@@ -97,6 +97,7 @@ class InstructorPlanDraftGenerator:
         ]
         payload = {
             "objective": request.objective_text,
+            **({"task_context": request.compiled_context.content} if request.compiled_context else {}),
             "source_findings": request.source_findings,
             "trusted_scope_summary": {
                 "has_artifacts": bool(request.artifact_ids),

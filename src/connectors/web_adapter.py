@@ -129,6 +129,7 @@ class WebCollectorAdapter(SourceConnector):
                 continue
 
             elapsed_ms = (time.time() - t0) * 1000
+            result.discard_error_pages()
             if not result.has_data:
                 metrics_record(name, False, elapsed_ms)
                 domain_health_record(name, v1.urls, False)

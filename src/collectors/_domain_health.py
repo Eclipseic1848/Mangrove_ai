@@ -4,7 +4,7 @@
 `platforms.ANTI_SCRAPE_DOMAINS` 是手工维护的已知强反爬站清单，不会随时间自动
 增补或淘汰。本模块追踪"非隐身引擎"（article/site_crawler/firecrawl/crawl4ai/
 simple_http）在具体域名上的近期成败，一旦某域名近期持续失败（样本足够且成功率
-过低），临时把它并入反爬短路判断——让 scrapling(Camoufox) 对这个新出现的
+过低），临时把它并入反爬短路判断——让 scrapling 隐身浏览器对这个新出现的
 "疑似强反爬站"也提前尝试，避免继续在注定失败的中间引擎上空跑。
 
 只统计"非隐身引擎"：scrapling 自身失败不计入（它已是终极兜底，它失败换个思路
@@ -57,8 +57,8 @@ def record(collector_name: str, urls: list, success: bool) -> None:
     if collector_name not in _TRACKED_COLLECTORS:
         return
     now = time.time()
-    for url in urls:
-        domain = _domain(url)
+    # 同一次引擎调用对同域只算一个样本，不能因链接多而误触发三次失败阈值。
+    for domain in {_domain(url) for url in urls}:
         if not domain:
             continue
         _recent.setdefault(domain, deque(maxlen=_WINDOW_SIZE)).append((now, success))

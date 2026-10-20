@@ -73,6 +73,31 @@ def test_connection_version_drift_rejected_before_cancel(proposed, monkeypatch):
     _no_new_revision(store, manager)
 
 
+@pytest.mark.parametrize("waiting", [False, True])
+def test_retired_model_rejects_new_task_without_replacing_decision(proposed, monkeypatch, waiting):
+    client, store, manager, path = proposed
+    AgenticRuntimeRepository(store.db_path).register(RuntimeTaskConfig(
+        user_id="user-a", task_id="safe-revision", revision=1, runtime_version=RuntimeVersion.PI,
+        model_connection_id="retired-connection", model_connection_version="old-version",
+        model_connection_model="retired-model", external_api_confirmed=True,
+    ))
+    def unavailable(*args, **kwargs):
+        raise route.ModelConnectionError("退役模型")
+    monkeypatch.setattr(route, "get_default_broker", lambda: SimpleNamespace(freeze_connection_for_new_task=unavailable))
+    if waiting:
+        accepted = client.post(path, json={"mode": "after_safe_point", "external_api_confirmed": True})
+        assert accepted.status_code == 202, accepted.text
+        store.update_semantic_workspace_task("user-a", "safe-revision", status="needs_input")
+    proposal_id = path.split("/")[-2]
+    repository = route._steering_repository()
+    original = repository.get_decision_for_proposal("user-a", proposal_id)
+    rejected = client.post(path, json={"mode": "new_task", "external_api_confirmed": True})
+    assert rejected.status_code == 422, rejected.text
+    assert repository.get_decision_for_proposal("user-a", proposal_id) == original
+    assert manager.cancelled == []
+    _no_new_revision(store, manager)
+
+
 @pytest.mark.parametrize("changed", [{"adapter_id": "changed-adapter"}, {"model": "changed-model"}])
 def test_binding_identity_drift_rejected_before_cancel(proposed, monkeypatch, changed):
     client, store, original_manager, path = proposed
@@ -94,6 +119,7 @@ def test_binding_identity_drift_rejected_before_cancel(proposed, monkeypatch, ch
 
     class BindingManager(_ApiManager):
         prepare_runtime_binding = SemanticWorkspaceManager.prepare_runtime_binding
+        _kernel_for_binding = SemanticWorkspaceManager._kernel_for_binding
         _uses_capability_contract = SemanticWorkspaceManager._uses_capability_contract
         _capability_agent_kernel = None
 

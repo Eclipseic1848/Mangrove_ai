@@ -14,3 +14,5 @@ src/database_migrations/alembic/versions/*.py text eol=lf
 src/database_migrations/alembic/versions/*.sql text eol=lf
 # 0023 已以 CRLF 冻结并迁移，精确保留原字节，不重写既有摘要。
 src/database_migrations/alembic/versions/webui_0023_cookie_health_binding.py -text
+# 第三方增量补丁按原始字节冻结；上下文行的空格属于补丁语法。
+external/patches/mediacrawler-cookie-refresh.patch -text -whitespace

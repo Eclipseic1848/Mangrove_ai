@@ -804,11 +804,52 @@ sudo -u mangrove /opt/mangrove/venv/bin/python -m src.database_migrations status
   --profile webui --database data/webui.db
 sudo -u mangrove /opt/mangrove/venv/bin/python -m src.database_migrations status \
   --profile scheduler --database data/scheduler.db
+sudo -u mangrove /opt/mangrove/venv/bin/python -m src.database_migrations status \
+  --profile legacy_app --database data/app.db
 ```
 
 应与交付清单匹配且无迁移内容漂移。相同版本代码与已匹配数据库迁移通常不需要重新 apply。
 
 若提示版本落后或 hash 不匹配：停在这里，由开发判断。只有计划已审查、目标库确认且已独立备份，才执行显式迁移；不能套用“新实例初始化”的命令。未识别数据库不得执行升级。
+
+#### 9.4.1 补齐缺失的 SQLite 采集结果库
+
+`data/app.db` 保存采集流程中经确认入库的结果。账号和任务历史使用 WebUI 库；
+前两个库正常不能代替采集结果库的检查。
+
+仅当存储设置为 SQLite、`data/app.db` 确实不存在、`legacy_app` 状态为
+`uninitialized`，且已确认需要启用该入库功能时，执行下面步骤。
+已有文件或符号链接不进入初始化；已有库的版本问题交开发处理。
+
+先查看计划，正常目标为 `legacy_app_0001`：
+
+```bash
+cd /opt/mangrove/app
+sudo -u mangrove /opt/mangrove/venv/bin/python -m src.database_migrations plan \
+  --profile legacy_app --database data/app.db
+```
+
+确认计划后创建独立恢复目录，再通过现有迁移工具建库：
+
+```bash
+if [ ! -e data/app.db ] && [ ! -L data/app.db ]; then
+  MANGROVE_APP_INIT_BACKUP="/opt/mangrove/backups/app-init-$(date +%Y%m%d-%H%M%S)"
+  sudo install -d -o mangrove -g mangrove -m 0700 "$MANGROVE_APP_INIT_BACKUP"
+  sudo -u mangrove /opt/mangrove/venv/bin/python -m src.database_migrations apply \
+    --profile legacy_app --database data/app.db \
+    --backup "$MANGROVE_APP_INIT_BACKUP/app.before.db" && sudo chmod 0600 data/app.db
+else
+  echo "采集库已存在，不执行初始化；请核对版本。"
+fi
+```
+
+保留恢复点及 `.receipt.json` 收据。再次运行 `status`，须显示 `current`、
+`current_revision: legacy_app_0001`；再核对获准测试任务的实际入库条数。
+补齐此独立数据库无需重启主服务，不覆盖账号、历史任务或交付文件。
+
+当前工程的 WebUI、调度与检查点存储仍使用 SQLite。设置中的 MySQL 选项不会迁移
+这些数据库；现行 MySQL 采集写入分支受外部只读边界限制，不能用于替换内部存储。
+如需整体切换，必须另做存储适配和数据迁移，不能只更改设置。
 
 ---
 
@@ -1608,6 +1649,15 @@ sudo rm /var/lib/nginx/mangrove/maintenance
 **MediaCrawler 的现有第三方许可证标注为非商业学习用途。** 公司启用该组件前，应由负责人确认已有适当授权或提供批准的替代来源；本手册不替公司推定授权。依据为工程随附的 `external/MediaCrawler/README.md` 和组件 LICENSE。
 
 当前外部组件准备脚本是 PowerShell，不能在 Linux 上直接执行。开发应交付可在目标 Linux 安装的精确组件与独立依赖清单。尤其 MediaCrawler 的依赖与 Mangrove 主环境不同，不应把它的 requirements 安装进主 venv。
+
+MediaCrawler 默认使用 `MEDIACRAWLER_PYTHON`。如快手需要独立升级，可配置可选的
+`MEDIACRAWLER_PYTHON_KS`；快手普通采集和身份验证共用该解释器，其余平台继续使用默认解释器。
+留空时保持原行为；已配置的新解释器缺失或启动失败时直接报错，不自动降级。该选择会进入账号验证的环境绑定，
+变更后应重新验证相应身份，不复制旧健康证明。历史冻结任务没有快手覆盖配置时继续沿用原解释器，不能被当前设置隐式切换。
+
+部署维护时，可将 `COOKIE_HEALTH_MAINTENANCE_FILE` 指向网关使用的维护标记文件。标记存在或状态无法确认时，
+自动 Cookie 巡检等待；正在执行的单项正常收尾，维护解除后从未执行项继续，不重发已完成的认证。
+该设置默认留空，不改变原巡检开关和间隔；维护工具必须在恢复入口时移除标记。
 
 若本次必须使用社媒采集，而 Linux 组件依赖尚未演练，**此项应在交付清单写“待开发完成”，不能让新手 IT 自行挑版本解决，也不能把整个平台标为完整验收。**
 

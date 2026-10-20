@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 import sqlite3
 
+from filelock import FileLock
+
 from src import account_execution as execution
 
 from .models import (
@@ -385,6 +387,12 @@ class SqliteCandidateVerificationRepository:
 
         inspect_database(DatabaseTarget("webui", database)).require_current()
         self._db_path = str(database)
+
+    def execution_lease(self, attempt_id: str) -> FileLock:
+        database = Path(self._db_path)
+        # 与后台恢复共用既有租约路径，初验和语义重试也必须保护正在执行的核验。
+        return FileLock(str(database.with_name(
+            f"{database.name}.candidate-reverification-{attempt_id}.lock")), timeout=0)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self._db_path, timeout=30)

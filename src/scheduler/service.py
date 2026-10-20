@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import platform
 from contextlib import nullcontext
@@ -199,10 +200,14 @@ class SchedulerService:
             from src.config.settings import settings
 
             from src.llm.provider import _usage_ctx
+            from src.model_connections.text_protocol import ModelOutputTruncatedError
             usage = {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'calls': 0}
             token = _usage_ctx.set(usage)
             try:
                 result = await asyncio.wait_for(self._invoke_runner(task), timeout=settings.scheduler_task_timeout_seconds)
+            except ModelOutputTruncatedError:
+                # 响应已明确结束并撤销授权；截断是已知失败，不能冒充停止未知或完整交付。
+                result = {"error": "模型输出达到上限并被截断，本次任务未完成；未生成正式交付"}
             finally:
                 _usage_ctx.reset(token)
             returned = True
@@ -283,6 +288,27 @@ class SchedulerService:
             # 身份或本人上下文无法加载时停止，且不把底层凭证错误写入任务历史。
             raise RuntimeError("定时任务无法加载有效的本人执行上下文") from None
 
+        context_kwargs = {}
+        if task.get("task_context_json") is not None:
+            from src.conductor.state import frozen_task_context
+            from src.task_context import MemorySelection, TaskContextRepository, TaskContextSelection, TaskContextService, TaskTemplateRef
+
+            try:
+                saved = frozen_task_context({"task_context_preview": json.loads(task["task_context_json"])})
+                selection = TaskContextSelection(
+                    template=TaskTemplateRef(template_id=saved.template.template_id, version=saved.template.version) if saved.template else None,
+                    memories=tuple(MemorySelection(memory_id=item.memory_id) for item in saved.memories),
+                )
+                # 每次触发重读同一引用；模板只取原版本，运行中继续用本次冻结快照。
+                preview = TaskContextService(TaskContextRepository(store.db_path)).preview(
+                    owner_id=owner, purpose=saved.purpose, objective_text=task["user_input"],
+                    output_formats=saved.output_formats, selection=selection,
+                )
+                context_kwargs["task_context_preview"] = preview.model_dump(mode="json")
+            except Exception:
+                # 此时尚未创建模型或采集工作者；可安全记录失败，不误报停止状态未知。
+                return {"error": "定时任务的记忆或模板不可用，请重新检查并创建计划"}
+
         from src.model_connections.conductor import conductor_connection
         connection = nullcontext()
         run_id = "schedule_" + uuid4().hex
@@ -302,11 +328,12 @@ class SchedulerService:
             # 定时任务不自动业务入库，也不再次生成相同的定时计划。
             result = await runner(
                 task["user_input"],
-                provider=task.get("provider"),
+                provider="bound" if task.get("model_connection_id") else task.get("provider"),
                 model=task.get("model"),
                 session_id=f"scheduler:{task['task_id']}",
                 approved_db_write=False,
                 ignore_schedule=True,
+                **context_kwargs,
             )
             if isinstance(result, dict) and not result.get("error") and not result.get("needs_clarification"):
                 from src.notifications import auto_conductor
@@ -337,6 +364,16 @@ class SchedulerService:
         if result.get("needs_clarification"):
             q = str(result.get("clarification_question") or "").strip()
             return False, f"任务描述需澄清（定时执行无人应答，请重新创建更明确的任务）：{q}"[:500]
+        # 产出节点会保留核验失败的诊断文件；文件存在不能代表任务成功。
+        quality = result.get("quality") or {}
+        if quality.get("passed") is False:
+            checks = quality.get("source_checks") or []
+            reason = "资料内容或任务要求未达标"
+            if quality.get("review_complete") is False:
+                reason = "资料核对未完整完成"
+            elif checks and all(isinstance(item, dict) and item.get("usable") is False for item in checks):
+                reason = "已核对的来源均不符合任务要求"
+            return False, f"结果核验未通过：{reason}；任务未完成，已生成的诊断文件仍可查看"
         outputs = result.get("outputs") or {}
         parts = []
         if outputs.get("report_md"):

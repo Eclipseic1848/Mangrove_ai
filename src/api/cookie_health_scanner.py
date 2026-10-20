@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from pathlib import Path
 import time
 from typing import Optional
 
@@ -23,6 +24,19 @@ logger = logging.getLogger(__name__)
 
 _IDLE_CHECK_SECONDS = 300.0   # 巡检关闭/未到点时，多久再检查一次
 _BETWEEN_ITEM_SECONDS = 5.0   # 同一轮巡检内，相邻两项之间的等待
+
+
+def _maintenance_active() -> bool:
+    if not settings.cookie_health_maintenance_file:
+        return False
+    try:
+        Path(settings.cookie_health_maintenance_file).stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError:
+        # 无法确认维护状态时不发认证请求，避免与升级或恢复争用账号锁。
+        return True
+    return True
 
 
 class CookieHealthScanner:
@@ -59,6 +73,9 @@ class CookieHealthScanner:
 
         logger.info("Cookie 健康巡检：开始一轮扫描（%d 项）", len(_COOKIE_HEALTH_KEYS))
         for key in _COOKIE_HEALTH_KEYS:
+            # 保留当前未执行项，维护解除后继续，不重发已经完成的认证请求。
+            while not self._stop.is_set() and settings.cookie_health_scan_enabled and _maintenance_active():
+                await self._sleep(_IDLE_CHECK_SECONDS)
             # 管理员关闭后不再发起下一平台探测；已发送的请求仍正常收尾。
             if self._stop.is_set() or not settings.cookie_health_scan_enabled:
                 break
@@ -71,6 +88,9 @@ class CookieHealthScanner:
 
     async def _loop(self) -> None:
         while not self._stop.is_set():
+            if _maintenance_active():
+                await self._sleep(_IDLE_CHECK_SECONDS)
+                continue
             if not settings.cookie_health_scan_enabled:
                 await self._sleep(_IDLE_CHECK_SECONDS)
                 continue

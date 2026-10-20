@@ -1,6 +1,7 @@
 import { useRef, useState, type CSSProperties } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 
 type Workbook = {
   sheets: string[]; total_rows: number; total_columns: number;
@@ -15,7 +16,8 @@ function columnName(index: number): string {
   return result;
 }
 
-export function WorkbookPreview({ uploadId }: { uploadId: string }) {
+export function WorkbookPreview({ uploadId, previewUrl }: { uploadId: string; previewUrl?: undefined } | { uploadId?: undefined; previewUrl: string }) {
+  const { user } = useAuth();
   const [sheet, setSheet] = useState(0);
   const [row, setRow] = useState(0);
   const [column, setColumn] = useState(0);
@@ -23,9 +25,10 @@ export function WorkbookPreview({ uploadId }: { uploadId: string }) {
   const [detail, setDetail] = useState<string | null>(null);
   const drag = useRef<{ id: number; x: number; y: number; left: number; top: number } | null>(null);
   const result = useQuery({
-    queryKey: ["upload-workbook", uploadId, sheet, row, column],
-    queryFn: (): Promise<Workbook> => api.get(`/api/data-sources/uploads/${encodeURIComponent(uploadId)}/workbook-preview?sheet=${sheet}&row=${row}&column=${column}`),
+    queryKey: ["upload-workbook", user?.user_id, uploadId, previewUrl, sheet, row, column],
+    queryFn: (): Promise<Workbook> => api.get(`${previewUrl ?? `/api/data-sources/uploads/${encodeURIComponent(uploadId!)}/workbook-preview`}${previewUrl ? "&" : "?"}sheet=${sheet}&row=${row}&column=${column}`),
     retry: false,
+    ...(previewUrl ? { staleTime: Infinity, refetchOnWindowFocus: false, refetchOnReconnect: false } : {}),
   });
   const data = result.data;
   const button = "rounded border px-2 py-1.5 text-xs hover:bg-muted disabled:opacity-40 focus-visible:ring-2 focus-visible:ring-ring";

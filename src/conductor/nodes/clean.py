@@ -7,6 +7,8 @@ from __future__ import annotations
 import re
 from typing import Any, Dict
 
+from src.collectors._common import is_challenge_page as _is_captcha_page
+
 from ..state import ConductorState
 from ..targets import is_direct_video_manifest
 
@@ -16,16 +18,6 @@ _MIN_CONTENT_LEN = 12
 _TAG_RE = re.compile(r"<[^>]+>")          # HTML 标签
 _WS_RE = re.compile(r"[ \t　]+")          # 行内连续空白（含全角空格）
 _BLANK_RE = re.compile(r"\n{3,}")         # 3+ 连续空行 → 2
-
-# 反爬验证页/错误页特征词：正文较短且命中这些词 → 判定为脏数据（非真实内容）
-_CAPTCHA_SIGNALS = (
-    "验证码", "安全验证", "人机验证", "访问异常", "访问受限", "请开启JavaScript",
-    "请启用JavaScript", "系统繁忙", "拒绝访问", "Access Denied", "403 Forbidden",
-    "404 Not Found", "Just a moment", "Checking your browser", "点击继续访问",
-    "异常流量", "滑动验证",
-)
-# 命中特征词时只有正文短于此才判脏（真实长文提到"验证码"不误杀）
-_CAPTCHA_MAX_LEN = 400
 
 # 乱码检测：�（解码替换符）或不可打印字符占比超过此比例 → 判为乱码
 _GARBLED_RATIO = 0.15
@@ -51,13 +43,6 @@ def _is_boilerplate(text: str) -> bool:
     return not any(p in text for p in "。！？.!?，,")
 
 
-def _is_captcha_page(text: str) -> bool:
-    """短正文且命中反爬验证页/错误页特征词 → 判为脏数据。"""
-    if len(text) > _CAPTCHA_MAX_LEN:
-        return False
-    return any(s in text for s in _CAPTCHA_SIGNALS)
-
-
 def _is_garbled(text: str) -> bool:
     """乱码检测：解码替换符/不可打印字符占比过高。"""
     if not text:
@@ -69,6 +54,9 @@ def _is_garbled(text: str) -> bool:
 async def clean_node(state: ConductorState) -> Dict[str, Any]:
     raw = state.get("raw_dataset", [])
     spec = state["task_spec"]
+    if state.get("project_result"):
+        # 项目字段已绑定逐字原文，通用去HTML会改坏JSON中的业务值。
+        return {"cleaned_dataset": raw, "clean_stats": {}}
     seen = set()
     cleaned: list[Dict[str, Any]] = []
     # 剔除原因统计（白盒卡片透出，让"为什么少了 N 条"可解释）

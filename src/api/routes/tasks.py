@@ -23,6 +23,26 @@ from ..session_store import pending_store
 router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 
 
+def _artifact_path(value: str | None, *, detail: str) -> Path:
+    from src.config.settings import settings
+    from src.services.managed_paths import ManagedPathCodec, ManagedPathError
+
+    codec = ManagedPathCodec(settings.data_prep_artifact_root, legacy_anchor=("downloads",))
+    try:
+        # 历史绝对路径只按固定锚点重定位；不搜索同名文件、不改写历史记录。
+        raw = (value or "").replace("\\", "/")
+        if raw.startswith("downloads/"):
+            raw = raw[len("downloads/"):]
+        elif Path(raw).is_absolute() and Path(raw).is_relative_to(codec.root):
+            raw = codec.encode(raw)
+        path = codec.decode(raw)
+        if path.is_file():
+            return path
+    except (ManagedPathError, OSError, ValueError):
+        pass
+    raise HTTPException(status_code=404, detail=detail)
+
+
 def _trigger_to_schedule_str(trigger: TriggerIn) -> str:
     """把表单化的触发方式转成 once@/cron@/every@ 调度串，复用既有 parse_schedule 校验。"""
     if trigger.type == "cron":
@@ -121,6 +141,7 @@ def create_task(body: ScheduleIn, user=Depends(get_execution_user), request: Req
                 interval_seconds=sched.interval_seconds,
                 model_connection_id=pend.get("model_connection_id"),
                 model_connection_version=pend.get("model_connection_version"),
+                **({"task_context_preview": pend["task_context_preview"]} if pend.get("task_context_preview") else {}),
             )
         except (HTTPException, ExecutionDenied):
             raise
@@ -282,9 +303,7 @@ def task_report(sched_id: str, user=Depends(get_current_user)) -> Dict[str, Any]
     if not m:
         detail = task.get("last_error") or "该任务还没有生成过报告"
         raise HTTPException(status_code=404, detail=detail)
-    p = Path(m.group(1).strip())
-    if not p.is_file():
-        raise HTTPException(status_code=404, detail="报告文件已不存在（可能已被清理）")
+    p = _artifact_path(m.group(1).strip(), detail="报告文件不可用，请联系管理员核对存储或迁移情况")
     return {
         "content": p.read_text(encoding="utf-8", errors="replace"),
         "last_run_at": task.get("last_run_at"),
@@ -325,9 +344,7 @@ def run_report(sched_id: str, run_id: int, user=Depends(get_current_user)) -> Di
     run = get_schedule_store().get_run(sched_id, run_id)
     if not run or not run.get("report_path"):
         raise HTTPException(status_code=404, detail="该次执行没有生成报告")
-    p = Path(run["report_path"])
-    if not p.is_file():
-        raise HTTPException(status_code=404, detail="报告文件已不存在（可能已被清理）")
+    p = _artifact_path(run["report_path"], detail="报告文件不可用，请联系管理员核对存储或迁移情况")
     return {"content": p.read_text(encoding="utf-8", errors="replace"),
             "run_at": run["run_at"], "success": bool(run["success"])}
 
@@ -336,12 +353,13 @@ def run_report(sched_id: str, run_id: int, user=Depends(get_current_user)) -> Di
 def run_download(sched_id: str, run_id: int, kind: str = "report", user=Depends(get_current_user)):
     """下载某次执行的产物文件。kind=report（Markdown 报告）| json（采集数据）。"""
     _owned_task(sched_id, user)
+    if kind not in ("report", "json"):
+        raise HTTPException(status_code=422, detail="下载类型仅支持 report 或 json")
     run = get_schedule_store().get_run(sched_id, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="执行记录不存在")
     path = run.get("report_path") if kind == "report" else run.get("json_path")
-    if not path or not Path(path).is_file():
-        raise HTTPException(status_code=404, detail="文件不存在（可能已被清理）")
+    path = _artifact_path(path, detail="文件不可用，请联系管理员核对存储或迁移情况")
     ts = (run.get("run_at") or "").replace(":", "").replace("-", "").replace("T", "_")
     suffix = ".md" if kind == "report" else ".json"
     media = "text/markdown" if kind == "report" else "application/json"

@@ -1,0 +1,29 @@
+{
+  "capability_id": "csv-group-summary",
+  "version": "1.0.0",
+  "accepts": ["csv"],
+  "produces": ["json"],
+  "operations": ["group_sum"],
+  "deterministic": true,
+  "evidence_preserving": false,
+  "side_effect": "read_only",
+  "network": "none",
+  "resource_class": "cpu_small",
+  "limits": {"max_bytes": 65536, "max_rows": 10000, "timeout_seconds": 30, "max_concurrency": 1},
+  "healthcheck": "python table_summary.py --health",
+  "parameters_schema": {
+    "type": "array", "minItems": 1, "maxItems": 1,
+    "items": {
+      "type": "string", "maxLength": 65536, "contentMediaType": "application/json",
+      "contentSchema": {
+        "type": "object", "additionalProperties": false,
+        "required": ["csv", "group_field", "value_field"],
+        "properties": {
+          "csv": {"type": "string"},
+          "group_field": {"type": "string"},
+          "value_field": {"type": "string"}
+        }
+      }
+    }
+  }
+}

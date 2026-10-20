@@ -8,7 +8,7 @@ from tests.test_pi_runtime_workspace_api import _client, _uploads, FakePiRuntime
 from tests.test_capability_reuse import need
 
 
-def setup(tmp_path, monkeypatch, role="admin"):
+def setup(tmp_path, monkeypatch, role="super_admin"):
     from src.capability_catalog import SqliteCapabilityCatalogRepository
     from src.conversation_steering import CapabilityPack, ProcedureScope, CapabilityMaturity
     from src.semantic_harness.capabilities import TABLE_DUCKDB_MANIFEST
@@ -23,8 +23,9 @@ def setup(tmp_path, monkeypatch, role="admin"):
     return client, ref
 
 
-def test_resolve_is_admin_only(tmp_path, monkeypatch):
-    client, _ = setup(tmp_path, monkeypatch, "user")
+@pytest.mark.parametrize("role", ["user", "admin"])
+def test_resolve_is_super_admin_only(tmp_path, monkeypatch, role):
+    client, _ = setup(tmp_path, monkeypatch, role)
     response = client.post("/api/semantic-workspace/capabilities/resolve", json={"need": need().model_dump(mode="json")})
     assert response.status_code == 403
 
@@ -80,7 +81,7 @@ def test_create_auto_selects_and_records_identity_without_purpose(tmp_path, monk
         })
         assert response.status_code == 202, response.text
         task_id = response.json()["task_id"]
-        selected = CapabilityCatalog(SqliteCapabilityCatalogRepository(settings.webui_db_path)).resolve_selection(CatalogActor(owner_id="user-a", role="admin"), task_id=task_id, revision=1)
+        selected = CapabilityCatalog(SqliteCapabilityCatalogRepository(settings.webui_db_path)).resolve_selection(CatalogActor(owner_id="user-a", role="superadmin"), task_id=task_id, revision=1)
         assert selected.pack_refs[0].model_dump() == ref
         events = get_store().list_semantic_workspace_events("user-a", task_id)
         event = next(item for item in events if item["event_type"] == "capability_reuse_planned")
@@ -112,9 +113,9 @@ async def test_discovery_requires_explicit_permission_after_governance_rejection
         calls.append(kwargs)
         return {"status": "needs_confirmation", "candidates": [], "gaps": []}
     monkeypatch.setattr(routes, "discover_open_source_candidates", discovery)
-    result = await routes.resolve_gray_capabilities(routes.CapabilityResolveRequest(need=need()), user={"user_id": "user-a", "role": "admin"})
+    result = await routes.resolve_gray_capabilities(routes.CapabilityResolveRequest(need=need()), user={"user_id": "user-a", "role": "super_admin"})
     assert not result["matches"] and calls == []
-    await routes.resolve_gray_capabilities(routes.CapabilityResolveRequest(need=need(), allow_discovery=True), user={"user_id": "user-a", "role": "admin"})
+    await routes.resolve_gray_capabilities(routes.CapabilityResolveRequest(need=need(), allow_discovery=True), user={"user_id": "user-a", "role": "super_admin"})
     assert calls == [{"allow_discovery": True}]
 
 def test_resolve_runs_full_mount_gate_not_only_catalog_visibility(tmp_path, monkeypatch):

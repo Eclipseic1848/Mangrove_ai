@@ -84,6 +84,8 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
         "type": "select", "choices": ["True", "False"],
     },
     # 搜索与采集服务
+    "search_provider": {"label": "搜索渠道", "group": "search", "secret": False, "user": False,
+        "type": "select", "choices": ["auto", "anysearch", "searxng", "ddgs", "tavily", "deepseek"]},
     "tavily_api_key": {"label": "Tavily API Key", "group": "search", "secret": True, "user": False},
     "searxng_base_url": {"label": "SearXNG 地址", "group": "search", "secret": False, "user": False},
     "anysearch_api_key": {"label": "AnySearch API Key", "group": "search", "secret": True, "user": False},

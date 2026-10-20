@@ -77,7 +77,12 @@ def rename_conversation(conv_id: str, body: RenameIn, user=Depends(get_current_u
 
 
 @router.delete("/{conv_id}")
-def delete_conversation(conv_id: str, user=Depends(get_current_user)):
+async def delete_conversation(conv_id: str, user=Depends(get_current_user)):
     _own_conv_or_404(conv_id, user)
+    from .chat import _RUNNING
+    # 检查与删除间不切换后台协程；在途任务必须先停止，防止删除后继续写回消息。
+    task = _RUNNING.get(f"{user['user_id']}:{conv_id}")
+    if task and not task.done():
+        raise HTTPException(status_code=409, detail="任务仍在执行，请先停止任务，等待停止完成后再删除历史记录")
     get_store().delete_conversation(conv_id)
     return {"ok": True}

@@ -122,3 +122,31 @@ def test_recent_completion_uses_event_or_reply_time_not_rename(tmp_path, monkeyp
     assert result["stats"]["completed"] == 1
     assert [item["id"] for item in result["items"]] == [recent["conv_id"]]
     assert all("completed_at" not in item for item in store.list_chat_history(owner["user_id"]))
+
+
+@pytest.mark.parametrize("role,kind,outcome_status,count,expected", [
+    ("assistant", "output", "partial", 4, "needs_input"),
+    ("assistant", "output", "complete", 5, "needs_input"),
+    ("assistant", "output", "incomplete", 0, "needs_input"),
+    ("assistant", "notice", "empty", 0, "needs_input"),
+    ("assistant", "output", "failed", 0, "failed"),
+    ("assistant", "error", "partial", 4, "failed"),
+    ("assistant", "error", "incomplete", 0, "failed"),
+    ("assistant", "cancelled", "partial", 4, "cancelled"),
+    ("assistant", "clarification", "failed", 0, "needs_input"),
+    ("user", None, "partial", 4, "needs_input"),
+    ("assistant", "chat", None, 0, "completed"),
+    ("assistant", "output", None, 0, "completed"),
+])
+def test_chat_history_does_not_treat_collection_snapshot_as_delivery(tmp_path, role, kind, outcome_status, count, expected):
+    store = WebUIStore(str(migrated_webui_database(tmp_path / "webui.db")))
+    owner = store.create_user("owner", "unused")
+    conversation = store.create_conversation(owner["user_id"], "合成采集状态")
+    meta = {"kind": kind} if kind else {}
+    if outcome_status:
+        meta["collection_outcome"] = {"status": outcome_status, "selected_count": count,
+            "target_complete": count == 5, "ready_for_review": outcome_status in {"complete", "partial"}}
+    store.add_message(conversation["conv_id"], role, "合成回复", meta=meta)
+    item = store.list_chat_history(owner["user_id"], include_activity_time=True)[0]
+    assert item["status"] == expected
+    assert (item["completed_at"] is not None) == (expected == "completed")

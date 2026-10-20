@@ -20,7 +20,7 @@ from src.services.document_parser_contracts import (
     DocumentParserHealth,
     DocumentParserServiceError,
 )
-from src.services.document_parser_resilience import document_parser_request_slot
+from src.services.document_parser_resilience import document_parser_request_slot, document_parser_remaining_timeout
 
 
 def _bbox(value: Any) -> Optional[tuple[float, float, float, float]]:
@@ -124,6 +124,9 @@ class PaddleOCRVLDocumentClient:
         return httpx.Client(timeout=timeout, trust_env=False), True
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        remaining = document_parser_remaining_timeout(self.timeout_seconds)
+        if remaining is not None:
+            kwargs["timeout"] = httpx.Timeout(remaining, connect=min(5.0, remaining))
         client, should_close = self._request_client()
         headers = dict(kwargs.pop("headers", {}) or {})
         if self.api_key:
@@ -181,20 +184,32 @@ class PaddleOCRVLDocumentClient:
 
     def parse_image(self, raw_bytes: bytes, *, filename: str) -> DocumentParseResult:
         """解析 PNG/JPEG/WEBP 图片；PaddleX 协议中 fileType=1。"""
-        return self._parse_file(raw_bytes, file_type=1)
+        result = self._parse_file(raw_bytes, file_type=1)
+        if result.blocks:
+            return result
+        pages = result.raw_response["result"]["layoutParsingResults"]
+        # 被跳过的缺失字段或无效坐标不等于已确认空布局，不能据此再发一次请求。
+        if not pages or any(not isinstance(page, Mapping) or not isinstance(page.get("prunedResult"), Mapping)
+               or page["prunedResult"].get("parsing_res_list") != [] for page in pages):
+            return result
+        # 只有已返回的空布局才补一次全图识别；异常、超时或未知结果不得自动重发。
+        from src.api.execution import execution_checkpoint
+        execution_checkpoint()
+        return self._parse_file(raw_bytes, file_type=1, use_layout_detection=False)
 
     def _parse_file(
         self,
         raw_bytes: bytes,
         *,
         file_type: int,
+        use_layout_detection: bool = True,
     ) -> DocumentParseResult:
         payload = {
             "file": base64.b64encode(raw_bytes).decode("ascii"),
             "fileType": file_type,
             "useDocOrientationClassify": False,
             "useDocUnwarping": False,
-            "useLayoutDetection": True,
+            "useLayoutDetection": use_layout_detection,
             "useSealRecognition": True,
             "useOcrForImageBlock": True,
             "formatBlockContent": True,
@@ -216,6 +231,9 @@ class PaddleOCRVLDocumentClient:
             raise DocumentParserServiceError(
                 "PaddleOCR-VL 响应必须是 JSON 对象"
             )
+        if file_type == 1 and not use_layout_detection:
+            # 缓存必须冻结实际请求模式；全图识别无法证明文字块映射到原件坐标。
+            raw_response["_mangrove_image_ocr_mode"] = "full_image_without_layout_v1"
         return self.parse_response(raw_response)
 
     def parse_response(self, raw_response: Dict[str, Any]) -> DocumentParseResult:
@@ -276,7 +294,7 @@ class PaddleOCRVLDocumentClient:
             blocks=tuple(blocks),
             raw_response=dict(raw_response),
             provider=self.provider,
-            source_coordinates_verified=bool(pages) and all(
+            source_coordinates_verified=raw_response.get("_mangrove_image_ocr_mode") != "full_image_without_layout_v1" and bool(pages) and all(
                 isinstance(page, Mapping)
                 and isinstance(page.get("prunedResult"), Mapping)
                 and isinstance(page["prunedResult"].get("model_settings"), Mapping)

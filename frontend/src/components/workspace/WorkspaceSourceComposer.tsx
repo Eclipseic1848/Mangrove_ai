@@ -1,9 +1,8 @@
 import { beijingTime } from "@/lib/beijingTime";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ComponentProps } from "react";
-import { TaskContextLibrary } from "./TaskContextLibrary";
+import { useEffect, useLayoutEffect, useRef, useState, type ComponentProps } from "react";
 import { TaskComposer, type WebIntakeDraft } from "./TaskComposer";
 import { WebSourceIntake } from "./WebSourceIntake";
-import { getSourceAcquisition, getTaskContextOptions, previewTaskContext, type TaskContextPreview, type TaskTemplateOption, type OwnerMemoryOption } from "@/lib/semanticWorkspaceApi";
+import { getSourceAcquisition, previewTaskContext, type TaskContextPreview } from "@/lib/semanticWorkspaceApi";
 import type { SourceSnapshot } from "@/types/semanticWorkspace";
 import type { UploadItem } from "@/types/dataPrep";
 import type { ReusableSource } from "@/types/semanticWorkspace";
@@ -12,9 +11,10 @@ import { ReusableSourcePicker, ReusableSourceFacts, reusableSelection, sourceId 
 import { sendDraftTurn } from "@/lib/semanticWorkspaceApi";
 import { nanoid } from "nanoid/non-secure";
 import { Markdown } from "@/components/Markdown";
-import { api, downloadFile, ChatConnectionInterrupted } from "@/lib/api";
+import { api, ChatConnectionInterrupted } from "@/lib/api";
 import { outputSelection, resolveOutputFormats } from "@/lib/outputFormats";
 import { CollectionProgress } from "./CollectionProgress";
+import { CollectionResultFiles, hasCollectionPreview, type CollectionFile } from "./CollectionResultFiles";
 import { MessageFooter } from "./MessageFooter";
 import { TemplateAction } from "./TemplateAction";
 import { Loader2, Square } from "lucide-react";
@@ -30,13 +30,15 @@ export type SourceTaskPayload = Parameters<ComposerProps["onSubmit"]>[0] & {
   };
 };
 type Choice = { snapshotId: string; attemptId: string; snapshot?: SourceSnapshot; error?: string };
-type Props = Omit<ComposerProps, "onSubmit"> & {
+type Props = Omit<ComposerProps, "onSubmit" | "onChat"> & {
+  onChat?: (draft: WebIntakeDraft, externalApiConfirmed: boolean, context?: NonNullable<SourceTaskPayload["taskContext"]> & { output_formats: string[] }) => Promise<void>;
   ownerId: string;
   draftScope?: string;
   initialSources?: SourceSnapshot[];
   initialUnavailableSourceIds?: string[];
   initialReusableSources?: ReusableSource[];
   preserveContext?: boolean;
+  onCollectionFilesChange?: (files: CollectionFile[]) => void;
   onSubmit: (payload: SourceTaskPayload) => Promise<void>;
 };
 const splitLines = (value: string) => value.split(/[\n,，]/).map(item => item.trim()).filter(Boolean);
@@ -48,9 +50,15 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   const storageKey = `mangrove_workspace_draft_${ownerId}_${draftScope}`;
   const filesKey = `${storageKey}_files`;
   const [saved] = useState(() => {
-    try { return JSON.parse(localStorage.getItem(storageKey) || "null") as { draft?: WebIntakeDraft; sources?: Choice[]; history?: ReusableSource[]; mustInclude?: string; exclusions?: string; quantity?: string; completeness?: string; templateId?: string; templateVersion?: number; memoryIds?: number[] } | null; } catch { return null; }
+    try { return JSON.parse(localStorage.getItem(storageKey) || "null") as { draft?: WebIntakeDraft; sources?: Choice[]; history?: ReusableSource[]; mustInclude?: string; exclusions?: string; quantity?: string; completeness?: string } | null; } catch { return null; }
   });
   const [draft, setDraft] = useState<WebIntakeDraft | null>(props.draft ?? saved?.draft ?? null);
+  const liveFiles = [...(draft?.collection?.progress ?? [])].reverse().find(item => item.files?.length)?.files ?? [];
+  const latestReply = draft?.conversation?.[(draft.conversation?.length ?? 0) - 1];
+  const savedFiles = latestReply?.role === "assistant" ? hasCollectionPreview(latestReply.files ?? []) ? latestReply.files! : [...(latestReply.work_progress ?? [])].reverse().find(item => item.files?.length)?.files ?? liveFiles : liveFiles;
+  const collectionFiles = (draft?.collection?.pending ? liveFiles : savedFiles).map(file => ({ ...file, inProgress: Boolean(draft?.collection?.pending) }));
+  const collectionFilesKey = JSON.stringify(collectionFiles);
+  useEffect(() => { props.onCollectionFilesChange?.(collectionFiles); }, [collectionFilesKey, props.onCollectionFilesChange]);
   const [sources, setSources] = useState<Choice[]>(() => (saved?.sources ?? [...initialSources.map(snapshot => ({ snapshotId: snapshot.snapshot_id, attemptId: snapshot.attempt_id, snapshot })), ...initialUnavailableSourceIds.map(snapshotId => ({ snapshotId, attemptId: "" }))]).map(source => initialUnavailableSourceIds.includes(source.snapshotId) ? { snapshotId: source.snapshotId, attemptId: "", error: "来源已删除，请明确移除此组后换新资料；不会重新采集。" } : source));
   const [uploads, setUploads] = useState<UploadItem[]>([]);
   const [history, setHistory] = useState<ReusableSource[]>(() => saved?.history ?? initialReusableSources.filter(item => item.kind === "delivery_output"));
@@ -66,12 +74,6 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   const [exclusions, setExclusions] = useState(saved?.exclusions ?? "");
   const [quantity, setQuantity] = useState(saved?.quantity ?? "当前已成功读取页面中有证据的内容");
   const [completeness, setCompleteness] = useState(saved?.completeness ?? "逐来源披露失败、范围和未覆盖内容，不承诺全网完整");
-  const [options, setOptions] = useState<{ templates: TaskTemplateOption[]; memories: OwnerMemoryOption[] }>({ templates: [], memories: [] });
-  const [templateId, setTemplateId] = useState(saved?.templateId ?? "");
-  const [templateVersion, setTemplateVersion] = useState(saved?.templateVersion ?? 0);
-  const [libraryOpen, setLibraryOpen] = useState(false);
-  const [optionsRevision, setOptionsRevision] = useState(0);
-  const [memoryIds, setMemoryIds] = useState<number[]>(saved?.memoryIds ?? []);
   const [preview, setPreview] = useState<{ identity: string; value: TaskContextPreview } | null>(null);
   const [reviewing, setReviewing] = useState(false);
   const [error, setError] = useState("");
@@ -120,42 +122,33 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
   }, []);
   useEffect(() => {
     if (stale) return;
-    try { localStorage.setItem(storageKey, JSON.stringify({ draft, mustInclude, exclusions, quantity, completeness, templateId, templateVersion, memoryIds,
+    try { localStorage.setItem(storageKey, JSON.stringify({ draft, mustInclude, exclusions, quantity, completeness,
       history: history.map(({ source_key, kind, identity, label, sha256, upload_id, output_id, acquired_at, time_kind, media_type, size_bytes, origin }) => ({ source_key, kind, identity, label, sha256, upload_id, output_id, acquired_at, time_kind, media_type, size_bytes, origin, availability: "unknown", limitations: [] })),
       sources: sources.map(({ snapshotId, attemptId }) => ({ snapshotId, attemptId })) })); } catch { /* 不存原文，存储不可用时仅当前会话保留。 */ }
-  }, [draft, sources, history, storageKey, stale, mustInclude, exclusions, quantity, completeness, templateId, templateVersion, memoryIds]);
+  }, [draft, sources, history, storageKey, stale, mustInclude, exclusions, quantity, completeness]);
   useEffect(() => {
     const changed = (event: StorageEvent) => { if (event.key === storageKey || event.key === filesKey) { generation.current += 1; setStale(true); } };
     window.addEventListener("storage", changed);
     return () => window.removeEventListener("storage", changed);
   }, [storageKey, filesKey]);
   const hasWeb = sources.length > 0;
-  useEffect(() => {
-    if (preserveContext || (props.unified && !hasWeb && !templateId && !memoryIds.length && !libraryOpen)) return;
-    let current = true;
-    void getTaskContextOptions("web_research").then(value => { if (current) setOptions(value); }).catch(reason => { if (current) setError(reason instanceof Error ? reason.message : "上下文选项加载失败"); });
-    return () => { current = false; };
-  }, [preserveContext, optionsRevision, props.unified, hasWeb, templateId, memoryIds.length, libraryOpen]);
-  const template = options.templates.find(item => item.template_id === templateId && item.version === templateVersion);
-  const contextSelected = Boolean(templateId || memoryIds.length);
-  const selectionMissing = Boolean(templateId && !template) || memoryIds.some(id => !options.memories.some(item => item.memory_id === id));
-  const selection = useMemo(() => ({ template: template ? { template_id: template.template_id, version: template.version } : null, memories: memoryIds.map(memory_id => ({ memory_id })) }), [template, memoryIds]);
   const sourceIdentity = JSON.stringify([sources.map(item => [item.snapshotId, item.snapshot?.artifacts.map(artifact => [artifact.artifact_id, artifact.content_sha256])]), uploads.map(item => [item.upload_id, item.sha256]), history.map(item => [item.source_key, item.sha256, item.availability])]);
   const outputFormats = props.unified
     ? resolveOutputFormats(draft?.prompt ?? "", outputSelection(draft?.formats, draft?.formatSelection) === "manual" ? draft?.formats ?? [] : null, draft?.conversation).formats
     : draft?.formats?.length ? draft.formats : ["markdown"];
-  const reviewIdentity = JSON.stringify([sourceIdentity, taskObjective(draft?.prompt ?? "", draft), outputFormats, mustInclude, exclusions, quantity, completeness, selection]);
+  const contextObjective = props.unified && !hasWeb && !uploads.length && !history.length ? draft?.prompt.trim() ?? "" : taskObjective(draft?.prompt ?? "", draft);
+  const reviewIdentity = JSON.stringify([sourceIdentity, contextObjective, outputFormats, mustInclude, exclusions, quantity, completeness]);
   const currentReview = useRef(reviewIdentity);
   currentReview.current = reviewIdentity;
   const ready = !restoringHistory && history.every(item => item.availability === "available") && sources.every(item => item.snapshot && item.snapshot.coverage.status !== "hard_insufficient" && !item.error);
-  const contextReady = preserveContext || (!hasWeb && !contextSelected) || (!selectionMissing && Boolean(preview?.identity === reviewIdentity && (!hasWeb || (quantity.trim() && completeness.trim()))));
+  const contextReady = preserveContext || !hasWeb || Boolean(preview?.identity === reviewIdentity && quantity.trim() && completeness.trim());
   const review = async () => {
-    if (!draft?.prompt.trim() || reviewing || selectionMissing) return;
+    if (!draft?.prompt.trim() || reviewing) return;
     const identity = reviewIdentity;
     const request = generation.current;
     setReviewing(true); setError("");
     try {
-      const value = await previewTaskContext({ purpose: "web_research", objective_text: taskObjective(draft.prompt.trim(), draft), output_formats: outputFormats, selection });
+      const value = await previewTaskContext({ purpose: "web_research", objective_text: contextObjective, output_formats: outputFormats, selection: { template: null, memories: [] } });
       if (request === generation.current && identity === currentReview.current) setPreview({ identity, value });
     } catch (reason) { if (request === generation.current) setError(reason instanceof Error ? reason.message : "上下文检查失败"); }
     finally { setReviewing(false); }
@@ -275,7 +268,7 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
         <Markdown safeResources>{message.content}</Markdown>
         {message.role === "assistant" && message.content.includes("沉淀为模板") && <TemplateAction convId={savedSession} messageId={message.id} />}
         {message.work_progress?.length ? <CollectionProgress pending={false} progress={message.work_progress} /> : null}
-        {message.files?.filter(file => /^\/api\/downloads\/[^?#]+$/.test(file.url)).map(file => <button key={file.url} type="button" className="mt-2 mr-2 rounded-lg border px-3 py-2 text-xs hover:bg-muted" onClick={() => void downloadFile(file.url, file.name).catch(reason => setError(reason instanceof Error ? reason.message : "下载失败"))}>下载 {file.name}</button>)}
+        {message.files?.length ? <CollectionResultFiles files={message.files} /> : null}
         <MessageFooter convId={draft.sessionId ?? draft.collection?.convId} messageId={message.id} content={message.content} createdAt={message.created_at} usage={message.token_usage} assistant={message.role === "assistant"} />
       </article>)}
       {(chatting || draft?.collection?.pending) && <p className="ml-8 whitespace-pre-wrap rounded-2xl bg-muted px-4 py-3">{chatting || draft?.collection?.prompt}</p>}
@@ -300,14 +293,16 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
         } catch (reason) { if (stopGeneration === generation.current) setError(reason instanceof Error ? reason.message : "停止执行未成功"); }
         finally { stopPending.current = false; setStopping(false); }
       }}>{stopping ? <Loader2 aria-hidden="true" className="h-5 w-5 animate-spin motion-reduce:animate-none" /> : <Square aria-hidden="true" className="h-3.5 w-3.5 fill-current" />}</button> : undefined}
-      onChat={props.unified ? props.onChat ?? chat : undefined}
+      onChat={props.unified ? (next, confirmed) => props.onChat
+        ? props.onChat(next, confirmed)
+        : chat(next, confirmed) : undefined}
       webSourceCount={sources.length} additionalSourceCount={history.length} additionalInputFormats={history.map(item => { const format = item.label.split(".").pop()?.toLowerCase() || ""; return format === "md" ? "markdown" : format; })}
-      sourceBusy={props.sourceBusy || acquiring || submitting || restoringHistory} submitBlocked={props.submitBlocked || stale || Boolean(draft?.collection?.pending) || !ready || !contextReady || webOpen || pickerOpen || libraryOpen}
+      sourceBusy={props.sourceBusy || acquiring || submitting || restoringHistory} submitBlocked={props.submitBlocked || stale || Boolean(draft?.collection?.pending) || !ready || !contextReady || webOpen || pickerOpen}
       onPickSources={() => { pickerTrigger.current = document.activeElement as HTMLElement; setPickerOpen(true); }}
       sourceIdentity={sourceIdentity}
       onUploadsChange={value => { setUploads(value); props.onUploadsChange?.(value); }}
       onSubmit={async payload => {
-        if (stale || !ready || !contextReady || webOpen || pickerOpen || libraryOpen) return;
+        if (stale || !ready || !contextReady || webOpen || pickerOpen) return;
         const requestGeneration = generation.current;
         const storedDraft = localStorage.getItem(storageKey);
         const storedFiles = localStorage.getItem(filesKey);
@@ -328,7 +323,8 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
             }
           }
           const allUploads = [...new Map([...payload.uploads, ...history.filter(item => item.kind === "upload").map(item => ({ upload_id: sourceId(item), original_name: item.label, media_type: item.media_type || "", size_bytes: item.size_bytes ?? 0, sha256: item.sha256 || "" }))].map(item => [item.upload_id, item])).values()];
-          await onSubmit({ ...payload, uploads: allUploads, deliveryOutputIds: history.filter(item => item.kind === "delivery_output").map(sourceId), sourceSnapshotIds: sources.map(item => item.snapshotId), ...(!preserveContext && preview && (hasWeb || contextSelected) ? { taskContext: { context_purpose: "web_research", context_selection: selection, context_preview_sha256: preview.value.preview_sha256 } } : {}), ...(hasWeb && !preserveContext && preview ? { sourceGoal: {
+          // 不提交空的显式选择，后端按当前任务自动匹配并冻结上下文。
+          await onSubmit({ ...payload, uploads: allUploads, deliveryOutputIds: history.filter(item => item.kind === "delivery_output").map(sourceId), sourceSnapshotIds: sources.map(item => item.snapshotId), ...(hasWeb && !preserveContext && preview ? { sourceGoal: {
             must_include: splitLines(mustInclude), explicit_exclusions: splitLines(exclusions), quantity_requirement: quantity.trim(), completeness_requirement: completeness.trim(),
           } } : {}) });
           try { if (requestGeneration === generation.current && localStorage.getItem(storageKey) === storedDraft && localStorage.getItem(filesKey) === storedFiles) { localStorage.removeItem(storageKey); localStorage.removeItem(filesKey); } } catch { /* 当前草稿已完成。 */ }
@@ -353,23 +349,17 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
         <p className="text-xs text-muted-foreground">确认时使用上方文件与全部已选网页组。逐来源保留缺口，排序不代表冲突优先级。</p>
         {preserveContext && <p className="text-xs text-muted-foreground">本次保留原任务目标与上下文，确认后按当前完整资料创建新版本；旧版本不变。</p>}
       </section>}
-      {!preserveContext && (!props.unified || hasWeb || contextSelected) && <section aria-label="任务上下文" className="mt-3 space-y-3 border-t pt-3"><p className="text-xs text-muted-foreground">模板与个人记忆只提供建议；当前任务要求和输出格式优先。</p><button type="button" className="rounded-lg border px-3 py-2 text-xs hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setLibraryOpen(true)}>管理任务模板与记忆</button>
-        {selectionMissing && <p role="alert" className="text-xs text-destructive">所选模板版本或记忆已不可用，请重新选择或明确取消；不会自动换成新版。</p>}
-        {preserveContext ? <p className="text-xs text-muted-foreground">本次保留原任务目标与上下文，确认后按当前完整资料创建新版本；旧版本不变。</p> : <>
-        {hasWeb && <div className="grid gap-3 sm:grid-cols-2">
+      {!preserveContext && hasWeb && <section aria-label="任务上下文" className="mt-3 space-y-3 border-t pt-3">
+        <div className="grid gap-3 sm:grid-cols-2">
           <label className="text-xs font-medium">必须包含<textarea rows={2} className={fields} value={mustInclude} onChange={event => setMustInclude(event.target.value)} /></label>
           <label className="text-xs font-medium">明确不要<textarea rows={2} className={fields} value={exclusions} onChange={event => setExclusions(event.target.value)} /></label>
           <label className="text-xs font-medium">数量要求<input className={fields} value={quantity} onChange={event => setQuantity(event.target.value)} /></label>
           <label className="text-xs font-medium">完整性要求<input className={fields} value={completeness} onChange={event => setCompleteness(event.target.value)} /></label>
-        </div>}
-        <label className="block text-xs font-medium">任务模板（可选）<select aria-label="任务模板（可选）" className={fields} value={templateId ? JSON.stringify([templateId, templateVersion]) : ""} onChange={event => { const selected = options.templates.find(item => JSON.stringify([item.template_id, item.version]) === event.target.value); setTemplateId(selected?.template_id ?? ""); setTemplateVersion(selected?.version ?? 0); }}><option value="">不使用模板</option>{templateId && !template && <option disabled value={JSON.stringify([templateId, templateVersion])}>已选版本不可用</option>}{options.templates.map(item => <option key={item.template_id} value={JSON.stringify([item.template_id,item.version])}>{item.title} · {item.source === "legacy_library" ? `内容版 ${item.summary_sha256.slice(7, 15)}` : `V${item.version}`}</option>)}</select></label>
-        <div className="space-y-2">{memoryIds.filter(id => !options.memories.some(item => item.memory_id === id)).map(id => <button key={id} type="button" className="rounded-lg border px-3 py-2 text-xs focus-visible:ring-2 focus-visible:ring-ring" onClick={() => setMemoryIds(current => current.filter(value => value !== id))}>移除已不可用的记忆 {id}</button>)}</div><details><summary className="cursor-pointer text-xs font-medium">个人记忆（可选）</summary>{options.memories.map(item => <label key={item.memory_id} className="mt-2 flex gap-2 text-xs"><input type="checkbox" checked={memoryIds.includes(item.memory_id)} onChange={event => setMemoryIds(current => event.target.checked ? [...current, item.memory_id] : current.filter(id => id !== item.memory_id))} />{item.summary}</label>)}</details>
-        <button type="button" disabled={reviewing || selectionMissing || !ready || !draft?.prompt.trim()} onClick={() => void review()} className="rounded-lg border px-3 py-2 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">{reviewing ? "正在检查草案" : contextReady ? "重新检查草案" : "检查上下文草案"}</button>
-        {contextReady && preview && <div role="status" className="text-xs"><p>已检查，可以启动</p><p>当前要求：{draft?.prompt}</p><p>输出：{outputFormats.join("、")}</p><p>建议目标：{preview.value.proposed_changes.goal_contract || "无模板建议"}</p><p>建议方法：{preview.value.proposed_changes.method || "无额外方法"}</p><p>{preview.value.template ? preview.value.template.source === "legacy_library" ? `模板内容版 ${preview.value.template.summary_sha256.slice(7, 15)}` : `模板 V${preview.value.template.version}` : "未选模板"} · 已选 {preview.value.memories.length} 条本人记忆</p></div>}
-        </>}
+        </div>
+        <button type="button" disabled={reviewing || !ready || !draft?.prompt.trim()} onClick={() => void review()} className="rounded-lg border px-3 py-2 text-xs hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50">{reviewing ? "正在检查草案" : contextReady ? "重新检查草案" : "检查上下文草案"}</button>
+        {contextReady && preview && <div role="status" className="text-xs"><p>已检查，可以启动</p><p>当前要求：{draft?.prompt}</p><p>输出：{outputFormats.join("、")}</p></div>}
       </section>}
     </TaskComposer>
-    {!preserveContext && <TaskContextLibrary key={ownerId} taskMode open={libraryOpen} onClose={() => setLibraryOpen(false)} onChanged={() => { setPreview(null); setOptionsRevision(value => value + 1); }} />}
     {pickerOpen && <ReusableSourcePicker selectedKeys={[...uploads.map(item => `upload:${item.upload_id}`), ...sources.map(item => `snapshot:${item.snapshotId}`), ...history.map(item => item.source_key)]}
       onClose={added => { generation.current++; setPickerOpen(false); requestAnimationFrame(() => { if (added) container.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="任务要求"]')?.focus(); else pickerTrigger.current?.focus(); }); }}
       onAdd={async items => {

@@ -79,6 +79,42 @@ def test_clarification_without_result_context_has_one_real_http_attempt(monkeypa
     assert calls == ["/v1/chat/completions"]
 
 
+def test_direct_rewriter_sends_resolved_model_identity_over_saved_preference(monkeypatch):
+    from src.conversation_steering import rewriter as implementation
+    sent = []
+
+    def respond(request):
+        body = json.loads(request.content)
+        sent.append(body)
+        content = json.dumps({"open_questions": [], "intent": "normalization", "confidence": "high",
+            "normalized_text": "说明当前模型", "direct_answer": "本次使用 resolved-model。"}, ensure_ascii=False)
+        return httpx.Response(200, json={"id": "synthetic-response", "object": "chat.completion", "created": 1,
+            "model": "resolved-model", "choices": [{"index": 0, "finish_reason": "stop",
+                "message": {"role": "assistant", "content": content}}]})
+
+    original = httpx.AsyncClient
+    class IsolatedClient(original):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs, transport=httpx.MockTransport(respond))
+
+    connection = SimpleNamespace(provider="local", requested_model="model-alias", model="resolved-model",
+        base_url="http://127.0.0.1:9/v1", api_key="synthetic", timeout=2, trust_env=False, extra_body=None)
+    monkeypatch.setattr(implementation, "get_provider", lambda: SimpleNamespace(resolve_model=lambda *args, **kwargs: connection))
+    monkeypatch.setattr(implementation.httpx, "AsyncClient", IsolatedClient)
+    turn = RawUserTurn(turn_id="identity-turn", owner_id="user-a", task_id="task-a", revision=1, text="你用的不是 guessed-model 吗？")
+    request = SteeringRequest(owner_id="user-a", task_id="task-a", revision=1, text=turn.text, provider="local",
+        current_status="preparing_no_sources", model="model-alias", memory_context="默认供应商：another-provider")
+    result = asyncio.run(implementation.InstructorContextRewriter(provider="local", model="model-alias").rewrite(turn, request))
+    assert result.direct_answer == "本次使用 resolved-model。"
+    body = sent[0]
+    context = json.loads(body["messages"][1]["content"])
+    assert body["model"] == context["current_model"]["model"] == "resolved-model"
+    assert set(context["current_model"]) == {"model"}
+    assert context["memory_context"] == "默认供应商：another-provider"
+    assert "不能据此声称所有模型服务" in body["messages"][0]["content"]
+    assert "不给出保存偏好、修改记忆或切换模型的操作建议" in body["messages"][0]["content"]
+
+
 def test_capability_scope_and_raw_turn_are_immutable_contracts() -> None:
     personal = CapabilityPack(
         pack_id="pack_pdf_table",

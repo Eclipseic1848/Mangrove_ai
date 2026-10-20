@@ -4,11 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 from pathlib import Path
 import threading
 from typing import Callable, Literal, Protocol
 
 from src.account_execution import ExecutionDenied
+from src.capability_catalog.integrity import verify_capability_integrity
+from src.capability_catalog.reuse import validated_reuse_contract
 from .sqlite_repository import validation_checkpoint
 
 from src.capability_catalog import (
@@ -821,15 +824,30 @@ class CapabilityGovernance:
             raise RuntimeError("能力治理未配置平台发布 Adapter")
         # 先写目录（INSERT OR IGNORE 幂等）再写不可变事件：目录失败时事件不落库，
         # 重试可完整重走；事件失败时目录多一行 pack，由下一次发布幂等覆盖。
-        self._platform_publisher.save_pack(
-            CapabilityPack(
-                pack_id=platform_target.pack_id,
-                version=platform_target.version,
-                digest=platform_target.digest,
-                scope=ProcedureScope.PLATFORM,
-                maturity=LegacyCapabilityMaturity.VERIFIED,
-            )
+        platform_pack = CapabilityPack(
+            pack_id=platform_target.pack_id,
+            version=platform_target.version,
+            digest=platform_target.digest,
+            scope=ProcedureScope.PLATFORM,
+            maturity=LegacyCapabilityMaturity.VERIFIED,
         )
+        if self._platform_materialize is not None:
+            subject = self._platform_materialize(platform_target)
+            # 发布只读精确平台制品的接口声明；缓存篡改不得变成目录事实。
+            verify_capability_integrity(subject, platform_target.digest)
+            reuse_path = subject / "mangrove-reuse.json"
+            if reuse_path.is_file():
+                if reuse_path.stat().st_size > 64 * 1024:
+                    raise ValueError("公共能力接口声明超过 64 KiB")
+                public = json.loads(reuse_path.read_text(encoding="utf-8"))
+                if not isinstance(public, dict) or set(public) - {"reuse_contract", "license", "source_provenance", "reuse_tools"}:
+                    raise ValueError("公共能力接口声明含未批准字段")
+                platform_pack = platform_pack.model_copy(update={
+                    "manifest": tuple((key, public[key]) for key in ("reuse_contract", "license", "reuse_tools") if key in public),
+                    "source_provenance": tuple(public.get("source_provenance", ())),
+                })
+                validated_reuse_contract(platform_pack)
+        self._platform_publisher.save_pack(platform_pack)
         event = CapabilityGovernanceEvent(
             event_type="platform_published",
             # 幂等键由平台 digest 派生，调用方任意键不得产生第二条发布事实。

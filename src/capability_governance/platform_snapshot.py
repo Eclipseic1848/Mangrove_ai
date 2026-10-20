@@ -16,6 +16,7 @@ from typing import Protocol
 
 from src.capability_adapters.models import CapabilityRuntimeManifest
 from src.capability_catalog import OciArtifactDescriptor
+from src.capability_catalog.reuse import validated_reuse_contract
 from src.conversation_steering import CapabilityPack
 
 from .models import PlatformSnapshot
@@ -65,6 +66,26 @@ _SNAPSHOT_TAR_NAME = "mangrove-capability.tar"
 _FIXED_MTIME = 946684800  # 2000-01-01T00:00:00Z
 _FIXED_MODE = 0o644
 _ARTIFACT_TYPE = "application/vnd.mangrove.capability.v1"
+
+
+def _public_parameters_schema(value):
+    """删除私人注释，保留校验约束和实际参数名称。"""
+    if isinstance(value, list):
+        return [_public_parameters_schema(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    result = {}
+    for key, item in value.items():
+        if key in {"title", "description", "default", "examples", "$comment"}:
+            continue
+        if key in {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas", "dependencies"} and isinstance(item, dict):
+            # 属性名可以叫 description/default；不能把真实参数当成 Schema 注释删除。
+            result[key] = {name: _public_parameters_schema(schema) for name, schema in item.items()}
+        elif key in {"items", "prefixItems", "additionalItems", "additionalProperties", "unevaluatedProperties", "unevaluatedItems", "contains", "propertyNames", "allOf", "anyOf", "oneOf", "not", "if", "then", "else", "contentSchema"}:
+            result[key] = _public_parameters_schema(item)
+        else:
+            result[key] = item
+    return result
 
 
 def _pack_tar(source_dir: Path, output: Path) -> None:
@@ -144,6 +165,24 @@ class PlatformSnapshotGenerator:
                 ),
                 encoding="utf-8",
             )
+            # 公共接口声明必须进入新快照，随后与代码一起验证和签名；个人描述不复制。
+            reuse_path = materialized / "mangrove-reuse.json"
+            reuse_path.unlink(missing_ok=True)
+            metadata = dict(pack.manifest)
+            if "reuse_contract" in metadata:
+                contract = validated_reuse_contract(pack)
+                contract = contract.model_copy(update={"parameters_schema": _public_parameters_schema(contract.parameters_schema)})
+                public = {
+                    "reuse_contract": contract.model_dump_json(),
+                    "license": metadata["license"],
+                    "source_provenance": pack.source_provenance,
+                }
+                if "reuse_tools" in metadata:
+                    public["reuse_tools"] = metadata["reuse_tools"]
+                encoded = json.dumps(public, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+                if len(encoded.encode("utf-8")) > 64 * 1024:
+                    raise ValueError("公共能力接口声明超过 64 KiB")
+                reuse_path.write_text(encoded, encoding="utf-8")
             tar_path = work / _SNAPSHOT_TAR_NAME
             _pack_tar(materialized, tar_path)
             descriptor = self._platform_store.push_file(

@@ -2,6 +2,15 @@ import { useEffect, useState } from "react";
 import { Loader2, ListChecks, ExternalLink, Check } from "lucide-react";
 import type { ChatProgress } from "@/lib/api";
 
+export type CollectionCounts = NonNullable<ChatProgress["candidate_counts"]>;
+
+export function CollectionCountSummary({ counts }: { counts: CollectionCounts }) {
+  const entries = [["已找到", counts.found], ["已排除", counts.excluded], ["待核对", counts.review_required], ["未完成", counts.unfinished], ["完整入选", `${counts.selected}/${counts.target_count}`]] as const;
+  return <dl aria-label="采集数量" className="grid grid-cols-3 gap-x-3 gap-y-2 rounded-lg border bg-background p-3 text-xs">
+    {entries.map(([label, value]) => <div key={label}><dt className="text-muted-foreground">{label}</dt><dd className={`mt-1 font-medium tabular-nums ${label === "完整入选" ? "text-primary" : "text-foreground"}`}>{value} 篇</dd></div>)}
+  </dl>;
+}
+
 export function CollectionProgress({ pending, progress = [], steps = [], preparing = false }: {
   pending: boolean; progress?: ChatProgress[]; steps?: string[]; preparing?: boolean;
 }) {
@@ -13,6 +22,7 @@ export function CollectionProgress({ pending, progress = [], steps = [], prepari
     return () => clearInterval(timer);
   }, [pending]);
   const latest = progress[progress.length - 1];
+  const counts = [...progress].reverse().find(item => item.candidate_counts)?.candidate_counts;
   const stages = [...new Map(progress.map(item => [item.node, item])).values()];
   const sources = [...new Map(progress.flatMap(item => item.sources ?? []).filter(source => {
     try { const url = new URL(source.url); return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password; } catch { return false; }
@@ -33,6 +43,7 @@ export function CollectionProgress({ pending, progress = [], steps = [], prepari
         {pending && seconds >= 30 && <p className="mt-2 text-xs text-muted-foreground">数据读取或模型分析可能较慢；新的执行进展会在这里更新，无需重复发送。</p>}
       </div>
     </div>
+    {counts && <div className="mt-3"><CollectionCountSummary counts={counts} /></div>}
     {stages.length > 0 && <ol aria-label="执行阶段" className="mt-3 flex flex-wrap gap-2">{stages.map(stage => <li key={stage.node} className="inline-flex items-center gap-1 rounded-full border bg-background px-2 py-1 text-xs">
       {stage.status === "completed" ? <Check aria-hidden="true" className="h-3 w-3 text-primary" /> : pending && stage === latest ? <Loader2 aria-hidden="true" className="h-3 w-3 animate-spin motion-reduce:animate-none" /> : null}{stage.label}
     </li>)}</ol>}

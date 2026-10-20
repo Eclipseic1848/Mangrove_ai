@@ -129,7 +129,7 @@ def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_ex
 
     def respond(request):
         body = json.loads(request.content)
-        assert body.get("max_tokens") == {"deepseek": 384000, "qwen": 131072, "local": None}[provider_name]
+        assert body.get("max_tokens") == {"deepseek": 393216, "qwen": 131072, "local": None}[provider_name]
         assert (body.get("enable_thinking") is False) if disable_thinking else "enable_thinking" not in body
         requests.append(body)
         if response_mode == "timeout":
@@ -184,7 +184,7 @@ def test_real_rewriter_payloads_use_observed_sources_and_actual_turns_without_ex
 
 def test_structured_protocol_uses_catalog_output_not_small_task_cap():
     _, body, _ = structured_request(api_format="openai_chat_completions", model="deepseek-v4-pro", grant_token="synthetic", system_prompt="JSON", payload={})
-    assert body["max_tokens"] == 384000
+    assert body["max_tokens"] == 393216
 
 
 def test_responses_does_not_misuse_answer_limit_for_thinking_total():

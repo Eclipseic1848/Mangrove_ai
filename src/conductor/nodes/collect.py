@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import re
 import time
 from typing import Any, Dict, List
 
@@ -46,12 +47,23 @@ def _item_key(item: Dict[str, Any]) -> str:
 
 async def collect_node(state: ConductorState) -> Dict[str, Any]:
     spec = state["task_spec"]
+    if spec.project_collection:
+        from ..project_collection import collect_projects
+        return await collect_projects(state)
     if spec.evidence_collection:
         from ..evidence_collection import collect_topics
         return await collect_topics(state)
     if spec.bank_benefits:
         from ..bank_benefits import collect_bank_benefits
         return await collect_bank_benefits(state)
+    from ..task_spec import DataType
+    # 专属来源仍沿原路执行，不能被通用公告检索替代。
+    if (spec.data_type is DataType.BID and not spec.urls
+            and not {"mediacrawler", "ecommerce"}.intersection(state.get("collector_candidates") or [])
+            and "最新" in ((state.get("user_input") or "") + spec.intent)
+            and not re.search(r"(?:不要求|不需要|无需|不要|不用|不必)\s*最新", (state.get("user_input") or "") + spec.intent)):
+        from ..bid_collection import collect_latest_bid_notices
+        return await collect_latest_bid_notices(state)
     names = state.get("collector_candidates")
     if not names:
         names = [c.name for c in select_collectors(spec)]
@@ -97,15 +109,20 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
             logger.warning("采集器 %s 超时（>%ss），降级", name, timeout)
             last_msg = f"{name} 超时（>{timeout}s）"
             attempts.append({"collector": name, "success": False, "count": 0, "message": last_msg})
+            metrics_record(name, False, (time.time() - t0) * 1000)
+            domain_health_record(name, spec.urls, False)
             continue
         except Exception as e:
             emit_progress("collect", "warning", "当前来源读取未成功，将检查其他可用来源。")
             logger.warning("采集器 %s 异常: %s", name, e)
             last_msg = f"{name} 异常: {e}"
             attempts.append({"collector": name, "success": False, "count": 0, "message": last_msg})
+            metrics_record(name, False, (time.time() - t0) * 1000)
+            domain_health_record(name, spec.urls, False)
             continue
 
         elapsed_ms = (time.time() - t0) * 1000
+        result.discard_error_pages()
         if result.has_data:
             attempts.append({
                 "collector": name,

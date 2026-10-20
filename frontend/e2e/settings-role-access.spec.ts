@@ -188,6 +188,7 @@ test("平台模型仅分本地与云端，三角色去重并移除过期型号�
     { ...UX_CONNECTION, connection_id: "cloud-deepseek", display_name: "导入的平台 DeepSeek", models: [makeModel("deepseek-flash"), makeModel("deepseek-v4-flash", false)] },
   ];
   for (const role of ["user", "admin", "super_admin"] as const) {
+    await page.goto("about:blank");
     await page.unrouteAll({ behavior: "wait" });
     await mockSettings(page, role);
     await page.route("**/api/model-connections", route => route.fulfill({ json: { items: [...local, { ...local[1], connection_id: "duplicate-local" }, ...cloud, { ...cloud[1], connection_id: "duplicate-cloud" }] } }));
@@ -351,6 +352,7 @@ test("平台保存未知可核对列表但不自动重试，更换本地地址�
 
 test("三角色模型页面有真实列表且高级首选不替换任务默认", async ({ page }, testInfo) => {
   for (const role of ["user", "admin", "super_admin"] as const) {
+    await page.goto("about:blank");
     await page.unrouteAll({ behavior: "wait" });
     await mockSettings(page, role);
     await page.setViewportSize({ width: 1440, height: 1000 });
@@ -381,7 +383,7 @@ test("三角色模型页面有真实列表且高级首选不替换任务默认",
       await expect(page.getByLabel("连接首选模型", { exact: true })).toHaveValue("deepseek-v4-flash");
       await page.getByLabel("连接首选模型", { exact: true }).selectOption("deepseek-v4-pro");
       await expect(page.getByLabel("连接首选模型", { exact: true })).toHaveValue("deepseek-v4-pro");
-      await expect(page.getByLabel("默认任务模型", { exact: true })).toHaveValue("");
+      await expect(page.getByLabel("默认任务模型", { exact: true })).toHaveAttribute("value", "");
       expect(personalWrites).toBe(0);
       expect((await new AxeBuilder({ page }).include('[role="dialog"]').analyze()).violations).toEqual([]);
       await page.getByRole("button", { name: "完成管理", exact: true }).click();
@@ -591,8 +593,8 @@ test("普通用户只看到个人范围并可配置自己的 Provider 连接", a
   await expect(page.getByText("连接已验证并保存")).toBeVisible();
 });
 
-test("管理员从能力卡片创建验证并渐进查看步骤缺口", async ({ page }) => {
-  await mockSettings(page, "admin");
+test("超级管理员从能力卡片创建验证并渐进查看步骤缺口", async ({ page }) => {
+  await mockSettings(page, "super_admin");
   let validationRun: Record<string, any> | null = null;
   await page.route("**/api/capability-governance/packs", (route) => route.fulfill({
     json: {
@@ -710,7 +712,7 @@ test("管理员从能力卡片创建验证并渐进查看步骤缺口", async ({
 });
 
 test("五步成功记录与独立供应链证据分别展示", async ({ page }) => {
-  await mockSettings(page, "admin");
+  await mockSettings(page, "super_admin");
   const digest = `sha256:${"c".repeat(64)}`;
   await page.route("**/api/capability-governance/packs", (route) => route.fulfill({
     json: {
@@ -771,7 +773,7 @@ test("五步成功记录与独立供应链证据分别展示", async ({ page }) 
 });
 
 test("草稿能力卡片展示脱敏缺口并提示自动晋级", async ({ page }) => {
-  await mockSettings(page, "admin");
+  await mockSettings(page, "super_admin");
   const digest = `sha256:${"d".repeat(64)}`;
   await page.route("**/api/capability-governance/packs", (route) => route.fulfill({
     json: {
@@ -858,6 +860,10 @@ test("普通用户设置不加载低频能力验证和供应链证据", async ({
 
 test("普通用户可创建并区分同一 Provider 的多套命名连接", async ({ page }) => {
   await mockSettings(page, "user");
+  await page.route("**/overview-brands/deepseek.png", route => route.fulfill({
+    contentType: "image/png",
+    body: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jSugAAAAASUVORK5CYII=", "base64"),
+  }));
   const connections: Record<string, unknown>[] = [];
   const createdBodies: Record<string, unknown>[] = [];
   await page.route("**/api/model-connections", (route) => route.fulfill({
@@ -895,6 +901,11 @@ test("普通用户可创建并区分同一 Provider 的多套命名连接", asyn
 
   await expect(page.locator("#model-connection-list").getByText("DeepSeek 日常", { exact: true })).toBeVisible();
   await expect(page.locator("#model-connection-list").getByText("DeepSeek 备用", { exact: true })).toBeVisible();
+  const logos = page.locator('#model-connection-list img[src="/overview-brands/deepseek.png"]');
+  await expect(logos).toHaveCount(2);
+  await expect.poll(() => logos.evaluateAll(images => images.every(image =>
+    (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0,
+  ))).toBe(true);
   await expect(page.getByText("Key •••• 1111")).toBeVisible();
   await expect(page.getByText("Key •••• 2222")).toBeVisible();
   expect(createdBodies).toEqual([
@@ -1156,7 +1167,7 @@ test("导入连接网络失败后仍可再次验证且无需重填 Key", async (
     connection_id: "imported-1",
     model_id: "deepseek-v4-flash",
   });
-  await expect(page.getByLabel("默认任务模型", { exact: true })).toHaveValue(JSON.stringify(["imported-1", "deepseek-v4-flash"]));
+  await expect(page.getByLabel("默认任务模型", { exact: true })).toHaveAttribute("value", JSON.stringify(["imported-1", "deepseek-v4-flash"]));
   await expect(page.locator('[data-model-tour="default-connection"]')).toContainText(
     "DeepSeek V4 Flash",
   );
@@ -1253,6 +1264,7 @@ test("模型连接接口误返回网页时显示可恢复错误而不是 JSON �
 test("三角色明暗主题设置主视图没有自动化可访问性违规", async ({ page }) => {
   for (const role of ["user", "admin", "super_admin"] as const) {
     for (const theme of ["light", "dark"] as const) {
+      await page.goto("about:blank");
       await page.unrouteAll({ behavior: "wait" });
       await mockSettings(page, role, theme);
       await page.goto("/settings?section=models");
@@ -1270,8 +1282,8 @@ test("三角色明暗主题设置主视图没有自动化可访问性违规", as
   }
 });
 
-test("管理员审核视图分组渐进披露并完成一次审计查看", async ({ page }) => {
-  await mockSettings(page, "admin");
+test("超级管理员审核视图分组渐进披露并完成一次审计查看", async ({ page }) => {
+  await mockSettings(page, "super_admin");
   const draftDigest = `sha256:${"a".repeat(64)}`;
   const verifiedDigest = `sha256:${"b".repeat(64)}`;
   const baseItem = (packId: string, digest: string) => ({
@@ -1423,8 +1435,8 @@ test("管理员审核视图分组渐进披露并完成一次审计查看", async
   });
 });
 
-test("管理员提交平台候选并发布到管理员灰度", async ({ page }) => {
-  await mockSettings(page, "admin");
+test("超级管理员提交平台候选并发布到管理员灰度", async ({ page }) => {
+  await mockSettings(page, "super_admin");
   const personalDigest = `sha256:${"a".repeat(64)}`;
   const platformDigest = `sha256:${"b".repeat(64)}`;
   const verifiedItem = {

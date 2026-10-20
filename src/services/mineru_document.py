@@ -20,7 +20,7 @@ from src.services.document_parser_contracts import (
     DocumentParserHealth,
     DocumentParserServiceError,
 )
-from src.services.document_parser_resilience import document_parser_request_slot
+from src.services.document_parser_resilience import document_parser_request_slot, document_parser_remaining_timeout
 
 
 class MinerUServiceError(DocumentParserServiceError):
@@ -248,6 +248,9 @@ class MinerUDocumentClient:
         return httpx.Client(timeout=timeout, trust_env=False), True
 
     def _request(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
+        remaining = document_parser_remaining_timeout(self.timeout_seconds)
+        if remaining is not None:
+            kwargs["timeout"] = httpx.Timeout(remaining, connect=min(5.0, remaining))
         client, should_close = self._request_client()
         try:
             response = client.request(method, f"{self.base_url}{path}", **kwargs)

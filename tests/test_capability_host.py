@@ -157,8 +157,12 @@ async def test_pi_cancel_during_resource_creation(tmp_path, monkeypatch, barrier
     async def remove(name, _owner_identity):
         commands.append(("docker", "rm", "-f", name))
 
+    async def unexpected_rpc(_command):
+        raise AssertionError("取消创建屏障测试不应启动主容器")
+
     monkeypatch.setattr(runtime, "_assert_image", no_image)
     monkeypatch.setattr(runtime, "_remove_owned_container", remove)
+    monkeypatch.setattr(runtime, "_spawn_rpc_process", unexpected_rpc)
     checkpoint = {}
 
     class Prepared(Exception):
@@ -192,8 +196,13 @@ async def test_pi_cancel_during_resource_creation(tmp_path, monkeypatch, barrier
             connection_broker=RecordingBroker(), egress_controller=runtime.egress_controller, capability_host=host,
         )
         monkeypatch.setattr(canceller, "_remove_owned_container", remove)
+    operation_task = runtime._operations[("owner", "task", 1)]
     cancel = asyncio.create_task(canceller.cancel("owner", "task", 1))
-    await asyncio.sleep(0.02)
+    # 独立实例经轮询投递取消；确认已投递后再释放创建屏障，不能用固定短睡眠代替。
+    async with asyncio.timeout(3):
+        while not operation_task.cancelling():
+            assert not operation_task.done()
+            await asyncio.sleep(0.001)
     if barrier != "ready":
         assert not cancel.done()
     release.set()
@@ -561,12 +570,19 @@ async def test_capability_host_rejects_empty_or_remote_only_selection(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("public_contract", [False, True])
 async def test_pi_runtime_uses_sidecar_only_for_native_capability(
     tmp_path: Path,
     pi_image_runner,
+    public_contract: bool,
 ) -> None:
     docker = RecordingDocker()
     pack = _native_pack(tmp_path / "pack", "prettier")
+    if public_contract:
+        template = Path(__file__).resolve().parents[1] / "examples/capabilities/csv-group-summary/reuse-contract.json"
+        contract = json.loads(template.read_text(encoding="utf-8"))
+        contract.update(capability_id="table.duckdb", version="3.9.6")
+        (pack / "mangrove-reuse.json").write_text(json.dumps({"reuse_contract": json.dumps(contract)}), encoding="utf-8")
     source = tmp_path / "source.txt"
     source.write_text("source", encoding="utf-8")
     host = CapabilityHost(
@@ -624,8 +640,19 @@ async def test_pi_runtime_uses_sidecar_only_for_native_capability(
     bridge = json.loads(
         (config_dir / "capability-host.json").read_text(encoding="utf-8")
     )
-    assert bridge["capabilities"] == [{"name": "prettier", "kind": "node"}]
+    assert len(bridge["capabilities"]) == 1
+    assert bridge["capabilities"][0]["name"] == "prettier"
+    assert bridge["capabilities"][0]["kind"] == "node"
+    purpose = bridge["capabilities"][0]["purpose"]
+    assert purpose.startswith("格式化 JSON")
+    if public_contract:
+        assert "group_sum" in purpose
+        assert "contentSchema" in purpose
+        assert "group_field" in purpose
+    else:
+        assert purpose == "格式化 JSON"
     assert bridge["relayUrl"].startswith("http://mangrove-cap-host-")
+    assert "优先调用已选用工具" in (config_dir / "mangrove-system.md").read_text(encoding="utf-8")
     host_runs = [
         item
         for item in docker.commands

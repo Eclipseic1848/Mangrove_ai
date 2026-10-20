@@ -10,9 +10,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import shutil
+import time
 from contextlib import contextmanager
+from http.cookies import SimpleCookie
 from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import urlsplit
@@ -201,8 +204,7 @@ _MC_COOKIE_PLATFORM = {
     "mc_cookie_ks": ("快手", "ks"), "mc_cookie_tieba": ("贴吧", "tieba"),
 }
 
-# 电商登录页探测：明确跳回登录页可判定未认证，HTTP 200 只证明页面可达。
-# 尚未接通稳定身份接口的平台保持 unknown，不靠页面壳或搜索结果证明账号身份。
+# 电商先使用当前账号接口；未接通的平台保持 unknown，页面壳不能证明身份。
 # 拼多多/淘宝反爬更激进，标 best_effort=True：请求被拦截时不误判为"Cookie 失效"，
 # 而是回"无法判断"，避免让管理员误删一个其实还有效的 Cookie。
 # 淘宝 2026-07-08 实测：探测请求（无真实浏览器 TLS/JS 指纹）会被淘宝 WAF 转发到内部边缘节点
@@ -211,13 +213,13 @@ _MC_COOKIE_PLATFORM = {
 _ECOMMERCE_PROBES = {
     "jd_cookie": {
         "cn": "京东",
-        "url": "https://order.jd.com/center/list.action",
+        "url": "https://me-api.jd.com/user_new/info/GetJDUserInfoUnion",
         "login_markers": ("passport.jd.com",),
         "best_effort": False,
     },
     "tb_cookie": {
         "cn": "淘宝/天猫",
-        "url": "https://member1.taobao.com/member/fresh/account_setting.htm",
+        "url": "https://h5api.m.taobao.com/h5/mtop.user.getusersimple/1.0/",
         "login_markers": ("login.taobao.com", "login.tmall.com"),
         "best_effort": True,
     },
@@ -252,7 +254,8 @@ def _cookie_verification_evidence(error: Exception | None = None) -> dict:
     # 原因来自有限代码表，不能把第三方返回的任意字符串当成公开分类透传。
     reasons = {"login_required", "rate_limited", "challenge_required", "access_denied", "network_error",
                "http_error", "identity_unverified", "identity_probe_unsupported", "identity_probe_failed",
-               "empty_result", "collection_failed", "collector_unavailable", "credential_missing", "credential_changed"}
+               "empty_result", "collection_failed", "collector_unavailable", "credential_missing", "credential_changed",
+               "credential_scope_incomplete"}
     reason = error.reason if isinstance(error, CookieProbeError) and error.reason in reasons else "probe_failed"
     status = ("invalid" if _cookie_failure_status(error) == "invalid" else "unknown") if error is not None else "valid"
     return {"scope": "identity", "status": status,
@@ -264,17 +267,17 @@ def _classify_ecommerce_probe(
 ) -> str:
     """跳回登录页可证明当前探测未认证；页面成功加载不证明身份。"""
     url = urlsplit(landed_url)
-    if any((url.path == marker if marker.startswith("/") else url.hostname == marker) for marker in login_markers):
-        raise CookieProbeError(f"{cn} 登录状态已失效，请重新导出 Cookie", reason="login_required", status="invalid")
     if status_code != 200:
         hint = "，可能是反爬拦截而非 Cookie 失效" if best_effort else "，请稍后重试确认"
         reason = "rate_limited" if status_code == 429 else "access_denied" if status_code == 403 else "http_error"
         raise CookieProbeError(f"{cn} 无法判断 Cookie 状态（HTTP {status_code}）{hint}", reason=reason)
+    if any((url.path == marker if marker.startswith("/") else url.hostname == marker) for marker in login_markers):
+        raise CookieProbeError(f"{cn} 当前身份请求未登录，请重新获取业务域 Cookie", reason="login_required", status="invalid")
     raise CookieProbeError(f"{cn} 无法判断 Cookie 状态：页面可达，但未取得已登录身份凭据", reason="identity_unverified")
 
 
 async def _verify_ecommerce_cookie(cookie_key: str) -> str:
-    """真实探测：带上 Cookie 访问一个必须登录才能访问的页面，交给 _classify_ecommerce_probe 判定。"""
+    """读取当前账号身份；尚未接通的页面探测不能作为验证成功。"""
     from src.config.user_ctx import effective
 
     probe = _ECOMMERCE_PROBES[cookie_key]
@@ -282,14 +285,62 @@ async def _verify_ecommerce_cookie(cookie_key: str) -> str:
     if not cookie:
         raise CookieProbeError(f"{probe['cn']} 未配置 Cookie", reason="credential_missing")
     headers = {"User-Agent": _ECOMMERCE_UA, "Cookie": cookie}
+    params = None
+    if cookie_key == "jd_cookie":
+        headers["Referer"] = "https://home.m.jd.com/"
+    elif cookie_key == "tb_cookie":
+        parsed = SimpleCookie()
+        try:
+            parsed.load(cookie)
+        except Exception:
+            pass
+        token = parsed["_m_h5_tk"].value.split("_", 1)[0] if "_m_h5_tk" in parsed else ""
+        if not token:
+            # 缺少身份接口签名令牌只说明导出范围不足，不证明登录会话失效。
+            raise CookieProbeError("淘宝身份接口缺少业务域令牌，请从已登录业务域请求复制完整 Cookie", reason="credential_scope_incomplete")
+        timestamp = str(int(time.time() * 1000))
+        app_key, data = "12574478", "{}"
+        sign = hashlib.md5(f"{token}&{timestamp}&{app_key}&{data}".encode("utf-8"), usedforsecurity=False).hexdigest()
+        params = {"jsv": "2.7.2", "appKey": app_key, "t": timestamp, "sign": sign,
+                  "api": "mtop.user.getUserSimple", "v": "1.0", "type": "originaljson",
+                  "dataType": "json", "ecode": "1", "sessionOption": "AutoLoginOnly", "data": data}
+        headers["Referer"] = "https://www.taobao.com/"
     try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
-            r = await c.get(probe["url"], headers=headers)
+        # 重定向后不一定还携带本次凭据；登录跳转或挑战不能单独证明凭据已失效。
+        async with httpx.AsyncClient(timeout=15, follow_redirects=False) as c:
+            r = await c.get(probe["url"], headers=headers, params=params)
     except httpx.RequestError:
         # 不透传带请求地址或凭证的第三方异常。
         raise CookieProbeError(f"{probe['cn']} 无法判断 Cookie 状态：网络探测失败，请稍后重试", reason="network_error") from None
+    if cookie_key == "jd_cookie" and r.status_code == 200:
+        try:
+            data = r.json()
+            code = data.get("retcode")
+            if code in ("1001", 1001):
+                raise CookieProbeError("京东身份接口返回未登录，请重新获取业务域 Cookie", reason="login_required", status="invalid")
+            account = data.get("data", {}).get("userInfo", {}).get("baseInfo", {}).get("curPin")
+            # 只认当前账号接口的明确成功和账号标识，HTTP 200 或公开商品不证明身份。
+            if code in ("0", 0) and not isinstance(code, bool) and isinstance(account, str) and account.strip():
+                return "京东本次登录身份验证通过；尚未验证商品或评论采集权限"
+        except (ValueError, AttributeError, TypeError):
+            pass
+    elif cookie_key == "tb_cookie" and r.status_code == 200:
+        try:
+            response = r.json()
+            ret = response.get("ret")
+            codes = {item.split("::", 1)[0] for item in ret} if isinstance(ret, list) and ret and all(isinstance(item, str) for item in ret) else set()
+            if "FAIL_SYS_SESSION_EXPIRED" in codes:
+                raise CookieProbeError("淘宝身份接口返回会话未登录，请重新获取业务域 Cookie", reason="login_required", status="invalid")
+            if codes & {"RGV587_ERROR", "FAIL_SYS_USER_VALIDATE"}:
+                raise CookieProbeError("淘宝要求完成服务器访问验证挑战，当前无法判断 Cookie 状态", reason="challenge_required")
+            account = response.get("data", {}).get("userNumId")
+            if codes == {"SUCCESS"} and not isinstance(account, bool) and str(account).isdigit() and int(account) > 0:
+                return "淘宝本次登录身份验证通过；尚未验证天猫、商品或评论采集权限"
+        except (ValueError, AttributeError, TypeError):
+            pass
     return _classify_ecommerce_probe(
-        str(r.url), r.status_code, probe["cn"], probe["login_markers"], probe["best_effort"],
+        str(r.url), r.status_code, probe["cn"],
+        () if cookie_key in {"jd_cookie", "tb_cookie"} else probe["login_markers"], probe["best_effort"],
     )
 
 
@@ -578,8 +629,22 @@ async def reauthenticate_cookie(body: CookieReauthenticationIn, user=Depends(get
             await _verify_target(body.key)
         except Exception as error:
             # 新值尚未进入Vault；固定提示避免第三方异常携带凭证正文。
-            return {"ok": False, "saved": False, "detail": "新凭证未通过身份验证，原配置未修改",
-                    "verification": _cookie_verification_evidence(error)}
+            evidence = _cookie_verification_evidence(error)
+            hints = {
+                "identity_probe_unsupported": "该平台的独立身份验证暂未接通",
+                "credential_missing": "未取得可验证的 Cookie",
+                "credential_scope_incomplete": "Cookie 缺少身份接口需要的业务域信息，请复制已登录业务域请求的完整 Cookie",
+                "network_error": "服务器网络探测未完成",
+                "rate_limited": "平台提示请求频繁，请稍后检查",
+                "challenge_required": "平台要求完成验证挑战",
+                "access_denied": "平台拒绝了本次服务器访问",
+                "collector_unavailable": "服务器身份验证组件不可用",
+                "identity_unverified": "本次无法确认登录身份",
+                "login_required": "服务器身份接口返回未登录，请核对已登录业务域的 Cookie",
+            }
+            hint = hints.get(evidence["reason"], "服务器本次未能确认登录身份")
+            return {"ok": False, "saved": False, "detail": hint + "；原配置未修改。可选择保存配置，登录状态仍需另行核对。",
+                    "verification": evidence}
     if capture_probe_environment() != environment:
         raise HTTPException(409, "验证环境已变化，原配置未修改，请重新验证")
     if body.scope == "platform":

@@ -1,14 +1,20 @@
 """将既有采集编排的文本调用绑定到工作台选定的连接，不把密钥交给编排器。"""
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import contextmanager
 
 from src.api.execution import execution_checkpoint
 from src.account_execution import ExecutionDenied
-from src.llm.provider import _bound_chat, _bound_chat_failure, _bound_chat_identity, verify_bound_model
+from src.config.settings import settings
+from src.llm.provider import _bound_chat, _bound_chat_failure, _bound_chat_identity, _DEEPSEEK_THINKING_MODELS, verify_bound_model
 from src.model_connections import get_default_broker
 from src.model_connections.text_protocol import structured_request, response_text, collect_response_usage, ModelOutputTruncatedError
+
+
+# 百炼文档核验这两款支持 none：https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-responses
+_QWEN_RESPONSES_REASONING_MODELS = ("qwen3.8-max", "qwen3.8-flash")
 
 
 @contextmanager
@@ -16,20 +22,44 @@ def conductor_connection(*, owner_id, connection_id, connection_version, model, 
     broker = get_default_broker()
     failure = []
 
-    async def generate(messages, *, max_tokens=8192):
+    async def generate(messages, *, max_tokens=None, thinking=None):
         verify_bound_model()
         execution_checkpoint(required=True)
         grant = None
         try:
+            call_budget = settings.pi_runtime_timeout_seconds
             grant = broker.issue_grant(
                 owner_user_id=owner_id, connection_id=connection_id, connection_version=connection_version,
                 model_id=model, task_id=task_id, revision=revision, run_id=run_id,
-                purpose="agent_inference", ttl_seconds=300,
+                # 授权覆盖整次等待预算及短暂收口；停用、撤销仍由 Broker 实时检查。
+                purpose="agent_inference", ttl_seconds=call_budget + 60,
             )
             system = "\n".join(str(message["content"]) for message in messages if message["role"] == "system")
             turns = [dict(message) for message in messages if message["role"] != "system"]
+            output_limit = max_tokens
+            if output_limit is None:
+                preset = broker.verified_model_preset(owner_id, connection_id, connection_version, model)
+                # 未核容量保留旧协议兼容值，不能凭同名自定义模型猜测官方上限。
+                if not preset or not preset.max_output_tokens:
+                    output_limit = 8192
+                elif grant.api_format in {"openai_chat_completions", "anthropic_messages"}:
+                    output_limit = preset.max_output_tokens
             path, body, headers = structured_request(api_format=grant.api_format, model=grant.model,
-                                                     grant_token=grant.token, system_prompt=system, payload={}, max_tokens=max_tokens)
+                                                     grant_token=grant.token, system_prompt=system, payload={}, max_tokens=output_limit)
+            if (settings.qwen_enable_thinking is False and grant.api_format == "openai_responses"
+                    and grant.model in _QWEN_RESPONSES_REASONING_MODELS):
+                connection = broker.get_connection(owner_id, grant.connection_id)
+                if connection and connection.get("preset_id") == "qwen":
+                    # 冻结连接绕过旧 Provider 配置；只补已有关闭设置，不把同名自定义模型当百炼。
+                    body["reasoning"] = {"effort": "none"}
+            if thinking is not None and grant.model in _DEEPSEEK_THINKING_MODELS:
+                connection = broker.get_connection(owner_id, grant.connection_id)
+                if connection and connection.get("preset_id") == "deepseek":
+                    # 原文抽取显式关思考，避免思考占满回答额度；普通任务沿用原默认值。
+                    if grant.api_format == "openai_chat_completions":
+                        body["thinking"] = {"type": "enabled" if thinking else "disabled"}
+                    elif grant.api_format == "openai_responses":
+                        body["reasoning"] = {"effort": "high" if thinking else "none"}
             if grant.api_format == "openai_chat_completions":
                 body["messages"] = [{"role": "system", "content": system}, *turns]
             elif grant.api_format == "openai_responses":
@@ -41,12 +71,13 @@ def conductor_connection(*, owner_id, connection_id, connection_version, model, 
                 body["contents"] = [{"role": "model" if turn["role"] == "assistant" else "user",
                                      "parts": [{"text": turn["content"]}]} for turn in turns]
                 body["generationConfig"].pop("responseMimeType", None)
-            result = await broker.relay(grant_token=grant.token, protocol_path=path, method="POST",
-                                        headers=headers, body=json.dumps(body, ensure_ascii=False).encode("utf-8"))
-            try:
-                raw = b"".join([chunk async for chunk in result.iter_bytes()])
-            finally:
-                await result.aclose()
+            async with asyncio.timeout(call_budget):
+                result = await broker.relay(grant_token=grant.token, protocol_path=path, method="POST",
+                                            headers=headers, body=json.dumps(body, ensure_ascii=False).encode("utf-8"))
+                try:
+                    raw = b"".join([chunk async for chunk in result.iter_bytes()])
+                finally:
+                    await result.aclose()
             execution_checkpoint(required=True)
             if not 200 <= result.status_code < 300:
                 raise ValueError("所选模型调用失败，未切换模型或自动重发")

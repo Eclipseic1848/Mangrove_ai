@@ -27,7 +27,8 @@ def test_reachable_page_does_not_prove_login(monkeypatch, key):
     def respond(request):
         return httpx.Response(200, text="<html>Loading...</html>", request=request)
     monkeypatch.setattr(cr.httpx, "AsyncClient", lambda **kw: original(**kw, transport=httpx.MockTransport(respond)))
-    with user_overrides_context({key: "synthetic-cookie"}):
+    value = "_m_h5_tk=synthetic_123" if key == "tb_cookie" else "synthetic-cookie"
+    with user_overrides_context({key: value}):
         with pytest.raises(cr.CookieProbeError) as error:
             asyncio.run(cr._verify_ecommerce_cookie(key))
     assert error.value.status == "unknown"

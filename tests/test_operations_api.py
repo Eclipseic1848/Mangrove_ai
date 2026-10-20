@@ -376,3 +376,60 @@ def test_exports_escape_formulas_and_event_records_reject_updates(platform):
             conn.execute("UPDATE operations_events SET action='篡改' WHERE event_id=?", (event,))
         with pytest.raises(sqlite3.IntegrityError):
             conn.execute("UPDATE operations_outcomes SET result='failure' WHERE event_id=?", (event,))
+
+
+@pytest.mark.parametrize("endpoint", ["summary", "events/query"])
+def test_read_only_query_does_not_reserve_writer_slot(platform, monkeypatch, endpoint):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    import sqlite3
+    from src import operations as ops
+
+    client, actor, users, store = platform
+    actor["user"] = users["manager"]
+    with store._conn() as conn:
+        for name in ("root", "member"):
+            event = ops.begin(conn, kind="visit", module="概览", action="访问页面", actor=users[name])
+            ops.finish(conn, event)
+    ready, release = Event(), Event()
+    method = "summary" if endpoint == "summary" else "query"
+    original = getattr(ops, method)
+
+    def slow_read(*args, **kwargs):
+        result = original(*args, **kwargs)
+        # 用事件固定查询仍未退出的并发窗口，不靠大量数据或不稳定耗时制造锁竞争。
+        ready.set()
+        assert release.wait(5)
+        return result
+
+    monkeypatch.setattr(ops, method, slow_read)
+    acquired = False
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        pending = pool.submit(client.post, f"/api/operations/{endpoint}", json=period(kind="visit"))
+        try:
+            assert ready.wait(5)
+            writer = sqlite3.connect(store.db_path, timeout=0.15)
+            try:
+                writer.execute("BEGIN IMMEDIATE")
+                acquired = True
+            except sqlite3.OperationalError as error:
+                assert "locked" in str(error)
+            finally:
+                writer.rollback()
+                writer.close()
+        finally:
+            release.set()
+            response = pending.result(timeout=5)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    if endpoint == "summary":
+        assert result["pv"] == result["uv"] == 1
+        assert {item["actor_id"] for item in result["users"]} == {users["member"]["user_id"]}
+    else:
+        assert result["total"] == 1
+        assert result["items"][0]["actor_id"] == users["member"]["user_id"]
+    assert response.headers["cache-control"] == "no-store"
+    audit = client.post("/api/operations/events/query", json=period(kind="access")).json()["items"]
+    action = "查看统计" if endpoint == "summary" else "查看日志"
+    assert any(item["action"] == action and item["result"] == "success" and item["status_code"] == 200 for item in audit)
+    assert acquired, "只读运营查询不应预占独立心跳或审计事务需要的写槽"

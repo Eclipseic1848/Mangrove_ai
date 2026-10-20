@@ -16,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Pagination } from "@/components/ui/pagination";
 import { Modal } from "@/components/ui/modal";
 import { Markdown } from "@/components/Markdown";
+import { ModelPicker } from "@/components/ModelPicker";
 import { api, downloadFile } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { useAuth, isAdminish } from "@/lib/auth";
@@ -77,6 +78,11 @@ interface Template {
   cron_expr?: string;
 }
 
+interface SchedulerStatus {
+  enabled: boolean;
+  running: boolean;
+}
+
 const TEMPLATE_ICONS: Record<string, typeof Sparkles> = {
   daily_voc_report: MessageSquare,
   weekly_sentiment_report: TrendingUp,
@@ -116,6 +122,7 @@ type CronMode = "daily" | "weekly" | "monthly" | "advanced";
 
 interface FormState {
   modelChoice?: string;
+  templateId?: string;
   name: string;
   prompt: string;
   freqMode: FreqMode;
@@ -256,6 +263,7 @@ function TaskFormModal({
       if (initial.mode === "create") {
         await api.post("/api/tasks/manual", {
           name: f.name.trim(), prompt: f.prompt.trim(), trigger,
+          template_id: f.templateId,
           model_connection_id: selected!.connectionId, model: selected!.model, external_api_confirmed: externalConfirmed,
           start_date: f.startDate || undefined, end_date: f.endDate || undefined,
         });
@@ -280,14 +288,13 @@ function TaskFormModal({
   return (
     <Modal open={open} onClose={onClose} title={initial.mode === "create" ? "添加自动化任务" : "编辑自动化任务"} wide>
       <div className="grid max-h-[70vh] gap-4 overflow-y-auto pr-1">
-        <p id={`${formId}-timing-help`} className="text-sm text-muted-foreground">计划时间统一为 UTC+8。保存后按所选模型执行，不自动切换其他模型。</p>
+        <p id={`${formId}-timing-help`} className="text-sm text-muted-foreground">保存后按所选模型执行，不自动切换其他模型。</p>
         <div>
           <label htmlFor="automation-model" className="mb-1 block text-sm">执行模型</label>
-          <select id="automation-model" value={modelValue} onChange={event => { setModelValue(event.target.value); setExternalConfirmed(false); }}
-            className="h-10 w-full rounded-md border bg-background px-3 text-sm">
-            <option value="">请选择执行模型</option>
-            {choices.map(item => <option key={JSON.stringify([item.connectionId, item.model])} value={JSON.stringify([item.connectionId, item.model])}>{item.group} · {item.label}</option>)}
-          </select>
+          <ModelPicker id="automation-model" choices={choices} value={modelValue}
+            onValueChange={value => { setModelValue(value); setExternalConfirmed(false); }}
+            emptyLabel="请选择执行模型" allowEmpty unavailableLabel="原执行模型已不可用，请重新选择"
+            disabled={saving} className="w-full" />
           {modelError && <p role="alert" className="mt-2 text-sm text-destructive">{modelError}</p>}
           {selected?.group === '云端模型' && <label className="mt-2 flex items-start gap-2 text-sm">
             <input type="checkbox" checked={externalConfirmed} onChange={event => setExternalConfirmed(event.target.checked)} />
@@ -454,6 +461,9 @@ export function Tasks() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [lastReadAt, setLastReadAt] = useState("");
+  const [schedulerStatus, setSchedulerStatus] = useState<SchedulerStatus | null>(null);
+  const [schedulerReadError, setSchedulerReadError] = useState(false);
+  const schedulerRequest = useRef(0);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [cancelTarget, setCancelTarget] = useState<Task | null>(null);
@@ -470,6 +480,7 @@ export function Tasks() {
   // 运行记录：按任务/成败/关键词筛选 + 后端分页（记录会无限增长，不能一次性全拉）
   const [recentRuns, setRecentRuns] = useState<RecentRun[]>([]);
   const [recentRunsLoading, setRecentRunsLoading] = useState(false);
+  const [runsReadError, setRunsReadError] = useState(false);
   const [runsTotal, setRunsTotal] = useState(0);
   const [runsTaskFilter, setRunsTaskFilter] = useState("");
   const [runsSuccessFilter, setRunsSuccessFilter] = useState<"all" | "success" | "failed">("all");
@@ -477,12 +488,14 @@ export function Tasks() {
   const [runsPage, setRunsPage] = useState(1);
   const [runsPageSize, setRunsPageSize] = useState(10);
   const runsRequest = useRef(0);
+  const runsReadQuery = useRef('');
 
   const [runsLoading, setRunsLoading] = useState(false);
 
   // 报告查看弹窗：既服务「某任务的执行历史」也服务「运行记录 Tab 里直接查看」
   const [historyFor, setHistoryFor] = useState<Task | null>(null);
   const [runs, setRuns] = useState<Run[]>([]);
+  const [historyReadError, setHistoryReadError] = useState(false);
   const [historyPage, setHistoryPage] = useState(1);
   const [historyPageSize, setHistoryPageSize] = useState(10);
   const [historyTotal, setHistoryTotal] = useState(0);
@@ -493,8 +506,32 @@ export function Tasks() {
     { mode: "create"; form: FormState } | { mode: "edit"; taskId: string; form: FormState } | null
   >(null);
 
+  const loadSchedulerStatus = () => {
+    const request = ++schedulerRequest.current;
+    api.get('/api/tasks/scheduler/status').then(status => {
+      if (request !== schedulerRequest.current) return;
+      setSchedulerStatus(status); setSchedulerReadError(false);
+    }).catch(() => {
+      if (request !== schedulerRequest.current) return;
+      // 读取失败后不能继续把上次正常状态当成当前运行事实。
+      setSchedulerStatus(null); setSchedulerReadError(true);
+    });
+  };
+  const schedulerHealthy = schedulerStatus?.enabled === true && schedulerStatus?.running === true;
+  const schedulerMessage = schedulerReadError
+    ? '自动调度状态读取失败，无法确认计划是否会到点执行，请重试。'
+    : schedulerStatus?.enabled === false
+      ? '自动调度已关闭：计划不会到点执行。可手动立即执行；恢复自动调度请联系管理员。'
+      : schedulerHealthy
+        ? '自动调度运行中，计划将按设定时间执行。'
+        : schedulerStatus?.enabled === true && schedulerStatus?.running === false
+          ? '自动调度已开启，但轮询未运行：计划不会到点执行，请联系管理员。'
+          : schedulerStatus ? '自动调度状态无法确认，请重试或联系管理员。' : '正在读取自动调度状态…';
+  const schedulerNeedsAttention = schedulerReadError || (schedulerStatus !== null && !schedulerHealthy);
+
   const load = () => {
     setLoading(true);
+    loadSchedulerStatus();
     api.get("/api/tasks").then(items => {
       setTasks(items); setLoadError(false); setLastReadAt(new Date().toISOString());
     }).catch(() => setLoadError(true)).finally(() => setLoading(false));
@@ -505,9 +542,11 @@ export function Tasks() {
     let active = true;
     const timer = setInterval(() => {
       if (document.visibilityState !== 'visible') return;
+      loadSchedulerStatus();
       api.get('/api/tasks').then(items => { if (active) {
-        setTasks(items); setLoadError(false); setLastReadAt(new Date().toISOString()); setRefreshTick(t => t + 1);
-      } }).catch(() => { if (active) setLoadError(true); });
+        setTasks(items); setLoadError(false); setLastReadAt(new Date().toISOString());
+      } }).catch(() => { if (active) setLoadError(true); })
+        .finally(() => { if (active) setRefreshTick(t => t + 1); });
     }, 5000);
     return () => { active = false; clearInterval(timer); };
   }, []);
@@ -534,21 +573,24 @@ export function Tasks() {
 
   const loadRecentRuns = () => {
     const request = ++runsRequest.current;
-    setRecentRunsLoading(true);
     const params = new URLSearchParams();
     if (runsTaskFilter) params.set("task_id", runsTaskFilter);
     if (runsSuccessFilter !== "all") params.set("success", runsSuccessFilter === "success" ? "true" : "false");
     if (runsQuery.trim()) params.set("q", runsQuery.trim());
     params.set("limit", String(runsPageSize));
     params.set("offset", String((runsPage - 1) * runsPageSize));
+    // 同一查询的后台刷新保留现有节点，避免实时轮询卸载列表造成闪屏和滚动跳动。
+    const query = params.toString();
+    if (runsReadQuery.current !== query) setRecentRunsLoading(true);
     api.get(`/api/tasks/runs/recent?${params.toString()}`)
       .then((res) => {
         if (request !== runsRequest.current) return;
+        runsReadQuery.current = query; setRunsReadError(false);
         setRecentRuns(res.items);
         setRunsTotal(res.total);
         setRunsPage((page) => Math.min(page, Math.max(1, Math.ceil(res.total / runsPageSize))));
       })
-      .catch((e) => { if (request === runsRequest.current) toast.error(e.message || "读取运行记录失败"); })
+      .catch(() => { if (request === runsRequest.current) setRunsReadError(true); })
       .finally(() => { if (request === runsRequest.current) setRecentRunsLoading(false); });
   };
   useEffect(() => setRunsPage(1), [runsTaskFilter, runsSuccessFilter, runsQuery]);
@@ -567,18 +609,19 @@ export function Tasks() {
     const background = historyQuery.current === params.toString();
     historyQuery.current = params.toString();
     // 轮询保留列表节点与滚动位置；只有切换查询才显示加载占位。
-    if (!background) setRunsLoading(true);
+    if (!background) { setRunsLoading(true); setHistoryReadError(false); }
     api.get(`/api/tasks/runs/recent?${params}`)
       .then((res) => {
         if (!active) return;
+        setHistoryReadError(false);
         setRuns(res.items);
         setHistoryTotal(res.total);
         setHistoryPage((page) => Math.min(page, Math.max(1, Math.ceil(res.total / historyPageSize))));
       })
-      .catch((e) => {
+      .catch(() => {
         if (!active) return;
-        toast.error(e.message || "读取执行历史失败");
-        if (!background) setRuns([]);
+        // 读取失败不能判作无历史，也不能清除已展示的记录。
+        setHistoryReadError(true);
       })
       .finally(() => { if (active) setRunsLoading(false); });
     return () => { active = false; };
@@ -634,7 +677,7 @@ export function Tasks() {
 
   const openCreate = (template?: Template) => {
     const form = template
-      ? { ...EMPTY_FORM, name: template.name, prompt: template.prompt,
+      ? { ...EMPTY_FORM, templateId: template.id, name: template.name, prompt: template.prompt,
           freqMode: (template.trigger_type as FreqMode) || "cron",
           ...(template.cron_expr ? parseCronToForm(template.cron_expr) : {}) }
       : EMPTY_FORM;
@@ -655,6 +698,7 @@ export function Tasks() {
     setHistoryPageSize(10);
     setHistoryTotal(0);
     setRuns([]);
+    setHistoryReadError(false);
     historyQuery.current = '';
     setHistoryFor(t);
     setReading(null);
@@ -670,7 +714,7 @@ export function Tasks() {
   };
 
   const download = async (taskId: string, r: Run, kind: "report" | "json") => {
-    const ts = r.run_at.replace(/[-:]/g, "").replace("T", "_");
+    const ts = beijingTime(r.run_at).replace(" ", "_").replace(/[^\d_]/g, "");
     try {
       await downloadFile(
         `/api/tasks/${taskId}/runs/${r.run_id}/download?kind=${kind}`,
@@ -695,7 +739,10 @@ export function Tasks() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <PageGuide page={`tasks.${tab}`} ready={!(tab === "scheduled" ? loading : recentRunsLoading)} />
-          <Button variant="outline" size="sm" onClick={tab === "scheduled" ? load : loadRecentRuns} className="gap-1.5">
+          <Button variant="outline" size="sm" onClick={() => {
+            if (tab === "scheduled") load();
+            else { loadSchedulerStatus(); loadRecentRuns(); }
+          }} className="gap-1.5">
             <RefreshCw className="h-4 w-4" /> 刷新
           </Button>
           <Button data-guide="automation-add" size="sm" onClick={() => setPickerOpen(true)} className="gap-1.5">
@@ -714,6 +761,15 @@ export function Tasks() {
       </div>
 
       <div className="flex-1 overflow-y-auto px-7 py-6">
+        <div role={schedulerNeedsAttention ? 'alert' : 'status'} className={cn(
+          'mb-4 flex flex-wrap items-center gap-2 rounded-lg border border-border px-4 py-3 text-sm',
+          schedulerNeedsAttention ? 'text-destructive' : 'text-muted-foreground',
+        )}>
+          <span>{schedulerMessage}</span>
+          {(schedulerReadError || (schedulerStatus !== null && schedulerStatus.enabled !== false && !schedulerHealthy)) && (
+            <Button variant="outline" size="sm" onClick={loadSchedulerStatus}>重试读取调度状态</Button>
+          )}
+        </div>
         {selectedTask && <p role="status" className="mb-4 text-sm text-muted-foreground">已定位所选计划。<Link className="ml-2 text-primary underline" to="/tasks">查看全部计划</Link></p>}
         {tab === "scheduled" ? (
           <>
@@ -841,6 +897,10 @@ export function Tasks() {
           </>
         ) : (
           <>
+            {runsReadError && <div role="alert" className="mb-4 flex flex-wrap items-center gap-2 text-sm text-destructive">
+              <span>{runsReadQuery.current ? '运行记录更新失败，当前显示上次读取的数据。' : '运行记录加载失败，请重试。'}</span>
+              <Button variant="outline" size="sm" disabled={recentRunsLoading} onClick={loadRecentRuns}>重试读取运行记录</Button>
+            </div>}
             <div className="mb-3 flex flex-wrap items-center gap-2">
               <div className="relative">
                 <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -949,7 +1009,7 @@ export function Tasks() {
 
       {/* 单份报告直读（运行记录 Tab 里点「查看」） */}
       {reading && !historyFor && (
-        <Modal open onClose={() => setReading(null)} title={`报告 · ${reading.runAt}`} wide>
+        <Modal open onClose={() => setReading(null)} title={`报告 · ${beijingTime(reading.runAt)}`} wide>
           <div className="max-h-[70vh] overflow-y-auto pr-1">
             <Markdown>{reading.content}</Markdown>
           </div>
@@ -963,7 +1023,7 @@ export function Tasks() {
       <Modal
         open={!!historyFor}
         onClose={closeHistory}
-        title={reading ? `报告 · ${reading.runAt}` : `执行历史 · ${historyFor?.name || historyFor?.user_input || ""}`}
+        title={reading ? `报告 · ${beijingTime(reading.runAt)}` : `执行历史 · ${historyFor?.name || historyFor?.user_input || ""}`}
         wide
       >
         {reading ? (
@@ -980,11 +1040,15 @@ export function Tasks() {
           </>
         ) : (
           <>
+            {historyReadError && <div role="alert" className="mb-3 flex flex-wrap items-center gap-2 text-sm text-destructive">
+              <span>{runs.length ? "执行历史更新失败，当前显示上次读取的数据。" : "执行历史读取失败，请重试。"}</span>
+              <Button variant="outline" size="sm" disabled={runsLoading} onClick={() => setRefreshTick((tick) => tick + 1)}>重试读取执行历史</Button>
+            </div>}
             <div className="max-h-[60vh] overflow-y-auto pr-1">
               {runsLoading ? (
                 <p className="py-6 text-center text-sm text-muted-foreground">加载中…</p>
               ) : !runs.length ? (
-                <p className="py-6 text-center text-sm text-muted-foreground">还没有执行历史。</p>
+                !historyReadError && <p className="py-6 text-center text-sm text-muted-foreground">还没有执行历史。</p>
               ) : (
                 <div className="grid min-w-0 grid-cols-1 gap-2">
                   {runs.map((r) => (

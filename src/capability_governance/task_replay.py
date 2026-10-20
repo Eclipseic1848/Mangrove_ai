@@ -13,6 +13,7 @@ from src.capability_adapters import load_runtime_manifests
 from src.capability_catalog import CapabilitySelection, CatalogActor
 from src.agentic_runtime.models import PiRuntimeRequest
 from src.config.settings import settings
+from src.services.managed_paths import ManagedPathCodec
 from src.services.upload_store import UploadStore
 
 from .models import (
@@ -138,6 +139,9 @@ class SqliteValidationTaskResolver:
         self._execution_root = Path(
             execution_root or settings.semantic_execution_root
         ).expanduser().resolve()
+        self._output_paths = ManagedPathCodec(
+            self._execution_root, legacy_anchor=("data", "semantic-executions")
+        )
         self._capability_mounts = capability_mounts
         self._uploads = UploadStore(
             root=str(self._upload_root),
@@ -148,6 +152,20 @@ class SqliteValidationTaskResolver:
         connection = sqlite3.connect(self._db_path, timeout=30)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def _resolve_output_path(self, file_path: str) -> Path:
+        # 正式输出保存受管标识，不能把标识当磁盘路径；旧绝对路径仍按原边界读取。
+        raw_path = Path(file_path).expanduser()
+        if file_path.startswith(ManagedPathCodec.PREFIX):
+            output_path = self._output_paths.decode(file_path)
+            raw_path = self._execution_root / file_path[len(ManagedPathCodec.PREFIX):].replace("\\", "/")
+        else:
+            output_path = raw_path.resolve()
+        # decode 会展开软链接，仍须检查原始末级，防止编码路径绕过普通文件门。
+        if (self._execution_root not in output_path.parents
+            or not output_path.is_file() or raw_path.is_symlink()):
+            raise ValueError("真实任务正式输出已缺失或不是普通文件")
+        return output_path
 
     @staticmethod
     def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
@@ -365,13 +383,7 @@ class SqliteValidationTaskResolver:
             source_objects.append((str(upload_id), actual, item.size_bytes))
         reopened_outputs: list[tuple[str, str]] = []
         for output_id, expected_hash, expected_size, file_path in outputs:
-            output_path = Path(file_path).expanduser().resolve()
-            if (
-                self._execution_root not in output_path.parents
-                or not output_path.is_file()
-                or Path(file_path).is_symlink()
-            ):
-                raise ValueError("真实任务正式输出已缺失或不是普通文件")
+            output_path = self._resolve_output_path(file_path)
             actual = _file_sha256(output_path)
             if actual != expected_hash or output_path.stat().st_size != expected_size:
                 raise ValueError("真实任务正式输出内容 hash 或大小已变化")
@@ -749,12 +761,9 @@ class SqliteValidationTaskResolver:
         truncated = False
         for index, row in enumerate(outputs):
             file_path = str(row["file_path"])
-            output_path = Path(file_path).expanduser().resolve()
-            if (
-                self._execution_root not in output_path.parents
-                or not output_path.is_file()
-                or Path(file_path).is_symlink()
-            ):
+            try:
+                output_path = self._resolve_output_path(file_path)
+            except (ValueError, OSError):
                 return self._failed_content(subject_type, "output_invalid")
             try:
                 content, file_truncated = _read_limited(output_path, remaining)

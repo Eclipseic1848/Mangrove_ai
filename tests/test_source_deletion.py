@@ -101,11 +101,9 @@ def test_history_reads_snapshot_metadata_without_preview(canvas,monkeypatch):
     with sqlite3.connect(settings.webui_db_path) as connection:
         connection.execute("INSERT INTO source_acquisition_attempts(attempt_id,owner_id,idempotency_key,request_hash,request_url,normalized_url,allowed_scope_json,purpose,status,started_at) VALUES ('metadata-attempt','user-a','metadata-key','hash','url','url','{}','合成','succeeded','now')")
         connection.execute("INSERT INTO source_snapshots(snapshot_id,owner_id,attempt_id,allowed_scope_json,valid_page_count,failed_page_count,created_at) VALUES ('metadata-snapshot','user-a','metadata-attempt','{}',0,0,'now')")
-    original=SourceAcquisitionRepository.get_snapshot;seen=[]
-    def read(self,*args,**kwargs):
-        seen.append(kwargs.get('include_preview'))
-        assert kwargs.get('include_preview') is False
-        return original(self,*args,**kwargs)
-    monkeypatch.setattr(SourceAcquisitionRepository,'get_snapshot',read)
-    assert reuse.history('user-a')
-    assert seen==[False]
+    def forbidden(*args,**kwargs):
+        raise AssertionError('列表应批量读取元数据，不逐份装载快照')
+    monkeypatch.setattr(SourceAcquisitionRepository,'get_snapshot',forbidden)
+    item=next(item for item in reuse.history('user-a') if item.get('source_snapshot_id')=='metadata-snapshot')
+    assert item['availability']=='unavailable' and item['reason_code']=='source_coverage_insufficient'
+    assert 'text_preview' not in item and 'artifacts' not in item

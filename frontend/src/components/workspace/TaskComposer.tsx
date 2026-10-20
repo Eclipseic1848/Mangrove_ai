@@ -1,4 +1,5 @@
 import { taskModelChoices } from "@/lib/taskModelChoices";
+import { ModelPicker } from "@/components/ModelPicker";
 import {
   useCallback,
   useEffect,
@@ -299,6 +300,7 @@ export function TaskComposer({
   modelConnections = [],
   defaultConnectionId = null,
   defaultConnectionModel = null,
+  allowCapabilities = false,
   grayCapabilities = [],
 }: {
   compact?: boolean;
@@ -348,6 +350,7 @@ export function TaskComposer({
   modelConnections?: ModelConnection[];
   defaultConnectionId?: string | null;
   defaultConnectionModel?: string | null;
+  allowCapabilities?: boolean;
   grayCapabilities?: GrayCapability[];
 }) {
   const [prompt, setPrompt] = useState(initialPrompt);
@@ -403,11 +406,16 @@ export function TaskComposer({
     error: string;
   } | null>(null);
   const reuseRequest = useRef(0);
-  const reuseContext = JSON.stringify([prompt, formats, sourceIdentity, runtimeSelection, usesPiConfiguration, active, grayCapabilities,
+  const reuseContext = JSON.stringify([prompt, formats, sourceIdentity, runtimeSelection, usesPiConfiguration, active, allowCapabilities, grayCapabilities,
     items.map(item => [item.id, item.status, item.upload])]);
   useLayoutEffect(() => {
     // 修改输入或离开当前输入流程后，旧匹配和迟到响应都不能继续启用工具。
     reuseRequest.current += 1;
+    if (!allowCapabilities) {
+      setSelectedCapabilityIds([]);
+      setReuse(null);
+      return;
+    }
     setReuse(current => current ? { ...current, result: null, pending: false, error: "任务要求、资料或输出已改变，请重新匹配工具。" } : null);
   }, [reuseContext]);
   useEffect(() => () => { reuseRequest.current += 1; }, []);
@@ -744,7 +752,7 @@ export function TaskComposer({
     ? taskModelChoices(modelOptions, modelConnections, allowLocalPiRuntime, modelLocked ? { connectionId: defaultConnectionId, model: defaultConnectionModel } : undefined,
       { connectionId: selectedConnectionId, model: selectedConnection ? selectedConnectionModelId : selectedModel.split("::").slice(1).join("::") })
     : modelOptions.filter(item => !unified || items.length || webSourceCount || additionalSourceCount || item.provider === "local")
-      .map(item => ({ connectionId: item.provider, model: item.model, label: item.label, group: item.provider }));
+      .map(item => ({ connectionId: item.provider, model: item.model, label: item.label, group: item.provider === "local" ? "本地模型" : "云端模型", personal: false }));
   const selectedChoice = selectableModels.find(item => item.connectionId === (usesPiConfiguration ? selectedConnectionId : selectedModel.split("::")[0]) && item.model === (selectedConnection ? selectedConnectionModelId : selectedModel.split("::").slice(1).join("::")));
   const piSelectionInvalid =
     (usesPiConfiguration
@@ -879,8 +887,8 @@ export function TaskComposer({
           usesPiConfiguration
           && Boolean(selectedConnection)
           && confirmedForSend,
-        ...(usesPiConfiguration && reuse && reusedMatch ? { capabilityNeed: reuse.need } : {}),
-        capabilityPackRefs: usesPiConfiguration && reusedMatch ? [reusedMatch.ref] : usesPiConfiguration
+        ...(allowCapabilities && usesPiConfiguration && reuse && reusedMatch ? { capabilityNeed: reuse.need } : {}),
+        capabilityPackRefs: !allowCapabilities ? [] : usesPiConfiguration && reusedMatch ? [reusedMatch.ref] : usesPiConfiguration
           ? grayCapabilities
               .filter((item) => selectedCapabilityIds.includes(
                 `${item.pack_id}@${item.version}@${item.digest}`,
@@ -1145,7 +1153,7 @@ export function TaskComposer({
           Mangrove 增强模式可以在同一任务中观察并组合表格与文档来源。
         </div>
       )}
-      {reuse && <div role="status" aria-live="polite" className="mt-3 space-y-2 rounded-lg border p-3 text-xs" data-testid="capability-reuse-result">
+      {allowCapabilities && reuse && <div role="status" aria-live="polite" className="mt-3 space-y-2 rounded-lg border p-3 text-xs" data-testid="capability-reuse-result">
         {reuse.pending && <p>正在匹配已获准工具…</p>}
         {reuse.error && <p className="text-destructive">{reuse.error}</p>}
         {reusedMatch && <>
@@ -1235,11 +1243,12 @@ export function TaskComposer({
         )}
         </div>
         </details>
-        {unified && <select aria-label="选择模型" data-testid="workspace-model-picker" disabled={modelLocked || submitting}
-          className="ml-auto h-9 min-w-0 max-w-[min(100%,16rem)] rounded-lg border bg-background px-2 text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        {unified && <ModelPicker aria-label="选择模型" data-testid="workspace-model-picker" disabled={modelLocked || submitting}
+          choices={selectableModels} className="ml-auto max-w-[min(100%,22rem)]"
+          emptyLabel={selectableModels.length ? "请选择可用模型" : "暂无模型，请在设置中配置"}
           value={selectedChoice ? JSON.stringify([selectedChoice.connectionId, selectedChoice.model]) : ""}
-          onChange={event => {
-            const choice = selectableModels.find(item => JSON.stringify([item.connectionId, item.model]) === event.target.value);
+          onValueChange={value => {
+            const choice = selectableModels.find(item => JSON.stringify([item.connectionId, item.model]) === value);
             if (!choice) return;
             const connection = modelConnections.find(item => item.connection_id === choice.connectionId);
             modelSelectionExplicit.current = true;
@@ -1250,10 +1259,7 @@ export function TaskComposer({
             setExternalApiConfirmed(false);
             setFileNotice("");
             updateDraft({ connectionId: connection?.connection_id ?? null, connectionModel: connection ? choice.model : null, localModel: connection ? null : choice.model, legacyProvider: usesPiConfiguration ? undefined : choice.connectionId });
-          }}>
-          <option value="" disabled>{selectableModels.length ? "请选择可用模型" : "暂无模型，请在设置中配置"}</option>
-          {[...new Set(selectableModels.map(item => item.group))].map(group => <optgroup key={group} label={group}>{selectableModels.filter(item => item.group === group).map(item => <option key={JSON.stringify([item.connectionId, item.model])} value={JSON.stringify([item.connectionId, item.model])}>{item.label}</option>)}</optgroup>)}
-        </select>}
+          }} />}
         {stopAction || <button
           type="button"
           onClick={() => void submit()}
@@ -1292,15 +1298,15 @@ export function TaskComposer({
                 <div>
                   <p className="text-[11px] font-medium">执行引擎</p>
                   <p className="mt-0.5 text-[11px] text-muted-foreground">
-                    vNext 增强模式允许在任务级容器中动态使用工具。
+                    增强模式支持在任务中按需使用工具。
                   </p>
                 </div>
                 <fieldset className="flex flex-wrap rounded-lg border bg-background p-1">
                   <legend className="sr-only">执行引擎</legend>
                   {([
                     ["platform_default", "平台默认（推荐）"],
-                    ["pi", "增强模式（Pi）"],
-                    ["legacy", "兼容模式（Legacy）"],
+                    ["pi", "增强模式"],
+                    ["legacy", "兼容模式"],
                   ] as const).map(([value, label]) => (
                     <label
                       key={value}
@@ -1336,10 +1342,10 @@ export function TaskComposer({
                     当前结果先作为未验证候选，不会冒充正式交付。
                   </p>}
                   {!unified && modelControls}
-                  {grayCapabilities.length > 0 && (
+                  {allowCapabilities && grayCapabilities.length > 0 && (
                     <fieldset className="mt-3 rounded-xl border bg-background p-3">
                       <legend className="px-1 text-[11px] font-medium">
-                        本地任务能力（管理员灰度）
+                        扩展工具（超级管理员）
                       </legend>
                       <p className="mb-2 text-[11px] leading-5 text-muted-foreground">
                         选择会随当前任务版本冻结；创建后不可替换，不选则保持原有执行路径。

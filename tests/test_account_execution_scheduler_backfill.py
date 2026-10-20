@@ -62,6 +62,34 @@ def test_new_model_binding_is_not_accepted_as_unchanged_legacy(legacy):
         run(legacy)
 
 
+@pytest.mark.parametrize("context_value", [None, '{"synthetic_context":true}'])
+def test_new_context_column_only_accepts_unchanged_null(legacy, context_value):
+    web, scheduler, _, backup = legacy
+    with sqlite3.connect(scheduler) as connection:
+        connection.execute("UPDATE scheduled_tasks SET task_context_json=? WHERE task_id='old-task'", (context_value,))
+    before = (digest(web), digest(scheduler))
+    if context_value is None:
+        assert run(legacy, apply=False)["eligible_count"] == 1
+    else:
+        with pytest.raises(ValueError, match="历史计划已变化"):
+            run(legacy, apply=False)
+    assert (digest(web), digest(scheduler)) == before and not backup.exists()
+
+
+@pytest.mark.parametrize("time_zone", [None, "", "Asia/Shanghai", "America/Los_Angeles"])
+def test_migrated_time_zone_only_accepts_unchanged_null(legacy, time_zone):
+    web, scheduler, _, backup = legacy
+    with sqlite3.connect(scheduler) as connection:
+        connection.execute("UPDATE scheduled_tasks SET time_zone=? WHERE task_id='old-task'", (time_zone,))
+    before = (digest(web), digest(scheduler))
+    if time_zone is None:
+        assert run(legacy, apply=False)["eligible_count"] == 1
+    else:
+        with pytest.raises(ValueError, match="历史计划已变化"):
+            run(legacy, apply=False)
+    assert (digest(web), digest(scheduler)) == before and not backup.exists()
+
+
 def run(legacy, *, apply=True):
     from src.database_migrations.scheduler_backfill import backfill_schedules
     web, scheduler, manifest, backup = legacy
@@ -70,7 +98,7 @@ def run(legacy, *, apply=True):
                               expected_manifest_sha256=digest(manifest), backup_dir=backup, apply=apply)
 
 
-def test_verified_legacy_is_preserved_and_replay_is_idempotent(legacy):
+def test_verified_legacy_is_preserved_and_replay_is_idempotent(legacy, monkeypatch):
     web, scheduler, manifest, backup = legacy
     before = (digest(web), digest(scheduler))
     assert run(legacy, apply=False)["eligible_count"] == 1
@@ -79,7 +107,20 @@ def test_verified_legacy_is_preserved_and_replay_is_idempotent(legacy):
     with sqlite3.connect(web) as conn:
         assert conn.execute("SELECT generation,state FROM account_execution_bindings").fetchone() == (0, "idle")
     with sqlite3.connect(scheduler) as conn:
-        assert conn.execute("SELECT status FROM scheduled_tasks").fetchone() == ("active",)
+        assert conn.execute("SELECT status,time_zone,task_context_json FROM scheduled_tasks").fetchone() == ("active", None, None)
+    from datetime import datetime
+    from src.account_execution import ExecutionDenied
+    from src.api import auth
+    from src.api.store import WebUIStore
+    from src.scheduler.store import ScheduleStore
+
+    store = WebUIStore(str(web))
+    monkeypatch.setattr(auth, "get_store", lambda: store)
+    schedules = ScheduleStore(str(scheduler))
+    # 回填执行绑定不授予未知时区计划运行资格，即使已经到期也不能自然触发。
+    assert schedules.due_tasks(datetime(2999, 1, 2)) == []
+    with pytest.raises(ExecutionDenied, match="历史时区未记录"):
+        schedules.claim_execution("old-task", expected_task=schedules.get("old-task"))
     after = (digest(web), digest(scheduler))
     assert run(legacy)["outcome"] == "already_applied"
     assert (digest(web), digest(scheduler)) == after

@@ -939,7 +939,8 @@ def test_legacy_import_is_explicit_personal_draft_without_host_path(tmp_path) ->
     assert repository.list_packs() == (imported,)
 
 
-def test_oci_materialize_expands_frozen_capability_archive(tmp_path) -> None:
+@pytest.mark.parametrize("archive_name,declared", [("mangrove-capability.tar", False), ("public-table-1.0.0.tar", True), ("data.tar", False)])
+def test_oci_materialize_expands_frozen_capability_archive(tmp_path, archive_name, declared) -> None:
     """任务装载得到的必须是可执行目录，不能把归档文件误当能力根目录。"""
 
     import io
@@ -948,13 +949,20 @@ def test_oci_materialize_expands_frozen_capability_archive(tmp_path) -> None:
     import shutil
     import tarfile
 
-    archive = tmp_path / "mangrove-capability.tar"
+    archive = tmp_path / archive_name
     with tarfile.open(archive, "w") as bundle:
         manifest = b'{"schema_version":1,"name":"gray-python"}'
         info = tarfile.TarInfo("mangrove-capability.json")
         info.size = len(manifest)
         bundle.addfile(info, io.BytesIO(manifest))
-    digest = "sha256:" + "9" * 64
+    # 非标准名称也必须由冻结 OCI 层声明为能力归档，不能猜测任意 tar 的用途。
+    layer_manifest = json.dumps({"layers": [{"mediaType": "application/vnd.mangrove.capability.tar" if declared else "application/octet-stream",
+        "annotations": {"org.opencontainers.image.title": archive_name}}]}).encode("utf-8")
+    import hashlib
+    digest = "sha256:" + hashlib.sha256(layer_manifest).hexdigest()
+    blob = tmp_path / "layout/blobs/sha256" / digest.removeprefix("sha256:")
+    blob.parent.mkdir(parents=True)
+    blob.write_bytes(layer_manifest)
 
     def fake_runner(command, **kwargs):
         if command[1:3] == ("manifest", "fetch"):
@@ -982,8 +990,12 @@ def test_oci_materialize_expands_frozen_capability_archive(tmp_path) -> None:
         destination=tmp_path / "mounted",
     )
 
-    assert (result / "mangrove-capability.json").is_file()
-    assert not (result / archive.name).exists()
+    if declared or archive_name == "mangrove-capability.tar":
+        assert (result / "mangrove-capability.json").is_file()
+        assert not (result / archive.name).exists()
+    else:
+        assert (result / archive.name).is_file()
+        assert not (result / "mangrove-capability.json").exists()
 
 
 def test_oci_materialize_rejects_archive_path_traversal(tmp_path) -> None:

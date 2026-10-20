@@ -11,6 +11,37 @@ from tests.test_account_execution_scheduler import fixture
 from tests.test_workspace_draft_chat import draft_api, payload
 
 
+def test_chat_schedule_keeps_context_after_store_reopen(fixture, tmp_path, monkeypatch):
+    import json
+    from src.api.routes.chat import _build_result
+    from src.memory import loader
+    from src.scheduler.store import ScheduleStore
+    from src.task_context import TaskContextService, TaskContextRepository, TaskContextSelection, TaskTemplateDraft, TaskTemplateRef
+
+    web, store, owner, authorization = fixture
+    monkeypatch.setattr(loader, "MEMORY_DIR", tmp_path / "preferences")
+    monkeypatch.setattr(tasks, "get_schedule_store", lambda: store)
+    repository = TaskContextRepository(web.db_path)
+    repository.save_template(owner, TaskTemplateDraft(
+        template_id="daily", version=1, title="日报", source="owner_created", purpose="web_research",
+        goal_contract_draft="按本次要求处理", delivery_spec_draft={"formats": ["markdown"]},
+        method_draft="先列资料来源，再写摘要",
+    ))
+    preview = TaskContextService(repository).conversation_preview(
+        owner_id=owner, purpose="web_research", objective_text="每天汇总新闻", output_formats=("markdown",),
+        selection=TaskContextSelection(template=TaskTemplateRef(template_id="daily", version=1)),
+    )
+    with execution_context(authorization):
+        result = _build_result(owner, "synthetic-context-conversation", {
+            "task_id": "synthetic-context-schedule", "schedule_request": "cron@0 9 * * *",
+            "task_context_preview": preview.model_dump(mode="json"),
+        }, "", None, None, "每天汇总新闻")
+    reopened = ScheduleStore(store.db_path)
+    saved = json.loads(reopened.get(result["scheduled_task_id"])["task_context_json"])
+    assert saved == preview.model_dump(mode="json")
+    assert saved["template"]["version"] == 1
+
+
 def test_confirmed_schedule_preserves_connection_and_cannot_repeat(fixture, monkeypatch):
     web, store, owner, authorization = fixture
     monkeypatch.setattr(tasks, "get_schedule_store", lambda: store)
@@ -52,6 +83,9 @@ def test_natural_schedule_creates_once_after_time_clarification(draft_api, tmp_p
 
     client, user, _ = draft_api
     calls = []
+    # 路由可能在前例替换鉴权存储时导入，本例统一绑定当前临时库。
+    for module in (chat, semantic_workspace, conversations):
+        monkeypatch.setattr(module, "get_store", auth.get_store)
 
     def provider(request):
         body = json.loads(request.content)
@@ -174,5 +208,11 @@ def test_scheduled_report_emails_only_requested_business_files(fixture, tmp_path
         assert [item.get_filename() for item in sent[0].iter_attachments()] == ["report.md"]
     else:
         assert sent == []
-        assert "未自动发送" in store.list_runs(task_id)[0]["summary"]
-    assert store.list_runs(task_id)[0]["summary"].startswith("发送结果：")
+        if quality.get("passed") is False:
+            assert store.get(task_id)["last_success"] == 0
+            assert store.list_runs(task_id)[0]["state"] == "failed"
+            assert "结果核验未通过" in store.list_runs(task_id)[0]["summary"]
+        else:
+            assert "未自动发送" in store.list_runs(task_id)[0]["summary"]
+    if quality.get("passed") is not False:
+        assert store.list_runs(task_id)[0]["summary"].startswith("发送结果：")

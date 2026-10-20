@@ -112,6 +112,53 @@ def _source_content_standard_manifest() -> dict[str, bytes]:
 
 
 class TestS3PlatformSnapshotGenerator:
+    def test_public_reuse_metadata_is_frozen_without_private_description(self) -> None:
+        import io
+        import tarfile
+
+        template = Path(__file__).resolve().parents[1] / "examples/capabilities/csv-group-summary/reuse-contract.json"
+        contract = json.loads(template.read_text(encoding="utf-8"))
+        contract["capability_id"] = "python-table-summary"
+        pack = _source_pack().model_copy(update={
+            "manifest": (("reuse_contract", json.dumps(contract)), ("license", "MIT"),
+                         ("purpose", "个人内部周报")),
+            "source_provenance": ("https://github.com/example/public-tool",),
+        })
+        source = _FakeArtifactStore(materialized_content=_source_content())
+        platform = _FakeArtifactStore()
+        generator = PlatformSnapshotGenerator(source, platform)
+        first = generator.generate(pack)
+        assert generator.generate(pack).platform_digest == first.platform_digest
+        with tarfile.open(fileobj=io.BytesIO(platform.push_calls[0][2])) as bundle:
+            metadata = json.loads(bundle.extractfile("mangrove-reuse.json").read().decode("utf-8"))
+        from src.semantic_harness.models import CapabilityManifest
+
+        assert CapabilityManifest.model_validate_json(metadata["reuse_contract"]) == CapabilityManifest.model_validate(contract)
+        assert metadata["license"] == "MIT"
+        assert metadata["source_provenance"] == list(pack.source_provenance)
+        assert set(metadata) == {"reuse_contract", "license", "source_provenance"}
+        assert "个人内部周报" not in json.dumps(metadata, ensure_ascii=False)
+
+    def test_public_schema_removes_private_annotations_but_keeps_parameter_names(self) -> None:
+        import io
+        import tarfile
+
+        contract = json.loads((Path(__file__).resolve().parents[1] / "examples/capabilities/csv-group-summary/reuse-contract.json").read_text(encoding="utf-8"))
+        contract["capability_id"] = "python-table-summary"
+        schema = contract["parameters_schema"]
+        schema["items"].update(description="个人内部周报", default="/home/alice/private/report.csv", examples=["秘密样本"])
+        schema["items"]["contentSchema"]["properties"]["description"] = {"type": "string", "title": "私人标题"}
+        pack = _source_pack().model_copy(update={"manifest": (("reuse_contract", json.dumps(contract)), ("license", "MIT")),
+            "source_provenance": ("https://github.com/example/public-tool",)})
+        platform = _FakeArtifactStore()
+        PlatformSnapshotGenerator(_FakeArtifactStore(materialized_content=_source_content()), platform).generate(pack)
+        with tarfile.open(fileobj=io.BytesIO(platform.push_calls[0][2])) as bundle:
+            raw = bundle.extractfile("mangrove-reuse.json").read().decode("utf-8")
+        assert not any(private in raw for private in ("个人内部周报", "/home/alice", "秘密样本", "私人标题"))
+        public = json.loads(json.loads(raw)["reuse_contract"])["parameters_schema"]
+        assert public["items"]["contentSchema"]["properties"]["description"] == {"type": "string"}
+        assert public["items"]["contentSchema"]["required"] == ["csv", "group_field", "value_field"]
+
     def test_generate_is_deterministic(self, tmp_path) -> None:
         source_store = _FakeArtifactStore(
             materialized_content=_source_content()

@@ -1010,8 +1010,12 @@ def test_cleanup_failure_keeps_run_recoverable_until_resources_are_clean() -> No
 
 
 @pytest.mark.usefixtures("sqlite_execution_context")
+@pytest.mark.parametrize(("output_table", "managed_path"), [
+    ("semantic_delivery_outputs", False),
+    ("formal_delivery_outputs", True),
+])
 def test_real_task_ref_is_recomputed_from_owner_revision_and_formal_output(
-    tmp_path,
+    tmp_path, output_table, managed_path,
 ) -> None:
     import sqlite3
 
@@ -1114,8 +1118,8 @@ def test_real_task_ref_is_recomputed_from_owner_revision_and_formal_output(
             ),
         )
         connection.execute(
-            "INSERT INTO semantic_delivery_outputs "
-            "(output_id, delivery_id, run_id, user_id, format, filename, "
+            f"INSERT INTO {output_table} "
+            f"(output_id, delivery_id, run_id, {'owner_id' if managed_path else 'user_id'}, format, filename, "
             "media_type, sha256, size_bytes, file_path, qa_json, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
@@ -1128,7 +1132,7 @@ def test_real_task_ref_is_recomputed_from_owner_revision_and_formal_output(
                 "text/csv",
                 output_hash,
                 output_path.stat().st_size,
-                str(output_path),
+                f"managed:v1/{output_path.relative_to(tmp_path).as_posix()}" if managed_path else str(output_path),
                 "{}",
                 "2026-08-07T00:00:00+00:00",
             ),
@@ -1252,7 +1256,7 @@ def test_real_task_ref_is_recomputed_from_owner_revision_and_formal_output(
             ("owner-a", "workspace-real-ref", 1),
         )
         connection.execute(
-            "UPDATE semantic_delivery_outputs SET sha256=? WHERE output_id=?",
+            f"UPDATE {output_table} SET sha256=? WHERE output_id=?",
             ("d" * 64, "output-real"),
         )
     try:
@@ -2257,9 +2261,12 @@ def test_production_cleanup_does_not_treat_docker_daemon_failure_as_absent(
         raise AssertionError("Docker daemon 失败不得被误判为资源不存在")
 
 
+@pytest.mark.usefixtures("sqlite_execution_context")
+@pytest.mark.parametrize("tool_failed", [False, True])
 def test_pi_task_replay_reruns_frozen_request_and_removes_all_temporary_state(
     tmp_path,
     monkeypatch,
+    tool_failed,
 ) -> None:
     from src.agentic_runtime.models import (
         CandidateArtifact,
@@ -2312,8 +2319,17 @@ def test_pi_task_replay_reruns_frozen_request_and_removes_all_temporary_state(
     class FakeRuntime:
         started_request = None
 
-        def __init__(self, **_kwargs):
-            pass
+        def __init__(self, **kwargs):
+            from src.candidate_verification import CandidateVerificationService
+            service = kwargs.get("candidate_verification")
+            assert isinstance(service, CandidateVerificationService), "重放也必须绑定统一核验模块"
+            database = Path(service._repository._db_path)
+            assert database.is_relative_to(tmp_path / "validation-root" / "task-replays")
+            assert kwargs["state_store"].db_path == database
+            binding = kwargs["state_store"].get(request.user_id, request.task_id, request.revision)
+            assert binding["runtime_version"] == "pi"
+            assert binding["run_id"].startswith("pi_validation_")
+            service._repository.claim_runtime_binding(request.user_id, request.task_id, request.revision, binding["run_id"])
 
         async def start(self, replay_request, *, on_event, run_id=None):
             FakeRuntime.started_request = replay_request
@@ -2322,7 +2338,7 @@ def test_pi_task_replay_reruns_frozen_request_and_removes_all_temporary_state(
                 RuntimeEvent(
                     event_type="tool.completed",
                     summary="能力已完成",
-                    details={"tool": "capability_python_table_summary"},
+                    details={"tool": "capability_python_table_summary", "failed": tool_failed},
                 )
             )
             return PiRuntimeResult(
@@ -2397,7 +2413,7 @@ def test_pi_task_replay_reruns_frozen_request_and_removes_all_temporary_state(
         ),
     )
     root = tmp_path / "validation-root"
-    outcome = PiTaskReplayRunner(
+    runner = PiTaskReplayRunner(
         task_resolver=Resolver(),
         capability_mounts=lambda *_args: (mount,),
         execution_root=root,
@@ -2409,10 +2425,16 @@ def test_pi_task_replay_reruns_frozen_request_and_removes_all_temporary_state(
             "No such container" if args[0] == "container" else "not found",
         ),
         grant_revoker=lambda *_args: 0,
-    )(run)
+        execution_authorizer=lambda current: None if current == run else pytest.fail("验证身份漂移"),
+    )
+    if tool_failed:
+        with pytest.raises(RuntimeError, match="未实际调用"):
+            runner(run)
+    else:
+        outcome = runner(run)
+        assert outcome["cancelled"] is False
+        assert outcome["candidate_hashes"]
 
-    assert outcome["cancelled"] is False
-    assert outcome["candidate_hashes"]
     assert FakeRuntime.started_request.objective_text == request.objective_text
     assert FakeRuntime.started_request.task_id == request.task_id
     assert not any((root / "task-replays").iterdir())

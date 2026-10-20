@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { productText } from "@/lib/productText";
+import { useAuth } from "@/lib/auth";
 import type {
   StructuredProgressEvent,
   WorkspaceEvent,
@@ -516,7 +517,7 @@ function TimelineEvent({
 }
 
 export function TaskTimeline({
-  task,
+  task: sourceTask,
   liveEvents,
   onAnswer,
   onRefreshQuestion,
@@ -546,6 +547,28 @@ export function TaskTimeline({
   connectionLabel?: string;
   clarificationTurnIds?: string[];
 }) {
+  const { user } = useAuth();
+  const task = useMemo(() => {
+    if (user?.role === "super_admin") return sourceTask;
+    // 历史任务也隐藏扩展工具展示；只裁剪视图，不改写原执行记录和业务结果。
+    const hiddenIds = new Set(sourceTask.progress?.events
+      .filter(event => event.stage === "prepare_capabilities" || capabilityReferences(event).length > 0
+        || String(event.action?.tool ?? "").startsWith("capability_"))
+      .map(event => event.event_id));
+    return {
+      ...sourceTask,
+      progress: sourceTask.progress ? {
+        ...sourceTask.progress,
+        stages: sourceTask.progress.stages.filter(stage => stage.stage !== "prepare_capabilities"),
+        events: sourceTask.progress.events.filter(event => !hiddenIds.has(event.event_id)),
+      } : sourceTask.progress,
+      work_session: sourceTask.work_session ? {
+        ...sourceTask.work_session,
+        entries: sourceTask.work_session.entries.filter(entry => !hiddenIds.has(entry.event_id)
+          && !entry.event_type.startsWith("capability.") && !entry.tool_name?.startsWith("capability_")),
+      } : sourceTask.work_session,
+    };
+  }, [sourceTask, user?.role]);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [progressOpen, setProgressOpen] = useState(false);
   const [eventsOpen, setEventsOpen] = useState(true);
@@ -740,8 +763,8 @@ export function TaskTimeline({
             {task.runtime_version && (
               <span className="rounded-full border bg-muted/40 px-2.5 py-1 text-xs font-medium text-muted-foreground">
                 {task.runtime_version === "pi"
-                  ? "实际执行：增强模式（Pi）"
-                  : "实际执行：兼容模式（Legacy）"}
+                  ? "增强模式"
+                  : "兼容模式"}
               </span>
             )}
             <label className="flex items-center gap-1 text-xs text-muted-foreground">
@@ -1231,7 +1254,7 @@ export function TaskTimeline({
                 ) : null}
                 <ol className="mt-2 space-y-2 pl-2">
                   {task.progress?.events.map((event) => {
-                    const capabilities = capabilityReferences(event);
+                    const capabilities = user?.role === "super_admin" ? capabilityReferences(event) : [];
                     const showLegacyEvent = !workSession?.entries.length;
                     if (!showLegacyEvent && capabilities.length === 0) return null;
                     return (

@@ -222,7 +222,7 @@ class SteeringRequest(BaseModel):
     status_summary: str = ""
     current_goal: str = Field(default="", max_length=120_000)
     selection_reason: str = ""
-    memory_context: str = Field(default="", max_length=6500)
+    memory_context: str = Field(default="", max_length=12000)
     event_summaries: tuple[str, ...] = ()
     source_findings: tuple[dict[str, Any], ...] = Field(default=(), max_length=20)
     relevant_turns: tuple[RawUserTurn, ...] = Field(default=(), max_length=16)

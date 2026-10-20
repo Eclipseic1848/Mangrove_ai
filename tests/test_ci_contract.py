@@ -290,8 +290,8 @@ def test_gitleaks_allowlist_is_narrow_and_does_not_skip_commits() -> None:
     ]
 
     assert "useDefault = true" in config
-    assert config.count('targetRules = ["generic-api-key"]') == 6
-    assert config.count('condition = "AND"') == 6
+    assert config.count('targetRules = ["generic-api-key"]') == 7
+    assert config.count('condition = "AND"') == 7
     deletion_digest = next(item for item in tomllib.loads(config)["allowlists"]
                            if "index:ix_deletion_owner_key" in item["regexes"][0])
     assert deletion_digest["paths"] == [r"^src/database_migrations/schema_manifest\.json$"]
@@ -348,3 +348,33 @@ def test_feedback_schema_digest_exception_rejects_adjacent_credentials() -> None
     assert not pattern.search('"feedback_content_access": "synthetic-key"')
     assert re.search(rule["paths"][0], "src/database_migrations/schema_manifest.json")
     assert not re.search(rule["paths"][0], "other/schema_manifest.json")
+
+
+def test_cookie_probe_fixture_exception_rejects_other_inputs() -> None:
+    config = tomllib.loads((PROJECT_ROOT / ".gitleaks.toml").read_text(encoding="utf-8"))
+    path = "tests/test_cookie_probe_feedback.py"
+    rules = [item for item in config["allowlists"]
+             if item["paths"] == [r"^tests/test_cookie_probe_feedback\.py$"]]
+    assert len(rules) == 1
+    rule = rules[0]
+    assert rule["targetRules"] == ["generic-api-key"]
+    assert rule["condition"] == "AND" and rule["regexTarget"] == "line"
+    assert len(rule["regexes"]) == 1
+    pattern = re.compile(rule["regexes"][0])
+    lines = [line for line in (PROJECT_ROOT / path).read_text(encoding="utf-8").splitlines()
+             if "with user_overrides_context({key:" in line]
+    assert len(lines) == 1
+    fixture = lines[0]
+    assert pattern.fullmatch(fixture)
+    assert pattern.fullmatch("\n" + fixture)
+    for changed in (fixture.replace("synthetic_123", "different-value"),
+                    fixture.replace("{key:", '{"other_key":'),
+                    fixture.replace("user_overrides_context", "other_context"),
+                    "prefix" + fixture, fixture + ' "api_key": "synthetic-key"',
+                    "\n\n" + fixture, "\r" + fixture, fixture + "\n",
+                    "   " + fixture.lstrip()):
+        assert not pattern.fullmatch(changed)
+    assert re.search(rule["paths"][0], path)
+    for other in ("tests/test_cookie_health_contract.py", "src/test_cookie_probe_feedback.py",
+                  path + ".bak", "other/" + path):
+        assert not re.search(rule["paths"][0], other)

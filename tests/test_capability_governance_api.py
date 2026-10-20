@@ -46,7 +46,7 @@ def execution_users(tmp_path, monkeypatch):
         seed_execution_owner(database, owner)
     store = WebUIStore(str(database))
     with store._conn() as connection:
-        connection.execute("UPDATE users SET role='admin' WHERE user_id='admin-a'")
+        connection.execute("UPDATE users SET role='super_admin'")
         connection.execute("UPDATE users SET role='super_admin' WHERE user_id='super-a'")
     monkeypatch.setattr(auth, "_store", store)
     monkeypatch.setattr(settings, "webui_db_path", str(database))
@@ -92,48 +92,23 @@ def _use_read_governance(monkeypatch, db_path) -> None:
     monkeypatch.setattr(governance_routes, "_governance", lambda: governance)
 
 
-def test_governance_api_projects_user_and_admin_fields(
-    tmp_path,
-    monkeypatch,
-) -> None:
+@pytest.mark.parametrize("role", ["user", "admin", "super_admin"])
+def test_governance_api_is_super_admin_only(tmp_path, monkeypatch, role) -> None:
     db_path = tmp_path / "webui.db"
     _seed_catalog(str(db_path))
     _use_read_governance(monkeypatch, db_path)
-    monkeypatch.setattr(settings, "webui_db_path", str(db_path))
     app.dependency_overrides[get_current_user] = lambda: {
-        "execution_generation": 0,
-        "user_id": "owner-a",
-        "role": "user",
+        "execution_generation": 0, "user_id": "super-a", "role": role,
     }
-    client = TestClient(app)
-
-    user_response = client.get("/api/capability-governance/packs")
-
-    assert user_response.status_code == 200
-    assert [item["version"] for item in user_response.json()["items"]] == [
-        "2026.7.4",
-        "1.0.0",
-    ]
-    assert user_response.json()["items"][0]["owner_id"] is None
-    assert user_response.json()["items"][1]["owner_id"] == "owner-a"
-    assert user_response.json()["items"][0]["digest"] is None
-    assert user_response.json()["items"][1]["digest"].startswith("sha256:")
-
-    app.dependency_overrides[get_current_user] = lambda: {
-        "execution_generation": 0,
-        "user_id": "admin-a",
-        "role": "admin",
-    }
-    admin_response = client.get("/api/capability-governance/packs")
-
-    assert admin_response.status_code == 200
-    assert [item["owner_id"] for item in admin_response.json()["items"]] == [
-        None,
-        "owner-a",
-        "owner-b",
-    ]
-    assert all(item["digest"].startswith("sha256:") for item in admin_response.json()["items"])
-    app.dependency_overrides.clear()
+    try:
+        response = TestClient(app).get("/api/capability-governance/packs")
+        assert response.status_code == (200 if role == "super_admin" else 403)
+        if role == "super_admin":
+            items = response.json()["items"]
+            assert [item["owner_id"] for item in items] == [None, "owner-a", "owner-b"]
+            assert all(item["digest"].startswith("sha256:") for item in items)
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_owner_starts_and_reads_validation_without_supplying_hashes(
@@ -188,7 +163,7 @@ def test_owner_starts_and_reads_validation_without_supplying_hashes(
     app.dependency_overrides[get_current_user] = lambda: {
         "execution_generation": 0,
         "user_id": "owner-a",
-        "role": "user",
+        "role": "super_admin",
     }
     client = TestClient(app)
     payload = {
@@ -233,7 +208,7 @@ def test_packs_endpoint_serializes_sanitized_promotion_gaps(
     app.dependency_overrides[get_current_user] = lambda: {
         "execution_generation": 0,
         "user_id": "owner-a",
-        "role": "user",
+        "role": "super_admin",
     }
     client = TestClient(app)
 
@@ -297,7 +272,7 @@ def test_owner_and_admin_read_sanitized_supply_chain_summary(monkeypatch) -> Non
     app.dependency_overrides[get_current_user] = lambda: {
         "execution_generation": 0,
         "user_id": "owner-a",
-        "role": "user",
+        "role": "super_admin",
     }
     client = TestClient(app)
     url = (
@@ -309,7 +284,7 @@ def test_owner_and_admin_read_sanitized_supply_chain_summary(monkeypatch) -> Non
     app.dependency_overrides[get_current_user] = lambda: {
         "execution_generation": 0,
         "user_id": "admin-a",
-        "role": "admin",
+        "role": "super_admin",
     }
     admin_response = client.get(url)
 
@@ -431,7 +406,7 @@ def _audit_governance_fixture(monkeypatch) -> None:
     monkeypatch.setattr(governance_routes, "_governance", lambda: governance)
 
 
-def test_admin_review_endpoints_enforce_admin_and_serialize_sanitized(
+def test_super_admin_review_endpoints_serialize_sanitized(
     monkeypatch,
 ) -> None:
     _audit_governance_fixture(monkeypatch)
@@ -450,7 +425,7 @@ def test_admin_review_endpoints_enforce_admin_and_serialize_sanitized(
     app.dependency_overrides[get_current_user] = lambda: {
         "execution_generation": 0,
         "user_id": "admin-a",
-        "role": "admin",
+        "role": "super_admin",
     }
     response = client.get("/api/capability-governance/admin/review")
     assert response.status_code == 200
@@ -484,7 +459,7 @@ def test_admin_review_endpoints_enforce_admin_and_serialize_sanitized(
     )
     assert missing.status_code == 404
 
-    # 超级管理员与管理员同一治理类型（ADR-0029 决策 7）。
+    # 另一位超级管理员可读取相同的脱敏治理投影。
     app.dependency_overrides[get_current_user] = lambda: {
         "execution_generation": 0,
         "user_id": "super-a",
@@ -496,7 +471,7 @@ def test_admin_review_endpoints_enforce_admin_and_serialize_sanitized(
     app.dependency_overrides.clear()
 
 
-def test_audit_view_endpoint_requires_reason_idempotency_and_admin(
+def test_audit_view_endpoint_requires_reason_idempotency_and_super_admin(
     monkeypatch,
 ) -> None:
     _audit_governance_fixture(monkeypatch)
@@ -526,7 +501,7 @@ def test_audit_view_endpoint_requires_reason_idempotency_and_admin(
     app.dependency_overrides[get_current_user] = lambda: {
         "execution_generation": 0,
         "user_id": "admin-a",
-        "role": "admin",
+        "role": "super_admin",
     }
     missing_key = client.post(
         "/api/capability-governance/admin/audit-view",
@@ -668,7 +643,7 @@ def _platform_candidate_governance(monkeypatch) -> None:
     monkeypatch.setattr(governance_routes, "_governance", lambda: governance)
 
 
-def test_platform_candidate_endpoints_enforce_admin_and_serialize(
+def test_platform_candidate_endpoints_enforce_super_admin_and_serialize(
     monkeypatch,
 ) -> None:
     _platform_candidate_governance(monkeypatch)
@@ -693,7 +668,7 @@ def test_platform_candidate_endpoints_enforce_admin_and_serialize(
     app.dependency_overrides[get_current_user] = lambda: {
         "execution_generation": 0,
         "user_id": "admin-a",
-        "role": "admin",
+        "role": "super_admin",
     }
     missing_key = client.post(
         "/api/capability-governance/admin/platform-candidates",

@@ -76,6 +76,31 @@ def test_binding_survives_store_reopen_without_exposing_digest(store):
     assert "verification_binding" not in result
 
 
+def test_kuaishou_runtime_override_is_optional_and_bound(monkeypatch):
+    from src.config.cookie_probe_binding import capture_probe_environment, cookie_probe_binding
+
+    monkeypatch.setattr(cr.settings, "mediacrawler_python_ks", "")
+    original = capture_probe_environment()
+    assert "python_overrides" not in original
+    original_binding = cookie_probe_binding("mc_cookie_ks", "version", "synthetic", environment=original)
+    monkeypatch.setattr(cr.settings, "mediacrawler_python_ks", "candidate-python")
+    candidate = capture_probe_environment()
+    assert candidate["python_overrides"] == {"ks": "candidate-python"}
+    assert {key: value for key, value in candidate.items() if key != "python_overrides"} == original
+    assert cookie_probe_binding("mc_cookie_ks", "version", "synthetic", environment=candidate) != original_binding
+    monkeypatch.setattr(cr.settings, "mediacrawler_python_ks", "")
+    assert capture_probe_environment() == original
+
+
+def test_kuaishou_runtime_rotation_invalidates_saved_health(store, monkeypatch):
+    monkeypatch.setattr(cr.settings, "mediacrawler_python_ks", "candidate-A")
+    store.config_set("global", "mc_cookie_ks", "synthetic-cookie")
+    store.cookie_health_set("mc_cookie_ks", "valid", "身份通过", "manual")
+    assert store.cookie_health_all()["mc_cookie_ks"]["status"] == "valid"
+    monkeypatch.setattr(cr.settings, "mediacrawler_python_ks", "candidate-B")
+    assert store.cookie_health_all()["mc_cookie_ks"]["status"] == "unknown"
+
+
 def test_empty_collector_path_stays_unconfigured(store, monkeypatch):
     from src.collectors import registry
     from src.collectors.social_media_collector import SocialMediaCollector

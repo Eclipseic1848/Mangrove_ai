@@ -100,6 +100,7 @@ def test_interrupted_comment_write_preserves_previous_json(tmp_path, monkeypatch
 
 @__import__("pytest").mark.parametrize("limit,returned", [(1, 20), (5, 2)])
 def test_search_adapter_caps_details_before_upstream_fanout(tmp_path, monkeypatch, limit, returned):
+    import json
     import sys
     import types
     from scripts import mediacrawler_xhs as adapter
@@ -136,3 +137,8 @@ def test_search_adapter_caps_details_before_upstream_fanout(tmp_path, monkeypatc
         assert len(other["items"]) == min(limit, returned)
     monkeypatch.setattr(adapter.runpy, "run_path", lambda *a, **kw: asyncio.run(search()))
     adapter.main()
+    assert json.loads((tmp_path / "search_coverage.json").read_text(encoding="utf-8"))["pages"] == [
+        {"keyword": keyword, "page": 1, "item_count": returned + 1,
+         "accepted_count": min(limit, returned), "has_more": False}
+        for keyword in ["甲", "乙"]
+    ]

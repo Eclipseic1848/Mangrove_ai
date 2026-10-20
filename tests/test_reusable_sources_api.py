@@ -27,16 +27,19 @@ def test_history_releases_listing_read_lock_before_output_verification(canvas, m
     from src.config.settings import settings
     from src.source_acquisition import reuse
     client, _, _, task, _ = canvas
-    original = reuse.verified_output_metadata
-    def verify(owner, identity):
-        # 模拟核验期间其他任务提交元数据；列表不得持有跨连接读锁。
+    original = reuse._validate_output_metadata
+    calls=[]
+    def verify(record, manifest, output):
+        # 证据解析期间允许其他任务提交；批量列表必须已释放数据库读快照。
+        calls.append(record["output_id"])
         with sqlite3.connect(settings.webui_db_path, timeout=0.1) as connection:
-            connection.execute("UPDATE formal_delivery_outputs SET filename=filename WHERE output_id=?", (identity,))
-        return original(owner, identity)
-    monkeypatch.setattr(reuse, "verified_output_metadata", verify)
+            connection.execute("UPDATE formal_delivery_outputs SET filename=filename WHERE output_id=?", (record["output_id"],))
+        return original(record, manifest, output)
+    monkeypatch.setattr(reuse, "_validate_output_metadata", verify)
     response = client.get("/api/semantic-workspace/reusable-sources")
     assert response.status_code == 200
     assert any(item.get("output_id") == task["delivery"]["outputs"][0]["output_id"] for item in response.json()["items"])
+    assert task["delivery"]["outputs"][0]["output_id"] in calls
 
 
 def test_resolve_original_and_formal_output_without_new_task(canvas):
@@ -90,15 +93,14 @@ def test_history_does_not_advertise_known_invalid_formal_qa(canvas,monkeypatch):
     from src.source_acquisition import reuse
     client,_,_,task,_=canvas
     output=task["delivery"]["outputs"][0]
-    store=reuse._store()
-    original=store.get_semantic_delivery
-    def invalid(owner,identity):
-        import copy
-        manifest=copy.deepcopy(original(owner,identity))
-        if manifest:
-            for item in manifest["outputs"]: item["qa"]["openable"]=False
-        return manifest
-    monkeypatch.setattr(store,"get_semantic_delivery",invalid)
+    import json,sqlite3
+    from src.config.settings import settings
+    # 批量列表直接读登记；以真实临时发布证据失配验证原质量门。
+    with sqlite3.connect(settings.webui_db_path) as connection:
+        row=connection.execute("SELECT manifest_json FROM formal_delivery_runs WHERE delivery_id=?",(task["delivery"]["delivery_id"],)).fetchone()
+        manifest=json.loads(row[0])
+        for entry in manifest["outputs"]: entry["qa"]["openable"]=False
+        connection.execute("UPDATE formal_delivery_runs SET manifest_json=? WHERE delivery_id=?",(json.dumps(manifest),task["delivery"]["delivery_id"]))
     item=next(item for item in reuse.history("user-a") if item.get("output_id")==output["output_id"])
     assert item["availability"]=="unavailable"
     assert item["reason_code"]=="formal_evidence_invalid"
@@ -206,12 +208,16 @@ def test_attempt_status_does_not_read_new_snapshot_after_empty_identity_capture(
 @pytest.mark.parametrize('with_upload',[False,True])
 def test_reuse_need_checks_derived_actual_format_before_prepare(canvas,monkeypatch,with_upload):
     from src.api.routes import semantic_workspace as route
+    from src.api.auth import get_current_user
     from src.capability_catalog import SqliteCapabilityCatalogRepository
     from src.conversation_steering import CapabilityPack,ProcedureScope,CapabilityMaturity
     from src.semantic_harness.capabilities import TABLE_DUCKDB_MANIFEST
     from src.config.settings import settings
     from tests.test_capability_reuse import need
     client,_,_,task,upload=canvas
+    # 格式门使用获准的同Owner身份；公共资料夹具仍保留管理员角色。
+    monkeypatch.setitem(client.app.dependency_overrides,get_current_user,lambda:{
+        'user_id':'user-a','execution_generation':0,'role':'super_admin'})
     monkeypatch.setattr(settings,'pi_capability_host_enabled',True)
     SqliteCapabilityCatalogRepository(settings.webui_db_path).save_pack(CapabilityPack(pack_id='table.duckdb',version='1.0.0',digest='sha256:'+'a'*64,scope=ProcedureScope.PERSONAL,owner_id='user-a',maturity=CapabilityMaturity.VERIFIED,source_provenance=('https://github.com/duckdb/duckdb',),manifest=(('reuse_contract',TABLE_DUCKDB_MANIFEST.model_dump_json()),('license','MIT'))))
     monkeypatch.setattr(route,'_check_freeze_gate',lambda *args,**kwargs:None)

@@ -5,7 +5,8 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { api, ApiError } from "@/lib/api";
-import { verificationLabel } from "@/lib/configVerification";
+import { beijingTime } from "@/lib/beijingTime";
+import { reauthenticationFeedback, verificationLabel } from "@/lib/configVerification";
 import { ConfigGuideModal, GuideStepsInline } from "@/components/ConfigGuideModal";
 import { ADMIN_GUIDE_SECTIONS, COOKIE_KEY_ORDER, getGuideForKey } from "@/lib/configGuides";
 
@@ -100,7 +101,7 @@ const display = (value: string) => ({ True: "开启", False: "关闭", kuaidaili
 function savedCookieCheck(item: Item): CheckResult {
   if (!item.value.trim()) return { status: "请先配置 Cookie" };
   if (!item.health) return { status: "尚未检查" };
-  return { status: `上次检查：${item.health.status === "valid" ? "有效" : item.health.status === "invalid" ? "失效" : "未知"}`, log: item.health.message, time: item.health.checked_at.replace("T", " ") };
+  return { status: `上次检查：${item.health.status === "valid" ? "有效" : item.health.status === "invalid" ? "失效" : "未知"}`, log: item.health.message, time: beijingTime(item.health.checked_at) };
 }
 
 function CheckSummary({ label, result, onView }: { label: string; result: CheckResult; onView: () => void }) {
@@ -126,6 +127,7 @@ export function AdminConfigCenter() {
   const [guideService, setGuideService] = useState<Service | null>(null);
   const [values, setValues] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
+  const [verificationNotice, setVerificationNotice] = useState("");
   const [invalidKey, setInvalidKey] = useState("");
   const [revealed, setRevealed] = useState<string[]>([]);
   const searchInput = useRef<HTMLInputElement>(null);
@@ -169,7 +171,7 @@ export function AdminConfigCenter() {
   }, [loading, category, targetService, groups]);
   function openEdit(service: Service) {
     setEdit(service); setValues(Object.fromEntries(service.items.map(it => [it.key, it.secret ? "" : it.value])));
-    setError(""); setUnknown(false); setInvalidKey(""); setRevealed([]);
+    setError(""); setVerificationNotice(""); setUnknown(false); setInvalidKey(""); setRevealed([]);
   }
   async function save(verifyFirst = false) {
     if (!edit || lock.current || unknown) return;
@@ -186,12 +188,17 @@ export function AdminConfigCenter() {
       changed[it.key] = value;
     }
     if (!Object.keys(changed).length) { setError("没有需要保存的修改。密钥留空表示保留原值。"); return; }
-    lock.current = true; setBusy(true); setError("");
+    lock.current = true; setBusy(true); setError(""); setVerificationNotice("");
     try {
       if (verifyFirst) {
         const [key, value] = Object.entries(changed)[0];
         const result = await api.post("/api/config/reauthenticate", { key, value, scope: "platform" });
-        if (!result.saved) { setError(result.detail || "新凭证未通过验证，原配置未修改"); return; }
+        if (!result.saved) {
+          const feedback = reauthenticationFeedback(result);
+          if (feedback.failed) setError(feedback.message);
+          else setVerificationNotice(feedback.message);
+          return;
+        }
       } else await api.put("/api/config/batch", { values: changed });
       setNotice(verifyFirst ? "新凭证已验证并保存；原任务未自动恢复。" : `${edit.label} 已保存。`);
       setResults(old => ({ ...old, [edit.key]: { status: "配置已修改，尚未重新检查" } }));
@@ -306,13 +313,14 @@ export function AdminConfigCenter() {
         <fieldset disabled={busy || unknown} className="space-y-4">{visibleItems(edit, values).map(it => <div key={it.key} className="space-y-1">
           <label htmlFor={`config-${it.key}`} className="text-sm font-medium">{it.key === "data_prep_mode_enabled" ? "旧采集流程默认模式" : it.label}</label>
           {/* 少量固定选项复用浏览器原生选择器，保留系统键盘交互。 */}
-          {it.choices ? <select id={`config-${it.key}`} className="h-10 w-full rounded-md border bg-background px-3 text-sm" value={values[it.key]} onChange={e => { setValues(v => ({ ...v, [it.key]: e.target.value })); setError(""); setInvalidKey(""); }}><option value="" disabled>请选择</option>{it.choices.map(choice => <option key={choice} value={choice}>{display(choice)}</option>)}</select>
-            : <Input id={`config-${it.key}`} type={it.secret && !revealed.includes(it.key) ? "password" : it.type === "number" ? "number" : "text"} autoComplete={it.secret ? "new-password" : "off"} min={it.minimum} max={it.maximum} step={it.type === "number" ? 1 : undefined} aria-invalid={invalidKey === it.key} aria-describedby={`help-${it.key}${invalidKey === it.key ? " config-error" : ""}`} value={values[it.key] || ""} placeholder={it.secret ? "留空保留已存凭据" : "请输入配置值"} onChange={e => { setValues(v => ({ ...v, [it.key]: e.target.value })); setError(""); setInvalidKey(""); }} />}
+          {it.choices ? <select id={`config-${it.key}`} className="h-10 w-full rounded-md border bg-background px-3 text-sm" value={values[it.key]} onChange={e => { setValues(v => ({ ...v, [it.key]: e.target.value })); setError(""); setVerificationNotice(""); setInvalidKey(""); }}><option value="" disabled>请选择</option>{it.choices.map(choice => <option key={choice} value={choice}>{display(choice)}</option>)}</select>
+            : <Input id={`config-${it.key}`} type={it.secret && !revealed.includes(it.key) ? "password" : it.type === "number" ? "number" : "text"} autoComplete={it.secret ? "new-password" : "off"} min={it.minimum} max={it.maximum} step={it.type === "number" ? 1 : undefined} aria-invalid={invalidKey === it.key} aria-describedby={`help-${it.key}${invalidKey === it.key ? " config-error" : ""}`} value={values[it.key] || ""} placeholder={it.secret ? "留空保留已存凭据" : "请输入配置值"} onChange={e => { setValues(v => ({ ...v, [it.key]: e.target.value })); setError(""); setVerificationNotice(""); setInvalidKey(""); }} />}
           {it.secret && <Button type="button" size="sm" variant="ghost" aria-label={`${revealed.includes(it.key) ? "隐藏" : "显示"} ${it.label}`} onClick={() => setRevealed(keys => keys.includes(it.key) ? keys.filter(key => key !== it.key) : [...keys, it.key])}>{revealed.includes(it.key) ? "隐藏输入" : "显示输入"}</Button>}
           <div id={`help-${it.key}`} className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground"><span>{it.source === "override" ? "平台设置" : "服务器默认"}{it.secret && ` · ${it.value ? "已存凭据" : "未配置"}`}{it.type === "number" && ` · 最小 ${it.minimum}${it.maximum ? `，最大 ${it.maximum}` : ""}`}</span>{it.source === "override" && <Button type="button" size="sm" variant="outline" onClick={() => { setConfirm({ service: edit, item: it }); setError(""); setUnknown(false); }}>恢复 {it.label} 默认</Button>}</div>
           {getGuideForKey(it.key) && <details><summary className="cursor-pointer text-sm text-primary">如何填写</summary><GuideStepsInline configKey={it.key} /></details>}
         </div>)}</fieldset>
-        {edit.items.length === 1 && COOKIE_KEY_ORDER.includes(edit.items[0].key) && <p className="text-xs text-muted-foreground">验证并更新将访问平台身份接口，可能耗时数分钟；验证失败保留原凭证，不会自动恢复任务。</p>}
+        {edit.items.length === 1 && COOKIE_KEY_ORDER.includes(edit.items[0].key) && <p className="text-xs text-muted-foreground">在本机 Chrome 复制 Cookie 后可保存到当前服务器，供平台共享；个人任务优先使用自己的凭据。验证由服务器执行，可能耗时数分钟；失败保留原凭证。保存配置不代表验证通过，不会自动恢复任务。</p>}
+        {verificationNotice && <p role="status" className="text-sm text-muted-foreground">{verificationNotice}</p>}
         {error && <p id="config-error" role="alert" className="text-sm text-destructive">{error}</p>}
         <div className="flex justify-end gap-2"><Button type="button" variant="outline" disabled={busy} onClick={() => setEdit(null)}>{unknown ? "关闭并核对" : "取消"}</Button>{edit.items.length === 1 && COOKIE_KEY_ORDER.includes(edit.items[0].key) && <Button type="button" variant="outline" disabled={busy || unknown} onClick={() => void save(true)}>验证并更新</Button>}<Button type="submit" disabled={busy || unknown}>{busy ? "保存中…" : "保存配置"}</Button></div>
       </form>}

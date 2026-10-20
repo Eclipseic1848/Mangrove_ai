@@ -24,6 +24,8 @@ class ConductorState(TypedDict, total=False):
     execution_binding: str             # 恢复必须属于同一执行身份和冻结模型连接
     execution_started_at: float        # 本轮入口时间；总预算包含理解与规划已消耗的时间
     budget_exhausted: bool             # 已用尽总预算时不再进入后续模型或采集节点
+    task_context_preview: Optional[Dict[str, Any]]  # 本次运行冻结的模板、本人记忆和平台规范
+    task_context_purpose: str          # 执行入口决定用途，不能混入其他业务的个人记忆
 
     # ---- 意图阶段 ----
     needs_clarification: bool           # 是否需要向用户追问
@@ -39,6 +41,7 @@ class ConductorState(TypedDict, total=False):
     collector_notes: List[str]          # 采集过程给用户的说明（如登录过期/全网兜底），供 output 透出
     collector_attempts: List[Dict[str, Any]]  # 各候选采集器的执行结果，供 trace/排障展示
     raw_dataset: List[Dict[str, Any]]   # 原始数据
+    project_result: Dict[str, Any]     # 独立项目、原件、排除依据与实际覆盖缺口
     bank_collection: Dict[str, Any]    # 银行权益冻结参数、候选证据和逐银行执行说明
     evidence_collection: Dict[str, Any]  # 通用主题发现与证据抽取快照
     collection_outcome: Dict[str, Any]   # 获取失败、覆盖缺口与初稿资格
@@ -79,3 +82,32 @@ class ConductorState(TypedDict, total=False):
     evidence_ready: bool                # 显式视频证据是否充足
     supplemental_dataset: List[Dict[str, Any]]  # 补充资料，不混入主数据
     target_coverage: Optional[Dict[str, int]]  # 总数、已校验数、证据就绪数
+
+
+def frozen_task_context(state):
+    """后续节点只消费冻结快照；即使恢复时也不能读取另一 Owner 的上下文。"""
+    from src.memory._library_scope import execution_owner
+    from src.task_context import TaskContextPreview, _preview_sha256
+    import hashlib
+
+    snapshot = state.get("task_context_preview")
+    if snapshot is None:
+        return None
+    preview = TaskContextPreview.model_validate(snapshot)
+    owner = execution_owner()
+    if owner is None or preview.owner_id != owner or preview.compiled_context.owner_id != owner:
+        raise PermissionError("冻结上下文与执行 Owner 不一致")
+    # 恢复或转交使用完整冻结正文，不能把被改写的文字作为已确认上下文送出。
+    digest = hashlib.sha256(preview.compiled_context.content.encode("utf-8")).hexdigest()
+    if preview.compiled_context.summary_sha256 != "sha256:" + digest:
+        raise ValueError("冻结上下文正文摘要不一致")
+    # 引用、用途和输出格式也属于已确认绑定，不能在正文不变时偷偷替换。
+    expected = _preview_sha256(owner_id=preview.owner_id, purpose=preview.purpose,
+        objective_text=preview.objective_text, output_formats=preview.output_formats,
+        template=preview.template, memories=preview.memories, proposed_changes=preview.proposed_changes,
+        compiled_context=preview.compiled_context, automatically_selected=preview.automatically_selected,
+        lessons=preview.lessons, global_preferences=preview.global_preferences,
+        global_preferences_sha256=preview.global_preferences_sha256)
+    if preview.preview_sha256 != expected:
+        raise ValueError("冻结上下文引用摘要不一致")
+    return preview

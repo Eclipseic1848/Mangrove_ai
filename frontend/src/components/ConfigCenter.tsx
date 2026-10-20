@@ -6,7 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Modal } from "@/components/ui/modal";
 import { api, ApiError } from "@/lib/api";
-import { verificationLabel } from "@/lib/configVerification";
+import { reauthenticationFeedback, verificationLabel } from "@/lib/configVerification";
 import { ConfigGuideModal, GuideStepsInline } from "@/components/ConfigGuideModal";
 import { CONFIG_GUIDE_SECTIONS, COOKIE_KEY_ORDER } from "@/lib/configGuides";
 
@@ -105,7 +105,12 @@ export function SelfConfigCenter() {
     updateLock.current = true; setUpdating(true);
     try {
       const result = await api.post("/api/config/reauthenticate", { key: edit.key, value: val, scope: "personal" });
-      if (!result.saved) { toast.error(result.detail); return; }
+      if (!result.saved) {
+        const feedback = reauthenticationFeedback(result);
+        if (feedback.failed) toast.error(feedback.message);
+        else toast.info(feedback.message);
+        return;
+      }
       toast.success("新凭证已验证并保存；原任务未自动恢复。");
       setEdit(null); await load();
     } catch (error) {
@@ -126,14 +131,17 @@ export function SelfConfigCenter() {
 
   const save = async () => {
     if (!edit || updateLock.current || updateUnknown) return;
+    updateLock.current = true; setUpdating(true);
     try {
       await api.put(`/api/config/self/${edit.key}`, { value: val });
       toast.success(`${edit.label} 已保存，之后你的任务将优先使用它`);
       setEdit(null);
       load();
-    } catch (e: any) {
-      toast.error(e.message || "保存失败");
-    }
+    } catch (error) {
+      const uncertain = !(error instanceof ApiError) || error.status >= 500;
+      setUpdateUnknown(uncertain);
+      toast.error(uncertain ? "保存结果未知，请关闭后重新加载核对，不要重复提交。" : (error as Error).message);
+    } finally { updateLock.current = false; setUpdating(false); }
   };
 
   const del = async (it: CfgItem) => {
@@ -210,11 +218,11 @@ export function SelfConfigCenter() {
         <Input placeholder={edit?.key.includes("cookie") ? "粘贴从浏览器导出的 Cookie" : "输入 API Key"}
           disabled={updating || updateUnknown} value={val} onChange={(e) => setVal(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && save()} />
-        <p className="mt-2 text-xs text-muted-foreground">验证并更新将访问平台身份接口，可能耗时数分钟；失败保留原凭证，不会自动恢复任务。</p>
+        <p className="mt-2 text-xs text-muted-foreground">在本机 Chrome 复制 Cookie 后可保存到当前服务器，仅用于本人任务。验证由服务器执行，可能耗时数分钟；失败保留原凭证。保存配置不代表验证通过，不会自动恢复任务。</p>
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="outline" size="sm" disabled={updating} onClick={() => setEdit(null)}>{updateUnknown ? "关闭并核对" : "取消"}</Button>
-          <Button variant="outline" size="sm" disabled={!val.trim() || updating || updateUnknown} onClick={() => void reauthenticate()}>{updating ? "验证中…" : "验证并更新"}</Button>
-          <Button size="sm" disabled={!val.trim() || updating || updateUnknown} onClick={() => void save()}>保存</Button>
+          <Button variant="outline" size="sm" disabled={!val.trim() || updating || updateUnknown} onClick={() => void reauthenticate()}>{updating ? "处理中…" : "验证并更新"}</Button>
+          <Button size="sm" disabled={!val.trim() || updating || updateUnknown} onClick={() => void save()}>保存配置</Button>
         </div>
       </Modal>
 
