@@ -65,6 +65,10 @@ jobs:
             tests/test_data_prep_contracts.py \
             tests/test_prerun_contract.py \
             tests/test_candidate_verification_migration.py \
+            tests/test_deployment_drain.py tests/test_deployment_preflight.py \
+            tests/test_deployment_quarantine.py tests/test_deployment_quarantine_migration.py \
+            tests/test_deployment_quarantine_cli.py \
+            tests/test_runtime_service_identity.py tests/test_service_identity_window.py \
             -k "not collectors_import_smoke_reaches_scrapling_runtime_seams" \
             --junitxml=.artifacts/ci/python-fast.xml
       - name: 上传后端门证据

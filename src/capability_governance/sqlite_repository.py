@@ -13,6 +13,7 @@ import time
 from types import SimpleNamespace
 
 from src import account_execution as execution
+from src.deployment_quarantine import assert_not_quarantined, assert_task_not_quarantined
 
 from .models import (
     require_same_audit_evidence,
@@ -82,11 +83,19 @@ class SqliteCapabilityGovernanceRepository:
     def _execution_identity(run):
         return (run.actor_id, 'platform:' + run.run_id) if isinstance(run, PlatformValidationRun) else (run.owner_id, run.run_id)
 
+    def _require_not_quarantined(self, connection, run):
+        owner, resource_id = self._execution_identity(run)
+        assert_not_quarantined(connection, owner, 'validation', resource_id)
+        if isinstance(run, CapabilityValidationRun):
+            # 新验证身份不能复用已隔离的原任务快照重新执行。
+            assert_task_not_quarantined(connection, owner, run.task_ref.task_id)
+
     def _require_validation(self, connection, run, *, creating=False):
         owner, resource_id = self._execution_identity(run)
         auth = execution.current_authorization()
         if auth.owner_user_id != owner:
             raise execution.ExecutionDenied('验证 Owner 与冻结授权不符')
+        self._require_not_quarantined(connection, run)
         if creating:
             execution.require_authorized(connection, auth)
         else:
@@ -138,6 +147,12 @@ class SqliteCapabilityGovernanceRepository:
         from src.api.execution import execution_lock
 
         owner, resource_id = self._execution_identity(run)
+        inherited = execution.current_authorization(required=False)
+        if inherited is not None and inherited.owner_user_id != owner:
+            raise execution.ExecutionDenied('验证执行不能替换调用方旧授权')
+        with closing(self._connect()) as connection:
+            # 隔离拒绝必须发生在执行锁、租约和执行器之前，不能转成清理或停止事实。
+            self._require_not_quarantined(connection, run)
         with execution_lock(SimpleNamespace(db_path=self._db_path), owner, 'validation', resource_id):
             with closing(self._connect()) as connection:
                 binding = connection.execute('SELECT generation,state FROM account_execution_bindings WHERE owner_user_id=? AND resource_kind=\'validation\' AND resource_id=?', (owner, resource_id)).fetchone()
@@ -146,7 +161,6 @@ class SqliteCapabilityGovernanceRepository:
             if binding['state'] == 'paused' or (isinstance(run, PlatformValidationRun) and binding['state'] == 'cleanup_failed'):
                 raise execution.ExecutionDenied('验证已停止或仍缺少清理证明')
             auth = execution.ExecutionAuthorization(owner, binding['generation'])
-            inherited = execution.current_authorization(required=False)
             if inherited is not None and inherited != auth:
                 raise execution.ExecutionDenied('验证执行不能替换调用方旧授权')
             with execution.execution_context(auth):
@@ -167,6 +181,7 @@ class SqliteCapabilityGovernanceRepository:
         model = PlatformValidationRun if platform else CapabilityValidationRun
         with closing(self._connect()) as connection:
             connection.execute('BEGIN IMMEDIATE')
+            self._require_not_quarantined(connection, run)
             changed = execution.confirm_execution_stopped(connection, owner, 'validation', resource_id, expected_generation=auth.generation, cleanup_failed=cleanup_failed, now=time.time())
             if changed and not cleanup_failed:
                 row = connection.execute(f'SELECT payload_json FROM {table} WHERE run_id=?', (run.run_id,)).fetchone()

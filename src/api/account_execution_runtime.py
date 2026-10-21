@@ -10,6 +10,7 @@ from filelock import Timeout
 
 from src import account_execution as execution
 from src.api.execution import execution_lock, execution_to_thread
+from src.deployment_quarantine import is_quarantined, load_quarantine
 from src.source_acquisition import SourceAcquisitionRepository
 
 _LOGGER = logging.getLogger(__name__)
@@ -77,9 +78,19 @@ class AccountExecutionManager:
         return True
 
     async def run_once(self):
+        from src.services.deployment_drain import get_deployment_gate
+
+        with get_deployment_gate().admission("account_cleanup", continuation=True) as admitted:
+            if admitted:
+                await self._run_admitted_once()
+
+    async def _run_admitted_once(self):
         with self.store._conn() as conn:
             operations = [dict(row) for row in conn.execute("SELECT * FROM account_execution_holds WHERE status='pending' ORDER BY created_at,generation")]
         for operation in operations:
+            with self.store._conn() as conn:
+                if self._operation_quarantined(conn, operation):
+                    continue
             owner, generation = operation["owner_user_id"], operation["generation"]
             error, complete = None, False
             try:
@@ -92,7 +103,13 @@ class AccountExecutionManager:
                         error = "scheduler_unavailable"
                     with self.store._conn() as conn:
                         bindings = execution.list_execution_bindings(conn, owner, before_generation=generation)
+                        frozen = {(target["owner_id"], target["kind"], target["resource_id"])
+                                  for target in load_quarantine(conn)["targets"]}
                     for binding in bindings:
+                        identity = (owner, binding["resource_kind"], binding["resource_id"])
+                        if identity in frozen or (owner, "task", binding["resource_id"]) in frozen:
+                            # 新停用单只治理其余工作；持久隔离禁止旧工作，不代表它已确认停止。
+                            continue
                         if binding["resource_kind"] == "schedule":
                             continue
                         stopped, unknown = await self._reconcile_binding(binding)
@@ -103,10 +120,21 @@ class AccountExecutionManager:
                 error = error or "reconciliation_failed"
             with self.store._lock, self.store._conn() as conn:
                 conn.execute("BEGIN IMMEDIATE")
+                # 执行期间可能登记首次隔离；不能把拒绝解释成停止完成或失败回写。
+                if self._operation_quarantined(conn, operation):
+                    continue
                 execution.refresh_hold_operation(conn, operation["operation_id"], reconciliation_complete=bool(complete and not error), error_code=error, now=time.time())
+
+    def _operation_quarantined(self, conn, operation):
+        manifest = load_quarantine(conn)
+        return any(record["profile"] == "webui" and record["table"] == "account_execution_holds"
+                   and record["key"] == {"operation_id": operation["operation_id"]} for record in manifest["records"])
 
     async def _reconcile_binding(self, binding):
         owner, kind, resource_id, generation = (binding[key] for key in ("owner_user_id", "resource_kind", "resource_id", "generation"))
+        with self.store._conn() as conn:
+            if is_quarantined(conn, owner, kind, resource_id) or is_quarantined(conn, owner, "task", resource_id):
+                return False, True
         if kind == "workspace":
             return await self.workspace.pause_account_execution(owner, resource_id, expected_generation=generation), False
         if binding["state"] in {"idle", "paused"}:

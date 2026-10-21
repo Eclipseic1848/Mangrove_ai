@@ -106,6 +106,41 @@ def test_login_issues_only_host_only_http_only_cookies(sessions):
     assert client.get("/api/auth/me").status_code == 200
 
 
+@pytest.mark.parametrize("scheme,enabled,host,expected", [
+    ("http", True, "service.invalid", 200),
+    ("http", False, "service.invalid", 403),
+    ("https", False, "service.invalid", 200),
+    ("https", True, "service.invalid", 200),
+    ("http", False, "127.0.0.1", 200),
+])
+def test_explicit_http_deployment_preserves_cookie_csrf_and_owner_guards(
+    sessions, monkeypatch, scheme, enabled, host, expected,
+):
+    device, _, _ = sessions
+    monkeypatch.setattr(settings, "webui_allow_insecure_http", enabled)
+    origin = f"{scheme}://{host}"
+    with TestClient(device().app, base_url=origin, client=(host, 1234), headers={
+        "Origin": origin, "X-Mangrove-CSRF": "1",
+    }) as client:
+        response = client.post("/api/auth/login", json={"username": "synthetic-owner", "password": PASSWORD})
+        assert response.status_code == expected
+        if expected == 403:
+            assert not response.headers.get_list("set-cookie")
+            return
+        cookies = SimpleCookie()
+        for header in response.headers.get_list("set-cookie"):
+            cookies.load(header)
+        assert len(cookies) == 2
+        for cookie in cookies.values():
+            assert bool(cookie["secure"]) is (scheme == "https")
+            assert cookie["httponly"] and cookie["samesite"].lower() == "strict"
+            assert not cookie["domain"]
+        assert client.get("/api/auth/me").status_code == 200
+        assert client.get("/api/auth/me", headers={"X-Mangrove-Owner": "another-owner"}).status_code == 401
+        assert client.post("/api/auth/logout", headers={"Origin": "https://untrusted.invalid"}).status_code == 403
+        assert client.post("/api/auth/logout", headers={"X-Mangrove-CSRF": ""}).status_code == 403
+
+
 def test_logout_revokes_copied_current_device_credentials(sessions):
     device, _, _ = sessions
     client = device()

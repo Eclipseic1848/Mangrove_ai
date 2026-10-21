@@ -1207,6 +1207,7 @@ class ModelConnectionRepository:
     ) -> None:
         """只保存 Grant 哈希和冻结连接版本，不保存可用 Token。"""
 
+        from src.runtime_run_seals import assert_run_not_sealed
         with self._lock, self._conn() as conn:
             conn.execute("BEGIN IMMEDIATE")
             authorization = execution.current_authorization()
@@ -1214,6 +1215,7 @@ class ModelConnectionRepository:
                 raise execution.ExecutionDenied("Grant 发行上下文不属于 Owner")
             execution.require_authorized(conn, authorization)
             # 在写锁内复查，与停用/撤销串行，不能在停用后插入漏撤销的旧授权。
+            assert_run_not_sealed(conn, owner_user_id, task_id, revision)
             active = conn.execute(
                 "SELECT 1 FROM model_connections c JOIN model_connection_models m ON m.connection_id=c.connection_id "
                 "WHERE c.connection_id=? AND c.status='verified' AND m.model_id=? AND m.status='available' AND m.enabled=1 "
@@ -1254,6 +1256,7 @@ class ModelConnectionRepository:
     def resolve_grant(self, token_hash: str) -> dict[str, object] | None:
         """按不可逆 Token 哈希读取 Grant，并校验连接版本仍在线。"""
 
+        from src.runtime_run_seals import assert_run_not_sealed
         with self._conn() as conn:
             row = conn.execute(
                 """
@@ -1277,6 +1280,8 @@ class ModelConnectionRepository:
                 """,
                 (token_hash,),
             ).fetchone()
+            if row is not None:
+                assert_run_not_sealed(conn, row["owner_user_id"], row["task_id"], row["revision"])
         return dict(row) if row else None
 
     def revoke_grant(self, grant_id: str, reason: str) -> bool:

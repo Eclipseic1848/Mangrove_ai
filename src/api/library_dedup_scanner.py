@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import Optional
 
 from src.config.settings import settings
+from src.services.deployment_drain import get_deployment_gate
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,11 @@ class LibraryDedupScanner:
                 await self._sleep(min(_IDLE_CHECK_SECONDS, interval_seconds))
                 continue
             try:
-                await self._run_one_scan()
+                with get_deployment_gate().admission("library-dedup") as admitted:
+                    if not admitted:
+                        await self._sleep(_IDLE_CHECK_SECONDS)
+                        continue
+                    await self._run_one_scan()
             except Exception as e:  # noqa: BLE001 扫描本身意外出错也不能让循环死掉
                 logger.exception("模板库/教训库定时巡检：本轮扫描异常：%s", e)
             self._last_scan_at = time.time()

@@ -1,0 +1,82 @@
+"""本机封存工具与实际部署检查的合成纵切面，不接触真实服务。"""
+from __future__ import annotations
+
+import hashlib
+import json
+import sqlite3
+
+import pytest
+
+from tests.database_migration_helpers import migrated_profile_database
+from tests.test_deployment_preflight import _insert
+from tests.test_runtime_run_seals import _refresh_proof_snapshot, run_seal_database_template, unknown_run
+
+
+def test_plan_is_read_only_and_apply_requires_explicit_approval(unknown_run, monkeypatch, capsys):
+    import scripts.seal_runtime_run as cli
+
+    case = unknown_run
+    before = hashlib.sha256(case["db"].read_bytes()).hexdigest()
+    args = ["seal_runtime_run.py", "plan", "--database", str(case["db"]), "--owner-id", "owner", "--task-id", "task", "--revision", "1"]
+    monkeypatch.setattr(cli.sys, "argv", args)
+    assert cli.main() == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["stop_confirmed"] is False and plan["snapshot_sha256"] == case["kwargs"]["expected_snapshot_sha256"]
+    assert hashlib.sha256(case["db"].read_bytes()).hexdigest() == before
+    assert case["stopped_calls"] == []
+    monkeypatch.setattr(cli.sys, "argv", [args[0], "apply", *args[2:]])
+    assert cli.main() == 1
+    rejected = json.loads(capsys.readouterr().out)
+    assert rejected["ok"] is False
+    assert hashlib.sha256(case["db"].read_bytes()).hexdigest() == before
+    assert case["stopped_calls"] == []
+    full = [args[0], "apply", *args[2:], "--run-id", case["kwargs"]["run_id"], "--actor-id", "operator",
+            "--approval-reference", case["kwargs"]["approval_reference"], "--idempotency-key", "synthetic-seal-key",
+            "--snapshot-sha256", plan["snapshot_sha256"], "--proof", str(case["proof_path"]),
+            "--service", "synthetic-mangrove.service", "--runtime-root", str(case["runtime_root"])]
+    monkeypatch.setattr(cli.sys, "argv", full)
+    assert cli.main() == 0
+    assert json.loads(capsys.readouterr().out)["sealed"] is True
+    assert len(case["stopped_calls"]) == 2
+
+
+@pytest.mark.parametrize("command,flags", [
+    ("apply", ["--service-window-nonce", "a" * 32]),
+    ("plan", ["--service-window-manifest", "/run/approved.json", "--service-window-manifest-sha256", "b" * 64,
+              "--service-window-nonce", "a" * 32]),
+])
+def test_window_options_are_complete_and_never_used_by_read_only_plan(unknown_run, monkeypatch, capsys, command, flags):
+    import scripts.seal_runtime_run as cli
+
+    before = unknown_run["db"].read_bytes()
+    monkeypatch.setattr(cli.sys, "argv", ["seal_runtime_run.py", command, "--database", str(unknown_run["db"]),
+        "--owner-id", "owner", "--task-id", "task", "--revision", "1", *flags])
+    assert cli.main() == 1
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+    assert unknown_run["db"].read_bytes() == before and unknown_run["stopped_calls"] == []
+
+
+@pytest.mark.parametrize("null_projection", [False, True])
+@pytest.mark.parametrize("independent_blocker", [None, "account_cleanup", "source_reads"])
+def test_real_seal_only_clears_its_own_unknown_projection(unknown_run, tmp_path, independent_blocker, null_projection):
+    from src.runtime_run_seals import seal_unknown_run
+    from src.services.deployment_preflight import collect_persisted_blockers
+
+    case = unknown_run
+    if null_projection:
+        with sqlite3.connect(case["db"]) as conn:
+            conn.execute("UPDATE semantic_workspace_tasks SET run_id=NULL")
+        _refresh_proof_snapshot(case)
+    scheduler = migrated_profile_database(tmp_path / "scheduler.db", profile="scheduler")
+    before = {item.check_id for item in collect_persisted_blockers(case["db"], scheduler)}
+    assert before == {"persisted.runtime_unknown", "persisted.workspace_unknown"}
+    seal_unknown_run(case["db"], **case["kwargs"])
+    if independent_blocker == "account_cleanup":
+        with sqlite3.connect(case["db"]) as conn:
+            conn.execute("UPDATE account_execution_bindings SET state='cleanup_failed' WHERE owner_user_id='owner'")
+    elif independent_blocker == "source_reads":
+        _insert(case["db"], "source_read_uses", state="active")
+    after = {item.check_id for item in collect_persisted_blockers(case["db"], scheduler)}
+    assert after == ({f"persisted.{independent_blocker}"} if independent_blocker else set())
+    with sqlite3.connect(case["db"]) as conn:
+        assert conn.execute("SELECT status,json_extract(failure_json,'$.error_code') FROM agentic_runtime_runs").fetchone() == ("failed", "MODEL_OUTCOME_UNKNOWN")

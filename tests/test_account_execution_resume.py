@@ -30,7 +30,8 @@ def workspace(tmp_path, monkeypatch):
     monkeypatch.setattr(route, "get_semantic_workspace_manager", lambda: manager)
     monkeypatch.setattr(semantic_workspace_runtime, "get_store", lambda: store)
     with execution_context(store.capture_account_execution(owner["user_id"])):
-        store.create_semantic_workspace_task(owner["user_id"], task_id="resume-task", title="虚构暂停任务", objective_text="虚构目标", upload_ids=[], output_formats=[], provider="local", model=None, external_api_confirmed=False)
+        source = route._uploads().save_bytes(owner["user_id"], "synthetic.csv", b"name,value\nsynthetic,1\n", media_type="text/csv")
+        store.create_semantic_workspace_task(owner["user_id"], task_id="resume-task", title="虚构暂停任务", objective_text="虚构目标", upload_ids=[source.upload_id], source_refs=[{"upload_id": source.upload_id, "sha256": source.sha256}], output_formats=[], provider="local", model=None, external_api_confirmed=False)
     app = FastAPI()
     app.include_router(route.router)
     app.dependency_overrides[auth.get_current_user] = lambda: store.get_user(current["user"]["user_id"])
@@ -159,7 +160,7 @@ def test_preparation_never_rebinds_and_stale_request_cannot_adopt_new_epoch(work
         return original(*args, **kwargs)
     monkeypatch.setattr(route, "_inherit_task_context_hook", changed)
     response = client.post("/api/semantic-workspace/tasks/resume-task/account-resume", json={"expected_generation": 0, "expected_active_revision": 1})
-    assert response.status_code == 409
+    assert response.status_code == 409, response.text
     assert store.account_execution_binding(owner, "workspace", "resume-task")["generation"] == 0
     assert store.get_semantic_workspace_task(owner, "resume-task")["active_revision"] == 1
     assert queued == []

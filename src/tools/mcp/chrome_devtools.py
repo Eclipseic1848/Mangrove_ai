@@ -95,8 +95,13 @@ def _assert_readonly_browser_call(name: str, arguments: dict) -> None:
             raise ValueError("只允许读取明确的 HTTP/HTTPS 页面地址")
     if arguments.get("filePath"):
         target = Path(arguments["filePath"]).resolve()
-        if not target.is_relative_to(PROJECT_ROOT.resolve()):
-            raise PermissionError("浏览器输出只能保存在本项目目录")
+        directory = {"take_screenshot": "screenshots", "take_snapshot": "snapshots"}.get(name)
+        allowed_root = PROJECT_ROOT.resolve() / directory if directory else None
+        # 产物根必须保留为目录；不能覆盖源码、配置、数据库或已有文件。
+        if allowed_root is None or target == allowed_root or not target.is_relative_to(allowed_root):
+            raise PermissionError("截图或快照只能保存到项目的 screenshots 或 snapshots 目录")
+        if target.exists():
+            raise PermissionError("浏览器输出不能覆盖已有文件，请使用新文件名")
 
 # MCP 规范结果约定：MCP 端在响应中输出一行 "MCP_TOOL_RESULT:" + 单行 JSON，
 # 便于 Python 端可靠解析 file_path / file_name 等，避免依赖正则或非结构化文本。
@@ -165,7 +170,8 @@ class ChromeDevToolsConfig:
     auto_connect: bool = False  # 自动连接到运行中的 Chrome
     
     # 浏览器配置
-    headless: bool = False  # 无头模式
+    # 无桌面的 Linux 服务必须无头启动；显式传入的配置仍优先。
+    headless: bool = field(default_factory=lambda: sys.platform.startswith("linux") and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")))
     executable_path: Optional[str] = None  # Chrome 可执行文件路径
     user_data_dir: Optional[str] = None  # 用户数据目录
     channel: BrowserChannel = BrowserChannel.STABLE  # Chrome 渠道
@@ -338,6 +344,8 @@ class ChromeDevToolsMCP:
         
         # 添加配置参数
         cmd.extend(self.config.to_args())
+        # 采集进程不向第三方发送使用统计。
+        cmd.append("--no-usage-statistics")
         return cmd
     
     def _read_stderr(self):
@@ -381,6 +389,12 @@ class ChromeDevToolsMCP:
             raise RuntimeError("MCP 服务器进程未启动")
         if not skip_connected_check and not self._connected:
             raise RuntimeError("MCP 服务器未连接")
+
+        output_target = None
+        if method == "tools/call" and (payload.get("arguments") or {}).get("filePath"):
+            output_target = Path(payload["arguments"]["filePath"]).resolve()
+            # 固定实际落盘地址，不能让 MCP 的工作目录改变已核验目标。
+            params = {**payload, "arguments": {**payload["arguments"], "filePath": str(output_target)}}
         
         request_id = self._next_request_id()
         request = {
@@ -392,6 +406,10 @@ class ChromeDevToolsMCP:
             request["params"] = params
         
         request_str = json.dumps(request) + "\n"
+
+        if output_target is not None:
+            # 文件系统独占预留覆盖不同客户端；未知失败保留占位，禁止盲目重发覆盖。
+            os.close(os.open(output_target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
         
         try:
             with self._lock:
@@ -411,6 +429,13 @@ class ChromeDevToolsMCP:
                 
                 response = json.loads(response_line)
                 # logger.info(f"🔧 [MCP] 响应 - response={response}")
+
+                if output_target is not None and "error" not in response:
+                    result = response.get("result")
+                    # 占位不是产物；错误或未确认落盘不能被上层包装成生成成功。
+                    if (not isinstance(result, dict) or result.get("isError", False) is not False
+                            or not output_target.is_file() or output_target.stat().st_size == 0):
+                        raise RuntimeError("浏览器产物未确认写入；保留目标占位，请勿重用该文件名")
                 
                 if self.verbose:
                     logger.info(f"🔧 [MCP] 响应 - response={str(response)[:500]}...")
@@ -1448,7 +1473,7 @@ def create_browser_tools(mcp_client: ChromeDevToolsMCP) -> List:
             full_page: 如果设置为 true，截取完整页面而不是当前可见的视口（布尔值，可选）。与 uid 不兼容。
             file_path: 保存截图的绝对路径或相对于当前工作目录的路径（字符串，可选）。如果省略，截图将附加到响应中而不是保存到文件。
                       - 如果路径包含目录，目录会自动创建
-                      - 示例：`"screenshots/page.png"` 或 `"/tmp/screenshot.png"` 或 `"screenshot.png"`
+                      - 示例：`"screenshots/page.png"`，必须使用尚未存在的文件名。
             
         Returns:
             截图成功消息字符串
@@ -1462,6 +1487,7 @@ def create_browser_tools(mcp_client: ChromeDevToolsMCP) -> List:
                     file_path_obj = Path(file_path)
                     if not file_path_obj.is_absolute():
                         file_path_obj = Path.cwd() / file_path_obj
+                    _assert_readonly_browser_call("take_screenshot", {"filePath": str(file_path_obj)})
                     file_path_obj.parent.mkdir(parents=True, exist_ok=True)
                     processed_file_path = str(file_path_obj.absolute())
             
@@ -1668,7 +1694,7 @@ def create_browser_tools(mcp_client: ChromeDevToolsMCP) -> List:
             verbose: 是否包含完整 a11y 树中所有可用信息（布尔值，可选）。默认为 False。
             file_path: 保存快照的绝对路径或相对于当前工作目录的路径（字符串，可选）。如果省略，快照将附加到响应中而不是保存到文件。
                       - 如果路径包含目录，目录会自动创建
-                      - 示例：`"snapshots/page.txt"` 或 `"/tmp/snapshot.txt"` 或 `"snapshot.txt"`
+                      - 示例：`"snapshots/page.txt"`，必须使用尚未存在的文件名。
         
         Returns:
             页面快照字符串，包含元素列表和 uid
@@ -1682,6 +1708,7 @@ def create_browser_tools(mcp_client: ChromeDevToolsMCP) -> List:
                     file_path_obj = Path(file_path)
                     if not file_path_obj.is_absolute():
                         file_path_obj = Path.cwd() / file_path_obj
+                    _assert_readonly_browser_call("take_snapshot", {"filePath": str(file_path_obj)})
                     file_path_obj.parent.mkdir(parents=True, exist_ok=True)
                     processed_file_path = str(file_path_obj.absolute())
             

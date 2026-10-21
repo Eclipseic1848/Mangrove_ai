@@ -3,6 +3,7 @@ import asyncio
 import importlib
 import json
 import sqlite3
+from pathlib import Path
 
 import pytest
 from fastapi import FastAPI, Request
@@ -94,16 +95,44 @@ def test_workspace_stream_stops_disclosure_without_stopping_run(stream_session, 
         assert conn.execute("SELECT count(*) FROM platform_rate_events WHERE bucket='request.api'").fetchone()[0] == 1
 
 
+def test_queued_workspace_subscription_ends_for_drain_without_cancelling_task(stream_session, tmp_path, monkeypatch):
+    from src.services.deployment_drain import DeploymentGate
+    import src.services.deployment_drain as drain
+
+    store, _, request, user = stream_session
+    gate = DeploymentGate(tmp_path)
+    monkeypatch.setattr(drain, "_gate", gate)
+    store.create_semantic_workspace_task(user["user_id"], task_id="queued-task", title="虚构任务", objective_text="虚构正文", upload_ids=[], output_formats=[], provider="local", model=None, external_api_confirmed=False)
+
+    async def scenario():
+        events = semantic_workspace.stream_task("queued-task", request=request, user=user).body_iterator
+        assert (await anext(events))["event"] == "status"
+        gate.request_path.write_text(json.dumps({"version": 1, "request_id": "a" * 32, "phase": "draining"}), encoding="utf-8")
+        try:
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(anext(events), 2)
+            assert store.get_semantic_workspace_task(user["user_id"], "queued-task")["status"] == "queued"
+        finally:
+            await events.aclose()
+
+    asyncio.run(scenario())
+
+
 @pytest.mark.parametrize("reason", ["revoke", "access", "absolute"])
 def test_chat_stream_expires_while_background_finishes(stream_session, monkeypatch, reason):
+    from src.services.deployment_drain import DeploymentGate
+    import src.services.deployment_drain as drain
+
     store, _, request, user = stream_session
+    gate = DeploymentGate(Path(store.db_path).parent / "deployment-control")
+    monkeypatch.setattr(drain, "_gate", gate)
     monkeypatch.setattr(chat, "_resolve_model", lambda *_: ("local", "synthetic"))
 
     async def history(messages, **_):
         return messages
 
     monkeypatch.setattr(chat, "compress_history", history)
-    monkeypatch.setattr(chat, "_build_result", lambda *args: {"reply": "后台虚构结果", "kind": "output"})
+    monkeypatch.setattr(chat, "_build_result", lambda *args, model_connection_id=None, model_connection_version=None: {"reply": "后台虚构结果", "kind": "output"})
 
     async def scenario():
         release = asyncio.Event()
@@ -125,12 +154,14 @@ def test_chat_stream_expires_while_background_finishes(stream_session, monkeypat
             expired = await asyncio.wait_for(waiting, 2)
             assert expired["event"] == "auth-expired"
             assert not background.done()
+            assert gate.snapshot()["active"] == {"chat": 1}
             with pytest.raises(StopAsyncIteration):
                 await anext(events)
             release.set()
             await asyncio.wait_for(background, 2)
             assert store.list_messages(conv_id)[-1]["content"] == "后台虚构结果"
             assert f"{user['user_id']}:{conv_id}" not in chat._RUNNING
+            assert gate.snapshot()["total_active"] == 0
         finally:
             release.set()
             await asyncio.wait_for(background, 2)

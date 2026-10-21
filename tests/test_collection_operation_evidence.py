@@ -101,7 +101,7 @@ def test_nonzero_process_retains_only_safe_diagnostic_hint(crawler, caplog, plat
 
 @pytest.mark.parametrize("setup,factory,isolated_type,legacy_type,reason", [
     ("", "RuntimeError", "RuntimeError", "RuntimeError", "collection_failed"),
-    ("", "ModuleNotFoundError", "ModuleNotFoundError", "ModuleNotFoundError", "collection_failed"),
+    ("", "ModuleNotFoundError", "ModuleNotFoundError", "ModuleNotFoundError", "collector_dependency_missing"),
     ("from playwright._impl._errors import Error\n", "Error", "PlaywrightError", None, "collection_failed"),
     ("from playwright._impl._errors import TimeoutError\n", "TimeoutError", "PlaywrightTimeoutError", "TimeoutError", "collection_failed"),
     ("from playwright._impl._errors import TargetClosedError\n", "TargetClosedError", "PlaywrightTargetClosedError", None, "collection_failed"),
@@ -128,6 +128,7 @@ def test_isolated_exception_marker_is_closed_and_keeps_failure_behavior(crawler,
 
 @pytest.mark.parametrize("payload,isolated_type", [
     (b"MANGROVE_MC_EXCEPTION_TYPE:RuntimeError\n", "RuntimeError"),
+    (b"MANGROVE_MC_EXCEPTION_TYPE:ModuleNotFoundError\n", "ModuleNotFoundError"),
     (b"MANGROVE_MC_EXCEPTION_TYPE:PlaywrightError\r\n", "PlaywrightError"),
     (b"MANGROVE_MC_EXCEPTION_TYPE:UnknownError\n", "UnknownError"),
     (b"opaque-output\n", None),

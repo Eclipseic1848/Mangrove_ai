@@ -388,6 +388,11 @@ class SqliteCandidateVerificationRepository:
         inspect_database(DatabaseTarget("webui", database)).require_current()
         self._db_path = str(database)
 
+    def require_unsealed(self, owner_id: str, task_id: str, revision: int) -> None:
+        from src.runtime_run_seals import assert_run_not_sealed
+        with closing(self._connect()) as connection:
+            assert_run_not_sealed(connection, owner_id, task_id, revision)
+
     def execution_lease(self, attempt_id: str) -> FileLock:
         database = Path(self._db_path)
         # 与后台恢复共用既有租约路径，初验和语义重试也必须保护正在执行的核验。

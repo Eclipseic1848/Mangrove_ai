@@ -19,7 +19,7 @@ import asyncio
 import logging
 import re
 from typing import List, Set
-from urllib.parse import urljoin, urlsplit
+from urllib.parse import urldefrag, urljoin, urlsplit
 
 import httpx
 
@@ -41,8 +41,8 @@ _JS_HEAVY_DOMAINS = {
     "kuaishou.com", "taobao.com", "tmall.com", "weibo.com",
 }
 
-# 链接提取：从 HTML 中提取 href（>30 字节的 http 链接）
-_HREF_RE = re.compile(r'href\s*=\s*["\'](https?://[^"\'\s]{10,300})["\']', re.IGNORECASE)
+# 相对链接与绝对链接都参与遍历，协议与站点范围在解析后检查。
+_HREF_RE = re.compile(r'href\s*=\s*["\']([^"\'\s]{1,300})["\']', re.IGNORECASE)
 
 _MAX_DEPTH = 3       # 最大递归深度
 _MAX_PAGES = 50       # 总页数上限
@@ -83,11 +83,11 @@ class SiteCrawlerCollector(BaseCollector):
 
         # BFS 仅爬同域名，按种子域名分流：国内站强制直连（绕 Clash 系统代理劫持），境外站走代理
         async with smart_client(seeds[0], timeout=30.0) as client:
-            while queue and len(items) < max_items:
+            while queue and len(items) < max_items and len(visited) < _MAX_PAGES:
                 # 取当前深度的一批 URL 并发抓取
                 batch = []
                 current_depth = queue[0][1] if queue else 0
-                while queue and queue[0][1] == current_depth and len(batch) < _CONCURRENCY * 3:
+                while queue and queue[0][1] == current_depth and len(batch) < _CONCURRENCY * 3 and len(visited) < _MAX_PAGES:
                     url, depth = queue.pop(0)
                     if url in visited or dedup_seen(url):
                         continue
@@ -106,15 +106,16 @@ class SiteCrawlerCollector(BaseCollector):
                 results = await asyncio.gather(*tasks, return_exceptions=True)
 
                 for r in results:
-                    if isinstance(r, CollectedItem):
-                        items.append(r)
-                    elif isinstance(r, list):
-                        # 返回的是新发现的同域名链接（仅在未达深度上限时）
-                        if current_depth < _MAX_DEPTH:
-                            for new_url in r:
-                                if new_url not in visited and not dedup_seen(new_url):
-                                    queue.append((new_url, current_depth + 1))
-                    # Exception → 跳过
+                    if r is None or isinstance(r, Exception):
+                        continue
+                    item, links = r
+                    if item is not None:
+                        items.append(item)
+                    # 正文与链接必须同时保留，否则有正文的首页会阻断后续遍历。
+                    if current_depth < _MAX_DEPTH:
+                        for new_url in links:
+                            if new_url not in visited and not dedup_seen(new_url):
+                                queue.append((new_url, current_depth + 1))
 
         if not items:
             return CollectResult(False, self.name, message=f"BFS 遍历 {len(visited)} 个页面，均未提取到有效正文")
@@ -124,7 +125,7 @@ class SiteCrawlerCollector(BaseCollector):
     async def _crawl_one(self, client: httpx.AsyncClient, sem: asyncio.Semaphore,
                           url: str, depth: int, seed_url: str,
                           remaining: int) -> object:
-        """抓取单页，返回 CollectedItem（正文）或 List[str]（发现的新链接）。"""
+        """抓取单页，同时返回正文与发现的同站链接。"""
         async with sem:
             await get_rate_limiter().acquire(url)
             try:
@@ -145,7 +146,13 @@ class SiteCrawlerCollector(BaseCollector):
         links: List[str] = []
         if depth < _MAX_DEPTH and remaining > 0:
             for m in _HREF_RE.finditer(html):
-                link = m.group(1)
+                try:
+                    # 重定向后的页面地址决定相对链接；坏链接不能丢弃整页正文。
+                    link = urldefrag(urljoin(str(resp.url), m.group(1)))[0]
+                except ValueError:
+                    continue
+                if urlsplit(link).scheme not in {"http", "https"}:
+                    continue
                 host = (urlsplit(link).netloc or "").lower().replace("www.", "")
                 if host == seed_host or host.endswith("." + seed_host):
                     # 跳过明显的静态资源和非 HTML 路径
@@ -154,12 +161,13 @@ class SiteCrawlerCollector(BaseCollector):
                         continue
                     links.append(link)
 
+        item = None
         if text and text.strip():
-            return CollectedItem(
+            item = CollectedItem(
                 url=url, title=title, content=text,
                 metadata={"engine": self.name, "via": meta.get("via", ""), "depth": depth},
             )
-        return links if links else None
+        return item, links
 
 
 register(SiteCrawlerCollector())

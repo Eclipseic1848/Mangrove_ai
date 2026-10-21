@@ -6,6 +6,7 @@ from pathlib import Path
 import sqlite3
 
 from src.database_migrations import DatabaseTarget, inspect_database
+from src.deployment_quarantine import assert_task_not_quarantined
 from src.memory._io import atomic_write
 from src.memory._library_scope import entry_path, require_owner
 from src.timezone import now
@@ -47,6 +48,8 @@ class LearningReceipts:
         key = self._key(owner_id, task_id, revision, run_id, kind)
         timestamp = now().isoformat()
         with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            assert_task_not_quarantined(connection, owner_id, task_id)
             connection.execute(
                 "INSERT OR IGNORE INTO library_learning_receipts VALUES (?,?,?,?,?,'',NULL,'','','queued',?,?)",
                 (*key, timestamp, timestamp),
@@ -55,6 +58,8 @@ class LearningReceipts:
     def skip(self, *, owner_id, task_id, revision, run_id, kind, generated=False):
         key = self._key(owner_id, task_id, revision, run_id, kind)
         with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            assert_task_not_quarantined(connection, owner_id, task_id)
             connection.execute(
                 "UPDATE library_learning_receipts SET state='skipped',updated_at=? "
                 "WHERE owner_id=? AND task_id=? AND revision=? AND run_id=? AND kind=? AND state=?",
@@ -66,6 +71,8 @@ class LearningReceipts:
         if kind not in {"template_new", "lesson_new"}:
             raise ValueError("只有新经验需要调用模型生成")
         with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("BEGIN IMMEDIATE")
+            assert_task_not_quarantined(connection, owner_id, task_id)
             return connection.execute(
                 "UPDATE library_learning_receipts SET state='generating',updated_at=? "
                 "WHERE owner_id=? AND task_id=? AND revision=? AND run_id=? AND kind=? AND state='queued'",
@@ -81,6 +88,7 @@ class LearningReceipts:
         timestamp = now().isoformat()
         with closing(sqlite3.connect(self.database)) as connection, connection:
             connection.execute("BEGIN IMMEDIATE")
+            assert_task_not_quarantined(connection, owner_id, task_id)
             row = connection.execute(
                 "SELECT slug,before_sha256,after_sha256,after_content,state FROM library_learning_receipts "
                 "WHERE owner_id=? AND task_id=? AND revision=? AND run_id=? AND kind=?", key,
@@ -110,6 +118,8 @@ class LearningReceipts:
         with lock, closing(sqlite3.connect(self.database)) as connection, connection:
             connection.row_factory = sqlite3.Row
             connection.execute("BEGIN IMMEDIATE")
+            # 隔离拒绝须早于冲突回执和文件效果，不能借恢复学习改写原未知。
+            assert_task_not_quarantined(connection, owner_id, task_id)
             row = connection.execute(
                 "SELECT * FROM library_learning_receipts WHERE owner_id=? AND task_id=? AND revision=? AND run_id=? AND kind=?", key,
             ).fetchone()

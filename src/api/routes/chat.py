@@ -31,6 +31,7 @@ from src.conductor.context import compress_history
 from src.conductor.graph import astream_conductor
 from src.llm import list_models
 from src.llm.provider import _usage_ctx
+from src.deployment_quarantine import QuarantinedExecutionError, assert_task_not_quarantined
 
 from ..auth import get_current_user, get_store, platform_session_valid
 from ..schemas import ChatIn
@@ -323,15 +324,30 @@ def _load_owned_recovery(user, task_id):
         recovery = load_recovery(user["user_id"], task_id)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from None
+    _require_recovery_unquarantined(get_store(), user["user_id"], recovery)
+    return recovery
+
+
+def _require_recovery_unquarantined(store, user_id, recovery):
     state = recovery["state"]
-    conv = get_store().get_conversation(state["session_id"])
-    if not conv or conv["user_id"] != user["user_id"]:
+    conv = store.get_conversation(state["session_id"])
+    if not conv or conv["user_id"] != user_id:
         raise HTTPException(404, "会话不存在或无权访问")
-    connection = recovery["saved"]["binding_fields"].get("connection")
-    if connection and (len(connection) != 7 or connection[0] != user["user_id"]
+    fields = recovery["saved"]["binding_fields"]
+    if fields.get("owner") != user_id or fields.get("task") != recovery["task_id"]:
+        raise HTTPException(409, "原采集身份不完整，不能恢复")
+    connection = fields.get("connection")
+    if connection and (len(connection) != 7 or connection[0] != user_id
                        or connection[4] != state["session_id"] or connection[3] != state["model"]):
         raise HTTPException(409, "原模型连接身份不完整，不能恢复")
-    return recovery
+    try:
+        with store._conn() as conn:
+            # 恢复会新建聊天绑定；必须先拒绝原采集及原模型冻结任务身份，不能靠新绑定绕过。
+            assert_task_not_quarantined(conn, user_id, recovery["task_id"])
+            if connection:
+                assert_task_not_quarantined(conn, user_id, connection[4])
+    except QuarantinedExecutionError as exc:
+        raise HTTPException(409, str(exc)) from None
 
 
 @router.get("/collections/{task_id}/recovery")
@@ -366,6 +382,8 @@ async def resume_collection(task_id: str, body: CollectionResumeIn, request: Req
 async def _chat_stream(body, request, user, recovery=None, *, task_context=None):
     store = get_store()
     user_id = user["user_id"]
+    if recovery:
+        _require_recovery_unquarantined(store, user_id, recovery)
     binding = None
     if body.model_connection_id:
         from src.model_connections import get_default_broker, GrantError, ConnectionError as ModelConnectionError
@@ -538,8 +556,8 @@ async def _chat_stream(body, request, user, recovery=None, *, task_context=None)
                 "reply": "❌ 用户已取消任务",
             }, ensure_ascii=False)})
             raise
-        except ExecutionDenied:
-            # 账号暂停保留原会话，不写成用户取消或把迟到业务结果提交回会话。
+        except (ExecutionDenied, QuarantinedExecutionError):
+            # 账号暂停及历史隔离保留原会话，不写成用户取消或把迟到结果提交回会话。
             raise
         except Exception as e:  # noqa: BLE001
             try:
@@ -580,6 +598,11 @@ async def _chat_stream(body, request, user, recovery=None, *, task_context=None)
                         await execute()
                 else:
                     await execute()
+        except QuarantinedExecutionError:
+            queue.put_nowait({"event": "error", "data": json.dumps({"message": "历史任务已隔离，禁止恢复"}, ensure_ascii=False)})
+            queue.put_nowait({"event": "done", "data": "{}"})
+            _RUNNING.pop(task_key, None)
+            _PROGRESS.pop(task_key, None)
         except ExecutionDenied:
             queue.put_nowait({"event": "error", "data": json.dumps({"message": "账号执行已暂停"}, ensure_ascii=False)})
             queue.put_nowait({"event": "done", "data": "{}"})
@@ -589,7 +612,16 @@ async def _chat_stream(body, request, user, recovery=None, *, task_context=None)
             # 原流水线已发送失败/取消回执；运行资源的未知状态由持久绑定继续保留。
             pass
 
+    from src.services.deployment_drain import get_deployment_gate
+
+    lease = get_deployment_gate().try_acquire(
+        "chat", continuation=bool(getattr(request.state, "deployment_admitted", False))
+    )
+    if lease is None:
+        raise HTTPException(503, "服务正在更新，请稍后重试", headers={"Retry-After": "5"})
     bg = asyncio.create_task(authorized_pipeline())
+    # SSE 断开后流水线仍在运行；即使任务在首次调度前取消也须释放计数。
+    bg.add_done_callback(lambda _task: lease.release())
     _RUNNING[task_key] = bg
 
     async def event_gen():

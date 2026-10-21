@@ -23,7 +23,9 @@ from typing import Any, Dict, Optional
 from .cron import Schedule, compute_next_run
 from .store import ScheduleStore
 from src import account_execution as execution
+from src.deployment_quarantine import QuarantinedExecutionError
 from src.timezone import now as beijing_now, wall_time
+from src.services.deployment_drain import get_deployment_gate
 
 logger = logging.getLogger(__name__)
 
@@ -116,15 +118,21 @@ class SchedulerService:
         if task_id in self._running_ids:
             logger.info("定时任务已在执行中，本次触发跳过 task_id=%s", task_id)
             return False
-        try:
-            auth, task = self.store.claim_execution(task_id, expected_task=task, manual=keep_next_run)
-        except execution.ExecutionDenied:
-            if keep_next_run:
-                raise
+        lease = get_deployment_gate().try_acquire("scheduler")
+        if lease is None:
             return False
-        self._begin_claimed(auth, task)
-        await self._execute_claimed(auth, task, now, keep_next_run=keep_next_run)
-        return True
+        try:
+            try:
+                auth, task = self.store.claim_execution(task_id, expected_task=task, manual=keep_next_run)
+            except (execution.ExecutionDenied, QuarantinedExecutionError):
+                if keep_next_run:
+                    raise
+                return False
+            self._begin_claimed(auth, task)
+            await self._execute_claimed(auth, task, now, keep_next_run=keep_next_run)
+            return True
+        finally:
+            lease.release()
 
     def _begin_claimed(self, auth, task):
         from src.api.auth import get_store
@@ -259,14 +267,23 @@ class SchedulerService:
             return "running"
         if background:
             # 请求返回前领取持久授权和执行编号，页面断开不会取消后台任务。
-            auth, task = self.store.claim_execution(task_id, expected_task=task, manual=True)
-            self._begin_claimed(auth, task)
-            worker = asyncio.create_task(self._execute_claimed(auth, task, wall_time(), keep_next_run=True))
+            lease = get_deployment_gate().try_acquire("scheduler")
+            if lease is None:
+                return "draining"
+            try:
+                auth, task = self.store.claim_execution(task_id, expected_task=task, manual=True)
+                self._begin_claimed(auth, task)
+                worker = asyncio.create_task(self._execute_claimed(auth, task, wall_time(), keep_next_run=True))
+            except BaseException:
+                lease.release()
+                raise
+            # 租约属于真实后台任务，不能随 HTTP 返回释放；启动前取消也由回调收口。
+            worker.add_done_callback(lambda _task: lease.release())
             self._workers.add(worker)
             worker.add_done_callback(self._workers.discard)
             return {'run_id': task['_run_id'], 'state': 'running'}
-        await self._run_one(task, wall_time(), keep_next_run=True)
-        return "started"
+        started = await self._run_one(task, wall_time(), keep_next_run=True)
+        return "started" if started else "draining"
 
     async def _invoke_runner(self, task: Dict[str, Any]) -> Dict[str, Any]:
         from src.api.auth import get_store

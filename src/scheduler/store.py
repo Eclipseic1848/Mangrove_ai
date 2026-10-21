@@ -21,6 +21,7 @@ from typing import Any, Dict, Iterator, List, Optional
 
 from src.database_migrations import DatabaseTarget, inspect_database
 from src import account_execution as execution
+from src.deployment_quarantine import assert_not_quarantined, assert_task_not_quarantined, load_quarantine
 from src.timezone import now as beijing_now, wall_time
 
 
@@ -118,6 +119,8 @@ class ScheduleStore:
         with web._lock, web._conn() as web_conn:
             web_conn.execute("BEGIN IMMEDIATE")
             bindings = execution.list_execution_bindings(web_conn, owner, before_generation=before_generation)
+            frozen = {target["resource_id"] for target in load_quarantine(web_conn)["targets"]
+                      if target["owner_id"] == owner and target["kind"] in {"schedule", "task"}}
             with self._lock, self._conn() as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 known_ids = {row[0] for row in web_conn.execute(
@@ -128,6 +131,9 @@ class ScheduleStore:
                     complete = False
                 for binding in bindings:
                     if binding["resource_kind"] != "schedule":
+                        continue
+                    if binding["resource_id"] in frozen:
+                        # 新停用单治理其余计划；隔离旧计划既不改状态，也不追认已停止。
                         continue
                     conn.execute("UPDATE scheduled_tasks SET status='paused' WHERE task_id=? AND owner_user_id=? AND status='active'", (binding["resource_id"], owner))
                     if binding["state"] in {"idle", "paused"}:
@@ -313,14 +319,26 @@ class ScheduleStore:
                 (state or ('succeeded' if success else 'failed'), _iso(beijing_now()), int(success), summary, str(outputs.get('report_md') or ''), str(outputs.get('json') or ''), json.dumps(notification, ensure_ascii=False) if notification else None, json.dumps(usage) if usage else None, task_id, run_id))
 
     def close_stopped_run(self, task_id: str, run_id: int, owner: str, *, returned: bool) -> None:
+        from src.api.auth import get_store
+
         # 撤权后只允许封闭已开始的运行元数据；不写入迟到正文，也不恢复计划或授权。
-        with self._lock, self._conn() as conn:
-            conn.execute("""UPDATE scheduled_task_runs SET state=?, ended_at=?, summary=?
-                WHERE task_id=? AND run_id=? AND state='running'
-                AND EXISTS (SELECT 1 FROM scheduled_tasks WHERE task_id=? AND owner_user_id=?)""",
-                ('cancelled' if returned else 'unknown', _iso(beijing_now()),
-                 '执行授权已失效，结果未保存' if returned else '执行授权已失效，停止状态待确认',
-                 task_id, run_id, task_id, owner))
+        web = get_store()
+        with web._lock, web._conn() as web_conn:
+            web_conn.execute("BEGIN IMMEDIATE")
+            with self._lock, self._conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT owner_user_id FROM scheduled_tasks WHERE task_id=? AND owner_user_id=?", (task_id, owner)).fetchone()
+                if row is None:
+                    return
+                # 只核原身份隔离，不要求撤权后的旧执行重新取得业务授权。
+                assert_not_quarantined(web_conn, row["owner_user_id"], "schedule", task_id)
+                assert_task_not_quarantined(web_conn, row["owner_user_id"], task_id)
+                conn.execute("""UPDATE scheduled_task_runs SET state=?, ended_at=?, summary=?
+                    WHERE task_id=? AND run_id=? AND state='running'
+                    AND EXISTS (SELECT 1 FROM scheduled_tasks WHERE task_id=? AND owner_user_id=?)""",
+                    ('cancelled' if returned else 'unknown', _iso(beijing_now()),
+                     '执行授权已失效，结果未保存' if returned else '执行授权已失效，停止状态待确认',
+                     task_id, run_id, task_id, owner))
 
     def execution_status(self, task: dict, *, running: bool = False) -> dict:
         from src.api.auth import get_store
@@ -483,9 +501,21 @@ class ScheduleStore:
 
     def cancel(self, task_id: str) -> bool:
         """取消任务（标记 cancelled）。返回是否有改动。"""
-        with self._lock, self._conn() as conn:
-            cur = conn.execute(
-                "UPDATE scheduled_tasks SET status='cancelled' WHERE task_id=? AND status!='cancelled'",
-                (task_id,),
-            )
-            return cur.rowcount > 0
+        from src.api.auth import get_store
+
+        web = get_store()
+        with web._lock, web._conn() as web_conn:
+            web_conn.execute("BEGIN IMMEDIATE")
+            with self._lock, self._conn() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT owner_user_id FROM scheduled_tasks WHERE task_id=?", (task_id,)).fetchone()
+                if row is None:
+                    return False
+                # 路由先核 Owner；此处以实际归属核隔离，避免取消旧计划改写已固定原件。
+                assert_not_quarantined(web_conn, row["owner_user_id"], "schedule", task_id)
+                assert_task_not_quarantined(web_conn, row["owner_user_id"], task_id)
+                cur = conn.execute(
+                    "UPDATE scheduled_tasks SET status='cancelled' WHERE task_id=? AND status!='cancelled'",
+                    (task_id,),
+                )
+                return cur.rowcount > 0

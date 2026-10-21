@@ -19,6 +19,7 @@ import time
 from typing import Optional
 
 from src.config.settings import settings
+from src.services.deployment_drain import get_deployment_gate
 
 logger = logging.getLogger(__name__)
 
@@ -73,22 +74,27 @@ class CookieHealthScanner:
 
         logger.info("Cookie 健康巡检：开始一轮扫描（%d 项）", len(_COOKIE_HEALTH_KEYS))
         for key in _COOKIE_HEALTH_KEYS:
-            # 保留当前未执行项，维护解除后继续，不重发已经完成的认证请求。
-            while not self._stop.is_set() and settings.cookie_health_scan_enabled and _maintenance_active():
-                await self._sleep(_IDLE_CHECK_SECONDS)
-            # 管理员关闭后不再发起下一平台探测；已发送的请求仍正常收尾。
+            while not self._stop.is_set() and settings.cookie_health_scan_enabled:
+                # 保留当前未执行项；租约只覆盖已发送单项，不把维护等待计为在途。
+                if _maintenance_active() or get_deployment_gate().is_draining():
+                    await self._sleep(_IDLE_CHECK_SECONDS)
+                    continue
+                with get_deployment_gate().admission("cookie-health") as admitted:
+                    if not admitted:
+                        continue
+                    try:
+                        await _verify_global_cookie(key, "scheduled")
+                    except Exception as e:  # noqa: BLE001 单项失败不影响本轮其余项，也不该崩掉循环
+                        logger.info("Cookie 巡检本项未通过 key=%s type=%s", key, type(e).__name__)
+                await self._sleep(_BETWEEN_ITEM_SECONDS)
+                break
             if self._stop.is_set() or not settings.cookie_health_scan_enabled:
                 break
-            try:
-                await _verify_global_cookie(key, "scheduled")
-            except Exception as e:  # noqa: BLE001 单项失败不影响本轮其余项，也不该崩掉循环
-                logger.info("Cookie 巡检本项未通过 key=%s type=%s", key, type(e).__name__)
-            await self._sleep(_BETWEEN_ITEM_SECONDS)
         logger.info("Cookie 健康巡检：本轮扫描完成")
 
     async def _loop(self) -> None:
         while not self._stop.is_set():
-            if _maintenance_active():
+            if _maintenance_active() or get_deployment_gate().is_draining():
                 await self._sleep(_IDLE_CHECK_SECONDS)
                 continue
             if not settings.cookie_health_scan_enabled:

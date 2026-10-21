@@ -17,6 +17,8 @@ import uuid
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.utils.docker_user import docker_user_args
+
 from .tool_lock import load_locked_executable, sha256_file
 
 
@@ -509,6 +511,8 @@ class LockedCliOciSigningRuntime:
                 container_name,
                 "--label",
                 label,
+                # 绑定目录沿用服务账号，避免容器写出 root 文件导致事务无法清理。
+                *docker_user_args(),
                 "--publish",
                 "127.0.0.1::5000",
                 "--volume",

@@ -30,6 +30,7 @@ from src.account_execution import ExecutionDenied, current_authorization, execut
 from src.candidate_verification import CandidateVerificationService, CurrentVerifierRulesetResolver, SqliteCandidateVerificationRepository
 from src.database_migrations import DatabaseTarget, apply_migrations
 from src.api.execution import execution_to_thread
+from src.services.deployment_drain import get_deployment_gate
 
 from .models import (
     CapabilityGovernanceTarget,
@@ -870,6 +871,13 @@ class CapabilityValidationManager:
             }
         )
         for run in pending:
+            # 只有已记录取消意图的运行可续清理，不能借取消状态启动新的业务步骤。
+            lease = get_deployment_gate().try_acquire(
+                "capability-validation",
+                continuation=run.status is ValidationRunStatus.CANCELLING and run.cancel_requested,
+            )
+            if lease is None:
+                continue
             actor = CatalogActor(owner_id=run.owner_id, role=run.actor_role)
 
             def collect_supply_chain_evidence(
@@ -926,6 +934,8 @@ class CapabilityValidationManager:
             except Exception:
                 # 单条坏记录不能杀死恢复循环；运行本身仍保持持久化状态供下一轮接管。
                 logger.exception("能力验证运行执行失败：%s", run.run_id)
+            finally:
+                lease.release()
         return len(pending)
 
     async def reconcile_account_execution(self, owner_id: str, resource_id: str, expected_generation: int) -> bool:

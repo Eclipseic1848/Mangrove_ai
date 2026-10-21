@@ -347,6 +347,7 @@ class CandidateVerificationService:
         revision: int,
         verifier_factory: SemanticVerifierFactoryPort,
     ) -> VerificationAttempt:
+        self._repository.require_unsealed(owner_id, task_id, revision)
         context = self._repository.get_runtime_context(
             owner_id,
             task_id,
@@ -833,6 +834,7 @@ class CandidateVerificationService:
         )
         if attempt.task_id != task_id or attempt.revision != revision:
             raise ValueError("候选验证 Attempt 与当前任务修订不一致")
+        self._repository.require_unsealed(owner_id, task_id, revision)
         if attempt.status is not AttemptStatus.PASSED:
             raise ValueError("只有 passed 候选验证 Attempt 可以发布")
         if (
@@ -929,6 +931,7 @@ class CandidateVerificationService:
     ) -> VerificationAttempt:
         """资格 CAS 后持久化 requested；实际完整验证由 Worker 另行认领。"""
 
+        self._repository.require_unsealed(owner_id, task_id, revision)
         existing = self._repository.get_by_idempotency(owner_id, idempotency_key)
         if existing is not None:
             existing_rebaseline_authorization: (
@@ -1362,6 +1365,7 @@ class CandidateVerificationService:
         requested = self._repository.get(owner_id, attempt_id)
         if requested is None:
             raise PermissionError("候选验证 Attempt 不存在或 Owner 不匹配")
+        self._repository.require_unsealed(owner_id, requested.task_id, requested.revision)
         context, request, candidates, previous = self._load_reverification_context(
             owner_id=owner_id,
             task_id=requested.task_id,
@@ -1538,6 +1542,8 @@ class CandidateVerificationService:
     ) -> VerificationAttempt:
         """Worker 在认领前失败时留下 cancelled 终态，避免永久占据活动槽。"""
 
+        attempt = self.get_attempt(owner_id=owner_id, attempt_id=attempt_id)
+        self._repository.require_unsealed(owner_id, attempt.task_id, attempt.revision)
         cancelled, transitioned = self._repository.cancel_requested(
             owner_id,
             attempt_id,
@@ -1562,6 +1568,7 @@ class CandidateVerificationService:
     ) -> VerificationAttempt:
         """仅在调用方持有该 Attempt 租约时收口中断的 running。"""
 
+        self._repository.require_unsealed(attempt.owner_id, attempt.task_id, attempt.revision)
         if attempt.provider_attempt_id is not None:
             # running 后无法证明 Provider 尚未收到请求，必须按可能计费失败关闭。
             return self._finish_outcome_unknown(attempt)
@@ -1575,6 +1582,7 @@ class CandidateVerificationService:
         )
 
     def ensure_requested_event(self, attempt: VerificationAttempt) -> None:
+        self._repository.require_unsealed(attempt.owner_id, attempt.task_id, attempt.revision)
         if attempt.status is AttemptStatus.REQUESTED:
             self._event_writer("candidate_verification_attempt_requested", attempt)
 
@@ -1667,6 +1675,7 @@ class CandidateVerificationService:
         verifier: CandidateVerifierPort,
         operation: Callable[[], Awaitable[VerificationReport]],
     ) -> VerificationAttempt:
+        self._repository.require_unsealed(request.user_id, request.task_id, request.revision)
         if not candidates:
             raise ValueError("候选验证必须绑定非空 CandidateSet")
         if self._p0_reader(request):

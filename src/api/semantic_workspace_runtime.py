@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+from contextlib import closing, suppress
 from datetime import datetime
 import hashlib
 import json
@@ -82,7 +82,9 @@ from src.delivery_publishing.models import PublicationGate
 from src.delivery_publishing.pi_adapter import PiCandidateAdapter
 from src.delivery_publishing.repository import DeliveryPublishingRepository
 from src.delivery_publishing.service import DeliveryPublisher, reconcile_account_publications
+from src.deployment_quarantine import QuarantinedExecutionError
 from src.runtime_routing import RuntimeAssignment, runtime_routing_is_p0_blocked
+from src.runtime_run_seals import RuntimeRunSealedError
 from src.semantic_harness.compiler_models import ClarificationResolution
 from src.semantic_harness.harness_models import HarnessResume
 from src.semantic_harness.inspectors import UploadSourceInspector
@@ -92,6 +94,7 @@ from src.observability.workspace_telemetry import (
     workspace_task_span,
 )
 from src.services.managed_paths import ManagedPathCodec
+from src.services.deployment_drain import get_deployment_gate
 from src.source_acquisition import SourceAcquisitionRepository
 from src.task_context import TaskContextRepository
 from src.services.upload_store import UploadStore
@@ -938,6 +941,7 @@ class SemanticWorkspaceManager:
         task = get_store().get_semantic_workspace_task(owner_id, task_id)
         if task is None:
             raise KeyError("工作台任务不存在或无权访问")
+        AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(owner_id, task_id, expected_revision)
         module = self._candidate_verification_module()
         verifier_factory = self._build_full_candidate_verifier
         attempt = await module.request_reverification(
@@ -1205,17 +1209,25 @@ class SemanticWorkspaceManager:
     ) -> None:
         if (owner_id, attempt_id) in self._reverification_task_context.values():
             return
-        worker = asyncio.create_task(
-            self._execute_candidate_reverification(
-                owner_id=owner_id,
-                attempt_id=attempt_id,
-                verifier_factory=verifier_factory,
-            ),
-            name=f"candidate-reverification-{attempt_id}",
-        )
+        lease = get_deployment_gate().try_acquire("candidate-reverification")
+        if lease is None:
+            return
+        try:
+            worker = asyncio.create_task(
+                self._execute_candidate_reverification(
+                    owner_id=owner_id,
+                    attempt_id=attempt_id,
+                    verifier_factory=verifier_factory,
+                ),
+                name=f"candidate-reverification-{attempt_id}",
+            )
+        except BaseException:
+            lease.release()
+            raise
         self._reverification_tasks.add(worker)
         self._reverification_task_context[worker] = (owner_id, attempt_id)
         worker.add_done_callback(self._candidate_reverification_done)
+        worker.add_done_callback(lambda _task: lease.release())
 
     def _candidate_reverification_done(self, task: asyncio.Task[None]) -> None:
         self._reverification_tasks.discard(task)
@@ -1417,7 +1429,6 @@ class SemanticWorkspaceManager:
             for index in range(2)
         ]
         store = get_store()
-        store.purge_expired_semantic_workspace_tasks()
         self._maintenance = asyncio.create_task(
             self._maintenance_loop(),
             name="semantic-workspace-maintenance",
@@ -1425,32 +1436,41 @@ class SemanticWorkspaceManager:
         self._learning_worker = asyncio.create_task(
             self._learning_loop(), name="semantic-workspace-learning",
         )
-        try:
-            module = self._candidate_verification_module()
-        except RuntimeError as exc:
-            # 显式迁移前不创建表；没有 CandidateVerification Schema 时只跳过恢复。
-            _LOGGER.info("候选重验恢复尚不可用：%s", exc)
-        else:
-            self._recover_interrupted_candidate_reverifications(module)
-            self._resume_requested_candidate_reverifications(module)
-        # 恢复必须由 Web 服务进程接管，确保 Runtime 与文档 Relay 共享同一 Grant 域。
-        for task in store.list_pending_semantic_workspace_tasks():
-            if task["status"] == "cancelling":
-                # 异步维护循环确认执行静默和资源清理，不在启动时推断终态。
-                continue
+        # 封存后连恢复元数据也不改写，避免新进程启动越过备份和激活窗口。
+        with get_deployment_gate().admission("workspace-maintenance", continuation=True) as admitted:
+            if not admitted:
+                return
+            store.purge_expired_semantic_workspace_tasks()
             try:
-                authorization = self._workspace_authorization(task["user_id"], task["task_id"])
-                store.require_account_execution(authorization, "workspace", task["task_id"])
-            except ExecutionDenied:
+                module = self._candidate_verification_module()
+            except RuntimeError as exc:
+                # 显式迁移前不创建表；没有 CandidateVerification Schema 时只跳过恢复。
+                _LOGGER.info("候选重验恢复尚不可用：%s", exc)
+            else:
+                self._recover_interrupted_candidate_reverifications(module)
+                self._resume_requested_candidate_reverifications(module)
+            # 恢复必须由 Web 服务进程接管，确保 Runtime 与文档 Relay 共享同一 Grant 域。
+            for task in store.list_pending_semantic_workspace_tasks():
+                try:
+                    AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(task["user_id"], task["task_id"], task["active_revision"])
+                except (RuntimeRunSealedError, QuarantinedExecutionError):
+                    continue
+                if task["status"] == "cancelling":
+                    # 异步维护循环确认执行静默和资源清理，不在启动时推断终态。
+                    continue
+                try:
+                    authorization = self._workspace_authorization(task["user_id"], task["task_id"])
+                    store.require_account_execution(authorization, "workspace", task["task_id"])
+                except ExecutionDenied:
+                    self.enqueue(task["user_id"], task["task_id"])
+                    continue
+                with execution_context(authorization):
+                    store.update_semantic_workspace_task(
+                        task["user_id"],
+                        task["task_id"],
+                        status="queued",
+                    )
                 self.enqueue(task["user_id"], task["task_id"])
-                continue
-            with execution_context(authorization):
-                store.update_semantic_workspace_task(
-                    task["user_id"],
-                    task["task_id"],
-                    status="queued",
-                )
-            self.enqueue(task["user_id"], task["task_id"])
 
     def workers_ready(self) -> bool:
         """两个工作器都已启动且未退出时，进程才可以继续接单。"""
@@ -1500,9 +1520,16 @@ class SemanticWorkspaceManager:
             await asyncio.sleep(REVERIFICATION_RECOVERY_POLL_SECONDS)
             try:
                 from src.memory.workspace_learning import pending_template_uses, pending_lesson_failures, distill_failed_lesson
-                pending_learning = await asyncio.to_thread(pending_template_uses, settings.webui_db_path)
-                pending_learning += await asyncio.to_thread(pending_lesson_failures, settings.webui_db_path)
+                # 扫描会补写和轮转回执；封存后不写库，取消等待也须先等线程收口。
+                with get_deployment_gate().admission("workspace-maintenance", continuation=True) as admitted:
+                    if not admitted:
+                        continue
+                    pending_learning = await execution_to_thread(pending_template_uses, settings.webui_db_path)
+                    pending_learning += await execution_to_thread(pending_lesson_failures, settings.webui_db_path)
                 for learning in pending_learning:
+                    lease = get_deployment_gate().try_acquire("workspace-learning")
+                    if lease is None:
+                        break
                     try:
                         owner_id, task_id = learning["owner_id"], learning["task_id"]
                         task = get_store().get_semantic_workspace_task(owner_id, task_id)
@@ -1528,6 +1555,8 @@ class SemanticWorkspaceManager:
                         continue
                     except Exception:
                         _LOGGER.warning("方法统计补记暂时失败，下一轮重试", exc_info=True)
+                    finally:
+                        lease.release()
             except Exception:
                 _LOGGER.warning("学习回执恢复检查失败", exc_info=True)
 
@@ -1543,8 +1572,10 @@ class SemanticWorkspaceManager:
                 module = None
             if module is not None:
                 try:
-                    self._recover_interrupted_candidate_reverifications(module)
-                    self._resume_requested_candidate_reverifications(module)
+                    with get_deployment_gate().admission("workspace-maintenance", continuation=True) as admitted:
+                        if admitted:
+                            self._recover_interrupted_candidate_reverifications(module)
+                            self._resume_requested_candidate_reverifications(module)
                 except Exception:
                     # 单轮意外失败不得杀死维护任务；下一轮继续接管。
                     _LOGGER.exception("候选重验维护轮次失败，下一轮将重试")
@@ -1554,11 +1585,17 @@ class SemanticWorkspaceManager:
                 pending_tasks = get_store().list_pending_semantic_workspace_tasks()
                 now = time.monotonic()
                 for pending in pending_tasks:
+                    try:
+                        AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(pending["user_id"], pending["task_id"], pending["active_revision"])
+                    except (RuntimeRunSealedError, QuarantinedExecutionError):
+                        continue
                     if pending["status"] == "cancelling":
                         # 维护只恢复已存在的停止意图，不能制造新的用户取消代数。
                         # 沿用任务冻结身份进行清理，不借用维护线程的空授权。
-                        with execution_context(self._workspace_authorization(pending["user_id"], pending["task_id"])):
-                            await self.cancel(pending["user_id"], pending["task_id"], for_revision=True)
+                        with get_deployment_gate().admission("workspace-cleanup", continuation=True) as admitted:
+                            if admitted:
+                                with execution_context(self._workspace_authorization(pending["user_id"], pending["task_id"])):
+                                    await self.cancel(pending["user_id"], pending["task_id"], for_revision=True)
                         continue
                     if self._delivery_retry_after.get(
                         pending["task_id"], 0.0
@@ -1569,7 +1606,10 @@ class SemanticWorkspaceManager:
                 _LOGGER.exception("工作台非终态任务接管失败，下一轮将重试")
             if time.monotonic() - last_purge >= WORKSPACE_PURGE_INTERVAL_SECONDS:
                 try:
-                    get_store().purge_expired_semantic_workspace_tasks()
+                    with get_deployment_gate().admission("workspace-maintenance", continuation=True) as admitted:
+                        if not admitted:
+                            continue
+                        get_store().purge_expired_semantic_workspace_tasks()
                 except Exception:
                     _LOGGER.exception("工作台到期清理暂时失败，下一轮将重试")
                 else:
@@ -1796,6 +1836,11 @@ class SemanticWorkspaceManager:
         return execution.result()
 
     def enqueue(self, user_id: str, task_id: str) -> None:
+        if get_deployment_gate().is_draining():
+            return
+        task = get_store().get_semantic_workspace_task(user_id, task_id)
+        if task is not None:
+            AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(user_id, task_id, task["active_revision"])
         active = self._active.get(task_id)
         if active is not None and active.done():
             self._active.pop(task_id, None)
@@ -1822,7 +1867,13 @@ class SemanticWorkspaceManager:
         binding = get_store().account_execution_binding(user_id, "workspace", task_id)
         if task is None or binding is None or binding["state"] != "paused" or task["status"] != "paused":
             raise ExecutionDenied("工作台尚未确认暂停")
-        runtime = AgenticRuntimeRepository(settings.webui_db_path).get(user_id, task_id, task["active_revision"])
+        from src.runtime_run_seals import is_valid_run_seal
+        repository = AgenticRuntimeRepository(settings.webui_db_path)
+        with closing(repository._conn()) as connection:
+            if is_valid_run_seal(connection, user_id, task_id, task["active_revision"]):
+                return "new_revision"
+        repository.require_unsealed(user_id, task_id, task["active_revision"])
+        runtime = repository.get(user_id, task_id, task["active_revision"])
         if runtime is not None and runtime.get("run_id"):
             # cancelled 保留真实终态和取消标记，只能用新 Revision 重新执行。
             return "waiting" if runtime["status"] is RuntimeStatus.NEEDS_INPUT else "new_revision"
@@ -1902,6 +1953,7 @@ class SemanticWorkspaceManager:
         task = store.get_semantic_workspace_task(user_id, task_id)
         if task is None:
             raise KeyError("工作台任务不存在或无权访问")
+        AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(user_id, task_id, task["active_revision"])
         if not for_revision:
             task = store.request_semantic_workspace_cancellation(user_id, task_id)
         if task["status"] in _TERMINAL_STATUSES:
@@ -1946,6 +1998,7 @@ class SemanticWorkspaceManager:
 
     async def _confirm_runtime_stopped(self, user_id: str, task_id: str, revision: int, *, account_hold: bool = False, expected_generation: int | None = None, deletion_revision_only: bool = False) -> bool:
         store = get_store()
+        AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(user_id, task_id, revision)
         runtime = AgenticRuntimeRepository(settings.webui_db_path).get(user_id, task_id, revision)
         try:
             from src.source_acquisition import SourceAcquisitionRepository
@@ -1988,6 +2041,8 @@ class SemanticWorkspaceManager:
     async def answer(self, user_id: str, task_id: str, answer: str, *, accepted_turn_id: str, cancel_only: bool = False) -> dict[str, Any]:
         store = get_store()
         task = store.get_semantic_workspace_task(user_id, task_id)
+        if task is not None:
+            AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(user_id, task_id, task["active_revision"])
         question = (task or {}).get("question") or {}
         if question.get("answer_turn_id") != accepted_turn_id or question.get("answer") != answer:
             raise ValueError("回答与当前已接受轮次不一致")
@@ -2063,6 +2118,7 @@ class SemanticWorkspaceManager:
         if task is None:
             raise KeyError("工作台任务不存在或无权访问")
         revision = int(task["active_revision"])
+        AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(user_id, task_id, revision)
         candidate_verification = self._candidate_verification_module()
         store.append_semantic_workspace_event(
             user_id,
@@ -2137,6 +2193,7 @@ class SemanticWorkspaceManager:
         repository: AgenticRuntimeRepository,
         upload_store: UploadStore,
     ) -> None:
+        repository.require_unsealed(user_id, task_id, revision)
         self._require_candidate_delivery_eligible(
             repository=repository,
             user_id=user_id,
@@ -2336,6 +2393,12 @@ class SemanticWorkspaceManager:
 
     async def _launch_job(self, user_id: str, task_id: str) -> None:
         """取得重任务令牌后再启动，避免任务越过并发限制。"""
+        # 出队后可能仍在等待重任务令牌；必须在真实启动处重新封门并持有到收尾。
+        with get_deployment_gate().admission("workspace") as admitted:
+            if admitted:
+                await self._launch_admitted_job(user_id, task_id)
+
+    async def _launch_admitted_job(self, user_id: str, task_id: str) -> None:
         task = get_store().get_semantic_workspace_task(user_id, task_id)
         if (
             task is None
@@ -2490,6 +2553,8 @@ class SemanticWorkspaceManager:
         if task is None:
             return
         revision = task["active_revision"]
+        # 必须先于 running 投影及清空 failure；后台恢复也不能洗掉封存事实。
+        AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(user_id, task_id, revision)
         started = time.monotonic()
         try:
             store.update_semantic_workspace_task(
@@ -2746,6 +2811,7 @@ class SemanticWorkspaceManager:
         """执行 TaskRevision 已冻结的标准 vNext 容器任务。"""
 
         repository = AgenticRuntimeRepository(settings.webui_db_path)
+        repository.require_unsealed(user_id, task_id, revision)
         runtime = repository.get(user_id, task_id, revision)
         if runtime is None:
             raise ValueError("Pi Runtime 配置不存在")

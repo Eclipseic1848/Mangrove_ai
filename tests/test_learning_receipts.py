@@ -191,7 +191,7 @@ def test_upgrade_preserves_old_rows_and_backup_can_restore(tmp_path):
         before = connection.execute("SELECT * FROM user_memory").fetchall()
     target = migrations.DatabaseTarget("webui", database)
     receipt = migrations.apply_migrations(target, tmp_path / "before.db")
-    assert receipt.applied_revisions == ("webui_0022",)
+    assert receipt.applied_revisions == ("webui_0022", "webui_0023", "webui_0024", "webui_0025")
     assert migrations.inspect_database(target).state == "current"
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute("SELECT * FROM user_memory").fetchall() == before

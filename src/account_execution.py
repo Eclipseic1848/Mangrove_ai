@@ -8,6 +8,8 @@ import math
 import sqlite3
 from uuid import uuid4
 
+from src.deployment_quarantine import QuarantinedExecutionError, assert_not_quarantined, assert_task_not_quarantined, load_quarantine
+
 RESOURCE_KINDS = frozenset({"workspace", "data", "harness", "source", "validation", "chat", "candidate", "schedule"})
 STATES = frozenset({"active", "idle", "paused", "cleanup_failed"})
 ERROR_CODES = frozenset({"scheduler_unavailable", "holder_unknown", "cleanup_failed", "reconciliation_failed"})
@@ -87,8 +89,15 @@ def _binding(conn, owner_user_id, kind, resource_id):
     return _row(conn, "SELECT * FROM account_execution_bindings WHERE owner_user_id=? AND resource_kind=? AND resource_id=?", (owner_user_id, kind, resource_id))
 
 
+def _require_unquarantined_binding(conn, owner_user_id, kind, resource_id):
+    assert_not_quarantined(conn, owner_user_id, kind, resource_id)
+    # 旧任务不能换一种绑定类别，继续使用同一个已隔离身份。
+    assert_task_not_quarantined(conn, owner_user_id, resource_id)
+
+
 def require_binding(conn, auth, resource_kind, resource_id) -> dict:
     require_authorized(conn, auth)
+    _require_unquarantined_binding(conn, auth.owner_user_id, resource_kind, resource_id)
     binding = _binding(conn, auth.owner_user_id, resource_kind, resource_id)
     if binding is None or binding["generation"] != auth.generation or binding["state"] not in {"active", "idle"}:
         raise ExecutionDenied("执行绑定缺失或已阻断")
@@ -101,6 +110,7 @@ def bind_execution(conn, auth, resource_kind, resource_id, *, state="active", no
     if state not in {"active", "idle"}:
         raise ValueError("首次绑定必须明确是否有在途执行")
     require_authorized(conn, auth)
+    _require_unquarantined_binding(conn, auth.owner_user_id, resource_kind, resource_id)
     if _binding(conn, auth.owner_user_id, resource_kind, resource_id) is not None:
         return require_binding(conn, auth, resource_kind, resource_id)
     conn.execute("INSERT INTO account_execution_bindings(owner_user_id, resource_kind, resource_id, generation, state, updated_at) VALUES (?,?,?,?,?,?)", (auth.owner_user_id, resource_kind, resource_id, auth.generation, state, now))
@@ -119,6 +129,7 @@ def set_execution_state(conn, auth, kind, resource_id, *, state, now) -> dict:
 def confirm_execution_stopped(conn, owner_user_id, kind, resource_id, *, expected_generation, cleanup_failed=False, now) -> bool:
     _transaction(conn, now)
     ExecutionAuthorization(owner_user_id, expected_generation)
+    _require_unquarantined_binding(conn, owner_user_id, kind, resource_id)
     binding = _binding(conn, owner_user_id, kind, resource_id)
     if binding is None or binding["generation"] != expected_generation:
         return False
@@ -133,6 +144,7 @@ def resume_execution(conn, auth, kind, resource_id, *, expected_generation, now)
     _transaction(conn, now)
     require_authorized(conn, auth)
     ExecutionAuthorization(auth.owner_user_id, expected_generation)
+    _require_unquarantined_binding(conn, auth.owner_user_id, kind, resource_id)
     binding = _binding(conn, auth.owner_user_id, kind, resource_id)
     if binding is None or binding["generation"] != expected_generation or expected_generation > auth.generation or binding["state"] != "paused":
         raise ExecutionDenied("执行尚未确认静默，不能恢复")
@@ -163,13 +175,18 @@ def update_account_status(conn, owner_user_id, *, disabled=None, pending=None, a
     next_pending = user["pending"] if pending is None else int(pending)
     entering_hold = not (user["disabled"] or user["pending"]) and (next_disabled or next_pending)
     generation = user["execution_generation"] + int(bool(entering_hold))
+    quarantine = load_quarantine(conn)
     conn.execute("UPDATE users SET disabled=?,pending=?,execution_generation=? WHERE user_id=?", (next_disabled, next_pending, generation, owner_user_id))
     if entering_hold:
         # 撤销业务 Grant 与停用同事务；重新启用不会恢复旧 Run 的外发权利。
         conn.execute("UPDATE model_connection_grants SET revoked_at=strftime('%Y-%m-%dT%H:%M:%f',?,'unixepoch'),revoke_reason='account_execution_hold' WHERE owner_user_id=? AND revoked_at IS NULL", (now, owner_user_id))
         conn.execute("INSERT INTO account_execution_holds(operation_id,owner_user_id,generation,actor_user_id,reason,status,reconciliation_complete,created_at,updated_at) VALUES (?,?,?,?,?,'pending',0,?,?)", (uuid4().hex, owner_user_id, generation, actor_user_id, "disabled" if next_disabled else "pending", now, now))
-        # idle 已由业务方确认无在途执行；active 必须等待实际停止证明。
-        conn.execute("UPDATE account_execution_bindings SET state='paused',updated_at=? WHERE owner_user_id=? AND generation<? AND state='idle'", (now, owner_user_id, generation))
+        # 隔离只保留旧事实；其余 idle 才沿既有账号暂停语义收口。
+        frozen = {(target["owner_id"], target["kind"], target["resource_id"]) for target in quarantine["targets"]}
+        idle = [(now, owner_user_id, row[0], row[1], generation) for row in conn.execute(
+            "SELECT resource_kind,resource_id FROM account_execution_bindings WHERE owner_user_id=? AND generation<? AND state='idle'", (owner_user_id, generation))
+            if (owner_user_id, row[0], row[1]) not in frozen and (owner_user_id, "task", row[1]) not in frozen]
+        conn.executemany("UPDATE account_execution_bindings SET state='paused',updated_at=? WHERE owner_user_id=? AND resource_kind=? AND resource_id=? AND generation<? AND state='idle'", idle)
     return _row(conn, "SELECT * FROM account_execution_holds WHERE owner_user_id=? AND generation=?", (owner_user_id, generation)) if next_disabled or next_pending else None
 
 
@@ -182,10 +199,19 @@ def refresh_hold_operation(conn, operation_id, *, reconciliation_complete=None, 
     operation = _row(conn, "SELECT * FROM account_execution_holds WHERE operation_id=?", (operation_id,))
     if operation is None:
         raise KeyError("停用操作不存在")
+    quarantine = load_quarantine(conn)
+    if any(record["profile"] == "webui" and record["table"] == "account_execution_holds"
+           and record["key"]["operation_id"] == operation_id for record in quarantine["records"]):
+        raise QuarantinedExecutionError("历史账号停止记录已隔离，禁止改写")
     # 普通刷新不能抹去持久失败；成功重试必须显式清除错误。
     if error_code is _UNCHANGED:
         error_code = operation["error_code"]
-    counts = dict(conn.execute("SELECT state,count(*) FROM account_execution_bindings WHERE owner_user_id=? AND generation<? GROUP BY state", (operation["owner_user_id"], operation["generation"])).fetchall())
+    # 隔离不证明历史已停；新停用只归并仍可执行的绑定，不改原绑定事实。
+    frozen = {(target["owner_id"], target["kind"], target["resource_id"]) for target in quarantine["targets"]}
+    counts = {}
+    for kind, resource, state in conn.execute("SELECT resource_kind,resource_id,state FROM account_execution_bindings WHERE owner_user_id=? AND generation<?", (operation["owner_user_id"], operation["generation"])):
+        if (operation["owner_user_id"], kind, resource) not in frozen and (operation["owner_user_id"], "task", resource) not in frozen:
+            counts[state] = counts.get(state, 0) + 1
     complete = operation["reconciliation_complete"] if reconciliation_complete is None else int(reconciliation_complete)
     status = "failed" if error_code or counts.get("cleanup_failed") else ("pending" if counts.get("active") or not complete else "completed")
     conn.execute("UPDATE account_execution_holds SET status=?,reconciliation_complete=?,error_code=?,updated_at=? WHERE operation_id=?", (status, complete, error_code, now, operation_id))

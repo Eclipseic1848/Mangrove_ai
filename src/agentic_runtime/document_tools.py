@@ -116,6 +116,8 @@ class DocumentRetriever(Protocol):
 class CoverageStateStore(Protocol):
     """覆盖状态持久化 Seam；实现必须按 Owner/Run 精确隔离。"""
 
+    def require_unsealed(self, user_id: str, task_id: str, revision: int) -> None: ...
+
     def save_coverage(
         self,
         *,
@@ -173,6 +175,8 @@ class DocumentToolBroker:
             raise DocumentToolError("文档工具 Grant 缺少有效来源或 revision")
         authorization = execution.current_authorization(required=False)
         self._authorize(authorization, owner_user_id)
+        if self._state_store is not None:
+            self._state_store.require_unsealed(owner_user_id, task_id, revision)
         effective_ttl = ttl_seconds or self._ttl_seconds
         if effective_ttl <= 0:
             raise DocumentToolError("文档工具 Grant TTL 必须大于 0")
@@ -236,6 +240,8 @@ class DocumentToolBroker:
         if grant.revoked or grant.expires_at <= self._clock():
             raise DocumentToolError("文档工具 Grant 无效或已撤销")
         self._authorize(grant.authorization, grant.owner_user_id)
+        if self._state_store is not None:
+            self._state_store.require_unsealed(grant.owner_user_id, grant.task_id, grant.revision)
 
     def revoke_grant(self, grant_id: str, reason: str) -> None:
         """撤销指定 Grant；重复撤销保持幂等且不泄露其是否曾存在。"""

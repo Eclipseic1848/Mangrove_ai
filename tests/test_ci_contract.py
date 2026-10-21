@@ -188,6 +188,9 @@ def test_minimum_ci_workflow_is_pinned_bounded_and_evidence_producing() -> None:
         "python scripts/ci/check_requirement_consistency.py",
         ".artifacts/ci/backend-install.log",
         "tests/test_candidate_verification_migration.py",
+        "tests/test_deployment_drain.py", "tests/test_deployment_preflight.py",
+        "tests/test_deployment_quarantine.py", "tests/test_deployment_quarantine_migration.py",
+        "tests/test_deployment_quarantine_cli.py",
         '-k "not collectors_import_smoke_reaches_scrapling_runtime_seams"',
         "--junitxml=.artifacts/ci/python-fast.xml",
         "npm ci",
@@ -253,6 +256,12 @@ def test_unified_workspace_gate_includes_canvas_migration_and_existing_siblings(
     for name in ("test_progressive_clarification.py", "test_workspace_answer_persistence.py", "test_workspace_revision_safety.py", "test_progressive_clarification_evaluation.py", "test_semantic_plan_compiler.py", "test_issue98_workbench_closeout.py", "test_web_source_delivery_api.py", "test_workspace_canvas.py", "test_workspace_canvas_migration.py", "test_semantic_table_execution.py", "test_semantic_delivery.py", "test_database_migrations.py", "test_database_migrations_components.py", "test_runtime_config_secret_refs.py", "test_workspace_conversation_stream.py"):
         assert f"tests/{name}" in selected
     assert "--randomly-seed=0 --timeout=120" in selected
+    for name in ("drain", "preflight", "worker_drain", "admission", "control", "artifacts", "server_collectors_compat", "server_runtime_compat"):
+        assert f"tests/test_deployment_{name}.py" in selected
+    for name in ("seals", "seal_enforcement", "seal_migration", "seal_cli"):
+        assert f"tests/test_runtime_run_{name}.py" in selected
+    for suffix in ("", "_migration", "_cli", "_enforcement", "_background", "_recovery", "_run_boundary", "_preflight", "_scheduler"):
+        assert f"tests/test_deployment_quarantine{suffix}.py" in selected
     assert "data/webui.db" not in selected
 
 

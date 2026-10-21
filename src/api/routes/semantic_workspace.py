@@ -7,6 +7,7 @@ from src.api.workspace_feedback import WorkspaceFeedbackIn, read_feedback, write
 from src.account_execution import ExecutionDenied
 
 import asyncio
+from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from src.timezone import now as beijing_now
@@ -3158,6 +3159,8 @@ def stream_task(
     revision: Annotated[int | None, Query(ge=1)] = None,
     user=Depends(get_current_user),
 ):
+    from src.services.deployment_drain import get_deployment_gate
+
     user_id = user["user_id"]
     _task_or_404(user_id, task_id)
     audience = (
@@ -3178,6 +3181,9 @@ def stream_task(
         sent_messages: set[str] = set()
         last_status = ""
         while True:
+            # 只结束页面订阅，不取消 Run；队列在排空期间不领取，不能让 SSE 永久占住读租约。
+            if get_deployment_gate().is_draining():
+                return
             if not platform_session_valid(request):
                 yield {"event": "auth-expired", "data": json.dumps({"message": "登录已失效，请重新登录"}, ensure_ascii=False)}
                 return
@@ -3265,6 +3271,7 @@ async def _steer_task(user, task_id, payload, idempotency_key, *, answer_context
 
     user_id = user["user_id"]
     task = _task_or_404(user_id, task_id)
+    _runtime_repository().require_unsealed(user_id, task_id, int(task["active_revision"]))
     events = get_store().list_semantic_workspace_events(user_id, task_id)
     runtime = _runtime_repository().get(user_id, task_id, int(task["active_revision"])) or {}
     frozen_binding = next((event.get("details", {}).get("binding") for event in _runtime_repository().list_events(user_id, task_id, int(task["active_revision"])) if event["event_type"] == "kernel.binding.frozen"), None)
@@ -4051,6 +4058,7 @@ async def answer_task(
         return _task_detail_response(task_id, user, answer_receipt=saved_receipt)
     try:
         task = _task_or_404(user_id, task_id)
+        _runtime_repository().require_unsealed(user_id, task_id, int(task["active_revision"]))
         _workspace_question(user_id, task)
         history = store.workspace_clarification_history(user_id, task_id, payload.expected_revision)
         question = next((item["question"] for item in history if item["round_id"] == payload.question_round_id), None)
@@ -4469,7 +4477,13 @@ async def _create_revision(task_id: str, payload: WorkspaceRevisionIn, user, *, 
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="模型连接不存在或无权访问",
             ) from exc
-    if account_resume_generation is None and task["status"] not in {
+    from src.runtime_run_seals import is_valid_run_seal
+    with closing(sqlite3.connect(settings.webui_db_path)) as seal_connection:
+        sealed_previous = is_valid_run_seal(seal_connection, user_id, task_id, int(task["active_revision"]))
+    if not sealed_previous:
+        _runtime_repository().require_unsealed(user_id, task_id, int(task["active_revision"]))
+    # 有效封存证明旧 Run 已停止；新版本仍须通过原有显式确认与冻结合同。
+    if not sealed_previous and account_resume_generation is None and task["status"] not in {
         "completed",
         "candidate_ready",
         "failed",

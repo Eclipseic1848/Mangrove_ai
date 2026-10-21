@@ -12,7 +12,7 @@ import logging
 from src.config.settings import settings
 from src.conductor.task_spec import TaskSpec
 
-from ._common import build_target_urls
+from ._common import build_target_urls, crawler_browser_config
 from ._net import get_rate_limiter, retry_async
 from .base import BaseCollector, CollectedItem, CollectResult
 from .registry import register
@@ -50,7 +50,7 @@ class Crawl4AICollector(BaseCollector):
 
         items: list[CollectedItem] = []
         try:
-            async with AsyncWebCrawler() as crawler:
+            async with AsyncWebCrawler(config=crawler_browser_config()) as crawler:
                 for url in urls:
                     try:
                         # 按域名限速 + 失败指数退避

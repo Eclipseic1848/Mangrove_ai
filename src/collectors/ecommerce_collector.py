@@ -302,7 +302,6 @@ class EcommerceCollector(BaseCollector):
         if need <= 0:
             return []
         api = "https://club.jd.com/comment/productPageComments.action"
-        referer = f"https://item.jd.com/{sku}.html"
         out: List[CollectedItem] = []
         max_pages = (need + _PAGE_SIZE - 1) // _PAGE_SIZE
         for page in range(max_pages):
@@ -313,7 +312,8 @@ class EcommerceCollector(BaseCollector):
             }
 
             async def _do() -> httpx.Response:
-                resp = await client.get(api, params=params, headers=_jd_headers({"Referer": referer}))
+                # 沿用现役评论接口的无商品页 Referer 请求，保留 Cookie 与其余请求头。
+                resp = await client.get(api, params=params, headers=_jd_headers())
                 resp.raise_for_status()
                 return resp
 

@@ -285,6 +285,8 @@ async def run_task_now_endpoint(sched_id: str, user=Depends(get_execution_user))
         raise HTTPException(status_code=404, detail="任务不存在")
     if outcome == "running":
         raise HTTPException(status_code=409, detail="任务正在执行中，请稍候")
+    if outcome == "draining":
+        raise HTTPException(status_code=503, detail="服务正在更新，请稍后重试", headers={"Retry-After": "5"})
     return {"ok": True, "started": True, **outcome}
 
 

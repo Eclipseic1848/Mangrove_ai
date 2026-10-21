@@ -454,6 +454,12 @@ def test_adapter_rejects_current_schema_drift_instead_of_repairing_in_place(
             """
         )
         connection.execute("DROP INDEX idx_dpi_owner_request_idempotency")
+        from src.deployment_quarantine import EMPTY_MANIFEST, load_quarantine
+
+        assert load_quarantine(connection) == EMPTY_MANIFEST
+        # 本例故意制造旧Schema漂移；先去除依赖该列的空隔离保护，避免DDL先于适配器拒绝。
+        for operation in ("insert", "update", "delete"):
+            connection.execute(f"DROP TRIGGER first_cutover_delivery_publish_intents_no_{operation}")
         connection.execute(
             "ALTER TABLE delivery_publish_intents "
             "DROP COLUMN request_idempotency_hash"

@@ -104,13 +104,18 @@ class RestoreVerification:
 
 
 _PROFILE_HEADS = {
-    "webui": "webui_0023",
+    "webui": "webui_0025",
     "scheduler": "scheduler_0005",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
 }
 _PROFILE_REQUIRED_COLUMNS = {
     "webui": {
+        "runtime_run_seals": (
+            "owner_id", "task_id", "revision", "run_id", "runtime_identity_sha256",
+            "snapshot_json", "stop_proof_json", "actor_id", "reason", "approval_reference",
+            "idempotency_key", "request_sha256", "sealed_at",
+        ),
         "library_learning_receipts": ("owner_id", "task_id", "revision", "run_id", "kind", "state"),
         "operations_events": ("event_id", "occurred_at", "actor_id", "kind"),
         "operations_outcomes": ("event_id", "result", "changes_json"),
