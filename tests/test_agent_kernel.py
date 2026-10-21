@@ -633,7 +633,7 @@ async def test_kernel_fails_closed_before_run_when_contract_is_incompatible(
             available_capabilities=available_capabilities,
         )
     )
-    kernel = AgentKernel(adapter=adapter, repository=None)
+    kernel = AgentKernel(adapter=adapter, repository=_registered_repository(tmp_path))
 
     with pytest.raises(AgentKernelCapabilityError):
         await kernel.start(_request(tmp_path), on_event=lambda _event: None)

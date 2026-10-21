@@ -125,7 +125,7 @@ IT 不需要理解 Agent 内部实现，也不应自行编辑冻结任务、迁�
 | 停用窗口 | 尚未确认；正式停止原平台前约定 |
 | 正式部署 Git 分支 / 40 位提交 SHA | 按 `RELEASE-MANIFEST.md` 填写 |
 | 数据备份时间 / 文件数 / 总字节数 | 由开发填 |
-| 原数据库版本与迁移内容核对结果 | 本版要求 WebUI `webui_0023`、Scheduler `scheduler_0005`；导出前检查实际版本与摘要 |
+| 原数据库版本与迁移内容核对结果 | 本候选要求 WebUI `webui_0024`、Scheduler `scheduler_0005`；导出前检查实际版本与摘要，生产迁移须独立批准 |
 | Pi 镜像标签及 Image ID | 服务器仅 `0.87.1`；清点旧冻结引用并确定未结束任务的处置，不要求安装旧版 |
 | 模型访问方式、出站网络与预算负责人 | 由项目负责人/开发填写，不在本表放 Key |
 | 必须启用的采集服务 | 逐项填写 MediaCrawler、Firecrawl、SearXNG、RSSHub 等实际使用项 |
@@ -1632,7 +1632,7 @@ sudo rm /var/lib/nginx/mangrove/maintenance
 
 本节是受控更新规范，不是生产激活或用户验收记录。当前允许执行的步骤与阻塞以
 `docs/status/current.md` 及本次获准工单为准；有 `cleanup_failed`、来源读取仍在执行、
-停止待确认、未收口资源账本、状态未知或回执过期时，均禁止激活。不得改库把这些状态
+停止待确认、未收口资源账本、未裁决的历史未知或回执过期时，均禁止激活。不得改库把这些状态
 强制标成终态，不得为排空自动重发任务、清理未知容器或替换密钥。
 
 #### 候选代码、运行环境与真实业务路径
@@ -1708,6 +1708,50 @@ dist 外链接直接失败。目录链接不支持，根内文件链接会记录
 源码身份，并比较原生构建与实际服务并集的逐文件 SHA。提交相同不能代替字节核对；
 换行或平台差异须明确解释。旧资源保留使已打开页面可继续取得旧懒加载文件，不能据此承诺
 任意旧 API 协议仍兼容。所有旧资源继续保留到单独批准的退役，不在本次切换时清理。
+
+#### 历史未知的逐 Run 封存
+
+`MODEL_OUTCOME_UNKNOWN` 仍表示原结果未知。只有经过明确审批、逐 Run 停止证明完整并写入
+不可变封存记录后，才解除该条未知的部署阻断；其他 active、cleanup_failed、来源读取、
+删除和资源阻断独立检查。不能仅凭 idle、记录很旧、业务终态或空锁完成裁决。
+
+本机工具 `scripts/seal_runtime_run.py plan` 只读输出 Owner、任务、修订、原 Run、原冻结绑定
+与失败摘要、事件水位和账号代数快照；它明确返回 `stop_confirmed=false`。缺少原始
+RuntimeBinding、Run 不符、当前修订已变化或绑定仍未静默时拒绝，不用当前镜像补造历史身份。
+旧库先在一致性副本演练 `webui_0024`，生产备份及迁移另按获准窗口执行；不能直接运行
+Repository 或 startup 自动补表。
+
+生产 `apply` 仅在已批准的停机窗口执行：服务须 inactive、MainPID 为 0，并临时 masked，
+同根不能有另一个 Python 实例；工具与服务使用同一维护账号，并记录有效超级管理员身份。
+必须现场核对 unit 的 User、WorkingDirectory 与维护账号、真实源码根一致；mask 后若属性
+不可用，工具保持阻断，不能猜默认值或改用无关 unit/空目录绕过。
+屏蔽与停止本身不是本工具动作，必须先证明在制任务自然收尾，再按具体方案操作。封存工具
+不会停服务、取消 Run、删除资源或恢复接单；失败保持阻断。
+
+每个 Run 使用私有证据目录内的一份 JSON 主证明和 executor、resources、relay 三份原始
+观察记录。主证明绑定版本、Owner/task/revision/run、运行身份与快照摘要、审批引用、请求
+nonce 和带时区采样时间；三项均须明确 stopped，原件逐一绑定相同身份摘要、nonce、时间及
+非空 observations，文件名与 SHA-256 逐项核验。首次写入要求十分钟内的新鲜证明，未来时间、
+缺原件、原件被改、错身份或旧代数均拒绝。文件结构与摘要校验**不替代人工核对停止事实**；
+仍须在生产具体方案中列明每个观察来源、已确认事实和未知项，禁止填入合成记录洗绿。
+
+示例变量须从批准的逐目标清单取得，不能将多个 Run 共用一条笼统证明：
+
+```bash
+"$CONTROL_PYTHON" scripts/seal_runtime_run.py plan --database "$WEBUI_DB" \
+  --owner-id "$OWNER_ID" --task-id "$TASK_ID" --revision "$REVISION"
+"$CONTROL_PYTHON" scripts/seal_runtime_run.py apply --database "$WEBUI_DB" \
+  --owner-id "$OWNER_ID" --task-id "$TASK_ID" --revision "$REVISION" --run-id "$RUN_ID" \
+  --actor-id "$ACTOR_ID" --approval-reference "$APPROVAL_REFERENCE" --idempotency-key "$IDEMPOTENCY_KEY" \
+  --snapshot-sha256 "$SNAPSHOT_SHA256" --proof "$PROOF_FILE" \
+  --service "$SERVICE_NAME" --runtime-root "$OLD_RUNTIME_ROOT"
+```
+
+同一写事务复查身份、代数、快照和停机事实后，只追加一条封存兼审计记录。原 Run、failure、
+事件与结果不改写；数据库触发器同时禁止封存记录和原运行事实被更新、删除或 REPLACE。
+相同请求重放只返回旧回执，不重新证明停止；异参幂等键或证据冲突拒绝。封存后 Kernel、
+模型与文档 Grant、候选复验、工作台继续/发布和来源删除均检查同一持久权威；旧 token
+不能绕过。原 Run 不得恢复或重发，新修订仍走原显式合同，不通过取消旧 Run 清除未知。
 
 #### 已接入维护门的更新顺序
 

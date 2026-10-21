@@ -176,6 +176,7 @@ def begin_operation(owner_id,task_id,token,policy,key):
             authorization=current_authorization(required=True)
             if authorization.owner_user_id!=owner_id: raise PermissionError('Owner不匹配')
             require_authorized(connection,authorization)
+            _require_plan_unsealed(connection,owner_id,final_plan)
             assert_sources_readable(owner_id,refs,connection=connection)
             connection.execute('INSERT INTO source_deletion_operations VALUES (?,?,?,?,?,?,?,?,?,?)',(operation_id,owner_id,task_id,key,request_hash,_json(minimal),'planned',None,_now(),_now()))
             for item in minimal['objects']:
@@ -264,6 +265,29 @@ def _remove_object(owner_id,item):
         connection.execute("UPDATE source_deletions SET state='deleted',deleted_at=? WHERE owner_id=? AND source_key=?",(_now(),owner_id,key));connection.commit()
 
 
+def _require_tasks_unsealed(connection,owner_id,task_ids):
+    from src.runtime_run_seals import assert_run_not_sealed
+    for task_id in task_ids:
+        selected=task_ids[task_id] if isinstance(task_ids,dict) else None
+        revisions=connection.execute('SELECT revision FROM semantic_workspace_revisions WHERE user_id=? AND task_id=? UNION SELECT revision FROM agentic_runtime_runs WHERE user_id=? AND task_id=?',(owner_id,task_id,owner_id,task_id)).fetchall()
+        for row in revisions:
+            if selected is None or row[0] in selected:
+                assert_run_not_sealed(connection,owner_id,task_id,row[0])
+
+
+def _require_plan_unsealed(connection,owner_id,plan):
+    # 清理引用也会删运行副本；不能等删完来源后才由历史表触发器拒绝。
+    task_ids={plan['task_id']:None}
+    for item in plan['objects']:
+        if item['disposition']!='delete': continue
+        for ref in item['references']:
+            if ref.get('task_id') and ref.get('revision') is not None and ref['task_id'] not in task_ids:
+                task_ids[ref['task_id']]=set()
+            if ref.get('task_id') and task_ids.get(ref['task_id']) is not None and ref.get('revision') is not None:
+                task_ids[ref['task_id']].add(ref['revision'])
+    _require_tasks_unsealed(connection,owner_id,task_ids)
+
+
 def _cleanup_runtime_copies(owner_id,task_ids):
     from pathlib import Path,PureWindowsPath
     from src.services.managed_paths import ManagedPathCodec
@@ -271,6 +295,7 @@ def _cleanup_runtime_copies(owner_id,task_ids):
     root=Path(settings.semantic_execution_root).resolve()
     external_runtime_runs=[]
     with closing(_connection()) as connection:
+        _require_tasks_unsealed(connection,owner_id,task_ids)
         for task_id in task_ids:
             selected=task_ids[task_id] if isinstance(task_ids,dict) else None
             # 正式结果逐项处理；仅无正式登记的精确发布副本可整目录清除。
@@ -362,6 +387,7 @@ async def _continue_operation(owner_id,operation_id,manager):
         row=connection.execute('SELECT * FROM source_deletion_operations WHERE owner_id=? AND operation_id=?',(owner_id,operation_id)).fetchone()
     plan=json.loads(row['plan_json']);targets=[x for x in plan['objects'] if x['disposition']=='delete']
     with closing(_connection()) as connection:
+        _require_plan_unsealed(connection,owner_id,plan)
         task_ids={row['task_id']:{r[0] for r in connection.execute('SELECT revision FROM semantic_workspace_revisions WHERE user_id=? AND task_id=?',(owner_id,row['task_id']))}}
     for item in targets:
         for ref in item['references']:

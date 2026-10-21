@@ -34,6 +34,29 @@ def test_current_empty_databases_are_clear_without_writing(databases):
     assert sorted(path.name for path in databases[0].parent.iterdir()) == ["scheduler.db", "webui.db"]
 
 
+@pytest.mark.parametrize("workspace_run,workspace_expected", [("run-one", 0), ("different-run", 1), (None, 1)])
+def test_only_exact_valid_sealed_unknown_is_removed_from_deployment_blockers(databases, monkeypatch, workspace_run, workspace_expected):
+    from src import runtime_run_seals
+    from src.services.deployment_preflight import collect_persisted_blockers
+
+    for task, run in (("one", "run-one"), ("two", "run-two")):
+        _insert(databases[0], "agentic_runtime_runs", user_id="owner", task_id=task, revision=1,
+                run_id=run, status="needs_input", failure_json='{"error_code":"MODEL_OUTCOME_UNKNOWN"}')
+    _insert(databases[0], "semantic_workspace_tasks", user_id="owner", task_id="one", active_revision=1,
+            run_id=workspace_run, status="needs_input", failure_json='{"error_code":"MODEL_OUTCOME_UNKNOWN"}')
+    calls = []
+
+    def valid(conn, owner, task, revision):
+        calls.append((owner, task, revision))
+        return (owner, task, revision) == ("owner", "one", 1)
+
+    monkeypatch.setattr(runtime_run_seals, "is_valid_run_seal", valid)
+    blocks = {item.check_id: item.count for item in collect_persisted_blockers(*databases)}
+    assert blocks.get("persisted.runtime_unknown", 0) == 1
+    assert blocks.get("persisted.workspace_unknown", 0) == workspace_expected
+    assert ("owner", "one", 1) in calls
+
+
 def test_cleanup_failure_and_active_without_start_evidence_block(databases):
     from src.services.deployment_preflight import collect_persisted_blockers
 

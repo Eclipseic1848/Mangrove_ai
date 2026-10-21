@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+from contextlib import closing, suppress
 from datetime import datetime
 import hashlib
 import json
@@ -83,6 +83,7 @@ from src.delivery_publishing.pi_adapter import PiCandidateAdapter
 from src.delivery_publishing.repository import DeliveryPublishingRepository
 from src.delivery_publishing.service import DeliveryPublisher, reconcile_account_publications
 from src.runtime_routing import RuntimeAssignment, runtime_routing_is_p0_blocked
+from src.runtime_run_seals import RuntimeRunSealedError
 from src.semantic_harness.compiler_models import ClarificationResolution
 from src.semantic_harness.harness_models import HarnessResume
 from src.semantic_harness.inspectors import UploadSourceInspector
@@ -939,6 +940,7 @@ class SemanticWorkspaceManager:
         task = get_store().get_semantic_workspace_task(owner_id, task_id)
         if task is None:
             raise KeyError("工作台任务不存在或无权访问")
+        AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(owner_id, task_id, expected_revision)
         module = self._candidate_verification_module()
         verifier_factory = self._build_full_candidate_verifier
         attempt = await module.request_reverification(
@@ -1448,6 +1450,10 @@ class SemanticWorkspaceManager:
                 self._resume_requested_candidate_reverifications(module)
             # 恢复必须由 Web 服务进程接管，确保 Runtime 与文档 Relay 共享同一 Grant 域。
             for task in store.list_pending_semantic_workspace_tasks():
+                try:
+                    AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(task["user_id"], task["task_id"], task["active_revision"])
+                except RuntimeRunSealedError:
+                    continue
                 if task["status"] == "cancelling":
                     # 异步维护循环确认执行静默和资源清理，不在启动时推断终态。
                     continue
@@ -1578,6 +1584,10 @@ class SemanticWorkspaceManager:
                 pending_tasks = get_store().list_pending_semantic_workspace_tasks()
                 now = time.monotonic()
                 for pending in pending_tasks:
+                    try:
+                        AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(pending["user_id"], pending["task_id"], pending["active_revision"])
+                    except RuntimeRunSealedError:
+                        continue
                     if pending["status"] == "cancelling":
                         # 维护只恢复已存在的停止意图，不能制造新的用户取消代数。
                         # 沿用任务冻结身份进行清理，不借用维护线程的空授权。
@@ -1827,6 +1837,9 @@ class SemanticWorkspaceManager:
     def enqueue(self, user_id: str, task_id: str) -> None:
         if get_deployment_gate().is_draining():
             return
+        task = get_store().get_semantic_workspace_task(user_id, task_id)
+        if task is not None:
+            AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(user_id, task_id, task["active_revision"])
         active = self._active.get(task_id)
         if active is not None and active.done():
             self._active.pop(task_id, None)
@@ -1853,7 +1866,13 @@ class SemanticWorkspaceManager:
         binding = get_store().account_execution_binding(user_id, "workspace", task_id)
         if task is None or binding is None or binding["state"] != "paused" or task["status"] != "paused":
             raise ExecutionDenied("工作台尚未确认暂停")
-        runtime = AgenticRuntimeRepository(settings.webui_db_path).get(user_id, task_id, task["active_revision"])
+        from src.runtime_run_seals import is_valid_run_seal
+        repository = AgenticRuntimeRepository(settings.webui_db_path)
+        with closing(repository._conn()) as connection:
+            if is_valid_run_seal(connection, user_id, task_id, task["active_revision"]):
+                return "new_revision"
+        repository.require_unsealed(user_id, task_id, task["active_revision"])
+        runtime = repository.get(user_id, task_id, task["active_revision"])
         if runtime is not None and runtime.get("run_id"):
             # cancelled 保留真实终态和取消标记，只能用新 Revision 重新执行。
             return "waiting" if runtime["status"] is RuntimeStatus.NEEDS_INPUT else "new_revision"
@@ -1933,6 +1952,7 @@ class SemanticWorkspaceManager:
         task = store.get_semantic_workspace_task(user_id, task_id)
         if task is None:
             raise KeyError("工作台任务不存在或无权访问")
+        AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(user_id, task_id, task["active_revision"])
         if not for_revision:
             task = store.request_semantic_workspace_cancellation(user_id, task_id)
         if task["status"] in _TERMINAL_STATUSES:
@@ -1977,6 +1997,7 @@ class SemanticWorkspaceManager:
 
     async def _confirm_runtime_stopped(self, user_id: str, task_id: str, revision: int, *, account_hold: bool = False, expected_generation: int | None = None, deletion_revision_only: bool = False) -> bool:
         store = get_store()
+        AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(user_id, task_id, revision)
         runtime = AgenticRuntimeRepository(settings.webui_db_path).get(user_id, task_id, revision)
         try:
             from src.source_acquisition import SourceAcquisitionRepository
@@ -2019,6 +2040,8 @@ class SemanticWorkspaceManager:
     async def answer(self, user_id: str, task_id: str, answer: str, *, accepted_turn_id: str, cancel_only: bool = False) -> dict[str, Any]:
         store = get_store()
         task = store.get_semantic_workspace_task(user_id, task_id)
+        if task is not None:
+            AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(user_id, task_id, task["active_revision"])
         question = (task or {}).get("question") or {}
         if question.get("answer_turn_id") != accepted_turn_id or question.get("answer") != answer:
             raise ValueError("回答与当前已接受轮次不一致")
@@ -2094,6 +2117,7 @@ class SemanticWorkspaceManager:
         if task is None:
             raise KeyError("工作台任务不存在或无权访问")
         revision = int(task["active_revision"])
+        AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(user_id, task_id, revision)
         candidate_verification = self._candidate_verification_module()
         store.append_semantic_workspace_event(
             user_id,
@@ -2168,6 +2192,7 @@ class SemanticWorkspaceManager:
         repository: AgenticRuntimeRepository,
         upload_store: UploadStore,
     ) -> None:
+        repository.require_unsealed(user_id, task_id, revision)
         self._require_candidate_delivery_eligible(
             repository=repository,
             user_id=user_id,
@@ -2527,6 +2552,8 @@ class SemanticWorkspaceManager:
         if task is None:
             return
         revision = task["active_revision"]
+        # 必须先于 running 投影及清空 failure；后台恢复也不能洗掉封存事实。
+        AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(user_id, task_id, revision)
         started = time.monotonic()
         try:
             store.update_semantic_workspace_task(
@@ -2783,6 +2810,7 @@ class SemanticWorkspaceManager:
         """执行 TaskRevision 已冻结的标准 vNext 容器任务。"""
 
         repository = AgenticRuntimeRepository(settings.webui_db_path)
+        repository.require_unsealed(user_id, task_id, revision)
         runtime = repository.get(user_id, task_id, revision)
         if runtime is None:
             raise ValueError("Pi Runtime 配置不存在")

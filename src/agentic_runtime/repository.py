@@ -18,6 +18,7 @@ import uuid
 
 from src import account_execution as execution
 from src.database_migrations import DatabaseTarget, inspect_database
+from src.runtime_run_seals import assert_run_not_sealed
 
 from .models import (
     CandidateArtifact,
@@ -64,6 +65,11 @@ class AgenticRuntimeRepository:
             conn.execute("BEGIN")
             execution.require_authorized(conn, authorization)
 
+    def require_unsealed(self, user_id: str, task_id: str, revision: int) -> None:
+        """仅核对本仓库持久 Run，不能借新身份重发已封存版本。"""
+        with closing(self._conn()) as conn:
+            assert_run_not_sealed(conn, user_id, task_id, revision)
+
     def save_coverage(
         self,
         *,
@@ -83,6 +89,7 @@ class AgenticRuntimeRepository:
                 if authorization.owner_user_id != user_id:
                     raise execution.ExecutionDenied("文档账本Owner不匹配")
                 execution.require_authorized(conn, authorization)
+            assert_run_not_sealed(conn, user_id, task_id, revision)
             row = conn.execute(
                 """
                 SELECT contract_json FROM agentic_runtime_coverage
@@ -155,6 +162,8 @@ class AgenticRuntimeRepository:
 
         encoded = assessment.model_dump_json()
         with _LOCK, closing(self._conn()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            assert_run_not_sealed(conn, user_id, task_id, revision)
             conn.execute(
                 """
                 INSERT OR IGNORE INTO candidate_coverage_assessments (
@@ -560,6 +569,8 @@ class AgenticRuntimeRepository:
         assignments = ", ".join(f"{key}=?" for key in changes)
         values = [*changes.values(), user_id, task_id, revision]
         with _LOCK, closing(self._conn()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            assert_run_not_sealed(conn, user_id, task_id, revision)
             if run_id is not None:
                 frozen_row = conn.execute(
                     """
@@ -608,6 +619,8 @@ class AgenticRuntimeRepository:
         payload = details or {}
         created_at = _now()
         with _LOCK, closing(self._conn()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            assert_run_not_sealed(conn, user_id, task_id, revision)
             cursor = conn.execute(
                 f"""
                 {"INSERT OR IGNORE" if event_id is not None else "INSERT"}
@@ -695,6 +708,7 @@ class AgenticRuntimeRepository:
                     preallocated_run=preallocated_run,
                     connection=own_connection,
                 )
+        assert_run_not_sealed(connection, user_id, task_id, revision)
         event_id = f"agent_event_{uuid.uuid4().hex[:16]}"
         created_at = _now()
         details = {

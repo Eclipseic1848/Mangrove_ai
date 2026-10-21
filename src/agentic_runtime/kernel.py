@@ -356,6 +356,7 @@ class AgentKernel:
     ) -> PiRuntimeResult:
         """在创建外部 Run 前验证 Adapter 合同。"""
 
+        self._repo().require_unsealed(request.user_id, request.task_id, request.revision)
         await self._prepare_adapter_manifest()
         binding = self._find_binding(
             request.user_id,
@@ -450,6 +451,7 @@ class AgentKernel:
     ) -> PiRuntimeResult:
         """只沿已冻结绑定恢复同一外部 Run。"""
 
+        self._repo().require_unsealed(request.user_id, request.task_id, request.revision)
         await self._prepare_adapter_manifest()
         binding = self._find_binding(
             request.user_id,
@@ -513,6 +515,7 @@ class AgentKernel:
     ) -> Any:
         """向声明支持 steer 的 Adapter 发送运行中指令。"""
 
+        self._repo().require_unsealed(user_id, task_id, revision)
         await self._prepare_adapter_manifest()
         if "steer" not in self._adapter.manifest.available_capabilities:
             raise AgentKernelCapabilityError("当前 Runtime Adapter 不支持直接 steer")
@@ -524,6 +527,8 @@ class AgentKernel:
     async def cancel(self, user_id: str, task_id: str, revision: int) -> None:
         """终止 Adapter；返回后不再接受本 Run 的迟到事件。"""
 
+        # 封存已证明停止；普通取消不能再外发或清掉原未知 failure。
+        self._repo().require_unsealed(user_id, task_id, revision)
         key = (user_id, task_id, revision)
         done = asyncio.Event()
         self._cancel_requests[key] = done

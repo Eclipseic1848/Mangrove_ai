@@ -10,7 +10,7 @@
 | 产品入口 | `8088`；主工作台 `/data-prep` |
 | 默认任务运行时 | Pi 0.87.1，适配器 `pi-runtime` |
 | Pi / Capability Host 镜像 | `mangrove/pi-coding-agent:0.87.1-v1.0.0` |
-| 数据库版本 | WebUI `webui_0023`、Scheduler `scheduler_0005`；只经显式迁移升级 |
+| 数据库版本 | 候选要求 WebUI `webui_0024`、Scheduler `scheduler_0005`；服务器尚为 `webui_0023`，只经获准显式迁移升级 |
 | 部署方式 | 单进程 FastAPI、SQLite、systemd、Nginx、Docker；镜像为 linux/amd64 |
 | CoreMind | 1.0.1 已完成独立候选验证，未启用为默认运行时 |
 | 发布记录 | [GitHub Releases](https://github.com/Eclipseic1848/Mangrove_ai/releases)；提交与文件摘要见随包清单 |
@@ -91,6 +91,15 @@ Worker 每次实时检查，退出即判为未就绪，不被资源缓存遮蔽�
 源码、原生前端构建和保留旧 assets 后的服务并集使用独立清单；旧现役目录与真实持久数据根
 保持原位。控制流程不提供公网运维接口，不清空未知或清理失败记录，不自动重发。服务器已
 显式启用的 HTTP 部署兼容保留，默认安全连接门、Cookie、CSRF 和 Owner 校验保持。
+
+用户已确认增加历史未知 Run 封存：原未知结果、failure 与事件保留，只有逐 Run 停止证明完整、
+封存禁重发并留审计后，才解除该历史项的部署阻断。该增量使用 `webui_0024` 新增不可变记录，
+不自动封存或修复生产状态；实际裁决须先批准具体目标、证据及停机窗口。合并前 PR 使用 Refs，
+服务器验收通过后才补回 Closes 并关闭 Issue。
+
+排空、封存、服务器兼容与 CI 契约的386个唯一离线用例已核对：384通过、2项因 Windows
+文件符号链接权限跳过，无遗漏或未解决失败。迁移、调用方近邻及双轴审查另有定向证据，
+不与该组合重复相加；Linux 停机隔离、原库迁移与逐 Run 真实证明仍须获准后单独验证。
 
 本票仍未完成生产首次切换、服务器阻断状态收口及最终三端核对，不能把离线回归、独立审查
 或部署手册当作已部署/已验收。操作与回退边界见[部署手册 §18.3](../deployment/linux-migration-it-guide.md#183-244单实例排空候选核验与原子切换)。

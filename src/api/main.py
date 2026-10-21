@@ -131,6 +131,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Mangrove Web UI Gateway", version=__version__, lifespan=lifespan)
 
+from src.runtime_run_seals import RuntimeRunSealedError
+
+
+@app.exception_handler(RuntimeRunSealedError)
+async def sealed_run_response(_request, _error):
+    return JSONResponse(status_code=409, content={"detail": "历史 Run 已封存，结果仍未知，禁止恢复或重发"})
+
 from src.api.deployment_middleware import DeploymentAdmissionMiddleware
 from src.api.operations_middleware import OperationsMiddleware
 app.add_middleware(OperationsMiddleware)

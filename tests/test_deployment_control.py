@@ -17,6 +17,65 @@ from src.services.deployment_runtime import collect_resource_blockers, publish_d
 _REAL_PROCESS_PROBE = control_module._require_running_process
 
 
+@pytest.mark.parametrize("platform,pid,unit,other_python,allowed", [
+    ("win32", "0", "masked-runtime", False, False),
+    ("linux", "12", "masked-runtime", False, False),
+    ("linux", "0", "enabled", False, False),
+    ("linux", "0", "masked-runtime", True, False),
+    ("linux", "0", "masked-runtime", False, True),
+])
+def test_historical_seal_requires_stopped_masked_service_without_another_python(tmp_path, monkeypatch, platform, pid, unit, other_python, allowed):
+    from src import runtime_run_seals
+
+    service = MagicMock(return_value=SimpleNamespace(stdout=f"MainPID={pid}\nActiveState=inactive\nSubState=dead\nUnitFileState={unit}\nUser=service-user\nWorkingDirectory={tmp_path}\n"))
+    entry = MagicMock()
+    entry.name = "222"
+    entry.stat.return_value.st_uid = 100
+    entry.__truediv__.side_effect = lambda name: SimpleNamespace(resolve=lambda strict: tmp_path / "python3" if name == "exe" else tmp_path)
+    proc = MagicMock()
+    proc.iterdir.return_value = [entry] if other_python else []
+    monkeypatch.setattr(runtime_run_seals, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(runtime_run_seals, "os", SimpleNamespace(getpid=lambda: 111, geteuid=lambda: 100))
+    monkeypatch.setattr(runtime_run_seals, "subprocess", SimpleNamespace(run=service))
+    monkeypatch.setattr(runtime_run_seals, "Path", lambda value: proc if value == "/proc" else tmp_path)
+    monkeypatch.setattr(runtime_run_seals, "_service_user_uid", lambda user: 100)
+    if allowed:
+        runtime_run_seals._require_stopped_service("mangrove.service", tmp_path)
+    else:
+        with pytest.raises(ValueError):
+            runtime_run_seals._require_stopped_service("mangrove.service", tmp_path)
+    if platform == "win32":
+        service.assert_not_called()
+    else:
+        assert service.call_args.args[0] == ["systemctl", "show", "mangrove.service", "--property=MainPID,ActiveState,SubState,UnitFileState,User,WorkingDirectory"]
+
+
+@pytest.mark.parametrize("user,directory,service_uid", [("", "root", 100), ("service-user", "", 100),
+    ("service-user", "other", 100), ("service-user", "root", 200)])
+def test_historical_seal_rejects_missing_or_different_unit_identity(tmp_path, monkeypatch, user, directory, service_uid):
+    from src import runtime_run_seals
+
+    service_root = str(tmp_path) if directory == "root" else str(tmp_path / "other") if directory else ""
+    service = MagicMock(return_value=SimpleNamespace(stdout=f"MainPID=0\nActiveState=inactive\nSubState=dead\nUnitFileState=masked-runtime\nUser={user}\nWorkingDirectory={service_root}\n"))
+    monkeypatch.setattr(runtime_run_seals, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(runtime_run_seals, "os", SimpleNamespace(geteuid=lambda: 100))
+    monkeypatch.setattr(runtime_run_seals, "subprocess", SimpleNamespace(run=service))
+    monkeypatch.setattr(runtime_run_seals, "_service_user_uid", lambda value: service_uid)
+    with pytest.raises((ValueError, FileNotFoundError)):
+        runtime_run_seals._require_stopped_service("mangrove.service", tmp_path)
+
+
+def test_sealed_run_http_conflict_hides_internal_error_detail():
+    import asyncio
+    from src.api.main import app
+    from src.runtime_run_seals import RuntimeRunSealedError
+
+    handler = app.exception_handlers[RuntimeRunSealedError]
+    response = asyncio.run(handler(None, RuntimeRunSealedError("synthetic-private-path-or-secret")))
+    assert response.status_code == 409
+    assert json.loads(response.body) == {"detail": "历史 Run 已封存，结果仍未知，禁止恢复或重发"}
+
+
 @pytest.fixture(autouse=True)
 def process_probe(monkeypatch):
     # 运维目标是 Linux；文件协议测试不向 Windows 进程发任何信号。

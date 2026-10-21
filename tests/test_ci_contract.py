@@ -256,6 +256,8 @@ def test_unified_workspace_gate_includes_canvas_migration_and_existing_siblings(
     assert "--randomly-seed=0 --timeout=120" in selected
     for name in ("drain", "preflight", "worker_drain", "admission", "control", "artifacts", "server_collectors_compat", "server_runtime_compat"):
         assert f"tests/test_deployment_{name}.py" in selected
+    for name in ("seals", "seal_enforcement", "seal_migration", "seal_cli"):
+        assert f"tests/test_runtime_run_{name}.py" in selected
     assert "data/webui.db" not in selected
 
 

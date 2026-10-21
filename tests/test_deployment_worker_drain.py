@@ -103,15 +103,18 @@ async def test_scheduler_background_lease_outlives_http_and_finishes_naturally(f
 
 
 @pytest.mark.asyncio
-async def test_workspace_rechecks_drain_after_waiting_for_heavy_slot(monkeypatch, drain_gate):
+async def test_workspace_rechecks_drain_after_waiting_for_heavy_slot(monkeypatch, drain_gate, tmp_path):
     from src.api import semantic_workspace_runtime as runtime
+    from tests.database_migration_helpers import migrated_webui_database
+
+    monkeypatch.setattr(settings, "webui_db_path", str(migrated_webui_database(tmp_path / "workspace.db")))
 
     manager = runtime.SemanticWorkspaceManager.__new__(runtime.SemanticWorkspaceManager)
     manager._queue, manager._queued, manager._active = asyncio.Queue(), set(), {}
     manager._heavy = asyncio.Semaphore(0)
     waiting = asyncio.Event()
     calls = []
-    task = {"task_id": "queued-task", "deleted_at": None, "status": "queued", "cancel_requested": False}
+    task = {"task_id": "queued-task", "active_revision": 1, "deleted_at": None, "status": "queued", "cancel_requested": False}
     monkeypatch.setattr(runtime, "get_store", lambda: SimpleNamespace(get_semantic_workspace_task=lambda *args: task))
 
     def heavy(_task):
@@ -300,16 +303,19 @@ async def test_cancelled_learning_metadata_keeps_lease_until_thread_finishes(mon
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase,expected", [("draining", ["task"]), ("sealed", [])])
-async def test_workspace_cleanup_is_counted_and_seal_blocks_new_cleanup(monkeypatch, drain_gate, phase, expected):
+async def test_workspace_cleanup_is_counted_and_seal_blocks_new_cleanup(monkeypatch, drain_gate, phase, expected, tmp_path):
     from src.account_execution import ExecutionAuthorization
     from src.api import semantic_workspace_runtime as runtime
+    from tests.database_migration_helpers import migrated_webui_database
+
+    monkeypatch.setattr(settings, "webui_db_path", str(migrated_webui_database(tmp_path / "workspace.db")))
 
     request_drain(drain_gate, phase)
     manager = runtime.SemanticWorkspaceManager.__new__(runtime.SemanticWorkspaceManager)
     monkeypatch.setattr(manager, "_candidate_verification_module", lambda: None)
     monkeypatch.setattr(manager, "_workspace_authorization", lambda *args: ExecutionAuthorization("owner", 0))
     monkeypatch.setattr(runtime, "get_store", lambda: SimpleNamespace(
-        list_pending_semantic_workspace_tasks=lambda: [{"status": "cancelling", "user_id": "owner", "task_id": "task"}],
+        list_pending_semantic_workspace_tasks=lambda: [{"status": "cancelling", "user_id": "owner", "task_id": "task", "active_revision": 1}],
     ))
     monkeypatch.setattr(runtime, "time", SimpleNamespace(monotonic=lambda: 0))
     calls, sleeps = [], []
@@ -335,9 +341,12 @@ async def test_workspace_cleanup_is_counted_and_seal_blocks_new_cleanup(monkeypa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["draining", "sealed"])
-async def test_workspace_restart_keeps_sealed_metadata_unchanged(monkeypatch, drain_gate, phase):
+async def test_workspace_restart_keeps_sealed_metadata_unchanged(monkeypatch, drain_gate, phase, tmp_path):
     from src.account_execution import ExecutionAuthorization
     from src.api import semantic_workspace_runtime as runtime
+    from tests.database_migration_helpers import migrated_webui_database
+
+    monkeypatch.setattr(settings, "webui_db_path", str(migrated_webui_database(tmp_path / "workspace.db")))
 
     request_drain(drain_gate, phase)
     manager = runtime.SemanticWorkspaceManager.__new__(runtime.SemanticWorkspaceManager)
@@ -350,7 +359,7 @@ async def test_workspace_restart_keeps_sealed_metadata_unchanged(monkeypatch, dr
 
     store = SimpleNamespace(
         purge_expired_semantic_workspace_tasks=lambda: record("purge"),
-        list_pending_semantic_workspace_tasks=lambda: [{"user_id": "owner", "task_id": "task", "status": "queued"}],
+        list_pending_semantic_workspace_tasks=lambda: [{"user_id": "owner", "task_id": "task", "status": "queued", "active_revision": 1}],
         require_account_execution=lambda *args: None,
         update_semantic_workspace_task=lambda *args, **kwargs: record(kwargs["status"]),
     )

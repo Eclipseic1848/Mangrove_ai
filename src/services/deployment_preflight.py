@@ -45,8 +45,6 @@ _WEBUI_CHECKS = (
     ("publication", "SELECT count(*) FROM delivery_publish_intents WHERE status IN ('staging','committing')"),
     ("workspace", "SELECT count(*) FROM semantic_workspace_tasks WHERE status IN ('running','pausing','cancelling')"),
     ("runtime", "SELECT count(*) FROM agentic_runtime_runs WHERE status IN ('preparing','running')"),
-    ("runtime_unknown", "SELECT count(*) FROM agentic_runtime_runs WHERE json_extract(failure_json,'$.error_code')='MODEL_OUTCOME_UNKNOWN'"),
-    ("workspace_unknown", "SELECT count(*) FROM semantic_workspace_tasks WHERE json_extract(failure_json,'$.error_code')='MODEL_OUTCOME_UNKNOWN'"),
     ("harness", "SELECT count(*) FROM semantic_harness_runs WHERE status='running'"),
     ("candidate", "SELECT count(*) FROM candidate_verification_attempts WHERE status IN ('running','outcome_unknown')"),
     ("source_acquisition", "SELECT count(*) FROM source_acquisition_attempts WHERE status IN ('acquiring','cancelling')"),
@@ -130,6 +128,26 @@ def _collect_counts(conn: sqlite3.Connection, checks, blockers: list[DrainBlocke
                 blockers.append(DrainBlocker(f"persisted.{check_id}", count, "persisted_execution_not_quiet"))
 
 
+def _collect_unknown_counts(conn: sqlite3.Connection, blockers: list[DrainBlocker]) -> None:
+    from src.runtime_run_seals import is_valid_run_seal
+
+    counts = {"runtime_unknown": 0, "workspace_unknown": 0}
+    for owner, task, revision in conn.execute("""SELECT user_id,task_id,revision FROM agentic_runtime_runs
+            WHERE json_extract(failure_json,'$.error_code')='MODEL_OUTCOME_UNKNOWN'"""):
+        if not is_valid_run_seal(conn, owner, task, revision):
+            counts["runtime_unknown"] += 1
+    for owner, task, revision, run_id in conn.execute("""SELECT user_id,task_id,active_revision,run_id FROM semantic_workspace_tasks
+            WHERE json_extract(failure_json,'$.error_code')='MODEL_OUTCOME_UNKNOWN'"""):
+        runtime = conn.execute("SELECT run_id FROM agentic_runtime_runs WHERE user_id=? AND task_id=? AND revision=?",
+                               (owner, task, revision)).fetchone()
+        # 只解除完整证明且已禁止重发的同一 Run；不放行仅任务名相同或无 Run 绑定的未知。
+        if not (run_id and runtime and runtime[0] == run_id and is_valid_run_seal(conn, owner, task, revision)):
+            counts["workspace_unknown"] += 1
+    for check_id, count in counts.items():
+        if count:
+            blockers.append(DrainBlocker(f"persisted.{check_id}", count, "persisted_execution_not_quiet"))
+
+
 def collect_persisted_blockers(webui_db: Path, scheduler_db: Path) -> tuple[DrainBlocker, ...]:
     """空结果只表示两库已明确核对，不代表进程或文件资源已经静默。"""
     blockers = []
@@ -143,6 +161,7 @@ def collect_persisted_blockers(webui_db: Path, scheduler_db: Path) -> tuple[Drai
                     _check_states(conn, _WEBUI_STATES, blockers)
                     _check_failure_metadata(conn, blockers)
                     _collect_counts(conn, _WEBUI_CHECKS, blockers)
+                    _collect_unknown_counts(conn, blockers)
                 else:
                     _check_states(conn, (("scheduled_tasks", "status", ("active", "paused", "done", "cancelled")),), blockers)
                     _check_scheduler_shape(conn, blockers)
