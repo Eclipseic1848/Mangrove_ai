@@ -34,7 +34,7 @@ def test_current_empty_databases_are_clear_without_writing(databases):
     assert sorted(path.name for path in databases[0].parent.iterdir()) == ["scheduler.db", "webui.db"]
 
 
-@pytest.mark.parametrize("workspace_run,workspace_expected", [("run-one", 0), ("different-run", 1), (None, 1)])
+@pytest.mark.parametrize("workspace_run,workspace_expected", [("run-one", 0), ("different-run", 1), (None, 0), ("", 1)])
 def test_only_exact_valid_sealed_unknown_is_removed_from_deployment_blockers(databases, monkeypatch, workspace_run, workspace_expected):
     from src import runtime_run_seals
     from src.services.deployment_preflight import collect_persisted_blockers

@@ -1718,6 +1718,8 @@ dist 外链接直接失败。目录链接不支持，根内文件链接会记录
 本机工具 `scripts/seal_runtime_run.py plan` 只读输出 Owner、任务、修订、原 Run、原冻结绑定
 与失败摘要、事件水位和账号代数快照；它明确返回 `stop_confirmed=false`。缺少原始
 RuntimeBinding、Run 不符、当前修订已变化或绑定仍未静默时拒绝，不用当前镜像补造历史身份。
+旧工作台的 `run_id` 仅在 NULL 时兼容：用已匹配的原 Run 和原冻结绑定核身份，快照保留
+原 NULL，不回填原记录；空字符串及非空冲突仍拒绝，停止证明和其余身份门不省略。
 旧库先在一致性副本演练 `webui_0024`，生产备份及迁移另按获准窗口执行；不能直接运行
 Repository 或 startup 自动补表。
 

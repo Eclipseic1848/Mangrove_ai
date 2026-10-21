@@ -79,9 +79,10 @@ def snapshot_unknown_run(conn, owner_id: str, task_id: str, revision: int) -> di
         WHERE owner_user_id=? AND resource_kind='workspace' AND resource_id=?""", (owner_id, task_id))
     workspace = _row(conn, """SELECT active_revision,cancel_generation,status,run_id FROM semantic_workspace_tasks
         WHERE user_id=? AND task_id=?""", (owner_id, task_id))
+    # 旧工作台投影可为空；只使用已逐项吻合的原 Run/冻结绑定，不回填或接受非空冲突。
     if (owner is None or binding is None or workspace is None
             or binding["generation"] != owner["execution_generation"] or binding["state"] not in {"idle", "paused"}
-            or workspace["active_revision"] != revision or workspace["run_id"] != identity["run_id"]
+            or workspace["active_revision"] != revision or (workspace["run_id"] is not None and workspace["run_id"] != identity["run_id"])
             or workspace["status"] not in {"failed", "needs_input"}):
         raise ValueError("账号代数或执行绑定仍待确认")
     return {"version": 1, "identity": identity, "owner": owner, "binding": binding, "workspace": workspace}

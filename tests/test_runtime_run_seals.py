@@ -190,12 +190,36 @@ def test_snapshot_and_missing_seal_validation_are_read_only(unknown_run):
     assert unknown_run["db"].read_bytes() == before
 
 
+@pytest.mark.parametrize("unknown_run", ["failed", "needs_input"], indirect=True)
+def test_null_workspace_run_projection_keeps_original_history_and_audit(unknown_run):
+    with closing(sqlite3.connect(unknown_run["db"])) as conn, conn:
+        conn.execute("UPDATE semantic_workspace_tasks SET run_id=NULL")
+    _refresh_proof_snapshot(unknown_run)
+    before = _history(unknown_run["db"])
+
+    assert _seal(unknown_run)["sealed"] is True
+
+    with closing(sqlite3.connect(unknown_run["db"])) as conn:
+        audit = json.loads(conn.execute("SELECT snapshot_json FROM runtime_run_seals").fetchone()[0])
+        assert audit["workspace"]["run_id"] is None
+        assert audit["identity"]["run_id"] == unknown_run["kwargs"]["run_id"]
+        assert run_seals.is_valid_run_seal(conn, "owner", "task", 1)
+        with pytest.raises(run_seals.RuntimeRunSealedError):
+            run_seals.assert_run_not_sealed(conn, "owner", "task", 1)
+    assert _history(unknown_run["db"]) == before
+
+
+@pytest.mark.parametrize("null_projection", [False, True])
 @pytest.mark.parametrize("overrides", [
     {"owner_id": "other-owner"}, {"task_id": "other-task"}, {"revision": 2},
     {"run_id": "other-run"}, {"expected_snapshot_sha256": "0" * 64},
     {"approval_reference": "synthetic-different-approval"},
 ])
-def test_seal_rejects_wrong_identity_snapshot_and_approval(unknown_run, overrides):
+def test_seal_rejects_wrong_identity_snapshot_and_approval(unknown_run, overrides, null_projection):
+    if null_projection:
+        with closing(sqlite3.connect(unknown_run["db"])) as conn, conn:
+            conn.execute("UPDATE semantic_workspace_tasks SET run_id=NULL")
+        _refresh_proof_snapshot(unknown_run)
     before = _history(unknown_run["db"])
     with pytest.raises(ValueError):
         _seal(unknown_run, **overrides)
@@ -275,6 +299,7 @@ def test_seal_requires_enabled_approved_super_admin(unknown_run, actor_state):
     assert _count(unknown_run["db"]) == 0
 
 
+@pytest.mark.parametrize("null_projection", [False, True])
 @pytest.mark.parametrize("statement", [
     "UPDATE account_execution_bindings SET state='active'",
     "UPDATE account_execution_bindings SET state='cleanup_failed'",
@@ -283,10 +308,15 @@ def test_seal_requires_enabled_approved_super_admin(unknown_run, actor_state):
     "UPDATE semantic_workspace_tasks SET status='running'",
     "UPDATE semantic_workspace_tasks SET active_revision=2",
     "UPDATE semantic_workspace_tasks SET run_id='newer-run'",
+    "UPDATE semantic_workspace_tasks SET run_id=''",
     "UPDATE agentic_runtime_runs SET status='running'",
     "UPDATE agentic_runtime_runs SET failure_json='{}'",
 ])
-def test_current_generation_quiescence_revision_and_run_cannot_be_bypassed_with_fresh_proof(unknown_run, statement):
+def test_current_generation_quiescence_revision_and_run_cannot_be_bypassed_with_fresh_proof(unknown_run, statement, null_projection):
+    if null_projection:
+        with closing(sqlite3.connect(unknown_run["db"])) as conn, conn:
+            conn.execute("UPDATE semantic_workspace_tasks SET run_id=NULL")
+        _refresh_proof_snapshot(unknown_run)
     with closing(sqlite3.connect(unknown_run["db"])) as conn, conn:
         conn.execute(statement)
     before = _history(unknown_run["db"])
@@ -296,8 +326,13 @@ def test_current_generation_quiescence_revision_and_run_cannot_be_bypassed_with_
     assert _count(unknown_run["db"]) == 0 and _history(unknown_run["db"]) == before
 
 
+@pytest.mark.parametrize("null_projection", [False, True])
 @pytest.mark.parametrize("mutation", ["missing-event", "wrong-run", "missing-model", "wrong-connection", "wrong-version", "wrong-model"])
-def test_original_valid_runtime_binding_cannot_be_missing_or_rebuilt(unknown_run, mutation):
+def test_original_valid_runtime_binding_cannot_be_missing_or_rebuilt(unknown_run, mutation, null_projection):
+    if null_projection:
+        with closing(sqlite3.connect(unknown_run["db"])) as conn, conn:
+            conn.execute("UPDATE semantic_workspace_tasks SET run_id=NULL")
+        _refresh_proof_snapshot(unknown_run)
     with closing(sqlite3.connect(unknown_run["db"])) as conn, conn:
         if mutation == "missing-event":
             conn.execute("DELETE FROM agentic_runtime_events WHERE event_type='kernel.binding.frozen'")

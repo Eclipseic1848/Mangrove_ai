@@ -140,8 +140,8 @@ def _collect_unknown_counts(conn: sqlite3.Connection, blockers: list[DrainBlocke
             WHERE json_extract(failure_json,'$.error_code')='MODEL_OUTCOME_UNKNOWN'"""):
         runtime = conn.execute("SELECT run_id FROM agentic_runtime_runs WHERE user_id=? AND task_id=? AND revision=?",
                                (owner, task, revision)).fetchone()
-        # 只解除完整证明且已禁止重发的同一 Run；不放行仅任务名相同或无 Run 绑定的未知。
-        if not (run_id and runtime and runtime[0] == run_id and is_valid_run_seal(conn, owner, task, revision)):
+        # 旧工作台投影可为 NULL；原 Run 与冻结绑定须经封存验证，非空冲突仍阻断。
+        if not (runtime and runtime[0] and (run_id is None or runtime[0] == run_id) and is_valid_run_seal(conn, owner, task, revision)):
             counts["workspace_unknown"] += 1
     for check_id, count in counts.items():
         if count:

@@ -9,7 +9,7 @@ import pytest
 
 from tests.database_migration_helpers import migrated_profile_database
 from tests.test_deployment_preflight import _insert
-from tests.test_runtime_run_seals import run_seal_database_template, unknown_run
+from tests.test_runtime_run_seals import _refresh_proof_snapshot, run_seal_database_template, unknown_run
 
 
 def test_plan_is_read_only_and_apply_requires_explicit_approval(unknown_run, monkeypatch, capsys):
@@ -40,12 +40,17 @@ def test_plan_is_read_only_and_apply_requires_explicit_approval(unknown_run, mon
     assert len(case["stopped_calls"]) == 2
 
 
+@pytest.mark.parametrize("null_projection", [False, True])
 @pytest.mark.parametrize("independent_blocker", [None, "account_cleanup", "source_reads"])
-def test_real_seal_only_clears_its_own_unknown_projection(unknown_run, tmp_path, independent_blocker):
+def test_real_seal_only_clears_its_own_unknown_projection(unknown_run, tmp_path, independent_blocker, null_projection):
     from src.runtime_run_seals import seal_unknown_run
     from src.services.deployment_preflight import collect_persisted_blockers
 
     case = unknown_run
+    if null_projection:
+        with sqlite3.connect(case["db"]) as conn:
+            conn.execute("UPDATE semantic_workspace_tasks SET run_id=NULL")
+        _refresh_proof_snapshot(case)
     scheduler = migrated_profile_database(tmp_path / "scheduler.db", profile="scheduler")
     before = {item.check_id for item in collect_persisted_blockers(case["db"], scheduler)}
     assert before == {"persisted.runtime_unknown", "persisted.workspace_unknown"}
