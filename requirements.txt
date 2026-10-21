@@ -150,7 +150,7 @@ orjson==3.11.8
 ormsgpack==1.12.1
 packaging==25.0
 pandas==2.3.3
-pillow==12.3.0
+pillow==13.0.0
 plotly==6.6.0
 prettytable==3.17.0
 propcache==0.4.1
