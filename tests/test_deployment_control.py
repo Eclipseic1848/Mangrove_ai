@@ -17,6 +17,24 @@ from src.services.deployment_runtime import collect_resource_blockers, publish_d
 _REAL_PROCESS_PROBE = control_module._require_running_process
 
 
+def test_historical_seal_rejects_disk_mask_while_loaded_unit_is_not_masked(tmp_path, monkeypatch):
+    from src import runtime_run_seals
+
+    service = MagicMock(return_value=SimpleNamespace(stdout=(
+        f"MainPID=0\nLoadState=loaded\nActiveState=inactive\nSubState=dead\n"
+        f"UnitFileState=masked-runtime\nUser=service-user\nWorkingDirectory={tmp_path}\n")))
+    proc = MagicMock()
+    proc.iterdir.return_value = []
+    monkeypatch.setattr(runtime_run_seals, "sys", SimpleNamespace(platform="linux"))
+    monkeypatch.setattr(runtime_run_seals, "os", SimpleNamespace(getpid=lambda: 111, geteuid=lambda: 100))
+    monkeypatch.setattr(runtime_run_seals, "subprocess", SimpleNamespace(run=service))
+    monkeypatch.setattr(runtime_run_seals, "Path", lambda value: proc if value == "/proc" else tmp_path)
+    monkeypatch.setattr(runtime_run_seals, "_service_user_uid", lambda user: 100)
+
+    with pytest.raises(ValueError):
+        runtime_run_seals._require_stopped_service("mangrove.service", tmp_path)
+
+
 @pytest.mark.parametrize("platform,pid,unit,other_python,allowed", [
     ("win32", "0", "masked-runtime", False, False),
     ("linux", "12", "masked-runtime", False, False),
@@ -27,7 +45,7 @@ _REAL_PROCESS_PROBE = control_module._require_running_process
 def test_historical_seal_requires_stopped_masked_service_without_another_python(tmp_path, monkeypatch, platform, pid, unit, other_python, allowed):
     from src import runtime_run_seals
 
-    service = MagicMock(return_value=SimpleNamespace(stdout=f"MainPID={pid}\nActiveState=inactive\nSubState=dead\nUnitFileState={unit}\nUser=service-user\nWorkingDirectory={tmp_path}\n"))
+    service = MagicMock(return_value=SimpleNamespace(stdout=f"MainPID={pid}\nLoadState=masked\nActiveState=inactive\nSubState=dead\nUnitFileState={unit}\nUser=service-user\nWorkingDirectory={tmp_path}\n"))
     entry = MagicMock()
     entry.name = "222"
     entry.stat.return_value.st_uid = 100
@@ -47,7 +65,7 @@ def test_historical_seal_requires_stopped_masked_service_without_another_python(
     if platform == "win32":
         service.assert_not_called()
     else:
-        assert service.call_args.args[0] == ["systemctl", "show", "mangrove.service", "--property=MainPID,ActiveState,SubState,UnitFileState,User,WorkingDirectory"]
+        assert service.call_args.args[0] == ["systemctl", "show", "--all", "--property=MainPID,LoadState,ActiveState,SubState,UnitFileState,User,WorkingDirectory", "--", "mangrove.service"]
 
 
 @pytest.mark.parametrize("user,directory,service_uid", [("", "root", 100), ("service-user", "", 100),
@@ -56,7 +74,7 @@ def test_historical_seal_rejects_missing_or_different_unit_identity(tmp_path, mo
     from src import runtime_run_seals
 
     service_root = str(tmp_path) if directory == "root" else str(tmp_path / "other") if directory else ""
-    service = MagicMock(return_value=SimpleNamespace(stdout=f"MainPID=0\nActiveState=inactive\nSubState=dead\nUnitFileState=masked-runtime\nUser={user}\nWorkingDirectory={service_root}\n"))
+    service = MagicMock(return_value=SimpleNamespace(stdout=f"MainPID=0\nLoadState=masked\nActiveState=inactive\nSubState=dead\nUnitFileState=masked-runtime\nUser={user}\nWorkingDirectory={service_root}\n"))
     monkeypatch.setattr(runtime_run_seals, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(runtime_run_seals, "os", SimpleNamespace(geteuid=lambda: 100))
     monkeypatch.setattr(runtime_run_seals, "subprocess", SimpleNamespace(run=service))

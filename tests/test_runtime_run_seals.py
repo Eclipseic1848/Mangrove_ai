@@ -190,6 +190,29 @@ def test_snapshot_and_missing_seal_validation_are_read_only(unknown_run):
     assert unknown_run["db"].read_bytes() == before
 
 
+def test_proof_expiring_during_final_stop_check_leaves_no_audit(unknown_run, monkeypatch):
+    from types import SimpleNamespace
+
+    observed = datetime.fromisoformat(unknown_run["proof"]["observed_at"])
+    now = [observed + timedelta(seconds=1)]
+    stopped = run_seals._require_stopped_service
+
+    def final_check(service, root):
+        stopped(service, root)
+        if len(unknown_run["stopped_calls"]) == 2:
+            now[0] = observed + timedelta(seconds=601)
+
+    monkeypatch.setattr(run_seals, "datetime", SimpleNamespace(
+        now=lambda tz: now[0], fromisoformat=datetime.fromisoformat))
+    monkeypatch.setattr(run_seals, "_require_stopped_service", final_check)
+    before = _history(unknown_run["db"])
+
+    with pytest.raises(ValueError):
+        _seal(unknown_run)
+
+    assert _count(unknown_run["db"]) == 0 and _history(unknown_run["db"]) == before
+
+
 @pytest.mark.parametrize("unknown_run", ["failed", "needs_input"], indirect=True)
 def test_null_workspace_run_projection_keeps_original_history_and_audit(unknown_run):
     with closing(sqlite3.connect(unknown_run["db"])) as conn, conn:

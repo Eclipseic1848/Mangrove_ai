@@ -40,6 +40,22 @@ def test_plan_is_read_only_and_apply_requires_explicit_approval(unknown_run, mon
     assert len(case["stopped_calls"]) == 2
 
 
+@pytest.mark.parametrize("command,flags", [
+    ("apply", ["--service-window-nonce", "a" * 32]),
+    ("plan", ["--service-window-manifest", "/run/approved.json", "--service-window-manifest-sha256", "b" * 64,
+              "--service-window-nonce", "a" * 32]),
+])
+def test_window_options_are_complete_and_never_used_by_read_only_plan(unknown_run, monkeypatch, capsys, command, flags):
+    import scripts.seal_runtime_run as cli
+
+    before = unknown_run["db"].read_bytes()
+    monkeypatch.setattr(cli.sys, "argv", ["seal_runtime_run.py", command, "--database", str(unknown_run["db"]),
+        "--owner-id", "owner", "--task-id", "task", "--revision", "1", *flags])
+    assert cli.main() == 1
+    assert json.loads(capsys.readouterr().out)["ok"] is False
+    assert unknown_run["db"].read_bytes() == before and unknown_run["stopped_calls"] == []
+
+
 @pytest.mark.parametrize("null_projection", [False, True])
 @pytest.mark.parametrize("independent_blocker", [None, "account_cleanup", "source_reads"])
 def test_real_seal_only_clears_its_own_unknown_projection(unknown_run, tmp_path, independent_blocker, null_projection):

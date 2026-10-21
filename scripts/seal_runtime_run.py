@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from src.runtime_run_seals import _digest, seal_unknown_run, snapshot_unknown_run
 from src.database_migrations import DatabaseTarget, inspect_database
+from src.service_identity_window import ServiceIdentityWindow
 
 
 def main() -> int:
@@ -29,8 +30,15 @@ def main() -> int:
     parser.add_argument("--proof", type=Path)
     parser.add_argument("--service")
     parser.add_argument("--runtime-root", type=Path)
+    parser.add_argument("--service-window-manifest", type=Path)
+    parser.add_argument("--service-window-manifest-sha256")
+    parser.add_argument("--service-window-nonce")
     args = parser.parse_args()
     try:
+        window_values = (args.service_window_manifest, args.service_window_manifest_sha256, args.service_window_nonce)
+        if any(value is not None for value in window_values) and (args.command == "plan" or any(value is None for value in window_values)):
+            raise ValueError("维护窗口三个参数须完整且仅用于 apply")
+        window_args = {"service_window": ServiceIdentityWindow(*window_values)} if all(value is not None for value in window_values) else {}
         inspect_database(DatabaseTarget(profile="webui", path=args.database)).require_current()
         if args.command == "plan":
             with closing(sqlite3.connect(args.database.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
@@ -46,7 +54,7 @@ def main() -> int:
             result = seal_unknown_run(args.database, owner_id=args.owner_id, task_id=args.task_id, revision=args.revision,
                 run_id=args.run_id, actor_id=args.actor_id, approval_reference=args.approval_reference,
                 idempotency_key=args.idempotency_key, expected_snapshot_sha256=args.snapshot_sha256,
-                proof_path=args.proof, service=args.service, runtime_root=args.runtime_root)
+                proof_path=args.proof, service=args.service, runtime_root=args.runtime_root, **window_args)
     except Exception as error:
         print(json.dumps({"ok": False, "error_type": type(error).__name__, "detail": "封存核验未通过；保留历史未知及原记录"}, ensure_ascii=False))
         return 1

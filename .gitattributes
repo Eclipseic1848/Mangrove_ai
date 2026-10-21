@@ -16,3 +16,5 @@ src/database_migrations/alembic/versions/*.sql text eol=lf
 src/database_migrations/alembic/versions/webui_0023_cookie_health_binding.py -text
 # 第三方增量补丁按原始字节冻结；上下文行的空格属于补丁语法。
 external/patches/mediacrawler-cookie-refresh.patch -text -whitespace
+# 特权核验器按审核源码固定摘要，安装与跨平台检出统一 LF。
+scripts/runtime_service_identity.py text eol=lf

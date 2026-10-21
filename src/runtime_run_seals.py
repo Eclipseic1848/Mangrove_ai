@@ -13,6 +13,7 @@ import subprocess
 import sys
 
 from src.database_migrations import DatabaseTarget, inspect_database
+from src.service_identity_window import ServiceIdentityWindow, validate_window_ref, verify_service_window
 
 
 class RuntimeRunSealedError(PermissionError):
@@ -101,6 +102,10 @@ def _proof_valid(proof, snapshot, approval_reference):
     observed = datetime.fromisoformat(proof["observed_at"])
     if observed.utcoffset() is None:
         raise ValueError("停止证明时间必须含时区")
+    if "window_ref" in proof:
+        validate_window_ref(proof["window_ref"])
+        if proof["window_ref"]["approval_reference"] != approval_reference:
+            raise ValueError("维护窗口与停止证明审批不符")
     checks = proof.get("checks")
     if not isinstance(checks, dict) or set(checks) != {"executor", "resources", "relay"}:
         raise ValueError("必须逐 Run 核对执行器、受管资源和 Relay")
@@ -129,6 +134,7 @@ def is_valid_run_seal(conn, user_id: str, task_id: str, revision: int) -> bool:
         return (row["runtime_identity_sha256"] == _digest(snapshot["identity"]) == _digest(_runtime_identity(conn, user_id, task_id, revision))
                 and row["run_id"] == snapshot["identity"]["run_id"] and row["request_sha256"] == _request_digest(row)
                 and 0 <= (sealed_at - observed).total_seconds() <= 600
+                and ("window_ref" not in proof or 0 <= (sealed_at - validate_window_ref(proof["window_ref"])).total_seconds() <= 600)
                 and row["reason"] == "historical_unknown_stopped_run_sealed")
     except (KeyError, TypeError, ValueError, AttributeError):
         return False
@@ -140,20 +146,31 @@ def _service_user_uid(user: str) -> int:
     return int(user) if user.isdecimal() else pwd.getpwnam(user).pw_uid
 
 
-def _require_stopped_service(service: str, runtime_root: Path) -> None:
+def _require_stopped_service(service: str, runtime_root: Path, *, window: ServiceIdentityWindow | None = None,
+                             database: Path | None = None, approval_reference: str = "", target: dict | None = None):
     if sys.platform != "linux" or not re.fullmatch(r"[A-Za-z0-9_.@-]+\.service", service):
         raise ValueError("封存写入仅允许 Linux 已停止的维护窗口")
-    result = subprocess.run(["systemctl", "show", service, "--property=MainPID,ActiveState,SubState,UnitFileState,User,WorkingDirectory"],
+    result = subprocess.run(["systemctl", "show", "--all", "--property=MainPID,LoadState,ActiveState,SubState,UnitFileState,User,WorkingDirectory", "--", service],
                             check=True, capture_output=True, text=True, encoding="utf-8", timeout=10)
     state = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
-    if (state.get("MainPID") != "0" or state.get("ActiveState") != "inactive" or state.get("SubState") != "dead"
+    # 文件标记不能代替已加载状态；旧配置仍 loaded 时不能认作有效隔离。
+    if (state.get("LoadState") != "masked" or state.get("MainPID") != "0" or state.get("ActiveState") != "inactive" or state.get("SubState") != "dead"
             or state.get("UnitFileState") not in {"masked", "masked-runtime"}):
         raise ValueError("服务须先停止并临时屏蔽自动启动")
     runtime_root = runtime_root.resolve(strict=True)
-    # mask 后若原 unit 身份已不可读，继续阻断，不能猜测账号或用另一个空目录代替现役根。
-    if (not runtime_root.is_dir() or not state.get("User") or not state.get("WorkingDirectory") or _service_user_uid(state["User"]) != os.geteuid()
+    if not runtime_root.is_dir() or "User" not in state or "WorkingDirectory" not in state:
+        raise ValueError("服务身份缺失或真实源码根不匹配")
+    # 只有两个字段明确为空才可使用受保护的原身份；缺字段、半空及非空冲突均不能降级。
+    empty_identity = state["User"] == state["WorkingDirectory"] == ""
+    if not empty_identity and (not state["User"] or not state["WorkingDirectory"]
+            or _service_user_uid(state["User"]) != os.geteuid()
             or Path(state["WorkingDirectory"]).resolve(strict=True) != runtime_root):
         raise ValueError("维护账号、原服务账号或真实源码根不匹配")
+    if window is not None:
+        return verify_service_window(window, service=service, runtime_root=runtime_root, database=database,
+                                     approval_reference=approval_reference, target=target)
+    if empty_identity:
+        raise ValueError("空身份必须由 root 保护的原身份窗口核验")
     # 防止在 systemd 之外另有同根 Python 实例；只读本账号进程，不读取命令行和环境。
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
@@ -205,7 +222,7 @@ def _read_proof(path: Path, snapshot: dict, approval_reference: str):
 
 def seal_unknown_run(db_path: Path, *, owner_id: str, task_id: str, revision: int, run_id: str,
                      actor_id: str, approval_reference: str, idempotency_key: str, expected_snapshot_sha256: str,
-                     proof_path: Path, service: str, runtime_root: Path) -> dict:
+                     proof_path: Path, service: str, runtime_root: Path, service_window: ServiceIdentityWindow | None = None) -> dict:
     """仅在已确认停机窗口应用逐 Run 人工裁决；不取消任务、不清除原错误。"""
     if not owner_id or not task_id or type(revision) is not int or revision < 1 or not run_id:
         raise ValueError("需要精确 Owner、任务、修订和原 Run")
@@ -214,7 +231,18 @@ def seal_unknown_run(db_path: Path, *, owner_id: str, task_id: str, revision: in
     inspect_database(DatabaseTarget(profile="webui", path=db_path)).require_current()
     if os.name == "posix" and db_path.stat().st_uid != os.geteuid():
         raise ValueError("封存工具必须由原数据库维护账号执行")
-    _require_stopped_service(service, runtime_root)
+    entry_proof = _proof_document(proof_path) if service_window is not None else None
+
+    def stopped_window():
+        if service_window is None:
+            return _require_stopped_service(service, runtime_root)
+        target = {"owner_id": owner_id, "task_id": task_id, "revision": revision, "run_id": run_id,
+                  "runtime_identity_sha256": entry_proof["runtime_identity_sha256"],
+                  "snapshot_sha256": expected_snapshot_sha256, "request_id": entry_proof["request_id"]}
+        return _require_stopped_service(service, runtime_root, window=service_window, database=db_path,
+                                        approval_reference=approval_reference, target=target)
+
+    current_window = stopped_window()
     from types import SimpleNamespace
     from src.api.execution import execution_lock
 
@@ -230,7 +258,7 @@ def seal_unknown_run(db_path: Path, *, owner_id: str, task_id: str, revision: in
             expected = (owner_id, task_id, revision, run_id, actor_id, approval_reference, idempotency_key)
             actual = tuple(existing[key] for key in ("owner_id", "task_id", "revision", "run_id", "actor_id", "approval_reference", "idempotency_key"))
             if (actual != expected or _digest(json.loads(existing["snapshot_json"])) != expected_snapshot_sha256
-                    or _json(_proof_document(proof_path)) != existing["stop_proof_json"]
+                    or _json(entry_proof if entry_proof is not None else _proof_document(proof_path)) != existing["stop_proof_json"]
                     or not is_valid_run_seal(conn, owner_id, task_id, revision)):
                 raise ValueError("封存幂等键或证明发生冲突")
             return {"sealed": True, "request_sha256": existing["request_sha256"], "sealed_at": existing["sealed_at"], "replayed": True}
@@ -238,13 +266,24 @@ def seal_unknown_run(db_path: Path, *, owner_id: str, task_id: str, revision: in
         if snapshot["identity"]["run_id"] != run_id or _digest(snapshot) != expected_snapshot_sha256:
             raise ValueError("待裁决 Run 身份或状态已变化")
         proof = _read_proof(proof_path, snapshot, approval_reference)
+        if (entry_proof is not None and proof != entry_proof
+                or current_window is not None and proof.get("window_ref") != current_window.window_ref
+                or "window_ref" in proof and current_window is None):
+            raise ValueError("逐 Run 停止证明与当前受保护窗口不符")
         row = {"owner_id": owner_id, "task_id": task_id, "revision": revision, "run_id": run_id,
                "runtime_identity_sha256": _digest(snapshot["identity"]), "snapshot_json": _json(snapshot),
                "stop_proof_json": _json(proof), "actor_id": actor_id, "reason": "historical_unknown_stopped_run_sealed",
                "approval_reference": approval_reference, "idempotency_key": idempotency_key}
         row["request_sha256"] = _request_digest(row)
         # 在同一写事务结束前再次核验停机；证明文件只绑定人工审批，不替代当前停机事实。
-        _require_stopped_service(service, runtime_root)
-        row["sealed_at"] = datetime.now(timezone.utc).isoformat()
+        final_window = stopped_window()
+        sealed_at = datetime.now(timezone.utc)
+        if not 0 <= (sealed_at - _proof_valid(proof, snapshot, approval_reference)).total_seconds() <= 600:
+            raise ValueError("提交时停止证明已过期或来自未来")
+        if current_window is not None:
+            if final_window is None or final_window.window_ref != current_window.window_ref:
+                raise ValueError("提交前维护窗口身份已变化")
+            final_window.require_fresh(sealed_at)
+        row["sealed_at"] = sealed_at.isoformat()
         conn.execute(f'INSERT INTO runtime_run_seals ({",".join(row)}) VALUES ({",".join("?" for _ in row)})', tuple(row.values()))
         return {"sealed": True, "request_sha256": row["request_sha256"], "sealed_at": row["sealed_at"], "replayed": False}

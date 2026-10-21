@@ -1725,8 +1725,9 @@ Repository 或 startup 自动补表。
 
 生产 `apply` 仅在已批准的停机窗口执行：服务须 inactive、MainPID 为 0，并临时 masked，
 同根不能有另一个 Python 实例；工具与服务使用同一维护账号，并记录有效超级管理员身份。
-必须现场核对 unit 的 User、WorkingDirectory 与维护账号、真实源码根一致；mask 后若属性
-不可用，工具保持阻断，不能猜默认值或改用无关 unit/空目录绕过。
+必须现场核对 unit 的 User、WorkingDirectory 与维护账号、真实源码根一致；只有 mask 后
+两个键都明确为空时，才可使用下述受保护原身份窗口。缺字段、半空或非空冲突继续拒绝，
+不能猜默认值或改用无关 unit/空目录绕过；磁盘 masked 标记不能替代有效 `LoadState=masked`。
 屏蔽与停止本身不是本工具动作，必须先证明在制任务自然收尾，再按具体方案操作。封存工具
 不会停服务、取消 Run、删除资源或恢复接单；失败保持阻断。
 
@@ -1751,9 +1752,57 @@ nonce 和带时区采样时间；三项均须明确 stopped，原件逐一绑定
 
 同一写事务复查身份、代数、快照和停机事实后，只追加一条封存兼审计记录。原 Run、failure、
 事件与结果不改写；数据库触发器同时禁止封存记录和原运行事实被更新、删除或 REPLACE。
-相同请求重放只返回旧回执，不重新证明停止；异参幂等键或证据冲突拒绝。封存后 Kernel、
+相同请求重放仍先核当前维护门，只返回旧回执、不重新生成逐 Run 证明；异参幂等键或证据冲突拒绝。封存后 Kernel、
 模型与文档 Grant、候选复验、工作台继续/发布和来源删除均检查同一持久权威；旧 token
 不能绕过。原 Run 不得恢复或重发，新修订仍走原显式合同，不通过取消旧 Run 清除未知。
+
+#### masked 双空身份的受保护窗口
+
+该兼容只替换原服务身份来源；三份逐 Run 原始观察、有效超级管理员、快照与账号代数门均
+保持。`scripts/runtime_service_identity.py` 是只用标准库的本机工具，须经具体生产方案批准后，
+按审核 LF 原件安装到 `/usr/local/lib/mangrove/runtime_service_identity.py`。原件及祖先 root
+所有且其他账号不可写，摘要须精确匹配调用层 `src/service_identity_window.py` 的固定值。
+使用 `/usr/bin/python3 -I -B`；禁止 root 执行服务账号可写的候选代码或 Conda 解释器。
+不新增 sudoers，不把该工具开放为 API。以下是合同说明，不能代替首次生产窗口批准。
+
+root 批准清单为私有 0700 目录内的 root:root 0600 普通文件，只允许下列字段：
+
+| 字段 | 约束 |
+| --- | --- |
+| version、approval_reference、service | version=1；明确审批引用；固定 `mangrove.service` |
+| runtime_root、candidate_root、database | canonical 绝对路径；CLI 在候选根运行且位于原应用根之外 |
+| candidate_manifest_sha256 | 已审核候选清单摘要；清单文件自身摘要另由命令绑定 |
+| targets | 每项精确包含 owner_id/task_id/revision/run_id/runtime_identity_sha256/snapshot_sha256/request_id |
+| configuration_preservation | source/preserved 的精确保全映射；同文件系统、原 inode/字节/权限，不由工具移动 |
+| mask_path | 仅原服务在 `/etc/systemd/system` 或 `/run/systemd/system` 的精确 mask 路径 |
+
+`capture` 自行读取 live loaded 单元、原 PID/boot、源码根、数据库及原 unit/全部 drop-in，
+生成随机 nonce 和 `/run/mangrove-run-seal/<nonce>/identity.json` root 私有回执。返回的
+`identity_captured` **不表示已停止**；普通 JSON、自报 PID 或调用方指定 nonce 不能替代。
+
+```bash
+sudo -n -- /usr/bin/python3 -I -B /usr/local/lib/mangrove/runtime_service_identity.py capture \
+  --manifest "$ROOT_APPROVED_MANIFEST" --manifest-sha256 "$ROOT_MANIFEST_SHA256" \
+  --approval-reference "$APPROVAL_REFERENCE"
+```
+
+实际停止/mask 及可能需要的原配置保全须另按批准步骤完成；工具不执行这些动作。每次 verify
+核同 boot、有效 mask/PID0/inactive/dead、无待重读配置、原 PID 消失及无同根 Python，
+无自身 PID 豁免。数据库只核 path/dev/ino/uid/mode，允许迁移和封存原地写入、拒绝换 inode。
+窗口 UTC 与 monotonic 都最多 600 秒，到期不能自动启动服务刷新。
+
+主证明增加完整六字段 `window_ref`（version、nonce、receipt_sha256、manifest_sha256、
+approval_reference、captured_at），其余逐 Run 三份证据保持。随后在原 `apply` 命令补齐：
+
+```bash
+  --service-window-manifest "$ROOT_APPROVED_MANIFEST" \
+  --service-window-manifest-sha256 "$ROOT_MANIFEST_SHA256" --service-window-nonce "$WINDOW_NONCE"
+```
+
+这三个参数必须同时给出；只读 `plan` 拒绝窗口参数且不调用特权工具。首次写入事务前与
+INSERT 前各核一次，最终 `sealed_at` 再核 proof 与窗口时限，跨期不写入。历史审计验证
+不读 root 回执、不调用 sudo、不因后来过期而失效；精确重放可另用新的当前窗口，但旧
+proof/ref/request_sha 原样保留，不续期、不写第二条审计。设计见 [ADR-0050](../adr/0050-masked-service-identity-window.md)。
 
 #### 已接入维护门的更新顺序
 
