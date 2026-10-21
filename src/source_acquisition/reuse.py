@@ -7,6 +7,7 @@ from contextlib import closing
 import sqlite3
 
 from src.config.settings import settings
+from src.deployment_quarantine import assert_not_quarantined, assert_task_not_quarantined
 from src.services.upload_store import UploadStore
 from src.source_acquisition.service import SourceAcquisitionRepository
 
@@ -263,11 +264,24 @@ class SourceReadUse:
         self.task_id=task_id;self.revision=revision;self.use_id="source_use_"+uuid.uuid4().hex
         self._locks=None
 
+    def _require_unquarantined(self,connection):
+        assert_not_quarantined(connection,self.owner_id,"source_read",self.use_id)
+        if self.task_id is not None:
+            assert_task_not_quarantined(connection,self.owner_id,self.task_id)
+        # 重建对象可漏填 task_id；原登记关联仍须核对，不能借空投影恢复旧读。
+        row=connection.execute("SELECT task_id FROM source_read_uses WHERE owner_id=? AND use_id=?",(self.owner_id,self.use_id)).fetchone()
+        if row and row[0] is not None and row[0]!=self.task_id:
+            assert_task_not_quarantined(connection,self.owner_id,row[0])
+
     def recheck(self):
+        with closing(sqlite3.connect(settings.webui_db_path)) as connection:
+            self._require_unquarantined(connection)
         for ref in self.refs:
             resolve_frozen_source(self.owner_id,ref)
 
     def start(self, *, lock_timeout=0):
+        with closing(sqlite3.connect(settings.webui_db_path)) as connection:
+            self._require_unquarantined(connection)
         # 只等待短暂登记事务；文件传输、解析和运行读取不再占据独占锁。
         self._locks=source_locks(self.owner_id,self.refs,timeout=max(5,lock_timeout),read_registration=True)
         self._locks.__enter__()
@@ -275,12 +289,16 @@ class SourceReadUse:
         try:
             # 先登记实际使用，再做任何原件读取；崩溃不能留下无事实的读取窗口。
             with closing(sqlite3.connect(settings.webui_db_path)) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                self._require_unquarantined(connection)
                 connection.execute("INSERT INTO source_read_uses VALUES (?,?,?,?,?,?,?,?,NULL)",(self.use_id,self.owner_id,self.task_id,self.revision,self.operation,json.dumps(self.refs,ensure_ascii=False),"active",datetime.now(timezone.utc).isoformat()))
                 connection.commit()
             registered=True
             self._locks.__exit__(None,None,None);self._locks=None
             self.refs=[resolve_frozen_source(self.owner_id,ref)["frozen_ref"] for ref in self.refs]
             with closing(sqlite3.connect(settings.webui_db_path)) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                self._require_unquarantined(connection)
                 connection.execute("UPDATE source_read_uses SET source_refs_json=? WHERE use_id=? AND owner_id=?",(json.dumps(self.refs,ensure_ascii=False),self.use_id,self.owner_id))
                 connection.commit()
         except BaseException:
@@ -295,6 +313,8 @@ class SourceReadUse:
     def finish(self,*,known):
         try:
             with closing(sqlite3.connect(settings.webui_db_path)) as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                self._require_unquarantined(connection)
                 connection.execute("UPDATE source_read_uses SET state=?,finished_at=? WHERE owner_id=? AND use_id=?",("completed" if known else "unknown",datetime.now(timezone.utc).isoformat(),self.owner_id,self.use_id))
                 connection.commit()
         finally:

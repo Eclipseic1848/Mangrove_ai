@@ -65,10 +65,14 @@ async def lifespan(app: FastAPI):
         get_semantic_workspace_manager,
     )
     from src.config.runtime_config import apply_global_overrides
+    from src.deployment_quarantine import load_quarantine
     from src.observability.workspace_telemetry import (
         configure_workspace_telemetry,
         shutdown_workspace_telemetry,
     )
+    # 先核持久隔离权威，不能在清单缺失时启动后台重领旧工作。
+    with get_store()._conn() as quarantine_connection:
+        load_quarantine(quarantine_connection)
     apply_global_overrides(get_store())
     if settings.workspace_telemetry_enabled:
         try:
@@ -132,6 +136,12 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Mangrove Web UI Gateway", version=__version__, lifespan=lifespan)
 
 from src.runtime_run_seals import RuntimeRunSealedError
+from src.deployment_quarantine import QuarantinedExecutionError
+
+
+@app.exception_handler(QuarantinedExecutionError)
+async def quarantined_execution_response(_request, _error):
+    return JSONResponse(status_code=409, content={"detail": "历史工作已隔离，结果仍未知，暂不能执行或恢复"})
 
 
 @app.exception_handler(RuntimeRunSealedError)

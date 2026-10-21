@@ -8,11 +8,21 @@ import logging
 import os
 from pathlib import Path
 import re
+import sqlite3
 import time
 import uuid
+from contextlib import closing
 
 from src.services.deployment_drain import DeploymentGate
 from src.services.deployment_preflight import DrainBlocker, collect_persisted_blockers
+
+
+def collect_quarantine_summary(webui_db: Path) -> dict:
+    from src.deployment_quarantine import quarantine_summary
+
+    with closing(sqlite3.connect(webui_db.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
+        conn.execute("PRAGMA query_only=ON")
+        return quarantine_summary(conn)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -74,9 +84,11 @@ async def publish_drain_report(
         if first["phase"] != "open":
             try:
                 blockers = ()
+                legacy_quarantine = None
                 if not first["total_active"]:
                     blockers = await asyncio.to_thread(collect_persisted_blockers, webui_db, scheduler_db)
                     blockers += await asyncio.to_thread(collect_resource_blockers, execution_root)
+                    legacy_quarantine = await asyncio.to_thread(collect_quarantine_summary, webui_db)
                 final = gate.snapshot()
                 stable = (first["phase"], first["request_id"]) == (final["phase"], final["request_id"])
                 report = {
@@ -85,6 +97,7 @@ async def publish_drain_report(
                     "blockers": [asdict(item) for item in blockers],
                     "quiet": stable and final["phase"] in {"draining", "sealed"}
                     and not first["total_active"] and not final["total_active"] and not blockers,
+                    "legacy_quarantine": legacy_quarantine,
                 }
                 # 仅运维已创建的目录内落盘；普通启动和普通请求不创建控制文件。
                 write_private_json(gate.state_dir / "status.json", report)

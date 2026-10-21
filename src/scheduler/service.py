@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional
 from .cron import Schedule, compute_next_run
 from .store import ScheduleStore
 from src import account_execution as execution
+from src.deployment_quarantine import QuarantinedExecutionError
 from src.timezone import now as beijing_now, wall_time
 from src.services.deployment_drain import get_deployment_gate
 
@@ -123,7 +124,7 @@ class SchedulerService:
         try:
             try:
                 auth, task = self.store.claim_execution(task_id, expected_task=task, manual=keep_next_run)
-            except execution.ExecutionDenied:
+            except (execution.ExecutionDenied, QuarantinedExecutionError):
                 if keep_next_run:
                     raise
                 return False

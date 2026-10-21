@@ -8,6 +8,7 @@ import yaml
 
 from src.agentic_runtime.repository import AgenticRuntimeRepository
 from src.delivery_publishing.models import canonical_hash
+from src.deployment_quarantine import load_quarantine
 from src.memory import templates
 from src.memory._frontmatter import parse_frontmatter
 from src.memory._library_scope import entry_path, may_mutate, read_entry, require_owner
@@ -17,6 +18,20 @@ from src.timezone import now
 
 
 _BUSINESS_FAILURE_CHECKS = {"semantic_goal", "artifact_count", "table_output_contract"}
+
+
+def _pending_unquarantined(connection, query):
+    blocked = {(target["owner_id"], target["resource_id"])
+               for target in load_quarantine(connection)["targets"] if target["kind"] == "task"}
+    rows = []
+    # 先排除隔离旧项再计批次，避免它们永久占满前100条并饿死新任务。
+    for row in connection.execute(query):
+        if (row["owner_id"], row["task_id"]) in blocked:
+            continue
+        rows.append(row)
+        if len(rows) == 100:
+            break
+    return rows
 
 
 def _local_learning_binding(database, runtime, *, owner_id, task_id, revision):
@@ -95,9 +110,8 @@ def pending_lesson_failures(database):
         connection.row_factory = sqlite3.Row
         connection.execute("BEGIN IMMEDIATE")
         # 仅接管新版明确请求学习的失败事件；队列不可写不影响主任务，也不回填历史任务。
-        connection.execute(
-            "INSERT OR IGNORE INTO library_learning_receipts "
-            "SELECT e.user_id,e.task_id,r.revision,r.run_id,'lesson_new','',NULL,'','','queued',?,? "
+        requested = _pending_unquarantined(connection,
+            "SELECT e.user_id AS owner_id,e.task_id,r.revision,r.run_id "
             "FROM semantic_workspace_events e JOIN agentic_runtime_runs r "
             "ON r.user_id=e.user_id AND r.task_id=e.task_id "
             "AND r.revision=json_extract(e.details_json,'$.revision') "
@@ -106,11 +120,16 @@ def pending_lesson_failures(database):
             "AND json_extract(e.details_json,'$.failure_learning_requested')=1 "
             "AND NOT EXISTS (SELECT 1 FROM library_learning_receipts l "
             "WHERE l.owner_id=r.user_id AND l.task_id=r.task_id AND l.revision=r.revision "
-            "AND l.run_id=r.run_id AND l.kind='lesson_new') ORDER BY e.created_at LIMIT 100",
-            (now().isoformat(), now().isoformat()),
+            "AND l.run_id=r.run_id AND l.kind='lesson_new') ORDER BY e.created_at",
         )
-        rows = connection.execute("SELECT owner_id,task_id,revision,run_id FROM library_learning_receipts "
-            "WHERE kind='lesson_new' AND state IN ('queued','pending') ORDER BY updated_at LIMIT 100").fetchall()
+        connection.executemany(
+            "INSERT OR IGNORE INTO library_learning_receipts "
+            "VALUES (?,?,?,?,'lesson_new','',NULL,'','','queued',?,?)",
+            [(*tuple(row), now().isoformat(), now().isoformat()) for row in requested],
+        )
+        rows = _pending_unquarantined(connection,
+            "SELECT owner_id,task_id,revision,run_id FROM library_learning_receipts "
+            "WHERE kind='lesson_new' AND state IN ('queued','pending') ORDER BY updated_at")
         connection.executemany("UPDATE library_learning_receipts SET updated_at=? WHERE owner_id=? "
             "AND task_id=? AND revision=? AND run_id=? AND kind='lesson_new' AND state IN ('queued','pending')",
             [(now().isoformat(), *tuple(row)) for row in rows])
@@ -246,13 +265,13 @@ def pending_template_uses(database):
     with closing(sqlite3.connect(database)) as connection, connection:
         connection.row_factory = sqlite3.Row
         connection.execute("BEGIN IMMEDIATE")
-        rows = connection.execute(
+        rows = _pending_unquarantined(connection,
             "SELECT DISTINCT r.owner_id,r.task_id,r.revision,r.run_id,d.delivery_id "
             "FROM library_learning_receipts r JOIN formal_delivery_runs d "
             "ON d.owner_id=r.owner_id AND d.task_id=r.task_id AND d.task_revision=r.revision AND d.run_id=r.run_id "
             "WHERE r.kind IN ('template_use','template_new','lesson_use_1','lesson_use_2','lesson_use_3') AND r.state IN ('queued','pending') AND d.status='succeeded' "
-            "ORDER BY r.updated_at LIMIT 100"
-        ).fetchall()
+            "ORDER BY r.updated_at"
+        )
         # 拒绝授权或删除的任务也轮转，不能永久占满每轮前 100 条。
         connection.executemany(
             "UPDATE library_learning_receipts SET updated_at=? WHERE owner_id=? AND task_id=? "

@@ -393,7 +393,7 @@ def test_webui_0004_migrates_legacy_plaintext_and_backup_has_no_plaintext(
     with sqlite3.connect(database) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("webui_0024",)
+        ).fetchone() == ("webui_0025",)
         values = {
             row[0]
             for row in connection.execute(

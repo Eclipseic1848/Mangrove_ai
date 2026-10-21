@@ -7,6 +7,7 @@ import json
 import sqlite3
 
 from src.config.settings import settings
+from src.deployment_quarantine import assert_not_quarantined, assert_task_not_quarantined
 from src.source_acquisition import reuse
 
 
@@ -18,6 +19,25 @@ def _connection():
     connection=sqlite3.connect(settings.webui_db_path)
     connection.row_factory=sqlite3.Row
     return connection
+
+
+def _require_operation_unquarantined(connection,owner_id,operation_id):
+    assert_not_quarantined(connection,owner_id,"deletion",operation_id)
+    row=connection.execute('SELECT task_id FROM source_deletion_operations WHERE owner_id=? AND operation_id=?',(owner_id,operation_id)).fetchone()
+    if row:
+        if row[0] is None:
+            raise ValueError('source_deletion_task_unconfirmed')
+        assert_task_not_quarantined(connection,owner_id,row[0])
+
+
+def _require_source_deletion_unquarantined(connection,owner_id,key):
+    row=connection.execute('SELECT state,operation_id FROM source_deletions WHERE owner_id=? AND source_key=?',(owner_id,key)).fetchone()
+    if row is None:
+        raise ValueError('source_deletion_missing')
+    if not connection.execute('SELECT 1 FROM source_deletion_operations WHERE owner_id=? AND operation_id=?',(owner_id,row[1])).fetchone():
+        raise ValueError('source_deletion_operation_missing')
+    _require_operation_unquarantined(connection,owner_id,row[1])
+    return row[0]
 
 
 def deletion_plan(owner_id,task_id,shared_policy='keep_shared'):
@@ -149,7 +169,10 @@ def operation_by_key(owner_id,task_id,key):
 def begin_operation(owner_id,task_id,token,policy,key):
     request_hash=hashlib.sha256(_json([task_id,token,policy]).encode()).hexdigest()
     with closing(_connection()) as connection:
+        assert_task_not_quarantined(connection,owner_id,task_id)
         existing=connection.execute('SELECT * FROM source_deletion_operations WHERE owner_id=? AND task_id=? AND idempotency_key=?',(owner_id,task_id,key)).fetchone()
+        if existing:
+            _require_operation_unquarantined(connection,owner_id,existing['operation_id'])
     if existing:
         if existing['request_hash']!=request_hash: raise ValueError('idempotency_conflict')
         return _public_operation(existing)
@@ -165,8 +188,10 @@ def begin_operation(owner_id,task_id,token,policy,key):
         minimal=dict(task_id=task_id,shared_policy=policy,objects=[{k:v for k,v in x.items() if k not in {'label','acquired_at','time_kind','media_type','size_bytes'}} for x in plan['objects']],affected_tasks=plan['affected_tasks'])
         with closing(_connection()) as connection:
             connection.execute('BEGIN IMMEDIATE')
+            assert_task_not_quarantined(connection,owner_id,task_id)
             existing=connection.execute('SELECT * FROM source_deletion_operations WHERE owner_id=? AND task_id=? AND idempotency_key=?',(owner_id,task_id,key)).fetchone()
             if existing:
+                _require_operation_unquarantined(connection,owner_id,existing['operation_id'])
                 if existing['request_hash']!=request_hash: raise ValueError('idempotency_conflict')
                 return _public_operation(existing)
             # SQLite写锁覆盖最终引用快照到删除意图，发布提交不能插入这个窗口。
@@ -176,6 +201,7 @@ def begin_operation(owner_id,task_id,token,policy,key):
             authorization=current_authorization(required=True)
             if authorization.owner_user_id!=owner_id: raise PermissionError('Owner不匹配')
             require_authorized(connection,authorization)
+            _require_operation_unquarantined(connection,owner_id,operation_id)
             _require_plan_unsealed(connection,owner_id,final_plan)
             assert_sources_readable(owner_id,refs,connection=connection)
             connection.execute('INSERT INTO source_deletion_operations VALUES (?,?,?,?,?,?,?,?,?,?)',(operation_id,owner_id,task_id,key,request_hash,_json(minimal),'planned',None,_now(),_now()))
@@ -188,6 +214,8 @@ def begin_operation(owner_id,task_id,token,policy,key):
 
 def _set_state(owner_id,operation_id,state,error=None):
     with closing(_connection()) as connection:
+        connection.execute('BEGIN IMMEDIATE')
+        _require_operation_unquarantined(connection,owner_id,operation_id)
         connection.execute('UPDATE source_deletion_operations SET state=?,error_code=?,updated_at=? WHERE owner_id=? AND operation_id=?',(state,error,_now(),owner_id,operation_id));connection.commit()
 
 
@@ -201,7 +229,7 @@ def _remove_object(owner_id,item):
     from pathlib import Path
     key=item['source_key'];ref=_ref(item)
     with closing(_connection()) as connection:
-        phase=connection.execute('SELECT state FROM source_deletions WHERE owner_id=? AND source_key=?',(owner_id,key)).fetchone()[0]
+        phase=_require_source_deletion_unquarantined(connection,owner_id,key)
     if item['kind'] in {'upload','delivery_output'}:
         if item['kind']=='upload':
             store=reuse.uploads();base=store._user_dir(owner_id,'objects')
@@ -212,6 +240,8 @@ def _remove_object(owner_id,item):
             reuse.resolve_frozen_source(owner_id,ref)
             # 每项字节已核后记录删除阶段；重启仅此阶段允许确认原路径已经缺失。
             with closing(_connection()) as connection:
+                connection.execute('BEGIN IMMEDIATE')
+                _require_source_deletion_unquarantined(connection,owner_id,key)
                 connection.execute("UPDATE source_deletions SET state='removing' WHERE owner_id=? AND source_key=?",(owner_id,key));connection.commit()
             path.unlink()
         elif phase!='removing':
@@ -226,6 +256,7 @@ def _remove_object(owner_id,item):
         reuse.resolve_frozen_source(owner_id,ref)
     with closing(_connection()) as connection:
         connection.execute('BEGIN IMMEDIATE')
+        _require_source_deletion_unquarantined(connection,owner_id,key)
         identity=key.split(':',1)[1]
         connection.execute('DELETE FROM source_inspection_reports WHERE user_id=? AND artifact_id=?',(owner_id,identity))
         # 绑定保存了检查报告的正文副本；保留冻结身份，清除精确来源的观察正文。
@@ -268,6 +299,10 @@ def _remove_object(owner_id,item):
 def _require_tasks_unsealed(connection,owner_id,task_ids):
     from src.runtime_run_seals import assert_run_not_sealed
     for task_id in task_ids:
+        assert_task_not_quarantined(connection,owner_id,task_id)
+        # 直接清理入口也须遵守原删除操作隔离，不能靠绕开 continue 进入物理删除。
+        for operation in connection.execute('SELECT operation_id FROM source_deletion_operations WHERE owner_id=? AND task_id=?',(owner_id,task_id)):
+            _require_operation_unquarantined(connection,owner_id,operation[0])
         selected=task_ids[task_id] if isinstance(task_ids,dict) else None
         revisions=connection.execute('SELECT revision FROM semantic_workspace_revisions WHERE user_id=? AND task_id=? UNION SELECT revision FROM agentic_runtime_runs WHERE user_id=? AND task_id=?',(owner_id,task_id,owner_id,task_id)).fetchall()
         for row in revisions:
@@ -381,6 +416,8 @@ def _cleanup_runtime_copies(owner_id,task_ids):
 
 
 async def _continue_operation(owner_id,operation_id,manager):
+    with closing(_connection()) as connection:
+        _require_operation_unquarantined(connection,owner_id,operation_id)
     operation=get_operation(owner_id,operation_id)
     if operation['state'] in {'completed','needs_confirmation'}: return operation
     with closing(_connection()) as connection:
@@ -458,6 +495,8 @@ async def _continue_operation(owner_id,operation_id,manager):
 
 
 def _reconfirm_operation(owner_id,operation_id,token,policy):
+    with closing(_connection()) as connection:
+        _require_operation_unquarantined(connection,owner_id,operation_id)
     current=get_operation(owner_id,operation_id)
     if current['state']!='needs_confirmation': raise ValueError('operation_not_awaiting_confirmation')
     with closing(_connection()) as connection:
@@ -472,6 +511,7 @@ def _reconfirm_operation(owner_id,operation_id,token,policy):
             minimal['external_runtime_runs']=prior['external_runtime_runs']
         with closing(_connection()) as connection:
             connection.execute('BEGIN IMMEDIATE')
+            _require_operation_unquarantined(connection,owner_id,operation_id)
             for item in minimal['objects']:
                 existing=connection.execute('SELECT operation_id,state FROM source_deletions WHERE owner_id=? AND source_key=?',(owner_id,item['source_key'])).fetchone()
                 if existing and existing['operation_id']!=operation_id: raise ValueError('source_in_use')
@@ -489,6 +529,8 @@ async def continue_operation(owner_id,operation_id,manager,*,plan_token=None,sha
     from filelock import FileLock,Timeout
     from src.api.execution import execution_checkpoint
     execution_checkpoint(required=True)
+    with closing(_connection()) as connection:
+        _require_operation_unquarantined(connection,owner_id,operation_id)
     get_operation(owner_id,operation_id)
     path=Path(settings.webui_db_path).resolve().parent/'.source-read-locks'
     path.mkdir(parents=True,exist_ok=True)

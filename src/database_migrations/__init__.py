@@ -104,7 +104,7 @@ class RestoreVerification:
 
 
 _PROFILE_HEADS = {
-    "webui": "webui_0024",
+    "webui": "webui_0025",
     "scheduler": "scheduler_0005",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",

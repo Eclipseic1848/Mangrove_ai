@@ -93,7 +93,7 @@ def test_webui_0010_preserves_source_history_and_supports_recovery(tmp_path: Pat
         connection.commit()
     before = database.read_bytes()
     target = DatabaseTarget("webui", database)
-    assert inspect_database(target).pending_revisions == ("webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020", "webui_0021", "webui_0022", "webui_0023", "webui_0024")
+    assert inspect_database(target).pending_revisions == ("webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020", "webui_0021", "webui_0022", "webui_0023", "webui_0024", "webui_0025")
     with pytest.raises(SchemaNotCurrentError):
         WebUIStore(str(database))
     assert database.read_bytes() == before
@@ -103,7 +103,7 @@ def test_webui_0010_preserves_source_history_and_supports_recovery(tmp_path: Pat
         expected_source_sha256=hashlib.sha256(before).hexdigest(),
     )
     assert receipt.source_revision == "webui_0009"
-    assert receipt.applied_revisions == ("webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020", "webui_0021", "webui_0022", "webui_0023", "webui_0024")
+    assert receipt.applied_revisions == ("webui_0010", "webui_0011", "webui_0012", "webui_0013", "webui_0014", "webui_0015", "webui_0016", "webui_0017", "webui_0018", "webui_0019", "webui_0020", "webui_0021", "webui_0022", "webui_0023", "webui_0024", "webui_0025")
     with closing(sqlite3.connect(database)) as connection:
         columns = {row[1]: row for row in connection.execute(
             "PRAGMA table_info(source_acquisition_attempts)"
@@ -171,7 +171,7 @@ def test_current_webui_installs_component_schemas_and_evidence(tmp_path: Path) -
     with closing(sqlite3.connect(database)) as connection:
         assert connection.execute(
             "SELECT version_num FROM alembic_version"
-        ).fetchone() == ("webui_0024",)
+        ).fetchone() == ("webui_0025",)
         candidate_rows = connection.execute(
             "SELECT migration_id, backup_sha256 "
             "FROM candidate_verification_migrations ORDER BY migration_id"
@@ -190,6 +190,47 @@ def test_current_webui_installs_component_schemas_and_evidence(tmp_path: Path) -
             "SELECT backup_sha256 FROM capability_acquisition_migrations "
             "WHERE migration_id='0001_acquisition_runs'"
         ).fetchone() == (receipt.backup_sha256,)
+
+
+def test_webui_0025_preserves_unknown_history_seal_schema_and_verified_recovery(tmp_path: Path) -> None:
+    database = tmp_path / "webui.db"
+    _upgrade(database, "webui_0024")
+    failure = '{\n  "error_code": "MODEL_OUTCOME_UNKNOWN", "cause_summary": "原始未知事实"\n}'
+    tables = ("account_execution_bindings", "semantic_workspace_tasks", "agentic_runtime_runs", "agentic_runtime_events", "source_read_uses", "runtime_run_seals")
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("INSERT INTO users(user_id,username,password_hash,created_at) VALUES ('owner','synthetic-owner','synthetic-hash','before')")
+        connection.execute("INSERT INTO account_execution_bindings VALUES ('owner','workspace','task',0,'cleanup_failed',1)")
+        connection.execute("INSERT INTO semantic_workspace_tasks(task_id,user_id,title,objective_text,status,active_revision,run_id,failure_json,created_at,updated_at) "
+                           "VALUES ('task','owner','合成历史任务','保留未知','needs_input',1,NULL,?,'before','before')", (failure,))
+        connection.execute("INSERT INTO agentic_runtime_runs(user_id,task_id,revision,runtime_version,permission_profile,status,run_id,failure_json,created_at,updated_at) "
+                           "VALUES ('owner','task',1,'pi','standard','failed','original-run',?,'before','before')", (failure,))
+        connection.execute("INSERT INTO agentic_runtime_events(event_id,user_id,task_id,revision,event_type,summary,details_json,created_at) "
+                           "VALUES ('original-event','owner','task',1,'runtime.failed','原始未知事件',?,'before')", (failure,))
+        connection.execute("INSERT INTO source_read_uses VALUES ('old-use','owner',NULL,NULL,'preview','[]','unknown','before',NULL)")
+        history = {table: connection.execute(f'SELECT * FROM "{table}"').fetchall() for table in tables}
+        byte_history = connection.execute("SELECT CAST(failure_json AS BLOB) FROM agentic_runtime_runs").fetchall()
+        seal_schema = connection.execute("SELECT type,name,sql FROM sqlite_master WHERE name='runtime_run_seals' "
+                                         "OR name GLOB 'runtime_run_seals_*' OR name GLOB '*_sealed_no_*' ORDER BY name").fetchall()
+    target = DatabaseTarget("webui", database)
+    original_sha256 = hashlib.sha256(database.read_bytes()).hexdigest()
+    receipt = apply_migrations(target, tmp_path / "before-0025.db", expected_source_sha256=original_sha256)
+    assert receipt.source_revision == "webui_0024"
+    assert receipt.target_revision == "webui_0025"
+    assert receipt.applied_revisions == ("webui_0025",)
+    with closing(sqlite3.connect(database)) as connection:
+        assert {table: connection.execute(f'SELECT * FROM "{table}"').fetchall() for table in tables} == history
+        assert connection.execute("SELECT CAST(failure_json AS BLOB) FROM agentic_runtime_runs").fetchall() == byte_history
+        assert connection.execute("SELECT type,name,sql FROM sqlite_master WHERE name='runtime_run_seals' "
+                                  "OR name GLOB 'runtime_run_seals_*' OR name GLOB '*_sealed_no_*' ORDER BY name").fetchall() == seal_schema
+    inspect_database(target).require_current()
+    restored = tmp_path / "restored-0024.db"
+    shutil.copyfile(receipt.backup_path, restored)
+    verification = verify_restored_copy(receipt.receipt_path, restored)
+    assert verification.integrity_check == "ok"
+    assert hashlib.sha256(restored.read_bytes()).hexdigest() == receipt.backup_sha256
+    assert inspect_database(DatabaseTarget("webui", restored)).current_revision == "webui_0024"
+    with closing(sqlite3.connect(restored)) as connection:
+        assert {table: connection.execute(f'SELECT * FROM "{table}"').fetchall() for table in tables} == history
 
 
 def test_current_webui_resumes_known_history_without_rewriting_evidence(
@@ -307,7 +348,7 @@ def test_current_webui_resumes_known_history_without_rewriting_evidence(
             )
         connection.commit()
 
-    _upgrade(database, "webui_0024")
+    _upgrade(database, "webui_0025")
 
     attempts = SqliteCandidateVerificationRepository(database).list_for_candidate(
         "owner-a",

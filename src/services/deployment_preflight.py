@@ -1,12 +1,13 @@
 """部署前只读核对持久停止事实；不修复、不取消，也不重放业务。"""
 from __future__ import annotations
 
-from contextlib import closing
+from contextlib import ExitStack, closing
 from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
 
 from src.database_migrations import DatabaseTarget, inspect_database
+from src.deployment_quarantine import load_quarantine, verify_quarantine_records
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,7 @@ _WEBUI_CHECKS = (
                 AND json_extract(v.payload_json,'$.actor_id')=b.owner_user_id AND v.status='queued'
                 AND NOT EXISTS (SELECT 1 FROM capability_platform_validation_leases l WHERE l.run_id=v.run_id)))
         ))"""),
-    ("account_hold", "SELECT count(*) FROM account_execution_holds WHERE status!='completed' OR reconciliation_complete!=1 OR error_code IS NOT NULL"),
+    ("account_hold", "SELECT count(*) FROM account_execution_holds WHERE (status!='completed' OR reconciliation_complete!=1 OR error_code IS NOT NULL)"),
     ("source_reads", "SELECT count(*) FROM source_read_uses WHERE state!='completed'"),
     ("source_deletion_operations", "SELECT count(*) FROM source_deletion_operations WHERE state NOT IN ('completed','needs_confirmation')"),
     ("source_deletions", "SELECT count(*) FROM source_deletions WHERE state!='deleted'"),
@@ -63,6 +64,19 @@ _WEBUI_CHECKS = (
 _SCHEDULER_CHECKS = (
     ("scheduler_runs", "SELECT count(*) FROM scheduled_task_runs WHERE state IN ('running','unknown')"),
 )
+
+_CHECK_SOURCES = {
+    "account_cleanup": ("account_execution_bindings", ""), "account_active": ("account_execution_bindings", "b"),
+    "account_hold": ("account_execution_holds", ""), "source_reads": ("source_read_uses", ""),
+    "source_deletion_operations": ("source_deletion_operations", ""), "source_deletions": ("source_deletions", ""),
+    "publication": ("delivery_publish_intents", ""), "workspace": ("semantic_workspace_tasks", ""),
+    "runtime": ("agentic_runtime_runs", ""), "harness": ("semantic_harness_runs", ""),
+    "candidate": ("candidate_verification_attempts", ""), "source_acquisition": ("source_acquisition_attempts", ""),
+    "validation": ("capability_validation_runs", ""), "platform_validation": ("capability_platform_validation_runs", ""),
+    "learning_generation": ("library_learning_receipts", ""), "source_refresh": ("source_refresh_intents", ""),
+    "gap_action": ("candidate_gap_actions", ""), "answer_unknown": ("semantic_workspace_events", "e"),
+    "scheduler_runs": ("scheduled_task_runs", ""),
+}
 
 
 _WEBUI_STATES = (
@@ -117,10 +131,19 @@ def _check_scheduler_shape(conn: sqlite3.Connection, blockers: list[DrainBlocker
         blockers.append(DrainBlocker("persisted.scheduler_state", None, "state_unreadable"))
 
 
-def _collect_counts(conn: sqlite3.Connection, checks, blockers: list[DrainBlocker]) -> None:
+def _collect_counts(conn: sqlite3.Connection, checks, blockers: list[DrainBlocker], manifest, profile) -> None:
     for check_id, query in checks:
         try:
-            count = conn.execute(query).fetchone()[0]
+            table, alias = _CHECK_SOURCES[check_id]
+            registered = [record for record in manifest["records"] if record["profile"] == profile and record["table"] == table]
+            args, exclusions = [], []
+            for record in registered:
+                exclusions.append("(" + " AND ".join(f'{alias + "." if alias else ""}"{key}"=?' for key in record["key"]) + ")")
+                args.extend(record["key"].values())
+            # 仅排除同一快照内已核原件与隔离覆盖的精确行；其他旧项与新项照常阻断。
+            if exclusions:
+                query += " AND NOT (" + " OR ".join(exclusions) + ")"
+            count = conn.execute(query, args).fetchone()[0]
         except Exception:
             blockers.append(DrainBlocker(f"persisted.{check_id}", None, "state_unreadable"))
         else:
@@ -128,16 +151,22 @@ def _collect_counts(conn: sqlite3.Connection, checks, blockers: list[DrainBlocke
                 blockers.append(DrainBlocker(f"persisted.{check_id}", count, "persisted_execution_not_quiet"))
 
 
-def _collect_unknown_counts(conn: sqlite3.Connection, blockers: list[DrainBlocker]) -> None:
+def _collect_unknown_counts(conn: sqlite3.Connection, blockers: list[DrainBlocker], manifest) -> None:
     from src.runtime_run_seals import is_valid_run_seal
 
     counts = {"runtime_unknown": 0, "workspace_unknown": 0}
+    quarantined_runtime = {tuple(record["key"][name] for name in ("user_id", "task_id", "revision"))
+                           for record in manifest["records"] if record["profile"] == "webui" and record["table"] == "agentic_runtime_runs"}
+    quarantined_workspace = {record["key"]["task_id"] for record in manifest["records"]
+                             if record["profile"] == "webui" and record["table"] == "semantic_workspace_tasks"}
     for owner, task, revision in conn.execute("""SELECT user_id,task_id,revision FROM agentic_runtime_runs
             WHERE json_extract(failure_json,'$.error_code')='MODEL_OUTCOME_UNKNOWN'"""):
-        if not is_valid_run_seal(conn, owner, task, revision):
+        if (owner, task, revision) not in quarantined_runtime and not is_valid_run_seal(conn, owner, task, revision):
             counts["runtime_unknown"] += 1
     for owner, task, revision, run_id in conn.execute("""SELECT user_id,task_id,active_revision,run_id FROM semantic_workspace_tasks
             WHERE json_extract(failure_json,'$.error_code')='MODEL_OUTCOME_UNKNOWN'"""):
+        if task in quarantined_workspace:
+            continue
         runtime = conn.execute("SELECT run_id FROM agentic_runtime_runs WHERE user_id=? AND task_id=? AND revision=?",
                                (owner, task, revision)).fetchone()
         # 旧工作台投影可为 NULL；原 Run 与冻结绑定须经封存验证，非空冲突仍阻断。
@@ -151,22 +180,29 @@ def _collect_unknown_counts(conn: sqlite3.Connection, blockers: list[DrainBlocke
 def collect_persisted_blockers(webui_db: Path, scheduler_db: Path) -> tuple[DrainBlocker, ...]:
     """空结果只表示两库已明确核对，不代表进程或文件资源已经静默。"""
     blockers = []
-    for profile, path in (("webui", webui_db), ("scheduler", scheduler_db)):
-        try:
-            inspect_database(DatabaseTarget(profile=profile, path=path)).require_current()
-            with closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)) as conn:
+    try:
+        with ExitStack() as stack:
+            connections = {}
+            for profile, path in (("webui", webui_db), ("scheduler", scheduler_db)):
+                inspect_database(DatabaseTarget(profile=profile, path=path)).require_current()
+                conn = stack.enter_context(closing(sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=5)))
                 conn.execute("PRAGMA query_only=ON")
                 conn.execute("BEGIN")
+                connections[profile] = conn
+            profile = "quarantine"
+            manifest = load_quarantine(connections["webui"])
+            verify_quarantine_records(connections["webui"], manifest, scheduler_connection=connections["scheduler"])
+            for profile, conn in connections.items():
                 if profile == "webui":
                     _check_states(conn, _WEBUI_STATES, blockers)
                     _check_failure_metadata(conn, blockers)
-                    _collect_counts(conn, _WEBUI_CHECKS, blockers)
-                    _collect_unknown_counts(conn, blockers)
+                    _collect_counts(conn, _WEBUI_CHECKS, blockers, manifest, profile)
+                    _collect_unknown_counts(conn, blockers, manifest)
                 else:
                     _check_states(conn, (("scheduled_tasks", "status", ("active", "paused", "done", "cancelled")),), blockers)
                     _check_scheduler_shape(conn, blockers)
-                    _collect_counts(conn, _SCHEDULER_CHECKS, blockers)
-        except Exception:
-            # 路径和底层异常可能含敏感信息，未知检查仅返回固定低敏代码。
-            blockers.append(DrainBlocker(f"persisted.{profile}.unreadable", None, "database_or_schema_unreadable"))
+                    _collect_counts(conn, _SCHEDULER_CHECKS, blockers, manifest, profile)
+    except Exception:
+        # 隔离权威与两库任一不可核，都不能把未知当成排空。
+        blockers.append(DrainBlocker(f"persisted.{profile}.unreadable", None, "database_or_schema_unreadable"))
     return tuple(blockers)

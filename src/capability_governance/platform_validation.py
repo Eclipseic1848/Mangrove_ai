@@ -13,6 +13,7 @@ from filelock import Timeout as FileLockTimeout
 
 from src.account_execution import ExecutionDenied
 from src.api.execution import execution_to_thread
+from src.deployment_quarantine import QuarantinedExecutionError
 from src.services.deployment_drain import get_deployment_gate
 from .sqlite_repository import validation_checkpoint
 
@@ -194,7 +195,8 @@ class PlatformValidationManager:
                         if context:
                             if self._repository.validation_cleanup_available(run, self._worker_id):
                                 self._repository.confirm_validation_stopped(run, cleanup_failed=not self._known_quiet)
-            except (ExecutionDenied, FileLockTimeout):
+            except (ExecutionDenied, QuarantinedExecutionError, FileLockTimeout):
+                # 隔离只表示禁止恢复；不进入上面的停止确认，也不阻塞独立新验证。
                 continue
             finally:
                 lease.release()
@@ -247,7 +249,7 @@ class PlatformValidationManager:
                     return False
                 self._repository.confirm_validation_stopped(run)
                 return True
-        except (ExecutionDenied, FileLockTimeout):
+        except (ExecutionDenied, QuarantinedExecutionError, FileLockTimeout):
             return False
 
     def _advance_validation(
@@ -362,7 +364,7 @@ class PlatformValidationManager:
             self._step_active = False
             self._known_quiet = True
             validation_checkpoint()
-        except ExecutionDenied:
+        except (ExecutionDenied, QuarantinedExecutionError):
             raise
         except Exception:
             # 普通异常也可能留下签名进程或未知外部结果；不得标为空闲或自动重签。
@@ -419,7 +421,7 @@ class LockedPlatformValidationExecutor:
         if step is PlatformValidationStep.TRIVY:
             try:
                 evidence = self._supply_chain.collect(run.target, subject)
-            except ExecutionDenied:
+            except (ExecutionDenied, QuarantinedExecutionError):
                 raise
             except Exception as error:
                 return _failed_evidence(run, step, error)
@@ -467,7 +469,7 @@ class LockedPlatformValidationExecutor:
     ) -> PlatformValidationEvidence:
         try:
             evidence = runner.run(subject)
-        except ExecutionDenied:
+        except (ExecutionDenied, QuarantinedExecutionError):
             raise
         except Exception as error:
             return _failed_evidence(run, step, error)

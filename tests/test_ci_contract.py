@@ -189,6 +189,8 @@ def test_minimum_ci_workflow_is_pinned_bounded_and_evidence_producing() -> None:
         ".artifacts/ci/backend-install.log",
         "tests/test_candidate_verification_migration.py",
         "tests/test_deployment_drain.py", "tests/test_deployment_preflight.py",
+        "tests/test_deployment_quarantine.py", "tests/test_deployment_quarantine_migration.py",
+        "tests/test_deployment_quarantine_cli.py",
         '-k "not collectors_import_smoke_reaches_scrapling_runtime_seams"',
         "--junitxml=.artifacts/ci/python-fast.xml",
         "npm ci",
@@ -258,6 +260,8 @@ def test_unified_workspace_gate_includes_canvas_migration_and_existing_siblings(
         assert f"tests/test_deployment_{name}.py" in selected
     for name in ("seals", "seal_enforcement", "seal_migration", "seal_cli"):
         assert f"tests/test_runtime_run_{name}.py" in selected
+    for suffix in ("", "_migration", "_cli", "_enforcement", "_background", "_recovery", "_run_boundary", "_preflight", "_scheduler"):
+        assert f"tests/test_deployment_quarantine{suffix}.py" in selected
     assert "data/webui.db" not in selected
 
 

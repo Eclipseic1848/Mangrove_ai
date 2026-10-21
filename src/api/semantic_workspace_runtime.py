@@ -82,6 +82,7 @@ from src.delivery_publishing.models import PublicationGate
 from src.delivery_publishing.pi_adapter import PiCandidateAdapter
 from src.delivery_publishing.repository import DeliveryPublishingRepository
 from src.delivery_publishing.service import DeliveryPublisher, reconcile_account_publications
+from src.deployment_quarantine import QuarantinedExecutionError
 from src.runtime_routing import RuntimeAssignment, runtime_routing_is_p0_blocked
 from src.runtime_run_seals import RuntimeRunSealedError
 from src.semantic_harness.compiler_models import ClarificationResolution
@@ -1452,7 +1453,7 @@ class SemanticWorkspaceManager:
             for task in store.list_pending_semantic_workspace_tasks():
                 try:
                     AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(task["user_id"], task["task_id"], task["active_revision"])
-                except RuntimeRunSealedError:
+                except (RuntimeRunSealedError, QuarantinedExecutionError):
                     continue
                 if task["status"] == "cancelling":
                     # 异步维护循环确认执行静默和资源清理，不在启动时推断终态。
@@ -1586,7 +1587,7 @@ class SemanticWorkspaceManager:
                 for pending in pending_tasks:
                     try:
                         AgenticRuntimeRepository(settings.webui_db_path).require_unsealed(pending["user_id"], pending["task_id"], pending["active_revision"])
-                    except RuntimeRunSealedError:
+                    except (RuntimeRunSealedError, QuarantinedExecutionError):
                         continue
                     if pending["status"] == "cancelling":
                         # 维护只恢复已存在的停止意图，不能制造新的用户取消代数。

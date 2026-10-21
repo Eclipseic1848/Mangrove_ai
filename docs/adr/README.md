@@ -52,6 +52,7 @@
 | [0045](0045-natural-language-collection-schedules.md) | 自然语言采集计划 | 已采纳 | 2026-09-17 |
 | [0046](0046-beijing-time-and-legacy-schedules.md) | 北京时间与历史计划兼容 | 已采纳 | 未单独记录 |
 | [0047](0047-owner-controlled-draft-verification.md) | 初稿后由用户决定是否继续核对 | 已采纳 | 2026-09-20 |
+| [0051](0051-first-cutover-quarantine.md) | 首次切换隔离历史未知工作，保留原事实并禁止重发 | 已采纳；生产操作须单独批准 | 2026-10-21 |
 
 ## 产品决策汇总（plan 第 3 节 + 本次确认）
 

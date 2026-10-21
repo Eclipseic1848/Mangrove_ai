@@ -35,6 +35,10 @@ def _row(conn, sql, args=()):
 
 
 def assert_run_not_sealed(conn, user_id: str, task_id: str, revision: int) -> None:
+    from src.deployment_quarantine import assert_task_not_quarantined
+
+    # 首次维护隔离不证明已停止；仍在同一执行门拒绝所有旧任务修订。
+    assert_task_not_quarantined(conn, user_id, task_id)
     # 任一封存记录都先拒绝；损坏的证明只能继续阻断，不能恢复旧 Run。
     if conn.execute("SELECT 1 FROM runtime_run_seals WHERE owner_id=? AND task_id=? AND revision=?",
                     (user_id, task_id, revision)).fetchone():

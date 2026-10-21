@@ -218,6 +218,7 @@ async def test_reporter_never_calls_database_while_execution_active(tmp_path, mo
     monkeypatch.setattr(module, "collect_persisted_blockers", lambda *a: pytest.fail("活动期间不应探查数据库"))
     await publish_drain_report(gate, webui_db=tmp_path / "unused.db", scheduler_db=tmp_path / "unused2.db", execution_root=tmp_path, runtime_root=tmp_path, stopping=stopping)
     assert written[0]["total_active"] == 1 and written[0]["quiet"] is False
+    assert written[0]["legacy_quarantine"] is None
     lease.release()
 
 
