@@ -25,17 +25,46 @@ test("HTTP缺少原生UUID时登录后概览与工作台不白屏，访问编号
   expect(errors).toEqual([]);
 });
 
-test("可选品牌资源存在时显示模型和平台 Logo 图片", async ({ page }) => {
+test("正式品牌资源在概览显示17个真实模型和平台 Logo", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.setViewportSize({ width: 1440, height: 1000 });
   await mockOverview(page, "super_admin");
+  await page.route(/\/api\/operations\/(?:visits|heartbeat)$/, route => route.fulfill({ json: { ok: true } }));
+  await page.addInitScript(() => localStorage.setItem("mangrove_theme", "light"));
   await page.goto("/");
+  await expect(page).toHaveTitle(/Mangrove/);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   const logos = page.locator('img[src^="/overview-brands/"]');
+  const modelCard = page.getByRole("region", { name: "模型与连接", exact: true });
+  const platformCard = page.getByRole("region", { name: "平台登录态", exact: true });
   await expect(logos).toHaveCount(17);
   await expect.poll(() => logos.evaluateAll(images => images.every(image =>
-    (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0,
+    (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 1,
   ))).toBe(true);
+  await expect(page.locator("html")).not.toHaveClass(/dark/);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+  await modelCard.scrollIntoViewIfNeeded();
+  await page.screenshot({ path: testInfo.outputPath("overview-brand-logos-desktop-light.png"), fullPage: true });
+
+  await page.getByRole("button", { name: "深色主题", exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator("html")).toHaveClass(/dark/);
+  await expect(logos).toHaveCount(17);
+  await expect.poll(() => logos.evaluateAll(images => images.every(image =>
+    (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 1,
+  ))).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+  await modelCard.scrollIntoViewIfNeeded();
+  await modelCard.screenshot({ path: testInfo.outputPath("overview-model-logos-mobile-dark.png") });
+  await platformCard.scrollIntoViewIfNeeded();
+  await platformCard.screenshot({ path: testInfo.outputPath("overview-platform-logos-mobile-dark.png") });
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
 });
 
-test("公开构建缺少品牌资源时保留通用图标和服务名称", async ({ page }) => {
+test("品牌图片请求异常时保留通用图标和服务名称", async ({ page }) => {
   await mockOverview(page, "super_admin");
   const requested = new Set<string>();
   await page.route("**/overview-brands/*.png", route => {
@@ -107,11 +136,6 @@ test("概览分页默认十条，支持四种条数及筛选复位", async ({ pa
   await list.screenshot({ path: testInfo.outputPath("overview-pagination-mobile.png") });
 });
 async function mockOverview(page: Page, role = "user") {
-  // 品牌图片不公开分发；合成资源验证有图场景，独立用例覆盖缺图降级。
-  await page.route("**/overview-brands/*.png", route => route.fulfill({
-    contentType: "image/png",
-    body: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jSugAAAAASUVORK5CYII=", "base64"),
-  }));
   await page.addInitScript((currentRole) => {
     // 本组验证概览交互；新手教程由独立用例覆盖。
     localStorage.setItem(`onboarding_all_${JSON.stringify(["owner", currentRole])}`, "skipped");
