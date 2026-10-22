@@ -131,7 +131,8 @@ async function connectMcp(capability) {
     args: command.arguments || [],
     cwd: inside(root, command.working_directory || "."),
     env: safeEnvironment(command),
-    stderr: "pipe",
+    // MCP 日志不属于调用结果；由系统丢弃，避免反压和敏感日志外露。
+    stderr: "ignore",
   });
   const client = new Client(
     { name: "mangrove-capability-host", version: "1.0.0" },
