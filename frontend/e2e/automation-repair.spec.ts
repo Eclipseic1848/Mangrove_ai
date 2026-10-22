@@ -111,6 +111,7 @@ async function mockAutomation(page: Page, schedulerStatus: Record<string, unknow
     cron_expr: '30 9 * * 1,3,5', run_count: 23, next_run_at: '2099-10-07T09:30:00',
     time_zone: 'Asia/Shanghai', execution_state: 'idle', provider: 'local', model: 'synthetic',
     model_connection_id: '__local__', source: 'manual',
+    start_date: null as string | null, end_date: null as string | null,
   });
   const run = (id: number, taskId = 'existing') => ({
     task_id: taskId, task_name: '合成计划', run_id: id, run_at: '2026-10-06T09:30:00+08:00',
@@ -166,6 +167,8 @@ async function mockAutomation(page: Page, schedulerStatus: Record<string, unknow
     if (item && method === 'PATCH') {
       Object.assign(item, body.status ? { status: body.status, execution_state: body.status === 'paused' ? 'paused' : 'idle' }
         : { name: body.name, user_input: body.prompt, ...body.trigger, trigger_type: body.trigger.type });
+      if ('start_date' in body) item.start_date = body.start_date;
+      if ('end_date' in body) item.end_date = body.end_date;
       return route.fulfill({ json: { ok: true } });
     }
     if (item && path.endsWith('/run_now')) {
@@ -180,6 +183,43 @@ async function mockAutomation(page: Page, schedulerStatus: Record<string, unknow
     return route.fulfill({ json: {} });
   });
   return state;
+}
+
+for (const scenario of [
+  { name: '同时清空开始和结束日期', start: '', end: '' },
+  { name: '只清空开始日期并保留结束日期', start: '', end: '2099-10-31' },
+  { name: '只清空结束日期并保留开始日期', start: '2099-10-01', end: '' },
+  { name: '保存新的有效日期', start: '2099-11-01', end: '2099-11-30' },
+]) {
+  test(`编辑自动化任务日期：${scenario.name}`, async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', error => errors.push(error.message));
+    const state = await mockAutomation(page);
+    state.tasks[0].start_date = '2099-10-01';
+    state.tasks[0].end_date = '2099-10-31';
+    await page.goto('/tasks');
+    await page.getByRole('button', { name: '编辑', exact: true }).click();
+    let dialog = page.getByRole('dialog', { name: '编辑自动化任务' });
+    await expect(dialog.getByLabel('开始日期', { exact: true })).toHaveValue('2099-10-01');
+    await expect(dialog.getByLabel('结束日期', { exact: true })).toHaveValue('2099-10-31');
+    await chooseModel(dialog.getByLabel('执行模型', { exact: true }), JSON.stringify(['__local__', 'synthetic']));
+    const name = `日期修改：${scenario.name}`;
+    await dialog.getByLabel('名称', { exact: true }).fill(name);
+    await dialog.getByLabel('开始日期', { exact: true }).fill(scenario.start);
+    await dialog.getByLabel('结束日期', { exact: true }).fill(scenario.end);
+    await dialog.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(dialog).not.toBeVisible();
+    const updates = () => state.requests.filter(request => request.method === 'PATCH' && request.path === '/api/tasks/existing');
+    await expect.poll(() => updates().length).toBe(1);
+    expect(updates()[0].body).toMatchObject({ name, start_date: scenario.start || null, end_date: scenario.end || null,
+      model_connection_id: '__local__', model: 'synthetic', trigger: { type: 'cron', cron_expr: '30 9 * * 1,3,5' } });
+    await expect(page.getByText(name, { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '编辑', exact: true }).click();
+    dialog = page.getByRole('dialog', { name: '编辑自动化任务' });
+    await expect(dialog.getByLabel('开始日期', { exact: true })).toHaveValue(scenario.start);
+    await expect(dialog.getByLabel('结束日期', { exact: true })).toHaveValue(scenario.end);
+    expect(errors).toEqual([]);
+  });
 }
 
 for (const [cronExpr, expectedCron, mode, time] of [
