@@ -276,7 +276,8 @@ function TaskFormModal({
         await api.patch(`/api/tasks/${initial.taskId}`, {
           name: f.name.trim(), prompt: f.prompt.trim(), trigger,
           model_connection_id: selected.connectionId, model: selected.model, external_api_confirmed: externalConfirmed,
-          start_date: f.startDate || undefined, end_date: f.endDate || undefined,
+          // 显式传 null 才表示清空；省略字段会保留原计划的日期限制。
+          start_date: f.startDate || null, end_date: f.endDate || null,
         });
         toast.success("已保存修改");
       }

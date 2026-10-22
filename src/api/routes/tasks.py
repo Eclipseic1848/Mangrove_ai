@@ -225,9 +225,12 @@ def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_execution_use
             interval_seconds=task.get("interval_seconds"),
             run_at=datetime.fromisoformat(task["run_at"]) if task.get("run_at") else None,
         )
-        next_run = compute_next_run(
-            cur_sched, start_date=task.get("start_date"), end_date=task.get("end_date")
-        )
+        try:
+            next_run = compute_next_run(
+                cur_sched, start_date=task.get("start_date"), end_date=task.get("end_date")
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
         if next_run is None:
             raise HTTPException(status_code=422, detail="该任务的执行时间已过或无后续，无法恢复")
         store.set_status(sched_id, "active", next_run_at=next_run)
@@ -247,8 +250,9 @@ def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_execution_use
         provider, model = model_binding['provider'], model_binding['model']
     elif provider != task.get('provider') or model != task.get('model'):
         raise HTTPException(status_code=422, detail="更换模型时必须明确选择可用模型连接")
-    start_date = body.start_date if body.start_date is not None else task.get("start_date")
-    end_date = body.end_date if body.end_date is not None else task.get("end_date")
+    # 显式 null 表示清除限制；只有未传字段才沿用原日期。
+    start_date = body.start_date if "start_date" in body.model_fields_set else task.get("start_date")
+    end_date = body.end_date if "end_date" in body.model_fields_set else task.get("end_date")
 
     if body.trigger is not None:
         try:
@@ -262,7 +266,10 @@ def update_task(sched_id: str, body: TaskPatchIn, user=Depends(get_execution_use
             run_at=datetime.fromisoformat(task["run_at"]) if task.get("run_at") else None,
         )
 
-    next_run = compute_next_run(sched, start_date=start_date, end_date=end_date)
+    try:
+        next_run = compute_next_run(sched, start_date=start_date, end_date=end_date)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     if next_run is None:
         raise HTTPException(status_code=422, detail="该计划的执行时间已过或无后续，未保存")
 
