@@ -157,19 +157,23 @@ function buildCronExpr(f: FormState): string {
 
 /** 反解已有 cron 表达式为结构化表单值；反解不了的复杂表达式落到“高级”原样展示。 */
 function parseCronToForm(expr: string): Partial<FormState> {
+  const advanced: Partial<FormState> = { cronMode: "advanced", advancedCron: expr };
+  const isIntegerInRange = (value: string, min: number, max: number) =>
+    /^\d+$/.test(value) && Number(value) >= min && Number(value) <= max;
   const parts = (expr || "").trim().split(/\s+/);
-  if (parts.length !== 5) return { cronMode: "advanced", advancedCron: expr };
+  if (parts.length !== 5) return advanced;
   const [mm, hh, dom, mon, dow] = parts;
-  const time = `${hh.padStart(2, "0")}:${mm.padStart(2, "0")}`;
+  // 简单表单只能无损表达固定时分、单日期及星期列表，其余保留原式避免改名时改期。
+  if (!isIntegerInRange(mm, 0, 59) || !isIntegerInRange(hh, 0, 23)) return advanced;
+  const time = `${String(Number(hh)).padStart(2, "0")}:${String(Number(mm)).padStart(2, "0")}`;
   if (dom === "*" && mon === "*" && dow === "*") return { cronMode: "daily", time };
-  if (dom === "*" && mon === "*" && dow !== "*") {
-    const weekdays = dow.split(",").map(Number).filter((n) => !Number.isNaN(n));
-    return { cronMode: "weekly", time, weekdays };
+  if (dom === "*" && mon === "*" && dow.split(",").every((day) => isIntegerInRange(day, 0, 6))) {
+    return { cronMode: "weekly", time, weekdays: dow.split(",").map(Number) };
   }
-  if (dom !== "*" && mon === "*" && dow === "*") {
-    return { cronMode: "monthly", time, monthDay: Number(dom) || 1 };
+  if (mon === "*" && dow === "*" && isIntegerInRange(dom, 1, 31)) {
+    return { cronMode: "monthly", time, monthDay: Number(dom) };
   }
-  return { cronMode: "advanced", advancedCron: expr };
+  return advanced;
 }
 
 function formToTrigger(f: FormState): { type: FreqMode; cron_expr?: string; interval_seconds?: number; run_at?: string } {
