@@ -119,6 +119,7 @@ async function mockAutomation(page: Page, schedulerStatus: Record<string, unknow
   });
   const state = {
     tasks: [task('existing', '合成计划')], runs: Array.from({ length: 23 }, (_, index) => run(index + 1)),
+    templates: [{ id: 'audit-template', name: '审计模板', description: '合成模板', prompt: '合成模板需求', trigger_type: 'cron', cron_expr: '30 9 * * 1,3,5' }],
     requests: [] as Array<{ method: string; path: string; query: URLSearchParams; body: any }>,
     schedulerStatus, statusFailure: false, tasksFailure: false, runsFailure: false, holdNextRuns: false,
     releaseRuns: undefined as (() => void) | undefined,
@@ -133,7 +134,7 @@ async function mockAutomation(page: Page, schedulerStatus: Record<string, unknow
       ? { status: 503, json: { detail: '合成状态读取失败' } } : { json: state.schedulerStatus });
     if (path === '/api/tasks') return route.fulfill(state.tasksFailure
       ? { status: 503, json: { detail: '合成任务列表读取失败' } } : { json: state.tasks });
-    if (path === '/api/tasks/templates') return route.fulfill({ json: [{ id: 'audit-template', name: '审计模板', description: '合成模板', prompt: '合成模板需求', trigger_type: 'cron', cron_expr: '30 9 * * 1,3,5' }] });
+    if (path === '/api/tasks/templates') return route.fulfill({ json: state.templates });
     if (path === '/api/models') return route.fulfill({ json: { options: [{ provider: 'local', model: 'synthetic' }] } });
     if (path === '/api/model-connections') return route.fulfill({ json: { items: [] } });
     if (path === '/api/model-connections/preferences/default') return route.fulfill({ json: { preference: null } });
@@ -180,6 +181,87 @@ async function mockAutomation(page: Page, schedulerStatus: Record<string, unknow
   });
   return state;
 }
+
+for (const [cronExpr, expectedCron, mode, time] of [
+  ['0 9 * * 1-5', '0 9 * * 1-5', '高级', ''],
+  ['0 9 1,15 * *', '0 9 1,15 * *', '高级', ''],
+  ['*/15 9 * * *', '*/15 9 * * *', '高级', ''],
+  ['0 9-17 * * *', '0 9-17 * * *', '高级', ''],
+  ['0 9 * 1 *', '0 9 * 1 *', '高级', ''],
+  ['0 9 1 * 1', '0 9 1 * 1', '高级', ''],
+  ['0 9 * * 7', '0 9 * * 7', '高级', ''],
+  ['0 9 * * 1,', '0 9 * * 1,', '高级', ''],
+  ['0 0 * * *', '0 0 * * *', '每天', '00:00'],
+  ['0 9 * * 0,1,3', '0 9 * * 0,1,3', '每周', '09:00'],
+  ['0 9 31 * *', '0 9 31 * *', '每月', '09:00'],
+  ['05 09 * * *', '5 9 * * *', '每天', '09:05'],
+]) {
+  const title = mode === '高级' ? '已有复杂 cron 仅改名称保存并重开仍保留原表达式' : '已有简单 cron 仅改名称保存并重开保持原计划';
+  test(`${title}：${cronExpr}`, async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on('pageerror', error => errors.push(error.message));
+    const state = await mockAutomation(page);
+    state.tasks[0].cron_expr = cronExpr;
+    await page.goto('/tasks');
+    await page.getByRole('button', { name: '编辑', exact: true }).click();
+    let dialog = page.getByRole('dialog', { name: '编辑自动化任务' });
+    await expect(dialog.getByLabel('执行模型', { exact: true })).toHaveAttribute('value', JSON.stringify(['__local__', 'synthetic']));
+    await chooseModel(dialog.getByLabel('执行模型', { exact: true }), JSON.stringify(['__local__', 'synthetic']));
+    await dialog.getByLabel('名称', { exact: true }).fill('仅修改名称的合成计划');
+    await dialog.getByRole('button', { name: '保存', exact: true }).click();
+    await expect(dialog).not.toBeVisible();
+    const updates = () => state.requests.filter(request => request.method === 'PATCH' && request.path === '/api/tasks/existing');
+    await expect.poll(() => updates().length).toBe(1);
+    expect(updates()[0].body).toMatchObject({ name: '仅修改名称的合成计划', trigger: { type: 'cron' } });
+    expect(updates()[0].body.trigger.cron_expr).toBe(expectedCron);
+    await expect(page.getByText('仅修改名称的合成计划', { exact: true })).toBeVisible();
+    await page.getByRole('button', { name: '编辑', exact: true }).click();
+    dialog = page.getByRole('dialog', { name: '编辑自动化任务' });
+    await expect(dialog.getByRole('button', { name: mode, exact: true })).toHaveClass(/bg-secondary/);
+    if (mode === '高级') {
+      await expect(dialog.getByLabel('Cron 表达式', { exact: true })).toHaveValue(expectedCron);
+    } else {
+      await expect(dialog.getByLabel('Cron 表达式', { exact: true })).toHaveCount(0);
+      await expect(dialog.getByLabel('执行时间', { exact: true })).toHaveValue(time);
+      if (mode === '每周') await expect(dialog.getByRole('button', { name: '日', exact: true })).toHaveClass(/bg-primary/);
+      if (mode === '每月') await expect(dialog.getByLabel('每月执行日期', { exact: true })).toHaveValue('31');
+    }
+    if (cronExpr === '0 9 * * 1-5') await dialog.screenshot({ path: testInfo.outputPath('cron-advanced-preserved-desktop.png') });
+    if (mode === '每月') {
+      await page.setViewportSize({ width: 390, height: 844 });
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+      await dialog.screenshot({ path: testInfo.outputPath('cron-monthly-31-mobile.png') });
+    }
+    expect(errors).toEqual([]);
+  });
+}
+
+test('复杂 cron 模板创建提交原表达式并可按高级模式重开', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const state = await mockAutomation(page);
+  const cronExpr = '0 9 1,15 * *';
+  state.templates[0].cron_expr = cronExpr;
+  await page.goto('/tasks');
+  await page.getByRole('button', { name: '添加自动化', exact: true }).first().click();
+  await page.getByRole('button', { name: /审计模板/ }).click();
+  let dialog = page.getByRole('dialog', { name: '添加自动化任务' });
+  await expect(dialog.getByLabel('提示词', { exact: true })).toHaveValue('合成模板需求');
+  await dialog.getByLabel('名称', { exact: true }).fill('复杂模板计划');
+  await chooseModel(dialog.getByLabel('执行模型', { exact: true }), JSON.stringify(['__local__', 'synthetic']));
+  await dialog.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  const creations = () => state.requests.filter(request => request.method === 'POST' && request.path === '/api/tasks/manual');
+  await expect.poll(() => creations().length).toBe(1);
+  expect(creations()[0].body).toMatchObject({ name: '复杂模板计划', template_id: 'audit-template', trigger: { type: 'cron' } });
+  expect(creations()[0].body.trigger.cron_expr).toBe(cronExpr);
+  const card = page.locator('.animate-fade-in').filter({ has: page.getByText('复杂模板计划', { exact: true }) });
+  await card.getByRole('button', { name: '编辑', exact: true }).click();
+  dialog = page.getByRole('dialog', { name: '编辑自动化任务' });
+  await expect(dialog.getByRole('button', { name: '高级', exact: true })).toHaveClass(/bg-secondary/);
+  await expect(dialog.getByLabel('Cron 表达式', { exact: true })).toHaveValue(cronExpr);
+  expect(errors).toEqual([]);
+});
 
 for (const scenario of [
   { name: '关闭', status: { enabled: false, running: false }, message: '自动调度已关闭' },
