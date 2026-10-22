@@ -12,7 +12,7 @@ export const PROVIDERS: Record<string, { label: string; file?: string }> = {
 
 export function OptionalBrandImage({ src, className }: { src: string; className?: string }) {
   const [failedSource, setFailedSource] = useState<string | null>(null);
-  // 品牌图片是部署可选资源；公开构建缺图时保持通用图标和服务名称。
+  // 正常发布必须携带品牌图片；仅在请求异常时保留图标和名称，避免空白。
   return failedSource === src ? <Cpu aria-hidden className={className} />
     : <img src={src} alt="" className={className} onError={() => setFailedSource(src)} />;
 }

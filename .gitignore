@@ -111,10 +111,27 @@ external/firecrawl/
 # 违反 external/README.md「只提交集成说明和补丁」声明，仅保留本机。
 external/chrome-devtools-howso/
 
-# 第三方品牌 Logo 图片（抖音/淘宝/京东/B站等）再分发有商标风险，不进入公开仓库。
+# 未列明的本机品牌素材目录继续忽略，不随本次修复批量发布。
 logos/
-# 概览可选本机品牌资源沿用不公开第三方商标图片的边界；缺图时使用通用图标。
+# 仅下面列明的既有品牌图随正式版本发布，其余本机图片仍不纳入。
 frontend/public/overview-brands/*.png
+!frontend/public/overview-brands/bilibili.png
+!frontend/public/overview-brands/claude-color.png
+!frontend/public/overview-brands/deepseek.png
+!frontend/public/overview-brands/douyin.png
+!frontend/public/overview-brands/gemini-color.png
+!frontend/public/overview-brands/grok.png
+!frontend/public/overview-brands/jd.png
+!frontend/public/overview-brands/kimi-color.png
+!frontend/public/overview-brands/kuaishou.png
+!frontend/public/overview-brands/pdd.png
+!frontend/public/overview-brands/qwen.png
+!frontend/public/overview-brands/taobao.png
+!frontend/public/overview-brands/tieba.png
+!frontend/public/overview-brands/weibo.png
+!frontend/public/overview-brands/xiaohongshu.png
+!frontend/public/overview-brands/zhihu.png
+!frontend/public/overview-brands/zhipu-color.png
 # 本机设计审计结果和独立演示原型不属于产品发布源码。
 premium-audit.json
 frontend/prototypes/

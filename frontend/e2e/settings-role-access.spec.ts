@@ -858,12 +858,12 @@ test("普通用户设置不加载低频能力验证和供应链证据", async ({
   expect(evidenceRequests).toEqual([]);
 });
 
-test("普通用户可创建并区分同一 Provider 的多套命名连接", async ({ page }) => {
-  await mockSettings(page, "user");
-  await page.route("**/overview-brands/deepseek.png", route => route.fulfill({
-    contentType: "image/png",
-    body: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jSugAAAAASUVORK5CYII=", "base64"),
-  }));
+test("普通用户可创建并区分同一 Provider 的多套命名连接并显示真实 Logo", async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await mockSettings(page, "user", "light");
   const connections: Record<string, unknown>[] = [];
   const createdBodies: Record<string, unknown>[] = [];
   await page.route("**/api/model-connections", (route) => route.fulfill({
@@ -886,6 +886,8 @@ test("普通用户可创建并区分同一 Provider 的多套命名连接", asyn
   });
 
   await page.goto("/settings?section=models");
+  await expect(page).toHaveTitle(/Mangrove/);
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
   await page.getByRole("button", { name: "添加自己的模型", exact: true }).click();
   await page.getByText("连接名称（已自动填写，可选修改）", { exact: true }).click();
   await page.getByLabel("连接名称").fill("DeepSeek 日常");
@@ -904,7 +906,7 @@ test("普通用户可创建并区分同一 Provider 的多套命名连接", asyn
   const logos = page.locator('#model-connection-list img[src="/overview-brands/deepseek.png"]');
   await expect(logos).toHaveCount(2);
   await expect.poll(() => logos.evaluateAll(images => images.every(image =>
-    (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 0,
+    (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 1,
   ))).toBe(true);
   await expect(page.getByText("Key •••• 1111")).toBeVisible();
   await expect(page.getByText("Key •••• 2222")).toBeVisible();
@@ -922,6 +924,29 @@ test("普通用户可创建并区分同一 Provider 的多套命名连接", asyn
       model: "deepseek-v4-flash",
     },
   ]);
+  await expect(page.locator("html")).not.toHaveClass(/dark/);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+  await expect(page.locator("[data-sonner-toast]")).toHaveCount(0);
+  const connectionList = page.locator("#model-connection-list");
+  await connectionList.scrollIntoViewIfNeeded();
+  await expect(logos.first()).toBeInViewport();
+  await expect(logos.last()).toBeInViewport();
+  await connectionList.screenshot({ path: testInfo.outputPath("settings-provider-logos-desktop-light.png") });
+
+  await page.getByRole("button", { name: "深色主题", exact: true }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(page.locator("html")).toHaveClass(/dark/);
+  await expect(logos).toHaveCount(2);
+  await expect.poll(() => logos.evaluateAll(images => images.every(image =>
+    (image as HTMLImageElement).complete && (image as HTMLImageElement).naturalWidth > 1,
+  ))).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+  await connectionList.scrollIntoViewIfNeeded();
+  await expect(logos.first()).toBeInViewport();
+  await expect(logos.last()).toBeInViewport();
+  await connectionList.screenshot({ path: testInfo.outputPath("settings-provider-logos-mobile-dark.png") });
+  await expect(page.locator("vite-error-overlay")).toHaveCount(0);
+  expect(errors).toEqual([]);
 });
 
 test("部分成功连接展示逐模型结果并可只重试失败模型", async ({ page }) => {

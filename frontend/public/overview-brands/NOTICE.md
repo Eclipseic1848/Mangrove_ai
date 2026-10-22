@@ -6,6 +6,15 @@ https://github.com/lobehub/lobe-icons/tree/master/packages/static-png/light
 其余图片复用本项目现有品牌资源；OpenAI 使用已安装的 react-simple-icons。
 标识仅用于识别对应服务，商标权归各品牌所有，不表示合作或认证。
 
+## 正式发布范围
+
+以下17个既有原件随版本发布，不依赖维护者本机的忽略文件：
+
+- 模型：deepseek.png、qwen.png、claude-color.png、gemini-color.png、kimi-color.png、zhipu-color.png、grok.png。
+- 平台：bilibili.png、douyin.png、jd.png、kuaishou.png、pdd.png、taobao.png、tieba.png、weibo.png、xiaohongshu.png、zhihu.png。
+
+`npm run build` 必须核对这些源文件和构建文件逐字节一致。组件中的异常兜底不代表正常发布可以缺少图片。
+
 ## LobeHub MIT License
 
 Copyright (c) 2023 LobeHub
