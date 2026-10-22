@@ -793,18 +793,19 @@ class PiRuntime:
             ttl_seconds=self.timeout_seconds,
         )
 
-    def _revoke_document_grant(
+    async def _revoke_document_grant(
         self,
         run_key: tuple[str, str, int],
         *,
         reason: str,
     ) -> None:
-        grant = self._document_grants.pop(run_key, None)
+        grant = self._document_grants.get(run_key)
         if grant is not None:
-            self._document_tool_broker.revoke_grant(
+            await self._document_tool_broker.release_grant(
                 grant.grant_id,
-                reason,
+                reason=reason,
             )
+            self._document_grants.pop(run_key, None)
 
     def _activate_document_tools(
         self,
@@ -1408,22 +1409,29 @@ class PiRuntime:
             # 服务异常退出时容器可能仍在运行；必须先终止旧执行者，避免两个
             # Agent 同时写同一候选目录。
             await self._remove_owned_container(checkpoint.container_name, resource_owner_identity(request.user_id, request.task_id, request.revision, checkpoint.run_id))
-        if request.model_connection_id is not None:
-            # 即便会话缺失而重开新 Run，旧进程遗留授权也必须先关闭。
-            self._broker().revoke_run_grants(
+        try:
+            if request.model_connection_id is not None:
+                # 即便会话缺失而重开新 Run，旧进程遗留授权也必须先关闭。
+                self._broker().revoke_run_grants(
+                    request.user_id,
+                    request.task_id,
+                    request.revision,
+                    checkpoint.run_id,
+                    reason="run_resumed",
+                )
+        finally:
+            # 模型撤权失败也不能跳过原文档读取的收敛与内存释放。
+            await self._document_tool_broker.release_grants(
                 request.user_id,
                 request.task_id,
                 request.revision,
-                checkpoint.run_id,
+                run_id=checkpoint.run_id,
                 reason="run_resumed",
             )
-        self._document_tool_broker.revoke_run_grants(
-            request.user_id,
-            request.task_id,
-            request.revision,
-            checkpoint.run_id,
-            reason="run_resumed",
-        )
+            previous_key = (request.user_id, request.task_id, request.revision)
+            previous_grant = self._document_grants.get(previous_key)
+            if previous_grant is not None and previous_grant.run_id == checkpoint.run_id:
+                self._document_grants.pop(previous_key, None)
         from .draft_snapshot import host_copy_pending
         host_copy = session_path is None and host_copy_pending(root, owner_id=request.user_id,
             task_id=request.task_id, revision=request.revision, run_id=checkpoint.run_id)
@@ -1989,7 +1997,7 @@ class PiRuntime:
         except Exception as error:
             errors.append(error)
         try:
-            self._revoke_document_grant(run_key, reason=reason)
+            await self._revoke_document_grant(run_key, reason=reason)
         except Exception as error:
             errors.append(error)
         if errors:
@@ -2048,9 +2056,10 @@ class PiRuntime:
                 )
             finally:
                 try:
-                    self._document_tool_broker.revoke_revision_grants(
+                    await self._document_tool_broker.release_grants(
                         user_id, task_id, revision, reason="run_cancelled",
                     )
+                    self._document_grants.pop(run_key, None)
                 finally:
                     if lock is not None:
                         lock.release()
