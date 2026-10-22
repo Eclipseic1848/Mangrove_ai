@@ -41,10 +41,13 @@ def migrated_run(tmp_path, monkeypatch):
     def revoke(*args, **kwargs):
         revoked.append((args, kwargs))
 
+    async def release_documents(*args, **kwargs):
+        revoked.append((args, kwargs))
+
     host = CapabilityHost(image="synthetic-host", execution_root=base / "capability-hosts")
     runtime = PiRuntime(state_store=repository, execution_root=base, capability_host=host,
                         connection_broker=SimpleNamespace(revoke_revision_grants=revoke),
-                        document_tool_broker=SimpleNamespace(revoke_revision_grants=revoke),
+                        document_tool_broker=SimpleNamespace(release_grants=release_documents),
                         configure_as_default_document_broker=False)
     commands = []
 

@@ -274,6 +274,48 @@ class DocumentToolBroker:
             ):
                 self.revoke_grant(grant.grant_id, reason)
 
+    async def release_grant(self, grant_id: str, *, reason: str) -> None:
+        """结果已消费后撤销并等待真实读取收敛，再释放进程内状态。"""
+        token_key = self._grant_keys.get(grant_id)
+        grant = self._grants.get(token_key or "")
+        if grant is not None and not grant.revoked:
+            self.revoke_grant(grant_id, reason)
+        for task in tuple(self._active_tasks.get(grant_id, ())):
+            # 取消回执不能冒充底层线程已经退出，重复取消仍须等待检索器收尾。
+            while not task.done():
+                # 此处只确认资源收敛，读取异常仍由原调用者处理。
+                with suppress(asyncio.CancelledError, Exception):
+                    await asyncio.shield(task)
+            with suppress(asyncio.CancelledError, Exception):
+                task.result()
+        token_key = self._grant_keys.pop(grant_id, None)
+        if token_key is not None:
+            self._grants.pop(token_key, None)
+        self._active_tasks.pop(grant_id, None)
+        self._cancel_events.pop(grant_id, None)
+
+    async def release_grants(
+        self,
+        owner_user_id: str,
+        task_id: str,
+        revision: int,
+        *,
+        run_id: str | None = None,
+        reason: str,
+    ) -> None:
+        """恢复只释放原 Run，取消则释放指定 Owner 的整个修订。"""
+        grants = tuple(
+            grant for grant in self._grants.values()
+            if grant.owner_user_id == owner_user_id
+            and grant.task_id == task_id and grant.revision == revision
+            and (run_id is None or grant.run_id == run_id)
+        )
+        # 等待任何读取前先撤销整个匹配范围，避免其他旧 Token 继续进入。
+        for grant in grants:
+            self.revoke_grant(grant.grant_id, reason)
+        for grant in grants:
+            await self.release_grant(grant.grant_id, reason=reason)
+
     def revoke_revision_grants(
         self,
         owner_user_id: str,
