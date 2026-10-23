@@ -26,5 +26,6 @@ class CapabilityHostLease(BaseModel):
     relay_token: str = Field(repr=False)
     capability_names: tuple[str, ...]
     capability_kinds: tuple[tuple[str, str], ...]
+    capability_timeouts: tuple[tuple[str, int], ...] = ()
     runtime_dir: Path
     owner_identity: str | None = None
