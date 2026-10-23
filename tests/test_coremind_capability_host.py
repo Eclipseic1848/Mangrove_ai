@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.agentic_runtime.coremind_runtime import CoreMindAgentKernelAdapter, _tool_definitions
-from src.capability_host import CapabilityHost
+from src.capability_host import CapabilityHost, CapabilityHostRequest
 from src.agentic_runtime.egress_policy import DockerCommandResult
 from src.agentic_runtime.kernel import AgentKernelCapabilityError, AgentKernelResultUnknownError
 from tests.test_coremind_agent_kernel_adapter import _account_execution, _request, _binding, _InteractiveCoreMindClient
@@ -41,7 +41,7 @@ async def test_host_invoke_uses_owned_container_and_fixed_protocol(tmp_path):
             return DockerCommandResult(0, "a" * 64, "")
         return DockerCommandResult(0, json.dumps({"stdout": "ok", "stderr": ""}), "")
     host = CapabilityHost(image="test", execution_root=tmp_path, command_runner=runner)
-    lease = host.cleanup_lease("owner", "task", 1, "run").model_copy(update={"capability_names": ("tool",), "capability_kinds": (("tool", "python"),)})
+    lease = host.cleanup_lease("owner", "task", 1, "run").model_copy(update={"capability_names": ("tool",), "capability_kinds": (("tool", "python"),), "capability_timeouts": (("tool", 120),)})
     assert await host.invoke(lease, {"capability": "tool", "arguments": ["--read"]}) == {"stdout": "ok", "stderr": ""}
     assert commands[-1][:4] == ("docker", "exec", "a" * 64, "node")
     with pytest.raises(ValueError):
@@ -76,9 +76,13 @@ class BridgeHost:
         return {"stdout": "bounded-result", "stderr": ""}
 
 
-async def _bridge(tmp_path):
-    host = BridgeHost(tmp_path / "host")
+async def _bridge(tmp_path, host=None, *, timeout_seconds=120):
+    host = host or BridgeHost(tmp_path / "host")
     pack = _native_pack(tmp_path, "tool")
+    manifest_path = pack / "mangrove-capability.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["entrypoint"]["timeout_seconds"] = timeout_seconds
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     resolutions = []
     def resolve(*identity):
         resolutions.append(identity)
@@ -96,6 +100,152 @@ async def _bridge(tmp_path):
     call = {**{key: definition[key] for key in ("name", "toolId", "registrationId")},
             "runId": "run-a", "callId": "invoke-1", "args": {"capability": "tool", "arguments": []}}
     return adapter, host, request, binding, root, call, resolutions
+
+
+@pytest.mark.asyncio
+async def test_bridge_call_outlives_short_docker_operations(tmp_path):
+    calls = []
+
+    async def runner(command):
+        calls.append(command)
+        if "inspect" in command:
+            return DockerCommandResult(0, "a" * 64, "")
+        if command[:2] == ("docker", "exec") and "/invoke" in command[-2]:
+            await asyncio.sleep(0.06)
+            return DockerCommandResult(0, json.dumps({"stdout": "completed", "stderr": ""}), "")
+        return DockerCommandResult(0, "", "")
+
+    host = CapabilityHost(image="unused", execution_root=tmp_path / "hosts",
+                          command_runner=runner, docker_timeout_seconds=0.01)
+    adapter, _, request, binding, root, call, _ = await _bridge(tmp_path, host)
+    client = _InteractiveCoreMindClient()
+    try:
+        await adapter._answer_tool_call(client, request=request, binding=binding, run_root=root, call=call)
+        assert client.tool_results[-1]["result"]["stdout"] == "completed"
+        assert sum(command[:2] == ("docker", "exec") and "/invoke" in command[-2] for command in calls) == 1
+    finally:
+        await adapter._stop_capability_host((request.user_id, request.task_id, request.revision))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_bridge_real_host_timeout_or_cancel_never_replays(tmp_path, cancel):
+    started, cancelled = asyncio.Event(), asyncio.Event()
+    calls = []
+
+    async def runner(command):
+        if "inspect" in command:
+            return DockerCommandResult(0, "a" * 64, "")
+        if command[:2] == ("docker", "exec") and "/invoke" in command[-2]:
+            calls.append(command)
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+        return DockerCommandResult(0, "", "")
+
+    host = CapabilityHost(image="unused", execution_root=tmp_path / "hosts",
+                          command_runner=runner, docker_timeout_seconds=0.01)
+    adapter, _, request, binding, root, call, _ = await _bridge(tmp_path, host, timeout_seconds=1)
+    # 启动后磁盘清单变化不能延长已经冻结的本次调用预算。
+    manifest_path = tmp_path / "prettier-pack/mangrove-capability.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["entrypoint"]["timeout_seconds"] = 3600
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    client = _InteractiveCoreMindClient()
+    pending = asyncio.create_task(adapter._answer_tool_call(
+        client, request=request, binding=binding, run_root=root, call=call,
+    ))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        if cancel:
+            pending.cancel()
+        with pytest.raises(asyncio.CancelledError if cancel else AgentKernelResultUnknownError):
+            await asyncio.wait_for(pending, timeout=2)
+        assert cancelled.is_set()
+        with pytest.raises(AgentKernelResultUnknownError):
+            await adapter._answer_tool_call(client, request=request, binding=binding, run_root=root, call=call)
+        assert len(calls) == 1 and client.tool_results == []
+    finally:
+        pending.cancel()
+        await adapter._stop_capability_host((request.user_id, request.task_id, request.revision))
+
+
+@pytest.mark.asyncio
+async def test_host_rejects_call_without_frozen_budget_before_docker(tmp_path):
+    async def runner(command):
+        pytest.fail("缺少冻结预算时不得调用Docker")
+
+    host = CapabilityHost(image="unused", execution_root=tmp_path, command_runner=runner)
+    lease = host.cleanup_lease("owner", "task", 1, "run").model_copy(update={
+        "capability_names": ("tool",), "capability_kinds": (("tool", "node"),),
+    })
+    with pytest.raises(ValueError, match="冻结执行预算"):
+        await host.invoke(lease, {"capability": "tool", "arguments": []})
+
+
+@pytest.mark.asyncio
+async def test_host_uses_selected_capability_budget_instead_of_longest(tmp_path):
+    packs = []
+    for name, budget in (("short", 1), ("long", 60)):
+        pack = _native_pack(tmp_path / name, name)
+        path = pack / "mangrove-capability.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["entrypoint"]["timeout_seconds"] = budget
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        packs.append(pack)
+
+    async def runner(command):
+        if "inspect" in command:
+            return DockerCommandResult(0, "a" * 64, "")
+        if command[:2] == ("docker", "exec") and "/invoke" in command[-2]:
+            if json.loads(command[-1])["capability"] == "short":
+                await asyncio.Event().wait()
+            await asyncio.sleep(0.06)
+            return DockerCommandResult(0, json.dumps({"stdout": "long-completed", "stderr": ""}), "")
+        return DockerCommandResult(0, "", "")
+
+    host = CapabilityHost(image="unused", execution_root=tmp_path / "hosts",
+                          command_runner=runner, docker_timeout_seconds=0.01)
+    lease = await host.start(CapabilityHostRequest(
+        user_id="owner", task_id="task", revision=1, run_id="run",
+        network_name="none", capability_dirs=tuple(packs),
+    ))
+    try:
+        with pytest.raises(RuntimeError, match="Docker 操作超时"):
+            await asyncio.wait_for(host.invoke(lease, {"capability": "short", "arguments": []}), timeout=2)
+        assert await host.invoke(lease, {"capability": "long", "arguments": []}) == {"stdout": "long-completed", "stderr": ""}
+    finally:
+        await host.stop(lease)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["inspect", "stop", "rm"])
+async def test_host_cleanup_keeps_short_docker_budget(tmp_path, operation):
+    blocked = False
+    interrupted = False
+
+    async def runner(command):
+        nonlocal interrupted
+        if blocked and operation in command:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                interrupted = True
+        return DockerCommandResult(0, "a" * 64 if "inspect" in command else "", "")
+
+    host = CapabilityHost(image="unused", execution_root=tmp_path / "hosts",
+                          command_runner=runner, docker_timeout_seconds=0.01)
+    adapter, _, request, _, _, _, _ = await _bridge(tmp_path, host)
+    blocked = True
+    if operation == "stop":
+        # stop失败后，原rm成功清理仍可完成；它也必须及时获得执行机会。
+        await asyncio.wait_for(adapter._stop_capability_host((request.user_id, request.task_id, request.revision)), timeout=0.5)
+    else:
+        with pytest.raises(RuntimeError, match="超时"):
+            await asyncio.wait_for(adapter._stop_capability_host((request.user_id, request.task_id, request.revision)), timeout=0.5)
+    assert interrupted
 
 
 @pytest.mark.asyncio

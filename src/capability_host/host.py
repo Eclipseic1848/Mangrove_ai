@@ -59,11 +59,13 @@ class CapabilityHost:
         self._run = command_runner or _run_docker
         self._docker_timeout_seconds = docker_timeout_seconds
 
-    async def _docker(self, command: tuple[str, ...]) -> DockerCommandResult:
+    async def _docker(
+        self, command: tuple[str, ...], *, timeout_seconds: float | None = None,
+    ) -> DockerCommandResult:
         try:
             return await asyncio.wait_for(
                 self._run(command),
-                timeout=self._docker_timeout_seconds,
+                timeout=self._docker_timeout_seconds if timeout_seconds is None else timeout_seconds,
             )
         except TimeoutError as error:
             raise RuntimeError(
@@ -148,6 +150,9 @@ class CapabilityHost:
             capability_kinds=tuple(
                 (item.manifest.name, item.manifest.kind) for item in mounted
             ),
+            capability_timeouts=tuple(
+                (item.manifest.name, item.manifest.entrypoint.timeout_seconds) for item in mounted
+            ),
             runtime_dir=runtime_dir,
             owner_identity=cleanup.owner_identity,
         )
@@ -218,6 +223,9 @@ class CapabilityHost:
         encoded = json.dumps(payload, ensure_ascii=False, allow_nan=False)
         if len(encoded.encode("utf-8")) > 64 * 1024:
             raise ValueError("能力输入超过限制")
+        timeout_seconds = dict(lease.capability_timeouts).get(name)
+        if timeout_seconds is None:
+            raise ValueError("能力缺少冻结执行预算")
         resource_id = await owned_resource_id(self._docker, "container", lease.container_name, lease.owner_identity)
         if resource_id is None:
             raise RuntimeError("能力容器已失效")
@@ -229,7 +237,11 @@ class CapabilityHost:
             "if(!r.ok)throw Error('invoke failed');process.stdout.write(Buffer.concat(chunks))})()"
             ".catch(()=>process.exit(1))"
         )
-        result = await self._docker(("docker", "exec", resource_id, "node", "-e", script, encoded))
+        # Sidecar 按冻结预算执行；宿主另留短运维预算接收结果，不用30秒截断合法调用。
+        result = await self._docker(
+            ("docker", "exec", resource_id, "node", "-e", script, encoded),
+            timeout_seconds=timeout_seconds + self._docker_timeout_seconds,
+        )
         if result.returncode or len(result.stdout.encode("utf-8")) > 2 * 1024 * 1024:
             raise RuntimeError("能力调用结果未知，禁止自动重放")
         value = json.loads(result.stdout)
