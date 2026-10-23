@@ -684,9 +684,9 @@ def test_scheduler_context_migration_preserves_old_plan_and_verified_backup(tmp_
         ScheduleStore(str(database))
     assert database.read_bytes() == original
     plan = plan_database(target)
-    assert plan.source_revision == "scheduler_0004" and plan.pending_revisions == ("scheduler_0005",)
+    assert plan.source_revision == "scheduler_0004" and plan.pending_revisions == ("scheduler_0005", "scheduler_0006")
     receipt = apply_migrations(target, tmp_path / "scheduler-before.db")
-    assert receipt.applied_revisions == ("scheduler_0005",)
+    assert receipt.applied_revisions == ("scheduler_0005", "scheduler_0006")
     with closing(sqlite3.connect(receipt.backup_path)) as backup_connection:
         backup_connection.row_factory = sqlite3.Row
         assert dict(backup_connection.execute("SELECT * FROM scheduled_tasks").fetchone()) == old
@@ -703,6 +703,71 @@ def test_scheduler_context_migration_preserves_old_plan_and_verified_backup(tmp_
     shutil.copyfile(receipt.backup_path, restored)
     verification = verify_restored_copy(receipt.receipt_path, restored)
     assert verification.schema_state == "legacy" and restored.read_bytes() == receipt.backup_path.read_bytes()
+
+
+def test_scheduler_xlsx_migration_preserves_history_and_quarantine_metadata(tmp_path: Path) -> None:
+    from src.deployment_quarantine import snapshot_record, verify_quarantine_records
+
+    database = tmp_path / "scheduler.db"
+    target = DatabaseTarget(profile="scheduler", path=database)
+    engine = database_migrations.create_engine(database_migrations.URL.create("sqlite", database=str(database)))
+    try:
+        with engine.begin() as connection:
+            database_migrations.command.upgrade(database_migrations._alembic_config(connection), "scheduler_0005")
+    finally:
+        engine.dispose()
+    with closing(sqlite3.connect(database)) as conn:
+        conn.row_factory = sqlite3.Row
+        conn.execute("INSERT INTO scheduled_tasks(task_id,user_input,owner_user_id,trigger_type,status,created_at,time_zone,task_context_json) "
+                     "VALUES ('legacy-plan','原业务请求','synthetic-owner','once','paused','2026-01-01',NULL,NULL)")
+        for run_id, state in ((7, "unknown"), (8, None)):
+            conn.execute("INSERT INTO scheduled_task_runs(run_id,task_id,run_at,success,summary,report_path,json_path,state,notification_json,usage_json) "
+                         "VALUES (?, 'legacy-plan','2026-01-01',0,'原未知结果','downloads/old/report.md','downloads/old/data.json',?, ?, ?)",
+                         (run_id, state, '{"status":"unknown","message":"不自动重发"}', '{"calls":1}'))
+        conn.commit()
+        old_plan = dict(conn.execute("SELECT * FROM scheduled_tasks").fetchone())
+        old_runs = [dict(row) for row in conn.execute("SELECT * FROM scheduled_task_runs ORDER BY run_id")]
+        manifest = {"version": 1, "approval_reference": "synthetic-xlsx-migration", "actor_id": "synthetic-admin",
+                    "accepted_risk": "first_cutover_unknown_interruption",
+                    "targets": [{"owner_id": "synthetic-owner", "kind": "task", "resource_id": "legacy-plan", "generation": 0}],
+                    "records": [snapshot_record(conn, "scheduler", "scheduled_tasks", {"task_id": "legacy-plan"}),
+                                *[snapshot_record(conn, "scheduler", "scheduled_task_runs", {"run_id": run_id}) for run_id in (7, 8)]]}
+        with closing(sqlite3.connect(":memory:")) as web:
+            verify_quarantine_records(web, manifest, scheduler_connection=conn)
+    original = database.read_bytes()
+    # 构造器仅验证；不能顺手建列、回填路径或把原未知改为成功。
+    with pytest.raises(SchemaNotCurrentError):
+        ScheduleStore(str(database))
+    assert database.read_bytes() == original
+    plan = plan_database(target)
+    assert plan.source_revision == "scheduler_0005" and plan.pending_revisions == ("scheduler_0006",)
+    receipt = apply_migrations(target, tmp_path / "scheduler-before-xlsx.db",
+                               expected_source_sha256=hashlib.sha256(original).hexdigest())
+    assert receipt.applied_revisions == ("scheduler_0006",)
+    with closing(sqlite3.connect(database)) as conn:
+        conn.row_factory = sqlite3.Row
+        assert dict(conn.execute("SELECT * FROM scheduled_tasks").fetchone()) == old_plan
+        current = [dict(row) for row in conn.execute("SELECT * FROM scheduled_task_runs ORDER BY run_id")]
+        assert all(row.pop("xlsx_path") is None for row in current)
+        assert current == old_runs
+        column = next(row for row in conn.execute("PRAGMA table_info(scheduled_task_runs)") if row[1] == "xlsx_path")
+        assert column[2] == "TEXT" and column[3] == 0 and column[4] is None
+        with closing(sqlite3.connect(":memory:")) as web:
+            verify_quarantine_records(web, manifest, scheduler_connection=conn)
+    migrated = database.read_bytes()
+    ScheduleStore(str(database))
+    assert database.read_bytes() == migrated
+    replay = apply_migrations(target, tmp_path / "scheduler-xlsx-replay.db")
+    assert replay.applied_revisions == () and database.read_bytes() == migrated
+    with closing(sqlite3.connect(receipt.backup_path)) as conn:
+        conn.row_factory = sqlite3.Row
+        assert conn.execute("SELECT version_num FROM alembic_version").fetchone()[0] == "scheduler_0005"
+        assert [dict(row) for row in conn.execute("SELECT * FROM scheduled_task_runs ORDER BY run_id")] == old_runs
+        assert "xlsx_path" not in {row[1] for row in conn.execute("PRAGMA table_info(scheduled_task_runs)")}
+    restored = tmp_path / "scheduler-xlsx-restored.db"
+    shutil.copyfile(receipt.backup_path, restored)
+    verified = verify_restored_copy(receipt.receipt_path, restored)
+    assert verified.schema_state == "legacy" and restored.read_bytes() == receipt.backup_path.read_bytes()
 
 
 def test_legacy_app_writer_requires_explicit_sqlite_migration(

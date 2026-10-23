@@ -183,7 +183,7 @@ def main(argv=None):
                 raise ValueError("必须登记原现役根下的精确双库")
             identities = tuple(_database_identity(path, uid) for path in (database, scheduler))
             _maintenance_check(database, scheduler, runtime, uid)
-            for profile, path, revision in (("webui", database, "webui_0025"), ("scheduler", scheduler, "scheduler_0005")):
+            for profile, path, revision in (("webui", database, "webui_0025"), ("scheduler", scheduler, "scheduler_0006")):
                 status = inspect_database(DatabaseTarget(profile, path))
                 status.require_current()
                 if status.current_revision != revision:

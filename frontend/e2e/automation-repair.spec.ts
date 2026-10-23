@@ -1,6 +1,8 @@
 import { expect, test, type Page } from '@playwright/test';
+import { readFileSync } from 'node:fs';
 import { chooseModel } from './model-picker';
 test.use({ timezoneId: 'America/Los_Angeles' });
+const xlsxFixture = readFileSync(new URL('../../tests/fixtures/semantic_harness/public/batch0/workload_filter/source.xlsx', import.meta.url));
 
 test('模型显式选择与历史时区阻断', async ({ page }, testInfo) => {
   const errors: string[] = [];
@@ -116,13 +118,14 @@ async function mockAutomation(page: Page, schedulerStatus: Record<string, unknow
   const run = (id: number, taskId = 'existing') => ({
     task_id: taskId, task_name: '合成计划', run_id: id, run_at: '2026-10-06T09:30:00+08:00',
     success: id % 2 === 1, state: id % 2 === 1 ? 'succeeded' : 'failed',
-    summary: `合成记录${id}`, has_report: true, has_json: true,
+    summary: `合成记录${id}`, has_report: true, has_json: true, has_xlsx: false as boolean | undefined,
   });
   const state = {
     tasks: [task('existing', '合成计划')], runs: Array.from({ length: 23 }, (_, index) => run(index + 1)),
     templates: [{ id: 'audit-template', name: '审计模板', description: '合成模板', prompt: '合成模板需求', trigger_type: 'cron', cron_expr: '30 9 * * 1,3,5' }],
     requests: [] as Array<{ method: string; path: string; query: URLSearchParams; body: any }>,
     schedulerStatus, statusFailure: false, tasksFailure: false, runsFailure: false, holdNextRuns: false,
+    xlsxUnavailable: false,
     releaseRuns: undefined as (() => void) | undefined,
   };
   await page.addInitScript(() => localStorage.setItem('onboarding_all_["synthetic","admin"]', 'skipped'));
@@ -153,10 +156,18 @@ async function mockAutomation(page: Page, schedulerStatus: Record<string, unknow
       return route.fulfill({ json: { items: filtered.slice(offset, offset + limit), total: filtered.length } });
     }
     if (/\/runs\/\d+\/report$/.test(path)) return route.fulfill({ json: { content: '# 合成报告\n\n验证结果：20。', run_at: '2026-10-06T09:30:00+08:00', success: true } });
-    if (/\/runs\/\d+\/download$/.test(path)) return route.fulfill({
-      contentType: url.searchParams.get('kind') === 'json' ? 'application/json' : 'text/markdown',
-      body: url.searchParams.get('kind') === 'json' ? '{"synthetic":true}' : '# 合成报告\n验证结果：20。',
-    });
+    if (/\/runs\/\d+\/download$/.test(path)) {
+      const kind = url.searchParams.get('kind');
+      if (kind === 'xlsx') {
+        const selected = state.runs.find(item => path === `/api/tasks/${item.task_id}/runs/${item.run_id}/download`);
+        return route.fulfill(!selected?.has_xlsx || state.xlsxUnavailable
+          ? { status: 404, json: { detail: '该次执行没有生成Excel' } }
+          : { contentType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', body: xlsxFixture });
+      }
+      if (kind !== 'report' && kind !== 'json') return route.fulfill({ status: 422, json: { detail: '下载类型无效' } });
+      return route.fulfill({ contentType: kind === 'json' ? 'application/json' : 'text/markdown',
+        body: kind === 'json' ? '{"synthetic":true}' : '# 合成报告\n验证结果：20。' });
+    }
     if (path === '/api/tasks/manual' && method === 'POST') {
       const created = { ...task(`created-${state.tasks.length}`, body.name), user_input: body.prompt,
         ...body.trigger, trigger_type: body.trigger.type, run_count: 0, source: body.template_id ? 'template' : 'manual' };
@@ -184,6 +195,82 @@ async function mockAutomation(page: Page, schedulerStatus: Record<string, unknow
   });
   return state;
 }
+
+for (const surface of ['运行记录', '执行历史']) {
+  test(`${surface}按Owner和本次run下载真实Excel并隐藏宿主路径`, async ({ page }, testInfo) => {
+    const errors: string[] = [];
+    page.on('pageerror', error => errors.push(error.message));
+    const state = await mockAutomation(page);
+    const summary = '[本轮Excel] xlsx=/private/owner-a/run-7/结果.xlsx';
+    state.runs = [{ ...state.runs[0], run_id: 7, summary, has_report: false, has_json: false, has_xlsx: true },
+      { ...state.runs[1], task_id: 'other-task', run_id: 73, summary: '[其他Run] xlsx=/private/other-task/旧结果.xlsx', has_xlsx: true }];
+    Object.assign(state.tasks[0], { last_run_at: state.runs[0].run_at, last_success: true, last_result: summary });
+    await page.goto('/tasks');
+    if (surface === '运行记录') await page.getByRole('button', { name: '运行记录', exact: true }).click();
+    else await page.getByRole('button', { name: '历史', exact: true }).click();
+    const scope = surface === '执行历史' ? page.getByRole('dialog') : page;
+    const row = scope.getByText(/^\[本轮Excel\]/).locator('..').locator('..');
+    await expect(row.getByTitle('下载表格 (Excel)', { exact: true })).toBeVisible();
+    await expect(row).toContainText('[本轮Excel] Excel已生成，可下载');
+    await expect(row).not.toContainText('/private/');
+    await expect(row.getByTitle('下载报告 (Markdown)', { exact: true })).toHaveCount(0);
+    await expect(row.getByTitle('下载采集数据 (JSON)', { exact: true })).toHaveCount(0);
+    const requested = page.waitForRequest(request => new URL(request.url()).pathname === '/api/tasks/existing/runs/7/download');
+    const downloading = page.waitForEvent('download');
+    await row.getByTitle('下载表格 (Excel)', { exact: true }).click();
+    const request = await requested, file = await downloading;
+    expect(request.method()).toBe('GET');
+    expect(new URL(request.url()).search).toBe('?kind=xlsx');
+    expect(await request.headerValue('x-mangrove-owner')).toBe('synthetic');
+    expect(file.suggestedFilename()).toBe('xlsx_20261006_093000.xlsx');
+    expect(await file.failure()).toBeNull();
+    expect(readFileSync((await file.path())!)).toEqual(xlsxFixture);
+    if (surface === '执行历史') {
+      expect(state.requests.some(request => request.path === '/api/tasks/runs/recent' && request.query.get('task_id') === 'existing')).toBe(true);
+      await expect(page.getByText(/^上次（/)).toContainText('Excel已生成，可下载');
+      await expect(page.getByText(/^上次（/)).not.toContainText('/private/');
+    }
+    expect(state.requests.filter(request => request.path.endsWith('/download')).map(request => request.path)).toEqual(['/api/tasks/existing/runs/7/download']);
+    await page.screenshot({ path: testInfo.outputPath(`automation-xlsx-${surface}.png`) });
+    expect(errors).toEqual([]);
+  });
+}
+
+test('运行记录及历史的旧记录和未生成Excel不伪造下载入口', async ({ page }) => {
+  const state = await mockAutomation(page);
+  state.runs = [{ ...state.runs[0], has_xlsx: undefined }, { ...state.runs[1], has_xlsx: false }];
+  await page.goto('/tasks');
+  await page.getByRole('button', { name: '运行记录', exact: true }).click();
+  await expect(page.getByText('合成记录1', { exact: true })).toBeVisible();
+  await expect(page.getByTitle('下载表格 (Excel)', { exact: true })).toHaveCount(0);
+  await expect(page.getByTitle('下载报告 (Markdown)', { exact: true })).toHaveCount(2);
+  await expect(page.getByTitle('下载采集数据 (JSON)', { exact: true })).toHaveCount(2);
+  await page.goto('/tasks');
+  await page.getByRole('button', { name: '历史', exact: true }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByText('合成记录1', { exact: true })).toBeVisible();
+  await expect(dialog.getByTitle('下载表格 (Excel)', { exact: true })).toHaveCount(0);
+  await expect(dialog.getByTitle('下载报告 (Markdown)', { exact: true })).toHaveCount(2);
+  await expect(dialog.getByTitle('下载采集数据 (JSON)', { exact: true })).toHaveCount(2);
+  expect(state.requests.filter(request => request.path.endsWith('/download'))).toHaveLength(0);
+});
+
+test('Excel文件失效返回404时提示失败且不保存或重发', async ({ page }) => {
+  const state = await mockAutomation(page);
+  state.runs = [{ ...state.runs[0], has_xlsx: true }];
+  state.xlsxUnavailable = true;
+  let downloads = 0;
+  page.on('download', () => downloads++);
+  await page.goto('/tasks');
+  await page.getByRole('button', { name: '运行记录', exact: true }).click();
+  const response = page.waitForResponse(response => new URL(response.url()).pathname === '/api/tasks/existing/runs/1/download');
+  await page.getByTitle('下载表格 (Excel)', { exact: true }).click();
+  expect((await response).status()).toBe(404);
+  await expect(page.getByText('下载失败', { exact: true })).toBeVisible();
+  expect(downloads).toBe(0);
+  expect(state.requests.filter(request => request.path.endsWith('/download'))).toHaveLength(1);
+  expect(state.requests.filter(request => request.path.endsWith('/run_now'))).toHaveLength(0);
+});
 
 for (const scenario of [
   { name: '同时清空开始和结束日期', start: '', end: '' },

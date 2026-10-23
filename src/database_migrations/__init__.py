@@ -105,7 +105,7 @@ class RestoreVerification:
 
 _PROFILE_HEADS = {
     "webui": "webui_0025",
-    "scheduler": "scheduler_0005",
+    "scheduler": "scheduler_0006",
     "legacy_app": "legacy_app_0001",
     "qualification_ledger": "qualification_ledger_0001",
 }
@@ -309,6 +309,7 @@ _PROFILE_REQUIRED_COLUMNS = {
             "success",
             "report_path",
             "json_path",
+            "xlsx_path",
         ),
     },
     "legacy_app": {

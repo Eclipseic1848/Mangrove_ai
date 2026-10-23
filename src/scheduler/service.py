@@ -355,9 +355,10 @@ class SchedulerService:
             if isinstance(result, dict) and not result.get("error") and not result.get("needs_clarification"):
                 from src.notifications import auto_conductor
                 outputs = result.get("outputs") or {}
+                # 只承接本轮声明的业务产物，不能扫描目录补发历史附件。
                 delivery = {"task_id": result.get("task_id"), "reply": result.get("reply", ""), "files": [
                     {"url": f"/api/downloads/{result.get('task_id')}/{Path(outputs[key]).name}"}
-                    for key in ("report_md", "json") if outputs.get(key)
+                    for key in ("report_md", "json", "xlsx") if outputs.get(key)
                 ]}
                 await auto_conductor(store, owner, run_id, task["user_input"], result, delivery,
                                      provider=task.get("provider"), model=task.get("model"))
@@ -397,6 +398,8 @@ class SchedulerService:
             parts.append(f"report={outputs['report_md']}")
         if outputs.get("json"):
             parts.append(f"json={outputs['json']}")
+        if outputs.get("xlsx"):
+            parts.append("xlsx=已生成")
         if parts:
             if result.get("notification"):
                 # 列表会截断摘要，发送状态放在路径之前，避免失败提示被长路径遮掉。
