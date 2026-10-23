@@ -3,7 +3,7 @@
 <p align="center"><strong>用自然语言完成数据采集、整理、分析与交付。</strong></p>
 
 <p align="center">
-  <a href="https://github.com/Eclipseic1848/Mangrove_ai/releases/tag/v1.0.0"><img alt="v1.0.0" src="https://img.shields.io/badge/release-v1.0.0-2563EB"></a>
+  <a href="CHANGELOG.md"><img alt="代码版本 v1.1.0" src="https://img.shields.io/badge/code-v1.1.0-2563EB"></a>
   <img alt="Python 3.13" src="https://img.shields.io/badge/Python-3.13-3776AB?logo=python&logoColor=white">
   <img alt="React and Vite" src="https://img.shields.io/badge/React%20%2B%20Vite-646CFF?logo=vite&logoColor=white">
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-22C55E"></a>
@@ -20,7 +20,7 @@ Mangrove 将数据任务集中在一个工作台中。描述目标、选择资�
 处理数据并生成初稿；你可以查看结果和已发现的问题，选择接受初稿或继续核对，再下载交付文件。
 任务保留来源、版本和执行记录，方便追溯与后续复用。
 
-> 开发分支正在按 [v1.1.0 基线工单 #239](https://github.com/Eclipseic1848/Mangrove_ai/issues/239) 整理十月现役增量；这不代表 v1.1.0 已发布。当前能力及验收边界见 [状态台账](docs/status/current.md)，完整发布范围将在最终变更日志中列出。
+> 当前代码版本为 **v1.1.0**，本轮变更见 [更新记录](CHANGELOG.md)，能力及验收边界见 [状态台账](docs/status/current.md)。正式发布状态与可下载制品以 [GitHub Releases](https://github.com/Eclipseic1848/Mangrove_ai/releases) 为准。
 
 ## 功能概览
 
@@ -45,8 +45,8 @@ Mangrove 将数据任务集中在一个工作台中。描述目标、选择资�
 
 ## Linux 服务器部署
 
-从 [v1.0.0 Release](https://github.com/Eclipseic1848/Mangrove_ai/releases/tag/v1.0.0)
-下载 Linux 部署包，按发行页说明取得 `mangrove-v1.0.0-linux-amd64.zip`。
+从 [GitHub Releases](https://github.com/Eclipseic1848/Mangrove_ai/releases) 选择实际已发布的版本，
+按对应发行页取得 Linux 部署包；文件名、可用制品及校验摘要以该发行页和随包清单为准。
 校验并解压后阅读 `00-先读我.md`，再按[完整部署手册](docs/deployment/linux-migration-it-guide.md)操作。
 
 支持单台 Ubuntu/Debian **x86_64 / linux/amd64** 服务器。主服务由 systemd 管理，
@@ -68,7 +68,8 @@ Python 和系统依赖需要联网安装。Firecrawl、SearXNG、MediaCrawler �
 > 迁移摘要并备份数据和配套密钥。绑定旧 Pi 版本的未完成任务不保证原地续跑。
 
 GitHub 自动生成的 Source code 压缩包不含 `.git`，不能替代专用部署包中的 Git 仓库包。
-正式核验依赖提交身份；自行构建时请通过 `git clone` 检出 `v1.0.0`。
+正式核验依赖提交身份；自行构建时请通过 `git clone` 检出所选发行版的真实标签，并核对发行页
+标明的提交 SHA。开发分支 `main` 应记录完整提交号。
 
 ## 本地快速开始（Windows）
 

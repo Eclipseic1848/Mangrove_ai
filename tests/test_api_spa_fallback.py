@@ -111,3 +111,9 @@ def test_assets_keep_head_conditional_requests_and_missing_file_404(frontend_dis
     assert client.head("/assets/app.js").status_code == 200
     assert client.get("/assets/app.js", headers={"If-None-Match": response.headers["etag"]}).status_code == 304
     assert client.get("/assets/missing.js").status_code == 404
+
+
+def test_openapi_version_matches_release_version():
+    import src
+
+    assert app.openapi()["info"]["version"] == src.__version__ == "1.1.0"
