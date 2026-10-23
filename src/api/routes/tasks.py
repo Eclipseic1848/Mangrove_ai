@@ -123,9 +123,12 @@ def recent_runs(
 
 @router.get("")
 def list_tasks(user=Depends(get_current_user)) -> List[Dict[str, Any]]:
+    from ..auth import get_store
+
     store = get_schedule_store()
     service = get_scheduler_service()
-    return [{**task, **store.execution_status(task, running=service.is_running(task['task_id']))}
+    bindings = get_store().account_execution_bindings(user["user_id"], "schedule")
+    return [{**task, **store.execution_status(task, running=service.is_running(task['task_id']), bindings=bindings)}
             for task in store.list_active(owner_user_id=user["user_id"])]
 
 

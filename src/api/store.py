@@ -667,6 +667,14 @@ class WebUIStore:
             ).fetchone()
             return dict(row) if row else None
 
+    def account_execution_bindings(self, user_id: str, kind: str) -> dict[str, dict]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM account_execution_bindings WHERE owner_user_id=? AND resource_kind=?",
+                (user_id, kind),
+            ).fetchall()
+        return {row["resource_id"]: dict(row) for row in rows}
+
     def require_account_execution(self, auth, kind: str, resource_id: str) -> dict:
         with self._conn() as conn:
             conn.execute("BEGIN")

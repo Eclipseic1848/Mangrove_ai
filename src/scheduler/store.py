@@ -340,9 +340,13 @@ class ScheduleStore:
                      '执行授权已失效，结果未保存' if returned else '执行授权已失效，停止状态待确认',
                      task_id, run_id, task_id, owner))
 
-    def execution_status(self, task: dict, *, running: bool = False) -> dict:
-        from src.api.auth import get_store
-        binding = get_store().account_execution_binding(task['owner_user_id'], 'schedule', task['task_id'])
+    def execution_status(self, task: dict, *, running: bool = False, bindings: dict[str, dict] | None = None) -> dict:
+        if bindings is None:
+            from src.api.auth import get_store
+            binding = get_store().account_execution_binding(task['owner_user_id'], 'schedule', task['task_id'])
+        else:
+            # 空快照或缺项仍是缺少授权，不能重查另一时点的绑定覆盖这个事实。
+            binding = bindings.get(task['task_id'])
         reason = ''
         # 停止未确认优先于历史时区，不能通过复制新计划绕开禁止重试。
         unsafe = bool(binding and binding['state'] in ('active', 'cleanup_failed'))
