@@ -262,38 +262,47 @@ async def test_missing_binding_inventory_never_counts_as_quiescent(fixture):
 async def test_old_due_snapshot_cannot_run_rescheduled_future_task(fixture, change_epoch, future_run):
     web, store, _, first_auth = fixture
     first = add(store, first_auth)
+    blocker = add(store, first_auth)
     second_owner = web.create_user("queued-second", "synthetic-unused")["user_id"]
     second_auth = web.capture_account_execution(second_owner)
     second = add(store, second_auth, "cron")
-    entered, release = asyncio.Event(), asyncio.Event()
+    with store._conn() as conn:
+        for minute, task_id in enumerate((first, blocker, second)):
+            conn.execute("UPDATE scheduled_tasks SET next_run_at=? WHERE task_id=?",
+                         (datetime(2026, 9, 6, 0, minute).isoformat(), task_id))
+    entered = {task_id: asyncio.Event() for task_id in (first, blocker)}
+    release = asyncio.Event()
     calls = []
 
     async def runner(*args, **kwargs):
         task_id = kwargs["session_id"].removeprefix("scheduler:")
         calls.append(task_id)
-        if task_id == first:
-            entered.set()
+        if task_id in entered:
+            entered[task_id].set()
             await release.wait()
         return {"reply": "虚构完成"}
 
     service = SchedulerService(store, runner=runner)
     work = asyncio.create_task(service.tick(datetime(2026, 9, 6, 1)))
-    await asyncio.wait_for(entered.wait(), 3)
-    if change_epoch:
-        web.update_user(second_owner, disabled=True)
-        assert await service.reconcile_account_execution(second_owner, 1)
-        web.update_user(second_owner, disabled=False)
-    current = web.capture_account_execution(second_owner)
-    future = datetime(2026, 9, 9) if future_run else datetime(2026, 9, 6)
-    with execution_context(current):
-        store.set_status(second, "active", next_run_at=future)
-    release.set()
-    await work
-    assert calls == [first]
+    try:
+        # 先占满两槽，确保第三条旧快照是在改期/换代之后才尝试领取。
+        await asyncio.wait_for(asyncio.gather(*(event.wait() for event in entered.values())), 3)
+        if change_epoch:
+            web.update_user(second_owner, disabled=True)
+            assert await service.reconcile_account_execution(second_owner, 1)
+            web.update_user(second_owner, disabled=False)
+        current = web.capture_account_execution(second_owner)
+        future = datetime(2026, 9, 9) if future_run else datetime(2026, 9, 6)
+        with execution_context(current):
+            store.set_status(second, "active", next_run_at=future)
+    finally:
+        release.set()
+        await asyncio.wait_for(work, 5)
+    assert calls == [first, blocker]
     assert store.get(second)["next_run_at"] == future.isoformat()
     assert store.list_runs(second) == []
     assert web.account_execution_binding(second_owner, "schedule", second)["generation"] == current.generation
     # 新一轮读取到期事实后，合法恢复的计划仍能正常执行。
     await service.tick(future)
-    assert calls == [first, second]
+    assert calls == [first, blocker, second]
     assert len(store.list_runs(second)) == 1

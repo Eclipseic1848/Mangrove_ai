@@ -52,6 +52,7 @@ class SchedulerService:
         # 正在执行的任务 id 集合：防到点触发与手动「立即执行」撞车并发重跑同一任务
         self._running_ids: dict[str, int] = {}
         self._workers: set[asyncio.Task] = set()
+        self._due_slots = asyncio.Semaphore(2)
         self.last_poll_at: str | None = None
 
     # ---- 生命周期 ----
@@ -73,18 +74,30 @@ class SchedulerService:
     async def stop(self) -> None:
         """停止后台轮询。"""
         self._stop.set()
-        for worker in list(self._workers):
-            worker.cancel()
-        if self._workers:
-            await asyncio.gather(*self._workers, return_exceptions=True)
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
+        workers = list(self._workers)
+        if self._task is not None:
+            workers.append(self._task)
+        try:
+            await self._settle_tasks(workers, self._stop)
+        finally:
             self._task = None
         logger.info("调度器已停止 instance=%s", self.instance_id)
+
+    @staticmethod
+    async def _settle_tasks(tasks, stop_claiming: asyncio.Event):
+        # 取消等待者不证明执行已停止；重复取消也要等真实工作收敛后再向上传播。
+        joined = asyncio.gather(*tasks, return_exceptions=True)
+        cancelled = False
+        while True:
+            try:
+                results = await asyncio.shield(joined)
+                break
+            except asyncio.CancelledError:
+                stop_claiming.set()
+                cancelled = True
+        if cancelled:
+            raise asyncio.CancelledError
+        return results
 
     # ---- 循环与执行 ----
     async def _loop(self) -> None:
@@ -99,14 +112,38 @@ class SchedulerService:
                 pass  # 正常的轮询间隔到时
 
     async def tick(self, now: Optional[datetime] = None) -> int:
-        """执行一轮：跑完所有到点任务，返回本轮执行的任务数。"""
+        """执行一轮：最多两路领取到点任务，返回本轮执行的任务数。"""
         now = wall_time(now)
         self.last_poll_at = beijing_now().isoformat()
         due = self.store.due_tasks(now=now)
-        count = 0
-        for task in due:
-            count += int(await self._run_one(task, now))
-        return count
+        pending = iter(due)
+        stop_claiming = asyncio.Event()
+
+        async def consume() -> int:
+            count = 0
+            while not self._stop.is_set() and not stop_claiming.is_set():
+                async with self._due_slots:
+                    if self._stop.is_set() or stop_claiming.is_set():
+                        break
+                    task = next(pending, None)
+                    if task is None:
+                        break
+                    try:
+                        count += int(await self._run_one(task, now))
+                    except Exception:
+                        logger.exception("定时任务领取出错，继续其它任务 task_id=%s", task["task_id"])
+            return count
+
+        # 每轮只创建两个消费者；槽位由实例共享，重叠轮询也不能突破并发上限。
+        workers = [asyncio.create_task(consume()) for _ in range(min(2, len(due)))]
+        self._workers.update(workers)
+        for worker in workers:
+            worker.add_done_callback(self._workers.discard)
+        results = await self._settle_tasks(workers, stop_claiming)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        return sum(results)
 
     async def _run_one(
         self, task: Dict[str, Any], now: datetime, *, keep_next_run: bool = False
