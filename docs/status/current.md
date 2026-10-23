@@ -10,7 +10,7 @@
 | 产品入口 | `8088`；主工作台 `/data-prep` |
 | 默认任务运行时 | Pi 0.87.1，适配器 `pi-runtime` |
 | Pi / Capability Host 镜像 | `mangrove/pi-coding-agent:0.87.1-v1.0.0` |
-| 数据库版本 | WebUI `webui_0025`；本地 #249 候选要求 Scheduler `scheduler_0006`，服务器仍为已验收的 `scheduler_0005`，尚未执行本票生产迁移 |
+| 数据库版本 | WebUI `webui_0025`；Scheduler `scheduler_0006`，#249 已完成生产迁移，126条旧运行记录的 `xlsx_path` 保持 NULL |
 | 部署方式 | 单进程 FastAPI、SQLite、systemd、Nginx、Docker；镜像为 linux/amd64 |
 | CoreMind | 1.0.1 已完成独立候选验证，未启用为默认运行时 |
 | 发布记录 | [GitHub Releases](https://github.com/Eclipseic1848/Mangrove_ai/releases)；提交与文件摘要见随包清单 |
@@ -142,7 +142,7 @@ Worker 每次实时检查，退出即判为未就绪，不被资源缓存遮蔽�
 
 ## 1.12. 自动化工作簿通知与历史下载
 
-[#249](https://github.com/Eclipseic1848/Mangrove_ai/issues/249) 的本地候选仅从本轮显式输出取
+[#249](https://github.com/Eclipseic1848/Mangrove_ai/issues/249) 已合并并关闭；实现仅从本轮显式输出取
 `report_md`、`json` 和 `xlsx` 交给原通知管线，不扫描目录或拿旧文件补附件；只有工作簿的成功
 结果也记录产出摘要。原格式选择、通知授权、质量门和未知不重发保持。
 
@@ -157,10 +157,35 @@ Run 校验，返回真实 XLSX 字节及类型；缺失或越根返回404。前�
 再次通过，原MD/JSON行为保持。旧WebUI版本夹具的两处期望已对照基线修正，首次隔离
 脚本的当前Schema检查同步到0006，其他维护门不变；不在生产重新执行首次隔离。
 
-本票尚未完成 PR、CI、合并或服务器验收，不能据本地回归标记生产完成。迁移后旧代码只认
-Scheduler 0005，不能仅换回旧源码和服务配置；迁前完整备份须独立恢复、转存，并在副本验证
-旧值与隔离权威不变。新进程启动后不得回灌旧库抹掉新增业务，必要时保持维护、保全现场并
-前向修复。具体回退约束见[部署手册 §18.2](../deployment/linux-migration-it-guide.md#182-回退的关键区别)。
+[PR #271](https://github.com/Eclipseic1848/Mangrove_ai/pull/271) 已合并为 `1d9fccd`，PR/main三项CI成功，
+#249 已完成生产验收并关闭。完整备份、独立恢复、四库核验与F盘同摘要副本通过；显式迁移
+Scheduler 0005→0006，126条旧运行的新增列全为NULL，旧列和隔离权威保持。新进程封口、
+1935份源码/102份原生前端/1298份服务并集、10挂载及17PNG三入口51项通过，本地发布树、
+GitHub main和服务器对应同一 `1d9fccd`，入口已恢复。验收与关闭原件 `production-acceptance.json`、
+`closure-result.json` 私有保留；[公开验收摘要](https://github.com/Eclipseic1848/Mangrove_ai/issues/249#issuecomment-6356840950)。
+
+本票唯一stop命令退出0、耗时约123.067秒，但systemd判定timeout，按停止条件暂停。用户授权
+后仅执行一次reset-failed，重核PID0、inactive/dead、Result=success和无库持有者，再续行原包；
+原超时事实保留，真实退出时刻未知，不将重核完成时间当作退出时间。维护总窗67分36秒，
+包含暂停与例外处理；备份开始至迁移完成22分10秒，未超过共用60分钟硬限。
+
+旧代码只认Scheduler 0005，不能仅换回旧源码和服务配置，也不能以旧5覆盖新6。新进程已经
+启动并恢复接单，当前没有已核兼容0006的回退候选；原恢复点保留，必要时保持维护、保全
+新增业务和现场并前向修复。具体约束见[部署手册 §18.2](../deployment/linux-migration-it-guide.md#182-回退的关键区别)。
+
+## 1.13. 自动化报告读取代次
+
+[#250](https://github.com/Eclipseic1848/Mangrove_ai/issues/250) 的本地实现为报告读取增加请求代次；
+只接受最后一次选择的成功或失败回调。同任务不同Run乱序返回时保留最后选择；关闭、返回历史、
+打开另一任务历史、切换任务定位或筛选、切换视图及卸载会作废旧回调，避免重开窗口或弹出旧错误。
+当前读取失败仍正常提示，后台轮询不作废仍在读取的报告；原报告、JSON、Excel下载保持。
+
+四项缺陷分别先红后绿，永久浏览器回归覆盖10个新增边界。自动化42项、品牌3项通过；轮询单例
+改为等待新一轮历史请求后另行复验通过，属于重复补验，不加入45个唯一用例的分母。构建及17张
+品牌图片原件/产物校验通过。测试使用合成HTTP边界和已有拒绝代理，不是客户或生产业务验收。
+
+本节登记本地工程证据；本票CI、合并与生产验收仍须逐门完成，不能据此关闭工单。最近完成的
+生产验收为#249的`1d9fccd`，WebUI0025/Scheduler0006，后续更新复用已验证的排空机制。
 
 ## 2. 已实现能力
 
