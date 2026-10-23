@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import FileResponse, Response
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from python_multipart.exceptions import MultipartParseError
 from starlette.datastructures import UploadFile
 from starlette.formparsers import MultiPartException, MultiPartParser
@@ -260,22 +262,45 @@ def delete_upload(
 # ===== Phase 3：数据库命名连接管理 =====
 
 
+class DbConnectionDraft(BaseModel):
+    model_config = ConfigDict(strict=True)
+
+    dialect: Literal["sqlite", "mysql", "postgresql"]
+    name: str = ""
+    host: str = ""
+    port: int = Field(default=0, ge=0, le=65535)
+    database_name: str = ""
+    username: str = ""
+    password: str = ""
+    sqlite_relpath: str = ""
+
+
+def _parse_db_connection(payload: dict, *, require_name: bool = False) -> DbConnectionDraft:
+    # 写库和内联探测前使用同一合同；校验错误不能回显含密码的输入。
+    try:
+        draft = DbConnectionDraft.model_validate(payload)
+    except ValidationError:
+        raise HTTPException(422, "数据库连接参数无效：请检查方言、字段类型及端口（0–65535）") from None
+    if require_name and not draft.name.strip():
+        raise HTTPException(422, "请提供连接名称")
+    if draft.dialect == "sqlite":
+        if not (draft.sqlite_relpath or draft.database_name).strip():
+            raise HTTPException(422, "请提供 SQLite 相对路径")
+    elif not draft.host.strip():
+        raise HTTPException(422, "请提供数据库主机")
+    return draft
+
+
 @router.post("/connections")
 def create_db_connection(payload: dict, user=Depends(get_current_user)):
     """创建数据库命名连接（密码 Fernet 加密落库）。"""
+    draft = _parse_db_connection(payload, require_name=True)
     store = get_store()
     from src.services.db_connections import to_public_dict
     try:
         row = store.create_db_connection(
             user["user_id"],
-            name=payload.get("name", ""),
-            dialect=payload["dialect"],
-            host=payload.get("host", ""),
-            port=payload.get("port", 0),
-            database_name=payload.get("database_name", ""),
-            username=payload.get("username", ""),
-            password=payload.get("password", ""),
-            sqlite_relpath=payload.get("sqlite_relpath", ""),
+            **draft.model_dump(),
         )
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
@@ -337,6 +362,7 @@ def test_db_connection(payload: dict, user=Depends(get_current_user)):
         )
     else:
         # 内联草案——直接构造临时 SourceSpec
+        draft = _parse_db_connection(payload)
         spec = SourceSpec(
             source_id="test", source_type=SourceType.DATABASE,
             locator="dbconn://inline", options={"user_id": user_id},
@@ -344,13 +370,13 @@ def test_db_connection(payload: dict, user=Depends(get_current_user)):
         # 为内联草案直接注入 credentials
         from src.connectors.db_dialects import DbCredentials as DBC
         creds = DBC(
-            dialect=payload["dialect"],
-            host=payload.get("host", ""),
-            port=payload.get("port", 0),
-            database=payload.get("database_name", ""),
-            username=payload.get("username", ""),
-            password=payload.get("password", ""),
-            sqlite_relpath=payload.get("sqlite_relpath", ""),
+            dialect=draft.dialect,
+            host=draft.host,
+            port=draft.port,
+            database=draft.database_name,
+            username=draft.username,
+            password=draft.password,
+            sqlite_relpath=draft.sqlite_relpath,
         )
         connector = DatabaseConnector(credentials=creds)
         import asyncio
