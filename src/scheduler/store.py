@@ -314,9 +314,9 @@ class ScheduleStore:
     def finish_run(self, task_id: str, run_id: int, *, success: bool, summary: str, outputs: dict | None = None, notification: dict | None = None, usage: dict | None = None, state: str | None = None):
         outputs = outputs or {}
         with self._execution_write(task_id) as conn:
-            conn.execute('''UPDATE scheduled_task_runs SET state=?,ended_at=?,success=?,summary=?,report_path=?,json_path=?,notification_json=?,usage_json=?
+            conn.execute('''UPDATE scheduled_task_runs SET state=?,ended_at=?,success=?,summary=?,report_path=?,json_path=?,notification_json=?,usage_json=?,xlsx_path=?
                 WHERE task_id=? AND run_id=? AND state='running' ''',
-                (state or ('succeeded' if success else 'failed'), _iso(beijing_now()), int(success), summary, str(outputs.get('report_md') or ''), str(outputs.get('json') or ''), json.dumps(notification, ensure_ascii=False) if notification else None, json.dumps(usage) if usage else None, task_id, run_id))
+                (state or ('succeeded' if success else 'failed'), _iso(beijing_now()), int(success), summary, str(outputs.get('report_md') or ''), str(outputs.get('json') or ''), json.dumps(notification, ensure_ascii=False) if notification else None, json.dumps(usage) if usage else None, str(outputs['xlsx']) if outputs.get('xlsx') else None, task_id, run_id))
 
     def close_stopped_run(self, task_id: str, run_id: int, owner: str, *, returned: bool) -> None:
         from src.api.auth import get_store

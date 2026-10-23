@@ -62,6 +62,7 @@ interface Run {
   summary: string;
   has_report: boolean;
   has_json: boolean;
+  has_xlsx?: boolean;
 }
 
 interface RecentRun extends Run {
@@ -105,6 +106,7 @@ function lastSummary(t: Task): string {
   const notification = body.match(/发送结果：([^;]+)/)?.[0];
   if (!t.last_success) return `${note ? note + " " : ""}${body || "执行失败"}`;
   if (/report=/.test(body)) return `${note ? note + " " : ""}${notification ? notification + '；' : ''}报告已生成，点击「报告」查看或下载`;
+  if (/xlsx=/.test(body)) return `${note ? note + " " : ""}${notification ? notification + '；' : ''}Excel已生成，可下载`;
   return `${note ? note + " " : ""}${body}`;
 }
 
@@ -112,6 +114,7 @@ function runSummary(r: Run): string {
   const note = r.summary.match(/^\[[^\]]+\]/)?.[0] ?? "";
   const body = r.summary.replace(/^\[[^\]]+\]\s*/, "");
   if (/report=/.test(body)) return note ? `${note} 报告已生成` : "报告已生成";
+  if (/xlsx=/.test(body)) return note ? `${note} Excel已生成，可下载` : "Excel已生成，可下载";
   return r.summary;
 }
 
@@ -718,12 +721,15 @@ export function Tasks() {
     }
   };
 
-  const download = async (taskId: string, r: Run, kind: "report" | "json") => {
+  const download = async (taskId: string, r: Run, kind: "report" | "json" | "xlsx") => {
     const ts = beijingTime(r.run_at).replace(" ", "_").replace(/[^\d_]/g, "");
+    const suffix = { report: ".md", json: ".json", xlsx: ".xlsx" }[kind];
     try {
       await downloadFile(
         `/api/tasks/${taskId}/runs/${r.run_id}/download?kind=${kind}`,
-        `${kind}_${ts}${kind === "report" ? ".md" : ".json"}`,
+        `${kind}_${ts}${suffix}`,
+        undefined,
+        kind === "xlsx" ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" : undefined,
       );
     } catch (e: any) {
       toast.error(e.message || "下载失败");
@@ -971,6 +977,12 @@ export function Tasks() {
                         <Braces className="h-3.5 w-3.5" />
                       </Button>
                     )}
+                    {r.has_xlsx && (
+                      <Button variant="ghost" size="icon" title="下载表格 (Excel)" aria-label="下载表格 (Excel)"
+                        onClick={() => download(r.task_id, r, "xlsx")}>
+                        <Download className="h-3.5 w-3.5" />
+                      </Button>
+                    )}
                   </div>
                 </div>
               ))
@@ -1089,6 +1101,12 @@ export function Tasks() {
                           <Button variant="ghost" size="icon" title="下载采集数据 (JSON)"
                             onClick={() => download(historyFor!.task_id, r, "json")}>
                             <Braces className="h-3.5 w-3.5" />
+                          </Button>
+                        )}
+                        {r.has_xlsx && (
+                          <Button variant="ghost" size="icon" title="下载表格 (Excel)" aria-label="下载表格 (Excel)"
+                            onClick={() => download(historyFor!.task_id, r, "xlsx")}>
+                            <Download className="h-3.5 w-3.5" />
                           </Button>
                         )}
                       </div>

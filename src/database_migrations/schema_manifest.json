@@ -26,10 +26,10 @@
     "objects": {
       "index:idx_runs_task": "6d7421c5b093d5849032fc9c581e94642ee1d02b93df008fe8bf6d601c242382"
     },
-    "revision": "scheduler_0005",
+    "revision": "scheduler_0006",
     "tables": {
       "alembic_version": "691ed6fce5f31a9b013517c6b69e28441a10825af909745693a8fa7b7a627981",
-      "scheduled_task_runs": "783f875fa24e30da1259de3b91a3896e8b1f1aff1a58f1de136bbc2c2536ba56",
+      "scheduled_task_runs": "a9cabb659e3035c9b2cbca4379f6b903348b9638093ee0560cf0711a33fbc6f9",
       "scheduled_tasks": "658310b5fe11599ec809ba2703925d1537b175285a56dc9081fcbb5035a59791"
     }
   },

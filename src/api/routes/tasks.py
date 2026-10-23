@@ -43,6 +43,14 @@ def _artifact_path(value: str | None, *, detail: str) -> Path:
     raise HTTPException(status_code=404, detail=detail)
 
 
+def _xlsx_path(value: str | None) -> Path | None:
+    try:
+        path = _artifact_path(value, detail="工作簿不可用或已清理")
+    except HTTPException:
+        return None
+    return path if path.suffix.lower() == ".xlsx" else None
+
+
 def _trigger_to_schedule_str(trigger: TriggerIn) -> str:
     """把表单化的触发方式转成 once@/cron@/every@ 调度串，复用既有 parse_schedule 校验。"""
     if trigger.type == "cron":
@@ -106,6 +114,7 @@ def recent_runs(
             "summary": (r["summary"] or "")[:200],
             "has_report": bool(r["report_path"]),
             "has_json": bool(r["json_path"]),
+            "has_xlsx": _xlsx_path(r.get("xlsx_path")) is not None,
         }
         for r in rows
     ]
@@ -341,6 +350,7 @@ def task_runs(sched_id: str, user=Depends(get_current_user)) -> List[Dict[str, A
             "summary": (r["summary"] or "")[:200],
             "has_report": bool(r["report_path"]),
             "has_json": bool(r["json_path"]),
+            "has_xlsx": _xlsx_path(r.get("xlsx_path")) is not None,
         }
         for r in runs
     ]
@@ -360,18 +370,22 @@ def run_report(sched_id: str, run_id: int, user=Depends(get_current_user)) -> Di
 
 @router.get("/{sched_id}/runs/{run_id}/download")
 def run_download(sched_id: str, run_id: int, kind: str = "report", user=Depends(get_current_user)):
-    """下载某次执行的产物文件。kind=report（Markdown 报告）| json（采集数据）。"""
+    """下载某次执行的产物文件。kind=report（Markdown）| json | xlsx。"""
     _owned_task(sched_id, user)
-    if kind not in ("report", "json"):
-        raise HTTPException(status_code=422, detail="下载类型仅支持 report 或 json")
+    formats = {"report": ("report_path", ".md", "text/markdown"),
+               "json": ("json_path", ".json", "application/json"),
+               "xlsx": ("xlsx_path", ".xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")}
+    if kind not in formats:
+        raise HTTPException(status_code=422, detail="下载类型仅支持 report、json 或 xlsx")
     run = get_schedule_store().get_run(sched_id, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="执行记录不存在")
-    path = run.get("report_path") if kind == "report" else run.get("json_path")
-    path = _artifact_path(path, detail="文件不可用，请联系管理员核对存储或迁移情况")
+    field, suffix, media = formats[kind]
+    path = (_xlsx_path(run.get(field)) if kind == "xlsx" else
+            _artifact_path(run.get(field), detail="文件不可用，请联系管理员核对存储或迁移情况"))
+    if path is None:
+        raise HTTPException(status_code=404, detail="工作簿不可用或已清理")
     ts = (run.get("run_at") or "").replace(":", "").replace("-", "").replace("T", "_")
-    suffix = ".md" if kind == "report" else ".json"
-    media = "text/markdown" if kind == "report" else "application/json"
     return FileResponse(path, filename=f"{kind}_{ts}{suffix}", media_type=media)
 
 
