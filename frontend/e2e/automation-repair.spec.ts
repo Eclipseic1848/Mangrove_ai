@@ -196,6 +196,208 @@ async function mockAutomation(page: Page, schedulerStatus: Record<string, unknow
   return state;
 }
 
+async function holdAutomationReport(page: Page, taskId: string, runId: number, reply: { status?: number; json: unknown }) {
+  const path = `**/api/tasks/${taskId}/runs/${runId}/report`;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  let requested!: () => void;
+  const started = new Promise<void>(resolve => { requested = resolve; });
+  await page.route(path, async route => {
+    requested();
+    await held;
+    await route.fulfill(reply);
+  });
+  return { started, async finish() {
+    const late = page.waitForResponse(path);
+    release();
+    await (await late).finished();
+    // 等响应后的界面提交完成，不能在旧回调执行前抢先断言。
+    await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
+  } };
+}
+
+test('报告迟到响应只保留最后选择的同任务Run', async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const state = await mockAutomation(page);
+  state.runs = [{ ...state.runs[0], summary: '报告选择A' }, { ...state.runs[2], summary: '报告选择B' }];
+  const held = await holdAutomationReport(page, 'existing', 1, { json: { content: '# 迟到报告A\n\n已经作废的A正文' } });
+  await page.route('**/api/tasks/existing/runs/3/report', route => route.fulfill({
+    json: { content: '# 当前报告B\n\n最后选择B的报告正文' },
+  }));
+  await page.goto('/tasks');
+  await expect(page).toHaveURL(/\/tasks$/);
+  await page.getByRole('button', { name: '运行记录', exact: true }).click();
+  await page.getByText('报告选择A', { exact: true }).locator('..').locator('..').getByRole('button', { name: '查看', exact: true }).click();
+  await held.started;
+  await page.getByText('报告选择B', { exact: true }).locator('..').locator('..').getByRole('button', { name: '查看', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('最后选择B的报告正文');
+  await page.screenshot({ path: testInfo.outputPath('report-before-late-response.png') });
+  await held.finish();
+  await page.screenshot({ path: testInfo.outputPath('report-after-late-response.png') });
+  await expect(page.getByRole('dialog')).toContainText('最后选择B的报告正文');
+  await expect(page.getByRole('dialog')).not.toContainText('已经作废的A正文');
+  expect(errors).toEqual([]);
+});
+
+test('关闭执行历史后迟到报告不得重新打开', async ({ page }, testInfo) => {
+  const state = await mockAutomation(page);
+  state.runs = [{ ...state.runs[0], summary: '待关闭的报告' }];
+  const held = await holdAutomationReport(page, 'existing', 1, { json: { content: '# 已关闭报告\n\n不应重新打开的正文' } });
+  await page.goto('/tasks');
+  await page.getByRole('button', { name: '历史', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '查看', exact: true }).click();
+  await held.started;
+  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).last().click();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await held.finish();
+  await page.screenshot({ path: testInfo.outputPath('report-after-history-closed.png') });
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByText('不应重新打开的正文', { exact: true })).toHaveCount(0);
+});
+
+test('作废报告迟到失败不得提示错误或替换当前报告', async ({ page }, testInfo) => {
+  const state = await mockAutomation(page);
+  state.runs = [{ ...state.runs[0], summary: '旧请求' }, { ...state.runs[2], summary: '当前请求' }];
+  const held = await holdAutomationReport(page, 'existing', 1, { status: 503, json: { detail: '作废报告的迟到错误' } });
+  await page.route('**/api/tasks/existing/runs/3/report', route => route.fulfill({ json: { content: '# 当前正文B' } }));
+  await page.goto('/tasks');
+  await page.getByRole('button', { name: '运行记录', exact: true }).click();
+  await page.getByText('旧请求', { exact: true }).locator('..').locator('..').getByRole('button', { name: '查看', exact: true }).click();
+  await held.started;
+  await page.getByText('当前请求', { exact: true }).locator('..').locator('..').getByRole('button', { name: '查看', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('当前正文B');
+  await held.finish();
+  await page.screenshot({ path: testInfo.outputPath('report-after-obsolete-error.png') });
+  expect(await page.getByText('作废报告的迟到错误', { exact: true }).count()).toBe(0);
+  await expect(page.getByRole('dialog')).toContainText('当前正文B');
+});
+
+test('当前报告读取失败仍显示错误并保留历史列表', async ({ page }) => {
+  const state = await mockAutomation(page);
+  state.runs = [state.runs[0]];
+  await page.route('**/api/tasks/existing/runs/1/report', route => route.fulfill({
+    status: 503, json: { detail: '当前报告读取失败' },
+  }));
+  await page.goto('/tasks');
+  await page.getByRole('button', { name: '历史', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '查看', exact: true }).click();
+  await expect(page.getByText('当前报告读取失败', { exact: true })).toBeVisible();
+  await expect(page.getByRole('dialog')).toContainText('执行历史');
+  await expect(page.getByRole('dialog').getByRole('button', { name: '查看', exact: true })).toBeVisible();
+});
+
+test('切换自动化视图后迟到报告不得打开', async ({ page }, testInfo) => {
+  const state = await mockAutomation(page);
+  state.runs = [state.runs[0]];
+  const held = await holdAutomationReport(page, 'existing', 1, { json: { content: '# 旧视图报告' } });
+  await page.goto('/tasks');
+  await page.getByRole('button', { name: '运行记录', exact: true }).click();
+  await page.getByRole('button', { name: '查看', exact: true }).click();
+  await held.started;
+  await page.getByRole('button', { name: '定时任务', exact: true }).click();
+  await held.finish();
+  await page.screenshot({ path: testInfo.outputPath('report-after-view-changed.png') });
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '历史', exact: true })).toBeVisible();
+});
+
+test('窄屏切换任务筛选后迟到报告不得打开', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  const state = await mockAutomation(page);
+  state.tasks.push({ ...state.tasks[0], task_id: 'other', name: '另一计划' });
+  state.runs = [state.runs[0], { ...state.runs[2], task_id: 'other', summary: '另一计划的运行记录' }];
+  const held = await holdAutomationReport(page, 'existing', 1, { json: { content: '# 旧筛选报告' } });
+  await page.goto('/tasks');
+  await page.getByRole('button', { name: '运行记录', exact: true }).click();
+  await page.getByRole('button', { name: '查看', exact: true }).first().click();
+  await held.started;
+  await page.locator('select').filter({ has: page.getByRole('option', { name: '全部任务', exact: true }) }).selectOption('other');
+  await expect(page.getByText('另一计划的运行记录', { exact: true })).toBeVisible();
+  await held.finish();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByText('另一计划的运行记录', { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath('report-task-filter-mobile.png') });
+});
+
+test('打开另一任务历史后旧报告不得替换新历史', async ({ page }) => {
+  const state = await mockAutomation(page);
+  state.tasks.push({ ...state.tasks[0], task_id: 'other', name: '另一计划' });
+  state.runs = [state.runs[0], { ...state.runs[2], task_id: 'other', summary: '另一计划的运行记录' }];
+  const held = await holdAutomationReport(page, 'existing', 1, { json: { content: '# 已离开的任务正文' } });
+  await page.goto('/tasks');
+  await page.getByRole('button', { name: '历史', exact: true }).first().click();
+  await page.getByRole('dialog').getByRole('button', { name: '查看', exact: true }).click();
+  await held.started;
+  await page.getByRole('dialog').getByRole('button', { name: '关闭', exact: true }).last().click();
+  await page.getByRole('button', { name: '历史', exact: true }).nth(1).click();
+  await expect(page.getByRole('dialog')).toContainText('执行历史 · 另一计划');
+  await held.finish();
+  await expect(page.getByRole('dialog')).toContainText('执行历史 · 另一计划');
+  await expect(page.getByRole('dialog')).toContainText('另一计划的运行记录');
+  await expect(page.getByRole('dialog')).not.toContainText('已离开的任务正文');
+});
+
+test('浏览器切换定位任务后迟到报告不得打开', async ({ page }) => {
+  const state = await mockAutomation(page);
+  state.runs = [state.runs[0]];
+  const held = await holdAutomationReport(page, 'existing', 1, { json: { content: '# 旧定位任务正文' } });
+  await page.goto('/tasks?task=other');
+  await page.getByRole('link', { name: '查看全部计划', exact: true }).click();
+  await page.getByRole('button', { name: '运行记录', exact: true }).click();
+  await page.getByRole('button', { name: '查看', exact: true }).click();
+  await held.started;
+  await page.goBack();
+  await expect(page).toHaveURL(/\/tasks\?task=other$/);
+  await held.finish();
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.getByText('旧定位任务正文', { exact: true })).toHaveCount(0);
+});
+
+test('离开自动化页面后旧报告失败不得弹错，返回页面也不重开', async ({ page }, testInfo) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  const state = await mockAutomation(page);
+  state.runs = [state.runs[0]];
+  await page.route('**/api/model-connections/presets', route => route.fulfill({ json: { items: [] } }));
+  await page.route('**/api/overview/**', route => route.fulfill({ json: new URL(route.request().url()).pathname.endsWith('/schedules')
+    ? [] : { items: [], total: 0, stats: { active: 0, attention: 0, completed: 0 }, cookies: [], services: [] } }));
+  const held = await holdAutomationReport(page, 'existing', 1, { status: 503, json: { detail: '旧页面报告的迟到错误' } });
+  await page.goto('/tasks');
+  await page.getByRole('button', { name: '运行记录', exact: true }).click();
+  await page.getByRole('button', { name: '查看', exact: true }).click();
+  await held.started;
+  // 独立报告仍待响应，直接导航，不能先关闭历史而掩盖卸载缺陷。
+  await page.getByRole('link', { name: '概览', exact: true }).click();
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole('heading', { name: '概览', exact: true })).toBeVisible();
+  await held.finish();
+  expect(await page.getByText('旧页面报告的迟到错误', { exact: true }).count()).toBe(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath('report-after-unmount.png') });
+  await page.goBack();
+  await expect(page).toHaveURL(/\/tasks$/);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
+test('后台轮询不作废当前仍在读取的报告', async ({ page }) => {
+  const state = await mockAutomation(page);
+  state.runs = [state.runs[0]];
+  const held = await holdAutomationReport(page, 'existing', 1, { json: { content: '# 跨轮询的当前报告' } });
+  await page.goto('/tasks');
+  await page.getByRole('button', { name: '历史', exact: true }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '查看', exact: true }).click();
+  await held.started;
+  const readsBeforePoll = state.requests.filter(request => request.path === '/api/tasks/runs/recent').length;
+  await expect.poll(() => state.requests.filter(request => request.path === '/api/tasks/runs/recent').length, { timeout: 10_000 }).toBeGreaterThan(readsBeforePoll);
+  await held.finish();
+  await expect(page.getByRole('dialog')).toContainText('跨轮询的当前报告');
+  await page.getByRole('button', { name: '返回历史列表', exact: true }).click();
+  await expect(page.getByRole('dialog')).toContainText('执行历史');
+});
+
 for (const surface of ['运行记录', '执行历史']) {
   test(`${surface}按Owner和本次run下载真实Excel并隐藏宿主路径`, async ({ page }, testInfo) => {
     const errors: string[] = [];

@@ -509,6 +509,13 @@ export function Tasks() {
   const [historyTotal, setHistoryTotal] = useState(0);
   const historyQuery = useRef('');
   const [reading, setReading] = useState<{ taskId: string; runAt: string; content: string } | null>(null);
+  const reportRequest = useRef(0);
+  useEffect(() => {
+    // 切换任务或视图、离开页面后，旧报告回调不得影响当前界面。
+    reportRequest.current++;
+    setReading(null);
+    return () => { reportRequest.current++; };
+  }, [selectedTask, tab, runsTaskFilter]);
 
   const [formState, setFormState] = useState<
     { mode: "create"; form: FormState } | { mode: "edit"; taskId: string; form: FormState } | null
@@ -701,6 +708,12 @@ export function Tasks() {
     setFormState({ mode: "edit", taskId: t.task_id, form: taskToForm(t) });
   };
 
+  const closeReport = () => {
+    // 关闭阅读后作废在途响应，不能让迟到正文重新打开窗口。
+    reportRequest.current++;
+    setReading(null);
+  };
+
   const openHistory = (t: Task) => {
     setHistoryPage(1);
     setHistoryPageSize(10);
@@ -709,14 +722,17 @@ export function Tasks() {
     setHistoryReadError(false);
     historyQuery.current = '';
     setHistoryFor(t);
-    setReading(null);
+    closeReport();
   };
 
   const readReport = async (taskId: string, runId: number, runAt: string) => {
+    const request = ++reportRequest.current;
     try {
       const res = await api.get(`/api/tasks/${taskId}/runs/${runId}/report`);
+      if (request !== reportRequest.current) return;
       setReading({ taskId, runAt, content: res.content });
     } catch (e: any) {
+      if (request !== reportRequest.current) return;
       toast.error(e.message || "读取报告失败");
     }
   };
@@ -738,7 +754,7 @@ export function Tasks() {
 
   const closeHistory = () => {
     setHistoryFor(null);
-    setReading(null);
+    closeReport();
   };
 
   return (
@@ -1026,12 +1042,12 @@ export function Tasks() {
 
       {/* 单份报告直读（运行记录 Tab 里点「查看」） */}
       {reading && !historyFor && (
-        <Modal open onClose={() => setReading(null)} title={`报告 · ${beijingTime(reading.runAt)}`} wide>
+        <Modal open onClose={closeReport} title={`报告 · ${beijingTime(reading.runAt)}`} wide>
           <div className="max-h-[70vh] overflow-y-auto pr-1">
             <Markdown>{reading.content}</Markdown>
           </div>
           <div className="mt-4 flex justify-end">
-            <Button variant="outline" size="sm" onClick={() => setReading(null)}>关闭</Button>
+            <Button variant="outline" size="sm" onClick={closeReport}>关闭</Button>
           </div>
         </Modal>
       )}
@@ -1049,7 +1065,7 @@ export function Tasks() {
               <Markdown>{reading.content}</Markdown>
             </div>
             <div className="mt-4 flex justify-between">
-              <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setReading(null)}>
+              <Button variant="outline" size="sm" className="gap-1.5" onClick={closeReport}>
                 <ArrowLeft className="h-3.5 w-3.5" /> 返回历史列表
               </Button>
               <Button variant="outline" size="sm" onClick={closeHistory}>关闭</Button>
