@@ -32,7 +32,7 @@
 
 ### Docs
 
-- 后端、API 和前端统一产品版本 1.1.0；发行清单须绑定同一提交、构建摘要及版本，更新 CHANGELOG、公共入口和接手说明。（[#255](https://github.com/Eclipseic1848/Mangrove_ai/issues/255)）
+- 后端、API 和前端统一产品版本 1.1.0；发行清单须绑定同一提交、构建摘要及版本，更新 CHANGELOG、公共入口和接手说明。（[#255](https://github.com/Eclipseic1848/Mangrove_ai/issues/255)、[PR #280](https://github.com/Eclipseic1848/Mangrove_ai/pull/280)）
 
 ### 升级与验证边界
 
