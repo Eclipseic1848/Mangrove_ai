@@ -40,25 +40,103 @@ def test_detail_success_does_not_claim_comment_completion(coverage, status):
     assert not result.authentication
 
 
-def test_real_synthetic_process_failure_reaches_operation_result(crawler):
+def test_untyped_login_text_does_not_prove_source_rejection(crawler):
     (crawler / "main.py").write_text('raise RuntimeError("登录已过期 private-cookie=secret")', encoding="utf-8")
     with user_overrides_context({"mc_cookie_xhs": "synthetic"}):
         result = asyncio.run(SocialMediaCollector().collect(TaskSpec(intent="读取", platforms=["小红书"], keywords=["规则"])))
     assert not result.success
-    assert result.coverage["operations"]["search"]["next_action"] == "reauthenticate_selected_account"
+    assert result.coverage["operations"]["search"] == {"status": "unknown", "reason": "collection_failed", "next_action": "inspect_collection_service"}
+    assert result.coverage["failure"].get("rejection_confirmed") is not True
     assert result.coverage["connection"] == {"platform": "xhs", "source": "personal"}
     assert "secret" not in json.dumps(result.coverage)
     assert not result.authentication
 
 
-def test_collection_outcome_keeps_source_action_without_promoting_delivery():
+@pytest.mark.parametrize("status,code,reason,action", [
+    (401, None, "login_required", "reauthenticate_selected_account"),
+    (403, None, "access_denied", "check_platform_access"),
+    (429, None, "rate_limited", "wait_for_rate_limit"),
+    (461, None, "challenge_required", "complete_platform_challenge"),
+    (471, None, "challenge_required", "complete_platform_challenge"),
+    (200, 300011, "access_denied", "check_platform_access"),
+    (200, 300012, "rate_limited", "wait_for_rate_limit"),
+])
+def test_confirmed_rejection_overrides_old_logs_without_leaking(crawler, status, code, reason, action):
+    (crawler / "media_platform/xhs/client.py").write_text('''
+class PlatformAccessError(Exception):
+    def __init__(self, *, http_status, platform_code=None):
+        self.http_status = http_status
+        self.platform_code = platform_code
+        super().__init__("Cookie=synthetic-private-value /private/source")
+''', encoding="utf-8")
+    (crawler / "main.py").write_text(
+        "from media_platform.xhs.client import PlatformAccessError\n"
+        "print('CAPTCHA from an earlier operation')\n"
+        f"raise PlatformAccessError(http_status={status!r}, platform_code={code!r})\n", encoding="utf-8")
+    with user_overrides_context({"mc_cookie_xhs": "synthetic"}):
+        result = asyncio.run(SocialMediaCollector().collect(TaskSpec(intent="合成", platforms=["小红书"], keywords=["规则"])))
+    failure = result.coverage["failure"]
+    assert not result.success and failure["rejection_confirmed"] is True
+    assert (failure["reason"], failure["next_action"]) == (reason, action)
+    assert failure["diagnostic_hint"]["http_status"] == status
+    assert failure["diagnostic_hint"]["platform_code"] == code
+    assert result.coverage["operations"]["search"] == {"status": "failed", "reason": reason, "next_action": action}
+    assert "synthetic-private-value" not in json.dumps(result.coverage) + result.message
+    assert "/private/source" not in json.dumps(result.coverage) + result.message
+    assert "已过期" not in result.message
+
+
+@pytest.mark.parametrize("mode", ["missing", "wrong_token", "duplicate", "duplicate_field", "extra_field", "bad_status", "bad_code", "fake_class"])
+def test_unconfirmed_challenge_stays_unknown(crawler, mode):
+    (crawler / "media_platform/xhs/client.py").write_text('''
+class PlatformAccessError(Exception):
+    def __init__(self, *, http_status, platform_code=None):
+        self.http_status = http_status
+        self.platform_code = platform_code
+''', encoding="utf-8")
+    source = '''
+import json, os
+from media_platform.xhs.client import PlatformAccessError
+print("CAPTCHA from old output")
+payload = {"version": 1, "token": os.environ.get("MANGROVE_MC_DIAGNOSTIC_TOKEN", ""), "http_status": 471, "platform_code": None}
+'''
+    if mode == "wrong_token":
+        source += 'payload["token"] = "0" * 32 if payload["token"] != "0" * 32 else "1" * 32\n'
+    elif mode == "extra_field":
+        source += 'payload["private"] = "synthetic-hidden"\n'
+    elif mode == "bad_status":
+        source += 'payload["http_status"] = True\n'
+    elif mode == "bad_code":
+        source += 'payload["platform_code"] = True\n'
+    if mode not in {"missing", "fake_class"}:
+        source += ('print("MANGROVE_MC_REJECTION:" + json.dumps(payload)[:-1] + ", \\\"http_status\\\": 471}")\n'
+                   if mode == "duplicate_field" else 'print("MANGROVE_MC_REJECTION:" + json.dumps(payload))\n')
+    source += ('raise PlatformAccessError(http_status=471)\n' if mode == "duplicate" else
+               'raise type("PlatformAccessError", (Exception,), {})("CAPTCHA")\n' if mode == "fake_class" else
+               'raise RuntimeError("unconfirmed")\n')
+    compile(source, "<synthetic-crawler>", "exec")
+    (crawler / "main.py").write_text(source, encoding="utf-8")
+    with user_overrides_context({"mc_cookie_xhs": "synthetic"}):
+        result = asyncio.run(SocialMediaCollector().collect(TaskSpec(intent="合成", platforms=["小红书"], keywords=["规则"])))
+    failure = result.coverage["failure"]
+    assert failure.get("rejection_confirmed") is not True
+    assert failure["reason"] == "collection_failed" and failure["next_action"] == "inspect_collection_service"
+    assert result.coverage["operations"]["search"]["status"] == "unknown"
+    assert "验证码" not in result.message and "已过期" not in result.message
+
+
+@pytest.mark.parametrize("source_action,fragment", [
+    ("reauthenticate_selected_account", "不会自动续跑"),
+    ("check_platform_access", "基础登录正常不代表搜索可用"),
+])
+def test_collection_outcome_keeps_source_action_without_promoting_delivery(source_action, fragment):
     from src.conductor.collection_results import collection_outcome
     result = collection_outcome({"groups": [{"stop_reason": "collection_failed", "batches": [{"coverage": {
-        "operations": {"search": {"next_action": "reauthenticate_selected_account"},
+        "operations": {"search": {"next_action": source_action},
                        "comments": {"next_action": "private-secret"}},
     }}]}]})
-    assert result["source_actions"] == ["reauthenticate_selected_account"]
-    assert "不会自动续跑" in result["message"]
+    assert result["source_actions"] == [source_action]
+    assert fragment in result["message"]
     assert "private-secret" not in json.dumps(result)
     assert result["status"] == "failed" and not result["ready_for_review"]
 

@@ -99,7 +99,8 @@ def test_only_complete_independent_notes_enter_analysis(tmp_path, change, expect
     assert graph._route_after_collect(state) == expected
 
 
-def test_full_graph_analyzes_selected_evidence_checks_and_keeps_original_downloads(tmp_path, monkeypatch):
+@pytest.mark.parametrize("recovery", [False, True])
+def test_full_graph_analyzes_selected_evidence_checks_and_keeps_original_downloads(tmp_path, monkeypatch, recovery):
     state = report_state(tmp_path)
     original = deepcopy(state["bank_collection"])
     excluded = deepcopy(original["candidates"][0])
@@ -124,10 +125,20 @@ def test_full_graph_analyzes_selected_evidence_checks_and_keeps_original_downloa
     monkeypatch.setattr(analyze_module, "_classify_route_llm", classify)
     monkeypatch.setattr(analyze_module, "achat", report)
     monkeypatch.setattr(checker_module, "achat", check)
-    result = asyncio.run(graph.build_graph().ainvoke({"user_input": state["task_spec"].intent + "；请列出适用条件、期限和原文链接。",
-        "task_id": state["task_id"], "provider": "bound", "model": "test-model"}))
+    initial = {"user_input": state["task_spec"].intent + "；请列出适用条件、期限和原文链接。",
+        "task_id": state["task_id"], "provider": "bound", "model": "test-model"}
+    if recovery:
+        initial["task_spec"] = state["task_spec"]
+        async def resume():
+            async for kind, payload in graph.astream_collection_recovery(initial):
+                if kind == "final":
+                    return payload
+        result = asyncio.run(resume())
+    else:
+        result = asyncio.run(graph.build_graph().ainvoke(initial))
     nodes = [item["node"] for item in result["trace"]]
-    assert nodes == ["intent", "planner", "target_resolve", "router", "collect", "analyze", "checker", "output"]
+    prefix = [] if recovery else ["intent", "planner", "target_resolve", "router"]
+    assert nodes == [*prefix, "collect", "analyze", "checker", "output"]
     assert result["quality"]["passed"] and result["quality"]["review_complete"]
     assert len(result["cleaned_dataset"]) == 2
     for key in ("json", "xlsx", "evidence_zip", "report_md"):

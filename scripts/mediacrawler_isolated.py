@@ -1,6 +1,7 @@
 """在独立浏览器上下文运行采集器；凭证只从父进程管道读取。"""
 from pathlib import Path
 import json
+import os
 import re
 import runpy
 import sys
@@ -62,6 +63,25 @@ def _isolated_cause_type(error):
     return next(iter(types)) if cause is None and len(types) == 1 else None
 
 
+def _isolated_rejection(error):
+    error_type = type(error)
+    module = sys.modules.get("media_platform.xhs.client")
+    token = os.environ.get("MANGROVE_MC_DIAGNOSTIC_TOKEN", "")
+    if (error_type.__module__ != "media_platform.xhs.client" or error_type.__name__ != "PlatformAccessError"
+            or getattr(module, "PlatformAccessError", None) is not error_type
+            or re.fullmatch(r"[0-9a-f]{32}", token) is None):
+        return None
+    attributes = vars(error)
+    if "http_status" not in attributes or "platform_code" not in attributes:
+        return None
+    status, code = attributes["http_status"], attributes["platform_code"]
+    if type(status) is not int or (code is not None and type(code) is not int):
+        return None
+    if (status, code) not in {(401, None), (403, None), (429, None), (461, None), (471, None), (200, 300011), (200, 300012)}:
+        return None
+    return {"version": 1, "token": token, "http_status": status, "platform_code": code}
+
+
 def main():
     adapter = sys.argv.pop(1)
     if adapter not in {"default", "xhs", "identity"}:
@@ -117,6 +137,10 @@ if __name__ == "__main__":
             isolated_type = "Playwright" + error_type.__name__
         try:
             print("MANGROVE_MC_EXCEPTION_TYPE:" + isolated_type, file=sys.stderr, flush=True)
+            rejection = _isolated_rejection(error)
+            if rejection:
+                # 只输出已知拒绝的固定字段，并绑定本次父进程，不能把旧日志当新证明。
+                print("MANGROVE_MC_REJECTION:" + json.dumps(rejection, sort_keys=True), file=sys.stderr, flush=True)
             cause_type = _isolated_cause_type(error)
             if cause_type:
                 # 小写闭集枚举不触发旧业务分类器；没有唯一可信原因就不输出标记。

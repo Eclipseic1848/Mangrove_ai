@@ -352,9 +352,27 @@ def _require_recovery_unquarantined(store, user_id, recovery):
 
 @router.get("/collections/{task_id}/recovery")
 async def collection_recovery_status(task_id: str, user=Depends(get_current_user)):
+    from src.conductor.collection_recovery import authentication_refused
+
     recovery = _load_owned_recovery(user, task_id)
+    saved = recovery["saved"]
+    source = saved.get("credential_source")
+    # 只复用已证明的来源拒绝，不从历史日志推断当前登录状态。
+    refusals = {group["batches"][-1]["coverage"]["failure"]["reason"]
+                for group in saved["groups"] if authentication_refused(group)}
+    reason = "challenge_required" if "challenge_required" in refusals else "login_required" if refusals else "unfinished_steps"
+    action = {"challenge_required": "complete_platform_challenge", "login_required": "reauthenticate_selected_account",
+              "unfinished_steps": "resume_unfinished_steps"}[reason]
+    message = "原任务已保留进度，可继续处理尚未完成的步骤。"
+    if refusals:
+        account = {"platform": "平台统一的小红书采集账号", "personal": "你配置的小红书采集账号"}.get(source, "原任务的来源采集账号")
+        operator = {"platform": "请联系管理员确认", "personal": "请确认"}.get(source, "请联系账号维护者确认")
+        previous = "上次来源访问要求验证" if reason == "challenge_required" else "上次来源访问拒绝了登录凭证"
+        message = (f"原任务使用{account}。{previous}；{operator}该账号已在小红书正常登录并完成所需验证，"
+                   "并已在采集账号设置中更新、验证采集凭证。")
     return {"task_id": task_id, "conv_id": recovery["state"]["session_id"],
-            "message": "请先在登录态设置验证当前账号；恢复将沿用原任务和模型，仅继续可安全执行的未完成步骤。"}
+            "credential_source": source if source in {"platform", "personal"} else None,
+            "reason": reason, "next_action": action, "message": message}
 
 
 class CollectionResumeIn(BaseModel):
