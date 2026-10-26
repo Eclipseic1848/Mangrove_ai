@@ -387,3 +387,18 @@ def test_cookie_probe_fixture_exception_rejects_other_inputs() -> None:
     for other in ("tests/test_cookie_health_contract.py", "src/test_cookie_probe_feedback.py",
                   path + ".bak", "other/" + path):
         assert not re.search(rule["paths"][0], other)
+
+
+def test_release_versions_are_consistently_v1_1_0() -> None:
+    import src
+
+    package = json.loads((PROJECT_ROOT / "frontend/package.json").read_text(encoding="utf-8"))
+    lock = json.loads((PROJECT_ROOT / "frontend/package-lock.json").read_text(encoding="utf-8"))
+
+    assert (
+        src.__version__
+        == package["version"]
+        == lock["version"]
+        == lock["packages"][""]["version"]
+        == "1.1.0"
+    )
