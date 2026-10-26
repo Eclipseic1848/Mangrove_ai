@@ -12,7 +12,7 @@ import httpx
 import pytest
 
 
-ROOT = Path(__file__).resolve().parents[1] / "external/MediaCrawler/repo"
+ROOT = Path(os.environ.get("MANGROVE_XHS_TEST_ROOT") or Path(__file__).resolve().parents[1] / "external/MediaCrawler/repo")
 API = "https://edith.xiaohongshu.com"
 WWW = "https://www.xiaohongshu.com"
 
@@ -359,6 +359,45 @@ async def test_server_existing_security_failures_stay_single_attempt(xhs, status
     client, _ = build(respond)
     with pytest.raises((module.PlatformAccessError, module.IPBlockError)):
         await client.get_note_by_id_from_html("synthetic", "synthetic", "synthetic", enable_cookie=True)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,code", [(401, None), (403, None), (429, None), (461, None), (471, None), (200, 300011), (200, 300012)])
+@pytest.mark.parametrize("operation", ["search", "html"])
+async def test_confirmed_source_rejection_is_single_attempt(xhs, status, code, operation):
+    module, build, _, _ = xhs
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(status, json={"success": False, "code": code},
+                              headers={"Verifytype": "synthetic", "Verifyuuid": "synthetic"})
+
+    client, _ = build(respond)
+    with pytest.raises(Exception) as caught:
+        if operation == "search":
+            await client.get_note_by_keyword("合成范围", search_id="synthetic")
+        else:
+            await client.get_note_by_id_from_html("synthetic", "synthetic", "synthetic", enable_cookie=True)
+    assert len(calls) == 1, "来源已明确拒绝，不得自动重试原请求"
+    assert type(caught.value).__name__ == "PlatformAccessError"
+    assert caught.value.http_status == status and caught.value.platform_code == code
+    assert "web_session" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [401, 403, 429, 461, 471])
+async def test_raw_identity_keeps_single_response_contract(xhs, status):
+    _, build, _, _ = xhs
+    calls = []
+
+    def respond(request):
+        calls.append(request)
+        return httpx.Response(status, json={"success": False})
+
+    client, _ = build(respond)
+    assert await client.query_self() is None
     assert len(calls) == 1
 
 

@@ -549,10 +549,10 @@ assert result['items'] and result['has_more'] is True
 
 @pytest.mark.parametrize("failure, expected", [
     ("media_platform.xhs.exception.DataFetchError: request failed", "采集失败"),
-    ("CAPTCHA", "验证码"),
-    ("登录已过期", "登录已过期"),
+    ("CAPTCHA", "采集失败"),
+    ("登录已过期", "采集失败"),
     ("登录失败: network error", "采集失败"),
-    ("登录失败: CAPTCHA", "验证码"),
+    ("登录失败: CAPTCHA", "采集失败"),
 ])
 def test_initial_anonymous_login_probe_does_not_mask_collection_failure(crawler, failure, expected):
     (crawler / "main.py").write_text(

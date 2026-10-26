@@ -20,6 +20,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import signal
 import subprocess
 import sys
@@ -140,12 +141,39 @@ def _diagnose_mc_failure(platform: str, output: str) -> dict:
     return {"reason": "collection_failed", "next_action": "inspect_collection_service", "message": f"{cn}采集失败，请核对登录状态与采集服务配置"}
 
 
+def _confirmed_mc_rejection(output: str, token: str) -> dict | None:
+    markers = re.findall(r"(?m)^MANGROVE_MC_REJECTION:([^\r\n]*)\r?$", output)
+    if len(markers) != 1 or len(markers[0]) > 512:
+        return None
+
+    def unique_fields(pairs):
+        result = dict(pairs)
+        if len(result) != len(pairs):
+            raise ValueError("拒绝证明字段重复")
+        return result
+
+    try:
+        value = json.loads(markers[0], object_pairs_hook=unique_fields)
+    except (TypeError, ValueError):
+        return None
+    if (not isinstance(value, dict) or set(value) != {"version", "token", "http_status", "platform_code"}
+            or type(value["version"]) is not int or value["version"] != 1
+            or re.fullmatch(r"[0-9a-f]{32}", token) is None or value["token"] != token):
+        return None
+    status, code = value["http_status"], value["platform_code"]
+    if type(status) is not int or (code is not None and type(code) is not int):
+        return None
+    if (status, code) not in {(401, None), (403, None), (429, None), (461, None), (471, None), (200, 300011), (200, 300012)}:
+        return None
+    return {"http_status": status, "platform_code": code}
+
+
 def _operation_evidence(spec: TaskSpec, result: CollectResult) -> dict:
     """只描述本次操作事实，不能用成功采集推断登录身份或未来权限。"""
     primary = "detail" if spec.urls else "search"
     failure = result.coverage.get("failure") or {}
     evidence = {primary: {
-        "status": ("partial" if result.coverage.get("collector_timeout") else "succeeded") if result.success else "unknown",
+        "status": ("partial" if result.coverage.get("collector_timeout") else "succeeded") if result.success else "failed" if failure.get("rejection_confirmed") is True else "unknown",
         "reason": failure.get("reason", "operation_completed" if result.success else "operation_unconfirmed"),
         "next_action": failure.get("next_action", "none" if result.success else "inspect_collection_service"),
     }}
@@ -469,6 +497,8 @@ class SocialMediaCollector(BaseCollector):
             logger.info("MediaCrawler 启用代理IP池：provider=%s", settings.mc_ip_proxy_provider)
         # 独立入口统一禁用共享 CDP，不把宿主浏览器会话当作当前凭证的验证结果。
         env["MC_ENABLE_CDP_MODE"] = "false"
+        diagnostic_token = secrets.token_hex(16)
+        env["MANGROVE_MC_DIAGNOSTIC_TOKEN"] = diagnostic_token
         timed_out = False
         try:
             # 文件承接输出，避免子进程继承 PIPE 或输出缓冲满时阻塞超时回收。
@@ -518,6 +548,22 @@ class SocialMediaCollector(BaseCollector):
             text = (stdout or b"").decode("utf-8", "ignore")
             failure = _diagnose_mc_failure(platform, text)
             failure["diagnostic_hint"] = _safe_mc_failure_hint(stdout or b"", proc.returncode)
+            rejection = _confirmed_mc_rejection(text, diagnostic_token) if platform == "xhs" else None
+            if rejection:
+                status, code = rejection["http_status"], rejection["platform_code"]
+                if status == 401:
+                    reason, action, message = "login_required", "reauthenticate_selected_account", "小红书拒绝当前登录态，请重新验证本任务实际使用的采集账号"
+                elif status in {461, 471}:
+                    reason, action, message = "challenge_required", "complete_platform_challenge", "小红书要求完成平台安全验证，请由采集账号维护者正常登录验证后重新验证采集凭证"
+                elif status == 429 or code == 300012:
+                    reason, action, message = "rate_limited", "wait_for_rate_limit", "小红书限制本次访问频率，请等待限制解除，勿反复重试"
+                else:
+                    reason, action, message = "access_denied", "check_platform_access", "小红书拒绝本次访问，请由采集账号维护者检查平台访问限制；基础登录正常不代表搜索可用"
+                failure.update(reason=reason, next_action=action, message=message, rejection_confirmed=True)
+                failure["diagnostic_hint"].update(rejection)
+            elif platform == "xhs" and failure["reason"] in {"login_required", "challenge_required", "rate_limited"}:
+                # 第三方旧日志不是本次来源拒绝证明，不能据此恢复或要求用户换凭证。
+                failure.update(reason="collection_failed", next_action="inspect_collection_service", message="小红书采集失败；现有诊断不足以确认登录失效或安全验证，请检查本次采集服务诊断")
             logger.warning("MediaCrawler 退出码 %s，平台：%s，原因：%s，诊断提示（仅解析线索）：%s",
                            proc.returncode, platform, failure["reason"], json.dumps(failure["diagnostic_hint"], sort_keys=True))
             fallback = await direct_fallback()

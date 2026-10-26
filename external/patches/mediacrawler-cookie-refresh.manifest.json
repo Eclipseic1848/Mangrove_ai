@@ -1,19 +1,19 @@
 {
   "schema": "mangrove-xhs-cookie-refresh-v1",
   "line_endings": "preserve",
-  "patch_sha256": "17150177edae29306b948973a473460fb4c4b35f0e498ce4889c15a599670390",
+  "patch_sha256": "4738dff1c4956a06f6e323765edba3624efd09a1abac3f5ed55575a63cba94cf",
   "files": [
     {
       "path": "media_platform/xhs/client.py",
       "before_sha256": "5ff8921c662e36611f3ab0ac50b25ba54d5a8e0032d579882d735874e17478c8",
-      "after_sha256": "193c99f951a1bce33ef6e6d023ba0cde4dcae26c970ae798cf96cc52b32767ed",
+      "after_sha256": "2243e4b0614d8f0c11ac828f0d3eea2c1cc65b68ff4c87ac2ad812a268a66d38",
       "before_raw_sha256": [
         "1c133f74d403811c621d313980864efdfecc839b6f9d84a5b0787f627f9eb1ac",
         "5ff8921c662e36611f3ab0ac50b25ba54d5a8e0032d579882d735874e17478c8"
       ],
       "after_raw_sha256": [
-        "193c99f951a1bce33ef6e6d023ba0cde4dcae26c970ae798cf96cc52b32767ed",
-        "5c6e0a67ab88226458c63abff2a3d1f59c72569aa74adfcd474b9240c82a28dd"
+        "2243e4b0614d8f0c11ac828f0d3eea2c1cc65b68ff4c87ac2ad812a268a66d38",
+        "a1a3d03f4b73ab0ef95a3b4f615e2b43b28de2eba6b2283592ccc8f9a079b184"
       ]
     },
     {

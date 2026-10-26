@@ -11,20 +11,23 @@ from src.config import cookie_identity, user_ctx
 from src.config.cookie_probe_binding import capture_probe_environment
 from src.collectors.base import CollectedItem, CollectResult
 from src.conductor import evidence_collection as flow
-from src.conductor.collection_recovery import progress_location, recovery_request
+from src.conductor.collection_recovery import load_recovery, progress_location, recovery_request
 from src.conductor.task_spec import TaskSpec
 from tests.test_evidence_collection_flow import spec_for
 
 
-@pytest.mark.parametrize("change", ["same", "account", "node", "missing_initial", "missing_current", "query", "source", "legacy_same", "legacy_constraint"])
+@pytest.mark.parametrize("change", ["same", "account", "node", "missing_initial", "missing_current", "query", "source", "legacy_same", "legacy_constraint",
+    "unknown_challenge", "missing_rejection_proof", "non_boolean_rejection_proof", "confirmed_challenge", "interrupted_unknown_challenge"])
 def test_explicit_identity_recovery_preserves_or_rejects_progress(tmp_path, monkeypatch, change):
     monkeypatch.setattr(flow.settings, "webui_db_path", str(tmp_path / "webui.db"))
     monkeypatch.setattr(flow.settings, "semantic_execution_root", str(tmp_path / "execution"))
     monkeypatch.setattr(flow.settings, "data_prep_artifact_root", str(tmp_path / "artifacts"))
     monkeypatch.setattr(flow.settings, "mc_cookie_xhs", "new-cookie")
     monkeypatch.setattr(flow, "execution_owner", lambda: "owner")
-    spec = spec_for("设备维护", initial_candidates=1, candidate_limit=1)
+    spec = spec_for("设备维护", initial_candidates=1, candidate_limit=2 if change == "interrupted_unknown_challenge" else 1)
     state = {"task_id": "task", "task_spec": spec, "user_input": spec.intent}
+    if change == "interrupted_unknown_challenge":
+        state["session_id"] = "synthetic-conversation"
     environment = capture_probe_environment()
     account = hashlib.sha256(b"account-a").hexdigest()
     if change != "missing_initial":
@@ -34,7 +37,18 @@ def test_explicit_identity_recovery_preserves_or_rejects_progress(tmp_path, monk
     async def collect(self, request):
         calls.append(user_ctx.effective("mc_cookie_xhs"))
         if len(calls) == 1:
-            return CollectResult(False, "synthetic", coverage={"failure": {"reason": "login_required"}})
+            failure = {"reason": "login_required", "rejection_confirmed": True,
+                "diagnostic_hint": {"http_status": 401, "platform_code": None}}
+            if change in {"unknown_challenge", "non_boolean_rejection_proof", "interrupted_unknown_challenge"}:
+                failure = {"reason": "challenge_required", "rejection_confirmed": False if change != "non_boolean_rejection_proof" else 1,
+                    "diagnostic_hint": {"exit_code": 1, "http_status": None, "isolated_exception_type": "UnknownError", "isolated_cause_type": None}}
+            elif change == "missing_rejection_proof":
+                failure = {"reason": "login_required"}
+            elif change == "confirmed_challenge":
+                failure = {"reason": "challenge_required", "rejection_confirmed": True,
+                    "diagnostic_hint": {"http_status": 461, "platform_code": None}}
+            return CollectResult(False, "synthetic", coverage={"failure": failure,
+                "operations": {"search": {"status": "failed" if failure.get("rejection_confirmed") is True else "unknown", "reason": failure["reason"]}}})
         return CollectResult(True, "synthetic", items=[CollectedItem(content="设备规则", metadata={"note_id": "one", "note_type": "normal"})])
     async def assess(*args):
         return {"relevant": True, "records": []}
@@ -53,7 +67,14 @@ def test_explicit_identity_recovery_preserves_or_rejects_progress(tmp_path, monk
         saved["binding_fields"]["spec"]["evidence_collection"].pop("include_images")
         saved["binding"] = hashlib.sha256(json.dumps(saved["binding_fields"],ensure_ascii=False,sort_keys=True).encode("utf-8")).hexdigest()
         store.write_json(key, "progress.json", saved)
+    if change == "interrupted_unknown_challenge":
+        saved["groups"][0]["done"] = False
+        store.write_json(key, "progress.json", saved)
     original = path.read_bytes()
+    if change in {"unknown_challenge", "missing_rejection_proof", "non_boolean_rejection_proof", "interrupted_unknown_challenge"}:
+        with pytest.raises(ValueError, match="结果尚未确认"):
+            load_recovery("owner", "task")
+        assert path.read_bytes() == original and calls == ["old-cookie"]
     if change == "legacy_constraint":
         state["task_spec"] = spec.model_copy(update={"evidence_collection": spec.evidence_collection.model_copy(update={"include_images": False})})
     if change == "node":
@@ -68,7 +89,7 @@ def test_explicit_identity_recovery_preserves_or_rejects_progress(tmp_path, monk
             run()
         assert path.read_bytes() == original
         with recovery_request(saved["binding"], "a" * 32):
-            if change not in {"same", "legacy_same"}:
+            if change not in {"same", "legacy_same", "confirmed_challenge"}:
                 with pytest.raises(ValueError):
                     run()
                 assert path.read_bytes() == original and calls == ["old-cookie"]

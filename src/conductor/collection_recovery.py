@@ -28,14 +28,26 @@ def recovery_request(binding, attempt_id):
 
 def authentication_refused(group):
     batch = group.get("batches", [])[-1] if group.get("batches") else {}
+    failure = batch.get("coverage", {}).get("failure", {})
+    # 只有采集边界已证的拒绝才能退还预算；原日志提示与未知结果不能授权重发。
     return (group.get("stop_reason") == "collection_failed" and batch.get("phase") == "discovery"
-            and batch.get("coverage", {}).get("failure", {}).get("reason") in {"login_required", "challenge_required"}
+            and failure.get("rejection_confirmed") is True
+            and failure.get("reason") in {"login_required", "challenge_required"}
             and batch.get("returned_count") == 0 and batch.get("attempted", 0) > 0
             and not group.get("discovery_inflight"))
 
 
 def has_pending(saved):
     return any(not group.get("done") or authentication_refused(group) for group in saved["groups"])
+
+
+def _reject_unconfirmed_failures(saved):
+    # 失败收口前可能尚未保存 done；不能把该窗口中的未知请求当作可重发待办。
+    for group in saved["groups"]:
+        batch = (group.get("batches") or [{}])[-1]
+        if (group.get("stop_reason") == "collection_failed"
+                and batch.get("coverage", {}).get("failure", {}).get("rejection_confirmed") is not True):
+            raise ValueError("原采集请求结果尚未确认，无法安全恢复或自动重发；诊断已保留，请联系管理员核对。")
 
 
 def adopt_recovery(saved, binding, digest, proof, source):
@@ -56,6 +68,7 @@ def adopt_recovery(saved, binding, digest, proof, source):
     attempts = saved.get("recovery_attempts", [])
     if any(item["attempt_id"] == request["attempt_id"] for item in attempts):
         raise ValueError("该恢复请求已采用，不能重复执行")
+    _reject_unconfirmed_failures(saved)
     if not has_pending(saved):
         raise ValueError("原任务没有可恢复的未完成步骤")
     # 所有校验及来源完整性检查完成后才采用新摘要；未知步骤仍由原进度机拒绝重发。
@@ -85,6 +98,7 @@ def load_recovery(owner, task_id):
         raise ValueError("该任务不支持证据采集恢复")
     if not (saved.get("account_identity") or {}).get("account_ref"):
         raise ValueError("原任务没有冻结稳定账号身份，不能换凭证恢复")
+    _reject_unconfirmed_failures(saved)
     if not has_pending(saved):
         raise ValueError("原任务没有可恢复的未完成步骤")
     if (ArtifactStore().task_dir(task_id) / "workspace-import.json").exists():

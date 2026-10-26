@@ -239,6 +239,7 @@ def collection_outcome(snapshot):
         "complete_platform_challenge": "请通过来源平台正常登录完成验证，再重新验证采集凭证。",
         "wait_for_rate_limit": "请等待来源平台解除限流后再操作，不要反复更换凭证重试。",
         "inspect_collection_service": "请检查采集服务与网络；当前故障不能证明 Cookie 已过期。",
+        "check_platform_access": "来源平台拒绝本次访问，请由采集账号维护者检查平台访问限制；基础登录正常不代表搜索可用。",
         "install_collection_dependencies": "采集环境缺少运行依赖，请联系管理员补齐采集组件。",
         "install_collection_browser": "采集所需浏览器未安装或版本不匹配，请联系管理员安装匹配的浏览器。",
         "configure_collection_headless": "采集浏览器需要桌面环境，请联系管理员将服务器采集配置为无头模式。",

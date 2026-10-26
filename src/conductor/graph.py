@@ -392,12 +392,16 @@ async def astream_conductor(
 
 
 async def astream_collection_recovery(state):
-    # 仅重进原采集与快照节点；恢复不得重新理解或规划用户的冻结范围。
+    # 恢复沿用原范围和模型；足额报告继续正常分析质检，不能跳过未完成阶段。
     graph = StateGraph(ConductorState)
     graph.add_node("collect", _traced("collect", collect_node))
+    graph.add_node("analyze", _traced("analyze", analyze_node))
+    graph.add_node("checker", _traced("checker", checker_node))
     graph.add_node("output", _traced("output", output_node))
     graph.add_edge(START, "collect")
-    graph.add_edge("collect", "output")
+    graph.add_conditional_edges("collect", _route_after_collect, {"analyze": "analyze", "output": "output", "end": END})
+    graph.add_edge("analyze", "checker")
+    graph.add_conditional_edges("checker", _route_after_checker, {"analyze": "analyze", "output": "output"})
     graph.add_edge("output", END)
     stream = graph.compile().astream(state, stream_mode=["updates", "values", "custom"])
     async for event in _stream_events(stream):

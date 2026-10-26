@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, ApiError, type ChatProgress } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { Markdown } from "@/components/Markdown";
+import { Button } from "@/components/ui/button";
 import { CollectionProgress } from "./CollectionProgress";
 import { CollectionResultFiles, hasCollectionPreview, type CollectionFile } from "./CollectionResultFiles";
 import { MessageFooter } from "./MessageFooter";
@@ -14,7 +15,7 @@ import { type WebIntakeDraft } from "./TaskComposer";
 import { sendDraftTurn, resumeCollection } from "@/lib/semanticWorkspaceApi";
 import { nanoid } from "nanoid/non-secure";
 
-type Message = { id: number; role: string; content: string; task_id?: string; created_at?: string; meta?: { work_progress?: ChatProgress[]; files?: Array<{ name: string; url: string }>; token_usage?: TokenUsage; model_connection_id?: string | null; model_id?: string } };
+type Message = { id: number; role: string; content: string; task_id?: string; created_at?: string; meta?: { kind?: string; collection_outcome?: { status?: string } | null; work_progress?: ChatProgress[]; files?: Array<{ name: string; url: string }>; token_usage?: TokenUsage; model_connection_id?: string | null; model_id?: string } };
 
 export function CollectionHistory({ convId, composerProps, onCollectionFilesChange }: { convId: string; composerProps: Omit<ComponentProps<typeof WorkspaceSourceComposer>, "ownerId">; onCollectionFilesChange: (files: CollectionFile[]) => void }) {
   const { user } = useAuth();
@@ -46,16 +47,21 @@ export function CollectionHistory({ convId, composerProps, onCollectionFilesChan
   const collectionFiles = (collecting ? liveFiles : savedFiles).map(file => ({ ...file, inProgress: collecting }));
   const collectionFilesKey = JSON.stringify(collectionFiles);
   useEffect(() => { onCollectionFilesChange(collectionFiles); }, [collectionFilesKey, onCollectionFilesChange]);
-  const recoveryTask = [...(state.data?.messages ?? [])].reverse().find(message => message.task_id)?.task_id;
+  const recoveryMessage = [...(state.data?.messages ?? [])].reverse().find(message => message.task_id);
+  const recoveryTask = recoveryMessage?.task_id;
+  const completedNonCollection = recoveryMessage?.role === "assistant" && recoveryMessage.meta?.kind === "output"
+    && !recoveryMessage.meta.collection_outcome && !recoveryMessage.meta.work_progress?.some(step => step.candidate_counts);
   const recovery = useQuery({
-    queryKey: ["collection-recovery", user?.user_id, convId, recoveryTask, lastMessage?.id, state.data?.running],
+    queryKey: ["collection-recovery", user?.user_id, convId, recoveryTask, lastMessage?.id, state.data?.running, completedNonCollection],
     enabled: Boolean(recoveryTask) && !state.data?.running && !sending,
     retry: false,
     queryFn: async () => {
       try {
         return await api.get(`/api/chat/collections/${encodeURIComponent(recoveryTask!)}/recovery`) as { message: string };
       } catch (reason) {
-        if (reason instanceof ApiError && [404, 409].includes(reason.status)) return null;
+        // 只静默明确完成的非采集任务；真正采集失败或元数据未知时仍显示缺失记录等拒绝。
+        if (reason instanceof ApiError && reason.status === 409 && (reason.message === "原任务没有可恢复的未完成步骤"
+          || (completedNonCollection && ["没有可恢复的本人任务记录", "该任务不支持证据采集恢复"].includes(reason.message)))) return null;
         throw reason;
       }
     },
@@ -113,6 +119,9 @@ export function CollectionHistory({ convId, composerProps, onCollectionFilesChan
   if (state.isError) return <div role="alert" className="p-6">{state.error.message}<button type="button" className="ml-3 rounded border px-3 py-2" onClick={() => void state.refetch()}>重新读取</button></div>;
   const data = state.data;
   const previousModel = [...data.messages].reverse().find(message => message.meta?.model_id)?.meta;
+  const recoveryError = recovery.error instanceof ApiError && recovery.error.status === 404
+    ? "原采集任务不存在或无权访问，无法恢复。"
+    : recovery.error instanceof Error ? recovery.error.message : "恢复条件暂不可读取，请稍后重新查询。";
   return <div className="flex h-full min-h-0 min-w-0">
     <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
     {/* 正文与输入区各占布局空间，正文不能滚到输入框背后。 */}
@@ -141,7 +150,14 @@ export function CollectionHistory({ convId, composerProps, onCollectionFilesChan
         }}>{stopping ? "正在请求停止…" : "停止执行"}</button>
       </>}
       {!data.running && !sending && data.messages[data.messages.length - 1]?.role === "user" && <p role="alert" className="text-sm text-amber-700">本次执行没有完整结果，请检查服务状态；不会自动重新采集。</p>}
-      {!data.running && !sending && recovery.data && <div className="rounded-lg border p-3 text-sm">
+      {!data.running && !sending && recovery.isError && <div role="alert" aria-label="采集恢复条件" className="rounded-lg border p-3 text-sm">
+        <p>{recoveryError}</p>
+        <p className="mt-1 text-muted-foreground">已有资料仍保留，不会自动重新采集。</p>
+        <Button type="button" variant="outline" size="sm" className="mt-2 min-w-40" disabled={recovery.isFetching} onClick={() => void recovery.refetch()}>
+          {recovery.isFetching ? "正在查询…" : "重新查询恢复条件"}
+        </Button>
+      </div>}
+      {!data.running && !sending && !recovery.isError && recovery.data && <div className="rounded-lg border p-3 text-sm">
         <p>{recovery.data.message} 点击恢复即确认继续使用原模型处理原任务数据；已有文件保留。</p>
         <button type="button" className="mt-2 rounded border px-3 py-2" onClick={() => void resume()}>恢复原采集任务</button>
       </div>}

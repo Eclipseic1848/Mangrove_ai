@@ -354,6 +354,89 @@ for (const surface of ["历史任务", "即时对话"]) test(`采集中资料自
   await page.screenshot({ path: testInfo.outputPath("collection-live-final.png") });
 });
 
+for (const status of [404, 409, 503]) test(`历史采集恢复条件拒绝可见且重查不重发：${status}`, async ({ page }, testInfo) => {
+  await setup(page);
+  let queries = 0, resumes = 0;
+  const detail = status === 409
+    ? "原采集请求结果尚未确认，无法安全恢复或自动重发；诊断已保留，请联系管理员核对。"
+    : status === 404 ? "不应展示其他账号的任务信息" : "恢复条件查询暂不可用";
+  await page.route("**/api/chat/collections/collection-preview/recovery", route => {
+    queries++;
+    expect(route.request().method()).toBe("GET");
+    return route.fulfill(queries === 1 ? { status, json: { detail } } : { json: {
+      credential_source: "platform", reason: "challenge_required", next_action: "complete_platform_challenge",
+      message: "本任务使用平台统一的小红书采集账号。请联系管理员完成来源验证。",
+    } });
+  });
+  await page.route("**/api/chat/collections/collection-preview/resume", route => {
+    resumes++;
+    return route.fulfill({ status: 500, json: { detail: "重查资格不应恢复执行" } });
+  });
+  await page.goto("/data-prep?conversation=preview-conv");
+  const problem = page.getByRole("alert", { name: "采集恢复条件", exact: true });
+  await expect(problem).toBeVisible();
+  await expect(problem).toContainText("已有资料仍保留");
+  if (status === 404) {
+    await expect(problem).toContainText("任务不存在或无权访问");
+    await expect(problem).not.toContainText(detail);
+  } else await expect(problem).toContainText(detail);
+  await expect(page.getByRole("button", { name: "恢复原采集任务", exact: true })).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath(`collection-recovery-query-${status}.png`) });
+  const retry = problem.getByRole("button", { name: "重新查询恢复条件", exact: true });
+  await retry.focus(); await page.keyboard.press("Enter");
+  await expect(problem).toBeHidden();
+  await expect(page.getByText("本任务使用平台统一的小红书采集账号。请联系管理员完成来源验证。", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: "恢复原采集任务", exact: true })).toBeVisible();
+  expect(queries).toBe(2); expect(resumes).toBe(0);
+});
+
+test("历史采集已无待恢复步骤时不显示恢复故障", async ({ page }) => {
+  await setup(page);
+  await page.route("**/api/chat/collections/collection-preview/recovery", route => route.fulfill({
+    status: 409, json: { detail: "原任务没有可恢复的未完成步骤" },
+  }));
+  await page.goto("/data-prep?conversation=preview-conv");
+  await expect(page.getByRole("region", { name: "已采集资料预览", exact: true })).toBeVisible();
+  await expect(page.getByRole("alert", { name: "采集恢复条件", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "恢复原采集任务", exact: true })).toHaveCount(0);
+});
+
+for (const detail of ["没有可恢复的本人任务记录", "该任务不支持证据采集恢复"]) test(`普通分析完成后不显示采集恢复故障：${detail}`, async ({ page }, testInfo) => {
+  await setup(page);
+  await page.route("**/api/conversations/preview-conv/messages", route => route.fulfill({ json: [{
+    id: 1, role: "assistant", content: "普通分析已完成", task_id: "plain-analysis",
+    meta: { kind: "output", files: [{ name: "analysis.md", url: "/api/downloads/plain-analysis/analysis.md" }] },
+  }] }));
+  await page.route("**/api/chat/collections/plain-analysis/recovery", route => route.fulfill({ status: 409, json: { detail } }));
+  const checked = page.waitForResponse(response => response.url().endsWith("/api/chat/collections/plain-analysis/recovery"));
+  await page.goto("/data-prep?conversation=preview-conv");
+  await expect(page.getByRole("article", { name: "智能体回复", exact: true })).toContainText("普通分析已完成");
+  await (await checked).finished();
+  const input = page.getByRole("textbox", { name: "任务要求", exact: true });
+  await input.fill("继续分析这份结果");
+  await page.screenshot({ path: testInfo.outputPath("plain-analysis-without-collection-recovery.png") });
+  await expect(page.getByRole("alert", { name: "采集恢复条件", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "恢复原采集任务", exact: true })).toHaveCount(0);
+  await expect(input).toHaveValue("继续分析这份结果");
+});
+
+for (const evidence of ["采集结果", "候选进度"]) test(`真实采集失败缺少恢复进度时保留拒绝说明：${evidence}`, async ({ page }) => {
+  await setup(page);
+  await page.route("**/api/conversations/preview-conv/messages", route => route.fulfill({ json: [{
+    id: 1, role: "assistant", content: "来源获取失败，诊断已保留", task_id: "collection-preview",
+    meta: { kind: "output", files, ...(evidence === "采集结果" ? { collection_outcome: { status: "failed" } } : {
+      work_progress: [{ node: "collect", label: "采集数据", status: "failed", summary: "首批来源未完成", sequence: 1,
+        candidate_counts: { found: 0, excluded: 0, review_required: 0, unfinished: 0, selected: 0, target_count: 5 } }],
+    }) },
+  }] }));
+  await page.route("**/api/chat/collections/collection-preview/recovery", route => route.fulfill({
+    status: 409, json: { detail: "没有可恢复的本人任务记录" },
+  }));
+  await page.goto("/data-prep?conversation=preview-conv");
+  await expect(page.getByRole("alert", { name: "采集恢复条件", exact: true })).toContainText("没有可恢复的本人任务记录");
+  await expect(page.getByRole("button", { name: "恢复原采集任务", exact: true })).toHaveCount(0);
+});
+
 test("历史采集 SSE 中断后使用轮询的新快照和数量，不冻结旧进度", async ({ page }) => {
   await setup(page);
   let running = false, revision = 2;

@@ -1,15 +1,24 @@
 diff --git a/media_platform/xhs/client.py b/media_platform/xhs/client.py
 --- a/media_platform/xhs/client.py
 +++ b/media_platform/xhs/client.py
-@@ -40,6 +40,7 @@
+@@ -40,6 +40,16 @@
  from .help import get_search_id
  from .extractor import XiaoHongShuExtractor
  from .playwright_sign import sign_with_xhshow
 +from .session_cookies import CookieSyncError, SessionCookies
++
++
++class PlatformAccessError(httpx.RequestError):
++    """来源已明确拒绝；必须停止当前请求，不能自动重试。"""
++
++    def __init__(self, *, http_status: int, platform_code: Optional[int] = None):
++        self.http_status = http_status
++        self.platform_code = platform_code
++        super().__init__("XHS source request rejected")
  
  
  class XiaoHongShuClient(AbstractApiClient, ProxyRefreshMixin):
-@@ -72,10 +73,11 @@
+@@ -72,10 +82,11 @@
          self.playwright_page = playwright_page
          self.cookie_dict = cookie_dict
          self._extractor = XiaoHongShuExtractor()
@@ -22,7 +31,7 @@ diff --git a/media_platform/xhs/client.py b/media_platform/xhs/client.py
          """请求头参数签名 (使用 xhshow 纯算法)
  
          Args:
-@@ -95,25 +97,29 @@
+@@ -95,25 +106,29 @@
          else:
              raise ValueError("params or payload is required")
  
@@ -50,7 +59,7 @@ diff --git a/media_platform/xhs/client.py b/media_platform/xhs/client.py
 +        })
 +        return headers
 +
-+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1), retry=retry_if_not_exception_type((NoteNotFoundError, CookieSyncError, asyncio.CancelledError)))
++    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1), retry=retry_if_not_exception_type((NoteNotFoundError, IPBlockError, PlatformAccessError, CookieSyncError, asyncio.CancelledError)))
      async def request(self, method, url, **kwargs) -> Union[str, Any]:
 +        async with self._session.lock:
 +            return await self._request_once(method, url, **kwargs)
@@ -59,7 +68,7 @@ diff --git a/media_platform/xhs/client.py b/media_platform/xhs/client.py
          """
          Wrapper for httpx common request method, processes request response
          Args:
-@@ -129,8 +135,29 @@
+@@ -129,20 +144,43 @@
  
          # return response.text
          return_response = kwargs.pop("return_response", False)
@@ -81,15 +90,38 @@ diff --git a/media_platform/xhs/client.py b/media_platform/xhs/client.py
 +            if snapshot is not None:
 +                client.cookies = httpx.Cookies(jar)
              response = await client.request(method, url, timeout=self.timeout, **kwargs)
+-
+-        if response.status_code == 471 or response.status_code == 461:
+-            # someday someone maybe will bypass captcha
+-            verify_type = response.headers["Verifytype"]
+-            verify_uuid = response.headers["Verifyuuid"]
+-            msg = f"CAPTCHA appeared, request failed, Verifytype: {verify_type}, Verifyuuid: {verify_uuid}, Response: {response}"
+-            utils.logger.error(msg)
+-            raise Exception(msg)
 +            if snapshot is not None:
 +                await self._session.commit(snapshot, client.cookies.jar, response)
 +                self.headers["Cookie"], self.cookie_dict = await self._session.values(url)
 +        if raw_identity:
 +            return response.json() if response.status_code == 200 else None
++
++        if response.status_code in {401, 403, 429, 461, 471}:
++            raise PlatformAccessError(http_status=response.status_code)
++        try:
++            response_data = response.json()
++        except (TypeError, ValueError):
++            response_data = None
++        code = str(response_data.get("code")) if isinstance(response_data, dict) else ""
++        if response.status_code == 200 and code in {"300011", "300012"}:
++            raise PlatformAccessError(http_status=200, platform_code=int(code))
  
-         if response.status_code == 471 or response.status_code == 461:
-             # someday someone maybe will bypass captcha
-@@ -172,7 +199,7 @@
+         if return_response:
+             return response.text
+-        data: Dict = response.json()
++        data: Dict = response_data if response_data is not None else response.json()
+         if data["success"]:
+             return data.get("data", data.get("success", {}))
+         elif data["code"] == self.IP_ERROR_CODE:
+@@ -172,7 +210,7 @@
          Returns:
  
          """
@@ -98,7 +130,7 @@ diff --git a/media_platform/xhs/client.py b/media_platform/xhs/client.py
          # Build URL manually to ensure query string encoding matches the sign string
          # (httpx's default params encoding differs from browser/XHS frontend behavior)
          if params:
-@@ -181,7 +208,7 @@
+@@ -181,7 +219,7 @@
              full_url = f"{self._host}{uri}"
  
          return await self.request(
@@ -107,7 +139,7 @@ diff --git a/media_platform/xhs/client.py b/media_platform/xhs/client.py
          )
  
      async def post(self, uri: str, data: dict, **kwargs) -> Dict:
-@@ -194,13 +221,14 @@
+@@ -194,13 +232,14 @@
          Returns:
  
          """
@@ -123,7 +155,7 @@ diff --git a/media_platform/xhs/client.py b/media_platform/xhs/client.py
              **kwargs,
          )
  
-@@ -234,12 +262,10 @@
+@@ -234,12 +273,10 @@
              Dict: User info if logged in, None otherwise
          """
          uri = "/api/sns/web/v1/user/selfinfo"
@@ -140,7 +172,7 @@ diff --git a/media_platform/xhs/client.py b/media_platform/xhs/client.py
  
      async def pong(self) -> bool:
          """
-@@ -270,12 +296,10 @@
+@@ -270,12 +307,10 @@
          Returns:
  
          """
@@ -157,12 +189,12 @@ diff --git a/media_platform/xhs/client.py b/media_platform/xhs/client.py
  
      async def get_note_by_keyword(
          self,
-@@ -667,7 +691,7 @@
+@@ -667,7 +702,7 @@
          data = {"original_url": f"{self._domain}/discovery/item/{note_id}"}
          return await self.post(uri, data=data, return_response=True)
  
 -    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
-+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1), retry=retry_if_not_exception_type((CookieSyncError, asyncio.CancelledError)))
++    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1), retry=retry_if_not_exception_type((IPBlockError, PlatformAccessError, CookieSyncError, asyncio.CancelledError)))
      async def get_note_by_id_from_html(
          self,
          note_id: str,
