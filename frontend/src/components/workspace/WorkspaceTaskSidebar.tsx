@@ -6,9 +6,14 @@ import {
   HardDrive,
   Inbox,
   Loader2,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Trash2,
 } from "lucide-react";
+import { useLayoutEffect, useRef, type MutableRefObject } from "react";
+import * as Tooltip from "@radix-ui/react-tooltip";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { beijingTime } from "@/lib/beijingTime";
 import type {
@@ -86,6 +91,9 @@ function formatBytes(bytes: number) {
 }
 
 export function WorkspaceTaskSidebar({
+  collapsed,
+  onToggle,
+  scrollPosition,
   tasks,
   activeTaskId,
   filter,
@@ -105,6 +113,9 @@ export function WorkspaceTaskSidebar({
   onNew,
   onToggleRecycleBin,
 }: {
+  collapsed: boolean;
+  onToggle: () => void;
+  scrollPosition: MutableRefObject<number>;
   tasks: Pick<WorkspaceTask, "task_id" | "title" | "status" | "updated_at">[];
   activeTaskId: string | null;
   filter: "all" | "active" | "needs_input" | "completed";
@@ -124,6 +135,11 @@ export function WorkspaceTaskSidebar({
   onNew: () => void;
   onToggleRecycleBin: () => void;
 }) {
+  const listRef = useRef<HTMLDivElement>(null);
+  useLayoutEffect(() => {
+    // 窄屏抽屉会卸载列表，展开时恢复同一列表的阅读位置。
+    if (!collapsed && listRef.current) listRef.current.scrollTop = scrollPosition.current;
+  }, [collapsed, scrollPosition]);
   const filtered = tasks.filter((task) => {
     if (recycleBin) return true;
     if (filter === "active") {
@@ -143,7 +159,23 @@ export function WorkspaceTaskSidebar({
   ];
 
   return (
-    <aside aria-label="任务列表" className="flex h-full min-h-0 w-[280px] shrink-0 flex-col border-r bg-muted/20">
+    <aside aria-label="任务列表" className={cn("flex h-full min-h-0 shrink-0 flex-col border-r bg-muted/20", collapsed ? "w-12" : "w-[280px]")}>
+      <div className={cn("flex shrink-0 items-center", collapsed ? "flex-col gap-2 py-2" : "h-10 justify-between px-3")}>
+        <h2 className={cn("text-sm font-semibold", collapsed && "order-2 mt-1 text-xs font-medium text-muted-foreground [writing-mode:vertical-rl] [text-orientation:upright]")}>任务列表</h2>
+        <Tooltip.Provider delayDuration={200}>
+          <Tooltip.Root>
+            <Tooltip.Trigger asChild>
+              <Button id="task-list-toggle" type="button" variant="outline" aria-label={collapsed ? "展开任务列表" : "收起任务列表"} aria-expanded={!collapsed} aria-controls="workspace-task-list-content" onClick={onToggle}
+                className={cn("shrink-0 rounded-lg text-xs", collapsed ? "order-1 h-11 w-11 p-0" : "h-9 gap-1.5 px-2.5")}>
+                {collapsed ? <PanelLeftOpen aria-hidden="true" /> : <PanelLeftClose aria-hidden="true" />}
+                {!collapsed && <span>收起</span>}
+              </Button>
+            </Tooltip.Trigger>
+            {collapsed && <Tooltip.Content side="right" sideOffset={8} className="z-50 rounded-md border bg-card px-2.5 py-1.5 text-xs text-foreground shadow-md">展开任务列表</Tooltip.Content>}
+          </Tooltip.Root>
+        </Tooltip.Provider>
+      </div>
+      <div id="workspace-task-list-content" hidden={collapsed} className={cn("min-h-0 flex-1 flex-col", !collapsed && "flex")}>
       <div className="p-3">
         <button
           type="button"
@@ -173,7 +205,7 @@ export function WorkspaceTaskSidebar({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+      <div ref={listRef} role="region" aria-label="任务记录" onScroll={event => { if (!collapsed) scrollPosition.current = event.currentTarget.scrollTop; }} className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         {error && <div role="alert" className="space-y-2 px-2 py-3 text-xs text-red-700 dark:text-red-300">
           <p>{error}读取失败，已加载的任务仍保留。</p>
           {Boolean(lastReadAt) && <p>最近成功读取：{beijingTime(new Date(lastReadAt!).toISOString())}</p>}
@@ -265,6 +297,7 @@ export function WorkspaceTaskSidebar({
             </span>
           )}
         </button>
+      </div>
       </div>
     </aside>
   );
