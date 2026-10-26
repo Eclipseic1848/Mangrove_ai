@@ -13,8 +13,6 @@ import {
   FileSearch,
   LayoutTemplate,
   Loader2,
-  PanelLeftClose,
-  PanelLeftOpen,
   RotateCcw,
   Trash2,
   X,
@@ -517,6 +515,7 @@ export function SemanticWorkspacePage() {
   }, [user?.user_id]);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [navigationOpen, setNavigationOpen] = useState(() => window.innerWidth >= 1024);
+  const navigationScrollPosition = useRef(0);
   const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 767px)").matches);
   useEffect(() => {
     const media = window.matchMedia("(max-width: 767px)");
@@ -960,6 +959,9 @@ export function SemanticWorkspacePage() {
 
   const taskNavigation = (
           <WorkspaceTaskSidebar
+          collapsed={!navigationOpen}
+          onToggle={() => setNavigationOpen(value => !value)}
+          scrollPosition={navigationScrollPosition}
           tasks={[...loadedTasks, ...(recycleBin ? [] : collectionHistory.data || []).map(item => ({ ...item, task_id: `conversation:${item.conv_id}` }))].sort((a, b) => b.updated_at.localeCompare(a.updated_at))}
           activeTaskId={selectedConversationId ? `conversation:${selectedConversationId}` : selectedTaskId}
           filter={filter}
@@ -1110,10 +1112,6 @@ export function SemanticWorkspacePage() {
             if (selectedTaskId === operation.task_id) setSelectedTaskId(null);
             void Promise.all(["semantic-workspace-task", "semantic-workspace-tasks", "semantic-workspace-storage", "workspace-task-source", "workspace-task-derived-source", "workspace-source-file"].map(key => queryClient.invalidateQueries({ queryKey: [key] })));
           }} />}
-          <button id="task-list-toggle" type="button" aria-expanded={navigationOpen} onClick={() => setNavigationOpen(value => !value)} className="inline-flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-medium hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
-            {navigationOpen ? <PanelLeftClose aria-hidden="true" className="h-3.5 w-3.5" /> : <PanelLeftOpen aria-hidden="true" className="h-3.5 w-3.5" />}
-            {navigationOpen ? "收起任务列表" : "展开任务列表"}
-          </button>
           {(newTask ? draftUploads.length > 0 : Boolean(task?.uploads?.length || taskWebSources.some(source => source.snapshot?.artifacts.length) || task?.delivery_output_ids?.length)) ? (
             <button
               type="button"
@@ -1147,19 +1145,23 @@ export function SemanticWorkspacePage() {
       <div className={cn("relative flex min-h-0 flex-1", settingsOpen && "hidden")}>
 
         {narrow ? (
+          <>
+          {!navigationOpen && taskNavigation}
           <Dialog.Root open={navigationOpen} onOpenChange={setNavigationOpen}>
             <Dialog.Portal>
               <Dialog.Overlay className="fixed inset-0 z-40 bg-foreground/20" />
               <Dialog.Content aria-describedby={undefined} className="fixed inset-y-0 left-0 z-50 max-w-[90vw] bg-background" onCloseAutoFocus={event => {
                 event.preventDefault();
-                document.getElementById("task-list-toggle")?.focus();
+                // 等抽屉卸载并挂载原位窄轨后，再归还键盘焦点。
+                requestAnimationFrame(() => document.getElementById("task-list-toggle")?.focus());
               }}>
                 <Dialog.Title className="sr-only">任务列表</Dialog.Title>
                 {taskNavigation}
               </Dialog.Content>
             </Dialog.Portal>
           </Dialog.Root>
-        ) : navigationOpen && taskNavigation}
+          </>
+        ) : taskNavigation}
 
         <div className="min-w-0 flex-1">
           {selectedConversationId || newTask ? (
