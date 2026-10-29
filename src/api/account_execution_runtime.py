@@ -10,7 +10,7 @@ from filelock import Timeout
 
 from src import account_execution as execution
 from src.api.execution import execution_lock, execution_to_thread
-from src.deployment_quarantine import is_quarantined, load_quarantine
+from src.deployment_quarantine import is_quarantined, load_quarantine, quarantine_targets
 from src.source_acquisition import SourceAcquisitionRepository
 
 _LOGGER = logging.getLogger(__name__)
@@ -104,7 +104,7 @@ class AccountExecutionManager:
                     with self.store._conn() as conn:
                         bindings = execution.list_execution_bindings(conn, owner, before_generation=generation)
                         frozen = {(target["owner_id"], target["kind"], target["resource_id"])
-                                  for target in load_quarantine(conn)["targets"]}
+                                  for target in quarantine_targets(conn)}
                     for binding in bindings:
                         identity = (owner, binding["resource_kind"], binding["resource_id"])
                         if identity in frozen or (owner, "task", binding["resource_id"]) in frozen:

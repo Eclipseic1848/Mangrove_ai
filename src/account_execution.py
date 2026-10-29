@@ -8,7 +8,7 @@ import math
 import sqlite3
 from uuid import uuid4
 
-from src.deployment_quarantine import QuarantinedExecutionError, assert_not_quarantined, assert_task_not_quarantined, load_quarantine
+from src.deployment_quarantine import QuarantinedExecutionError, assert_not_quarantined, assert_task_not_quarantined, load_quarantine, quarantine_targets
 
 RESOURCE_KINDS = frozenset({"workspace", "data", "harness", "source", "validation", "chat", "candidate", "schedule"})
 STATES = frozenset({"active", "idle", "paused", "cleanup_failed"})
@@ -175,14 +175,14 @@ def update_account_status(conn, owner_user_id, *, disabled=None, pending=None, a
     next_pending = user["pending"] if pending is None else int(pending)
     entering_hold = not (user["disabled"] or user["pending"]) and (next_disabled or next_pending)
     generation = user["execution_generation"] + int(bool(entering_hold))
-    quarantine = load_quarantine(conn)
+    targets = quarantine_targets(conn)
     conn.execute("UPDATE users SET disabled=?,pending=?,execution_generation=? WHERE user_id=?", (next_disabled, next_pending, generation, owner_user_id))
     if entering_hold:
         # 撤销业务 Grant 与停用同事务；重新启用不会恢复旧 Run 的外发权利。
         conn.execute("UPDATE model_connection_grants SET revoked_at=strftime('%Y-%m-%dT%H:%M:%f',?,'unixepoch'),revoke_reason='account_execution_hold' WHERE owner_user_id=? AND revoked_at IS NULL", (now, owner_user_id))
         conn.execute("INSERT INTO account_execution_holds(operation_id,owner_user_id,generation,actor_user_id,reason,status,reconciliation_complete,created_at,updated_at) VALUES (?,?,?,?,?,'pending',0,?,?)", (uuid4().hex, owner_user_id, generation, actor_user_id, "disabled" if next_disabled else "pending", now, now))
         # 隔离只保留旧事实；其余 idle 才沿既有账号暂停语义收口。
-        frozen = {(target["owner_id"], target["kind"], target["resource_id"]) for target in quarantine["targets"]}
+        frozen = {(target["owner_id"], target["kind"], target["resource_id"]) for target in targets}
         idle = [(now, owner_user_id, row[0], row[1], generation) for row in conn.execute(
             "SELECT resource_kind,resource_id FROM account_execution_bindings WHERE owner_user_id=? AND generation<? AND state='idle'", (owner_user_id, generation))
             if (owner_user_id, row[0], row[1]) not in frozen and (owner_user_id, "task", row[1]) not in frozen]
@@ -207,7 +207,7 @@ def refresh_hold_operation(conn, operation_id, *, reconciliation_complete=None, 
     if error_code is _UNCHANGED:
         error_code = operation["error_code"]
     # 隔离不证明历史已停；新停用只归并仍可执行的绑定，不改原绑定事实。
-    frozen = {(target["owner_id"], target["kind"], target["resource_id"]) for target in quarantine["targets"]}
+    frozen = {(target["owner_id"], target["kind"], target["resource_id"]) for target in quarantine_targets(conn)}
     counts = {}
     for kind, resource, state in conn.execute("SELECT resource_kind,resource_id,state FROM account_execution_bindings WHERE owner_user_id=? AND generation<?", (operation["owner_user_id"], operation["generation"])):
         if (operation["owner_user_id"], kind, resource) not in frozen and (operation["owner_user_id"], "task", resource) not in frozen:

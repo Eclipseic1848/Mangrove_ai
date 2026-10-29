@@ -11,7 +11,7 @@
 | 产品入口 | `8088`；主工作台 `/data-prep` |
 | 默认任务运行时 | Pi 0.87.1，适配器 `pi-runtime` |
 | Pi / Capability Host 镜像 | `mangrove/pi-coding-agent:0.87.1-v1.0.0` |
-| 数据库版本 | WebUI `webui_0025`；Scheduler `scheduler_0006`，#249 已完成生产迁移，126条旧运行记录的 `xlsx_path` 保持 NULL |
+| 数据库版本 | 代码目标 WebUI `webui_0026`、Scheduler `scheduler_0006`；#285 的 0025→0026 生产迁移待实证，126条旧运行记录的 `xlsx_path` 保持 NULL |
 | 部署方式 | 单进程 FastAPI、SQLite、systemd、Nginx、Docker；镜像为 linux/amd64 |
 | CoreMind | 1.0.1 已完成独立候选验证，未启用为默认运行时 |
 | 发布记录 | [GitHub Releases](https://github.com/Eclipseic1848/Mangrove_ai/releases)；提交与文件摘要见随包清单 |
@@ -307,7 +307,7 @@ package/lock产品版本为 `1.1.0`，API沿现有单一导入生成OpenAPI版�
 本节仅说明源码机制和离线验证：402项合成后端回归、33项真实本机补丁安装检查、22项浏览器回归及构建/17品牌原件
 通过，不等于小红书实际已放行。生产更新、实际来源验证及客户验收状态以工单回执为准。
 
-## 1.20. 小红书登录选择与来源停止边界（本地候选）
+## 1.20. 小红书登录选择与来源停止边界
 
 本地候选承接现役平台浏览器会话和阶段诊断；个人 Cookie 保持优先，只有明确选择平台浏览器
 时才使用共享会话目录。小红书 Cookie 采集及身份探针采用无头浏览器，不依赖桌面；平台浏览器
@@ -321,9 +321,19 @@ package/lock产品版本为 `1.1.0`，API沿现有单一导入生成OpenAPI版�
 
 对应永久回归包括 `test_xhs_headless_regressions.py`、`test_xhs_profile_freeze_regressions.py`、
 `test_xhs_collect_routing_regressions.py`、`test_xhs_browser_proof_regressions.py` 及浏览器会话用例。
-本节描述候选机制，不表示已合并、部署或完成客户真实采集；CI、来源验收和三端一致以
+该机制已由 PR #287 合并，尚不表示已部署或完成客户真实采集；CI、来源验收和三端一致以
 [#285](https://github.com/Eclipseic1848/Mangrove_ai/issues/285) 的实际回执为准。独立 Cookie
 辅助工具仍属后续范围，正式 `v1.1.0` Tag/Release 保持不动。
+
+## 1.21. 两条旧 Chat 补充隔离（源码与离线验证阶段）
+
+#285 经用户批准，为两条旧 Chat 增加独立、固定的补充隔离；显式迁移目标为 `webui_0026`。
+原首次隔离34目标/53原件保持。仅原件、Owner、代数及 `cleanup_failed` 匹配的两条可登记；
+其他异常仍阻断部署。原结果保持未知，不能恢复、重发或经旧模型授权绕过。
+
+原服务首次切换只对这两条允许受控停止例外，不称历史自然排空；新实例仍须严格封口。
+回退必须使用识别补充隔离的兼容代码并保留新库。见 [ADR-0052](../adr/0052-supplemental-chat-quarantine.md)。
+本节不代表生产已迁移、真实来源已通过或 #285 已关闭，实际结果以工单回执为准。
 
 ## 2. 已实现能力
 
