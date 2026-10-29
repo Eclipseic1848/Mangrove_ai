@@ -2,7 +2,7 @@
 # 完整生产依赖拆分与漏洞治理属于 P0-03（#58）。
 alembic==1.18.3
 cryptography==50.0.1
-filelock==3.20.3
+filelock==4.2.1
 httpx==0.28.1
 langchain-core==1.4.6
 langchain-openai==1.1.14
