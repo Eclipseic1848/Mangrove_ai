@@ -8,6 +8,8 @@ import sqlite3
 
 SETTING_KEY = "deployment.first_cutover_quarantine"
 ACCEPTED_RISK = "first_cutover_unknown_interruption"
+CHAT_SETTING_KEY = "deployment.supplemental_chat_quarantine"
+CHAT_ACCEPTED_RISK = "legacy_chat_unknown_interruption"
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 EMPTY_MANIFEST = {
     "version": 1, "targets": [], "records": [], "approval_reference": None,
@@ -168,10 +170,18 @@ def _require_target_records(conn, manifest, scheduler_connection):
 def quarantine_summary(conn) -> dict:
     """明确历史仍未知，不把可执行域 quiet 冒充历史全部自然完成。"""
     manifest = load_quarantine(conn)
-    return {"accepted_risk": manifest["accepted_risk"], "approval_reference": manifest["approval_reference"],
+    result = {"accepted_risk": manifest["accepted_risk"], "approval_reference": manifest["approval_reference"],
             "targets": len(manifest["targets"]), "records": len(manifest["records"]),
             "manifest_sha256": hashlib.sha256(_json(manifest).encode("utf-8")).hexdigest(),
             "historical_stop_proven": False}
+    chat = load_chat_quarantine(conn)
+    result["supplemental_chat_quarantine"] = {
+        "accepted_risk": chat["accepted_risk"], "approval_reference": chat["approval_reference"],
+        "targets": len(chat["targets"]), "records": len(chat["records"]),
+        "manifest_sha256": hashlib.sha256(_json(chat).encode("utf-8")).hexdigest(),
+        "historical_stop_proven": False,
+    }
+    return result
 
 
 class QuarantinedExecutionError(PermissionError):
@@ -202,7 +212,7 @@ def _unique_object(pairs):
     return result
 
 
-def _validate(manifest):
+def _validate(manifest, *, accepted_risk=ACCEPTED_RISK):
     if (not isinstance(manifest, dict) or set(manifest) != set(EMPTY_MANIFEST)
             or type(manifest["version"]) is not int or manifest["version"] != 1
             or not isinstance(manifest["targets"], list) or not isinstance(manifest["records"], list)
@@ -212,7 +222,7 @@ def _validate(manifest):
         if manifest != EMPTY_MANIFEST:
             raise ValueError("空隔离清单不能携带虚构审批")
     elif (not _text(manifest["approval_reference"]) or not _text(manifest["actor_id"])
-          or manifest["accepted_risk"] != ACCEPTED_RISK):
+          or manifest["accepted_risk"] != accepted_risk):
         raise ValueError("隔离清单缺少固定风险接受与审批身份")
     targets = set()
     for target in manifest["targets"]:
@@ -245,10 +255,10 @@ def _validate(manifest):
     return manifest
 
 
-def _raw_manifest(conn):
+def _raw_manifest(conn, setting_key=SETTING_KEY):
     try:
         row = conn.execute("SELECT length(CAST(value AS BLOB)),substr(CAST(value AS BLOB),1,?) FROM app_settings WHERE key=?",
-                           (MAX_MANIFEST_BYTES + 1, SETTING_KEY)).fetchone()
+                           (MAX_MANIFEST_BYTES + 1, setting_key)).fetchone()
     except sqlite3.Error:
         raise QuarantinedExecutionError("隔离权威不可读取，禁止执行") from None
     if row is None or row[0] is None or not 0 < row[0] <= MAX_MANIFEST_BYTES:
@@ -264,11 +274,81 @@ def load_quarantine(conn) -> dict:
         raise QuarantinedExecutionError("隔离权威无效，禁止执行") from None
 
 
+def _validate_chat_manifest(manifest):
+    manifest = _validate(manifest, accepted_risk=CHAT_ACCEPTED_RISK)
+    if manifest == EMPTY_MANIFEST:
+        return manifest
+    if (len(manifest["targets"]) != 2 or len(manifest["records"]) != 2
+            or any(target["kind"] != "chat" or type(target["generation"]) is not int
+                   for target in manifest["targets"])
+            or any(record["profile"] != "webui" or record["table"] != "account_execution_bindings"
+                   or record["key"]["resource_kind"] != "chat" for record in manifest["records"])):
+        raise ValueError("补充隔离仅接受两条明确代数的旧 Chat 绑定")
+    targets = {(target["owner_id"], target["resource_id"]) for target in manifest["targets"]}
+    records = {(record["key"]["owner_user_id"], record["key"]["resource_id"]) for record in manifest["records"]}
+    if targets != records:
+        raise ValueError("补充 Chat 目标与原件身份不一致")
+    return manifest
+
+
+def load_chat_quarantine(conn) -> dict:
+    try:
+        return _validate_chat_manifest(json.loads(
+            _raw_manifest(conn, CHAT_SETTING_KEY).decode("utf-8"), object_pairs_hook=_unique_object))
+    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+        raise QuarantinedExecutionError("补充 Chat 隔离权威无效，禁止执行") from None
+
+
+def quarantine_targets(conn) -> tuple[dict, ...]:
+    # 合并执行目标，不合并审批或改写首次切换的原始固定清单。
+    return tuple(load_quarantine(conn)["targets"] + load_chat_quarantine(conn)["targets"])
+
+
+def verify_chat_quarantine_records(conn, manifest) -> None:
+    manifest = _validate_chat_manifest(manifest)
+    generations = {(target["owner_id"], target["resource_id"]): target["generation"]
+                   for target in manifest["targets"]}
+    for record in manifest["records"]:
+        row = _record_metadata(conn, "webui", "account_execution_bindings", record["key"])
+        if (snapshot_record(conn, "webui", "account_execution_bindings", record["key"]) != record
+                or row["state"] != "cleanup_failed"
+                or row["generation"] != generations[(row["owner_user_id"], row["resource_id"])]):
+            raise ValueError("补充 Chat 原件、代数或清理失败状态已变化")
+
+
+def register_chat_quarantine(conn, manifest) -> dict:
+    """仅在显式维护事务固定两条旧 Chat；原未知和首次隔离原件不改。"""
+    if not conn.in_transaction:
+        raise ValueError("补充 Chat 隔离登记必须持有显式事务")
+    manifest = _validate_chat_manifest(manifest)
+    previous = load_chat_quarantine(conn)
+    if previous == manifest:
+        verify_chat_quarantine_records(conn, manifest)
+        return previous
+    if previous != EMPTY_MANIFEST or manifest == EMPTY_MANIFEST:
+        raise ValueError("补充 Chat 隔离清单已固定，不能替换或清空")
+    verify_chat_quarantine_records(conn, manifest)
+    original_targets = {(target["owner_id"], target["kind"], target["resource_id"])
+                        for target in load_quarantine(conn)["targets"]}
+    if any((target["owner_id"], "chat", target["resource_id"]) in original_targets
+           for target in manifest["targets"]):
+        raise ValueError("补充 Chat 隔离不能重复首次隔离目标")
+    actor = conn.execute("SELECT role,disabled,pending FROM users WHERE user_id=?", (manifest["actor_id"],)).fetchone()
+    if actor is None or tuple(actor) != ("super_admin", 0, 0):
+        raise PermissionError("补充 Chat 隔离须记录有效超级管理员")
+    raw = _raw_manifest(conn, CHAT_SETTING_KEY)
+    changed = conn.execute("UPDATE app_settings SET value=? WHERE key=? AND CAST(value AS BLOB)=?",
+                           (_json(manifest), CHAT_SETTING_KEY, raw)).rowcount
+    if changed != 1:
+        raise ValueError("补充 Chat 隔离权威已变化，拒绝登记")
+    return manifest
+
+
 def is_quarantined(conn, owner_id, kind, resource_id) -> bool:
     if not _text(owner_id) or not _text(resource_id) or kind not in _kinds():
         raise QuarantinedExecutionError("执行身份不完整，禁止执行")
     return any(target["owner_id"] == owner_id and target["kind"] == kind and target["resource_id"] == resource_id
-               for target in load_quarantine(conn)["targets"])
+               for target in quarantine_targets(conn))
 
 
 def assert_not_quarantined(conn, owner_id, kind, resource_id) -> None:

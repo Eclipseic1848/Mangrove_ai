@@ -7,7 +7,9 @@ from pathlib import Path
 import sqlite3
 
 from src.database_migrations import DatabaseTarget, inspect_database
-from src.deployment_quarantine import load_quarantine, verify_quarantine_records
+from src.deployment_quarantine import (
+    load_chat_quarantine, load_quarantine, verify_chat_quarantine_records, verify_quarantine_records,
+)
 
 
 @dataclass(frozen=True)
@@ -192,6 +194,10 @@ def collect_persisted_blockers(webui_db: Path, scheduler_db: Path) -> tuple[Drai
             profile = "quarantine"
             manifest = load_quarantine(connections["webui"])
             verify_quarantine_records(connections["webui"], manifest, scheduler_connection=connections["scheduler"])
+            chat_manifest = load_chat_quarantine(connections["webui"])
+            verify_chat_quarantine_records(connections["webui"], chat_manifest)
+            # 独立核对补充原件后，仅排除明确的两条绑定；其他新未知仍然阻断。
+            manifest = dict(manifest, records=manifest["records"] + chat_manifest["records"])
             for profile, conn in connections.items():
                 if profile == "webui":
                     _check_states(conn, _WEBUI_STATES, blockers)

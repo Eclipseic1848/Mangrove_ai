@@ -36,6 +36,8 @@ def test_normal_recovery_endpoint_preserves_history_and_frozen_task(tmp_path, mo
     monkeypatch.setattr(settings, "data_prep_artifact_root", str(tmp_path / "artifacts"))
     monkeypatch.setattr("src.data_prep.artifact_store._DEFAULT_ROOT", None)
     monkeypatch.setattr(settings, "mc_cookie_xhs", "old-cookie")
+    monkeypatch.setattr(settings, "template_learning_enabled", False)
+    monkeypatch.setattr(settings, "lesson_learning_enabled", False)
     monkeypatch.setattr(flow, "execution_owner", lambda: "owner")
     monkeypatch.setattr(chat, "platform_session_valid", lambda _: True)
     user = {"user_id": "owner", "role": "user", "execution_generation": 0}
@@ -51,9 +53,29 @@ def test_normal_recovery_endpoint_preserves_history_and_frozen_task(tmp_path, mo
     from src.model_connections.vault import FernetCredentialVault
     from src.llm.provider import _bound_chat_identity
     seen = []
+    stages = []
+    recovery_started = False
     def provider(request):
-        seen.append(json.loads(request.content))
-        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps({"relevant": True, "records": []})}}]})
+        payload = json.loads(request.content)
+        seen.append(payload)
+        content = json.dumps({"relevant": True, "records": []})
+        if recovery_started:
+            system = "\n".join(item["content"] for item in payload["messages"] if item["role"] == "system")
+            if "按原始query和本组范围判断相关性" in system:
+                stage = "screen"
+            elif "从来源抽取用户要求的字段" in system:
+                stage = "extract"
+            elif "你是分析报告的模板路由器" in system:
+                stage, content = "route", "generic"
+            elif "你是报告质量审查员" in system:
+                stage = "check"
+                content = json.dumps({"score": 90, "passed": True, "issues": [], "summary": "合成原件已核对",
+                    "source_checks": [{"source_id": 1, "usable": True, "reason": "原文包含设备说明"}]})
+            else:
+                assert "你是数据分析助手" in system, system
+                stage, content = "report", "## 设备说明\n本次核对1篇设备说明，原文未明确条件。[1]"
+            stages.append(stage)
+        return httpx.Response(200, json={"choices": [{"message": {"content": content}}]})
     context = nullcontext()
     if bound:
         broker = connections.ConnectionBroker(repository=ModelConnectionRepository(str(database)),
@@ -74,7 +96,8 @@ def test_normal_recovery_endpoint_preserves_history_and_frozen_task(tmp_path, mo
         calls.append(user_ctx.effective("mc_cookie_xhs"))
         frozen.append(_bound_chat_identity.get())
         if len(calls) == 1:
-            return CollectResult(False, "synthetic", coverage={"failure": {"reason": "login_required"}})
+            # 恢复用例模拟已确认的来源拒绝，未知结果不能授权重发。
+            return CollectResult(False, "synthetic", coverage={"failure": {"reason": "login_required", "rejection_confirmed": True}})
         return CollectResult(True, "synthetic", items=[CollectedItem(content="设备说明", metadata={"note_id": "one", "note_type": "normal"})])
     async def review(*args, **kwargs):
         raise ValueError("合成验收不启动外部初稿模型")
@@ -83,6 +106,7 @@ def test_normal_recovery_endpoint_preserves_history_and_frozen_task(tmp_path, mo
     with context:
         state.update(asyncio.run(collect_node(state)))
     seen.clear()
+    recovery_started = True
     state.update(asyncio.run(output_node(state)))
     original = {path: Path(path).read_bytes() for path in state["outputs"].values()}
     monkeypatch.setattr(settings, "mc_cookie_xhs", "new-cookie")
@@ -92,7 +116,8 @@ def test_normal_recovery_endpoint_preserves_history_and_frozen_task(tmp_path, mo
     app.dependency_overrides[auth.get_current_user] = lambda: user
     endpoint = "/api/chat/collections/collection-api"
     with TestClient(app) as client:
-        assert client.get(endpoint + "/recovery").status_code == 200
+        recovery_response = client.get(endpoint + "/recovery")
+        assert recovery_response.status_code == 200, recovery_response.text
         user["user_id"] = "other"
         assert client.post(endpoint + "/resume", json={"request_id": "a" * 32}).status_code == 409
         user["user_id"] = "owner"
@@ -106,7 +131,7 @@ def test_normal_recovery_endpoint_preserves_history_and_frozen_task(tmp_path, mo
         assert calls == ["old-cookie", "new-cookie"]
         assert frozen[0] == frozen[1]
         if bound:
-            assert len(seen) == 2
+            assert stages == ["screen", "extract", "route", "report", "check"]
             assert all(item["model"] == "deepseek-flash" for item in seen)
             assert frozen[1][5] == "original-run"
         assert all(Path(path).read_bytes() == raw for path, raw in original.items())

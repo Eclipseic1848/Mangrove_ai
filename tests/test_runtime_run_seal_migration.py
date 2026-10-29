@@ -61,9 +61,9 @@ def test_seal_migration_preserves_history_replays_and_restores(tmp_path):
         details = conn.execute("SELECT CAST(details_json AS BLOB) FROM agentic_runtime_events").fetchone()[0]
     source = database.read_bytes()
     target = migrations.DatabaseTarget("webui", database)
-    assert migrations.inspect_database(target).pending_revisions == ("webui_0024", "webui_0025")
+    assert migrations.inspect_database(target).pending_revisions == ("webui_0024", "webui_0025", "webui_0026")
     receipt = migrations.apply_migrations(target, tmp_path / "backup.db", expected_source_sha256=hashlib.sha256(source).hexdigest())
-    assert receipt.applied_revisions == ("webui_0024", "webui_0025")
+    assert receipt.applied_revisions == ("webui_0024", "webui_0025", "webui_0026")
     with closing(sqlite3.connect(database)) as conn, conn:
         assert _history(conn) == before
         assert conn.execute("SELECT CAST(failure_json AS BLOB) FROM agentic_runtime_runs").fetchone()[0] == failure

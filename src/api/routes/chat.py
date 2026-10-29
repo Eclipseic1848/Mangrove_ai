@@ -31,7 +31,7 @@ from src.conductor.context import compress_history
 from src.conductor.graph import astream_conductor
 from src.llm import list_models
 from src.llm.provider import _usage_ctx
-from src.deployment_quarantine import QuarantinedExecutionError, assert_task_not_quarantined
+from src.deployment_quarantine import QuarantinedExecutionError, assert_not_quarantined, assert_task_not_quarantined
 
 from ..auth import get_current_user, get_store, platform_session_valid
 from ..schemas import ChatIn
@@ -346,6 +346,8 @@ def _require_recovery_unquarantined(store, user_id, recovery):
             assert_task_not_quarantined(conn, user_id, recovery["task_id"])
             if connection:
                 assert_task_not_quarantined(conn, user_id, connection[4])
+                # 恢复会建立新 Chat，必须先拒绝原冻结运行，不能换新 ID 重发旧工作。
+                assert_not_quarantined(conn, user_id, "chat", connection[5])
     except QuarantinedExecutionError as exc:
         raise HTTPException(409, str(exc)) from None
 

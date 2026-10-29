@@ -26,7 +26,7 @@ def test_feedback_audit_upgrade_preserves_history_and_restore(tmp_path):
         history = conn.execute('SELECT * FROM message_feedback').fetchall()
     before = database.read_bytes()
     target = migrations.DatabaseTarget('webui', database)
-    expected = ('webui_0013', 'webui_0014', 'webui_0015', 'webui_0016', 'webui_0017', 'webui_0018', 'webui_0019', 'webui_0020', 'webui_0021', 'webui_0022', 'webui_0023', 'webui_0024', 'webui_0025')
+    expected = ('webui_0013', 'webui_0014', 'webui_0015', 'webui_0016', 'webui_0017', 'webui_0018', 'webui_0019', 'webui_0020', 'webui_0021', 'webui_0022', 'webui_0023', 'webui_0024', 'webui_0025', 'webui_0026')
     assert migrations.inspect_database(target).pending_revisions == expected
     receipt = migrations.apply_migrations(target, tmp_path / 'backup.db', expected_source_sha256=hashlib.sha256(before).hexdigest())
     assert receipt.applied_revisions == expected
