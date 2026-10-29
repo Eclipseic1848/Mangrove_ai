@@ -13,6 +13,7 @@ _PROBE_ENVIRONMENT = ContextVar("cookie_probe_environment", default=None)
 
 def capture_probe_environment():
     from src.config.settings import settings
+    from src.config.user_ctx import effective, get_user_override
     from src.config.secret_refs import RUNTIME_CONFIG_SECRET_KEYS
     from src.collectors.social_media_collector import _proxy_env
 
@@ -27,6 +28,9 @@ def capture_probe_environment():
         "timeout": settings.collect_timeout_mediacrawler_seconds,
         "sleep_min": settings.mc_crawl_min_sleep_sec,
         "sleep_max": settings.mc_crawl_max_sleep_sec,
+        "xhs_login_mode": effective("mc_xhs_login_mode"),
+        "xhs_browser_selected": get_user_override("mc_xhs_login_mode") == "browser",
+        "xhs_user_data_dir": settings.mc_xhs_user_data_dir,
     }
     if settings.mediacrawler_python_ks:
         result["python_overrides"] = {"ks": settings.mediacrawler_python_ks}

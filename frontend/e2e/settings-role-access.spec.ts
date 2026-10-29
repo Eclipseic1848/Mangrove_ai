@@ -1625,3 +1625,48 @@ for (const role of ["admin", "super_admin"] as const) {
     expect(errors).toEqual([]);
   });
 }
+
+
+for (const role of ["user", "admin", "super_admin"] as const) {
+  test(`移除小红书任务登录方式后保留原采集账号页面：${role}`, async ({ page }) => {
+    await mockSettings(page, role);
+    const writes: string[] = [];
+    page.on("request", request => {
+      if (["PUT", "POST", "DELETE"].includes(request.method()) && request.url().includes("/api/config")) writes.push(request.url());
+    });
+    await page.route("**/api/config/self", route => route.fulfill({ json: { items: [
+      { key: "mc_xhs_login_mode", label: "小红书登录方式", secret: false, group: "search", set: true, value: "browser" },
+      { key: "mc_cookie_xhs", label: "小红书 Cookie", secret: true, group: "cookies", set: true, value: "····demo" },
+    ] } }));
+    await page.goto("/settings?section=credentials");
+    await expect(page.getByText("····demo", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("小红书任务登录方式", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "保存登录方式", exact: true })).toHaveCount(0);
+    await page.reload();
+    await expect(page.getByText("····demo", { exact: true })).toBeVisible();
+    expect(writes).toEqual([]);
+  });
+}
+
+for (const role of ["admin", "super_admin"] as const) {
+  test(`平台配置不显示小红书登录方式且保留其他采集项：${role}`, async ({ page }) => {
+    await mockSettings(page, role);
+    const writes: string[] = [];
+    page.on("request", request => {
+      if (["PUT", "POST", "DELETE"].includes(request.method()) && request.url().includes("/api/config")) writes.push(request.url());
+    });
+    await page.route(/\/api\/config(?:\?.*)?$/, route => route.fulfill({ json: { groups: [{
+      key: "search", label: "搜索与采集服务", items: [
+        { key: "mc_xhs_login_mode", label: "小红书登录方式", secret: false, value: "browser", choices: ["auto", "cookie", "browser"] },
+        { key: "collector_max_items", label: "采集条数上限", secret: false, value: "100", type: "int" },
+      ],
+    }] } }));
+    await page.goto("/settings?section=platform");
+    await expect(page.getByText("采集条数上限：", { exact: true })).toBeVisible();
+    await expect(page.getByText("小红书登录方式：", { exact: true })).toHaveCount(0);
+    await page.getByRole("button", { name: "配置 搜索与采集服务 · 其他配置", exact: true }).click();
+    await expect(page.getByLabel("采集条数上限", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("小红书登录方式", { exact: true })).toHaveCount(0);
+    expect(writes).toEqual([]);
+  });
+}

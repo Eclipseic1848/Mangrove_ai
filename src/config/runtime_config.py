@@ -93,6 +93,8 @@ REGISTRY: Dict[str, Dict[str, Any]] = {
     "firecrawl_api_key": {"label": "Firecrawl API Key", "group": "search", "secret": True, "user": False},
     "rsshub_base_url": {"label": "RSSHub 地址", "group": "search", "secret": False, "user": False},
     # 平台 Cookie（登录态凭证，普通用户可用自己账号的）
+    "mc_xhs_login_mode": {"label": "小红书登录方式（browser 显式选择平台会话）", "group": "search", "secret": False, "user": True,
+        "type": "select", "choices": ["auto", "cookie", "browser"]},
     "mc_cookie_xhs": {"label": "小红书 Cookie", "group": "cookies", "secret": True, "user": True},
     "mc_cookie_dy": {"label": "抖音 Cookie", "group": "cookies", "secret": True, "user": True},
     "mc_cookie_wb": {"label": "微博 Cookie", "group": "cookies", "secret": True, "user": True},

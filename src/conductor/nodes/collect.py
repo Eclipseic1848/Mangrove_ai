@@ -17,6 +17,7 @@ from typing import Any, Dict, List
 from src.collectors import get_registry, select_collectors
 from src.collectors._domain_health import record as domain_health_record
 from src.collectors._metrics import record as metrics_record
+from src.collectors.platforms import normalize_platform
 from src.config.settings import settings
 
 from ..state import ConductorState
@@ -47,6 +48,8 @@ def _item_key(item: Dict[str, Any]) -> str:
 
 async def collect_node(state: ConductorState) -> Dict[str, Any]:
     spec = state["task_spec"]
+    # 首个命中小红书不能把多平台任务缩成专属来源；仅全部目标都归一为小红书时限制兜底。
+    xhs_only = {normalize_platform(platform) for platform in spec.platforms if platform.strip()} == {"小红书"}
     if spec.project_collection:
         from ..project_collection import collect_projects
         return await collect_projects(state)
@@ -67,8 +70,11 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
     names = state.get("collector_candidates")
     if not names:
         names = [c.name for c in select_collectors(spec)]
+    if xhs_only:
+        # 小红书专属任务只接受专属采集器，候选排序或缺失不能转为通用网页。
+        names = [name for name in names if name == "mediacrawler"]
     if not names:
-        return {"raw_dataset": [], "collector_used": "", "error": "没有可用的采集器"}
+        return {"raw_dataset": [], "collector_used": "", "error": "小红书专属采集器不可用" if xhs_only else "没有可用的采集器"}
 
     registry = get_registry()
     last_msg = ""
@@ -105,20 +111,26 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
             raise CollectionInterrupted({"raw_dataset": merged, "collector_used": "+".join(used_names),
                 "collector_notes": notes, "collector_attempts": attempts}) from exc
         except asyncio.TimeoutError:
-            emit_progress("collect", "warning", "当前来源响应超时，将检查其他可用来源。")
+            emit_progress("collect", "warning", "小红书来源响应超时，已停止本次采集，请检查采集服务状态。"
+                          if xhs_only else "当前来源响应超时，将检查其他可用来源。")
             logger.warning("采集器 %s 超时（>%ss），降级", name, timeout)
             last_msg = f"{name} 超时（>{timeout}s）"
             attempts.append({"collector": name, "success": False, "count": 0, "message": last_msg})
             metrics_record(name, False, (time.time() - t0) * 1000)
             domain_health_record(name, spec.urls, False)
+            if xhs_only and name == "mediacrawler":
+                break
             continue
         except Exception as e:
-            emit_progress("collect", "warning", "当前来源读取未成功，将检查其他可用来源。")
+            emit_progress("collect", "warning", "小红书来源读取未成功，已停止本次采集，请检查来源与采集服务状态。"
+                          if xhs_only else "当前来源读取未成功，将检查其他可用来源。")
             logger.warning("采集器 %s 异常: %s", name, e)
             last_msg = f"{name} 异常: {e}"
             attempts.append({"collector": name, "success": False, "count": 0, "message": last_msg})
             metrics_record(name, False, (time.time() - t0) * 1000)
             domain_health_record(name, spec.urls, False)
+            if xhs_only and name == "mediacrawler":
+                break
             continue
 
         elapsed_ms = (time.time() - t0) * 1000
@@ -152,7 +164,7 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
             if "兜底" in (result.message or ""):
                 notes.append(f"ℹ️ {result.message}")
             # 足够了（或不启用补采）就停；否则继续用下一个采集器补齐
-            if not topup_enabled or len(merged) >= enough:
+            if (xhs_only and name == "mediacrawler") or not topup_enabled or len(merged) >= enough:
                 break
             # 诚实提示：只有后面真有候选引擎才说"继续补采"，否则明说已无引擎可补
             remaining = [n for n in names[idx + 1:] if registry.get(n) is not None]
@@ -163,7 +175,13 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
             continue
 
         last_msg = f"{name}: {result.message}"
-        emit_progress("collect", "warning", "当前来源未返回可用资料，将检查其他可用来源。")
+        failure = result.coverage.get("failure") or {}
+        source_rejected = (name == "mediacrawler" and failure.get("rejection_confirmed") is True
+                           and failure.get("reason") in {"challenge_required", "login_required", "rate_limited", "access_denied"})
+        if source_rejected:
+            emit_progress("collect", "warning", "来源平台已明确拒绝访问，已停止本次采集，请查看来源提示。")
+        else:
+            emit_progress("collect", "warning", result.message if xhs_only and name == "mediacrawler" else "当前来源未返回可用资料，将检查其他可用来源。")
         attempts.append({
             "collector": name,
             "success": False,
@@ -175,6 +193,10 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
         # 社媒采集器失败且原因可操作（登录过期/风控/频次）时，记为面向用户的提示
         if name == "mediacrawler" and result.message:
             notes.append(f"⚠️ {result.message}")
+        if name == "mediacrawler" and (xhs_only or source_rejected):
+            # 明确拒绝后整轮停止；混合来源也不能把原规格交给其他引擎再次请求被拒站点。
+            attempts[-1]["coverage"] = result.coverage
+            break
         logger.info("采集器 %s 未取得数据，尝试降级。%s", name, result.message)
 
     if merged:

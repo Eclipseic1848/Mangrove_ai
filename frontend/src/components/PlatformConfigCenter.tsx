@@ -149,7 +149,9 @@ export function AdminConfigCenter() {
     setLoading(true); setLoadError("");
     try {
       const data = await api.get("/api/config");
-      if (sequence === loadSequence.current) setGroups(data.groups || []);
+      if (sequence === loadSequence.current) setGroups((data.groups || []).map((group: Group) => ({
+        ...group, items: group.items.filter(item => item.key !== "mc_xhs_login_mode"),
+      })));
       return true;
     } catch {
       if (sequence === loadSequence.current) setLoadError("配置加载失败。当前内容可能不是最新，请重新加载后再操作。");

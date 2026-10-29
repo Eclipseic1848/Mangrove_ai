@@ -15,6 +15,8 @@ MediaCrawler 多数平台需先按其文档完成登录/cookie 配置，本采�
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
+from contextvars import ContextVar
 import hashlib
 import json
 import logging
@@ -62,6 +64,41 @@ _COOKIE_ATTR = {
 }
 
 
+_DIAGNOSTIC_SINK = ContextVar("collection_diagnostic_sink", default=None)
+_LOCKED_XHS_PROFILE = ContextVar("locked_xhs_profile", default=None)
+
+
+@contextmanager
+def collection_diagnostics(sink):
+    token = _DIAGNOSTIC_SINK.set(sink)
+    try:
+        yield
+    finally:
+        _DIAGNOSTIC_SINK.reset(token)
+
+
+def _runtime_diagnostic(run_dir):
+    runtime = {}
+    for filename in ("runtime_diagnostic.json", "process_diagnostic.json"):
+        try:
+            diagnostic = run_dir / filename
+            if diagnostic.stat().st_size > 4096:
+                continue
+            value = json.loads(diagnostic.read_text(encoding="utf-8"))
+            if not isinstance(value, dict):
+                continue
+            for key, item in value.items():
+                if key in {"browser_started", "login_detected", "search_started", "search_list_received", "challenge_detected"} and type(item) is bool:
+                    runtime[key] = item
+                elif key in {"search_item_count", "note_detail_count", "exit_code", "login_navigation_retries"} and type(item) is int:
+                    runtime[key] = item
+                elif key == "termination" and isinstance(item, str) and item in {"exited", "timeout", "cancelled"}:
+                    runtime[key] = item
+        except (OSError, ValueError, RecursionError):
+            pass
+    return runtime
+
+
 def _platform_cookie(platform: str) -> str:
     """取该平台 Cookie：当前任务用户的自配 Cookie 优先 → 全局配置/.env（无则空串，调用方回退扫码）。"""
     attr = _COOKIE_ATTR.get(platform)
@@ -69,6 +106,26 @@ def _platform_cookie(platform: str) -> str:
         return ""
     from src.config.user_ctx import effective
     return (effective(attr) or "").strip()
+
+
+def _xhs_login_mode() -> str:
+    from src.config.cookie_probe_binding import current_probe_environment
+    from src.config.user_ctx import effective
+    frozen = current_probe_environment()
+    return frozen.get("xhs_login_mode", "auto") if frozen else effective("mc_xhs_login_mode")
+
+
+def _xhs_browser_profile(platform: str, *, identity_probe: bool = False) -> str:
+    """平台设置不能隐式覆盖个人账号；浏览器会话不能作为 Cookie 身份证明。"""
+    from src.config.cookie_probe_binding import current_probe_environment
+    from src.config.user_ctx import get_user_override
+    frozen = current_probe_environment()
+    mode = _xhs_login_mode()
+    selected = frozen.get("xhs_browser_selected", False) if frozen else get_user_override("mc_xhs_login_mode") == "browser"
+    if platform != "xhs" or identity_probe or mode != "browser" or (get_user_override("mc_cookie_xhs") is not None and not selected):
+        return ""
+    profile = frozen.get("xhs_user_data_dir", "") if frozen else settings.mc_xhs_user_data_dir
+    return profile or "<missing>"
 
 
 # MediaCrawler 平台代码 -> 中文展示名（用于把失败原因翻译成人话）
@@ -364,17 +421,23 @@ class SocialMediaCollector(BaseCollector):
 
     async def collect(self, spec: TaskSpec, *, identity_probe: bool = False) -> CollectResult:
         platform = _resolve_platform(spec)
-        cookie = _platform_cookie(platform)
+        profile = _xhs_browser_profile(platform, identity_probe=identity_probe)
+        cookie = "" if profile else _platform_cookie(platform)
+        if profile:
+            path = Path(profile).expanduser()
+            if not path.is_absolute() or not path.is_dir() or path.name != "xhs_user_data_dir":
+                return CollectResult(False, self.name, message="小红书浏览器会话目录未配置、不存在或目录名不是 xhs_user_data_dir", coverage={"failure": {"reason": "browser_profile_unavailable", "next_action": "configure_collection_service"}})
+            profile = str(path.resolve())
         parsed = SimpleCookie()
         try:
             parsed.load(cookie)
         except Exception:
             pass
         identity = parsed["web_session"].value if platform == "xhs" and "web_session" in parsed else ";".join(sorted(cookie.split(";")))
-        key = hashlib.sha256((platform + "\0" + identity).encode("utf-8")).hexdigest()
+        key = hashlib.sha256((platform + "\0" + (profile or identity)).encode("utf-8")).hexdigest()
         lock_dir = Path(settings.webui_db_path).resolve().parent / ".collector-locks"
         lock_dir.mkdir(parents=True, exist_ok=True)
-        lock = FileLock(lock_dir / (key + ".lock"), thread_local=False)
+        lock = FileLock(Path(profile) / ".mangrove-collector.lock" if profile else lock_dir / (key + ".lock"), thread_local=False)
         deadline = asyncio.get_running_loop().time() + 10 * settings.collect_timeout_mediacrawler_seconds
         # 本实例按凭证串行；文件锁兼容多进程，不将凭证或 Owner 明文写入文件名。
         while True:
@@ -387,19 +450,39 @@ class SocialMediaCollector(BaseCollector):
                 if asyncio.get_running_loop().time() >= deadline:
                     return CollectResult(False, self.name, message="共享采集凭证排队超时，请稍后重试")
                 await asyncio.sleep(0.05)
+        # 已占用的会话锁必须对应本次登录来源，配置热更新不能中途换账号或目录。
+        profile_token = _LOCKED_XHS_PROFILE.set(profile)
         try:
             execution_checkpoint()
+            # 手动 Chromium 不遵守应用锁；包括悬空链接在内都先交由维护者检查，不删除锁。
+            if profile and ((Path(profile) / "SingletonLock").exists() or (Path(profile) / "SingletonLock").is_symlink()):
+                return CollectResult(False, self.name, message="小红书浏览器会话正被使用，请先结束手动采集后重试", coverage={"failure": {"reason": "browser_profile_busy", "next_action": "wait_for_profile_release"}})
             # 验证、不同 Owner 和并发任务不能共享按日期追加的结果文件。
             with TemporaryDirectory(prefix="mangrove-mc-") as run_dir:
                 if identity_probe:
                     return await self._collect(spec, Path(run_dir), cookie, identity_probe=True)
-                result = await self._collect(spec, Path(run_dir), cookie)
+                try:
+                    result = await self._collect(spec, Path(run_dir), cookie)
+                finally:
+                    # 超时取消也先保留阶段证据，再销毁临时目录；诊断不改变取消和未知结果。
+                    runtime = _runtime_diagnostic(Path(run_dir)) if platform == "xhs" else {}
+                    sink = _DIAGNOSTIC_SINK.get()
+                    if runtime and sink is not None:
+                        try:
+                            sink(dict(runtime))
+                        except Exception:
+                            logger.warning("采集阶段诊断未能保存")
+                if runtime:
+                    result.coverage["runtime"] = runtime
                 result.coverage["operations"] = _operation_evidence(spec, result)
                 from src.config.user_ctx import get_user_override
                 result.coverage["connection"] = {"platform": platform, "source":
-                    "unconfigured" if not cookie else "personal" if get_user_override(_COOKIE_ATTR.get(platform, "")) is not None else "platform"}
+                    "platform" if profile else "unconfigured" if not cookie else "personal" if get_user_override(_COOKIE_ATTR.get(platform, "")) is not None else "platform"}
+                if profile:
+                    result.coverage["connection"]["login_mode"] = "browser"
                 return result
         finally:
+            _LOCKED_XHS_PROFILE.reset(profile_token)
             lock.release()
 
     async def _collect(self, spec: TaskSpec, run_dir: Path, cookie: str, *, identity_probe: bool = False) -> CollectResult:
@@ -414,7 +497,10 @@ class SocialMediaCollector(BaseCollector):
         if spec.include_comments and platform != "xhs":
             return CollectResult(False, self.name, message="附带评论目前仅支持小红书")
         xhs_options = platform == "xhs" and (spec.include_comments or spec.xhs_sort or spec.xhs_note_type)
-        if xhs_options and not cookie:
+        profile = _LOCKED_XHS_PROFILE.get() if platform == "xhs" and not identity_probe else ""
+        if profile is None:
+            profile = _xhs_browser_profile(platform, identity_probe=identity_probe)
+        if xhs_options and not cookie and not profile:
             return CollectResult(False, self.name, message="小红书专属采集需要配置个人或平台 Cookie")
         if not direct_urls and not spec.keywords:
             return CollectResult(False, self.name, message="社媒采集需要关键词")
@@ -461,11 +547,18 @@ class SocialMediaCollector(BaseCollector):
         if "--cookies" in cmd:
             index = cmd.index("--cookies")
             del cmd[index:index + 2]
+        if profile:
+            if "--lt" in cmd:
+                index = cmd.index("--lt")
+                del cmd[index:index + 2]
+            cmd += ["--lt", "qrcode", "--headless", "false"]
+        elif platform == "xhs" and _xhs_login_mode() == "cookie" and not cookie:
+            return CollectResult(False, self.name, message="小红书配置为 Cookie 登录，但未配置所选凭证")
         credential_input = json.dumps(cookie, ensure_ascii=False).encode("utf-8")
         if len(credential_input) > 131072:
             return CollectResult(False, self.name, message="采集凭证超过读取上限")
         cmd[1:2] = [str(Path(__file__).resolve().parents[2] / "scripts" / "mediacrawler_isolated.py"),
-                    "identity" if identity_probe else "xhs" if platform == "xhs" else "default"]
+                    "identity" if identity_probe else "xhs-browser" if profile else "xhs" if platform == "xhs" else "default"]
         cmd += ["--save_data_path", str(run_dir)]
         if platform == "xhs" and not direct_urls:
             cmd += ["--start", str(spec.xhs_search_page)]
@@ -474,7 +567,7 @@ class SocialMediaCollector(BaseCollector):
         # 日志不打印 cookie 明文，避免泄露登录态
         safe_cmd = [("***" if i and cmd[i - 1] in {"--cookies", "--specified_id"} else a) for i, a in enumerate(cmd)]
         logger.info("调用 MediaCrawler: %s (cwd=%s, 登录=%s)",
-                    " ".join(safe_cmd), mc_dir, "cookie" if cookie else "扫码/会话")
+                    " ".join(safe_cmd), mc_dir, "平台浏览器会话" if profile else "cookie" if cookie else "扫码/会话")
         # 把“动态采集间隔区间”以环境变量注入子进程，供 MediaCrawler 的 config 读取，
         # 实现每次 sleep 在 [min, max] 间随机、模拟真人节奏规避频次风控。
         from src.config.secret_refs import RUNTIME_CONFIG_SECRET_KEYS
@@ -497,9 +590,14 @@ class SocialMediaCollector(BaseCollector):
             logger.info("MediaCrawler 启用代理IP池：provider=%s", settings.mc_ip_proxy_provider)
         # 独立入口统一禁用共享 CDP，不把宿主浏览器会话当作当前凭证的验证结果。
         env["MC_ENABLE_CDP_MODE"] = "false"
+        # 清除宿主残留，只向显式平台会话传入已验证目录。
+        env.pop("MANGROVE_XHS_BROWSER_PROFILE", None)
+        if profile:
+            env["MANGROVE_XHS_BROWSER_PROFILE"] = str(Path(profile).expanduser().resolve())
         diagnostic_token = secrets.token_hex(16)
         env["MANGROVE_MC_DIAGNOSTIC_TOKEN"] = diagnostic_token
         timed_out = False
+        cancelled = False
         try:
             # 文件承接输出，避免子进程继承 PIPE 或输出缓冲满时阻塞超时回收。
             with TemporaryFile(mode="w+b") as process_output:
@@ -516,10 +614,11 @@ class SocialMediaCollector(BaseCollector):
                 try:
                     await asyncio.wait_for(proc.communicate(input=credential_input), timeout=mc_timeout)
                 except asyncio.TimeoutError:
-                    if not (xhs_options and spec.include_comments):
-                        return CollectResult(False, self.name, message=f"MediaCrawler 运行超时（{mc_timeout:.0f}s）")
                     # 先回收本次进程树，再只读取当前目录中完整且来源匹配的记录。
                     timed_out = True
+                except asyncio.CancelledError:
+                    cancelled = True
+                    raise
                 finally:
                     # 只回收本次创建的进程树，且回收有界；不触碰共享浏览器或未知进程。
                     if proc.returncode is None:
@@ -536,17 +635,32 @@ class SocialMediaCollector(BaseCollector):
                             if proc.returncode is None:
                                 proc.kill()
                             await asyncio.wait_for(proc.wait(), timeout=5)
+                    try:
+                        (run_dir / "process_diagnostic.json").write_text(json.dumps({"exit_code": proc.returncode, "termination": "cancelled" if cancelled else "timeout" if timed_out else "exited"}), encoding="utf-8")
+                    except OSError:
+                        # 辅助诊断写盘失败不能覆盖原取消或改变任务执行结果。
+                        logger.warning("采集进程诊断未能保存")
                 process_output.seek(0)
                 stdout = process_output.read()
+        except asyncio.CancelledError:
+            logger.info("MediaCrawler 本次子进程已因任务取消回收，平台：%s", platform)
+            raise
         except Exception as e:
             # 部分异常（如某些 OSError）str() 为空，只报错误类型看不出原因；
             # 完整堆栈记日志备查，用户看到的消息至少带上异常类型名。
             logger.exception("MediaCrawler 子进程启动失败")
             return CollectResult(False, self.name, message=f"MediaCrawler 启动失败: {type(e).__name__}: {e}")
 
+        if timed_out and not (xhs_options and spec.include_comments):
+            return CollectResult(False, self.name, message=f"MediaCrawler 运行超时（{mc_timeout:.0f}s）", coverage={"failure": {"reason": "collector_timeout", "next_action": "inspect_collection_service"}})
+
         if proc.returncode != 0 and not timed_out:
             text = (stdout or b"").decode("utf-8", "ignore")
             failure = _diagnose_mc_failure(platform, text)
+            if profile and failure["reason"] == "collector_display_unavailable":
+                # 已选的平台浏览器需要维护显示连接，不能引导用户改动无关 Cookie 或登录模式。
+                failure.update(next_action="restore_collection_display",
+                    message="小红书平台采集浏览器无法连接远程桌面，请联系管理员恢复显示服务后再试")
             failure["diagnostic_hint"] = _safe_mc_failure_hint(stdout or b"", proc.returncode)
             rejection = _confirmed_mc_rejection(text, diagnostic_token) if platform == "xhs" else None
             if rejection:
@@ -601,7 +715,7 @@ class SocialMediaCollector(BaseCollector):
         if not records:
             pages = search_coverage.get("pages") or []
             if pages and all(page.get("item_count") == 0 and page.get("has_more") is False for page in pages):
-                return CollectResult(True, self.name, message="本次检索未返回更多内容", coverage=search_coverage)
+                return CollectResult(platform != "xhs", self.name, message="本次检索未返回真实笔记" if platform == "xhs" else "本次检索未返回更多内容", coverage=search_coverage)
             fallback = await direct_fallback()
             if fallback:
                 return fallback
@@ -624,6 +738,8 @@ class SocialMediaCollector(BaseCollector):
 
         items: list[CollectedItem] = []
         for rec in chosen[: direct_limit]:
+            if platform == "xhs" and not rec.get("note_id"):
+                continue
             canonical_url = rec.get("note_url") or rec.get("aweme_url") or rec.get("video_url") or rec.get("url") or ""
             content_id = str(rec.get("aweme_id") or rec.get("note_id") or rec.get("video_id") or "")
             if direct_urls and (not canonical_url or not content_id or (expected_ids and content_id not in expected_ids)):
@@ -689,7 +805,7 @@ class SocialMediaCollector(BaseCollector):
         if timed_out or partial_comments:
             search_coverage.update(partial=True, collector_timeout=timed_out, incomplete_comment_notes=partial_comments)
             message += ("；采集超时，已保留有效数据" if timed_out else "") + f"；{partial_comments} 篇评论未采全，详见覆盖说明"
-        return CollectResult(True, self.name, items=items, message=message, coverage=search_coverage)
+        return CollectResult(bool(items), self.name, items=items, message=message, coverage=search_coverage)
 
 
 register(SocialMediaCollector())

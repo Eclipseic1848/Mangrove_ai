@@ -84,7 +84,7 @@ def _isolated_rejection(error):
 
 def main():
     adapter = sys.argv.pop(1)
-    if adapter not in {"default", "xhs", "identity"}:
+    if adapter not in {"default", "xhs", "xhs-browser", "identity"}:
         raise ValueError("不支持的采集适配入口")
     raw = sys.stdin.buffer.read(131073)
     if len(raw) > 131072:
@@ -101,9 +101,23 @@ def main():
     config.LOGIN_TYPE = "cookie" if cookie else "qrcode"
     # 不让旧持久会话或宿主 CDP 账号替代本次选定的凭证；无凭证时也仅在当前会话登录。
     config.SAVE_LOGIN_STATE = False
+    if adapter == "xhs-browser":
+        profile = Path(os.environ.get("MANGROVE_XHS_BROWSER_PROFILE", ""))
+        platform = sys.argv[sys.argv.index("--platform") + 1] if "--platform" in sys.argv else ""
+        if cookie or platform != "xhs" or not profile.is_absolute() or not profile.is_dir() or profile.name != "xhs_user_data_dir":
+            raise ValueError("平台浏览器会话配置无效")
+        config.SAVE_LOGIN_STATE = True
+        config.HEADLESS = False
+        # 上游使用 % platform 拼接；绝对路径覆盖 cwd，百分号按字面量转义。
+        config.USER_DATA_DIR = str(profile.resolve().parent).replace("%", "%%") + "/%s_user_data_dir"
+    else:
+        os.environ.pop("MANGROVE_XHS_BROWSER_PROFILE", None)
     config.ENABLE_CDP_MODE = False
     platform = (sys.argv[sys.argv.index("--platform") + 1]
                 if "--platform" in sys.argv else getattr(config, "PLATFORM", ""))
+    # Cookie 采集无需桌面；显式平台浏览器会话仍保留自己的显示与登录方式。
+    if platform == "xhs" and cookie:
+        config.HEADLESS = True
     if platform == "ks":
         from tools import crawler_util, utils
         # 原解析器会丢掉含等号的登录字段；在 core 导入前同时修正公共导出与原函数。
@@ -116,7 +130,7 @@ def main():
         if not install_probe(platform, output):
             return
     entry = (Path(__file__).with_name("mediacrawler_xhs.py")
-             if adapter == "xhs" else Path.cwd() / "main.py")
+             if adapter in {"xhs", "xhs-browser"} else Path.cwd() / "main.py")
     runpy.run_path(str(entry), run_name="__main__")
 
 
