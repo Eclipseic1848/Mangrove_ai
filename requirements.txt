@@ -33,7 +33,7 @@ docker==7.1.0
 docstring_parser==0.17.0
 easydict==1.13
 fastapi==0.141.1
-filelock==3.20.3
+filelock==4.2.1
 filetype==1.2.0
 magika==0.6.3
 fonttools==4.61.1
