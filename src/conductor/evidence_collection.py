@@ -12,7 +12,7 @@ from pathlib import Path
 
 from filelock import FileLock
 from src.api.execution import execution_checkpoint
-from src.collectors.social_media_collector import SocialMediaCollector
+from src.collectors.social_media_collector import SocialMediaCollector, _xhs_browser_profile, collection_diagnostics
 from src.config.settings import settings
 from src.data_prep.artifact_store import ArtifactStore
 from src.llm import achat
@@ -28,6 +28,10 @@ from .utils import parse_json_obj
 
 ASSESSMENT_TOKEN_LIMITS = {"screen": 4096, "extract": 65536}
 STEP_TIMEOUT_SECONDS = {"discovery": 180, "screen": 90, "extract": 240, "images": 120, "comments": 60}
+
+
+class _SourceAccessStopped(Exception):
+    """来源要求验证时越过局部评论降级，停止整个任务的后续来源请求。"""
 
 
 class StepBudgetExceeded(Exception):
@@ -146,10 +150,13 @@ async def collect_evidence(state, *, scope, queries, assess, exclude, read_image
         # 节点与执行环境变化不能沿用旧进度，环境原值只在当前调用内存中保留。
         credential_binding = hashlib.sha256(json.dumps({"credentials": identity, "execution": environment}, sort_keys=True).encode("utf-8")).hexdigest()
         from src.config.cookie_identity import read_identity
-        proof = read_identity("mc_cookie_xhs", credentials["mc_cookie_xhs"], environment)
+        # 浏览器不使用该 Cookie，不能借其证明账号；仍保留原凭据摘要以免放宽冻结合同。
+        browser_session = bool(_xhs_browser_profile("xhs"))
+        proof = None if browser_session else read_identity("mc_cookie_xhs", credentials["mc_cookie_xhs"], environment)
+        source = "platform" if browser_session else identity["mc_cookie_xhs"]["source"]
         return await _collect_evidence(state, scope=scope, queries=queries, assess=assess,
             exclude=exclude, read_images=read_images, rank=rank, legacy=legacy, credential_binding=credential_binding,
-            credential_proof=proof, credential_source=identity["mc_cookie_xhs"]["source"])
+            credential_proof=proof, credential_source=source)
 
 
 async def _collect_evidence(state, *, scope, queries, assess, exclude, read_images, rank, legacy, credential_binding, credential_proof=None, credential_source=None):
@@ -253,6 +260,10 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
             emit_progress("collect", "started", summary + "；" + details,
                           candidate_counts=counts, files=files)
 
+        def save_collection_diagnostic(diagnostic):
+            data["last_collection_diagnostic"] = diagnostic
+            save()
+
         async def call(operation, stage):
             remaining = scope.time_budget_seconds - elapsed_before - (time.monotonic() - started)
             if remaining <= 0:
@@ -264,7 +275,10 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                 parser_budget = document_parser_deadline(time.monotonic() + limit) if stage == "images" else nullcontext()
                 with parser_budget:
                     async with deadline:
-                        return await operation
+                        diagnostic_scope = collection_diagnostics(
+                            lambda value: save_collection_diagnostic({**value, "phase": stage})) if stage in {"discovery", "comments"} else nullcontext()
+                        with diagnostic_scope:
+                            return await operation
             except asyncio.TimeoutError:
                 # 收口可能超过阶段限额，实际总预算用尽时仍按全局停止处理。
                 if deadline.expired() and (remaining <= STEP_TIMEOUT_SECONDS[stage] or elapsed_before + time.monotonic() - started >= scope.time_budget_seconds):
@@ -356,7 +370,10 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
         defer_unknown = legacy and scope.include_images and not scope.raw_only
         progressive_images = defer_unknown and binding["processing_version"] in {"bank-benefits-collection-v6", "bank-benefits-collection-v7"}
         early_limit = 2 if binding["processing_version"] == "bank-benefits-collection-v6" else scope.ocr_limit
+        source_stopped = False
         for query, group in zip(queries, data["groups"], strict=True):
+            if source_stopped:
+                break
             if group["done"]:
                 continue
             group_scope = scope.model_copy(update={"banks" if legacy else "queries": [query]})
@@ -412,6 +429,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                                 "returned_count": len(batch.items), "message": batch.message, "coverage": batch.coverage,
                                 **({"unknown_ocr_attempted": 0} if binding["processing_version"] in {"bank-benefits-collection-v6", "bank-benefits-collection-v7"} else {})})
                             if not batch.success:
+                                source_stopped = (batch.coverage.get("failure") or {}).get("reason") in {"challenge_required", "rate_limited", "login_required", "access_denied"}
                                 group.update(stop_reason="collection_failed", message=batch.message)
                                 break
                             pending_before = len(group["pending"])
@@ -505,13 +523,17 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                                         detail._collection_task_id = None
                                         result = await call(collector.collect(detail), "comments")
                                         operation_coverage = result.coverage
+                                        if (operation_coverage.get("failure") or {}).get("reason") in {"challenge_required", "rate_limited", "login_required", "access_denied"}:
+                                            group["batches"].append({"phase": "comments", "coverage": operation_coverage})
+                                            note["metadata"]["comment_coverage"] = {"truncated": True, "reasons": ["platform_access_stopped"]}
+                                            raise _SourceAccessStopped(result.message)
                                         matches = [item for item in result.items if item.metadata.get("note_id") == note["metadata"]["note_id"]]
                                         if not result.success or len(matches) != 1:
                                             raise ValueError("评论读取未返回匹配笔记")
                                         meta = matches[0].metadata
                                         note["metadata"]["comments"] = meta.get("comments") or []
                                         coverage = meta.get("comment_coverage") or {"truncated": True, "reasons": ["coverage_unknown"]}
-                                    except (PermissionError, asyncio.TimeoutError):
+                                    except (PermissionError, asyncio.TimeoutError, _SourceAccessStopped):
                                         raise
                                     except StepBudgetExceeded:
                                         coverage = {"truncated": True, "reasons": ["comments_outcome_unknown"]}
@@ -533,7 +555,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                                 else:
                                     note.update(status="excluded" if reason else "selected", reason=reason)
                                 group["selected_count"] = sum(n["status"] == "selected" and n["group"] == query.name for n in data["candidates"])
-                            except (PermissionError, asyncio.TimeoutError):
+                            except (PermissionError, asyncio.TimeoutError, _SourceAccessStopped):
                                 raise
                             except StepBudgetExceeded as error:
                                 note.update(status="review_required", reason=str(error))
@@ -565,6 +587,9 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                     # 后续无图机会已检查，失败识图仍占原额度，不能把额度耗尽改报成来源为空。
                     group["stop_reason"] = "ocr_limit"
                 group["done"] = True
+            except _SourceAccessStopped as error:
+                source_stopped = True
+                group.update(stop_reason="collection_failed", message=str(error), done=True)
             except asyncio.TimeoutError:
                 group.update(stop_reason="time_budget", done=True)
             except StepBudgetExceeded as error:

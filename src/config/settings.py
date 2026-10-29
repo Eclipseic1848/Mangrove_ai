@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     # MediaCrawler 按平台 Cookie 登录（登录态，放 .env）：填入则该平台用 cookie 登录（--lt cookie），
     # 留空则回退 base_config 的扫码+会话保存。每个值为浏览器登录后复制的整段 Cookie 头。
     mc_cookie_dy: str = Field(default="", description="抖音 Cookie（MediaCrawler 登录态）；空则走扫码")
+    # 平台浏览器会话仅显式启用；个人 Cookie 与身份探针始终保持隔离。
+    mc_xhs_login_mode: Literal["auto", "cookie", "browser"] = Field(default="auto", description="小红书平台登录方式：auto/cookie/browser；个人 Cookie 默认优先，个人显式 browser 选择平台会话")
+    mc_xhs_user_data_dir: str = Field(default="", description="小红书平台已保存浏览器用户数据目录的绝对路径；仅 browser 模式使用")
     mc_cookie_xhs: str = Field(default="", description="小红书 Cookie（MediaCrawler 登录态）；空则走扫码")
     mc_cookie_wb: str = Field(default="", description="微博 Cookie（MediaCrawler 登录态）；空则走扫码")
     mc_cookie_bili: str = Field(default="", description="B站 Cookie（MediaCrawler 登录态）；空则走扫码")

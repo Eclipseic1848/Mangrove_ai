@@ -121,6 +121,84 @@ async def atomic_json_item(self, item, item_type):
         _write_json(path, [*existing, item])
 
 
+def _install_runtime_diagnostics(core, run_dir):
+    """只记录阶段布尔值和计数；平台拒绝后本次子进程不再发送后续请求。"""
+    state = {"browser_started": False, "search_started": False, "search_list_received": False,
+             "search_item_count": 0, "note_detail_count": 0, "challenge_detected": False}
+
+    def report(**values):
+        state.update(values)
+        _write_json(run_dir / "runtime_diagnostic.json", state)
+
+    report()
+    crawler = getattr(core, "XiaoHongShuCrawler", None)
+    if crawler and hasattr(crawler, "launch_browser"):
+        original_launch = crawler.launch_browser
+
+        async def launch(self, *args, **kwargs):
+            context = await original_launch(self, *args, **kwargs)
+            report(browser_started=True)
+            return context
+        crawler.launch_browser = launch
+    if hasattr(core.XiaoHongShuClient, "pong"):
+        original_pong = core.XiaoHongShuClient.pong
+
+        async def pong(self, *args, **kwargs):
+            result = await original_pong(self, *args, **kwargs)
+            report(login_detected=bool(result))
+            return result
+        core.XiaoHongShuClient.pong = pong
+    login_class = getattr(core, "XiaoHongShuLogin", None)
+    original_check = getattr(login_class, "check_login_state", None)
+    if os.environ.get("MANGROVE_XHS_BROWSER_PROFILE") and hasattr(original_check, "retry_with"):
+        from tenacity import retry_if_exception
+
+        def navigating(error):
+            # 扫码跳转会使页面内容暂不可读；只重查本地登录状态，不重发任何采集请求。
+            transient = (type(error).__module__ == "playwright._impl._errors"
+                         and type(error).__name__ == "Error"
+                         and "Unable to retrieve content because the page is navigating and changing the content" in str(error))
+            if transient:
+                report(login_navigation_retries=state.get("login_navigation_retries", 0) + 1)
+            return transient
+
+        # 沿用原来的停止/等待预算及False结果重查；关闭页面和其他异常仍按原路径停止。
+        check = original_check.retry_with(retry=original_check.retry.retry | retry_if_exception(navigating))
+
+        async def check_login_state(self, *args, **kwargs):
+            result = await check(self, *args, **kwargs)
+            report(login_detected=bool(result))
+            return result
+        login_class.check_login_state = check_login_state
+    if crawler and hasattr(crawler, "get_note_detail_async_task"):
+        original_detail = crawler.get_note_detail_async_task
+
+        async def detail(self, *args, **kwargs):
+            result = await original_detail(self, *args, **kwargs)
+            if result:
+                report(note_detail_count=state["note_detail_count"] + 1)
+            return result
+        crawler.get_note_detail_async_task = detail
+    if hasattr(core.XiaoHongShuClient, "_request_once"):
+        from media_platform.xhs.client import PlatformAccessError
+        original_request = core.XiaoHongShuClient._request_once
+        blocked = None
+
+        async def request(self, *args, **kwargs):
+            nonlocal blocked
+            # 当前上游在会话锁内调用此接缝，排队请求也必须在发送前检查停止状态。
+            if blocked is not None:
+                raise blocked
+            try:
+                return await original_request(self, *args, **kwargs)
+            except PlatformAccessError as error:
+                blocked = error
+                report(challenge_detected=error.http_status in {461, 471})
+                raise
+        core.XiaoHongShuClient._request_once = request
+    return report, state
+
+
 def main():
     # 子进程 cwd 是已配置的独立 MediaCrawler；只替换此进程的公开评论接缝。
     sys.path.insert(0, str(Path.cwd()))
@@ -131,10 +209,12 @@ def main():
     AsyncFileWriter.write_single_item_to_json = atomic_json_item
 
     # 个人/平台 Cookie 由父进程选定；禁止串用持久浏览器或另一用户的 CDP 会话。
-    config.SAVE_LOGIN_STATE = False
+    # 只有父入口完成平台/路径/空凭证检查后，才能保留显式平台会话。
+    config.SAVE_LOGIN_STATE = bool(os.environ.get("MANGROVE_XHS_BROWSER_PROFILE"))
     config.ENABLE_CDP_MODE = False
 
     run_dir = Path(sys.argv[sys.argv.index("--save_data_path") + 1])
+    report, runtime = _install_runtime_diagnostics(core, run_dir)
     statuses = {}
     timeout = float(os.environ.get("MANGROVE_XHS_TIMEOUT_SECONDS", "600"))
     # 在父进程硬截止前留出写盘、浏览器关闭和逐篇采集间隔的余量。
@@ -157,8 +237,10 @@ def main():
             kwargs["sort"] = SearchSortType(sort)
         if note_type:
             kwargs["note_type"] = SearchNoteType({"all": 0, "video": 1, "image": 2}[note_type])
+        report(search_started=True)
         result = await original_search(self, **kwargs)
         raw = (result or {}).get("items") or []
+        report(search_list_received=True, search_item_count=runtime["search_item_count"] + len(raw))
         if not (result or {}).get("has_more"):
             exhausted.add(keyword)
         # 上游会把不足一页的额度提升到20；详情扇出前截断，才能遵守宿主冻结预算。

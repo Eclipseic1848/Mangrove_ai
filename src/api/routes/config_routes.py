@@ -173,7 +173,13 @@ def set_self_config(key: str, body: ConfigValueIn, user=Depends(get_current_user
         raise HTTPException(status_code=403, detail="该项不支持按用户自助配置")
     if not body.value.strip():
         raise HTTPException(status_code=400, detail="值不能为空（清除请用删除）")
-    get_store().config_set(user["user_id"], key, body.value.strip(), updated_by=user["user_id"])
+    value = body.value.strip()
+    if rc.REGISTRY[key].get("choices"):
+        try:
+            value = rc.cast_value(key, value)
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from None
+    get_store().config_set(user["user_id"], key, value, updated_by=user["user_id"])
     return {"ok": True, "key": key}
 
 
