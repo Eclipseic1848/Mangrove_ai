@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mangrove 小红书登录助手</title>
+  <link rel="stylesheet" href="popup.css">
+  <script type="module" src="popup.mjs"></script>
+</head>
+<body>
+  <main>
+    <header class="heading">
+      <img src="xiaohongshu.png" alt="" width="40" height="40">
+      <div><h1>小红书登录助手</h1><p>本机获取 · 手动导入</p></div>
+    </header>
+    <ol class="steps" aria-label="维护登录态的步骤">
+      <li aria-current="step"><span>1</span>官方登录</li>
+      <li><span>2</span>本机读取</li>
+      <li><span>3</span>手动导入</li>
+    </ol>
+    <section id="step-1" aria-labelledby="title-1">
+      <h2 id="title-1" tabindex="-1">先确认官网上的账号</h2>
+      <p>在当前 Chrome 个人资料的普通窗口中登录小红书，确认是你要维护的账号，并完成官网要求的验证。</p>
+      <a class="button outline" href="https://www.xiaohongshu.com/" target="_blank" rel="noopener noreferrer">打开小红书官网 ↗</a>
+      <p class="notice">密码只在小红书官方页面输入，助手不接收密码。</p>
+      <button id="login-done" class="button primary" type="button">我已完成官方登录</button>
+    </section>
+    <section id="step-2" aria-labelledby="title-2" hidden>
+      <h2 id="title-2" tabindex="-1">读取本机登录态</h2>
+      <p>助手只读取当前 Chrome 中小红书的登录字段，不访问其他网站，不自动上传至 Mangrove。</p>
+      <label class="consent"><input id="consent" type="checkbox">我确认当前官方账号正确，并同意读取本机小红书登录态</label>
+      <p id="read-error" role="alert" class="error" hidden></p>
+      <div class="actions">
+        <button id="read" class="button primary" type="button" disabled>读取最新登录态</button>
+        <button id="back" class="button outline" type="button">上一步</button>
+      </div>
+    </section>
+    <section id="step-3" aria-labelledby="title-3" hidden>
+      <h2 id="title-3" tabindex="-1">复制后手动导入</h2>
+      <p id="summary" class="notice"></p>
+      <p>返回 Mangrove，将登录态粘贴到对应的小红书配置，再手动保存和验证。个人配置仅用于本人；平台共享配置由超级管理员维护。</p>
+      <p class="sensitive">剪贴板将包含敏感登录态，请勿发给他人、聊天或模型；粘贴完成后请自行清理剪贴板。</p>
+      <div class="actions">
+        <button id="copy" class="button primary" type="button" disabled>复制登录态</button>
+        <button id="reread" class="button outline" type="button">返回重读</button>
+      </div>
+      <p id="copy-status" role="status" aria-live="polite"></p>
+    </section>
+    <footer>
+      <p>基础身份：未验证 <span aria-hidden="true">·</span> 搜索访问：未验证</p>
+      <p>复制不等于保存或验证。不会自动恢复旧任务，登录态也可能再次过期。关闭窗口后清除助手内的本次读取内容。</p>
+    </footer>
+  </main>
+</body>
+</html>

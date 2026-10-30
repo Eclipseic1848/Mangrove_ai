@@ -16,12 +16,15 @@ import shutil
 import time
 from contextlib import contextmanager
 from http.cookies import SimpleCookie
+from io import BytesIO
 from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import urlsplit
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from src.config import runtime_config as rc
@@ -33,6 +36,37 @@ from ..auth import get_current_user, get_store, is_admin_role, require_admin
 router = APIRouter(prefix="/api/config", tags=["config"])
 
 logger = logging.getLogger(__name__)
+
+_XHS_HELPER_ROOT = Path(__file__).resolve().parents[3] / "tools" / "xhs-cookie-helper"
+_XHS_HELPER_FILES = (
+    "manifest.json", "popup.html", "popup.css", "popup.mjs", "cookies.mjs", "README.md", "xiaohongshu.png",
+)
+
+
+@router.get("/cookie-helper/xhs/download")
+def download_xhs_cookie_helper(user=Depends(get_current_user)):
+    """仅下载同一份本机工具代码，不读取配置，也不授予共享账号写权限。"""
+    package = BytesIO()
+    try:
+        with ZipFile(package, "w", compression=ZIP_DEFLATED) as archive:
+            for name in _XHS_HELPER_FILES:
+                source = _XHS_HELPER_ROOT / name
+                # 固定清单不接收客户端路径；缺件或链接时拒绝分发不完整安装包。
+                if source.is_symlink() or not source.is_file() or source.stat().st_size > 65536:
+                    raise ValueError("invalid helper package")
+                content = source.read_bytes()
+                if len(content) > 65536:
+                    raise ValueError("invalid helper package")
+                entry = ZipInfo("mangrove-xhs-cookie-helper/" + name, date_time=(2026, 10, 29, 0, 0, 0))
+                entry.compress_type = ZIP_DEFLATED
+                entry.external_attr = 0o100644 << 16
+                archive.writestr(entry, content)
+    except (OSError, ValueError):
+        raise HTTPException(status_code=503, detail="登录助手安装包暂不可用，请联系管理员") from None
+    return Response(package.getvalue(), media_type="application/zip", headers={
+        "Content-Disposition": 'attachment; filename="mangrove-xhs-cookie-helper.zip"',
+        "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+    })
 
 
 class ConfigValueIn(BaseModel):

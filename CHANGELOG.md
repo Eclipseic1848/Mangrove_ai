@@ -1,5 +1,11 @@
 # 更新记录
 
+## 未发布
+
+### Improvements
+
+- 新增小红书本机 Chrome 登录助手与个人/超管平台双入口，沿三步引导显式读取和复制，再手动导入原配置；不接收密码、不自动上传、验证或恢复任务。（[#293](https://github.com/Eclipseic1848/Mangrove_ai/issues/293)）
+
 ## v1.1.0
 
 版本变更如下；正式发布状态及对应提交以 [GitHub Releases](https://github.com/Eclipseic1848/Mangrove_ai/releases) 为准。

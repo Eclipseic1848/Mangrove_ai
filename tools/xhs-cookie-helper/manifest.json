@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "Mangrove 小红书登录助手",
+  "description": "经本人确认读取当前 Chrome 的小红书登录态，复制后手动导入 Mangrove。",
+  "version": "1.0.0",
+  "permissions": ["cookies"],
+  "host_permissions": ["*://xiaohongshu.com/*", "*://www.xiaohongshu.com/*"],
+  "incognito": "not_allowed",
+  "action": {
+    "default_title": "Mangrove 小红书登录助手",
+    "default_popup": "popup.html",
+    "default_icon": "xiaohongshu.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
+  }
+}
