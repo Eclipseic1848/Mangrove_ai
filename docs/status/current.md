@@ -1,6 +1,6 @@
 # Mangrove 当前状态
 
-> 核验日期：2026-10-23（America/Los_Angeles）。适用范围：v1.1.0 源码与顺序整改；正式发行状态及对应提交以 [GitHub Releases](https://github.com/Eclipseic1848/Mangrove_ai/releases) 为准。
+> 核验日期：2026-10-29（America/Los_Angeles）。适用范围：v1.1.0 源码与顺序整改；正式发行状态及对应提交以 [GitHub Releases](https://github.com/Eclipseic1848/Mangrove_ai/releases) 为准。
 > 本文件维护能力状态、验证范围与待办；安装操作见[部署手册](../deployment/linux-migration-it-guide.md)。
 
 ## 1. 版本与运行方式
@@ -11,7 +11,7 @@
 | 产品入口 | `8088`；主工作台 `/data-prep` |
 | 默认任务运行时 | Pi 0.87.1，适配器 `pi-runtime` |
 | Pi / Capability Host 镜像 | `mangrove/pi-coding-agent:0.87.1-v1.0.0` |
-| 数据库版本 | 代码目标 WebUI `webui_0026`、Scheduler `scheduler_0006`；#285 的 0025→0026 生产迁移待实证，126条旧运行记录的 `xlsx_path` 保持 NULL |
+| 数据库版本 | WebUI `webui_0026`、Scheduler `scheduler_0006`；#285 已完成 0025→0026 生产迁移，126条旧运行记录的 `xlsx_path` 保持 NULL |
 | 部署方式 | 单进程 FastAPI、SQLite、systemd、Nginx、Docker；镜像为 linux/amd64 |
 | CoreMind | 1.0.1 已完成独立候选验证，未启用为默认运行时 |
 | 发布记录 | [GitHub Releases](https://github.com/Eclipseic1848/Mangrove_ai/releases)；提交与文件摘要见随包清单 |
@@ -325,7 +325,7 @@ package/lock产品版本为 `1.1.0`，API沿现有单一导入生成OpenAPI版�
 [#285](https://github.com/Eclipseic1848/Mangrove_ai/issues/285) 的实际回执为准。独立 Cookie
 辅助工具仍属后续范围，正式 `v1.1.0` Tag/Release 保持不动。
 
-## 1.21. 两条旧 Chat 补充隔离（源码与离线验证阶段）
+## 1.21. 两条旧 Chat 补充隔离
 
 #285 经用户批准，为两条旧 Chat 增加独立、固定的补充隔离；显式迁移目标为 `webui_0026`。
 原首次隔离34目标/53原件保持。仅原件、Owner、代数及 `cleanup_failed` 匹配的两条可登记；
@@ -333,7 +333,20 @@ package/lock产品版本为 `1.1.0`，API沿现有单一导入生成OpenAPI版�
 
 原服务首次切换只对这两条允许受控停止例外，不称历史自然排空；新实例仍须严格封口。
 回退必须使用识别补充隔离的兼容代码并保留新库。见 [ADR-0052](../adr/0052-supplemental-chat-quarantine.md)。
-本节不代表生产已迁移、真实来源已通过或 #285 已关闭，实际结果以工单回执为准。
+#285 已完成生产迁移、固定隔离与工程验收并关闭；历史未知仍保留，客户五条完整报告未实跑。
+具体部署与来源检查结果以该工单回执为准，不据工程关闭推断历史业务已完成。
+
+## 1.22. 小红书本机登录助手
+
+[#293](https://github.com/Eclipseic1848/Mangrove_ai/issues/293) 按已确认的分步弹窗提供个人与平台双入口。
+个人入口进入本人配置，新增平台助手入口仅超级管理员可见；既有管理员平台配置权限保持。
+Chrome 扩展在用户明确同意后读取当前普通个人资料的小红书 Cookie，默认不显示原值，仅显式复制。
+网页不检测扩展连接，不自动上传、保存、验证或恢复任务；当前 HTTP 环境沿用原手动导入流程。
+基础身份与搜索访问未验证时如实显示，不从 Cookie 存在推断有效或永久可用。
+
+安装包只含固定工具源码与复用图片，登录后可下载；不包含凭据、账号数据或后台采集能力。
+使用步骤见[本机登录助手](../deployment/xhs-login-helper.md)。工程、生产与真实使用验收以 #293
+回执为准，代码实现不代替日常浏览器中的用户登录与账号确认，已发布 Tag/Release 不变。
 
 ## 2. 已实现能力
 

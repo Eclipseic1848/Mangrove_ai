@@ -8,6 +8,7 @@ export function Modal({
   title,
   children,
   wide = false,
+  headingLevel = 3,
 }: {
   open: boolean;
   onClose: () => void;
@@ -15,7 +16,10 @@ export function Modal({
   children: ReactNode;
   /** 宽版：用于报告查看等大内容场景（默认窄版确认框） */
   wide?: boolean;
+  /** 独立于页面二级区域的弹窗使用二级标题，避免跳过标题层级。 */
+  headingLevel?: 2 | 3;
 }) {
+  const Title = headingLevel === 2 ? "h2" : "h3";
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
@@ -78,7 +82,7 @@ export function Modal({
         onKeyDown={handleDialogKeyDown}
         className={`relative max-h-[calc(100dvh-2rem)] w-full overflow-y-auto ${wide ? "max-w-3xl" : "max-w-sm"} animate-fade-in rounded-xl border border-border bg-card p-5 shadow-xl`}
       >
-        {title && <h3 id={titleId} className="mb-3 text-base font-semibold">{title}</h3>}
+        {title && <Title id={titleId} className="mb-3 text-base font-semibold">{title}</Title>}
         {children}
       </div>
     </div>,
