@@ -3,7 +3,7 @@
 
 POST /api/chat/stream  (平台 Cookie 鉴权，请求体 ChatIn)
 事件序列：
-  event: meta    {"conv_id": ...}                       会话句柄（新建时回传）
+  event: meta    {"conv_id": ..., "chat_run_id": ...}   会话与本轮运行句柄
   event: node    {"node": "collect", "label": "采集数据"} 每个流水线节点完成
   event: result  {结构化最终结果}                          见 _build_result
   event: error   {"message": ...}
@@ -570,7 +570,7 @@ async def _chat_stream(body, request, user, recovery=None, *, task_context=None)
             result["user_created_at"] = next(m["created_at"] for m in reversed(saved_messages) if m["role"] == "user")
             queue.put_nowait({"event": "result", "data": json.dumps(result, ensure_ascii=False, default=str)})
         except asyncio.CancelledError:
-            store.add_message(conv_id, "assistant", "❌ 用户已取消任务", meta={"kind": "cancelled", "work_progress": progress})
+            store.add_message(conv_id, "assistant", "❌ 用户已取消任务", meta={"kind": "cancelled", "work_progress": progress, "chat_run_id": run_id})
             queue.put_nowait({"event": "result", "data": json.dumps({
                 "conv_id": conv_id, "kind": "cancelled",
                 "reply": "❌ 用户已取消任务",
@@ -581,7 +581,7 @@ async def _chat_stream(body, request, user, recovery=None, *, task_context=None)
             raise
         except Exception as e:  # noqa: BLE001
             try:
-                store.add_message(conv_id, "assistant", f"❌ 任务执行失败：{e}", meta={"kind": "error", "work_progress": progress})
+                store.add_message(conv_id, "assistant", f"❌ 任务执行失败：{e}", meta={"kind": "error", "work_progress": progress, "chat_run_id": run_id})
             except Exception:
                 pass
             queue.put_nowait({"event": "error", "data": json.dumps({"message": str(e)}, ensure_ascii=False)})
@@ -639,7 +639,7 @@ async def _chat_stream(body, request, user, recovery=None, *, task_context=None)
     )
     if lease is None:
         raise HTTPException(503, "服务正在更新，请稍后重试", headers={"Retry-After": "5"})
-    bg = asyncio.create_task(authorized_pipeline())
+    bg = asyncio.create_task(authorized_pipeline(), name=run_id)
     # SSE 断开后流水线仍在运行；即使任务在首次调度前取消也须释放计数。
     bg.add_done_callback(lambda _task: lease.release())
     _RUNNING[task_key] = bg
@@ -649,7 +649,7 @@ async def _chat_stream(body, request, user, recovery=None, *, task_context=None)
         if not platform_session_valid(request):
             yield {"event": "auth-expired", "data": json.dumps({"message": "登录已失效，请重新登录"}, ensure_ascii=False)}
             return
-        yield {"event": "meta", "data": json.dumps({"conv_id": conv_id, "task_id": collection_task_id}, ensure_ascii=False)}
+        yield {"event": "meta", "data": json.dumps({"conv_id": conv_id, "task_id": collection_task_id, "chat_run_id": run_id}, ensure_ascii=False)}
         while True:
             # 空闲时也复核撤销；只结束读取，不取消已经开始的后台流水线。
             if not platform_session_valid(request):
@@ -692,7 +692,10 @@ def chat_running(conv_id: str, user=Depends(get_current_user)):
     if not conv or conv["user_id"] != user["user_id"]:
         raise HTTPException(status_code=404, detail="会话不存在")
     task = _RUNNING.get(f"{user['user_id']}:{conv_id}")
-    return {"running": bool(task and not task.done()), "progress": _PROGRESS.get(f"{user['user_id']}:{conv_id}", [])}
+    running = bool(task and not task.done())
+    # 只公开该Owner仍在执行的本轮身份，避免把旧回复误当作新一轮结果。
+    return {"running": running, "chat_run_id": task.get_name() if running else None,
+            "progress": _PROGRESS.get(f"{user['user_id']}:{conv_id}", [])}
 
 
 @router.post("/{conv_id}/cancel")

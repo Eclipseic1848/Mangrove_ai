@@ -330,7 +330,10 @@ test("采集停止与发送共用位置，失败保留停止入口", async ({ pa
   let running = true, cancels = 0;
   await page.route("**/api/semantic-workspace/draft/turns", route => route.fulfill({ contentType: "text/event-stream", body: 'event: meta\ndata: {"conv_id":"stop-stream"}\n\nevent: auth-expired\ndata: {}\n\n' }));
   await page.route("**/api/chat/running/stop-stream", route => route.fulfill({ json: { running, progress: [] } }));
-  await page.route("**/api/conversations/stop-stream/messages", route => route.fulfill({ json: [{ id: 801, role: "assistant", content: "执行已停止", meta: {} }] }));
+  await page.route("**/api/conversations/stop-stream/messages", route => route.fulfill({ json: [
+    { id: 800, role: "user", content: "采集合成资料" },
+    { id: 801, role: "assistant", content: "执行已停止", meta: {} },
+  ] }));
   await page.route("**/api/chat/stop-stream/cancel", route => {
     cancels++;
     if (cancels === 1) return route.fulfill({ status: 500, json: { detail: "停止请求失败，请重试" } });
@@ -5824,7 +5827,7 @@ test.describe("对话首屏与并排附件预览", () => {
       { node: "collect", label: "采集数据", status: "completed", summary: "累计取得 3 条资料。", sequence: 2, sources: [{ url: "https://www.xiaohongshu.com/explore/synthetic", title: "中信私银合成来源", status: "received" }] },
       { node: "analyze", label: "分析资料", status: "started", summary: "正在分析资料…", sequence: 3 },
     ];
-    let started = false, finished = false, executions = 0;
+    let started = false, finished = false, executions = 0, progressCount = 1;
     const errors: string[] = [];
     page.on("pageerror", error => errors.push(error.message));
     const server = createServer(async (req, res) => {
@@ -5841,19 +5844,20 @@ test.describe("对话首屏与并排附件预览", () => {
       emit("meta", { conv_id: "saved-progress" });
       emit("progress", progress[0]);
       await collected.promise;
+      progressCount = 3;
       emit("progress", progress[1]); emit("progress", progress[2]);
       await analyzed.promise;
       const completed = { node: "analyze", label: "分析资料", status: "completed", summary: "分析已完成。", sequence: 4 };
-      progress.push(completed); emit("progress", completed);
+      progress.push(completed); progressCount = progress.length; emit("progress", completed);
       finished = true;
       emit("result", { reply: "分析完成", analysis: "# 合成资料分析报告\n本次使用 3 条测试资料。", files: [{ name: "report.md", url: "/api/downloads/saved-progress/report.md" }] });
       emit("done", {}); res.end();
     });
     await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
     const address = server.address() as { port: number };
-    await page.route("**/api/semantic-workspace/draft/turns", route => route.fulfill({ status: 307, headers: { Location: `http://127.0.0.1:${address.port}/stream` } }));
+    await page.route("**/api/semantic-workspace/draft/turns", route => route.continue({ url: `http://127.0.0.1:${address.port}/stream` }));
     await page.route("**/api/chat/history", route => route.fulfill({ json: started ? [{ conv_id: "saved-progress", title: "中信私银进度测试", updated_at: "2026-09-13T20:00:00Z", status: finished ? "completed" : "running" }] : [] }));
-    await page.route("**/api/chat/running/saved-progress", route => route.fulfill({ json: { running: !finished, progress } }));
+    await page.route("**/api/chat/running/saved-progress", route => route.fulfill({ json: { running: !finished, progress: progress.slice(0, progressCount) } }));
     await page.route("**/api/conversations/saved-progress/messages", route => route.fulfill({ json: [
       { id: 1, role: "user", content: "中信私银进度测试" },
       { id: 2, role: "assistant", content: "# 合成资料分析报告\n本次使用 3 条测试资料。", meta: { work_progress: progress, files: [{ name: "report.md", url: "/api/downloads/saved-progress/report.md" }] } },
@@ -6064,7 +6068,10 @@ test.describe("对话首屏与并排附件预览", () => {
     await page.route("**/api/semantic-workspace/draft/turns", route => { sent++; return route.fulfill({ status: 500 }); });
     await page.route("**/api/chat/running/collection-restored", route => route.fulfill({ json: { running: !canceled } }));
     await page.route("**/api/chat/collection-restored/cancel", route => { canceled = true; return route.fulfill({ json: { ok: true } }); });
-    await page.route("**/api/conversations/collection-restored/messages", route => route.fulfill({ json: [{ role: "assistant", content: "用户已取消任务", meta: {} }] }));
+    await page.route("**/api/conversations/collection-restored/messages", route => route.fulfill({ json: [
+      { id: 1, role: "user", content: "采集原始需求" },
+      { id: 2, role: "assistant", content: "用户已取消任务", meta: {} },
+    ] }));
     await page.addInitScript(() => localStorage.setItem("mangrove_workspace_draft_u1_new", JSON.stringify({ draft: {
       prompt: "采集原始需求", localModel: "Qwen3.6-35B-A3B", connectionId: null, connectionModel: null,
       collection: { convId: "collection-restored", pending: true, prompt: "采集原始需求", steps: ["采集数据"] },

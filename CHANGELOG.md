@@ -2,6 +2,10 @@
 
 ## 未发布
 
+### Bug Fixes
+
+- 修复采集终结后当前对话与历史续问仍显示旧进度的问题；按本轮运行身份只读恢复最终回复、数量和文件，连接未知时保留资料与重读入口，不自动重发任务。（[#297](https://github.com/Eclipseic1848/Mangrove_ai/issues/297)）
+
 ### Improvements
 
 - 将本机登录助手扩展至现有10个采集渠道，统一安装并按所选渠道授权；沿用个人/超管平台双入口及三步引导，保持原小红书包兼容。（[#295](https://github.com/Eclipseic1848/Mangrove_ai/issues/295)）

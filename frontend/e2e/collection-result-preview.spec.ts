@@ -312,7 +312,10 @@ for (const surface of ["历史任务", "即时对话"]) test(`采集中资料自
     return route.fulfill({ json: { running, progress: [{ node: "collect", label: "采集数据", status: "started", summary: "正在处理已找到的笔记", sequence: revision, candidate_counts,
       files: [{ name: "data-in-progress.json", url: `/api/downloads/collection-preview/data-in-progress.json?revision=${revision}` }] }] } });
   });
-  await page.route("**/api/conversations/preview-conv/messages", route => route.fulfill({ json: running ? [{ id: 1, role: "user", content: "合成采集要求" }] : [{ id: 2, role: "assistant", content: "合成采集结束", task_id: "collection-preview", created_at: "2026-10-12T10:00:00+08:00", meta: { files, token_usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } }] }));
+  await page.route("**/api/conversations/preview-conv/messages", route => route.fulfill({ json: [
+    { id: 1, role: "user", content: "合成采集要求" },
+    ...(running ? [] : [{ id: 2, role: "assistant", content: "合成采集结束", task_id: "collection-preview", created_at: "2026-10-12T10:00:00+08:00", meta: { files, token_usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 } } }]),
+  ] }));
   let releaseSecond: () => void = () => {};
   const waiting = new Promise<void>(resolve => { releaseSecond = resolve; });
   let secondRequested = false;
