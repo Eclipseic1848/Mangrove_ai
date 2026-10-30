@@ -26,7 +26,7 @@ export const COOKIE_KEY_ORDER = [
   "mc_cookie_ks", "mc_cookie_tieba", "jd_cookie", "tb_cookie", "pdd_cookie",
 ];
 
-const COOKIE_LOGIN_LINKS: Record<string, { label: string; url: string }> = {
+export const COOKIE_LOGIN_LINKS: Record<string, { label: string; url: string }> = {
   mc_cookie_xhs: { label: "小红书网页版", url: "https://www.xiaohongshu.com" },
   mc_cookie_wb: { label: "微博移动网页版", url: "https://m.weibo.cn" },
   mc_cookie_dy: { label: "抖音网页版", url: "https://www.douyin.com" },

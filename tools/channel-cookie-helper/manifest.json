@@ -1,0 +1,41 @@
+{
+  "manifest_version": 3,
+  "name": "Mangrove 登录助手",
+  "description": "明确授权后读取所选渠道的本机登录态，复制后手动导入 Mangrove。",
+  "version": "1.0.0",
+  "permissions": [
+    "cookies"
+  ],
+  "optional_host_permissions": [
+    "*://xiaohongshu.com/*",
+    "*://www.xiaohongshu.com/*",
+    "*://weibo.cn/*",
+    "*://m.weibo.cn/*",
+    "*://douyin.com/*",
+    "*://www.douyin.com/*",
+    "*://bilibili.com/*",
+    "*://api.bilibili.com/*",
+    "*://zhihu.com/*",
+    "*://www.zhihu.com/*",
+    "*://kuaishou.com/*",
+    "*://www.kuaishou.com/*",
+    "*://baidu.com/*",
+    "*://tieba.baidu.com/*",
+    "*://jd.com/*",
+    "*://me-api.jd.com/*",
+    "*://taobao.com/*",
+    "*://m.taobao.com/*",
+    "*://h5api.m.taobao.com/*",
+    "*://yangkeduo.com/*",
+    "*://mobile.yangkeduo.com/*"
+  ],
+  "incognito": "not_allowed",
+  "action": {
+    "default_title": "Mangrove 登录助手",
+    "default_popup": "popup.html",
+    "default_icon": "icon.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
+  }
+}

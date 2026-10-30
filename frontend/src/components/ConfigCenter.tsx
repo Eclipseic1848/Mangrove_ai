@@ -9,7 +9,8 @@ import { api, ApiError } from "@/lib/api";
 import { reauthenticationFeedback, verificationLabel } from "@/lib/configVerification";
 import { ConfigGuideModal, GuideStepsInline } from "@/components/ConfigGuideModal";
 import { CONFIG_GUIDE_SECTIONS, COOKIE_KEY_ORDER } from "@/lib/configGuides";
-import { XhsCookieHelperModal } from "@/components/XhsCookieHelperModal";
+import { CookieHelperModal } from "@/components/CookieHelperModal";
+import { COOKIE_HELPER_CHANNELS, isCookieHelperChannelKey, type CookieHelperChannelKey } from "@/lib/cookieHelperChannels";
 
 interface CookieHealth {
   status: "valid" | "invalid" | "unknown";
@@ -96,9 +97,15 @@ export function SelfConfigCenter() {
   const [edit, setEdit] = useState<CfgItem | null>(null);
   const [val, setVal] = useState("");
   const [guideOpen, setGuideOpen] = useState(false);
-  const [helperOpen, setHelperOpen] = useState(false);
-  const [xhsRevealed, setXhsRevealed] = useState(false);
+  const [helperKey, setHelperKey] = useState<CookieHelperChannelKey | null>(null);
+  const [cookieRevealed, setCookieRevealed] = useState(false);
   const { verifying, run } = useVerify();
+  const cookieEdit = edit && isCookieHelperChannelKey(edit.key) ? edit : null;
+  function openCookieHelper(key: string) {
+    if (!isCookieHelperChannelKey(key) || (edit && edit.key !== key)) return;
+    setCookieRevealed(false);
+    setHelperKey(key);
+  }
   const [confirmTarget, setConfirmTarget] = useState<string | null>(null);
   const updateLock = useRef(false);
   const [updating, setUpdating] = useState(false);
@@ -172,9 +179,9 @@ export function SelfConfigCenter() {
           {it.set ? it.value : "（未配置，用系统默认）"}
         </code>
         <span className="ml-auto flex max-w-full flex-wrap items-center justify-end gap-1">
-          {it.key === "mc_cookie_xhs" && <Button type="button" variant="outline" size="sm" className="h-7 px-2" onClick={() => setHelperOpen(true)}>小红书登录助手</Button>}
+          {isCookieHelperChannelKey(it.key) && <Button type="button" variant="outline" size="sm" className="h-7 px-2" onClick={() => openCookieHelper(it.key)}>{COOKIE_HELPER_CHANNELS[it.key].name}登录助手</Button>}
           <Button variant="ghost" size="sm" className="h-7 gap-1 px-2"
-            onClick={() => { setEdit(it); setVal(""); setUpdateUnknown(false); setXhsRevealed(false); }}>
+            onClick={() => { setEdit(it); setVal(""); setUpdateUnknown(false); setCookieRevealed(false); }}>
             <Pencil className="h-3.5 w-3.5" /> {it.set ? "修改" : "配置"}
           </Button>
           {it.set && (
@@ -217,26 +224,27 @@ export function SelfConfigCenter() {
         </div>
       </CardContent>
 
-      <XhsCookieHelperModal open={helperOpen} scope="personal" onClose={() => setHelperOpen(false)} onConfigure={() => {
-        setHelperOpen(false);
+      <CookieHelperModal key={helperKey ?? "closed"} open={!!helperKey} channelKey={helperKey ?? "mc_cookie_xhs"} scope="personal" onClose={() => setHelperKey(null)} onConfigure={() => {
+        const key = helperKey;
+        setHelperKey(null);
         // 从编辑框往返助手时保留手动输入，进入配置本身不提交凭据。
-        if (!edit) {
-          const item = byKey.get("mc_cookie_xhs");
-          if (item) { setEdit(item); setVal(""); setUpdateUnknown(false); setXhsRevealed(false); }
+        if (!edit && key) {
+          const item = byKey.get(key);
+          if (item) { setEdit(item); setVal(""); setUpdateUnknown(false); setCookieRevealed(false); }
         }
       }} />
 
-      <Modal open={!!edit && !helperOpen} onClose={() => { if (!updateLock.current) setEdit(null); }} title={`${edit?.set ? "修改" : "配置"} · ${edit?.label ?? ""}`}>
+      <Modal open={!!edit && !helperKey} onClose={() => { if (!updateLock.current) setEdit(null); }} title={`${edit?.set ? "修改" : "配置"} · ${edit?.label ?? ""}`}>
         {edit && <GuideStepsInline configKey={edit.key} />}
-        {edit?.key === "mc_cookie_xhs" && <Button type="button" variant="outline" size="sm" className="mb-3" disabled={updating} onClick={() => setHelperOpen(true)}>打开小红书登录助手</Button>}
-        {edit?.key === "mc_cookie_xhs" && <label htmlFor="personal-xhs-cookie" className="mb-1 block text-sm font-medium">小红书 Cookie</label>}
+        {cookieEdit && <Button type="button" variant="outline" size="sm" className="mb-3" disabled={updating || updateUnknown} onClick={() => openCookieHelper(cookieEdit.key)}>打开{COOKIE_HELPER_CHANNELS[cookieEdit.key as CookieHelperChannelKey].name}登录助手</Button>}
+        {cookieEdit && <label htmlFor={`personal-${cookieEdit.key}`} className="mb-1 block text-sm font-medium">{cookieEdit.label}</label>}
         <Input placeholder={edit?.key.includes("cookie") ? "粘贴从浏览器导出的 Cookie" : "输入 API Key"}
-          id={edit?.key === "mc_cookie_xhs" ? "personal-xhs-cookie" : undefined}
-          type={edit?.key === "mc_cookie_xhs" && !xhsRevealed ? "password" : "text"}
-          autoComplete={edit?.key === "mc_cookie_xhs" ? "new-password" : undefined}
+          id={cookieEdit ? `personal-${cookieEdit.key}` : undefined}
+          type={cookieEdit && !cookieRevealed ? "password" : "text"}
+          autoComplete={cookieEdit ? "new-password" : undefined}
           disabled={updating || updateUnknown} value={val} onChange={(e) => setVal(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && save()} />
-        {edit?.key === "mc_cookie_xhs" && <Button type="button" variant="ghost" size="sm" className="mt-1" aria-label={`${xhsRevealed ? "隐藏" : "显示"}小红书 Cookie`} aria-pressed={xhsRevealed} onClick={() => setXhsRevealed(value => !value)}>{xhsRevealed ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}{xhsRevealed ? "隐藏输入" : "显示输入"}</Button>}
+        {cookieEdit && <Button type="button" variant="ghost" size="sm" className="mt-1" aria-label={`${cookieRevealed ? "隐藏" : "显示"}${cookieEdit.label}`} aria-pressed={cookieRevealed} onClick={() => setCookieRevealed(value => !value)}>{cookieRevealed ? <EyeOff aria-hidden="true" /> : <Eye aria-hidden="true" />}{cookieRevealed ? "隐藏输入" : "显示输入"}</Button>}
         <p className="mt-2 text-xs text-muted-foreground">在本机 Chrome 复制 Cookie 后可保存到当前服务器，仅用于本人任务。验证由服务器执行，可能耗时数分钟；失败保留原凭证。保存配置不代表验证通过，不会自动恢复任务。</p>
         <div className="mt-4 flex justify-end gap-2">
           <Button variant="outline" size="sm" disabled={updating} onClick={() => setEdit(null)}>{updateUnknown ? "关闭并核对" : "取消"}</Button>

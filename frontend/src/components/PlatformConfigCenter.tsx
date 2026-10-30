@@ -10,7 +10,8 @@ import { reauthenticationFeedback, verificationLabel } from "@/lib/configVerific
 import { ConfigGuideModal, GuideStepsInline } from "@/components/ConfigGuideModal";
 import { ADMIN_GUIDE_SECTIONS, COOKIE_KEY_ORDER, getGuideForKey } from "@/lib/configGuides";
 import { useAuth } from "@/lib/auth";
-import { XhsCookieHelperModal } from "@/components/XhsCookieHelperModal";
+import { CookieHelperModal } from "@/components/CookieHelperModal";
+import { COOKIE_HELPER_CHANNELS, isCookieHelperChannelKey, type CookieHelperChannelKey } from "@/lib/cookieHelperChannels";
 
 type Item = { key: string; label: string; secret: boolean; value: string; source: string;
   default_value?: string; type?: string; choices?: string[]; minimum?: number; maximum?: number;
@@ -116,8 +117,8 @@ function CheckSummary({ label, result, onView }: { label: string; result: CheckR
 export function AdminConfigCenter() {
   const { user } = useAuth();
   const isSuperAdmin = user?.role === "super_admin";
-  const [helperOpen, setHelperOpen] = useState(false);
-  useEffect(() => { if (!isSuperAdmin) setHelperOpen(false); }, [isSuperAdmin]);
+  const [helperKey, setHelperKey] = useState<CookieHelperChannelKey | null>(null);
+  useEffect(() => { if (!isSuperAdmin) setHelperKey(null); }, [isSuperAdmin]);
   const [searchParams] = useSearchParams();
   const targetService = searchParams.get("service") || "";
   const targetCategory = CATEGORIES.find(c => c.groups.includes(targetService))?.label;
@@ -136,6 +137,11 @@ export function AdminConfigCenter() {
   const [verificationNotice, setVerificationNotice] = useState("");
   const [invalidKey, setInvalidKey] = useState("");
   const [revealed, setRevealed] = useState<string[]>([]);
+  function openCookieHelper(key: string) {
+    if (!isSuperAdmin || !isCookieHelperChannelKey(key) || (edit && edit.key !== key)) return;
+    setRevealed([]);
+    setHelperKey(key);
+  }
   const searchInput = useRef<HTMLInputElement>(null);
   const [unknown, setUnknown] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -308,7 +314,7 @@ export function AdminConfigCenter() {
             {service.readonly ? <Button variant="outline" size="sm" onClick={() => setView(service)}>查看详情</Button> : <Button variant="outline" size="sm" disabled={disabled} aria-label={`配置 ${service.label}`} onClick={() => openEdit(service)}>{service.items.some(it => it.value.trim()) ? "编辑配置" : "添加配置"}</Button>}
             {service.target && <Button variant="secondary" size="sm" disabled={disabled || group.key === "cookies" && !service.items[0]?.value.trim()} aria-label={`检查 ${service.label}`} onClick={() => { setConfirm({ service }); setError(""); setUnknown(false); }}>{group.key === "cookies" ? "检查状态" : "检查连接"}</Button>}
             <Button variant="ghost" size="sm" className="col-start-3" onClick={() => setGuideService(service)}>配置说明</Button>
-            {isSuperAdmin && service.key === "mc_cookie_xhs" && <Button type="button" variant="outline" size="sm" className="col-span-3" disabled={disabled} onClick={() => setHelperOpen(true)}>小红书登录助手</Button>}
+            {isSuperAdmin && isCookieHelperChannelKey(service.key) && <Button type="button" variant="outline" size="sm" className="col-span-3" disabled={disabled} onClick={() => openCookieHelper(service.key)}>{COOKIE_HELPER_CHANNELS[service.key].name}登录助手</Button>}
           </div>
         </section>))}</div>}
     </CardContent>
@@ -316,18 +322,19 @@ export function AdminConfigCenter() {
     <Modal open={!!view} onClose={() => setView(null)} title={view?.label || "配置详情"}>
       <p className="mb-4 text-sm text-muted-foreground">{view?.help}</p><dl className="space-y-3">{view?.items.map(it => <div key={it.key}><dt className="text-sm text-muted-foreground">{it.label}</dt><dd className="break-all text-sm">{display(it.value)} · {it.source === "override" ? "平台设置" : "服务器默认"}</dd></div>)}</dl><Button className="mt-4" variant="outline" onClick={() => setView(null)}>关闭</Button>
     </Modal>
-    <XhsCookieHelperModal open={helperOpen && isSuperAdmin} scope="platform" onClose={() => setHelperOpen(false)} onConfigure={() => {
+    <CookieHelperModal key={helperKey ?? "closed"} open={!!helperKey && isSuperAdmin} channelKey={helperKey ?? "mc_cookie_xhs"} scope="platform" onClose={() => setHelperKey(null)} onConfigure={() => {
       if (!isSuperAdmin) return;
-      setHelperOpen(false);
+      const key = helperKey;
+      setHelperKey(null);
       // 已有草稿只暂时隐藏，返回时不以空值覆盖。
-      if (!edit) {
-        const service = cookies.find(item => item.key === "mc_cookie_xhs");
+      if (!edit && key) {
+        const service = cookies.find(item => item.key === key);
         if (service) openEdit(service);
       }
     }} />
-    <Modal open={!!edit && !confirm && !helperOpen} onClose={() => { if (!lock.current) setEdit(null); }} title={`配置 ${edit?.label || ""}`} wide>
+    <Modal open={!!edit && !confirm && !helperKey} onClose={() => { if (!lock.current) setEdit(null); }} title={`配置 ${edit?.label || ""}`} wide>
       {edit && <form noValidate onSubmit={e => { e.preventDefault(); void save(); }} onKeyDown={e => { if (e.key === "Enter" && e.nativeEvent.isComposing) e.preventDefault(); }} className="space-y-4">
-        {isSuperAdmin && edit.key === "mc_cookie_xhs" && <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => setHelperOpen(true)}>打开小红书登录助手</Button>}
+        {isSuperAdmin && isCookieHelperChannelKey(edit.key) && <Button type="button" variant="outline" size="sm" disabled={busy || unknown} onClick={() => openCookieHelper(edit.key)}>打开{COOKIE_HELPER_CHANNELS[edit.key].name}登录助手</Button>}
         <p className="text-sm text-muted-foreground">{edit.help}</p><p className="text-sm">密钥留空保留。其他字段直接修改。</p>
         <fieldset disabled={busy || unknown} className="space-y-4">{visibleItems(edit, values).map(it => <div key={it.key} className="space-y-1">
           <label htmlFor={`config-${it.key}`} className="text-sm font-medium">{it.key === "data_prep_mode_enabled" ? "旧采集流程默认模式" : it.label}</label>

@@ -51,8 +51,10 @@ Mangrove 以同一任务的连续对话组织要求、澄清和反馈。文件�
 - **Anti-references：** 不做卡片墙、装饰渐变、双层常驻导航或没有真实能力的演示控件。
 - **Token ownership/runtime mapping：** 本文件镜像而不生成运行时 Token；权威实现位于
   `frontend/src/index.css` 的 HSL 变量，并由 Tailwind 配置和 `frontend/src/components/ui/` 消费。
-  本机小红书扩展的 `tools/xhs-cookie-helper/popup.css` 镜像基础 HSL 与主色前景变量，
-  通过系统明暗偏好选择主题；它不加载外站样式，也不改变网页主题。
+  原小红书扩展的 `tools/xhs-cookie-helper/popup.css` 与统一助手的 `tools/channel-cookie-helper/popup.css` 镜像基础 HSL 与主色前景变量，
+  通过系统明暗偏好选择主题；它们不加载外站样式，也不改变网页主题。
+  统一扩展的渠道选择使用有常驻标签的原生 select，由 Chrome/操作系统拥有展开弹层与键盘行为；
+  网页由原渠道入口直接带入，不增加重复渠道选择，也不声称与扩展自动同步。
 
 ## Colors
 
