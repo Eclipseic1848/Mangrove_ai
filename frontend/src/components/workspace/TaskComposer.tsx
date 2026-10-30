@@ -266,7 +266,7 @@ export type WebIntakeDraft = {
   formatSelection?: "auto" | "manual";
   conversation?: DraftChatMessage[];
   chatAttempt?: { requestId: string; fingerprint: string };
-  collection?: { convId: string; pending: boolean; prompt: string; steps: string[]; progress?: import("@/lib/api").ChatProgress[] };
+  collection?: { convId: string; runId?: string; pending: boolean; prompt: string; steps: string[]; progress?: import("@/lib/api").ChatProgress[] };
 };
 
 export function TaskComposer({

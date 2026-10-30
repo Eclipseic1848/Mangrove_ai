@@ -336,7 +336,7 @@ export async function downloadFile(url: string, filename: string, signal?: Abort
 export type ChatProgress = { node: string; label: string; status: "started" | "completed" | "waiting" | "warning" | "failed"; summary: string; sequence: number; sources?: Array<{ url: string; title: string; status: "requested" | "received" }>; candidate_counts?: { found: number; excluded: number; review_required: number; unfinished: number; selected: number; target_count: number }; files?: Array<{ name: string; url: string }> };
 export interface ChatEvents {
   onProgress?: (d: ChatProgress) => void;
-  onMeta?: (d: { conv_id: string }) => void;
+  onMeta?: (d: { conv_id: string; chat_run_id?: string | null }) => void;
   onNode?: (d: { node: string; label: string; view?: any }) => void;
   onResult?: (d: any) => void;
   onError?: (d: { message: string; code?: "stream_interrupted" }) => void;

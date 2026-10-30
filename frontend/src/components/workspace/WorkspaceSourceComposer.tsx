@@ -181,34 +181,68 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
     return () => { active = false; };
   }, [savedSession, needsSavedMetadata, draft?.collection?.pending, chatting, stale, props.active, metadataRetry]);
   useEffect(() => {
-    if (!draft?.collection?.pending || chatting || stale || props.active === false) return;
+    if (!draft?.collection?.pending || stale || props.active === false) return;
+    const collection = draft.collection;
+    const attemptId = draft.chatAttempt?.requestId;
+    const requestGeneration = generation.current;
     let active = true;
     let timer: ReturnType<typeof setTimeout>;
+    let reading: AbortController | undefined;
+    let failures = 0;
+    const current = () => {
+      const latest = parentDraft.current ?? draft;
+      return active && requestGeneration === generation.current && latest?.collection?.pending
+        && latest.collection.convId === collection.convId && latest.collection.runId === collection.runId
+        && latest.chatAttempt?.requestId === attemptId;
+    };
     const restore = async () => {
+      reading = new AbortController();
+      const deadline = setTimeout(() => reading?.abort(), 10_000);
       try {
-        const status = await api.get(`/api/chat/running/${draft.collection!.convId}`);
-        if (!active) return;
-        if (status.running) {
-          setError("");
-          if (status.progress?.length) updateDraft({ ...(parentDraft.current ?? draft), collection: { ...draft.collection!, progress: status.progress } });
+        const status = await api.get(`/api/chat/running/${encodeURIComponent(collection.convId)}`, { signal: reading.signal });
+        if (!current()) return;
+        if (status.running === true && (collection.runId ? status.chat_run_id === collection.runId : !status.chat_run_id)) {
+          failures = 0; setError(""); setConnectionNotice("");
+          const latest = parentDraft.current ?? draft;
+          if (status.progress?.length) updateDraft({ ...latest, collection: { ...latest.collection!, progress: status.progress } });
           timer = setTimeout(restore, 2000); return;
         }
-        const messages = await api.get(`/api/conversations/${draft.collection!.convId}/messages`);
-        if (!active) return;
-        const last = messages.at(-1);
-        if (last?.role !== "assistant") throw new Error("执行结果尚未形成，请保留当前任务，勿重复发送。");
+        if (typeof status.running !== "boolean") throw new Error("执行状态尚未确认");
+        const messages = await api.get(`/api/conversations/${encodeURIComponent(collection.convId)}/messages`, { signal: reading.signal });
+        if (!current()) return;
+        if (!Array.isArray(messages)) throw new Error("执行结果尚未确认");
         const latest = parentDraft.current ?? draft;
-        updateDraft({ ...latest, prompt: latest.prompt === draft.collection!.prompt ? "" : latest.prompt,
-          chatAttempt: undefined, collection: { ...draft.collection!, pending: false, progress: last.meta?.work_progress ?? draft.collection?.progress },
-          conversation: [...(draft.conversation ?? []), { role: "user", content: draft.collection!.prompt },
+        const previous = latest.conversation ?? [];
+        const matches = collection.runId ? messages.filter(message => message.role === "assistant" && message.meta?.chat_run_id === collection.runId) : [];
+        const normalized = (text: string) => text.replace(/\r\n/g, "\n").replace(/\n\n---\n\n/g, "\n\n").trim();
+        // 旧草稿缺少运行身份时，只承认完整历史前缀之后唯一的一对本轮消息。
+        const legacyMatch = !collection.runId && messages.length === previous.length + 2
+          && previous.every((message, index) => message.role === messages[index]?.role
+            && (!message.id || message.id === messages[index].id)
+            && normalized(message.content) === normalized(messages[index]?.content ?? ""))
+          && messages[messages.length - 2]?.role === "user" && messages[messages.length - 2]?.content === collection.prompt;
+        const last = collection.runId ? matches.length === 1 ? matches[0] : undefined : legacyMatch ? messages[messages.length - 1] : undefined;
+        if (last?.role !== "assistant" || typeof last.content !== "string") throw new Error("本轮执行结果尚未确认");
+        const userMessage = messages[messages.indexOf(last) - 1];
+        updateDraft({ ...latest, sessionId: collection.convId, prompt: latest.prompt === collection.prompt ? "" : latest.prompt,
+          chatAttempt: undefined, collection: { ...latest.collection!, pending: false, progress: last.meta?.work_progress ?? latest.collection?.progress },
+          conversation: [...previous, { role: "user", content: collection.prompt, created_at: userMessage?.role === "user" && userMessage.content === collection.prompt ? userMessage.created_at : undefined },
             { role: "assistant", content: last.content, files: last.meta?.files, id: last.id, created_at: last.created_at, token_usage: last.meta?.token_usage, work_progress: last.meta?.work_progress }] });
-        setError("");
-        setConnectionNotice("");
-      } catch { if (active) { setError(""); setConnectionNotice("暂时无法获取最新进度，请稍后重新读取执行状态，勿重复提交。"); } }
+        setError(""); setConnectionNotice("");
+        // 已确认同轮落库后只结束进度连接，不取消或重发后台执行。
+        generation.current += 1;
+        const request = chatRequest.current;
+        chatRequest.current = null; setChatting(null); request?.abort();
+      } catch {
+        if (current()) {
+          setError(""); setConnectionNotice("本次执行状态尚待确认，已保留上次读取的资料；请勿重复提交。");
+          if (++failures < 3) timer = setTimeout(restore, 2000 * failures);
+        }
+      } finally { clearTimeout(deadline); }
     };
     void restore();
-    return () => { active = false; clearTimeout(timer); };
-  }, [draft?.collection?.convId, draft?.collection?.pending, chatting, stale, props.active, collectionCheck]);
+    return () => { active = false; clearTimeout(timer); reading?.abort(); };
+  }, [draft?.collection?.convId, draft?.collection?.runId, draft?.collection?.pending, draft?.chatAttempt?.requestId, stale, props.active, collectionCheck]);
   const chat = async (next: WebIntakeDraft, externalApiConfirmed: boolean) => {
     const model = next.connectionId ? next.connectionModel : next.localModel;
     if (!model) { setError("请选择可用模型"); throw new Error("请选择可用模型"); }
@@ -217,7 +251,7 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
     const fingerprint = JSON.stringify(payload);
     const attempt = next.chatAttempt?.fingerprint === fingerprint ? next.chatAttempt : { requestId: nanoid(), fingerprint };
     const controller = new AbortController();
-    const requestGeneration = generation.current;
+    const requestGeneration = ++generation.current;
     chatRequest.current = controller;
     updateDraft({ ...next, sessionId, collection: undefined, chatAttempt: attempt });
     setChatting(payload.text); setError(""); setConnectionNotice("");
@@ -226,7 +260,7 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
       const result = await sendDraftTurn({ ...payload, request_id: attempt.requestId }, controller.signal, {
         onMeta: value => {
           if (controller.signal.aborted || requestGeneration !== generation.current) return;
-          collection = { convId: value.conv_id, pending: true, prompt: payload.text, steps: [] };
+          collection = { convId: value.conv_id, runId: value.chat_run_id ?? undefined, pending: true, prompt: payload.text, steps: [] };
           updateDraft({ ...next, chatAttempt: attempt, collection });
         },
         onNode: value => {
@@ -272,8 +306,8 @@ export function WorkspaceSourceComposer({ ownerId, draftScope = "new", initialSo
         <MessageFooter convId={draft.sessionId ?? draft.collection?.convId} messageId={message.id} content={message.content} createdAt={message.created_at} usage={message.token_usage} assistant={message.role === "assistant"} />
       </article>)}
       {(chatting || draft?.collection?.pending) && <p className="ml-8 whitespace-pre-wrap rounded-2xl bg-muted px-4 py-3">{chatting || draft?.collection?.prompt}</p>}
-      {(chatting || draft?.collection?.pending || (draft?.collection && !draft.conversation?.some(message => message.work_progress?.length))) && <CollectionProgress pending={Boolean(chatting || draft?.collection?.pending)} preparing={!draft?.collection} progress={draft?.collection?.progress} steps={draft?.collection?.steps} />}
-      {draft?.collection?.pending && !chatting && <button type="button" className="ml-2 rounded-lg border px-3 py-2 text-xs" onClick={() => setCollectionCheck(value => value + 1)}>重新读取执行状态</button>}
+      {(chatting || draft?.collection?.pending || (draft?.collection && !draft.conversation?.some(message => message.work_progress?.length))) && <CollectionProgress pending={!connectionNotice && Boolean(chatting || draft?.collection?.pending)} preparing={!draft?.collection} progress={draft?.collection?.progress} steps={draft?.collection?.steps} />}
+      {draft?.collection?.pending && <button type="button" className="ml-2 rounded-lg border px-3 py-2 text-xs" onClick={() => setCollectionCheck(value => value + 1)}>重新读取执行状态</button>}
     </section> : null}
     {connectionNotice && <p role="status" className="rounded-lg border bg-muted/30 px-3 py-2 text-sm text-muted-foreground">{connectionNotice}</p>}
     {error && <p role="alert" className="rounded-lg border border-destructive/30 px-3 py-2 text-sm text-destructive">{error}</p>}
