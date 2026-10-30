@@ -41,32 +41,53 @@ _XHS_HELPER_ROOT = Path(__file__).resolve().parents[3] / "tools" / "xhs-cookie-h
 _XHS_HELPER_FILES = (
     "manifest.json", "popup.html", "popup.css", "popup.mjs", "cookies.mjs", "README.md", "xiaohongshu.png",
 )
+_CHANNEL_HELPER_ROOT = Path(__file__).resolve().parents[3] / "tools" / "channel-cookie-helper"
+_CHANNEL_HELPER_FILES = (
+    "manifest.json", "channels.mjs", "cookies.mjs", "popup.html", "popup.css", "popup.mjs", "README.md", "icon.png",
+    *(f"brands/{name}.png" for name in (
+        "xiaohongshu", "weibo", "douyin", "bilibili", "zhihu", "kuaishou", "tieba", "jd", "taobao", "pdd",
+    )),
+)
 
 
-@router.get("/cookie-helper/xhs/download")
-def download_xhs_cookie_helper(user=Depends(get_current_user)):
-    """仅下载同一份本机工具代码，不读取配置，也不授予共享账号写权限。"""
+def _cookie_helper_download(root: Path, names: tuple[str, ...], slug: str):
+    """两个固定源码包共用边界，不接受客户端路径或读取账号配置。"""
     package = BytesIO()
     try:
+        if root.is_symlink() or not root.is_dir():
+            raise ValueError("invalid helper package")
         with ZipFile(package, "w", compression=ZIP_DEFLATED) as archive:
-            for name in _XHS_HELPER_FILES:
-                source = _XHS_HELPER_ROOT / name
-                # 固定清单不接收客户端路径；缺件或链接时拒绝分发不完整安装包。
-                if source.is_symlink() or not source.is_file() or source.stat().st_size > 65536:
+            for name in names:
+                source = root / name
+                # 图片子目录也不能借链接越出固定工具根，避免分发宿主私有文件。
+                if (source.is_symlink() or any((root / parent).is_symlink() for parent in Path(name).parents)
+                        or not source.is_file() or source.stat().st_size > 65536):
                     raise ValueError("invalid helper package")
                 content = source.read_bytes()
                 if len(content) > 65536:
                     raise ValueError("invalid helper package")
-                entry = ZipInfo("mangrove-xhs-cookie-helper/" + name, date_time=(2026, 10, 29, 0, 0, 0))
+                entry = ZipInfo(slug + "/" + name, date_time=(2026, 10, 29, 0, 0, 0))
                 entry.compress_type = ZIP_DEFLATED
                 entry.external_attr = 0o100644 << 16
                 archive.writestr(entry, content)
     except (OSError, ValueError):
         raise HTTPException(status_code=503, detail="登录助手安装包暂不可用，请联系管理员") from None
     return Response(package.getvalue(), media_type="application/zip", headers={
-        "Content-Disposition": 'attachment; filename="mangrove-xhs-cookie-helper.zip"',
+        "Content-Disposition": f'attachment; filename="{slug}.zip"',
         "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
     })
+
+
+@router.get("/cookie-helper/xhs/download")
+def download_xhs_cookie_helper(user=Depends(get_current_user)):
+    """保留已安装旧助手的原包，不授予共享账号写权限。"""
+    return _cookie_helper_download(_XHS_HELPER_ROOT, _XHS_HELPER_FILES, "mangrove-xhs-cookie-helper")
+
+
+@router.get("/cookie-helper/download")
+def download_channel_cookie_helper(user=Depends(get_current_user)):
+    """登录用户下载同一份多渠道工具源码，导入仍走原Owner与角色校验。"""
+    return _cookie_helper_download(_CHANNEL_HELPER_ROOT, _CHANNEL_HELPER_FILES, "mangrove-channel-cookie-helper")
 
 
 class ConfigValueIn(BaseModel):

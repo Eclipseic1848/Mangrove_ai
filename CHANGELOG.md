@@ -4,6 +4,7 @@
 
 ### Improvements
 
+- 将本机登录助手扩展至现有10个采集渠道，统一安装并按所选渠道授权；沿用个人/超管平台双入口及三步引导，保持原小红书包兼容。（[#295](https://github.com/Eclipseic1848/Mangrove_ai/issues/295)）
 - 新增小红书本机 Chrome 登录助手与个人/超管平台双入口，沿三步引导显式读取和复制，再手动导入原配置；不接收密码、不自动上传、验证或恢复任务。（[#293](https://github.com/Eclipseic1848/Mangrove_ai/issues/293)）
 
 ## v1.1.0

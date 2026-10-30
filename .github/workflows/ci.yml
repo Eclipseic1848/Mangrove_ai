@@ -105,7 +105,7 @@ jobs:
           mkdir -p ../.artifacts/ci
           npm run build 2>&1 | tee ../.artifacts/ci/frontend-build.log
       - name: 验证本机登录助手
-        run: node --test ../scripts/tests/xhs_cookie_helper.test.mjs
+        run: node --test ../scripts/tests/xhs_cookie_helper.test.mjs ../scripts/tests/channel_cookie_helper.test.mjs
       - name: 上传前端门证据
         if: always()
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
