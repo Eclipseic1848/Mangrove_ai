@@ -124,31 +124,50 @@ async def atomic_json_item(self, item, item_type):
 def _install_runtime_diagnostics(core, run_dir):
     """只记录阶段布尔值和计数；平台拒绝后本次子进程不再发送后续请求。"""
     state = {"browser_started": False, "search_started": False, "search_list_received": False,
-             "search_item_count": 0, "note_detail_count": 0, "challenge_detected": False}
+             "search_item_count": 0, "note_detail_count": 0, "challenge_detected": False,
+             "login_mode": "unknown", "runtime_phase": "browser_starting"}
+
+    def login_mode():
+        value = getattr(sys.modules.get("config"), "LOGIN_TYPE", None)
+        return value if type(value) is str and value in {"cookie", "qrcode", "phone"} else "unknown"
 
     def report(**values):
         state.update(values)
         _write_json(run_dir / "runtime_diagnostic.json", state)
 
-    report()
+    report(login_mode=login_mode())
     crawler = getattr(core, "XiaoHongShuCrawler", None)
     if crawler and hasattr(crawler, "launch_browser"):
         original_launch = crawler.launch_browser
 
         async def launch(self, *args, **kwargs):
+            report(runtime_phase="browser_starting")
             context = await original_launch(self, *args, **kwargs)
-            report(browser_started=True)
+            report(browser_started=True, runtime_phase="browser_ready")
             return context
         crawler.launch_browser = launch
     if hasattr(core.XiaoHongShuClient, "pong"):
         original_pong = core.XiaoHongShuClient.pong
 
         async def pong(self, *args, **kwargs):
+            report(login_mode=login_mode(), runtime_phase="login_check")
             result = await original_pong(self, *args, **kwargs)
-            report(login_detected=bool(result))
+            report(login_detected=bool(result), runtime_phase="login_confirmed" if result else "login_check")
             return result
         core.XiaoHongShuClient.pong = pong
     login_class = getattr(core, "XiaoHongShuLogin", None)
+    original_begin = getattr(login_class, "begin", None)
+    if original_begin is not None:
+        async def begin(self, *args, **kwargs):
+            mode = login_mode()
+            if mode == "cookie":
+                # 首次登录检查发生在注入之前；保留合法 Cookie 的原注入与后续同步。
+                report(login_mode=mode, runtime_phase="login_cookie_injection")
+                return await original_begin(self, *args, **kwargs)
+            # 后台任务不能等待管理员在另一个桌面扫码；这不是平台已证的认证拒绝。
+            report(login_mode=mode, login_detected=False, login_interaction_required=True, runtime_phase="login_interaction_required")
+            raise RuntimeError("小红书后台采集登录尚未确认，请维护本次使用的采集账号后再试")
+        login_class.begin = begin
     original_check = getattr(login_class, "check_login_state", None)
     if os.environ.get("MANGROVE_XHS_BROWSER_PROFILE") and hasattr(original_check, "retry_with"):
         from tenacity import retry_if_exception
@@ -166,8 +185,9 @@ def _install_runtime_diagnostics(core, run_dir):
         check = original_check.retry_with(retry=original_check.retry.retry | retry_if_exception(navigating))
 
         async def check_login_state(self, *args, **kwargs):
+            report(login_mode=login_mode(), runtime_phase="login_check")
             result = await check(self, *args, **kwargs)
-            report(login_detected=bool(result))
+            report(login_detected=bool(result), runtime_phase="login_confirmed" if result else "login_check")
             return result
         login_class.check_login_state = check_login_state
     if crawler and hasattr(crawler, "get_note_detail_async_task"):
@@ -237,10 +257,10 @@ def main():
             kwargs["sort"] = SearchSortType(sort)
         if note_type:
             kwargs["note_type"] = SearchNoteType({"all": 0, "video": 1, "image": 2}[note_type])
-        report(search_started=True)
+        report(search_started=True, runtime_phase="search")
         result = await original_search(self, **kwargs)
         raw = (result or {}).get("items") or []
-        report(search_list_received=True, search_item_count=runtime["search_item_count"] + len(raw))
+        report(search_list_received=True, search_item_count=runtime["search_item_count"] + len(raw), runtime_phase="list_received")
         if not (result or {}).get("has_more"):
             exhausted.add(keyword)
         # 上游会把不足一页的额度提升到20；详情扇出前截断，才能遵守宿主冻结预算。
