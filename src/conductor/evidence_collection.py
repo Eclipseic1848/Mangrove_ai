@@ -21,7 +21,7 @@ from src.memory._library_scope import execution_owner
 from src.model_connections.text_protocol import ModelOutputTruncatedError
 from src.model_connections.catalog import model_max_output_tokens
 from src.services.document_parser_resilience import document_parser_deadline
-from .collection_results import collection_outcome, collection_candidate_counts, verified_image_bytes
+from .collection_results import collection_outcome, collection_candidate_counts, collection_stop_explanation, verified_image_bytes
 from .progress import emit_progress
 from .utils import parse_json_obj
 
@@ -261,10 +261,14 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                           candidate_counts=counts, files=files)
 
         def save_collection_diagnostic(diagnostic):
-            data["last_collection_diagnostic"] = diagnostic
+            # 最后一条私有诊断只属于当前查询组，不能借给后续组解释未知结果。
+            data["last_collection_diagnostic"] = {**diagnostic, "group_name": query.name}
             save()
 
         async def call(operation, stage):
+            if stage in {"discovery", "comments"}:
+                # 新调用尚无运行事实，不能借用上一页或上一条评论请求的阶段诊断。
+                save_collection_diagnostic({"phase": stage})
             remaining = scope.time_budget_seconds - elapsed_before - (time.monotonic() - started)
             if remaining <= 0:
                 # 耗尽预算时不允许即时返回的协程再开始一次外部动作。
@@ -371,6 +375,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
         progressive_images = defer_unknown and binding["processing_version"] in {"bank-benefits-collection-v6", "bank-benefits-collection-v7"}
         early_limit = 2 if binding["processing_version"] == "bank-benefits-collection-v6" else scope.ocr_limit
         source_stopped = False
+        group_explanations = {}
         for query, group in zip(queries, data["groups"], strict=True):
             if source_stopped:
                 break
@@ -378,6 +383,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                 continue
             group_scope = scope.model_copy(update={"banks" if legacy else "queries": [query]})
             discovery_finished = False
+            interrupted = False
             try:
                 while group["selected_count"] < scope.target_count:
                     execution_checkpoint()
@@ -429,7 +435,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                                 "returned_count": len(batch.items), "message": batch.message, "coverage": batch.coverage,
                                 **({"unknown_ocr_attempted": 0} if binding["processing_version"] in {"bank-benefits-collection-v6", "bank-benefits-collection-v7"} else {})})
                             if not batch.success:
-                                source_stopped = (batch.coverage.get("failure") or {}).get("reason") in {"challenge_required", "rate_limited", "login_required", "access_denied"}
+                                source_stopped = (batch.coverage.get("failure") or {}).get("reason") in {"challenge_required", "rate_limited", "login_required", "login_interaction_required", "access_denied"}
                                 group.update(stop_reason="collection_failed", message=batch.message)
                                 break
                             pending_before = len(group["pending"])
@@ -523,7 +529,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                                         detail._collection_task_id = None
                                         result = await call(collector.collect(detail), "comments")
                                         operation_coverage = result.coverage
-                                        if (operation_coverage.get("failure") or {}).get("reason") in {"challenge_required", "rate_limited", "login_required", "access_denied"}:
+                                        if (operation_coverage.get("failure") or {}).get("reason") in {"challenge_required", "rate_limited", "login_required", "login_interaction_required", "access_denied"}:
                                             group["batches"].append({"phase": "comments", "coverage": operation_coverage})
                                             note["metadata"]["comment_coverage"] = {"truncated": True, "reasons": ["platform_access_stopped"]}
                                             raise _SourceAccessStopped(result.message)
@@ -587,6 +593,9 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                     # 后续无图机会已检查，失败识图仍占原额度，不能把额度耗尽改报成来源为空。
                     group["stop_reason"] = "ocr_limit"
                 group["done"] = True
+            except asyncio.CancelledError:
+                interrupted = True
+                raise
             except _SourceAccessStopped as error:
                 source_stopped = True
                 group.update(stop_reason="collection_failed", message=str(error), done=True)
@@ -596,7 +605,14 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                 group.update(stop_reason=str(error), done=True)
             finally:
                 save()
-                report(f"{query.name}：本组处理已收口", publish=True)
+                if interrupted:
+                    # 取消来源可能是外部截止或用户请求，不能冒充额度耗尽或推断取消者。
+                    summary = "本组处理已中断，结果仍待核对"
+                else:
+                    explanation = collection_stop_explanation(group, data.get("last_collection_diagnostic"), data.get("credential_source"))
+                    group_explanations[group["name"]] = explanation
+                    summary = "本组处理已收口；" + explanation
+                report(f"{query.name}：{summary}", publish=True)
         candidates = [{key: value for key, value in note.items() if not key.startswith("_")} for note in data["candidates"]]
         selected = []
         for query in queries:
@@ -618,7 +634,8 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                 "collection_output_attempt": recovery["attempt_id"] if recovery else None, "raw_dataset": selected,
                 "cleaned_dataset": selected, "collector_used": collector.name, "collection_outcome": outcome,
                 "error": None if outcome["ready_for_review"] else outcome["message"],
-                "collector_notes": [f"{g['name']}：取得 {g['selected_count']}/{scope.target_count} 篇；停止原因：{g['stop_reason']}。"
+                "collector_notes": [f"{g['name']}：取得 {g['selected_count']}/{scope.target_count} 篇；停止原因："
+                    + group_explanations.get(g["name"], collection_stop_explanation(g, data.get("last_collection_diagnostic"), data.get("credential_source"))) + "。"
                     + ("部分评论未采全，详见覆盖说明。" if any(b.get("coverage", {}).get("partial") for b in g["batches"]) else "")
                     for g in data["groups"]]}
     finally:

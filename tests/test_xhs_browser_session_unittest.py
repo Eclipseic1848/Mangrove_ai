@@ -509,6 +509,202 @@ time.sleep(30)
         self.assertTrue(diagnostic["challenge_detected"])
         self.assertEqual(diagnostic["note_detail_count"], 1)
 
+    def test_background_login_stops_before_interactive_fallback(self):
+        from scripts.mediacrawler_xhs import _install_runtime_diagnostics
+        for mode in ("qrcode", "phone", "unexpected-private-value"):
+            with self.subTest(mode=mode):
+                calls = []
+                class Login:
+                    async def begin(self):
+                        calls.append("interactive")
+                        await asyncio.sleep(30)
+                core = types.SimpleNamespace(XiaoHongShuClient=type("Client", (), {}), XiaoHongShuLogin=Login)
+                config = types.SimpleNamespace(LOGIN_TYPE=mode)
+                with patch.dict(sys.modules, config=config):
+                    _install_runtime_diagnostics(core, self.root)
+                    async def run():
+                        with self.assertRaisesRegex(RuntimeError, "登录尚未确认"):
+                            await asyncio.wait_for(Login().begin(), timeout=0.1)
+                    asyncio.run(run())
+                self.assertEqual(calls, [])
+                diagnostic = json.loads((self.root / "runtime_diagnostic.json").read_text(encoding="utf-8"))
+                self.assertTrue(diagnostic["login_interaction_required"])
+                self.assertEqual(diagnostic["runtime_phase"], "login_interaction_required")
+                self.assertEqual(diagnostic["login_mode"], mode if mode in {"qrcode", "phone"} else "unknown")
+                self.assertFalse(diagnostic["search_started"])
+                self.assertNotIn("unexpected-private-value", json.dumps(diagnostic))
+
+    def test_background_cookie_login_keeps_injection_after_false_initial_check(self):
+        from scripts.mediacrawler_xhs import _install_runtime_diagnostics
+        calls = []
+        class Client:
+            async def pong(self):
+                calls.append("initial-check")
+                return False
+            async def update_cookies(self):
+                calls.append("client-update")
+        class Login:
+            async def begin(self):
+                calls.append("cookie-injection")
+                saved = json.loads((self_root / "runtime_diagnostic.json").read_text(encoding="utf-8"))
+                assert saved["runtime_phase"] == "login_cookie_injection"
+        self_root = self.root
+        core = types.SimpleNamespace(XiaoHongShuClient=Client, XiaoHongShuLogin=Login)
+        with patch.dict(sys.modules, config=types.SimpleNamespace(LOGIN_TYPE="cookie")):
+            _install_runtime_diagnostics(core, self.root)
+            async def run():
+                client = Client()
+                if not await client.pong():
+                    await Login().begin()
+                    await client.update_cookies()
+                calls.append("search")
+            asyncio.run(run())
+        self.assertEqual(calls, ["initial-check", "cookie-injection", "client-update", "search"])
+        diagnostic = json.loads((self.root / "runtime_diagnostic.json").read_text(encoding="utf-8"))
+        self.assertEqual(diagnostic["login_mode"], "cookie")
+        self.assertFalse(diagnostic.get("login_interaction_required", False))
+        self.assertFalse(diagnostic["login_detected"])
+
+    def test_background_existing_login_remains_usable_without_begin(self):
+        from scripts.mediacrawler_xhs import _install_runtime_diagnostics
+        calls = []
+        class Client:
+            async def pong(self):
+                return True
+        class Login:
+            async def begin(self):
+                raise AssertionError("已有有效登录不能进入交互分支")
+        core = types.SimpleNamespace(XiaoHongShuClient=Client, XiaoHongShuLogin=Login)
+        with patch.dict(sys.modules, config=types.SimpleNamespace(LOGIN_TYPE="qrcode")):
+            _install_runtime_diagnostics(core, self.root)
+            async def run():
+                if not await Client().pong():
+                    await Login().begin()
+                calls.append("search")
+            asyncio.run(run())
+        self.assertEqual(calls, ["search"])
+        diagnostic = json.loads((self.root / "runtime_diagnostic.json").read_text(encoding="utf-8"))
+        self.assertTrue(diagnostic["login_detected"])
+        self.assertEqual(diagnostic["runtime_phase"], "login_confirmed")
+        self.assertFalse(diagnostic.get("login_interaction_required", False))
+
+    def test_background_login_check_cancellation_keeps_last_phase(self):
+        from scripts.mediacrawler_xhs import _install_runtime_diagnostics
+        class Client:
+            async def pong(self):
+                await asyncio.sleep(30)
+        with patch.dict(sys.modules, config=types.SimpleNamespace(LOGIN_TYPE="qrcode")):
+            _install_runtime_diagnostics(types.SimpleNamespace(XiaoHongShuClient=Client), self.root)
+            async def run():
+                with self.assertRaises(asyncio.TimeoutError):
+                    await asyncio.wait_for(Client().pong(), timeout=0.01)
+            asyncio.run(run())
+        diagnostic = json.loads((self.root / "runtime_diagnostic.json").read_text(encoding="utf-8"))
+        self.assertEqual(diagnostic["runtime_phase"], "login_check")
+        self.assertEqual(diagnostic["login_mode"], "qrcode")
+        self.assertNotIn("login_detected", diagnostic)
+        self.assertFalse(diagnostic["search_started"])
+
+    def test_background_cookie_injection_error_is_not_replaced_by_login_judgment(self):
+        from scripts.mediacrawler_xhs import _install_runtime_diagnostics
+        class Login:
+            async def begin(self):
+                raise PermissionError("synthetic-cookie-injection-error")
+        core = types.SimpleNamespace(XiaoHongShuClient=type("Client", (), {}), XiaoHongShuLogin=Login)
+        with patch.dict(sys.modules, config=types.SimpleNamespace(LOGIN_TYPE="cookie")):
+            _install_runtime_diagnostics(core, self.root)
+            async def run():
+                with self.assertRaisesRegex(PermissionError, "synthetic-cookie-injection-error"):
+                    await Login().begin()
+            asyncio.run(run())
+        diagnostic = json.loads((self.root / "runtime_diagnostic.json").read_text(encoding="utf-8"))
+        self.assertEqual(diagnostic["runtime_phase"], "login_cookie_injection")
+        self.assertFalse(diagnostic.get("login_interaction_required", False))
+        self.assertNotIn("synthetic-cookie-injection-error", json.dumps(diagnostic))
+
+    def test_background_entry_refuses_qrcode_without_waiting_for_scan(self):
+        (self.root / "media_platform/xhs/core.py").write_text('''
+import asyncio
+from pathlib import Path
+class XiaoHongShuClient:
+    async def pong(self): return False
+    async def get_note_by_keyword(self, **kwargs):
+        raise AssertionError("登录未确认不能发搜索")
+class XiaoHongShuLogin:
+    async def begin(self):
+        Path("interactive-login-started").touch()
+        await asyncio.sleep(30)
+class XiaoHongShuCrawler:
+    async def launch_browser(self): return object()
+''', encoding="utf-8")
+        (self.root / "main.py").write_text('''
+import asyncio
+from media_platform.xhs.core import XiaoHongShuClient, XiaoHongShuLogin, XiaoHongShuCrawler
+async def run():
+    await XiaoHongShuCrawler().launch_browser()
+    if not await XiaoHongShuClient().pong():
+        await XiaoHongShuLogin().begin()
+    raise AssertionError("登录未确认不能进入后续处理")
+asyncio.run(run())
+''', encoding="utf-8")
+        with patch.object(settings, "collect_timeout_mediacrawler_seconds", 1), \
+                user_overrides_context({"mc_cookie_xhs": "unused-personal-cookie", "mc_xhs_login_mode": "browser"}):
+            result = self.collect()
+        self.assertFalse(result.success)
+        self.assertFalse((self.root / "interactive-login-started").exists())
+        self.assertTrue(result.coverage["runtime"]["login_interaction_required"])
+        self.assertEqual(result.coverage["runtime"]["runtime_phase"], "login_interaction_required")
+        self.assertEqual(result.coverage["runtime"]["login_mode"], "browser")
+        self.assertEqual(result.coverage["runtime"]["termination"], "exited")
+        self.assertFalse(result.coverage["failure"].get("rejection_confirmed", False))
+        self.assertIn("平台统一采集账号", result.message)
+        self.assertNotIn("个人采集账号", result.message)
+
+    def test_background_entry_keeps_cookie_injection_and_existing_session_search(self):
+        (self.root / "media_platform/xhs/core.py").write_text('''
+import config
+class XiaoHongShuClient:
+    injected = False
+    async def pong(self): return config.LOGIN_TYPE == "qrcode"
+    async def update_cookies(self): assert self.injected
+    async def get_note_by_keyword(self, **kwargs):
+        assert config.LOGIN_TYPE == "qrcode" or self.injected
+        return {"items": [{"id": "note-1"}], "has_more": False}
+class XiaoHongShuLogin:
+    async def begin(self):
+        assert config.LOGIN_TYPE == "cookie", "已登录会话不能扫码"
+        XiaoHongShuClient.injected = True
+class XiaoHongShuCrawler:
+    async def launch_browser(self): return object()
+''', encoding="utf-8")
+        (self.root / "main.py").write_text('''
+import asyncio, json, sys
+from pathlib import Path
+from media_platform.xhs.core import XiaoHongShuClient, XiaoHongShuLogin, XiaoHongShuCrawler
+async def run():
+    await XiaoHongShuCrawler().launch_browser()
+    client = XiaoHongShuClient()
+    if not await client.pong():
+        await XiaoHongShuLogin().begin()
+        await client.update_cookies()
+    result = await client.get_note_by_keyword(keyword="agent", page=1)
+    assert len(result["items"]) == 1
+    out = Path(sys.argv[sys.argv.index("--save_data_path") + 1]) / "xhs/json"
+    out.mkdir(parents=True)
+    (out / "notes.json").write_text(json.dumps([{"note_id": "note-1", "title": "合成笔记",
+        "desc": "合成正文", "source_keyword": "agent"}]), encoding="utf-8")
+asyncio.run(run())
+''', encoding="utf-8")
+        for setting_mode, login_mode in (("auto", "cookie"), ("browser", "browser")):
+            with self.subTest(mode=setting_mode), patch.object(settings, "mc_xhs_login_mode", setting_mode):
+                result = self.collect()
+                self.assertTrue(result.success, result.message)
+                self.assertEqual(len(result.items), 1)
+                self.assertEqual(result.coverage["runtime"]["login_mode"], login_mode)
+                self.assertEqual(result.coverage["runtime"]["runtime_phase"], "list_received")
+                self.assertTrue(result.coverage["runtime"]["search_started"])
+                self.assertFalse(result.coverage["runtime"].get("login_interaction_required", False))
+
     def test_browser_login_retries_only_transient_navigation(self):
         self._assert_login_navigation("Error", "Page.content: Unable to retrieve content because the page is navigating and changing the content.", recovered=True)
 

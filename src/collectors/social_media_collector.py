@@ -88,11 +88,22 @@ def _runtime_diagnostic(run_dir):
             if not isinstance(value, dict):
                 continue
             for key, item in value.items():
-                if key in {"browser_started", "login_detected", "search_started", "search_list_received", "challenge_detected"} and type(item) is bool:
+                if key in {"browser_started", "login_detected", "search_started", "search_list_received", "challenge_detected", "login_interaction_required"} and type(item) is bool:
                     runtime[key] = item
                 elif key in {"search_item_count", "note_detail_count", "exit_code", "login_navigation_retries"} and type(item) is int:
                     runtime[key] = item
                 elif key == "termination" and isinstance(item, str) and item in {"exited", "timeout", "cancelled"}:
+                    runtime[key] = item
+                elif key == "login_mode" and isinstance(item, str) and item in {"browser", "cookie", "qrcode", "phone", "unknown"}:
+                    runtime[key] = item
+                elif key == "runtime_phase" and isinstance(item, str) and item in {
+                    "browser_starting", "browser_ready", "login_check", "login_cookie_injection",
+                    "login_interaction_required", "login_confirmed", "search", "list_received",
+                }:
+                    runtime[key] = item
+                elif key == "process_error_hint" and isinstance(item, str) and item in {
+                    "timeout", "network_error", "browser_closed", "dependency_missing", "collector_error", "unknown",
+                }:
                     runtime[key] = item
         except (OSError, ValueError, RecursionError):
             pass
@@ -636,7 +647,27 @@ class SocialMediaCollector(BaseCollector):
                                 proc.kill()
                             await asyncio.wait_for(proc.wait(), timeout=5)
                     try:
-                        (run_dir / "process_diagnostic.json").write_text(json.dumps({"exit_code": proc.returncode, "termination": "cancelled" if cancelled else "timeout" if timed_out else "exited"}), encoding="utf-8")
+                        diagnostic = {"exit_code": proc.returncode,
+                                      "termination": "cancelled" if cancelled else "timeout" if timed_out else "exited"}
+                        if platform == "xhs":
+                            # 超时取消会跳过后续日志读取；这里只保留闭集线索，原始日志不落盘。
+                            process_output.seek(0, os.SEEK_END)
+                            process_output.seek(max(0, process_output.tell() - 65536))
+                            hint = _safe_mc_failure_hint(process_output.read(65536), proc.returncode)
+                            types = {hint.get("exception_type"), hint.get("isolated_exception_type"), hint.get("isolated_cause_type")}
+                            if types & {"TimeoutError", "PlaywrightTimeoutError", "ConnectTimeout", "ReadTimeout", "builtin_timeout_error", "playwright_timeout", "httpx_connect_timeout", "httpx_read_timeout"}:
+                                category = "timeout"
+                            elif types & {"ConnectionError", "ConnectError", "RemoteProtocolError", "builtin_connection_error", "httpx_connect_error", "httpx_remote_protocol"}:
+                                category = "network_error"
+                            elif types & {"PlaywrightTargetClosedError", "playwright_target_closed"}:
+                                category = "browser_closed"
+                            elif types & {"ModuleNotFoundError", "ImportError", "builtin_module_not_found", "builtin_import_error"}:
+                                category = "dependency_missing"
+                            else:
+                                category = "collector_error" if types - {None} else "unknown"
+                            diagnostic.update(login_mode="browser" if profile else "cookie" if cookie else "qrcode",
+                                              process_error_hint=category)
+                        (run_dir / "process_diagnostic.json").write_text(json.dumps(diagnostic), encoding="utf-8")
                     except OSError:
                         # 辅助诊断写盘失败不能覆盖原取消或改变任务执行结果。
                         logger.warning("采集进程诊断未能保存")
@@ -678,6 +709,19 @@ class SocialMediaCollector(BaseCollector):
             elif platform == "xhs" and failure["reason"] in {"login_required", "challenge_required", "rate_limited"}:
                 # 第三方旧日志不是本次来源拒绝证明，不能据此恢复或要求用户换凭证。
                 failure.update(reason="collection_failed", next_action="inspect_collection_service", message="小红书采集失败；现有诊断不足以确认登录失效或安全验证，请检查本次采集服务诊断")
+            runtime = _runtime_diagnostic(run_dir) if platform == "xhs" else {}
+            if (not rejection and runtime.get("login_interaction_required") is True
+                    and runtime.get("login_detected") is False and runtime.get("search_started") is False):
+                from src.config.user_ctx import get_user_override
+                personal = not profile and get_user_override("mc_cookie_xhs") is not None
+                account = "个人采集账号" if personal else "平台统一采集账号"
+                action = ("请由管理员维护服务器采集浏览器的登录会话，再验证平台采集账号" if profile else
+                          "请在我的采集账号维护本人的登录信息并重新验证" if personal else
+                          "请由超级管理员维护平台统一账号并重新验证")
+                failure.update(reason="login_interaction_required", next_action="reauthenticate_selected_account",
+                    message=f"小红书{account}尚未确认登录，后台采集已停止；{action}。现有诊断不能认定登录凭证已过期")
+                # 本地等待交互不是平台认证拒绝证明，也不能触发替代抓取或旧任务重发。
+                return CollectResult(False, self.name, message=failure.pop("message"), coverage={"failure": failure})
             logger.warning("MediaCrawler 退出码 %s，平台：%s，原因：%s，诊断提示（仅解析线索）：%s",
                            proc.returncode, platform, failure["reason"], json.dumps(failure["diagnostic_hint"], sort_keys=True))
             fallback = await direct_fallback()

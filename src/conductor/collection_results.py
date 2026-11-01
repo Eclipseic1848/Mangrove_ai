@@ -24,11 +24,49 @@ CANDIDATE_REASON_LABELS = {
     "time_budget": "本次处理时间已用完", "ocr_limit": "已达到本次图片处理限额",
     "comment_source_unavailable": "评论来源暂时不可读取", "image_ocr_required": "图片仍待识别",
     "image_read_or_parse_failed": "图片读取或识别尚未完成", "raw_only": "已保留原始资料，尚未识别",
+    "target_reached": "已达到本次采集目标", "candidate_limit": "已达到本次候选检索限额",
+    "source_exhausted": "本次来源检索已结束", "no_new_candidates": "本批未返回新的候选资料",
+    "collection_failed": "来源获取尚未完成",
 }
 SEMANTIC_EXCLUSIONS = {"unrelated": ("relevant", False), "expired_rule": ("tag_stale", True),
                        "audience_mismatch": ("tag_audience_mismatch", True), "credit_card_only": ("credit_card_only", True)}
 _DIAGNOSTIC_SECRET = re.compile(
     r"authorization|\bbearer\b|api[_ -]?key|xsec[_ -]?token|cookie|secret|traceback|\bprovider\b|http\s*[45]\d\d|sk-[\w-]{4,}|(?:password|session|token)\s*[:=]", re.I)
+
+
+def collection_stop_explanation(group, diagnostic=None, credential_source=None):
+    """客户提示只采用固定原因或受控采集失败说明，机器状态保持原值。"""
+    reason = group.get("stop_reason")
+    if group.get("done") is False and group.get("candidate_attempted") == 0:
+        return "本组尚未开始采集"
+    label = CANDIDATE_REASON_LABELS.get(reason, "本组处理已停止，结果尚待核对")
+    failure = {}
+    if reason == "collection_failed":
+        failure = next((batch.get("coverage", {}).get("failure") or {} for batch in reversed(group.get("batches", []))
+                        if batch.get("coverage", {}).get("failure")), {})
+        message = group.get("message")
+        # 未知异常或第三方日志不能借组级失败进入客户回复。
+        if (failure.get("reason") in {"login_interaction_required", "login_required", "challenge_required", "rate_limited", "access_denied"}
+                and isinstance(message, str) and 0 < len(message) <= 500 and not _DIAGNOSTIC_SECRET.search(message)):
+            return message.strip()
+    if ((reason in {"discovery_outcome_unknown", "time_budget"}
+            or (reason == "collection_failed" and failure.get("reason") == "collector_timeout"))
+            and isinstance(diagnostic, dict)
+            and diagnostic.get("phase") == "discovery" and diagnostic.get("group_name") == group.get("name")):
+        if diagnostic.get("search_started") is True:
+            return "搜索已发出，结果尚未确认；本次不会自动重试，请先核对采集服务状态"
+        if diagnostic.get("search_started") is False:
+            phase = diagnostic.get("runtime_phase")
+            if diagnostic.get("browser_started") is True and (diagnostic.get("login_detected") is False
+                    or phase in {"login_check", "login_cookie_injection", "login_interaction_required"}):
+                action = {"platform": "请由超级管理员维护平台采集账号并重新验证",
+                          "personal": "请在我的采集账号维护本人的登录信息并重新验证"}.get(
+                              credential_source, "请先验证本次实际使用的采集账号")
+                # 未确认登录不等于凭证失效，也不授予未知请求自动恢复资格。
+                return "浏览器已启动，但未确认登录成功，搜索尚未开始；" + action
+            if diagnostic.get("browser_started") is False and phase == "browser_starting":
+                return "采集浏览器尚未完成启动，请联系管理员检查采集服务"
+    return label
 
 
 def collection_report_requested(state):
