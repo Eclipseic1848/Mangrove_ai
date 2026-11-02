@@ -16,6 +16,7 @@ from src.data_prep.document_models import BoundingBox, DocumentElement, ElementT
 from src.data_prep.models import RawArtifact, RecordEnvelope
 from src.services.document_parser_contracts import DocumentParserClient, DocumentParseResult
 from src.services.document_parser_factory import configured_document_parser_clients
+from src.services.document_parser_resilience import document_parser_single_attempt
 from src.services.upload_store import inspect_uploaded_image
 
 from .registry import Parser
@@ -84,7 +85,8 @@ class ImageParser(Parser):
         except ValueError:
             return [], [{"artifact_id": artifact.artifact_id, "reason": "invalid_image"}]
         errors: list[str] = []
-        for client in self.document_clients:
+        clients = self.document_clients[:1] if document_parser_single_attempt() else self.document_clients
+        for client in clients:
             provider = getattr(client, "provider", "document_parser")
             try:
                 result, raw_ref = self._load_image_result(client, artifact, raw_bytes)

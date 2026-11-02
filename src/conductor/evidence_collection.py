@@ -34,6 +34,10 @@ class _SourceAccessStopped(Exception):
     """来源要求验证时越过局部评论降级，停止整个任务的后续来源请求。"""
 
 
+class _ImageCollectionStopped(Exception):
+    """图片预算或失败必须交给组级停止门，不能降级后继续外发。"""
+
+
 class StepBudgetExceeded(Exception):
     """阶段超时的结果保留未知，不能冒充总预算耗尽或自动重发。"""
     def __init__(self, stage):
@@ -163,7 +167,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
     spec, task_id = state["task_spec"], state["task_id"]
     store = ArtifactStore()
     owner = execution_owner()
-    binding = {"processing_version": "bank-benefits-collection-v7" if legacy else "evidence-collection-v3", "owner": owner, "task": task_id, "spec": spec.model_dump(mode="json"),
+    binding = {"processing_version": "bank-benefits-collection-v8" if legacy else "evidence-collection-v4", "owner": owner, "task": task_id, "spec": spec.model_dump(mode="json"),
                "query": state.get("user_input"), "model": state.get("model"), "provider": state.get("provider"),
                "connection": _bound_chat_identity.get(), "credential_binding": credential_binding}
     context = state.get("task_context_preview")
@@ -184,16 +188,19 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
         saved = progress_store.read_json_if_exists(progress_key, "progress.json") if owner else None
         if saved and legacy:
             previous_version = (saved.get("binding_fields") or {}).get("processing_version")
-            if previous_version not in {"bank-benefits-collection-v5", "bank-benefits-collection-v6", "bank-benefits-collection-v7"}:
+            if previous_version not in {"bank-benefits-collection-v5", "bank-benefits-collection-v6", "bank-benefits-collection-v7", "bank-benefits-collection-v8"}:
                 raise ValueError("银行权益采集规则已变化，旧冻结进度不能恢复；请保留历史和原件，另建新任务")
             # 只沿用冻结版本，后续仍按原摘要和显式同账号恢复门核验，不能隐式升级旧进度。
             binding["processing_version"] = previous_version
-            if previous_version in {"bank-benefits-collection-v6", "bank-benefits-collection-v7"}:
+            if previous_version in {"bank-benefits-collection-v6", "bank-benefits-collection-v7", "bank-benefits-collection-v8"}:
                 early_limit = 2 if previous_version == "bank-benefits-collection-v6" else scope.ocr_limit
                 for group in saved["groups"]:
                     for batch in group["batches"]:
                         if batch.get("phase") == "discovery" and (type(batch.get("unknown_ocr_attempted")) is not int or not 0 <= batch["unknown_ocr_attempted"] <= early_limit):
                             raise ValueError("银行采集批次识图计数缺失或无效，拒绝恢复")
+        if saved and not legacy and (saved.get("binding_fields") or {}).get("processing_version") == "evidence-collection-v3":
+            binding["processing_version"] = "evidence-collection-v3"
+        per_image = binding["processing_version"] in {"bank-benefits-collection-v8", "evidence-collection-v4"}
         if saved:
             for scope_key in ("evidence_collection", "bank_benefits"):
                 current_scope = binding["spec"].get(scope_key)
@@ -232,6 +239,33 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
             data["elapsed_seconds"] = elapsed_before + time.monotonic() - started
             if owner:
                 progress_store.write_json(progress_key, "progress.json", data)
+
+        async def read_note_images(note, group, early_batch):
+            note["images"] = []
+            for index, url in enumerate(note["metadata"]["image_urls"], 1):
+                execution_checkpoint()
+                if not scope.raw_only and group["ocr_attempted"] >= scope.ocr_limit:
+                    raise _ImageCollectionStopped("ocr_limit")
+                # 逐张调用前持久占额；失败、取消和未知结果均不能退还或重算。
+                group["ocr_attempted"] += int(not scope.raw_only)
+                if early_batch is not None:
+                    early_batch["unknown_ocr_attempted"] += 1
+                save()
+                image_note = {**note, "metadata": {**note["metadata"], "image_urls": [url]}, "images": []}
+                try:
+                    image_note["images"] = await read_images(image_note, task_id, scope.raw_only)
+                except (asyncio.CancelledError, asyncio.TimeoutError, PermissionError):
+                    raise
+                except Exception:
+                    raise _ImageCollectionStopped("image_read_or_parse_failed") from None
+                finally:
+                    # 取消期间也把本张已取得的原件归回原笔记，保留原始图片序号。
+                    note["images"].extend({**image, "image_index": index} for image in image_note["images"])
+                    save()
+                expected = "downloaded" if scope.raw_only else "recognized"
+                if len(image_note["images"]) != 1 or image_note["images"][0].get("status") != expected:
+                    raise _ImageCollectionStopped("image_read_or_parse_failed")
+            return note["images"]
 
         def public_snapshot():
             return {"schema_version": "bank-benefits-v2" if legacy else "evidence-collection-v1",
@@ -276,7 +310,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
             limit = min(max(0, remaining), STEP_TIMEOUT_SECONDS[stage])
             deadline = asyncio.timeout(limit)
             try:
-                parser_budget = document_parser_deadline(time.monotonic() + limit) if stage == "images" else nullcontext()
+                parser_budget = document_parser_deadline(time.monotonic() + limit, single_attempt=per_image) if stage == "images" else nullcontext()
                 with parser_budget:
                     async with deadline:
                         diagnostic_scope = collection_diagnostics(
@@ -372,9 +406,19 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                 save()
 
         defer_unknown = legacy and scope.include_images and not scope.raw_only
-        progressive_images = defer_unknown and binding["processing_version"] in {"bank-benefits-collection-v6", "bank-benefits-collection-v7"}
+        progressive_images = defer_unknown and binding["processing_version"] in {"bank-benefits-collection-v6", "bank-benefits-collection-v7", "bank-benefits-collection-v8"}
         early_limit = 2 if binding["processing_version"] == "bank-benefits-collection-v6" else scope.ocr_limit
         source_stopped = False
+        if per_image:
+            # 新计量版本的图片未知/失败是整轮停止门；重载不能跳过失败笔记再发下一组。
+            for group in data["groups"]:
+                for note in data["candidates"]:
+                    if note["group"] == group["name"] and note.get("_stage") == "images_inflight":
+                        note.update(status="review_required", reason="images_outcome_unknown")
+                        group.update(stop_reason="images_outcome_unknown", done=True)
+                if group["stop_reason"] in {"image_read_or_parse_failed", "images_outcome_unknown"}:
+                    source_stopped = True
+            save()
         group_explanations = {}
         for query, group in zip(queries, data["groups"], strict=True):
             if source_stopped:
@@ -388,7 +432,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                 while group["selected_count"] < scope.target_count:
                     execution_checkpoint()
                     # 新v7所有模式都先停未知检索；旧v6保留冻结的读图模式门。
-                    if (progressive_images or binding["processing_version"] == "bank-benefits-collection-v7") and group.get("discovery_inflight"):
+                    if (progressive_images or binding["processing_version"] in {"bank-benefits-collection-v7", "bank-benefits-collection-v8"}) and group.get("discovery_inflight"):
                         group["stop_reason"] = "interrupted_discovery_outcome_unknown"
                         break
                     verify_bound_model()
@@ -433,7 +477,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                             group["discovery_inflight"] = False
                             group["batches"].append({"page": group["page"], "phase": "discovery", "attempted": batch_spec.max_items,
                                 "returned_count": len(batch.items), "message": batch.message, "coverage": batch.coverage,
-                                **({"unknown_ocr_attempted": 0} if binding["processing_version"] in {"bank-benefits-collection-v6", "bank-benefits-collection-v7"} else {})})
+                                **({"unknown_ocr_attempted": 0} if binding["processing_version"] in {"bank-benefits-collection-v6", "bank-benefits-collection-v7", "bank-benefits-collection-v8"} else {})})
                             pending_before = len(group["pending"])
                             seen = {n["metadata"]["note_id"] for n in data["candidates"] if n["group"] == query.name}
                             group["searched_count"] += len(batch.items[:batch_spec.max_items])
@@ -503,16 +547,24 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                                         if defer_unknown:
                                             continue
                                         break
-                                    group["ocr_attempted"] += int(not scope.raw_only)
-                                    if early_unknown:
+                                    if not per_image:
+                                        group["ocr_attempted"] += int(not scope.raw_only)
+                                    if early_unknown and not per_image:
                                         # 与总识图额度一起在请求前保存，取消或失败也不能返还本批名额。
                                         early_batch["unknown_ocr_attempted"] += 1
                                     note["_stage"] = "images_inflight"
                                     save()
                                     try:
-                                        note["images"] = await call(read_images(note, task_id, scope.raw_only), "images")
+                                        operation = read_note_images(note, group, early_batch if early_unknown else None) if per_image else read_images(note, task_id, scope.raw_only)
+                                        note["images"] = await call(operation, "images")
                                     except StepBudgetExceeded:
                                         note["evidence_gaps"] = list(dict.fromkeys([*note.get("evidence_gaps", []), "images_outcome_unknown"]))
+                                        if per_image:
+                                            raise _ImageCollectionStopped("images_outcome_unknown") from None
+                                    except asyncio.TimeoutError:
+                                        if per_image:
+                                            note.update(status="review_required", reason="images_outcome_unknown")
+                                        raise
                                     note["_images_done"] = True
                                     note["_stage"] = "images_done"
                                     save()
@@ -565,6 +617,10 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                                 else:
                                     note.update(status="excluded" if reason else "selected", reason=reason)
                                 group["selected_count"] = sum(n["status"] == "selected" and n["group"] == query.name for n in data["candidates"])
+                            except _ImageCollectionStopped as error:
+                                note.update(status="review_required", reason=str(error), _stage="images_stopped")
+                                note["evidence_gaps"] = list(dict.fromkeys([*note.get("evidence_gaps", []), "image_incomplete"]))
+                                raise
                             except (PermissionError, asyncio.TimeoutError, _SourceAccessStopped):
                                 raise
                             except StepBudgetExceeded as error:
@@ -603,7 +659,11 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
             except _SourceAccessStopped as error:
                 source_stopped = True
                 group.update(stop_reason="collection_failed", message=str(error), done=True)
+            except _ImageCollectionStopped as error:
+                source_stopped = str(error) != "ocr_limit"
+                group.update(stop_reason=str(error), done=True)
             except asyncio.TimeoutError:
+                source_stopped = per_image
                 group.update(stop_reason="time_budget", done=True)
             except StepBudgetExceeded as error:
                 group.update(stop_reason=str(error), done=True)

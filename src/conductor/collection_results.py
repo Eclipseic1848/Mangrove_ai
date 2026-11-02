@@ -23,7 +23,7 @@ CANDIDATE_REASON_LABELS = {
     "comments_incomplete": "评论资料尚未读取完整", "evidence_processing_failed": "本篇证据处理尚未完成",
     "time_budget": "本次处理时间已用完", "ocr_limit": "已达到本次图片处理限额",
     "comment_source_unavailable": "评论来源暂时不可读取", "image_ocr_required": "图片仍待识别",
-    "image_read_or_parse_failed": "图片读取或识别尚未完成", "raw_only": "已保留原始资料，尚未识别",
+    "image_read_or_parse_failed": "图片读取或识别失败，已保留取得的资料并停止后续处理", "raw_only": "已保留原始资料，尚未识别",
     "target_reached": "已达到本次采集目标", "candidate_limit": "已达到本次候选检索限额",
     "source_exhausted": "本次来源检索已结束", "no_new_candidates": "本批未返回新的候选资料",
     "collection_failed": "来源获取尚未完成",
@@ -287,7 +287,11 @@ def collection_outcome(snapshot):
     actions = sorted({operation.get("next_action") for group in groups for batch in group.get("batches", [])
         for operation in batch.get("coverage", {}).get("operations", {}).values()
         if operation.get("next_action") in action_messages})
-    if not count:
+    if (any(group.get("stop_reason") in {"image_read_or_parse_failed", "images_outcome_unknown"} for group in groups)
+            or any(note.get("reason") == "images_outcome_unknown" for note in snapshot.get("candidates", []))):
+        # 图片停止门不因先前已有入选资料而放行后续模型或初稿创建。
+        status = "incomplete"
+    elif not count:
         exhausted = bool(groups) and all(group.get("stop_reason") == "source_exhausted" for group in groups)
         unresolved = any(item.get("status") in {"review_required", "unprocessed"} for item in snapshot.get("candidates", []))
         status = "failed" if failed else "empty" if exhausted and not unresolved else "incomplete"

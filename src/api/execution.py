@@ -45,24 +45,33 @@ async def execution_http_checkpoint_async(_message) -> None:
     execution_checkpoint()
 
 
-async def execution_to_thread(func, /, *args, **kwargs):
+async def execution_to_thread(func, /, *args, _cancel_event=None, **kwargs):
     """取消 await 不等于线程已停止；释放执行身份前必须等待原子动作收口。"""
     execution_checkpoint()
     def invoke():
         # 线程池可能排队；取得真实线程后仍须核对原代数，才能开始原子动作。
         execution_checkpoint()
+        if _cancel_event is not None and _cancel_event.is_set():
+            raise TimeoutError("执行已取消，禁止开始排队动作")
         return func(*args, **kwargs)
 
     pending = asyncio.create_task(asyncio.to_thread(invoke))
     try:
         result = await asyncio.shield(pending)
     except asyncio.CancelledError:
+        # 可协作停止的图片线程先获通知，不能等健康检查结束后才阻止下一请求。
+        if _cancel_event is not None:
+            _cancel_event.set()
         # 多次取消也不能提前释放锁或宣称资源已静默。
         while not pending.done():
             try:
                 await asyncio.shield(pending)
             except asyncio.CancelledError:
                 continue
+            except Exception:
+                if _cancel_event is None:
+                    raise
+                break
         if not pending.cancelled():
             pending.exception()
         raise
