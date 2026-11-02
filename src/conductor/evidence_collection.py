@@ -434,10 +434,6 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                             group["batches"].append({"page": group["page"], "phase": "discovery", "attempted": batch_spec.max_items,
                                 "returned_count": len(batch.items), "message": batch.message, "coverage": batch.coverage,
                                 **({"unknown_ocr_attempted": 0} if binding["processing_version"] in {"bank-benefits-collection-v6", "bank-benefits-collection-v7"} else {})})
-                            if not batch.success:
-                                source_stopped = (batch.coverage.get("failure") or {}).get("reason") in {"challenge_required", "rate_limited", "login_required", "login_interaction_required", "access_denied"}
-                                group.update(stop_reason="collection_failed", message=batch.message)
-                                break
                             pending_before = len(group["pending"])
                             seen = {n["metadata"]["note_id"] for n in data["candidates"] if n["group"] == query.name}
                             group["searched_count"] += len(batch.items[:batch_spec.max_items])
@@ -451,11 +447,19 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                                                            uri=item.url, media_type="application/json") if owner else None
                                 note = {**raw, "group": query.name, "bank": query.name, "status": "unprocessed", "images": [],
                                         "_stage": "discovered", "_access_handle": item.access_handle}
+                                if not batch.success:
+                                    note["reason"] = "source_access_stopped"
                                 if artifact:
                                     note["source_artifact"] = artifact.model_dump(mode="json")
                                 data["candidates"].append(note)
                                 group["pending"].append(len(data["candidates"]) - 1)
                             group["unique_count"] = len(seen)
+                            if not batch.success:
+                                # 部分来源先持久保存；失败仍终止本轮，绝不把这些候选送去模型或当成初稿。
+                                source_stopped = True
+                                group.update(stop_reason="collection_failed", message=batch.message)
+                                save()
+                                break
                             pages = batch.coverage.get("pages") or []
                             group["exhausted"] = bool(spec.urls) or bool(pages and pages[-1].get("has_more") is False)
                             group["page"] += 1

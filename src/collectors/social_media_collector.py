@@ -98,8 +98,10 @@ def _runtime_diagnostic(run_dir):
                     runtime[key] = item
                 elif key == "runtime_phase" and isinstance(item, str) and item in {
                     "browser_starting", "browser_ready", "login_check", "login_cookie_injection",
-                    "login_interaction_required", "login_confirmed", "search", "list_received",
+                    "login_interaction_required", "login_confirmed", "search", "list_received", "note_detail",
                 }:
+                    runtime[key] = item
+                elif key == "rejected_operation" and isinstance(item, str) and item in {"search", "detail", "comments", "unknown"}:
                     runtime[key] = item
                 elif key == "process_error_hint" and isinstance(item, str) and item in {
                     "timeout", "network_error", "browser_closed", "dependency_missing", "collector_error", "unknown",
@@ -245,6 +247,13 @@ def _operation_evidence(spec: TaskSpec, result: CollectResult) -> dict:
         "reason": failure.get("reason", "operation_completed" if result.success else "operation_unconfirmed"),
         "next_action": failure.get("next_action", "none" if result.success else "inspect_collection_service"),
     }}
+    runtime = result.coverage.get("runtime") or {}
+    operation = runtime.get("rejected_operation")
+    if (not result.success and primary == "search" and runtime.get("search_list_received") is True
+            and (operation == "detail" or (not operation and runtime.get("runtime_phase") == "note_detail"))):
+        # 搜索已返回后发生的详情失败，不能把已知的搜索结果改成失败或未知。
+        evidence["detail"] = evidence["search"]
+        evidence["search"] = {"status": "succeeded", "reason": "operation_completed", "next_action": "none"}
     if spec.include_comments or spec.data_type == DataType.COMMENT:
         coverage = [item.metadata.get("comment_coverage") or {} for item in result.items]
         complete = result.success and bool(coverage) and all(item.get("truncated") is False for item in coverage)
@@ -685,6 +694,7 @@ class SocialMediaCollector(BaseCollector):
         if timed_out and not (xhs_options and spec.include_comments):
             return CollectResult(False, self.name, message=f"MediaCrawler 运行超时（{mc_timeout:.0f}s）", coverage={"failure": {"reason": "collector_timeout", "next_action": "inspect_collection_service"}})
 
+        failed_result = None
         if proc.returncode != 0 and not timed_out:
             text = (stdout or b"").decode("utf-8", "ignore")
             failure = _diagnose_mc_failure(platform, text)
@@ -727,7 +737,9 @@ class SocialMediaCollector(BaseCollector):
             fallback = await direct_fallback()
             if fallback:
                 return fallback
-            return CollectResult(False, self.name, message=failure.pop("message"), coverage={"failure": failure})
+            failed_result = CollectResult(False, self.name, message=failure.pop("message"), coverage={"failure": failure})
+            if platform != "xhs" or identity_probe:
+                return failed_result
 
         if identity_probe:
             identity_path = run_dir / "identity.json"
@@ -749,6 +761,16 @@ class SocialMediaCollector(BaseCollector):
                 _flatten_records(json.loads(jf.read_text(encoding="utf-8")), records)
             except Exception:
                 continue
+        if failed_result is not None:
+            candidates_path = run_dir / "search_candidates.json"
+            if not direct_urls and candidates_path.is_file():
+                candidates = json.loads(candidates_path.read_text(encoding="utf-8"))
+                # 完整详情覆盖同 ID 的搜索摘要；只使用当前调用目录，不借用历史资料。
+                merged = {record["note_id"]: record for record in candidates if record.get("note_id")}
+                merged.update({record["note_id"]: record for record in records if record.get("note_id") and not record.get("comment_id")})
+                records = [*merged.values(), *[record for record in records if record.get("comment_id")]]
+            if not records:
+                return failed_result
         expected_ids = {content_id_from_url(u) for u in direct_urls if content_id_from_url(u)}
         direct_limit = min(len(direct_urls), spec.max_items) if direct_urls else spec.max_items
         search_coverage_path = run_dir / "search_coverage.json"
@@ -806,6 +828,8 @@ class SocialMediaCollector(BaseCollector):
             if platform == "xhs":
                 media_url = public_note_url(str(media_url))
             content = rec.get("content") or rec.get("desc") or rec.get("title") or ""
+            if rec.get("_search_candidate"):
+                content = ""
             access_handle = None
             if platform == "xhs" and spec._collection_task_id:
                 from .source_access import seal_access, xhs_access_url
@@ -829,6 +853,7 @@ class SocialMediaCollector(BaseCollector):
                         "canonical_url": canonical_url,
                         "content_id": content_id,
                         "identity_verified": bool(direct_urls and canonical_url and content_id) or not direct_urls,
+                        **({"detail_status": "unavailable" if rec.get("_search_candidate") else "complete"} if platform == "xhs" else {}),
                         "media_url": media_url,
                         "raw_record": {
                             k: (public_note_url(str(rec[k])) if platform == "xhs" and k in {"video_download_url", "video_url"} else rec.get(k))
@@ -838,6 +863,13 @@ class SocialMediaCollector(BaseCollector):
                     },
                 )
             )
+        if failed_result is not None:
+            failed_result.items = items
+            failed_result.coverage.update(search_coverage, partial=bool(items))
+            if items:
+                complete = sum(item.metadata.get("detail_status") == "complete" for item in items)
+                failed_result.message += f"；已保留 {len(items)} 篇候选，其中 {complete} 篇详情已取得，仍需核对；本次未完成"
+            return failed_result
         if direct_urls and not items:
             fallback = await direct_fallback()
             if fallback:

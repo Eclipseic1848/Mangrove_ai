@@ -27,6 +27,7 @@ CANDIDATE_REASON_LABELS = {
     "target_reached": "已达到本次采集目标", "candidate_limit": "已达到本次候选检索限额",
     "source_exhausted": "本次来源检索已结束", "no_new_candidates": "本批未返回新的候选资料",
     "collection_failed": "来源获取尚未完成",
+    "source_access_stopped": "已保留取得的资料，来源读取中断，尚未完成核对",
 }
 SEMANTIC_EXCLUSIONS = {"unrelated": ("relevant", False), "expired_rule": ("tag_stale", True),
                        "audience_mismatch": ("tag_audience_mismatch", True), "credit_card_only": ("credit_card_only", True)}
