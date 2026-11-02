@@ -10,6 +10,11 @@ import sys
 import time
 from urllib.parse import quote, urlsplit
 
+if __package__:
+    from .mediacrawler_identity import _close_identity, seed_xhs_cookies
+else:
+    from mediacrawler_identity import _close_identity, seed_xhs_cookies
+
 
 async def bounded_comments(client, note_id, xsec_token, crawl_interval, callback, max_count, *, deadline=None):
     """一级评论单独计数；每条最多 20 个回复、两页补取，显式记录截断。"""
@@ -144,6 +149,12 @@ def _install_runtime_diagnostics(core, run_dir):
         async def launch(self, *args, **kwargs):
             report(runtime_phase="browser_starting")
             context = await original_launch(self, *args, **kwargs)
+            if login_mode() == "cookie":
+                try:
+                    await seed_xhs_cookies(context, sys.modules["config"].COOKIES, self.index_url)
+                except BaseException:
+                    await _close_identity((context,), True)
+                    raise
             report(browser_started=True, runtime_phase="browser_ready")
             return context
         crawler.launch_browser = launch
@@ -162,9 +173,9 @@ def _install_runtime_diagnostics(core, run_dir):
         async def begin(self, *args, **kwargs):
             mode = login_mode()
             if mode == "cookie":
-                # 首次登录检查发生在注入之前；保留合法 Cookie 的原注入与后续同步。
-                report(login_mode=mode, runtime_phase="login_cookie_injection")
-                return await original_begin(self, *args, **kwargs)
+                # 完整凭据已在首次请求前注入；失败后重注旧值会复活已删除或轮换的会话。
+                report(login_mode=mode, login_detected=False, runtime_phase="login_check")
+                raise RuntimeError("小红书所选 Cookie 登录尚未确认，已停止采集")
             # 后台任务不能等待管理员在另一个桌面扫码；这不是平台已证的认证拒绝。
             report(login_mode=mode, login_detected=False, login_interaction_required=True, runtime_phase="login_interaction_required")
             raise RuntimeError("小红书后台采集登录尚未确认，请维护本次使用的采集账号后再试")

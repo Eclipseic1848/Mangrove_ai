@@ -3,6 +3,7 @@ import hashlib
 import importlib
 import json
 from pathlib import Path
+import re
 import sys
 from urllib.parse import parse_qs, urlsplit
 
@@ -19,12 +20,32 @@ _CRAWLERS = {
 
 # 这几个平台原 start 有未认证导航、搜索或宽松 Cookie 判定；身份模式不调用原 start。
 _IDENTITY_STARTS = {
+    "xhs": ("create_xhs_client", "index_url", "user_agent"),
     "wb": ("create_weibo_client", "mobile_index_url", "mobile_user_agent"),
     "dy": ("create_douyin_client", "index_url", None),
     "zhihu": ("create_zhihu_client", "index_url", "user_agent"),
     "tieba": ("create_tieba_client", "index_url", "user_agent"),
     "ks": ("create_ks_client", "index_url", "user_agent"),
 }
+
+
+async def seed_xhs_cookies(context, raw, origin):
+    """选定凭据在首次导航前完整进入隔离上下文，后续更新只交给浏览器会话。"""
+    if origin not in {"https://www.xiaohongshu.com", "https://www.rednote.com"}:
+        raise ValueError("小红书 Cookie 初始化站点无效")
+    cookies = {}
+    for field in raw.split(";"):
+        if not field.strip():
+            continue
+        name, separator, value = field.strip().partition("=")
+        name, value = name.strip(), value.strip()
+        if (not separator or not re.fullmatch(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+", name)
+                or any(ord(char) < 32 or ord(char) > 126 for char in value)):
+            raise ValueError("小红书 Cookie 字段格式无效")
+        cookies[name] = value
+    if not cookies.get("web_session"):
+        raise ValueError("小红书 Cookie 缺少登录字段")
+    await context.add_cookies([{"name": name, "value": value, "url": origin} for name, value in cookies.items()])
 
 
 async def _close_identity(resources, interrupted):
@@ -128,11 +149,12 @@ async def probe_account(platform, client):
     account_kind = "unavailable"
     try:
         if platform == "xhs":
-            try:
-                current = await client.get("/api/sns/web/v2/user/me", params={})
-            except Exception:
-                # 新接口不可用不抹掉旧接口的有效证据；取消不会进入此分支。
-                current = None
+            uri = "/api/sns/web/v2/user/me"
+            # 身份未知或来源拒绝不能触发重试或改用另一接口；仍通过原会话锁同步 Cookie。
+            async with client._session.lock:
+                response = await client._request_once("GET", client._host + uri, headers=client.headers.copy(),
+                                                     _sign=(uri, {}, None), _raw_identity=True)
+            current = response.get("data") if isinstance(response, dict) and response.get("success") is True else None
             if isinstance(current, dict):
                 if current.get("guest") is True:
                     return {"status": "invalid", "reason": "login_required"}
@@ -140,12 +162,7 @@ async def probe_account(platform, client):
                 if current.get("guest") is False and isinstance(uid, str) and uid.strip():
                     account, account_kind = uid, "account_id"
             if account is None:
-                response = await client.query_self()
-                data = response.get("data", {}) if isinstance(response, dict) else {}
-                info = data.get("basic_info", {})
-                if response is None or response.get("success") is not True or data.get("result", {}).get("success") is not True or not isinstance(info.get("red_id"), str) or not info["red_id"].strip():
-                    return unknown
-                account, account_kind = info["red_id"], "handle"
+                return unknown
         elif platform == "bili":
             data = await client.get("/x/web-interface/nav")
             if data.get("isLogin") is False:
@@ -239,8 +256,11 @@ async def _start_identity(self, platform, core, output):
             else:
                 context = await self.launch_browser(playwright.chromium, playwright_proxy, user_agent, headless=config.HEADLESS)
             self.browser_context = context
-            cookies = core.utils.convert_str_cookie_to_dict(config.COOKIES)
-            await context.add_cookies([{"name": name, "value": value, "url": origin} for name, value in cookies.items()])
+            if platform == "xhs":
+                await seed_xhs_cookies(context, config.COOKIES, origin)
+            else:
+                cookies = core.utils.convert_str_cookie_to_dict(config.COOKIES)
+                await context.add_cookies([{"name": name, "value": value, "url": origin} for name, value in cookies.items()])
             await context.add_init_script(path="libs/stealth.min.js")
             self.context_page = await context.new_page()
             if platform != "ks":

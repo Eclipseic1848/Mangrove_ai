@@ -155,7 +155,8 @@ def test_hundred_candidate_cap_keeps_exclusions_and_exports_empty_snapshot(tmp_p
     assert set(output["outputs"]) == {"json", "xlsx", "evidence_zip"}
 
 
-def test_partial_collection_keeps_coverage_in_snapshot_and_reply(monkeypatch):
+@pytest.mark.parametrize("include_comments", [False, True])
+def test_partial_collection_keeps_coverage_in_snapshot_and_reply(monkeypatch, include_comments):
     async def collect(self, spec):
         return CollectResult(True, "mediacrawler", items=[CollectedItem(content="相关权益", metadata={
             "note_id": "one", "note_type": "normal", "publish_time": "2026-09-01T00:00:00+00:00",
@@ -166,15 +167,26 @@ def test_partial_collection_keeps_coverage_in_snapshot_and_reply(monkeypatch):
         return {"relevant": True}
     monkeypatch.setattr(SocialMediaCollector, "collect", collect)
     monkeypatch.setattr(bank_benefits, "assess_note", assess)
-    spec = TaskSpec(intent="权益", bank_benefits={"source_evidence": "小红书",
+    spec = TaskSpec(intent="权益", include_comments=include_comments, bank_benefits={"source_evidence": "小红书",
         "publication_from": "2026-01-01", "publication_to": "2026-12-31",
         "banks": [{"name": "中信", "keyword": "中信权益"}]})
     result = asyncio.run(bank_benefits.collect_bank_benefits({"task_spec": spec, "task_id": "partial"}))
     report = result["bank_collection"]["banks"][0]
-    assert report["selected_count"] == 1
+    assert report["selected_count"] == (0 if include_comments else 1)
     assert report["batches"][0]["coverage"]["collector_timeout"]
-    assert "评论未采全" in result["collector_notes"][0]
-    assert result["raw_dataset"][0]["metadata"]["comment_coverage"]["truncated"]
+    assert ("评论未采全" in result["collector_notes"][0]) is include_comments
+    assert result["bank_collection"]["candidates"][0]["metadata"]["comment_coverage"]["truncated"]
+
+
+def test_discovery_rejection_is_not_a_comment_coverage_gap(monkeypatch):
+    async def collect(self, spec):
+        return CollectResult(False, "mediacrawler", coverage={"partial": True,
+            "failure": {"reason": "challenge_required"}})
+    monkeypatch.setattr(SocialMediaCollector, "collect", collect)
+    spec = TaskSpec(intent="权益", include_comments=True, bank_benefits={"source_evidence": "小红书",
+        "banks": [{"name": "中信", "keyword": "中信权益"}]})
+    result = asyncio.run(bank_benefits.collect_bank_benefits({"task_spec": spec, "task_id": "discovery-gap"}))
+    assert "评论未采全" not in result["collector_notes"][0]
 
 
 @pytest.mark.parametrize("url,allowed", [

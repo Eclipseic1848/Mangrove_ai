@@ -79,9 +79,13 @@ if args.get_comment == "yes":
 
 def test_identity_probe_child_does_not_search(crawler):
     (crawler / "media_platform/xhs/core.py").write_text('''
+import asyncio
+from types import SimpleNamespace
 class Client:
-    async def query_self(self):
-        return {"success": True, "data": {"result": {"success": True}, "basic_info": {"red_id": "private-account"}}}
+    _session = SimpleNamespace(lock=asyncio.Lock())
+    _host, headers = "https://edith.xiaohongshu.com", {}
+    async def _request_once(self, *args, **kwargs):
+        return {"success": True, "data": {"guest": False, "user_id": "private-account"}}
 class XiaoHongShuCrawler:
     xhs_client = Client()
     async def search(self):
@@ -574,8 +578,12 @@ def test_cookie_verification_uses_isolated_browser(crawler, monkeypatch):
     from src.collectors import registry
     monkeypatch.setattr(registry, "get_registry", lambda: {"mediacrawler": SocialMediaCollector()})
     (crawler / "media_platform/xhs/core.py").write_text('''
+import asyncio
+from types import SimpleNamespace
 class Client:
-    async def query_self(self): return None
+    _session = SimpleNamespace(lock=asyncio.Lock())
+    _host, headers = "https://edith.xiaohongshu.com", {}
+    async def _request_once(self, *args, **kwargs): return None
 class XiaoHongShuCrawler:
     xhs_client = Client()
     async def search(self): raise AssertionError("不应搜索")
