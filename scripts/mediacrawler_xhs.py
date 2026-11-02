@@ -8,6 +8,7 @@ from pathlib import Path
 import runpy
 import sys
 import time
+from urllib.parse import quote, urlsplit
 
 
 async def bounded_comments(client, note_id, xsec_token, crawl_interval, callback, max_count, *, deadline=None):
@@ -192,16 +193,34 @@ def _install_runtime_diagnostics(core, run_dir):
         login_class.check_login_state = check_login_state
     if crawler and hasattr(crawler, "get_note_detail_async_task"):
         original_detail = crawler.get_note_detail_async_task
+        note_store = getattr(core, "xhs_store", None)
+        if note_store is not None:
+            original_save = note_store.update_xhs_note
+            saved = set()
+
+            async def save_note(note):
+                identity = note.get("note_id")
+                if identity and identity in saved:
+                    return
+                await original_save(note)
+                if identity:
+                    saved.add(identity)
+            note_store.update_xhs_note = save_note
 
         async def detail(self, *args, **kwargs):
+            report(runtime_phase="note_detail")
             result = await original_detail(self, *args, **kwargs)
             if result:
+                # 上游等整批 gather 后才写盘；一篇被拒绝不能抹掉此前已完成的详情。
+                if note_store is not None:
+                    await note_store.update_xhs_note(result)
                 report(note_detail_count=state["note_detail_count"] + 1)
             return result
         crawler.get_note_detail_async_task = detail
     if hasattr(core.XiaoHongShuClient, "_request_once"):
         from media_platform.xhs.client import PlatformAccessError
         original_request = core.XiaoHongShuClient._request_once
+        note_not_found = getattr(core, "NoteNotFoundError", ())
         blocked = None
 
         async def request(self, *args, **kwargs):
@@ -213,7 +232,26 @@ def _install_runtime_diagnostics(core, run_dir):
                 return await original_request(self, *args, **kwargs)
             except PlatformAccessError as error:
                 blocked = error
-                report(challenge_detected=error.http_status in {461, 471})
+                url = kwargs.get("url") or (args[1] if len(args) > 1 else "")
+                path = urlsplit(url).path
+                operation = {"/api/sns/web/v1/search/notes": "search",
+                             "/api/sns/web/v1/feed": "detail"}.get(path, "unknown")
+                if path.startswith("/explore/"):
+                    operation = "detail"
+                elif path.startswith("/api/sns/web/v2/comment/"):
+                    operation = "comments"
+                report(challenge_detected=error.http_status in {461, 471}, rejected_operation=operation)
+                raise
+            except note_not_found:
+                # 单篇已明确不存在由上游逐篇处理，不等于全平台拒绝或请求结果未知。
+                raise
+            except asyncio.CancelledError as error:
+                # 取消仍原样传播，同时拦住本批已排队但尚未发送的请求。
+                blocked = error
+                raise
+            except Exception as error:
+                # 结果未知也不能让已排队的同批请求继续发送，更不能由上游重试重复访问。
+                blocked = error
                 raise
         core.XiaoHongShuClient._request_once = request
     return report, state
@@ -246,7 +284,7 @@ def main():
 
     original_search = core.XiaoHongShuClient.get_note_by_keyword
     requested = int(sys.argv[sys.argv.index("--crawler_max_notes_count") + 1])
-    remaining_by_keyword, pages, exhausted = {}, [], set()
+    remaining_by_keyword, pages, exhausted, candidates = {}, [], set(), {}
 
     async def search(self, **kwargs):
         keyword = kwargs.get("keyword")
@@ -264,12 +302,31 @@ def main():
         if not (result or {}).get("has_more"):
             exhausted.add(keyword)
         # 上游会把不足一页的额度提升到20；详情扇出前截断，才能遵守宿主冻结预算。
-        items = [item for item in raw if item.get("model_type") not in ("rec_query", "hot_query")][:remaining]
+        items, seen = [], set()
+        for item in raw:
+            if item.get("model_type") in ("rec_query", "hot_query"):
+                continue
+            identity = item.get("id")
+            if identity and identity in seen:
+                continue
+            if identity:
+                seen.add(identity)
+            items.append(item)
+        items = items[:remaining]
         remaining_by_keyword[keyword] = remaining - len(items)
         pages.append({"keyword": keyword, "page": kwargs.get("page", 1),
                       "item_count": len(raw), "accepted_count": len(items),
                       "has_more": bool((result or {}).get("has_more"))})
         _write_json(run_dir / "search_coverage.json", {"pages": pages})
+        for item in items:
+            identity, card = item.get("id"), item.get("note_card")
+            if not isinstance(identity, str) or not identity or not isinstance(card, dict):
+                continue
+            # 搜索卡片只是候选，不含完整正文；认证参数不进入这份候选投影。
+            candidates.setdefault(identity, {"note_id": identity, "title": card.get("display_title") or card.get("title") or "",
+                "note_url": "https://www.xiaohongshu.com/explore/" + quote(identity, safe=""),
+                "type": card.get("type"), "source_keyword": keyword, "_search_candidate": True})
+        _write_json(run_dir / "search_candidates.json", list(candidates.values()))
         # 上游在has_more=False时先退出；有内容的末页仍须处理，来源真值保留在coverage。
         return {**(result or {}), "items": items, "has_more": True if items else bool((result or {}).get("has_more"))}
 

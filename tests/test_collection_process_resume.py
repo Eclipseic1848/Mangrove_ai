@@ -20,12 +20,20 @@ def test_process_death_preserves_completed_unknown_and_credential_boundary(tmp_p
     saved = json.loads(progress.read_text(encoding='utf-8'))
     assert saved['candidates'][0]['status'] == 'selected'
     assert saved['candidates'][1]['_stage'] == 'extract_inflight'
-    artifacts = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in (tmp_path / 'artifacts').rglob('*') if p.is_file()}
+    working_view = tmp_path / 'artifacts/process-resume/data-in-progress.json'
+    previous_view = json.loads(working_view.read_text(encoding='utf-8'))
+    # 实时进度是可更新视图；原始来源文件仍须逐字节保持。
+    artifacts = {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in (tmp_path / 'artifacts').rglob('*')
+                 if p.is_file() and p != working_view}
+    assert artifacts
     resumed = run('resume')
     assert resumed.returncode == 0, resumed.stderr
     result = json.loads((tmp_path / 'resume.json').read_text(encoding='utf-8'))
     assert [n['status'] for n in result['evidence_collection']['candidates']] == ['selected', 'review_required', 'selected']
     assert all(hashlib.sha256(p.read_bytes()).hexdigest() == digest for p, digest in artifacts.items())
+    current_view = json.loads(working_view.read_text(encoding='utf-8'))
+    assert current_view['snapshot_revision'] > previous_view['snapshot_revision']
+    assert [n['status'] for n in current_view['candidates']] == ['selected', 'review_required', 'selected']
     calls = [json.loads(line) for line in (tmp_path / 'calls.jsonl').read_text(encoding='utf-8').splitlines()]
     for operation in [['discover'], ['0', 'extract'], ['1', 'extract'], ['2', 'extract']]:
         assert calls.count(operation) == 1

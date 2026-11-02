@@ -29,11 +29,14 @@ def recovery_request(binding, attempt_id):
 def authentication_refused(group):
     batch = group.get("batches", [])[-1] if group.get("batches") else {}
     failure = batch.get("coverage", {}).get("failure", {})
+    runtime = batch.get("coverage", {}).get("runtime") or {}
     # 只有采集边界已证的拒绝才能退还预算；原日志提示与未知结果不能授权重发。
     return (group.get("stop_reason") == "collection_failed" and batch.get("phase") == "discovery"
             and failure.get("rejection_confirmed") is True
             and failure.get("reason") in {"login_required", "challenge_required"}
             and batch.get("returned_count") == 0 and batch.get("attempted", 0) > 0
+            # 旧版本可能因后续详情失败丢掉整批 items；已收到列表就不再属于零来源认证拒绝。
+            and runtime.get("search_list_received") is not True and not runtime.get("note_detail_count")
             and not group.get("discovery_inflight"))
 
 
