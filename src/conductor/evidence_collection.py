@@ -700,7 +700,9 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                 "error": None if outcome["ready_for_review"] else outcome["message"],
                 "collector_notes": [f"{g['name']}：取得 {g['selected_count']}/{scope.target_count} 篇；停止原因："
                     + group_explanations.get(g["name"], collection_stop_explanation(g, data.get("last_collection_diagnostic"), data.get("credential_source"))) + "。"
-                    + ("部分评论未采全，详见覆盖说明。" if any(b.get("coverage", {}).get("partial") for b in g["batches"]) else "")
+                    + ("部分评论未采全，详见覆盖说明。" if spec.include_comments and any(
+                        n["group"] == g["name"] and n.get("metadata", {}).get("comment_coverage", {}).get("truncated")
+                        for n in data["candidates"]) else "")
                     for g in data["groups"]]}
     finally:
         if lock:

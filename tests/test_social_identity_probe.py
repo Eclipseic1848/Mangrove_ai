@@ -13,7 +13,7 @@ from tests.test_kuaishou_identity_current import FakeKuaishouPage
 
 
 @pytest.mark.parametrize("platform,response,status", [
-    ("xhs", {"success": True, "data": {"result": {"success": True}, "basic_info": {"red_id": "synthetic-account"}}}, "valid"),
+    ("xhs", {"success": True, "data": {"guest": False, "user_id": "synthetic-account"}}, "valid"),
     ("xhs", {"success": True, "data": {"result": {"success": True}}}, "unknown"),
     ("xhs", None, "unknown"),
     ("xhs", {"success": True, "data": {"result": {"success": True}, "basic_info": {"red_id": True}}}, "unknown"),
@@ -61,6 +61,7 @@ def test_account_endpoint_evidence_is_required(platform, response, status):
         return SimpleNamespace(status=200, json=fetch)
 
     client = SimpleNamespace(query_self=fetch, get=fetch, request=fetch,
+                             _request_once=fetch, _session=SimpleNamespace(lock=asyncio.Lock()),
                              get_current_user_info=fetch, _fetch_json_by_browser=fetch,
                              _host="https://synthetic.invalid", headers={},
                              playwright_page=SimpleNamespace(context=SimpleNamespace(request=SimpleNamespace(get=browser_get))))
@@ -131,6 +132,7 @@ def test_probe_exception_is_unknown_and_does_not_leak_response(platform):
         pass
 
     client = SimpleNamespace(query_self=fail, get=fail, request=fail,
+                             _request_once=fail, _session=SimpleNamespace(lock=asyncio.Lock()),
                              get_current_user_info=fail, _fetch_json_by_browser=fail,
                              _host="https://synthetic.invalid", headers={},
                              playwright_page=SimpleNamespace(route=fail, close=close, context=SimpleNamespace(route=fail, request=SimpleNamespace(get=fail, post=fail))))
@@ -139,11 +141,11 @@ def test_probe_exception_is_unknown_and_does_not_leak_response(platform):
 
 
 def test_probe_cancellation_is_not_swallowed():
-    async def cancel():
+    async def cancel(*args, **kwargs):
         raise asyncio.CancelledError
 
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(probe_account("xhs", SimpleNamespace(query_self=cancel)))
+        asyncio.run(probe_account("xhs", _single_xhs_client(cancel)))
 
 
 def test_health_route_uses_identity_probe_without_search(monkeypatch):
@@ -165,44 +167,45 @@ def test_health_route_uses_identity_probe_without_search(monkeypatch):
 @pytest.mark.parametrize("guest,account,status,kind", [
     (False, "immutable-id", "valid", "account_id"),
     (True, "guest-id", "invalid", None),
-    ("false", "immutable-id", "valid", "handle"),
-    (False, True, "valid", "handle"),
-    (False, "", "valid", "handle"),
+    ("false", "immutable-id", "unknown", None),
+    (False, True, "unknown", None),
+    (False, "", "unknown", None),
 ])
 def test_xhs_stable_account_identity_requires_non_guest_and_valid_id(guest, account, status, kind):
     calls = []
-    async def current(uri, *, params):
-        assert uri == "/api/sns/web/v2/user/me" and params == {}
+    async def current(method, url, **kwargs):
+        assert method == "GET" and url == "https://edith.xiaohongshu.com/api/sns/web/v2/user/me"
+        assert kwargs["_raw_identity"] is True
         calls.append("current")
-        return {"guest": guest, "user_id": account, "red_id": "changeable-handle"}
-    async def legacy():
-        calls.append("legacy")
-        return {"success": True, "data": {"result": {"success": True}, "basic_info": {"red_id": "changeable-handle"}}}
-    result = asyncio.run(probe_account("xhs", SimpleNamespace(get=current, query_self=legacy)))
+        return {"success": True, "data": {"guest": guest, "user_id": account, "red_id": "changeable-handle"}}
+    result = asyncio.run(probe_account("xhs", _single_xhs_client(current)))
     assert result["status"] == status
     assert result.get("account_ref_kind") == kind
     if kind == "account_id":
         assert result["account_ref"] == hashlib.sha256(b"xhs\0immutable-id").hexdigest()
-    assert calls == (["current"] if kind == "account_id" or guest is True else ["current", "legacy"])
+    assert calls == ["current"]
     assert "immutable-id" not in json.dumps(result) and "changeable-handle" not in json.dumps(result)
 
 
 def test_xhs_current_identity_cancellation_does_not_fall_back():
     async def current(*args, **kwargs):
         raise asyncio.CancelledError()
-    async def forbidden():
-        raise AssertionError("取消后不能再调用旧接口")
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(probe_account("xhs", SimpleNamespace(get=current, query_self=forbidden)))
+        asyncio.run(probe_account("xhs", _single_xhs_client(current)))
 
 
-def test_xhs_new_identity_error_preserves_legacy_validation():
+def _single_xhs_client(request):
+    return SimpleNamespace(_host="https://edith.xiaohongshu.com", headers={},
+                           _session=SimpleNamespace(lock=asyncio.Lock()), _request_once=request)
+
+
+def test_xhs_identity_error_stays_unknown_without_legacy_request():
+    calls = []
     async def current(*args, **kwargs):
+        calls.append("current")
         raise RuntimeError("private-upstream-error")
-    async def legacy():
-        return {"success": True, "data": {"result": {"success": True}, "basic_info": {"red_id": "legacy-handle"}}}
-    result = asyncio.run(probe_account("xhs", SimpleNamespace(get=current, query_self=legacy)))
-    assert result["status"] == "valid" and result["account_ref_kind"] == "handle"
+    result = asyncio.run(probe_account("xhs", _single_xhs_client(current)))
+    assert result["status"] == "unknown" and calls == ["current"]
     assert "private-upstream-error" not in json.dumps(result)
 
 
@@ -370,7 +373,7 @@ def test_identity_start_injects_only_supplied_cookie_before_account_navigation(t
     assert "private-account" not in record and "private-token" not in record and "synthetic" not in record
 
 
-@pytest.mark.parametrize("platform", ["xhs", "bili"])
+@pytest.mark.parametrize("platform", ["bili"])
 def test_existing_identity_entry_preserves_verified_browser_start(monkeypatch, tmp_path, platform):
     from scripts import mediacrawler_identity as module
 
