@@ -1,10 +1,13 @@
 """布局为空的图片只补一次全图识别，原件、坐标和调用边界保持。"""
 import base64
+import asyncio
 from copy import deepcopy
+from contextlib import nullcontext
 import io
 import json
 import hashlib
 import time
+import threading
 
 import httpx
 from PIL import Image
@@ -155,3 +158,67 @@ def test_old_empty_image_cache_cannot_hide_new_fallback_policy(tmp_path):
     assert not rejects and records[0].data["text"] == "中国光大银行"
     assert [item["useLayoutDetection"] for item in calls] == [True, False]
     assert store.resolve_path(old_ref).read_bytes() == old_bytes
+
+
+def test_single_attempt_collection_does_not_repeat_empty_layout_or_use_secondary(tmp_path):
+    raw = image_bytes()
+    calls = []
+    def handler(request):
+        calls.append((request.url.host, request.method))
+        if request.method == "GET":
+            return httpx.Response(200, json={"paths": {"/layout-parsing": {"post": {}}}})
+        return httpx.Response(200, json=response_payload())
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    clients = [PaddleOCRVLDocumentClient(base_url=f"http://{host}.test", http_client=http)
+               for host in ("primary", "secondary")]
+    store = ArtifactStore(root=str(tmp_path))
+    artifact = store.write_raw("task", "card", raw, uri="card.png", media_type="image/png")
+    with resilience.document_parser_deadline(time.monotonic() + 10, single_attempt=True):
+        records, rejects = ImageParser(document_clients=clients, artifact_store=store).parse(artifact, raw)
+    assert not records and rejects[0]["reason"] == "image_ocr_required"
+    assert calls == [("primary.test", "GET"), ("primary.test", "POST")]
+    assert not resilience.document_parser_single_attempt()
+
+
+@pytest.mark.parametrize("blocked_at", ["health", "queue"])
+def test_cancelled_collection_image_thread_never_starts_ocr(monkeypatch, tmp_path, blocked_at):
+    from src.conductor import source_images
+    from src.parsers import image as image_module
+    raw = image_bytes()
+    started, release = threading.Event(), threading.Event()
+    calls = []
+    def handler(request):
+        calls.append(request.method)
+        if request.method == "GET":
+            started.set()
+            if blocked_at == "health":
+                assert release.wait(3), "合成健康检查未解除"
+            return httpx.Response(200, json={"paths": {"/layout-parsing": {"post": {}}}})
+        return httpx.Response(200, json=response_payload(text="原文"))
+    client = PaddleOCRVLDocumentClient(base_url="http://paddle.test", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    monkeypatch.setattr(image_module, "configured_document_parser_clients", lambda: [client])
+    monkeypatch.setattr(source_images.settings, "data_prep_artifact_root", str(tmp_path))
+    monkeypatch.setattr(source_images.settings, "document_parser_max_concurrency", 1)
+    monkeypatch.setattr(source_images.HttpSecurityGuard, "validate", lambda self, url: None)
+    monkeypatch.setattr(source_images, "PinnedAsyncHTTPTransport", lambda **kwargs: httpx.MockTransport(
+        lambda request: httpx.Response(200, content=raw, headers={"content-type": "image/png"})))
+    note = {"metadata": {"note_id": "cancel", "image_urls": ["https://image.test/one.png"]}}
+
+    async def run():
+        with resilience.document_parser_request_slot() if blocked_at == "queue" else nullcontext():
+            with resilience.document_parser_deadline(time.monotonic() + 3, single_attempt=True):
+                task = asyncio.create_task(source_images.read_images(note, "cancel", False))
+                async with asyncio.timeout(2):
+                    while not started.is_set():
+                        await asyncio.sleep(.001)
+                task.cancel()
+                await asyncio.sleep(.01)
+                if blocked_at == "health":
+                    assert not task.done(), "取消不能在原线程收口前返回"
+                release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert calls == ["GET"]
+    assert note["images"][0]["status"] == "downloaded"

@@ -12,6 +12,7 @@ from src.data_prep.artifact_store import ArtifactStore
 from src.model_connections.pinned_transport import PinnedAsyncHTTPTransport
 from src.parsers.image import ImageParser
 from src.services.upload_store import inspect_uploaded_image
+from src.services.document_parser_resilience import document_parser_stop_event
 from src.api.execution import execution_checkpoint, execution_to_thread
 
 
@@ -56,7 +57,8 @@ async def read_images(note, task_id, raw_only):
             row.update(sha256=artifact.sha256, artifact_path=artifact.storage_path,
                        media_type=media_type, status="downloaded", reason="raw_only" if raw_only else None)
             if parser is not None:
-                records, rejects = await execution_to_thread(parser.parse, artifact, raw)
+                records, rejects = await execution_to_thread(parser.parse, artifact, raw,
+                    _cancel_event=document_parser_stop_event())
                 if not records:
                     row.update(status="failed", reason="image_ocr_required")
                     continue

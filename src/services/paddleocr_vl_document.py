@@ -185,7 +185,8 @@ class PaddleOCRVLDocumentClient:
     def parse_image(self, raw_bytes: bytes, *, filename: str) -> DocumentParseResult:
         """解析 PNG/JPEG/WEBP 图片；PaddleX 协议中 fileType=1。"""
         result = self._parse_file(raw_bytes, file_type=1)
-        if result.blocks:
+        from src.services.document_parser_resilience import document_parser_single_attempt
+        if result.blocks or document_parser_single_attempt():
             return result
         pages = result.raw_response["result"]["layoutParsingResults"]
         # 被跳过的缺失字段或无效坐标不等于已确认空布局，不能据此再发一次请求。

@@ -190,7 +190,7 @@ def test_changed_bank_rules_reject_old_progress_without_replaying_or_rewriting(m
                     run()
                 assert path.read_bytes() == original
             else:
-                expected = "bank-benefits-collection-v5" if kind.startswith("previous_bank") else "bank-benefits-collection-v7" if bank else "evidence-collection-v3"
+                expected = "bank-benefits-collection-v5" if kind.startswith("previous_bank") else "bank-benefits-collection-v8" if bank else "evidence-collection-v4"
                 assert saved["binding_fields"]["processing_version"] == expected
                 result = run()
                 assert result["collection_outcome"]["selected_count"] == 1

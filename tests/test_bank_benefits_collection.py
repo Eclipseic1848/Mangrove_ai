@@ -27,7 +27,8 @@ def test_each_bank_replaces_rejected_ocr_and_stops_at_target(monkeypatch):
 
     async def read_images(note, task_id, raw_only):
         images.append(note["metadata"]["note_id"])
-        return [{"image_index": index, "status": "recognized", "text": "规则"} for index in (1, 2)]
+        return [{"image_index": index, "status": "recognized", "text": "规则"}
+                for index, _ in enumerate(note["metadata"]["image_urls"], 1)]
 
     monkeypatch.setattr(SocialMediaCollector, "collect", collect)
     monkeypatch.setattr(bank_benefits, "assess_note", assess)
@@ -37,16 +38,16 @@ def test_each_bank_replaces_rejected_ocr_and_stops_at_target(monkeypatch):
     spec = TaskSpec(intent="小红书银行权益", bank_benefits=scope)
     result = asyncio.run(bank_benefits.collect_bank_benefits({"task_spec": spec, "task_id": "test"}))
     assert searches == [("中信权益", 1), ("招行权益", 1)]
-    assert len(images) == 12
+    assert len(images) == 24
     assert len(result["raw_dataset"]) == 10
     for report in result["bank_collection"]["banks"]:
-        assert report["selected_count"] == 5 and report["ocr_attempted"] == 6
+        assert report["selected_count"] == 5 and report["ocr_attempted"] == 12
         assert report["stop_reason"] == "target_reached"
     assert len(result["bank_collection"]["candidates"]) == 40
 
 
 @pytest.mark.parametrize("image_status", ["failed", "downloaded"])
-def test_ocr_failures_count_toward_limit(monkeypatch, image_status):
+def test_ocr_failure_uses_one_slot_and_stops(monkeypatch, image_status):
     async def collect(self, spec):
         return CollectResult(True, "mediacrawler", items=[CollectedItem(
             url=f"https://example.com/{i}", content="权益", metadata={"note_id": str(i),
@@ -67,8 +68,8 @@ def test_ocr_failures_count_toward_limit(monkeypatch, image_status):
         "banks": [{"name": "中信", "keyword": "中信权益"}]})
     result = asyncio.run(bank_benefits.collect_bank_benefits({"task_spec": spec, "task_id": "test"}))
     report = result["bank_collection"]["banks"][0]
-    assert report["ocr_attempted"] == 20 and report["selected_count"] == 0
-    assert report["stop_reason"] == "ocr_limit"
+    assert report["ocr_attempted"] == 1 and report["selected_count"] == 0
+    assert report["stop_reason"] == "image_read_or_parse_failed"
 
 
 def test_image_candidate_and_beijing_year_boundary():

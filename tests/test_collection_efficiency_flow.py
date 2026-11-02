@@ -69,13 +69,13 @@ def test_failed_image_keeps_proved_fields_without_counting_complete(monkeypatch,
         calls.append(state["_assessment_stage"])
         return {"relevant": True, "records": [{"name": "会员权益", "evidence": {
             "name": {"source_id": "note", "quote": "会员权益原文"}}}]}
-    async def images(*args):
-        return [{"image_index": 1, "status": "recognized", "text": "会员权益原文"},
-                {"image_index": 2, "status": "failed"}]
+    async def images(note, *args):
+        return [{"image_index": 1, "status": "recognized" if note["metadata"]["image_urls"] == ["first"] else "failed",
+                 "text": "会员权益原文"}]
     result = run_flow(spec, assess, images)
     note = result["evidence_collection"]["candidates"][0]
-    assert calls == ["screen", "extract"]
-    assert note["status"] == "review_required" and note["reason"] == "image_incomplete"
+    assert calls == ["screen"]
+    assert note["status"] == "review_required" and note["reason"] == "image_read_or_parse_failed"
     assert note["assessment"]["records"][0]["name"] == "会员权益"
     assert result["collection_outcome"]["selected_count"] == 0
     assert not result["collection_outcome"]["ready_for_review"]
