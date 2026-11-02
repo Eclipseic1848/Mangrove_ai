@@ -54,6 +54,9 @@ class ImageParser(Parser):
             raise RuntimeError(f"健康状态异常: {health.status}")
         identity = "|".join((artifact.sha256, provider, client.base_url, client.backend,
                              health.version, "image-ocr-v2"))
+        if getattr(client, "image_layout_detection", True) is False:
+            # 同一原件的旧版面结果不能冒充首次全图识别；普通图片缓存保持原键。
+            identity += "|full-image-without-layout-v1"
         cache_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
         safe_provider = "".join(char if char.isalnum() or char in {"_", "-"} else "_" for char in provider)
         relative = f"third_party/{safe_provider}/{artifact.artifact_id}-{cache_key}.json"
@@ -85,6 +88,7 @@ class ImageParser(Parser):
         except ValueError:
             return [], [{"artifact_id": artifact.artifact_id, "reason": "invalid_image"}]
         errors: list[str] = []
+        diagnostic_code = "image_ocr_unavailable"
         clients = self.document_clients[:1] if document_parser_single_attempt() else self.document_clients
         for client in clients:
             provider = getattr(client, "provider", "document_parser")
@@ -133,6 +137,7 @@ class ImageParser(Parser):
                     elements.append(element.model_dump(mode="json"))
                 if not elements:
                     errors.append(f"{provider}: 未返回带坐标的内容块")
+                    diagnostic_code = "image_ocr_no_text"
                     continue
                 data = {"text": "\n".join(texts), "elements": elements}
                 content_hash = hashlib.sha256(
@@ -160,8 +165,10 @@ class ImageParser(Parser):
                 ], []
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"{provider}: {exc}")
+                diagnostic_code = "image_ocr_service_failed"
         return [], [{
             "artifact_id": artifact.artifact_id,
             "reason": "image_ocr_required",
+            "diagnostic_code": diagnostic_code,
             "errors": errors or ["未配置支持图片的完整文档解析服务"],
         }]
