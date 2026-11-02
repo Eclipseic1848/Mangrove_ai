@@ -21,7 +21,7 @@ from src.memory._library_scope import execution_owner
 from src.model_connections.text_protocol import ModelOutputTruncatedError
 from src.model_connections.catalog import model_max_output_tokens
 from src.services.document_parser_resilience import document_parser_deadline
-from .collection_results import collection_outcome, collection_candidate_counts, collection_stop_explanation, verified_image_bytes
+from .collection_results import IMAGE_FAILURE_LABELS, collection_outcome, collection_candidate_counts, collection_stop_explanation, verified_image_bytes
 from .progress import emit_progress
 from .utils import parse_json_obj
 
@@ -264,6 +264,9 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                     save()
                 expected = "downloaded" if scope.raw_only else "recognized"
                 if len(image_note["images"]) != 1 or image_note["images"][0].get("status") != expected:
+                    if len(image_note["images"]) == 1 and image_note["images"][0].get("reason") in IMAGE_FAILURE_LABELS:
+                        # 只投影固定图片阶段，不把服务原始异常或地址放进客户回复。
+                        group["image_failure_reason"] = image_note["images"][0]["reason"]
                     raise _ImageCollectionStopped("image_read_or_parse_failed")
             return note["images"]
 

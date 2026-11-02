@@ -98,6 +98,7 @@ class PaddleOCRVLDocumentClient:
         api_key: Optional[str] = None,
         timeout_seconds: Optional[float] = None,
         http_client: Optional[httpx.Client] = None,
+        image_layout_detection: bool = True,
     ) -> None:
         self.base_url = (base_url or settings.paddleocr_vl_base_url).rstrip("/")
         self.model_version = (
@@ -113,6 +114,7 @@ class PaddleOCRVLDocumentClient:
             timeout_seconds or settings.paddleocr_vl_timeout_seconds
         )
         self._client = http_client
+        self.image_layout_detection = image_layout_detection
 
     def _request_client(self) -> tuple[httpx.Client, bool]:
         if self._client is not None:
@@ -184,9 +186,9 @@ class PaddleOCRVLDocumentClient:
 
     def parse_image(self, raw_bytes: bytes, *, filename: str) -> DocumentParseResult:
         """解析 PNG/JPEG/WEBP 图片；PaddleX 协议中 fileType=1。"""
-        result = self._parse_file(raw_bytes, file_type=1)
+        result = self._parse_file(raw_bytes, file_type=1, use_layout_detection=self.image_layout_detection)
         from src.services.document_parser_resilience import document_parser_single_attempt
-        if result.blocks or document_parser_single_attempt():
+        if not self.image_layout_detection or result.blocks or document_parser_single_attempt():
             return result
         pages = result.raw_response["result"]["layoutParsingResults"]
         # 被跳过的缺失字段或无效坐标不等于已确认空布局，不能据此再发一次请求。

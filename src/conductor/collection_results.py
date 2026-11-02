@@ -5,7 +5,15 @@ import re
 from datetime import date, datetime
 
 
+IMAGE_FAILURE_LABELS = {
+    "image_download_failed": "图片下载失败，已保留取得的资料并停止后续处理",
+    "image_decode_failed": "图片格式无法读取，已保留取得的资料并停止后续处理",
+    "image_ocr_unavailable": "图片识别服务尚未配置，已保留图片并停止后续处理",
+    "image_ocr_service_failed": "图片识别服务未完成本次处理，已保留图片并停止后续处理",
+    "image_ocr_no_text": "图片已取得，但识别服务未返回可用文字，已停止后续处理",
+}
 CANDIDATE_REASON_LABELS = {
+    **IMAGE_FAILURE_LABELS,
     "content_type_unknown": "资料类型尚未确认", "content_type_mismatch": "与本次要求的资料类型不符",
     "publication_unknown": "发布时间尚未确认", "publication_outside_scope": "发布时间超出本次范围",
     "unrelated": "与本次采集主题不符", "relevance_unknown": "相关性仍待核对",
@@ -41,6 +49,8 @@ def collection_stop_explanation(group, diagnostic=None, credential_source=None):
     if group.get("done") is False and group.get("candidate_attempted") == 0:
         return "本组尚未开始采集"
     label = CANDIDATE_REASON_LABELS.get(reason, "本组处理已停止，结果尚待核对")
+    if reason == "image_read_or_parse_failed":
+        return IMAGE_FAILURE_LABELS.get(group.get("image_failure_reason"), label)
     failure = {}
     if reason == "collection_failed":
         failure = next((batch.get("coverage", {}).get("failure") or {} for batch in reversed(group.get("batches", []))

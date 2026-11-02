@@ -84,6 +84,7 @@ def test_image_refusal_keeps_previous_note_and_stops_all_followup(monkeypatch, t
     report = result["bank_collection"]
     assert report["banks"][0]["ocr_attempted"] == 14
     assert report["banks"][0]["stop_reason"] == "image_read_or_parse_failed"
+    assert report["banks"][0]["image_failure_reason"] == "image_download_failed"
     assert [len(note["images"]) for note in report["candidates"]] == [12, 2]
     assert report["candidates"][1]["images"][-1]["status"] == "failed"
     assert report["candidates"][0]["status"] == "selected"
