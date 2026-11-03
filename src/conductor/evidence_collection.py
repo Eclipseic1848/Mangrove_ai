@@ -167,7 +167,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
     spec, task_id = state["task_spec"], state["task_id"]
     store = ArtifactStore()
     owner = execution_owner()
-    binding = {"processing_version": "bank-benefits-collection-v8" if legacy else "evidence-collection-v4", "owner": owner, "task": task_id, "spec": spec.model_dump(mode="json"),
+    binding = {"processing_version": "bank-benefits-collection-v9" if legacy else "evidence-collection-v4", "owner": owner, "task": task_id, "spec": spec.model_dump(mode="json"),
                "query": state.get("user_input"), "model": state.get("model"), "provider": state.get("provider"),
                "connection": _bound_chat_identity.get(), "credential_binding": credential_binding}
     context = state.get("task_context_preview")
@@ -188,11 +188,11 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
         saved = progress_store.read_json_if_exists(progress_key, "progress.json") if owner else None
         if saved and legacy:
             previous_version = (saved.get("binding_fields") or {}).get("processing_version")
-            if previous_version not in {"bank-benefits-collection-v5", "bank-benefits-collection-v6", "bank-benefits-collection-v7", "bank-benefits-collection-v8"}:
+            if previous_version not in {"bank-benefits-collection-v5", "bank-benefits-collection-v6", "bank-benefits-collection-v7", "bank-benefits-collection-v8", "bank-benefits-collection-v9"}:
                 raise ValueError("银行权益采集规则已变化，旧冻结进度不能恢复；请保留历史和原件，另建新任务")
             # 只沿用冻结版本，后续仍按原摘要和显式同账号恢复门核验，不能隐式升级旧进度。
             binding["processing_version"] = previous_version
-            if previous_version in {"bank-benefits-collection-v6", "bank-benefits-collection-v7", "bank-benefits-collection-v8"}:
+            if previous_version in {"bank-benefits-collection-v6", "bank-benefits-collection-v7", "bank-benefits-collection-v8", "bank-benefits-collection-v9"}:
                 early_limit = 2 if previous_version == "bank-benefits-collection-v6" else scope.ocr_limit
                 for group in saved["groups"]:
                     for batch in group["batches"]:
@@ -200,7 +200,9 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                             raise ValueError("银行采集批次识图计数缺失或无效，拒绝恢复")
         if saved and not legacy and (saved.get("binding_fields") or {}).get("processing_version") == "evidence-collection-v3":
             binding["processing_version"] = "evidence-collection-v3"
-        per_image = binding["processing_version"] in {"bank-benefits-collection-v8", "evidence-collection-v4"}
+        per_image = binding["processing_version"] in {"bank-benefits-collection-v8", "bank-benefits-collection-v9", "evidence-collection-v4"}
+        bank_v9 = binding["processing_version"] == "bank-benefits-collection-v9"
+        allocation_v9 = bank_v9 and scope.include_images and not scope.raw_only
         if saved:
             for scope_key in ("evidence_collection", "bank_benefits"):
                 current_scope = binding["spec"].get(scope_key)
@@ -327,7 +329,8 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                 raise StepBudgetExceeded(stage) from None
 
         async def assessment_result(note, group_scope, stage):
-            assessment_state = {**state, "_assessment_stage": stage}
+            assessment_state = {**state, "_assessment_stage": stage,
+                                "_bank_screen_thinking_disabled": bank_v9 and stage == "screen"}
             try:
                 result = await call(assess(note, group_scope, assessment_state), stage)
             except ModelOutputTruncatedError:
@@ -409,7 +412,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                 save()
 
         defer_unknown = legacy and scope.include_images and not scope.raw_only
-        progressive_images = defer_unknown and binding["processing_version"] in {"bank-benefits-collection-v6", "bank-benefits-collection-v7", "bank-benefits-collection-v8"}
+        progressive_images = defer_unknown and binding["processing_version"] in {"bank-benefits-collection-v6", "bank-benefits-collection-v7", "bank-benefits-collection-v8", "bank-benefits-collection-v9"}
         early_limit = 2 if binding["processing_version"] == "bank-benefits-collection-v6" else scope.ocr_limit
         source_stopped = False
         if per_image:
@@ -431,11 +434,15 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
             group_scope = scope.model_copy(update={"banks" if legacy else "queries": [query]})
             discovery_finished = False
             interrupted = False
+            budget_blocked = False
+            def image_cost(note):
+                return 0 if note.get("_images_done") else len(note["metadata"].get("image_urls") or [])
+
             try:
                 while group["selected_count"] < scope.target_count:
                     execution_checkpoint()
                     # 新v7所有模式都先停未知检索；旧v6保留冻结的读图模式门。
-                    if (progressive_images or binding["processing_version"] in {"bank-benefits-collection-v7", "bank-benefits-collection-v8"}) and group.get("discovery_inflight"):
+                    if (progressive_images or binding["processing_version"] in {"bank-benefits-collection-v7", "bank-benefits-collection-v8", "bank-benefits-collection-v9"}) and group.get("discovery_inflight"):
                         group["stop_reason"] = "interrupted_discovery_outcome_unknown"
                         break
                     verify_bound_model()
@@ -445,9 +452,11 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                         data["candidates"][i]["status"] == "unprocessed" and (
                             (data["candidates"][i].get("assessment", {}).get("relevant") is True and (
                                 not data["candidates"][i]["metadata"].get("image_urls") or data["candidates"][i].get("_images_done")
-                                or group["ocr_attempted"] < scope.ocr_limit)) or (
+                                 or (group["ocr_attempted"] < scope.ocr_limit and (not allocation_v9
+                                     or image_cost(data["candidates"][i]) <= scope.ocr_limit - group["ocr_attempted"])))) or (
                                 early_batch and early_batch["unknown_ocr_attempted"] < early_limit
                                 and scope.ocr_limit - group["ocr_attempted"] > scope.target_count - group["selected_count"]
+                                 and (not allocation_v9 or image_cost(data["candidates"][i]) <= scope.ocr_limit - group["ocr_attempted"] - (scope.target_count - group["selected_count"]))
                                 and data["candidates"][i].get("assessment", {}).get("relevant") is None
                                 and data["candidates"][i]["metadata"].get("image_urls"))) for i in group["pending"])
                     if not group["pending"] or (defer_unknown and all(
@@ -480,7 +489,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                             group["discovery_inflight"] = False
                             group["batches"].append({"page": group["page"], "phase": "discovery", "attempted": batch_spec.max_items,
                                 "returned_count": len(batch.items), "message": batch.message, "coverage": batch.coverage,
-                                **({"unknown_ocr_attempted": 0} if binding["processing_version"] in {"bank-benefits-collection-v6", "bank-benefits-collection-v7", "bank-benefits-collection-v8"} else {})})
+                                **({"unknown_ocr_attempted": 0} if binding["processing_version"] in {"bank-benefits-collection-v6", "bank-benefits-collection-v7", "bank-benefits-collection-v8", "bank-benefits-collection-v9"} else {})})
                             pending_before = len(group["pending"])
                             seen = {n["metadata"]["note_id"] for n in data["candidates"] if n["group"] == query.name}
                             group["searched_count"] += len(batch.items[:batch_spec.max_items])
@@ -517,12 +526,12 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                                     break
                                 discovery_finished = True
                     # 每两个候选完成初筛后立即推进证据，避免整批筛完仍没有可看资料。
-                    pending = sorted(group["pending"], key=lambda i: rank(data["candidates"][i])) if discovery_finished else group["pending"]
+                    pending = sorted(group["pending"], key=lambda i: (rank(data["candidates"][i]), image_cost(data["candidates"][i]) if allocation_v9 else 0)) if discovery_finished else group["pending"]
                     if progressive_images and not discovery_finished:
                         # 先完成当前候选初筛，已发现的主题正例优先，未知只使用预留目标名额之外的额度。
                         for offset in range(0, len(pending), 2):
                             await screen_notes(pending[offset:offset + 2], group_scope)
-                        pending = sorted(pending, key=lambda i: (data["candidates"][i].get("assessment", {}).get("relevant") is not True, rank(data["candidates"][i])))
+                        pending = sorted(pending, key=lambda i: (data["candidates"][i].get("assessment", {}).get("relevant") is not True, rank(data["candidates"][i]), image_cost(data["candidates"][i]) if allocation_v9 else 0))
                     early_batch = next((batch for batch in reversed(group["batches"]) if batch.get("phase") == "discovery"), None)
                     for offset in range(0, len(pending), 2):
                         indices = pending[offset:offset + 2]
@@ -539,11 +548,16 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                                     and note.get("assessment", {}).get("relevant") is None
                                     and note["metadata"].get("image_urls")):
                                 if (not progressive_images or early_batch["unknown_ocr_attempted"] >= early_limit
-                                        or scope.ocr_limit - group["ocr_attempted"] <= scope.target_count - group["selected_count"]):
+                                        or scope.ocr_limit - group["ocr_attempted"] <= scope.target_count - group["selected_count"]
+                                        or (allocation_v9 and image_cost(note) > scope.ocr_limit - group["ocr_attempted"] - (scope.target_count - group["selected_count"]))):
                                     continue
                                 early_unknown = True
                             try:
                                 urls = (note["metadata"].get("image_urls") or []) if scope.include_images else []
+                                if allocation_v9 and not scope.raw_only and image_cost(note) > scope.ocr_limit - group["ocr_attempted"]:
+                                    # 不能完整读取时延后整篇，保留额度给其他候选。
+                                    budget_blocked = True
+                                    continue
                                 if urls and not note.get("_images_done"):
                                     if not scope.raw_only and group["ocr_attempted"] >= scope.ocr_limit:
                                         group["stop_reason"] = "ocr_limit"
@@ -651,7 +665,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                         break
                     group["pending"] = [i for i in group["pending"] if data["candidates"][i]["status"] == "unprocessed"] if defer_unknown else []
                     save()
-                if (defer_unknown and group["selected_count"] < scope.target_count and group["ocr_attempted"] >= scope.ocr_limit
+                if (defer_unknown and group["selected_count"] < scope.target_count and (group["ocr_attempted"] >= scope.ocr_limit or budget_blocked)
                         and group["stop_reason"] in {"candidate_limit", "source_exhausted", "no_new_candidates"}):
                     # 后续无图机会已检查，失败识图仍占原额度，不能把额度耗尽改报成来源为空。
                     group["stop_reason"] = "ocr_limit"

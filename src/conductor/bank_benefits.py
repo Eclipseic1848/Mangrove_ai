@@ -98,7 +98,8 @@ async def assess_note(note, scope, state):
             for index, line in enumerate(lines)] for key, lines in source_lines.items()},
           **({"unread_image_count": len((note.get("metadata") or {}).get("image_urls") or [])} if screen else {})}, ensure_ascii=False)},
     ], provider=state.get("provider"), model=state.get("model"), temperature=0,
-        max_tokens=state.get("_assessment_max_tokens", ASSESSMENT_TOKEN_LIMITS["screen" if screen else "extract"]))
+        max_tokens=state.get("_assessment_max_tokens", ASSESSMENT_TOKEN_LIMITS["screen" if screen else "extract"]),
+        **({"thinking": False} if screen and state.get("_bank_screen_thinking_disabled") is True else {}))
     parsed = parse_assessment(response, None if screen else "benefits")
     result = {key: parsed.get(key) if type(parsed.get(key)) is bool else None for key in (
         "relevant", "tag_stale", "tag_audience_mismatch", "credit_card_only", "tag_promo", "tag_resale", "tag_question",

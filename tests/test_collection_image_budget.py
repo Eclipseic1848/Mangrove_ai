@@ -26,8 +26,8 @@ def image_flow(monkeypatch, tmp_path, *, fail_at=None, timeout_at=None, cancel_a
         return CollectResult(True, "synthetic", items=[CollectedItem(
             content="会员权益原文", metadata={"note_id": str(i), "note_type": "normal",
                 "publish_time": "2026-09-01T00:00:00+00:00",
-                "image_urls": [f"https://example.com/{i}/{j}.png" for j in range(12)]})
-            for i in range(2)], coverage={"pages": [{"has_more": False}]})
+                "image_urls": [f"https://example.com/{i}/{j}.png" for j in range([8, 12, 1][i])]})
+            for i in range(3)], coverage={"pages": [{"has_more": False}]})
 
     async def assess(note, scope, state):
         calls["assess"].append((state["_assessment_stage"], note["metadata"]["note_id"]))
@@ -52,10 +52,11 @@ def image_flow(monkeypatch, tmp_path, *, fail_at=None, timeout_at=None, cancel_a
 
     monkeypatch.setattr(SocialMediaCollector, "collect", collect)
     monkeypatch.setattr(bank_benefits, "assess_note", assess)
+    monkeypatch.setattr(bank_benefits, "_priority", lambda note: int(note["metadata"]["note_id"]))
     monkeypatch.setattr(source_images.HttpSecurityGuard, "validate", lambda self, url: None)
     monkeypatch.setattr(source_images, "PinnedAsyncHTTPTransport", lambda **kwargs: httpx.MockTransport(respond))
     monkeypatch.setattr(source_images.ImageParser, "parse", parse)
-    spec = TaskSpec(intent="银行权益", bank_benefits={"source_evidence": "小红书", "target_count": 2,
+    spec = TaskSpec(intent="银行权益", bank_benefits={"source_evidence": "小红书", "target_count": 3,
         "publication_from": "2026-01-01", "publication_to": "2026-12-31", "ocr_limit": 20,
         "banks": [{"name": "光大", "keyword": "光大权益"}]})
     return {"task_id": "image-budget", "task_spec": spec}, calls
@@ -66,13 +67,13 @@ def test_twenty_image_budget_counts_each_picture_across_notes(monkeypatch, tmp_p
     result = asyncio.run(bank_benefits.collect_bank_benefits(state))
     assert len(calls["download"]) == len(calls["ocr"]) == 20
     assert calls["search"] == [1]
-    assert [item for item in calls["assess"] if item[0] == "extract"] == [("extract", "0")]
+    assert [item for item in calls["assess"] if item[0] == "extract"] == [("extract", "0"), ("extract", "1")]
     report = result["bank_collection"]
     assert report["banks"][0]["ocr_attempted"] == 20
     assert report["banks"][0]["stop_reason"] == "ocr_limit"
-    assert [len(note["images"]) for note in report["candidates"]] == [12, 8]
-    assert [image["image_index"] for image in report["candidates"][1]["images"]] == list(range(1, 9))
-    assert report["candidates"][1]["status"] == "review_required"
+    assert [len(note["images"]) for note in report["candidates"]] == [8, 12, 0]
+    assert [image["image_index"] for image in report["candidates"][1]["images"]] == list(range(1, 13))
+    assert report["candidates"][2]["status"] == "unprocessed"
     assert not result["collection_outcome"]["target_complete"]
 
 
@@ -85,7 +86,7 @@ def test_image_refusal_keeps_previous_note_and_stops_all_followup(monkeypatch, t
     assert report["banks"][0]["ocr_attempted"] == 14
     assert report["banks"][0]["stop_reason"] == "image_read_or_parse_failed"
     assert report["banks"][0]["image_failure_reason"] == "image_download_failed"
-    assert [len(note["images"]) for note in report["candidates"]] == [12, 2]
+    assert [len(note["images"]) for note in report["candidates"]] == [8, 6, 0]
     assert report["candidates"][1]["images"][-1]["status"] == "failed"
     assert report["candidates"][0]["status"] == "selected"
     assert not result["collection_outcome"]["ready_for_review"]
