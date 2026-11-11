@@ -73,7 +73,7 @@ class CollectionScope(BaseModel):
     candidate_limit: int = Field(default=100, ge=1, le=100)
     ocr_limit: int = Field(default=20, ge=0, le=20)
     strictness: Literal["strict", "best_effort"] = "best_effort"
-    time_budget_seconds: int = Field(default=1800, ge=30, le=14400)
+    time_budget_seconds: int | None = Field(default=1800, ge=30, le=14400)
 
     @model_validator(mode="after")
     def valid_bounds(self):
@@ -227,6 +227,32 @@ class TaskSpec(BaseModel):
         default=None, description="定时表达式：once@<时间> 或 cron@<5段>（MVP 仅记录，期2 执行）"
     )
 
+    # 仅新规划显式启用；旧冻结 JSON 缺字段时仍使用原时间预算。
+    xhs_unlimited_execution: bool = Field(default=False, strict=True, exclude_if=lambda value: value is False)
+
+    @model_validator(mode="after")
+    def valid_xhs_execution_budget(self):
+        from src.collectors.platforms import normalize_platform
+        scopes = [scope for scope in (self.evidence_collection, self.bank_benefits) if scope is not None]
+        if self.xhs_unlimited_execution:
+            if ({normalize_platform(p) for p in self.platforms} != {"小红书"}
+                    or self.time_budget_seconds is not None
+                    or any(scope.time_budget_seconds is not None for scope in scopes)):
+                raise ValueError("小红书不限时模式与来源或时间预算冲突")
+        elif any(scope.time_budget_seconds is None for scope in scopes):
+            raise ValueError("未启用小红书不限时模式，不能省略采集时间预算")
+        return self
+
+    def enable_unlimited_xhs_execution(self) -> None:
+        from src.collectors.platforms import normalize_platform
+        if {normalize_platform(p) for p in self.platforms} == {"小红书"}:
+            # 产品默认只在新任务规划时冻结，反序列化旧任务不改其原义。
+            self.xhs_unlimited_execution = True
+            self.time_budget_seconds = None
+            for scope in (self.evidence_collection, self.bank_benefits):
+                if scope is not None:
+                    scope.time_budget_seconds = None
+
     def needs_db_write(self) -> bool:
         return OutputFormat.DB in self.outputs
 
@@ -327,6 +353,7 @@ class TaskSpec(BaseModel):
             time_range=(draft.get("time_range") or None),
             max_items=max_items,
             time_budget_seconds=draft.get("time_budget_seconds"),
+            xhs_unlimited_execution=draft.get("xhs_unlimited_execution", False),
             login_strategy=_enum(LoginStrategy, draft.get("login_strategy"), LoginStrategy.NONE),
             analysis_type=_enum(AnalysisType, draft.get("analysis_type"), AnalysisType.SUMMARY),
             analysis_instruction=(draft.get("analysis_instruction") or None),

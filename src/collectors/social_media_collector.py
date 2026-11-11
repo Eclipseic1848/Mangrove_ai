@@ -88,11 +88,11 @@ def _runtime_diagnostic(run_dir):
             if not isinstance(value, dict):
                 continue
             for key, item in value.items():
-                if key in {"browser_started", "login_detected", "search_started", "search_list_received", "challenge_detected", "login_interaction_required"} and type(item) is bool:
+                if key in {"browser_started", "login_detected", "search_started", "search_list_received", "challenge_detected", "login_interaction_required", "startup_tree_reap_failed"} and type(item) is bool:
                     runtime[key] = item
                 elif key in {"search_item_count", "note_detail_count", "exit_code", "login_navigation_retries"} and type(item) is int:
                     runtime[key] = item
-                elif key == "termination" and isinstance(item, str) and item in {"exited", "timeout", "cancelled"}:
+                elif key == "termination" and isinstance(item, str) and item in {"exited", "timeout", "cancelled", "startup_cleanup_failed"}:
                     runtime[key] = item
                 elif key == "login_mode" and isinstance(item, str) and item in {"browser", "cookie", "qrcode", "phone", "unknown"}:
                     runtime[key] = item
@@ -107,9 +107,42 @@ def _runtime_diagnostic(run_dir):
                     "timeout", "network_error", "browser_closed", "dependency_missing", "collector_error", "unknown",
                 }:
                     runtime[key] = item
+                elif key == "startup_steps" and filename == "runtime_diagnostic.json" and isinstance(item, dict):
+                    # 只保留固定步骤及其有界状态，原始异常、地址和其他字段不能进入任务记录。
+                    steps = {}
+                    for step in ("init_script", "new_page", "homepage_navigation", "create_client", "driver_shutdown"):
+                        entry = item.get(step)
+                        if not isinstance(entry, dict):
+                            continue
+                        status, elapsed = entry.get("status"), entry.get("elapsed_ms")
+                        if status in ("started", "completed", "timeout", "failed", "cancelled") and type(elapsed) is int and 0 <= elapsed <= 2**53 - 1:
+                            steps[step] = {"status": status, "elapsed_ms": elapsed}
+                    if steps:
+                        runtime[key] = steps
         except (OSError, ValueError, RecursionError):
             pass
     return runtime
+
+
+async def _wait_for_xhs_startup(proc, credential_input, run_dir, timeout):
+    # 仅在启动期间读本次私有目录，退出失败后交给原有父进程回收路径。
+    communication = asyncio.create_task(proc.communicate(input=credential_input))
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                done, _ = await asyncio.wait({communication}, timeout=0.25)
+                if done:
+                    communication.result()
+                    return False
+                if (run_dir / "startup-reap-requested").is_file():
+                    return True
+                if timeout is not None and (run_dir / "startup-finished").is_file():
+                    await communication
+                    return False
+    finally:
+        if not communication.done():
+            communication.cancel()
+            await asyncio.gather(communication, return_exceptions=True)
 
 
 def _platform_cookie(platform: str) -> str:
@@ -458,7 +491,8 @@ class SocialMediaCollector(BaseCollector):
         lock_dir = Path(settings.webui_db_path).resolve().parent / ".collector-locks"
         lock_dir.mkdir(parents=True, exist_ok=True)
         lock = FileLock(Path(profile) / ".mangrove-collector.lock" if profile else lock_dir / (key + ".lock"), thread_local=False)
-        deadline = asyncio.get_running_loop().time() + 10 * settings.collect_timeout_mediacrawler_seconds
+        unlimited = platform == "xhs" and spec.xhs_unlimited_execution and not identity_probe
+        deadline = None if unlimited else asyncio.get_running_loop().time() + 10 * settings.collect_timeout_mediacrawler_seconds
         # 本实例按凭证串行；文件锁兼容多进程，不将凭证或 Owner 明文写入文件名。
         while True:
             from src.api.execution import execution_checkpoint
@@ -467,7 +501,7 @@ class SocialMediaCollector(BaseCollector):
                 lock.acquire(timeout=0)
                 break
             except LockTimeout:
-                if asyncio.get_running_loop().time() >= deadline:
+                if deadline is not None and asyncio.get_running_loop().time() >= deadline:
                     return CollectResult(False, self.name, message="共享采集凭证排队超时，请稍后重试")
                 await asyncio.sleep(0.05)
         # 已占用的会话锁必须对应本次登录来源，配置热更新不能中途换账号或目录。
@@ -599,6 +633,11 @@ class SocialMediaCollector(BaseCollector):
         env["PYTHONIOENCODING"] = "utf-8"
         # 显式清空未选的参数，不能继承宿主另一任务的检索范围。
         env["MANGROVE_XHS_TIMEOUT_SECONDS"] = str(frozen["timeout"] if frozen else settings.collect_timeout_mediacrawler_seconds)
+        # 模式来自冻结任务，不能继承宿主环境或扩大身份探针的运行范围。
+        unlimited = platform == "xhs" and spec.xhs_unlimited_execution and not identity_probe
+        env.pop("MANGROVE_XHS_UNLIMITED_EXECUTION", None)
+        if unlimited:
+            env["MANGROVE_XHS_UNLIMITED_EXECUTION"] = "1"
         env["MANGROVE_XHS_SORT"] = spec.xhs_sort or ""
         env["MANGROVE_XHS_NOTE_TYPE"] = spec.xhs_note_type or ""
         env["MC_CRAWL_MIN_SLEEP_SEC"] = str(frozen["sleep_min"] if frozen else settings.mc_crawl_min_sleep_sec)
@@ -616,8 +655,16 @@ class SocialMediaCollector(BaseCollector):
             env["MANGROVE_XHS_BROWSER_PROFILE"] = str(Path(profile).expanduser().resolve())
         diagnostic_token = secrets.token_hex(16)
         env["MANGROVE_MC_DIAGNOSTIC_TOKEN"] = diagnostic_token
+        # 不限时的浏览器会话也须保留组长，避免关闭失败后遗留其浏览器后代。
+        reap_xhs_startup = platform == "xhs" and not identity_probe and (unlimited or (bool(cookie) and not profile))
+        env.pop("MANGROVE_XHS_PARENT_REAPS_STARTUP", None)
+        if reap_xhs_startup:
+            env["MANGROVE_XHS_PARENT_REAPS_STARTUP"] = "1"
         timed_out = False
         cancelled = False
+        startup_cleanup_failed = False
+        startup_tree_reap_failed = False
+        reap_cancellation = None
         try:
             # 文件承接输出，避免子进程继承 PIPE 或输出缓冲满时阻塞超时回收。
             with TemporaryFile(mode="w+b") as process_output:
@@ -630,9 +677,12 @@ class SocialMediaCollector(BaseCollector):
                     stderr=asyncio.subprocess.STDOUT,
                     **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {"start_new_session": True}),
                 )
-                mc_timeout = frozen["timeout"] if frozen else settings.collect_timeout_mediacrawler_seconds
+                mc_timeout = None if unlimited else frozen["timeout"] if frozen else settings.collect_timeout_mediacrawler_seconds
                 try:
-                    await asyncio.wait_for(proc.communicate(input=credential_input), timeout=mc_timeout)
+                    if reap_xhs_startup:
+                        startup_cleanup_failed = await _wait_for_xhs_startup(proc, credential_input, run_dir, mc_timeout)
+                    else:
+                        await asyncio.wait_for(proc.communicate(input=credential_input), timeout=mc_timeout)
                 except asyncio.TimeoutError:
                     # 先回收本次进程树，再只读取当前目录中完整且来源匹配的记录。
                     timed_out = True
@@ -644,20 +694,41 @@ class SocialMediaCollector(BaseCollector):
                     if proc.returncode is None:
                         try:
                             if os.name == "nt":
-                                await asyncio.to_thread(
+                                reap = asyncio.to_thread(
                                     subprocess.run, ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                     timeout=5, creationflags=subprocess.CREATE_NO_WINDOW,
                                 )
+                                if startup_cleanup_failed:
+                                    reaping = asyncio.create_task(reap)
+                                    while not reaping.done():
+                                        try:
+                                            await asyncio.shield(reaping)
+                                        except asyncio.CancelledError as error:
+                                            # 整树命令完成前保留组长；写入诊断后再传播取消。
+                                            reap_cancellation = error
+                                            cancelled = True
+                                    startup_tree_reap_failed = reaping.result().returncode != 0
+                                else:
+                                    await reap
                             else:
                                 os.killpg(proc.pid, signal.SIGKILL)
+                        except (OSError, subprocess.TimeoutExpired):
+                            if not startup_cleanup_failed:
+                                raise
+                            startup_tree_reap_failed = True
                         finally:
                             if proc.returncode is None:
                                 proc.kill()
                             await asyncio.wait_for(proc.wait(), timeout=5)
                     try:
-                        diagnostic = {"exit_code": proc.returncode,
-                                      "termination": "cancelled" if cancelled else "timeout" if timed_out else "exited"}
+                        termination = "cancelled" if cancelled else "timeout" if timed_out else "exited"
+                        if startup_cleanup_failed and not cancelled:
+                            termination = "startup_cleanup_failed"
+                        diagnostic = {"exit_code": proc.returncode, "termination": termination}
+                        if startup_tree_reap_failed:
+                            diagnostic["startup_tree_reap_failed"] = True
+                            logger.warning("小红书采集启动后的进程树回收未确认")
                         if platform == "xhs":
                             # 超时取消会跳过后续日志读取；这里只保留闭集线索，原始日志不落盘。
                             process_output.seek(0, os.SEEK_END)
@@ -680,6 +751,8 @@ class SocialMediaCollector(BaseCollector):
                     except OSError:
                         # 辅助诊断写盘失败不能覆盖原取消或改变任务执行结果。
                         logger.warning("采集进程诊断未能保存")
+                    if reap_cancellation is not None:
+                        raise reap_cancellation
                 process_output.seek(0)
                 stdout = process_output.read()
         except asyncio.CancelledError:

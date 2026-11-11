@@ -41,7 +41,7 @@ def _v2_to_v1_spec(source: SourceSpec, selection_options: Dict[str, Any]) -> V1T
     time_range = selection_options.get("time_range")
     max_items = (source.limits.max_records if source.limits else None) or selection_options.get("max_items") or 30
 
-    return V1TaskSpec(
+    task = V1TaskSpec(
         intent=selection_options.get("intent") or "数据准备采集",
         platforms=platforms,
         urls=urls,
@@ -53,6 +53,10 @@ def _v2_to_v1_spec(source: SourceSpec, selection_options: Dict[str, Any]) -> V1T
         login_strategy=LoginStrategy.NONE,
         outputs=[],
     )
+    # SourceSpec 也会从旧检查点恢复；只有已冻结的显式模式才允许取消预算。
+    if selection_options.get("xhs_unlimited_execution") is True:
+        task.enable_unlimited_xhs_execution()
+    return task
 
 
 class WebCollectorAdapter(SourceConnector):
@@ -114,13 +118,15 @@ class WebCollectorAdapter(SourceConnector):
                 if name == "mediacrawler"
                 else settings.collect_timeout_seconds
             )
+            if name == "mediacrawler" and v1.xhs_unlimited_execution:
+                timeout = None
             t0 = time.time()
             try:
                 result = await asyncio.wait_for(collector.collect(v1), timeout=timeout)
             except asyncio.TimeoutError:
                 metrics_record(name, False, (time.time() - t0) * 1000)
                 domain_health_record(name, v1.urls, False)
-                warnings.append(f"{name} 超时（>{timeout}s），降级")
+                warnings.append(f"{name} 来源请求超时" if timeout is None else f"{name} 超时（>{timeout}s），降级")
                 continue
             except Exception as e:  # noqa: BLE001
                 metrics_record(name, False, (time.time() - t0) * 1000)

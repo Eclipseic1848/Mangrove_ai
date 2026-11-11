@@ -190,7 +190,8 @@ def test_collection_recovery_carries_original_context_and_rejects_snapshot_chang
         "session_id": "synthetic-chat", "task_context_preview": snapshot.model_dump(mode="json")}
 
     async def collect(self, request):
-        return CollectResult(False, "synthetic", coverage={"failure": {"reason": "login_required"}})
+        return CollectResult(False, "synthetic", coverage={"failure": {
+            "reason": "login_required", "rejection_confirmed": True}})
 
     async def forbidden(*args):
         raise AssertionError("零来源不得抽取或读图")

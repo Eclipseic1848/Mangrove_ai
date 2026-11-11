@@ -32,3 +32,19 @@ def test_document_parser_request_slot_limits_cross_task_concurrency(
         list(executor.map(lambda _: worker(), range(4)))
 
     assert maximum == 1
+
+
+def test_unlimited_image_keeps_single_attempt_and_cancel_signal():
+    import pytest
+    from src.services.document_parser_resilience import (
+        document_parser_deadline, document_parser_remaining_timeout,
+        document_parser_single_attempt, document_parser_stop_event,
+    )
+    with document_parser_deadline(None, single_attempt=True):
+        assert document_parser_single_attempt()
+        assert document_parser_remaining_timeout(60) is None
+        document_parser_stop_event().set()
+        with pytest.raises(TimeoutError, match="已停止"):
+            document_parser_remaining_timeout(60)
+    assert not document_parser_single_attempt()
+    assert document_parser_stop_event() is None
