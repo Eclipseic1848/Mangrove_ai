@@ -18,7 +18,7 @@ _STOP_REQUESTED: ContextVar[threading.Event | None] = ContextVar("document_parse
 
 
 @contextmanager
-def document_parser_deadline(deadline: float, *, single_attempt: bool = False) -> Iterator[None]:
+def document_parser_deadline(deadline: float | None, *, single_attempt: bool = False) -> Iterator[None]:
     """图片任务的预算跟随线程；普通文档解析保留原超时配置。"""
     token = _DEADLINE.set(deadline)
     stop_token = _STOP_REQUESTED.set(threading.Event() if single_attempt else None)
@@ -41,13 +41,16 @@ def document_parser_stop_event() -> threading.Event | None:
 
 def document_parser_remaining_timeout(configured: float) -> float | None:
     deadline = _DEADLINE.get()
-    if deadline is None:
-        return None
     stop = _STOP_REQUESTED.get()
+    if deadline is None and stop is None:
+        return None
     if stop is not None and stop.is_set():
         raise TimeoutError("图片解析已停止，禁止后续请求")
     from src.api.execution import execution_checkpoint
     execution_checkpoint()
+    # 不限时图片仍服从主动取消；不能借无截止时间恢复补识别。
+    if deadline is None:
+        return None
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise TimeoutError("图片解析预算已用尽")

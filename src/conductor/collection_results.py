@@ -29,6 +29,7 @@ CANDIDATE_REASON_LABELS = {
     "model_output_truncated": "模型返回内容不完整", "screening_failed": "本篇初筛尚未完成",
     "image_incomplete": "图片资料尚未识别完整", "images_incomplete": "图片资料尚未识别完整",
     "comments_incomplete": "评论资料尚未读取完整", "evidence_processing_failed": "本篇证据处理尚未完成",
+    "operation_timeout": "来源或处理服务响应超时，已保留资料并停止后续处理",
     "time_budget": "本次处理时间已用完", "ocr_limit": "已达到本次图片处理限额",
     "comment_source_unavailable": "评论来源暂时不可读取", "image_ocr_required": "图片仍待识别",
     "image_read_or_parse_failed": "图片读取或识别失败，已保留取得的资料并停止后续处理", "raw_only": "已保留原始资料，尚未识别",
@@ -41,6 +42,38 @@ SEMANTIC_EXCLUSIONS = {"unrelated": ("relevant", False), "expired_rule": ("tag_s
                        "audience_mismatch": ("tag_audience_mismatch", True), "credit_card_only": ("credit_card_only", True)}
 _DIAGNOSTIC_SECRET = re.compile(
     r"authorization|\bbearer\b|api[_ -]?key|xsec[_ -]?token|cookie|secret|traceback|\bprovider\b|http\s*[45]\d\d|sk-[\w-]{4,}|(?:password|session|token)\s*[:=]", re.I)
+_STARTUP_STEP_LABELS = {
+    "init_script": "初始化采集浏览器",
+    "new_page": "创建采集页面",
+    "homepage_navigation": "打开小红书首页",
+    "create_client": "初始化小红书采集客户端",
+    "driver_shutdown": "关闭采集浏览器",
+}
+
+
+def _startup_stop_explanation(diagnostic):
+    steps = diagnostic.get("startup_steps")
+    if not isinstance(steps, dict):
+        return None
+    unfinished = None
+    for step, label in _STARTUP_STEP_LABELS.items():
+        entry = steps.get(step)
+        if not isinstance(entry, dict):
+            continue
+        if step == "driver_shutdown" and (unfinished or diagnostic.get("runtime_phase") not in (
+                "browser_starting", "browser_ready")):
+            # 收尾不能把先前的取消或登录问题改写成浏览器准备失败。
+            continue
+        status = entry.get("status")
+        # 顺序固定，先发生的启动故障优先于后续清理失败。
+        if status in ("timeout", "failed"):
+            outcome = "超时" if status == "timeout" else "失败"
+            return f"{label}{outcome}，搜索尚未开始；请联系管理员检查采集服务"
+        if status in ("started", "cancelled"):
+            unfinished = label
+    if unfinished and diagnostic.get("termination") in ("cancelled", "timeout"):
+        return f"{unfinished}未完成，搜索尚未开始；请联系管理员检查采集服务"
+    return None
 
 
 def collection_stop_explanation(group, diagnostic=None, credential_source=None):
@@ -60,10 +93,16 @@ def collection_stop_explanation(group, diagnostic=None, credential_source=None):
         if (failure.get("reason") in {"login_interaction_required", "login_required", "challenge_required", "rate_limited", "access_denied"}
                 and isinstance(message, str) and 0 < len(message) <= 500 and not _DIAGNOSTIC_SECRET.search(message)):
             return message.strip()
-    if ((reason in {"discovery_outcome_unknown", "time_budget"}
-            or (reason == "collection_failed" and failure.get("reason") == "collector_timeout"))
-            and isinstance(diagnostic, dict)
-            and diagnostic.get("phase") == "discovery" and diagnostic.get("group_name") == group.get("name")):
+    if (not isinstance(diagnostic, dict) or diagnostic.get("phase") != "discovery"
+            or diagnostic.get("group_name") != group.get("name")):
+        return label
+    timed_or_unknown = (reason in {"discovery_outcome_unknown", "time_budget", "operation_timeout"}
+                        or (reason == "collection_failed" and failure.get("reason") == "collector_timeout"))
+    if ((timed_or_unknown or (reason == "collection_failed" and failure.get("reason") == "collection_failed"))
+            and failure.get("rejection_confirmed") is not True and diagnostic.get("search_started") is False):
+        if explanation := _startup_stop_explanation(diagnostic):
+            return explanation
+    if timed_or_unknown:
         if diagnostic.get("search_started") is True:
             return "搜索已发出，结果尚未确认；本次不会自动重试，请先核对采集服务状态"
         if diagnostic.get("search_started") is False:
@@ -297,7 +336,7 @@ def collection_outcome(snapshot):
     actions = sorted({operation.get("next_action") for group in groups for batch in group.get("batches", [])
         for operation in batch.get("coverage", {}).get("operations", {}).values()
         if operation.get("next_action") in action_messages})
-    if (any(group.get("stop_reason") in {"image_read_or_parse_failed", "images_outcome_unknown"} for group in groups)
+    if (any(group.get("stop_reason") in {"image_read_or_parse_failed", "images_outcome_unknown", "operation_timeout"} for group in groups)
             or any(note.get("reason") == "images_outcome_unknown" for note in snapshot.get("candidates", []))):
         # 图片停止门不因先前已有入选资料而放行后续模型或初稿创建。
         status = "incomplete"

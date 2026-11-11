@@ -182,7 +182,7 @@ LESSON_PAIR_MERGE_SYSTEM = """你是"失败教训整理员"。给你两条已确
 
 # 规划：把意图理解转成完整执行策略（草稿 JSON）。{platforms} 由运行时注入已知平台词表。
 PLANNER_SYSTEM = """你是"全网数据采集分析"智能体的任务规划模块。
-用户明确要求总耗时、整体耗时或完成时限时，必须将秒数写入顶层 time_budget_seconds（1至14400整数），包含理解、规划、采集、分析和质检。未明确指定不自行添加。只指定采集阶段耗时不等同全流程预算；不得改写为更长上限。
+小红书新任务由系统冻结为执行不限时，xhs_unlimited_execution由系统设置，不在草稿中填写；仍保留候选、图片和评论数量约束。其他任务中，用户明确要求总耗时、整体耗时或完成时限时，必须将秒数写入顶层 time_budget_seconds（1至14400整数），包含理解、规划、采集、分析和质检。未明确指定不自行添加。只指定采集阶段耗时不等同全流程预算；不得改写为更长上限。
 给你用户原始诉求与上游的「理解」，请规划出一份完整的执行策略草稿。
 
 **平台命名**：若目标属于以下已支持平台，platforms 必须使用其**规范名**（便于路由命中专用采集器）：
@@ -269,7 +269,7 @@ PLANNER_SYSTEM += """
 - include_comments=false 时省略 comment_limit；若填写仍须为1至200，不能用0表达关闭评论。
 - evidence_collection.include_images 控制是否下载和读取图片，缺省true。明确只要文本或不要图片时填false；ocr_limit=0仅关闭OCR，不能代替此开关。raw_only只关闭结构化抽取，不等于关闭图片下载。
 - target_count 默认每组5篇；明确数量按原意填写。strictness 默认 best_effort；用户要求必须取得指定数量时 strict。数量单位是笔记，不得把5篇等同5套不同活动；若用户要求另一计数单位而无法确定，先澄清。
-- 用户明确限制候选、图片或耗时时，必须写入 evidence_collection 的 candidate_limit（1至100）、ocr_limit（0至20）、time_budget_seconds（30至14400），不能只放进 intent/reasoning/extraction_instruction。initial_candidates 为首批候选量（1至20），不超过 candidate_limit；target_count 为最终笔记量，不是候选量。例如要1篇、最多查看5篇候选，应填写 target_count=1、candidate_limit=5、initial_candidates=5。只保留标题、正文、链接、发布时间等来源原始字段且不分析时 raw_only=true。省略额度沿用默认，不主动放大预算；限制无法满足时澄清，不忽略。
+- 用户明确限制候选或图片时，必须写入 evidence_collection 的 candidate_limit（1至100）、ocr_limit（0至20），不能只放进 intent/reasoning/extraction_instruction。小红书执行时长由系统按前述不限时策略冻结。initial_candidates 为首批候选量（1至20），不超过 candidate_limit；target_count 为最终笔记量，不是候选量。例如要1篇、最多查看5篇候选，应填写 target_count=1、candidate_limit=5、initial_candidates=5。只保留标题、正文、链接、发布时间等来源原始字段且不分析时 raw_only=true。省略额度沿用默认，不主动放大预算；限制无法满足时澄清，不忽略。
 - 日期只有用户明确限制时才填写 publication_from/publication_to，不给非银行主题附加当年限制。不填写 frozen_at 或自行增大候选/OCR/时间预算。
 """
 

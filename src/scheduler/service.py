@@ -249,7 +249,8 @@ class SchedulerService:
             usage = {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0, 'calls': 0}
             token = _usage_ctx.set(usage)
             try:
-                result = await asyncio.wait_for(self._invoke_runner(task), timeout=settings.scheduler_task_timeout_seconds)
+                async with asyncio.timeout(settings.scheduler_task_timeout_seconds) as timeout:
+                    result = await self._invoke_runner(task, execution_timeout=timeout)
             except ModelOutputTruncatedError:
                 # 响应已明确结束并撤销授权；截断是已知失败，不能冒充停止未知或完整交付。
                 result = {"error": "模型输出达到上限并被截断，本次任务未完成；未生成正式交付"}
@@ -322,7 +323,7 @@ class SchedulerService:
         started = await self._run_one(task, wall_time(), keep_next_run=True)
         return "started" if started else "draining"
 
-    async def _invoke_runner(self, task: Dict[str, Any]) -> Dict[str, Any]:
+    async def _invoke_runner(self, task: Dict[str, Any], *, execution_timeout=None) -> Dict[str, Any]:
         from src.api.auth import get_store
         from src.config.runtime_config import USER_KEYS
         from src.config.user_ctx import user_memories_context, user_overrides_context
@@ -379,6 +380,7 @@ class SchedulerService:
                 # 有效 Owner 确认后才装载执行器；注入的执行器也遵守同一授权边界。
                 from src.conductor.graph import run_conductor
                 runner = run_conductor
+                context_kwargs["execution_timeout"] = execution_timeout
             # 定时任务不自动业务入库，也不再次生成相同的定时计划。
             result = await runner(
                 task["user_input"],

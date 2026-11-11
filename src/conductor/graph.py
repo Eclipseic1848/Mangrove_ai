@@ -15,6 +15,7 @@ import logging
 import asyncio
 import time
 import uuid
+from contextvars import ContextVar
 from datetime import datetime
 from src.timezone import now as beijing_now
 from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -40,6 +41,14 @@ from .state import ConductorState
 from .targets import is_direct_video_manifest
 
 logger = logging.getLogger(__name__)
+_execution_timeout: ContextVar[asyncio.Timeout | None] = ContextVar("conductor_execution_timeout", default=None)
+
+
+def _honor_unlimited_execution(spec) -> None:
+    timeout = _execution_timeout.get()
+    if timeout is not None and getattr(spec, "xhs_unlimited_execution", False):
+        # 只有已校验的冻结规格可取消调度外层时限，不按用户文本猜测平台。
+        timeout.reschedule(None)
 
 
 def _route_after_intent(state: ConductorState) -> str:
@@ -142,6 +151,7 @@ def _traced(name: str, fn: Callable[[ConductorState], Awaitable[Dict[str, Any]]]
         t0 = time.perf_counter()
         emit_progress(name, "started", f"正在{LABELS.get(name, '处理任务')}…")
         spec = state.get("task_spec")
+        _honor_unlimited_execution(spec)
         budget = getattr(spec, "time_budget_seconds", None)
         started = state.get("execution_started_at") or time.time()
         remaining = budget - (time.time() - started) if budget is not None else None
@@ -167,6 +177,7 @@ def _traced(name: str, fn: Callable[[ConductorState], Awaitable[Dict[str, Any]]]
         else:
             result = await fn(state) or {}
         # 规划前尚不知道自然语言预算；识别后立即计入入口以来的全部已耗时间。
+        _honor_unlimited_execution(result.get("task_spec"))
         planned_budget = getattr(result.get("task_spec"), "time_budget_seconds", budget)
         if result.get("budget_exhausted") or (planned_budget is not None and time.time() - started >= planned_budget):
             message = "已达到本次任务的总耗时上限，停止后续步骤；已完成数据保留，在途外部请求可能结果未知，不自动重发。"
@@ -343,6 +354,7 @@ async def run_conductor(
     ignore_schedule: bool = False,
     task_id: Optional[str] = None,
     task_context_preview: Optional[Dict[str, Any]] = None,
+    execution_timeout: asyncio.Timeout | None = None,
 ) -> Dict[str, Any]:
     """运行一轮 Conductor，返回最终状态字典。
 
@@ -353,7 +365,11 @@ async def run_conductor(
         user_input, messages, provider, model, session_id, approved_db_write,
         ignore_schedule, task_id, task_context_preview,
     )
-    return await _ainvoke(init)
+    token = _execution_timeout.set(execution_timeout)
+    try:
+        return await _ainvoke(init)
+    finally:
+        _execution_timeout.reset(token)
 
 
 async def astream_conductor(

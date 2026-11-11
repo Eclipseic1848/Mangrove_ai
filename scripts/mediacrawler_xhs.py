@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager, suppress
 import json
 import os
 from pathlib import Path
@@ -14,6 +15,11 @@ if __package__:
     from .mediacrawler_identity import _close_identity, seed_xhs_cookies
 else:
     from mediacrawler_identity import _close_identity, seed_xhs_cookies
+
+
+HOMEPAGE_TIMEOUT_SECONDS = 60.0
+STARTUP_TIMEOUT_SECONDS = 90.0
+DRIVER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
 async def bounded_comments(client, note_id, xsec_token, crawl_interval, callback, max_count, *, deadline=None):
@@ -102,6 +108,9 @@ async def bounded_comments(client, note_id, xsec_token, crawl_interval, callback
             # 只取消本篇未完成的请求，已落盘的评论和父子关系仍返回给调用方。
             await asyncio.wait_for(crawl(), timeout=max(0, deadline - time.monotonic()))
     except asyncio.TimeoutError:
+        if deadline is None:
+            # 不限时没有预算到期；底层请求失败应停止，不能伪装成可续采的时间缺口。
+            raise
         reasons.add("comment_time_budget")
     if has_more and root_count >= max_count:
         reasons.add("top_level_limit")
@@ -143,10 +152,105 @@ def _install_runtime_diagnostics(core, run_dir):
 
     report(login_mode=login_mode())
     crawler = getattr(core, "XiaoHongShuCrawler", None)
+    unlimited = os.environ.get("MANGROVE_XHS_UNLIMITED_EXECUTION") == "1"
+    startup_active = False
+    startup_deadline = None
+    track_startup = ((login_mode() == "cookie" or unlimited) and crawler is not None
+                     and hasattr(crawler, "create_xhs_client") and hasattr(core, "async_playwright"))
+
+    parent_reaps_startup = os.environ.get("MANGROVE_XHS_PARENT_REAPS_STARTUP") == "1"
+
+    def notify_parent(name):
+        # 父进程只检查标记是否存在，避免 Windows 读取活 JSON 阻塞原子替换。
+        if parent_reaps_startup:
+            with suppress(OSError):
+                (run_dir / name).touch()
+
+    @asynccontextmanager
+    async def startup_step(name, deadline):
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+
+        def save(status):
+            steps = state.setdefault("startup_steps", {})
+            steps[name] = {"status": status, "elapsed_ms": int((loop.time() - started) * 1000)}
+            try:
+                report(startup_steps=steps)
+            except OSError:
+                # 诊断写盘失败不能覆盖原有异常或取消。
+                pass
+
+        save("started")
+        status = "completed"
+        try:
+            async with asyncio.timeout_at(deadline):
+                if deadline is not None and loop.time() >= deadline:
+                    raise TimeoutError()
+                yield
+        except asyncio.CancelledError:
+            status = "cancelled"
+            raise
+        except Exception as error:
+            kind = type(error)
+            playwright_timeout = (kind.__module__ == "playwright._impl._errors" and kind.__name__ == "TimeoutError")
+            status = "timeout" if isinstance(error, TimeoutError) or playwright_timeout else "failed"
+            raise
+        finally:
+            # 先保存前置故障，再让上游进入驱动退出。
+            save(status)
+
+    def track(operation, step):
+        async def run(*args, **kwargs):
+            if not startup_active:
+                return await operation(*args, **kwargs)
+            deadline = startup_deadline
+            if step == "homepage_navigation":
+                if unlimited:
+                    # 上游显式传入60秒；只覆盖本任务首页导航，保留错误与取消。
+                    kwargs["timeout"] = 0
+                else:
+                    deadline = min(deadline, asyncio.get_running_loop().time() + HOMEPAGE_TIMEOUT_SECONDS)
+            async with startup_step(step, deadline):
+                result = await operation(*args, **kwargs)
+                if step == "new_page":
+                    result.goto = track(result.goto, "homepage_navigation")
+                return result
+        return run
+
+    if track_startup:
+        crawler.create_xhs_client = track(crawler.create_xhs_client, "create_client")
+        original_playwright = core.async_playwright
+
+        class PlaywrightWithBoundedExit:
+            def __init__(self):
+                self.manager = original_playwright()
+
+            async def __aenter__(self):
+                return await self.manager.__aenter__()
+
+            async def __aexit__(self, *error):
+                if not startup_active and not unlimited:
+                    return await self.manager.__aexit__(*error)
+                deadline = asyncio.get_running_loop().time() + DRIVER_SHUTDOWN_TIMEOUT_SECONDS
+                try:
+                    async with startup_step("driver_shutdown", deadline):
+                        return await self.manager.__aexit__(*error)
+                except Exception:
+                    if parent_reaps_startup:
+                        # 驱动未确认退出时保留组长，让父进程按本次 PID 回收所属子树。
+                        notify_parent("startup-reap-requested")
+                        await asyncio.Event().wait()
+                    # 关闭失败独立留证，不能覆盖已发生的导航或初始化故障。
+                    if error[0] is None:
+                        raise
+
+        core.async_playwright = PlaywrightWithBoundedExit
+
     if crawler and hasattr(crawler, "launch_browser"):
         original_launch = crawler.launch_browser
 
         async def launch(self, *args, **kwargs):
+            nonlocal startup_active, startup_deadline
             report(runtime_phase="browser_starting")
             context = await original_launch(self, *args, **kwargs)
             if login_mode() == "cookie":
@@ -156,12 +260,23 @@ def _install_runtime_diagnostics(core, run_dir):
                     await _close_identity((context,), True)
                     raise
             report(browser_started=True, runtime_phase="browser_ready")
+            if track_startup:
+                # 不限执行时长仍跟踪前置步骤，退出清理使用独立上限。
+                startup_active = True
+                startup_deadline = None if unlimited else asyncio.get_running_loop().time() + STARTUP_TIMEOUT_SECONDS
+                context.add_init_script = track(context.add_init_script, "init_script")
+                context.new_page = track(context.new_page, "new_page")
             return context
         crawler.launch_browser = launch
     if hasattr(core.XiaoHongShuClient, "pong"):
         original_pong = core.XiaoHongShuClient.pong
 
         async def pong(self, *args, **kwargs):
+            nonlocal startup_active, startup_deadline
+            if startup_active:
+                notify_parent("startup-finished")
+            startup_active = False
+            startup_deadline = None
             report(login_mode=login_mode(), runtime_phase="login_check")
             result = await original_pong(self, *args, **kwargs)
             report(login_detected=bool(result), runtime_phase="login_confirmed" if result else "login_check")
@@ -285,9 +400,11 @@ def main():
     run_dir = Path(sys.argv[sys.argv.index("--save_data_path") + 1])
     report, runtime = _install_runtime_diagnostics(core, run_dir)
     statuses = {}
-    timeout = float(os.environ.get("MANGROVE_XHS_TIMEOUT_SECONDS", "600"))
-    # 在父进程硬截止前留出写盘、浏览器关闭和逐篇采集间隔的余量。
-    comment_deadline = time.monotonic() + max(0, timeout - min(30, timeout * 0.1))
+    comment_deadline = None
+    if os.environ.get("MANGROVE_XHS_UNLIMITED_EXECUTION") != "1":
+        timeout = float(os.environ.get("MANGROVE_XHS_TIMEOUT_SECONDS", "600"))
+        # 有限模式仍给写盘、浏览器关闭和逐篇采集间隔留出余量。
+        comment_deadline = time.monotonic() + max(0, timeout - min(30, timeout * 0.1))
     sort = os.environ.get("MANGROVE_XHS_SORT")
     note_type = os.environ.get("MANGROVE_XHS_NOTE_TYPE")
     if sort or note_type:
@@ -344,11 +461,14 @@ def main():
     core.XiaoHongShuClient.get_note_by_keyword = search
 
     async def get_comments(self, note_id, xsec_token, crawl_interval=1.0, callback=None, max_count=10):
-        remaining = max(1, config.CRAWLER_MAX_NOTES_COUNT - len(statuses))
-        # 沿用既定频率和数量上限；按剩余篇数分摊时间，避免首篇回复耗尽整批预算。
-        budget = max(0, (comment_deadline - time.monotonic()) / remaining - crawl_interval)
+        deadline = None
+        if comment_deadline is not None:
+            remaining = max(1, config.CRAWLER_MAX_NOTES_COUNT - len(statuses))
+            # 沿用既定频率和数量上限；有限模式按剩余篇数分摊时间。
+            budget = max(0, (comment_deadline - time.monotonic()) / remaining - crawl_interval)
+            deadline = time.monotonic() + budget
         rows, status = await bounded_comments(self, note_id, xsec_token, crawl_interval, callback, max_count,
-                                             deadline=time.monotonic() + budget)
+                                             deadline=deadline)
         statuses[note_id] = status
         _write_json(run_dir / "comment_coverage.json", statuses)
         return rows

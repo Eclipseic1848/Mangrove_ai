@@ -308,6 +308,13 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
             if stage in {"discovery", "comments"}:
                 # 新调用尚无运行事实，不能借用上一页或上一条评论请求的阶段诊断。
                 save_collection_diagnostic({"phase": stage})
+            if spec.xhs_unlimited_execution:
+                # 不设置执行截止时间；数量、来源拒绝和主动取消仍走原控制流。
+                diagnostic_scope = collection_diagnostics(
+                    lambda value: save_collection_diagnostic({**value, "phase": stage})) if stage in {"discovery", "comments"} else nullcontext()
+                parser_budget = document_parser_deadline(None, single_attempt=per_image) if stage == "images" else nullcontext()
+                with parser_budget, diagnostic_scope:
+                    return await operation
             remaining = scope.time_budget_seconds - elapsed_before - (time.monotonic() - started)
             if remaining <= 0:
                 # 耗尽预算时不允许即时返回的协程再开始一次外部动作。
@@ -680,8 +687,9 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                 source_stopped = str(error) != "ocr_limit"
                 group.update(stop_reason=str(error), done=True)
             except asyncio.TimeoutError:
-                source_stopped = per_image
-                group.update(stop_reason="time_budget", done=True)
+                source_stopped = spec.xhs_unlimited_execution or per_image
+                # 不限时任务仍可能收到服务自身的请求超时，不能误报任务预算耗尽。
+                group.update(stop_reason="operation_timeout" if spec.xhs_unlimited_execution else "time_budget", done=True)
             except StepBudgetExceeded as error:
                 group.update(stop_reason=str(error), done=True)
             finally:

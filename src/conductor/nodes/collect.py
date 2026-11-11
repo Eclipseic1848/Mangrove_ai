@@ -104,8 +104,10 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
             if name == "mediacrawler"
             else settings.collect_timeout_seconds
         )
+        if name == "mediacrawler" and spec.xhs_unlimited_execution:
+            timeout = None
         try:
-            # 超时保护：单个采集器卡死不冻住整条流水线，超时即降级到下一个
+            # 旧任务保留原超时；新小红书任务由明确失败或主动取消结束。
             result = await asyncio.wait_for(collector.collect(spec), timeout=timeout)
         except asyncio.CancelledError as exc:
             raise CollectionInterrupted({"raw_dataset": merged, "collector_used": "+".join(used_names),
@@ -113,8 +115,8 @@ async def collect_node(state: ConductorState) -> Dict[str, Any]:
         except asyncio.TimeoutError:
             emit_progress("collect", "warning", "小红书来源响应超时，已停止本次采集，请检查采集服务状态。"
                           if xhs_only else "当前来源响应超时，将检查其他可用来源。")
-            logger.warning("采集器 %s 超时（>%ss），降级", name, timeout)
-            last_msg = f"{name} 超时（>{timeout}s）"
+            last_msg = f"{name} 来源请求超时" if timeout is None else f"{name} 超时（>{timeout}s）"
+            logger.warning("%s", last_msg)
             attempts.append({"collector": name, "success": False, "count": 0, "message": last_msg})
             metrics_record(name, False, (time.time() - t0) * 1000)
             domain_health_record(name, spec.urls, False)

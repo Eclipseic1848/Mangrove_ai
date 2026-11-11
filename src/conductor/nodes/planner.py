@@ -259,6 +259,9 @@ async def planner_node(state: ConductorState) -> Dict[str, Any]:
     try:
         spec = TaskSpec.from_draft(draft, fallback_text=user_input)
         _preserve_project_request(spec, user_input)
+        if spec.evidence_collection or spec.bank_benefits:
+            spec.platforms = ["小红书"]
+        spec.enable_unlimited_xhs_execution()
     except ValueError as exc:
         problems = ([{"field": ".".join(map(str, error["loc"])), "type": error["type"]}
                      for error in exc.errors(include_input=False, include_url=False)]
