@@ -51,6 +51,20 @@ _STARTUP_STEP_LABELS = {
 }
 
 
+def collection_running_explanation(diagnostic):
+    """进行中仅展示固定步骤，不把第三方异常或地址带入页面。"""
+    if diagnostic.get("search_started") is not False:
+        return None
+    steps = diagnostic.get("startup_steps")
+    if isinstance(steps, dict):
+        for step, label in reversed(_STARTUP_STEP_LABELS.items()):
+            entry = steps.get(step)
+            if step != "driver_shutdown" and isinstance(entry, dict) and entry.get("status") == "started":
+                return f"正在{label}，搜索尚未开始"
+    return {"browser_starting": "正在启动采集浏览器，搜索尚未开始",
+            "login_check": "正在确认采集账号登录状态，搜索尚未开始"}.get(diagnostic.get("runtime_phase"))
+
+
 def _startup_stop_explanation(diagnostic):
     steps = diagnostic.get("startup_steps")
     if not isinstance(steps, dict):

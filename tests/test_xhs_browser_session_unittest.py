@@ -42,7 +42,8 @@ if browser:
     assert sys.argv[sys.argv.index("--lt") + 1] == "qrcode"
     assert "--cookies" not in sys.argv
 assert os.environ["MC_ENABLE_CDP_MODE"] == "false"
-assert os.environ["DISPLAY"] == "synthetic-display:0"
+headless_xhs = sys.argv[sys.argv.index("--platform") + 1] == "xhs" and bool(config.COOKIES) and not browser
+assert os.environ.get("DISPLAY") == (None if headless_xhs else "synthetic-display:0")
 assert os.environ["HOME"] == "synthetic-home"
 assert str(Path.cwd()) == os.environ["EXPECTED_CWD"]
 assert "MC_COOKIE_XHS" not in os.environ
@@ -152,9 +153,18 @@ out.mkdir(parents=True)
 
     def test_real_identity_entry_clears_inherited_browser_profile(self):
         (self.root / "media_platform/xhs/core.py").write_text('''
+import asyncio
+from types import SimpleNamespace
 class Client:
+    _session = SimpleNamespace(lock=asyncio.Lock())
+    _host = "https://edith.xiaohongshu.com"
+    headers = {}
     async def query_self(self):
-        return {"success": True, "data": {"result": {"success": True}, "basic_info": {"red_id": "synthetic-account"}}}
+        raise AssertionError("身份入口不能调用旧接口")
+    async def _request_once(self, method, url, **kwargs):
+        assert method == "GET" and url == self._host + "/api/sns/web/v2/user/me"
+        assert self._session.lock.locked() and kwargs["_raw_identity"] is True
+        return {"success": True, "data": {"guest": False, "user_id": "synthetic-account"}}
 class XiaoHongShuCrawler:
     xhs_client = Client()
     async def search(self):
@@ -168,6 +178,7 @@ assert config.LOGIN_TYPE == "cookie"
 assert config.SAVE_LOGIN_STATE is False
 assert config.ENABLE_CDP_MODE is False
 assert "MANGROVE_XHS_BROWSER_PROFILE" not in os.environ
+assert "DISPLAY" not in os.environ
 asyncio.run(XiaoHongShuCrawler().search())
 ''', encoding="utf-8")
         with patch.dict(os.environ, MANGROVE_XHS_BROWSER_PROFILE=str(self.profile)):
@@ -534,9 +545,17 @@ time.sleep(30)
                 self.assertFalse(diagnostic["search_started"])
                 self.assertNotIn("unexpected-private-value", json.dumps(diagnostic))
 
-    def test_background_cookie_login_keeps_injection_after_false_initial_check(self):
+    def test_background_cookie_login_stops_without_reinjection_after_false_initial_check(self):
         from scripts.mediacrawler_xhs import _install_runtime_diagnostics
         calls = []
+        class Context:
+            async def add_cookies(self, cookies):
+                assert cookies == [{"name": "web_session", "value": "synthetic-only", "url": "https://www.xiaohongshu.com"}]
+                calls.append("cookie-injection")
+        class Crawler:
+            index_url = "https://www.xiaohongshu.com"
+            async def launch_browser(self):
+                return Context()
         class Client:
             async def pong(self):
                 calls.append("initial-check")
@@ -545,21 +564,20 @@ time.sleep(30)
                 calls.append("client-update")
         class Login:
             async def begin(self):
-                calls.append("cookie-injection")
-                saved = json.loads((self_root / "runtime_diagnostic.json").read_text(encoding="utf-8"))
-                assert saved["runtime_phase"] == "login_cookie_injection"
-        self_root = self.root
-        core = types.SimpleNamespace(XiaoHongShuClient=Client, XiaoHongShuLogin=Login)
-        with patch.dict(sys.modules, config=types.SimpleNamespace(LOGIN_TYPE="cookie")):
+                calls.append("cookie-reinjection")
+        core = types.SimpleNamespace(XiaoHongShuClient=Client, XiaoHongShuLogin=Login, XiaoHongShuCrawler=Crawler)
+        with patch.dict(sys.modules, config=types.SimpleNamespace(LOGIN_TYPE="cookie", COOKIES="web_session=synthetic-only")):
             _install_runtime_diagnostics(core, self.root)
             async def run():
+                await Crawler().launch_browser()
                 client = Client()
                 if not await client.pong():
                     await Login().begin()
                     await client.update_cookies()
                 calls.append("search")
-            asyncio.run(run())
-        self.assertEqual(calls, ["initial-check", "cookie-injection", "client-update", "search"])
+            with self.assertRaisesRegex(RuntimeError, "登录尚未确认"):
+                asyncio.run(run())
+        self.assertEqual(calls, ["cookie-injection", "initial-check"])
         diagnostic = json.loads((self.root / "runtime_diagnostic.json").read_text(encoding="utf-8"))
         self.assertEqual(diagnostic["login_mode"], "cookie")
         self.assertFalse(diagnostic.get("login_interaction_required", False))
@@ -607,18 +625,30 @@ time.sleep(30)
 
     def test_background_cookie_injection_error_is_not_replaced_by_login_judgment(self):
         from scripts.mediacrawler_xhs import _install_runtime_diagnostics
+        calls = []
+        class Context:
+            async def add_cookies(self, cookies):
+                raise PermissionError("synthetic-cookie-injection-error")
+            async def close(self):
+                calls.append("close")
+        class Crawler:
+            index_url = "https://www.xiaohongshu.com"
+            async def launch_browser(self):
+                return Context()
         class Login:
             async def begin(self):
-                raise PermissionError("synthetic-cookie-injection-error")
-        core = types.SimpleNamespace(XiaoHongShuClient=type("Client", (), {}), XiaoHongShuLogin=Login)
-        with patch.dict(sys.modules, config=types.SimpleNamespace(LOGIN_TYPE="cookie")):
+                raise AssertionError("注入失败不能继续登录")
+        core = types.SimpleNamespace(XiaoHongShuClient=type("Client", (), {}), XiaoHongShuLogin=Login, XiaoHongShuCrawler=Crawler)
+        with patch.dict(sys.modules, config=types.SimpleNamespace(LOGIN_TYPE="cookie", COOKIES="web_session=synthetic-only")):
             _install_runtime_diagnostics(core, self.root)
             async def run():
                 with self.assertRaisesRegex(PermissionError, "synthetic-cookie-injection-error"):
-                    await Login().begin()
+                    await Crawler().launch_browser()
             asyncio.run(run())
+        self.assertEqual(calls, ["close"])
         diagnostic = json.loads((self.root / "runtime_diagnostic.json").read_text(encoding="utf-8"))
-        self.assertEqual(diagnostic["runtime_phase"], "login_cookie_injection")
+        self.assertEqual(diagnostic["runtime_phase"], "browser_starting")
+        self.assertFalse(diagnostic["browser_started"])
         self.assertFalse(diagnostic.get("login_interaction_required", False))
         self.assertNotIn("synthetic-cookie-injection-error", json.dumps(diagnostic))
 
@@ -665,17 +695,21 @@ asyncio.run(run())
 import config
 class XiaoHongShuClient:
     injected = False
-    async def pong(self): return config.LOGIN_TYPE == "qrcode"
+    async def pong(self): return config.LOGIN_TYPE == "qrcode" or self.injected
     async def update_cookies(self): assert self.injected
     async def get_note_by_keyword(self, **kwargs):
         assert config.LOGIN_TYPE == "qrcode" or self.injected
         return {"items": [{"id": "note-1"}], "has_more": False}
 class XiaoHongShuLogin:
     async def begin(self):
-        assert config.LOGIN_TYPE == "cookie", "已登录会话不能扫码"
+        raise AssertionError("已初始化的有效会话不能重注或扫码")
+class Context:
+    async def add_cookies(self, cookies):
+        assert cookies == [{"name": "web_session", "value": "synthetic-only", "url": "https://www.xiaohongshu.com"}]
         XiaoHongShuClient.injected = True
 class XiaoHongShuCrawler:
-    async def launch_browser(self): return object()
+    index_url = "https://www.xiaohongshu.com"
+    async def launch_browser(self): return Context()
 ''', encoding="utf-8")
         (self.root / "main.py").write_text('''
 import asyncio, json, sys
@@ -696,7 +730,8 @@ async def run():
 asyncio.run(run())
 ''', encoding="utf-8")
         for setting_mode, login_mode in (("auto", "cookie"), ("browser", "browser")):
-            with self.subTest(mode=setting_mode), patch.object(settings, "mc_xhs_login_mode", setting_mode):
+            with self.subTest(mode=setting_mode), patch.object(settings, "mc_xhs_login_mode", setting_mode), \
+                    patch.object(settings, "mc_cookie_xhs", "web_session=synthetic-only"):
                 result = self.collect()
                 self.assertTrue(result.success, result.message)
                 self.assertEqual(len(result.items), 1)
