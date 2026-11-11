@@ -118,6 +118,8 @@ def main():
     # Cookie 采集无需桌面；显式平台浏览器会话仍保留自己的显示与登录方式。
     if platform == "xhs" and cookie:
         config.HEADLESS = True
+        # 旧远程桌面会让无头 Chromium 建页挂起；只隔离本子进程，桌面登录仍保留 DISPLAY。
+        os.environ.pop("DISPLAY", None)
     if platform == "ks":
         from tools import crawler_util, utils
         # 原解析器会丢掉含等号的登录字段；在 core 导入前同时修正公共导出与原函数。

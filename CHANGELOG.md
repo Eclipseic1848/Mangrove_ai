@@ -4,6 +4,7 @@
 
 ### Bug Fixes
 
+- 修复小红书 Cookie 无头采集继承旧桌面环境后卡在浏览器建页的问题；实时展示前置步骤，实际搜索开始后再显示检索进度，保留显式桌面登录、其他渠道和不限时执行约定。（[#303](https://github.com/Eclipseic1848/Mangrove_ai/issues/303)）
 - 修复采集终结后当前对话与历史续问仍显示旧进度的问题；按本轮运行身份只读恢复最终回复、数量和文件，连接未知时保留资料与重读入口，不自动重发任务。（[#297](https://github.com/Eclipseic1848/Mangrove_ai/issues/297)）
 
 ### Improvements

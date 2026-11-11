@@ -21,7 +21,7 @@ from src.memory._library_scope import execution_owner
 from src.model_connections.text_protocol import ModelOutputTruncatedError
 from src.model_connections.catalog import model_max_output_tokens
 from src.services.document_parser_resilience import document_parser_deadline
-from .collection_results import IMAGE_FAILURE_LABELS, collection_outcome, collection_candidate_counts, collection_stop_explanation, verified_image_bytes
+from .collection_results import IMAGE_FAILURE_LABELS, collection_outcome, collection_candidate_counts, collection_running_explanation, collection_stop_explanation, verified_image_bytes
 from .progress import emit_progress
 from .utils import parse_json_obj
 
@@ -303,6 +303,11 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
             # 最后一条私有诊断只属于当前查询组，不能借给后续组解释未知结果。
             data["last_collection_diagnostic"] = {**diagnostic, "group_name": query.name}
             save()
+            if diagnostic.get("phase") == "discovery":
+                if diagnostic.get("search_started") is True and diagnostic.get("runtime_phase") == "search":
+                    report(f"{query.name}：正在检索第 {group['page']} 批候选")
+                elif explanation := collection_running_explanation(diagnostic):
+                    report(f"{query.name}：{explanation}")
 
         async def call(operation, stage):
             if stage in {"discovery", "comments"}:
@@ -487,7 +492,7 @@ async def _collect_evidence(state, *, scope, queries, assess, exclude, read_imag
                                 "xhs_search_page": group["page"], "xhs_sort": spec.xhs_sort or "general",
                                 "xhs_note_type": spec.xhs_note_type or "image"})
                             batch_spec._collection_task_id = task_id
-                            report(f"{query.name}：正在检索第 {group['page']} 批候选")
+                            report(f"{query.name}：准备获取第 {group['page']} 批候选")
                             # 调用前占用预算；结果未知时不重放，也不把重复帖退还成新预算。
                             group["candidate_attempted"] += batch_spec.max_items
                             group["discovery_inflight"] = True

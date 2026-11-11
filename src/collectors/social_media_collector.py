@@ -127,6 +127,8 @@ def _runtime_diagnostic(run_dir):
 async def _wait_for_xhs_startup(proc, credential_input, run_dir, timeout):
     # 仅在启动期间读本次私有目录，退出失败后交给原有父进程回收路径。
     communication = asyncio.create_task(proc.communicate(input=credential_input))
+    sink, reported_stage = _DIAGNOSTIC_SINK.get(), None
+    stages = ("browser_starting", "init_script", "new_page", "homepage_navigation", "create_client", "login_check", "search")
     try:
         async with asyncio.timeout(timeout):
             while True:
@@ -136,7 +138,21 @@ async def _wait_for_xhs_startup(proc, credential_input, run_dir, timeout):
                     return False
                 if (run_dir / "startup-reap-requested").is_file():
                     return True
-                if timeout is not None and (run_dir / "startup-finished").is_file():
+                if sink is not None:
+                    # 固定标记只表达已发生的阶段；不读活 JSON，也不把轮询伪装成进展。
+                    stage = next((name for name in reversed(stages) if (run_dir / ("startup-stage-" + name)).is_file()), None)
+                    if stage is not None and stage != reported_stage:
+                        reported_stage = stage
+                        diagnostic = {"search_started": stage == "search"}
+                        if stage in {"browser_starting", "login_check", "search"}:
+                            diagnostic["runtime_phase"] = stage
+                        else:
+                            diagnostic["startup_steps"] = {stage: {"status": "started"}}
+                        try:
+                            sink(diagnostic)
+                        except Exception:
+                            logger.warning("采集阶段诊断未能保存")
+                if timeout is not None and (run_dir / "startup-finished").is_file() and (sink is None or reported_stage == "search"):
                     await communication
                     return False
     finally:

@@ -146,9 +146,19 @@ def _install_runtime_diagnostics(core, run_dir):
         value = getattr(sys.modules.get("config"), "LOGIN_TYPE", None)
         return value if type(value) is str and value in {"cookie", "qrcode", "phone"} else "unknown"
 
+    parent_reaps_startup = os.environ.get("MANGROVE_XHS_PARENT_REAPS_STARTUP") == "1"
+
+    def notify_parent(name):
+        # 父进程只检查标记是否存在，避免 Windows 读取活 JSON 阻塞原子替换。
+        if parent_reaps_startup:
+            with suppress(OSError):
+                (run_dir / name).touch()
+
     def report(**values):
         state.update(values)
         _write_json(run_dir / "runtime_diagnostic.json", state)
+        if values.get("runtime_phase") in {"browser_starting", "login_check", "search"}:
+            notify_parent("startup-stage-" + values["runtime_phase"])
 
     report(login_mode=login_mode())
     crawler = getattr(core, "XiaoHongShuCrawler", None)
@@ -157,14 +167,6 @@ def _install_runtime_diagnostics(core, run_dir):
     startup_deadline = None
     track_startup = ((login_mode() == "cookie" or unlimited) and crawler is not None
                      and hasattr(crawler, "create_xhs_client") and hasattr(core, "async_playwright"))
-
-    parent_reaps_startup = os.environ.get("MANGROVE_XHS_PARENT_REAPS_STARTUP") == "1"
-
-    def notify_parent(name):
-        # 父进程只检查标记是否存在，避免 Windows 读取活 JSON 阻塞原子替换。
-        if parent_reaps_startup:
-            with suppress(OSError):
-                (run_dir / name).touch()
 
     @asynccontextmanager
     async def startup_step(name, deadline):
@@ -181,6 +183,8 @@ def _install_runtime_diagnostics(core, run_dir):
                 pass
 
         save("started")
+        if name != "driver_shutdown":
+            notify_parent("startup-stage-" + name)
         status = "completed"
         try:
             async with asyncio.timeout_at(deadline):
