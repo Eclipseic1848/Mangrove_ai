@@ -38,7 +38,7 @@ filetype==1.2.0
 magika==0.6.3
 fonttools==4.61.1
 frozenlist==1.8.0
-fsspec==2025.12.0
+fsspec==2026.6.0
 google-auth==2.48.0
 googleapis-common-protos==1.72.0
 graphene==3.4.3
